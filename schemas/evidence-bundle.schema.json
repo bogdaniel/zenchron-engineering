@@ -13,9 +13,10 @@
     "contract": { "$ref": "#/$defs/object_revision" },
     "policy": { "$ref": "#/$defs/object_revision" },
     "evidence": {
-      "type": "array",
-      "minItems": 1,
-      "items": { "$ref": "#/$defs/evidence_item" }
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
+      "additionalProperties": { "$ref": "#/$defs/evidence_item" }
     }
   },
   "$defs": {
@@ -108,9 +109,8 @@
     "evidence_item": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "claim_id", "producer", "result", "lifecycle", "provenance"],
+      "required": ["claim_id", "producer", "environment", "result", "lifecycle", "provenance"],
       "properties": {
-        "id": { "$ref": "#/$defs/non_empty_string" },
         "claim_id": { "$ref": "#/$defs/non_empty_string" },
         "producer": { "$ref": "#/$defs/producer" },
         "environment": { "$ref": "#/$defs/environment" },

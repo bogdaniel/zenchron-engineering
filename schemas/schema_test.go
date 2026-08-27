@@ -1,6 +1,8 @@
 package schemas_test
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +19,27 @@ var fixtureSchemas = map[string]string{
 	"engineering-work-contract": "engineering-work-contract.schema.json",
 	"evidence-bundle":           "evidence-bundle.schema.json",
 	"project-model":             "project-model.schema.json",
+}
+
+type invalidExpectation struct {
+	instanceLocation string
+	keyword          string
+}
+
+var invalidExpectations = map[string]invalidExpectation{
+	"ambiguous-unknown.engineering-fact.json":                   {"/value", "oneOf"},
+	"array-evidence-basis.authority-decision.json":              {"/basis/evidence_bundles", "type"},
+	"array-identities.engineering-policy.json":                  {"/rules", "type"},
+	"array-identities.engineering-work-contract.json":           {"/required_claims", "type"},
+	"array-identities.evidence-bundle.json":                     {"/evidence", "type"},
+	"array-identities.project-model.json":                       {"/critical_boundaries", "type"},
+	"authorized-with-denied-permission.authority-decision.json": {"/permission/status", "const"},
+	"fixed-agent-workflow.engineering-policy.json":              {"/rules/RULE-001", "additionalProperties"},
+	"fixed-agent-workflow.engineering-work-contract.json":       {"", "additionalProperties"},
+	"missing-environment.evidence-bundle.json":                  {"/evidence/evidence-security-review", "required"},
+	"missing-subject-revision.evidence-bundle.json":             {"/subject", "required"},
+	"missing-subject-revision.project-model.json":               {"/subject", "required"},
+	"stale-without-reason.evidence-bundle.json":                 {"/evidence/evidence-auth-tests/lifecycle", "required"},
 }
 
 func TestSchemasCompile(t *testing.T) {
@@ -60,18 +83,18 @@ func validateFixtures(t *testing.T, dir string, wantValid bool) {
 
 	for _, file := range files {
 		t.Run(filepath.Base(file), func(t *testing.T) {
+			base := filepath.Base(file)
 			name, err := schemaName(file)
 			if err != nil {
 				t.Fatal(err)
 			}
 			counts[name]++
-			instanceFile, err := os.Open(file)
+			instanceJSON, err := os.ReadFile(file)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer instanceFile.Close()
 
-			instance, err := jsonschema.UnmarshalJSON(instanceFile)
+			instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(instanceJSON))
 			if err != nil {
 				t.Fatalf("parse fixture: %v", err)
 			}
@@ -82,7 +105,19 @@ func validateFixtures(t *testing.T, dir string, wantValid bool) {
 			if !wantValid && err == nil {
 				t.Fatal("expected invalid fixture to fail validation")
 			}
+			if !wantValid {
+				want, ok := invalidExpectations[base]
+				if !ok {
+					t.Fatal("invalid fixture has no expected failure")
+				}
+				if !matchesValidationError(err, want) {
+					t.Fatalf("expected error at %q for %q; got %v", want.instanceLocation, want.keyword, err)
+				}
+			}
 		})
+	}
+	if !wantValid && len(files) != len(invalidExpectations) {
+		t.Errorf("found %d invalid fixtures, want %d expectations", len(files), len(invalidExpectations))
 	}
 
 	for name := range fixtureSchemas {
@@ -90,6 +125,26 @@ func validateFixtures(t *testing.T, dir string, wantValid bool) {
 			t.Errorf("no fixtures for %s in %s", name, dir)
 		}
 	}
+}
+
+func matchesValidationError(err error, want invalidExpectation) bool {
+	var validationErr *jsonschema.ValidationError
+	if !errors.As(err, &validationErr) {
+		return false
+	}
+	return matchesOutput(validationErr.BasicOutput(), want)
+}
+
+func matchesOutput(output *jsonschema.OutputUnit, want invalidExpectation) bool {
+	if output.InstanceLocation == want.instanceLocation && strings.HasSuffix(output.KeywordLocation, "/"+want.keyword) {
+		return true
+	}
+	for i := range output.Errors {
+		if matchesOutput(&output.Errors[i], want) {
+			return true
+		}
+	}
+	return false
 }
 
 func compileSchema(t *testing.T, file string) *jsonschema.Schema {

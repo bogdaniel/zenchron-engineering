@@ -14,19 +14,18 @@
     "prohibited_paths": ["internal/auth/**"]
   },
   "facts": ["fact-api-1"],
-  "invariants": [
-    { "id": "PAY-001", "statement": "A payment must not be charged twice." }
-  ],
-  "obligations": [
-    { "id": "payment-regression-tests", "statement": "Payment regression tests must pass." }
-  ],
-  "required_claims": [
-    {
-      "id": "claim-payment-regression-tests",
+  "invariants": {
+    "PAY-001": { "statement": "A payment must not be charged twice." }
+  },
+  "obligations": {
+    "payment-regression-tests": { "statement": "Payment regression tests must pass." }
+  },
+  "required_claims": {
+    "claim-payment-regression-tests": {
       "evidence_class": "test_result",
       "independent_from_change_producer": true
     }
-  ],
+  },
   "permissions": [
     { "type": "git.pull_request.create", "target": "main" }
   ],
@@ -36,8 +35,7 @@
   "authority_conditions": [
     {
       "action": { "type": "git.pull_request.create", "target": "main" },
-      "required_claims": ["claim-payment-regression-tests"],
-      "required_authorities": []
+      "required_claims": ["claim-payment-regression-tests"]
     }
   ],
   "provenance": {

@@ -14,9 +14,9 @@
     "prohibited_paths": ["internal/**"]
   },
   "facts": ["fact-auth-1"],
-  "invariants": [],
-  "obligations": [],
-  "required_claims": [],
+  "invariants": {},
+  "obligations": {},
+  "required_claims": {},
   "permissions": [
     { "type": "git.pull_request.create", "target": "main" }
   ],

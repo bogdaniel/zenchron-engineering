@@ -23,12 +23,12 @@
     "subject": { "$ref": "#/$defs/subject" },
     "scope": { "$ref": "#/$defs/scope" },
     "facts": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" }, "uniqueItems": true },
-    "invariants": { "type": "array", "items": { "$ref": "#/$defs/requirement" } },
-    "obligations": { "type": "array", "items": { "$ref": "#/$defs/requirement" } },
-    "required_claims": { "type": "array", "items": { "$ref": "#/$defs/required_claim" } },
-    "permissions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
-    "prohibitions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
-    "authority_conditions": { "type": "array", "items": { "$ref": "#/$defs/authority_condition" } },
+    "invariants": { "$ref": "#/$defs/requirements" },
+    "obligations": { "$ref": "#/$defs/requirements" },
+    "required_claims": { "$ref": "#/$defs/required_claims" },
+    "permissions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/action" } },
+    "prohibitions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/action" } },
+    "authority_conditions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/authority_condition" } },
     "provenance": { "$ref": "#/$defs/provenance" }
   },
   "$defs": {
@@ -64,21 +64,29 @@
     "requirement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "statement"],
+      "required": ["statement"],
       "properties": {
-        "id": { "$ref": "#/$defs/non_empty_string" },
         "statement": { "$ref": "#/$defs/non_empty_string" }
       }
+    },
+    "requirements": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
+      "additionalProperties": { "$ref": "#/$defs/requirement" }
     },
     "required_claim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "evidence_class", "independent_from_change_producer"],
+      "required": ["evidence_class", "independent_from_change_producer"],
       "properties": {
-        "id": { "$ref": "#/$defs/non_empty_string" },
         "evidence_class": { "$ref": "#/$defs/non_empty_string" },
         "independent_from_change_producer": { "type": "boolean" }
       }
+    },
+    "required_claims": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
+      "additionalProperties": { "$ref": "#/$defs/required_claim" }
     },
     "action": {
       "type": "object",
@@ -92,24 +100,16 @@
     "authority_condition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "required_claims", "required_authorities"],
+      "required": ["action", "required_claims"],
       "properties": {
         "action": { "$ref": "#/$defs/action" },
         "required_claims": {
           "type": "array",
-          "items": { "$ref": "#/$defs/non_empty_string" },
-          "uniqueItems": true
-        },
-        "required_authorities": {
-          "type": "array",
+          "minItems": 1,
           "items": { "$ref": "#/$defs/non_empty_string" },
           "uniqueItems": true
         }
-      },
-      "anyOf": [
-        { "properties": { "required_claims": { "minItems": 1 } } },
-        { "properties": { "required_authorities": { "minItems": 1 } } }
-      ]
+      }
     },
     "object_revision": {
       "type": "object",

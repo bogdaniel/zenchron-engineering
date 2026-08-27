@@ -11,12 +11,14 @@
     "revision": { "$ref": "#/$defs/non_empty_string" },
     "subject": { "$ref": "#/$defs/subject" },
     "critical_boundaries": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/critical_boundary" }
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
+      "additionalProperties": { "$ref": "#/$defs/critical_boundary" }
     },
     "test_capabilities": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/test_capability" }
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
+      "additionalProperties": { "$ref": "#/$defs/test_capability" }
     },
     "policy_profiles": {
       "type": "array",
@@ -38,9 +40,8 @@
     "critical_boundary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type", "paths"],
+      "required": ["type", "paths"],
       "properties": {
-        "id": { "$ref": "#/$defs/non_empty_string" },
         "type": { "$ref": "#/$defs/non_empty_string" },
         "paths": {
           "type": "array",
@@ -53,9 +54,8 @@
     "test_capability": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type"],
+      "required": ["type"],
       "properties": {
-        "id": { "$ref": "#/$defs/non_empty_string" },
         "type": { "$ref": "#/$defs/non_empty_string" }
       }
     }

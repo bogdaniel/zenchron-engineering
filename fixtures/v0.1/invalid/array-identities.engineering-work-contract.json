@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1",
-  "id": "contract-invalid",
+  "id": "contract-array-identities",
   "revision": "1",
   "objective": "Change session validation.",
   "acceptance_intent": ["Invalid sessions remain rejected"],
@@ -16,7 +16,18 @@
   "facts": ["fact-auth-2"],
   "invariants": {},
   "obligations": {},
-  "required_claims": {},
+  "required_claims": [
+    {
+      "id": "claim-auth",
+      "evidence_class": "test_result",
+      "independent_from_change_producer": true
+    },
+    {
+      "id": "claim-auth",
+      "evidence_class": "security_review",
+      "independent_from_change_producer": true
+    }
+  ],
   "permissions": [],
   "prohibitions": [],
   "authority_conditions": [],
@@ -24,6 +35,5 @@
     "project_model": { "id": "project-acme-payments", "revision": "1" },
     "policy": { "id": "policy-engineering-baseline", "revision": "1" },
     "compiler_version": "compiler-v0.1"
-  },
-  "fixed_agent_workflow": ["implementation-agent", "test-agent"]
+  }
 }

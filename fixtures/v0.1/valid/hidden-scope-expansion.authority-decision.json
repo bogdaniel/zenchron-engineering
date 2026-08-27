@@ -4,12 +4,13 @@
   "revision": "2",
   "subject": { "repository": "acme/payments", "revision": "rev-b" },
   "contract": { "id": "contract-retry-with-auth-impact", "revision": "2" },
+  "basis": { "evidence_bundles": {} },
   "action": { "type": "git.pull_request.create", "target": "main" },
   "capability": { "status": "available" },
   "permission": { "status": "granted" },
   "status": "incomplete",
-  "satisfied": ["claim-payment-regression-tests"],
-  "missing": ["claim-auth-regression-tests", "claim-security-review"],
+  "satisfied": [],
+  "missing": ["claim-payment-regression-tests", "claim-auth-regression-tests", "claim-security-review"],
   "stale": [],
   "blocking": []
 }

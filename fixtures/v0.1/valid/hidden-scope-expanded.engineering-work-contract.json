@@ -14,31 +14,28 @@
     "prohibited_paths": ["deploy/**"]
   },
   "facts": ["fact-api-1", "fact-auth-observed"],
-  "invariants": [
-    { "id": "AUTH-001", "statement": "Authentication protections must not weaken." }
-  ],
-  "obligations": [
-    { "id": "payment-regression-tests", "statement": "Payment regression tests must pass." },
-    { "id": "auth-regression-tests", "statement": "Authentication regression tests must pass." },
-    { "id": "independent-security-review", "statement": "An independent security review must approve the change." }
-  ],
-  "required_claims": [
-    {
-      "id": "claim-payment-regression-tests",
+  "invariants": {
+    "AUTH-001": { "statement": "Authentication protections must not weaken." }
+  },
+  "obligations": {
+    "payment-regression-tests": { "statement": "Payment regression tests must pass." },
+    "auth-regression-tests": { "statement": "Authentication regression tests must pass." },
+    "independent-security-review": { "statement": "An independent security review must approve the change." }
+  },
+  "required_claims": {
+    "claim-payment-regression-tests": {
       "evidence_class": "test_result",
       "independent_from_change_producer": true
     },
-    {
-      "id": "claim-auth-regression-tests",
+    "claim-auth-regression-tests": {
       "evidence_class": "test_result",
       "independent_from_change_producer": true
     },
-    {
-      "id": "claim-security-review",
+    "claim-security-review": {
       "evidence_class": "security_review",
       "independent_from_change_producer": true
     }
-  ],
+  },
   "permissions": [
     { "type": "git.pull_request.create", "target": "main" }
   ],
@@ -49,8 +46,7 @@
   "authority_conditions": [
     {
       "action": { "type": "git.pull_request.create", "target": "main" },
-      "required_claims": ["claim-payment-regression-tests", "claim-auth-regression-tests", "claim-security-review"],
-      "required_authorities": []
+      "required_claims": ["claim-payment-regression-tests", "claim-auth-regression-tests", "claim-security-review"]
     }
   ],
   "provenance": {

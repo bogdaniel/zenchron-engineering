@@ -17,3 +17,8 @@ The fixture set covers:
 
 These are schema fixtures, not evaluator golden outputs. Cross-object policy,
 staleness, and authority semantics belong to later kernel issues.
+
+Identity-addressed definitions use JSON objects keyed by identifier. Targeted
+invalid fixtures retain the old duplicate-ID array shape to prove it is rejected.
+Each invalid fixture also declares an expected instance location and validation
+keyword in `schemas/schema_test.go`; failure for an unrelated reason is not enough.

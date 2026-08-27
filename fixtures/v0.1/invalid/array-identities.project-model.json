@@ -1,25 +1,21 @@
 {
   "schema_version": "0.1",
-  "id": "project-acme-payments",
+  "id": "project-array-identities",
   "revision": "1",
   "subject": {
     "repository": "acme/payments",
     "revision": "rev-a"
   },
-  "critical_boundaries": {
-    "authentication": {
+  "critical_boundaries": [
+    {
+      "id": "authentication",
       "type": "authentication",
       "paths": ["internal/auth/**"]
     },
-    "payment-data": {
+    {
+      "id": "authentication",
       "type": "sensitive_data",
       "paths": ["internal/payments/**"]
     }
-  },
-  "test_capabilities": {
-    "go-test": {
-      "type": "unit_and_integration"
-    }
-  },
-  "policy_profiles": ["baseline", "security-sensitive"]
+  ]
 }

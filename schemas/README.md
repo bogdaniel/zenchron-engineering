@@ -13,3 +13,6 @@ Zenchron Engineering v0.1.
 Every schema has a stable `$id`, requires `schema_version: "0.1"`, and rejects
 undeclared fields. `fixtures/v0.1/` contains the tested contracts. Run
 `go test ./...` to compile every schema and validate every fixture.
+
+Identity-addressed members use JSON objects keyed by identifier. Arrays contain
+non-addressed values or references; their ordering has no v0.1 meaning.

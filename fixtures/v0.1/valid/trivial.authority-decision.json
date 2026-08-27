@@ -4,6 +4,7 @@
   "revision": "1",
   "subject": { "repository": "acme/payments", "revision": "rev-a" },
   "contract": { "id": "contract-docs-copy", "revision": "1" },
+  "basis": { "evidence_bundles": {} },
   "action": { "type": "git.pull_request.create", "target": "main" },
   "capability": { "status": "available" },
   "permission": { "status": "granted" },

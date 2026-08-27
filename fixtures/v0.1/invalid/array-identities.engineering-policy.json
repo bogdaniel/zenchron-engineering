@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-array-identities",
+  "revision": "1",
+  "rules": [
+    {
+      "id": "RULE-001",
+      "when": { "fact": "authentication.boundary_modified", "equals": true },
+      "effect": {
+        "obligations": {
+          "security-review": { "statement": "Security review must pass." }
+        }
+      }
+    },
+    {
+      "id": "RULE-001",
+      "when": { "fact": "authentication.boundary_modified", "equals": false },
+      "effect": {
+        "obligations": {
+          "basic-review": { "statement": "Basic review must pass." }
+        }
+      }
+    }
+  ]
+}

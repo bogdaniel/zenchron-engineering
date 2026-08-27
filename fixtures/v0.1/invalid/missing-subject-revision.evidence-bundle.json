@@ -7,11 +7,15 @@
   },
   "contract": { "id": "contract-auth-session", "revision": "1" },
   "policy": { "id": "policy-engineering-baseline", "revision": "1" },
-  "evidence": [
-    {
-      "id": "evidence-auth-tests",
+  "evidence": {
+    "evidence-auth-tests": {
       "claim_id": "claim-auth-regression-tests",
       "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
+      "environment": {
+        "type": "ci",
+        "identifier": "runner-linux-amd64",
+        "toolchain": ["go1.25"]
+      },
       "result": { "status": "pass" },
       "lifecycle": { "status": "valid" },
       "provenance": {
@@ -19,5 +23,5 @@
         "recorded_at": "2026-08-27T10:05:00Z"
       }
     }
-  ]
+  }
 }

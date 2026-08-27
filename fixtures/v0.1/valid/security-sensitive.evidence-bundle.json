@@ -1,12 +1,12 @@
 {
   "schema_version": "0.1",
-  "id": "evidence-auth-remediated",
+  "id": "evidence-auth-review",
   "revision": "1",
   "subject": {
     "repository": "acme/payments",
-    "revision": "rev-c"
+    "revision": "rev-b"
   },
-  "contract": { "id": "contract-auth-session", "revision": "2" },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
   "policy": { "id": "policy-engineering-baseline", "revision": "1" },
   "evidence": {
     "evidence-auth-tests-passed": {
@@ -20,8 +20,8 @@
       "result": { "status": "pass" },
       "lifecycle": { "status": "valid" },
       "provenance": {
-        "source": "ci-run-102",
-        "recorded_at": "2026-08-27T10:20:00Z"
+        "source": "ci-run-103",
+        "recorded_at": "2026-08-27T10:30:00Z"
       }
     },
     "evidence-security-review-approved": {
@@ -29,13 +29,13 @@
       "producer": { "id": "reviewer-security-1", "type": "human" },
       "environment": {
         "type": "code_review",
-        "identifier": "review-record-55"
+        "identifier": "review-record-56"
       },
       "result": { "status": "pass" },
       "lifecycle": { "status": "valid" },
       "provenance": {
-        "source": "review-record-55",
-        "recorded_at": "2026-08-27T10:25:00Z"
+        "source": "review-record-56",
+        "recorded_at": "2026-08-27T10:35:00Z"
       }
     }
   }

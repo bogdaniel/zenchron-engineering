@@ -14,25 +14,28 @@
     "prohibited_paths": ["deploy/**"]
   },
   "facts": ["fact-auth-2"],
-  "invariants": [
-    { "id": "AUTH-001", "statement": "Authentication protections must not weaken." }
-  ],
-  "obligations": [
-    { "id": "auth-regression-tests", "statement": "Authentication regression tests must pass." },
-    { "id": "independent-security-review", "statement": "An independent security review must approve the change." }
-  ],
-  "required_claims": [
-    {
-      "id": "claim-auth-regression-tests",
+  "invariants": {
+    "AUTH-001": { "statement": "Authentication protections must not weaken." }
+  },
+  "obligations": {
+    "auth-regression-tests": { "statement": "Authentication regression tests must pass." },
+    "independent-security-review": { "statement": "An independent security review must approve the change." },
+    "security-owner-approval": { "statement": "The security owner must approve merge." }
+  },
+  "required_claims": {
+    "claim-auth-regression-tests": {
       "evidence_class": "test_result",
       "independent_from_change_producer": true
     },
-    {
-      "id": "claim-security-review",
+    "claim-security-review": {
       "evidence_class": "security_review",
       "independent_from_change_producer": true
+    },
+    "claim-security-owner-approval": {
+      "evidence_class": "human_approval",
+      "independent_from_change_producer": true
     }
-  ],
+  },
   "permissions": [
     { "type": "git.pull_request.create", "target": "main" },
     { "type": "git.merge", "target": "main" }
@@ -43,8 +46,11 @@
   "authority_conditions": [
     {
       "action": { "type": "git.merge", "target": "main" },
-      "required_claims": ["claim-auth-regression-tests", "claim-security-review"],
-      "required_authorities": ["security-owner"]
+      "required_claims": [
+        "claim-auth-regression-tests",
+        "claim-security-review",
+        "claim-security-owner-approval"
+      ]
     }
   ],
   "provenance": {

@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1",
+  "id": "evidence-array-identities",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+  "evidence": [
+    {
+      "id": "evidence-auth",
+      "claim_id": "claim-auth-regression-tests",
+      "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
+      "environment": { "type": "ci", "identifier": "runner-1" },
+      "result": { "status": "pass" },
+      "lifecycle": { "status": "valid" },
+      "provenance": { "source": "ci-run-1", "recorded_at": "2026-08-27T10:00:00Z" }
+    },
+    {
+      "id": "evidence-auth",
+      "claim_id": "claim-security-review",
+      "producer": { "id": "reviewer-1", "type": "human" },
+      "environment": { "type": "code_review", "identifier": "review-1" },
+      "result": { "status": "pass" },
+      "lifecycle": { "status": "valid" },
+      "provenance": { "source": "review-1", "recorded_at": "2026-08-27T10:05:00Z" }
+    }
+  ]
+}

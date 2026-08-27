@@ -8,9 +8,8 @@
   },
   "contract": { "id": "contract-auth-session", "revision": "1" },
   "policy": { "id": "policy-engineering-baseline", "revision": "1" },
-  "evidence": [
-    {
-      "id": "evidence-auth-tests-rev-a",
+  "evidence": {
+    "evidence-auth-tests-rev-a": {
       "claim_id": "claim-auth-regression-tests",
       "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
       "environment": {
@@ -29,5 +28,5 @@
         "integrity": { "method": "sha256", "value": "fixture-digest-rev-a" }
       }
     }
-  ]
+  }
 }
