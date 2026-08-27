@@ -72,7 +72,12 @@ The first milestone must prove that the same facts + policies can produce approp
 ```bash
 go test ./...
 go run ./cmd/zenchron-engineering version
+go run ./cmd/zenchron-engineering selfhost issue 4
 ```
+
+`selfhost issue` requires authenticated local `gh` and `codex` CLIs. It only
+starts from a clean, synchronized `main`, creates a dedicated issue branch,
+requires an open PR and durable review handoff, and never merges it.
 
 ## License
 
