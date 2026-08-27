@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "id": "project-array-identities",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "critical_boundaries": [
+    {
+      "id": "authentication",
+      "type": "authentication",
+      "paths": ["internal/auth/**"]
+    },
+    {
+      "id": "authentication",
+      "type": "sensitive_data",
+      "paths": ["internal/payments/**"]
+    }
+  ]
+}

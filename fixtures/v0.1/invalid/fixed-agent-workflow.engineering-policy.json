@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-invalid",
+  "revision": "1",
+  "rules": {
+    "RULE-001": {
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": true
+      },
+      "effect": {
+        "obligations": {
+          "security-review": { "statement": "Security review must pass." }
+        }
+      },
+      "fixed_agent_workflow": ["architect-agent", "security-agent"]
+    }
+  }
+}

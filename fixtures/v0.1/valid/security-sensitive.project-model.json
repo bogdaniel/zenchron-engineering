@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "id": "project-acme-payments",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "critical_boundaries": {
+    "authentication": {
+      "type": "authentication",
+      "paths": ["internal/auth/**"]
+    },
+    "payment-data": {
+      "type": "sensitive_data",
+      "paths": ["internal/payments/**"]
+    }
+  },
+  "test_capabilities": {
+    "go-test": {
+      "type": "unit_and_integration"
+    }
+  },
+  "policy_profiles": ["baseline", "security-sensitive"]
+}

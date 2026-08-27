@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.1",
+  "id": "evidence-auth-failed",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+  "evidence": {
+    "evidence-auth-tests-failed": {
+      "claim_id": "claim-auth-regression-tests",
+      "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
+      "environment": {
+        "type": "ci",
+        "identifier": "runner-linux-amd64",
+        "toolchain": ["go1.25"]
+      },
+      "result": { "status": "fail", "summary": "Session expiry regression test failed." },
+      "lifecycle": { "status": "valid" },
+      "provenance": {
+        "source": "ci-run-101",
+        "recorded_at": "2026-08-27T10:10:00Z"
+      }
+    }
+  }
+}

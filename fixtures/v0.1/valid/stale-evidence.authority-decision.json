@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-auth-stale",
+  "revision": "2",
+  "subject": { "repository": "acme/payments", "revision": "rev-b" },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "basis": {
+    "evidence_bundles": {
+      "evidence-auth-rev-a": { "revision": "2" }
+    }
+  },
+  "action": { "type": "git.merge", "target": "main" },
+  "capability": { "status": "available" },
+  "permission": { "status": "granted" },
+  "status": "stale",
+  "satisfied": [],
+  "missing": [],
+  "stale": ["claim-auth-regression-tests"],
+  "blocking": []
+}

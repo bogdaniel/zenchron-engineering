@@ -1,0 +1,58 @@
+{
+  "schema_version": "0.1",
+  "id": "contract-retry-with-auth-impact",
+  "revision": "2",
+  "objective": "Change retry behavior while preserving session validation.",
+  "acceptance_intent": ["Retry behavior is correct", "Authentication protections do not weaken"],
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "scope": {
+    "stage": "observed",
+    "allowed_paths": ["internal/payments/retry.go", "internal/auth/session.go"],
+    "prohibited_paths": ["deploy/**"]
+  },
+  "facts": ["fact-api-1", "fact-auth-observed"],
+  "invariants": {
+    "AUTH-001": { "statement": "Authentication protections must not weaken." }
+  },
+  "obligations": {
+    "payment-regression-tests": { "statement": "Payment regression tests must pass." },
+    "auth-regression-tests": { "statement": "Authentication regression tests must pass." },
+    "independent-security-review": { "statement": "An independent security review must approve the change." }
+  },
+  "required_claims": {
+    "claim-payment-regression-tests": {
+      "evidence_class": "test_result",
+      "independent_from_change_producer": true
+    },
+    "claim-auth-regression-tests": {
+      "evidence_class": "test_result",
+      "independent_from_change_producer": true
+    },
+    "claim-security-review": {
+      "evidence_class": "security_review",
+      "independent_from_change_producer": true
+    }
+  },
+  "permissions": [
+    { "type": "git.pull_request.create", "target": "main" }
+  ],
+  "prohibitions": [
+    { "type": "git.merge", "target": "main" },
+    { "type": "deploy.production", "target": "payments" }
+  ],
+  "authority_conditions": [
+    {
+      "action": { "type": "git.pull_request.create", "target": "main" },
+      "required_claims": ["claim-payment-regression-tests", "claim-auth-regression-tests", "claim-security-review"]
+    }
+  ],
+  "provenance": {
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "compiler_version": "compiler-v0.1",
+    "previous_contract_revision": "1"
+  }
+}

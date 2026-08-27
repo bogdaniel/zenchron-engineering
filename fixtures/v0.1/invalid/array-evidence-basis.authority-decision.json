@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-array-basis",
+  "revision": "1",
+  "subject": { "repository": "acme/payments", "revision": "rev-b" },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "basis": {
+    "evidence_bundles": [
+      { "id": "evidence-auth-review", "revision": "1" },
+      { "id": "evidence-auth-review", "revision": "2" }
+    ]
+  },
+  "action": { "type": "git.merge", "target": "main" },
+  "capability": { "status": "available" },
+  "permission": { "status": "granted" },
+  "status": "incomplete",
+  "satisfied": [],
+  "missing": ["claim-security-owner-approval"],
+  "stale": [],
+  "blocking": []
+}

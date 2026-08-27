@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "id": "project-invalid",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments"
+  }
+}

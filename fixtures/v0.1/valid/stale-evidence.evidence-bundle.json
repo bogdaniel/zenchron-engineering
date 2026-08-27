@@ -1,0 +1,32 @@
+{
+  "schema_version": "0.1",
+  "id": "evidence-auth-rev-a",
+  "revision": "2",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+  "evidence": {
+    "evidence-auth-tests-rev-a": {
+      "claim_id": "claim-auth-regression-tests",
+      "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
+      "environment": {
+        "type": "ci",
+        "identifier": "runner-linux-amd64",
+        "toolchain": ["go1.25"]
+      },
+      "result": { "status": "pass" },
+      "lifecycle": {
+        "status": "stale",
+        "reason": "Candidate subject advanced from rev-a to rev-b."
+      },
+      "provenance": {
+        "source": "ci-run-100",
+        "recorded_at": "2026-08-27T10:05:00Z",
+        "integrity": { "method": "sha256", "value": "fixture-digest-rev-a" }
+      }
+    }
+  }
+}

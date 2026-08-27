@@ -1,0 +1,42 @@
+{
+  "schema_version": "0.1",
+  "id": "evidence-auth-remediated",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-c"
+  },
+  "contract": { "id": "contract-auth-session", "revision": "2" },
+  "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+  "evidence": {
+    "evidence-auth-tests-passed": {
+      "claim_id": "claim-auth-regression-tests",
+      "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
+      "environment": {
+        "type": "ci",
+        "identifier": "runner-linux-amd64",
+        "toolchain": ["go1.25"]
+      },
+      "result": { "status": "pass" },
+      "lifecycle": { "status": "valid" },
+      "provenance": {
+        "source": "ci-run-102",
+        "recorded_at": "2026-08-27T10:20:00Z"
+      }
+    },
+    "evidence-security-review-approved": {
+      "claim_id": "claim-security-review",
+      "producer": { "id": "reviewer-security-1", "type": "human" },
+      "environment": {
+        "type": "code_review",
+        "identifier": "review-record-55"
+      },
+      "result": { "status": "pass" },
+      "lifecycle": { "status": "valid" },
+      "provenance": {
+        "source": "review-record-55",
+        "recorded_at": "2026-08-27T10:25:00Z"
+      }
+    }
+  }
+}

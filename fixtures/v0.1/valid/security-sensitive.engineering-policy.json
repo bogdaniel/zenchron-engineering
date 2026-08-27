@@ -1,0 +1,71 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-engineering-baseline",
+  "revision": "1",
+  "rules": {
+    "AUTH-BOUNDARY-001": {
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": true
+      },
+      "effect": {
+        "obligations": {
+          "auth-regression-tests": {
+            "statement": "Authentication regression tests must pass.",
+            "required_claims": ["claim-auth-regression-tests"]
+          },
+          "independent-security-review": {
+            "statement": "An independent security review must approve the change.",
+            "required_claims": ["claim-security-review"]
+          },
+          "security-owner-approval": {
+            "statement": "The security owner must approve merge.",
+            "required_claims": ["claim-security-owner-approval"]
+          }
+        },
+        "invariants": {
+          "AUTH-001": {
+            "statement": "Authentication protections must not weaken."
+          }
+        },
+        "authority_conditions": [
+          {
+            "action": {
+              "type": "git.merge",
+              "target": "main"
+            },
+            "required_claims": [
+              "claim-auth-regression-tests",
+              "claim-security-review",
+              "claim-security-owner-approval"
+            ]
+          }
+        ]
+      }
+    },
+    "SENSITIVE-DATA-UNKNOWN-001": {
+      "when": {
+        "fact": "sensitive_data.boundary_modified",
+        "equals": "unknown",
+        "stage": "predicted",
+        "confidence": "low",
+        "provenance": {
+          "type": "intent_analysis"
+        }
+      },
+      "effect": {
+        "obligations": {
+          "resolve-sensitive-data-impact": {
+            "statement": "Resolve whether the change modifies a sensitive-data boundary."
+          }
+        },
+        "prohibitions": [
+          {
+            "type": "git.merge",
+            "target": "main"
+          }
+        ]
+      }
+    }
+  }
+}

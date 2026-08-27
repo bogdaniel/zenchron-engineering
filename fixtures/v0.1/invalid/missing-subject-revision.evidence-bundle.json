@@ -1,0 +1,27 @@
+{
+  "schema_version": "0.1",
+  "id": "evidence-invalid-subject",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments"
+  },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+  "evidence": {
+    "evidence-auth-tests": {
+      "claim_id": "claim-auth-regression-tests",
+      "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
+      "environment": {
+        "type": "ci",
+        "identifier": "runner-linux-amd64",
+        "toolchain": ["go1.25"]
+      },
+      "result": { "status": "pass" },
+      "lifecycle": { "status": "valid" },
+      "provenance": {
+        "source": "ci-run-100",
+        "recorded_at": "2026-08-27T10:05:00Z"
+      }
+    }
+  }
+}

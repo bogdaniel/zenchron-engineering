@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/engineering-fact.schema.json",
+  "title": "EngineeringFact v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "key", "value", "stage", "confidence", "subject", "provenance"],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "id": { "$ref": "#/$defs/non_empty_string" },
+    "key": { "$ref": "#/$defs/non_empty_string" },
+    "value": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "const": "unknown" }
+      ]
+    },
+    "stage": { "enum": ["predicted", "observed", "verified"] },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "subject": { "$ref": "#/$defs/subject" },
+    "provenance": { "$ref": "#/$defs/provenance" }
+  },
+  "$defs": {
+    "non_empty_string": { "type": "string", "minLength": 1 },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/non_empty_string" },
+        "revision": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "producer"],
+      "properties": {
+        "type": { "$ref": "#/$defs/non_empty_string" },
+        "producer": { "$ref": "#/$defs/non_empty_string" }
+      }
+    }
+  }
+}

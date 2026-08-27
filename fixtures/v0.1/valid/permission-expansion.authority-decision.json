@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-production-deploy-denied",
+  "revision": "1",
+  "subject": { "repository": "acme/payments", "revision": "rev-b" },
+  "contract": { "id": "contract-retry-with-auth-impact", "revision": "2" },
+  "basis": { "evidence_bundles": {} },
+  "action": { "type": "deploy.production", "target": "payments" },
+  "capability": { "status": "available" },
+  "permission": { "status": "denied" },
+  "status": "blocked",
+  "satisfied": [],
+  "missing": [],
+  "stale": [],
+  "blocking": ["permission:deploy.production:payments"]
+}

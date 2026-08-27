@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1",
+  "id": "contract-api-behavior",
+  "revision": "1",
+  "objective": "Change retry behavior for payment requests.",
+  "acceptance_intent": ["Retry behavior matches the documented business rule"],
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "scope": {
+    "stage": "observed",
+    "allowed_paths": ["internal/payments/retry.go", "internal/payments/retry_test.go"],
+    "prohibited_paths": ["internal/auth/**"]
+  },
+  "facts": ["fact-api-1"],
+  "invariants": {
+    "PAY-001": { "statement": "A payment must not be charged twice." }
+  },
+  "obligations": {
+    "payment-regression-tests": { "statement": "Payment regression tests must pass." }
+  },
+  "required_claims": {
+    "claim-payment-regression-tests": {
+      "evidence_class": "test_result",
+      "independent_from_change_producer": true
+    }
+  },
+  "permissions": [
+    { "type": "git.pull_request.create", "target": "main" }
+  ],
+  "prohibitions": [
+    { "type": "deploy.production", "target": "payments" }
+  ],
+  "authority_conditions": [
+    {
+      "action": { "type": "git.pull_request.create", "target": "main" },
+      "required_claims": ["claim-payment-regression-tests"]
+    }
+  ],
+  "provenance": {
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "compiler_version": "compiler-v0.1"
+  }
+}

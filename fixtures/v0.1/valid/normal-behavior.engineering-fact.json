@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "id": "fact-api-1",
+  "key": "api.behavior_modified",
+  "value": true,
+  "stage": "observed",
+  "confidence": "high",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "provenance": {
+    "type": "diff_analysis",
+    "producer": "api-detector-v1"
+  }
+}

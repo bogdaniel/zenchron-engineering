@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.1",
+  "id": "contract-invalid",
+  "revision": "1",
+  "objective": "Change session validation.",
+  "acceptance_intent": ["Invalid sessions remain rejected"],
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "scope": {
+    "stage": "observed",
+    "allowed_paths": ["internal/auth/session.go"],
+    "prohibited_paths": []
+  },
+  "facts": ["fact-auth-2"],
+  "invariants": {},
+  "obligations": {},
+  "required_claims": {},
+  "permissions": [],
+  "prohibitions": [],
+  "authority_conditions": [],
+  "provenance": {
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "compiler_version": "compiler-v0.1"
+  },
+  "fixed_agent_workflow": ["implementation-agent", "test-agent"]
+}
