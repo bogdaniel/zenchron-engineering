@@ -1,0 +1,55 @@
+{
+  "schema_version": "0.1",
+  "id": "contract-auth-session",
+  "revision": "1",
+  "objective": "Change session refresh validation.",
+  "acceptance_intent": ["Valid sessions refresh", "Invalid sessions remain rejected"],
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "scope": {
+    "stage": "observed",
+    "allowed_paths": ["internal/auth/session.go", "internal/auth/session_test.go"],
+    "prohibited_paths": ["deploy/**"]
+  },
+  "facts": ["fact-auth-2"],
+  "invariants": [
+    { "id": "AUTH-001", "statement": "Authentication protections must not weaken." }
+  ],
+  "obligations": [
+    { "id": "auth-regression-tests", "statement": "Authentication regression tests must pass." },
+    { "id": "independent-security-review", "statement": "An independent security review must approve the change." }
+  ],
+  "required_claims": [
+    {
+      "id": "claim-auth-regression-tests",
+      "evidence_class": "test_result",
+      "independent_from_change_producer": true
+    },
+    {
+      "id": "claim-security-review",
+      "evidence_class": "security_review",
+      "independent_from_change_producer": true
+    }
+  ],
+  "permissions": [
+    { "type": "git.pull_request.create", "target": "main" },
+    { "type": "git.merge", "target": "main" }
+  ],
+  "prohibitions": [
+    { "type": "deploy.production", "target": "payments" }
+  ],
+  "authority_conditions": [
+    {
+      "action": { "type": "git.merge", "target": "main" },
+      "required_claims": ["claim-auth-regression-tests", "claim-security-review"],
+      "required_authorities": ["security-owner"]
+    }
+  ],
+  "provenance": {
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "compiler_version": "compiler-v0.1"
+  }
+}

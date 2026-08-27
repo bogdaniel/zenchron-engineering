@@ -1,0 +1,70 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-engineering-baseline",
+  "revision": "1",
+  "rules": [
+    {
+      "id": "AUTH-BOUNDARY-001",
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": true
+      },
+      "effect": {
+        "obligations": [
+          {
+            "id": "auth-regression-tests",
+            "statement": "Authentication regression tests must pass.",
+            "required_claims": ["claim-auth-regression-tests"]
+          },
+          {
+            "id": "independent-security-review",
+            "statement": "An independent security review must approve the change.",
+            "required_claims": ["claim-security-review"]
+          }
+        ],
+        "invariants": [
+          {
+            "id": "AUTH-001",
+            "statement": "Authentication protections must not weaken."
+          }
+        ],
+        "authority_conditions": [
+          {
+            "action": {
+              "type": "git.merge",
+              "target": "main"
+            },
+            "required_claims": ["claim-auth-regression-tests", "claim-security-review"],
+            "required_authorities": ["security-owner"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SENSITIVE-DATA-UNKNOWN-001",
+      "when": {
+        "fact": "sensitive_data.boundary_modified",
+        "equals": "unknown",
+        "stage": "predicted",
+        "confidence": "low",
+        "provenance": {
+          "type": "intent_analysis"
+        }
+      },
+      "effect": {
+        "obligations": [
+          {
+            "id": "resolve-sensitive-data-impact",
+            "statement": "Resolve whether the change modifies a sensitive-data boundary."
+          }
+        ],
+        "prohibitions": [
+          {
+            "type": "git.merge",
+            "target": "main"
+          }
+        ]
+      }
+    }
+  ]
+}

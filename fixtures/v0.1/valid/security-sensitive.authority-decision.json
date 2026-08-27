@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-auth-merge",
+  "revision": "1",
+  "subject": { "repository": "acme/payments", "revision": "rev-b" },
+  "contract": { "id": "contract-auth-session", "revision": "1" },
+  "action": { "type": "git.merge", "target": "main" },
+  "capability": { "status": "available" },
+  "permission": { "status": "granted" },
+  "status": "awaiting_authority",
+  "satisfied": ["claim-auth-regression-tests", "claim-security-review"],
+  "missing": ["authority:security-owner"],
+  "stale": [],
+  "blocking": []
+}

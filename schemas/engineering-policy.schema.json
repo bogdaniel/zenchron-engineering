@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/engineering-policy.schema.json",
+  "title": "EngineeringPolicy v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "revision", "rules"],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "id": { "$ref": "#/$defs/non_empty_string" },
+    "revision": { "$ref": "#/$defs/non_empty_string" },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "non_empty_string": { "type": "string", "minLength": 1 },
+    "fact_value": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "const": "unknown" }
+      ]
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact", "equals"],
+      "properties": {
+        "fact": { "$ref": "#/$defs/non_empty_string" },
+        "equals": { "$ref": "#/$defs/fact_value" },
+        "stage": { "enum": ["predicted", "observed", "verified"] },
+        "confidence": { "enum": ["low", "medium", "high"] },
+        "provenance": { "$ref": "#/$defs/provenance_match" }
+      }
+    },
+    "provenance_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "type": { "$ref": "#/$defs/non_empty_string" },
+        "producer": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "statement": { "$ref": "#/$defs/non_empty_string" },
+        "required_claims": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "target"],
+      "properties": {
+        "type": { "$ref": "#/$defs/non_empty_string" },
+        "target": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "authority_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "required_claims", "required_authorities"],
+      "properties": {
+        "action": { "$ref": "#/$defs/action" },
+        "required_claims": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" },
+          "uniqueItems": true
+        },
+        "required_authorities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" },
+          "uniqueItems": true
+        }
+      },
+      "anyOf": [
+        { "properties": { "required_claims": { "minItems": 1 } } },
+        { "properties": { "required_authorities": { "minItems": 1 } } }
+      ]
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "obligations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/requirement" } },
+        "invariants": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/requirement" } },
+        "permissions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/action" } },
+        "prohibitions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/action" } },
+        "authority_conditions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/authority_condition" } }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "when", "effect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "when": { "$ref": "#/$defs/condition" },
+        "effect": { "$ref": "#/$defs/effect" }
+      }
+    }
+  }
+}

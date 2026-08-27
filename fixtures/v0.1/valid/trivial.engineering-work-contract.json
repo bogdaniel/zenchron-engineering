@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "id": "contract-docs-copy",
+  "revision": "1",
+  "objective": "Correct copy in the public README.",
+  "acceptance_intent": ["README text is accurate", "No executable code changes"],
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "scope": {
+    "stage": "observed",
+    "allowed_paths": ["README.md"],
+    "prohibited_paths": ["internal/**"]
+  },
+  "facts": ["fact-auth-1"],
+  "invariants": [],
+  "obligations": [],
+  "required_claims": [],
+  "permissions": [
+    { "type": "git.pull_request.create", "target": "main" }
+  ],
+  "prohibitions": [
+    { "type": "git.merge", "target": "main" },
+    { "type": "deploy.production", "target": "payments" }
+  ],
+  "authority_conditions": [],
+  "provenance": {
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "compiler_version": "compiler-v0.1"
+  }
+}

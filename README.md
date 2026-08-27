@@ -55,7 +55,8 @@ docs/principles.md           Frozen architectural principles
 docs/architecture.md         System architecture
 docs/adr/                    Architecture decisions
 docs/spec/v0.1.md            Initial domain specification
-schemas/                     Canonical JSON Schemas (to be implemented)
+schemas/                     Canonical JSON Schemas and Go validation tests
+fixtures/v0.1/               Positive and targeted invalid schema fixtures
 cmd/zenchron-engineering/    CLI entry point
 ```
 

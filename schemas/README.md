@@ -1,8 +1,7 @@
 # JSON Schemas
 
-This directory will contain the canonical JSON Schemas for durable/interchanged Zenchron Engineering domain objects.
-
-Planned v0.1 schemas:
+`schemas/` contains the canonical JSON Schema Draft 2020-12 contracts for
+Zenchron Engineering v0.1.
 
 - `project-model.schema.json`
 - `engineering-fact.schema.json`
@@ -11,4 +10,6 @@ Planned v0.1 schemas:
 - `evidence-bundle.schema.json`
 - `authority-decision.schema.json`
 
-Do not freeze these schemas from prose alone. They should be developed together with representative fixtures and validation tests so the domain model is forced through real low-, medium-, high-impact, scope-expansion, uncertainty, stale-evidence, privilege, and remediation cases.
+Every schema has a stable `$id`, requires `schema_version: "0.1"`, and rejects
+undeclared fields. `fixtures/v0.1/` contains the tested contracts. Run
+`go test ./...` to compile every schema and validate every fixture.

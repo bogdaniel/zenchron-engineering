@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/authority-decision.schema.json",
+  "title": "AuthorityDecision v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "revision", "subject", "contract", "action", "capability",
+    "permission", "status", "satisfied", "missing", "stale", "blocking"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "id": { "$ref": "#/$defs/non_empty_string" },
+    "revision": { "$ref": "#/$defs/non_empty_string" },
+    "subject": { "$ref": "#/$defs/subject" },
+    "contract": { "$ref": "#/$defs/object_revision" },
+    "action": { "$ref": "#/$defs/action" },
+    "capability": { "$ref": "#/$defs/capability" },
+    "permission": { "$ref": "#/$defs/permission" },
+    "status": { "enum": ["incomplete", "blocked", "stale", "awaiting_authority", "authorized"] },
+    "satisfied": { "$ref": "#/$defs/requirement_ids" },
+    "missing": { "$ref": "#/$defs/requirement_ids" },
+    "stale": { "$ref": "#/$defs/requirement_ids" },
+    "blocking": { "$ref": "#/$defs/requirement_ids" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "authorized" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "capability": { "properties": { "status": { "const": "available" } } },
+          "permission": { "properties": { "status": { "const": "granted" } } },
+          "missing": { "maxItems": 0 },
+          "stale": { "maxItems": 0 },
+          "blocking": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "permission": { "properties": { "status": { "const": "denied" } } } },
+        "required": ["permission"]
+      },
+      "then": { "properties": { "status": { "const": "blocked" } } }
+    },
+    {
+      "if": {
+        "properties": { "capability": { "properties": { "status": { "const": "unavailable" } } } },
+        "required": ["capability"]
+      },
+      "then": { "properties": { "status": { "const": "blocked" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "incomplete" } }, "required": ["status"] },
+      "then": { "properties": { "missing": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] },
+      "then": { "properties": { "blocking": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "stale" } }, "required": ["status"] },
+      "then": { "properties": { "stale": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "awaiting_authority" } }, "required": ["status"] },
+      "then": { "properties": { "missing": { "minItems": 1 } } }
+    }
+  ],
+  "$defs": {
+    "non_empty_string": { "type": "string", "minLength": 1 },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/non_empty_string" },
+        "revision": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "object_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "revision": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "target"],
+      "properties": {
+        "type": { "$ref": "#/$defs/non_empty_string" },
+        "target": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "enum": ["available", "unavailable", "unknown"] } }
+    },
+    "permission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "enum": ["granted", "denied"] } }
+    },
+    "requirement_ids": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/non_empty_string" },
+      "uniqueItems": true
+    }
+  }
+}

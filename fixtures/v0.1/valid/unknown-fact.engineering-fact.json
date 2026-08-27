@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "id": "fact-sensitive-data-unknown",
+  "key": "sensitive_data.boundary_modified",
+  "value": "unknown",
+  "stage": "predicted",
+  "confidence": "low",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "provenance": {
+    "type": "intent_analysis",
+    "producer": "impact-classifier-v1"
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/evidence-bundle.schema.json",
+  "title": "EvidenceBundle v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "revision", "subject", "contract", "policy", "evidence"],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "id": { "$ref": "#/$defs/non_empty_string" },
+    "revision": { "$ref": "#/$defs/non_empty_string" },
+    "subject": { "$ref": "#/$defs/subject" },
+    "contract": { "$ref": "#/$defs/object_revision" },
+    "policy": { "$ref": "#/$defs/object_revision" },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/evidence_item" }
+    }
+  },
+  "$defs": {
+    "non_empty_string": { "type": "string", "minLength": 1 },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/non_empty_string" },
+        "revision": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "object_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "revision": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "type": {
+          "enum": ["execution_provider", "assurance_provider", "deterministic_tool", "human"]
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "identifier"],
+      "properties": {
+        "type": { "$ref": "#/$defs/non_empty_string" },
+        "identifier": { "$ref": "#/$defs/non_empty_string" },
+        "toolchain": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["pass", "fail", "inconclusive"] },
+        "summary": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["valid", "stale", "invalid", "incomplete"] },
+        "reason": { "$ref": "#/$defs/non_empty_string" }
+      },
+      "if": {
+        "properties": { "status": { "enum": ["stale", "invalid", "incomplete"] } },
+        "required": ["status"]
+      },
+      "then": { "required": ["reason"] }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "value"],
+      "properties": {
+        "method": { "$ref": "#/$defs/non_empty_string" },
+        "value": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "recorded_at"],
+      "properties": {
+        "source": { "$ref": "#/$defs/non_empty_string" },
+        "recorded_at": { "type": "string", "format": "date-time" },
+        "integrity": { "$ref": "#/$defs/integrity" }
+      }
+    },
+    "evidence_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "claim_id", "producer", "result", "lifecycle", "provenance"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "claim_id": { "$ref": "#/$defs/non_empty_string" },
+        "producer": { "$ref": "#/$defs/producer" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "result": { "$ref": "#/$defs/result" },
+        "lifecycle": { "$ref": "#/$defs/lifecycle" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    }
+  }
+}

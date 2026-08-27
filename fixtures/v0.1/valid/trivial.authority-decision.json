@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-docs-pr",
+  "revision": "1",
+  "subject": { "repository": "acme/payments", "revision": "rev-a" },
+  "contract": { "id": "contract-docs-copy", "revision": "1" },
+  "action": { "type": "git.pull_request.create", "target": "main" },
+  "capability": { "status": "available" },
+  "permission": { "status": "granted" },
+  "status": "authorized",
+  "satisfied": [],
+  "missing": [],
+  "stale": [],
+  "blocking": []
+}

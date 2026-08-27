@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-expanded-pr",
+  "revision": "2",
+  "subject": { "repository": "acme/payments", "revision": "rev-b" },
+  "contract": { "id": "contract-retry-with-auth-impact", "revision": "2" },
+  "action": { "type": "git.pull_request.create", "target": "main" },
+  "capability": { "status": "available" },
+  "permission": { "status": "granted" },
+  "status": "incomplete",
+  "satisfied": ["claim-payment-regression-tests"],
+  "missing": ["claim-auth-regression-tests", "claim-security-review"],
+  "stale": [],
+  "blocking": []
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "id": "evidence-docs-copy",
+  "revision": "1",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-a"
+  },
+  "contract": { "id": "contract-docs-copy", "revision": "1" },
+  "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+  "evidence": [
+    {
+      "id": "evidence-json-parse",
+      "claim_id": "claim-json-valid",
+      "producer": { "id": "json-validator", "type": "deterministic_tool" },
+      "result": { "status": "pass" },
+      "lifecycle": { "status": "valid" },
+      "provenance": {
+        "source": "local-validation",
+        "recorded_at": "2026-08-27T10:00:00Z"
+      }
+    }
+  ]
+}

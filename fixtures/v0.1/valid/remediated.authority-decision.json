@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "decision-auth-pr-remediated",
+  "revision": "1",
+  "subject": { "repository": "acme/payments", "revision": "rev-c" },
+  "contract": { "id": "contract-auth-session", "revision": "2" },
+  "action": { "type": "git.pull_request.create", "target": "main" },
+  "capability": { "status": "available" },
+  "permission": { "status": "granted" },
+  "status": "authorized",
+  "satisfied": ["claim-auth-regression-tests", "claim-security-review"],
+  "missing": [],
+  "stale": [],
+  "blocking": []
+}
