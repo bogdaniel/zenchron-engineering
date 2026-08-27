@@ -56,6 +56,7 @@ docs/architecture.md         System architecture
 docs/adr/                    Architecture decisions
 docs/spec/v0.1.md            Initial domain specification
 schemas/                     Canonical JSON Schemas and Go validation tests
+domain/                      Go v0.1 representations and canonical JSON codecs
 fixtures/v0.1/               Positive and targeted invalid schema fixtures
 cmd/zenchron-engineering/    CLI entry point
 ```
