@@ -91,8 +91,20 @@ type executorReport struct {
 }
 
 type validationResult struct {
+	ID      string `json:"id"`
 	Command string `json:"command"`
 	Result  string `json:"result"`
+}
+
+type harnessCheck struct {
+	ID      string
+	Command string
+}
+
+var bootstrapChecks = []harnessCheck{
+	{ID: "format", Command: "gofmt -l <tracked Go files>"},
+	{ID: "vet", Command: "go vet ./..."},
+	{ID: "test", Command: "go test ./..."},
 }
 
 func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) error {
@@ -291,16 +303,137 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	if err := json.Unmarshal(reportData, &report); err != nil {
 		return fmt.Errorf("decode Codex report: %w", err)
 	}
-	for _, required := range []string{"gofmt -l .", "go vet ./...", "go test ./..."} {
-		if !validationPassed(report.Validation, required) {
-			return fmt.Errorf("Codex report does not show required validation %q passing", required)
+	return publishCandidate(root, number, issueBranch, target, runtime, &report, commands, stdout)
+}
+
+// selfhostResume publishes the uncommitted candidate left by an interrupted
+// selfhost issue run. It is intentionally narrow: it accepts only the exact
+// issue branch at origin/main with no remote branch or PR to avoid adopting
+// unrelated local work or history.
+func selfhostResume(rawNumber string, commands commandRunner, stdout io.Writer) error {
+	number, err := strconv.Atoi(rawNumber)
+	if err != nil || number < 1 {
+		return errors.New("issue number must be a positive integer")
+	}
+	for _, tool := range []string{"git", "gh"} {
+		if err := commands.LookPath(tool); err != nil {
+			return fmt.Errorf("required executable %q not found in PATH", tool)
 		}
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get working directory: %w", err)
+	}
+	root, err := commands.Output(cwd, "git", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return fmt.Errorf("not a Git repository: %w", err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	runtime, err := resolveGoRuntime(root, commands)
+	if err != nil {
+		return fmt.Errorf("resolve Go runtime before repository mutation: %w", err)
+	}
+	fmt.Fprintf(stdout, "Go runtime: %s\n", runtime)
+	for _, remote := range []struct {
+		args []string
+		name string
+	}{{[]string{"remote", "get-url", "origin"}, "origin"}, {[]string{"remote", "get-url", "--push", "origin"}, "origin push"}} {
+		value, err := commands.Output(root, "git", remote.args...)
+		if err != nil {
+			return fmt.Errorf("read %s remote: %w", remote.name, err)
+		}
+		if !expectedOrigin(value) {
+			return fmt.Errorf("wrong %s remote: got %q, want %q", remote.name, value, "github.com/"+repository)
+		}
+	}
+	if _, err := commands.Output(root, "gh", "auth", "status"); err != nil {
+		return fmt.Errorf("GitHub CLI authentication unavailable: %w", err)
+	}
+	identity, err := commands.Output(root, "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+	if err != nil {
+		return fmt.Errorf("identify GitHub repository: %w", err)
+	}
+	if identity != repository {
+		return fmt.Errorf("wrong repository: got %q, want %q", identity, repository)
+	}
+	issueBranch := fmt.Sprintf("issue-%d", number)
+	branch, err := commands.Output(root, "git", "branch", "--show-current")
+	if err != nil || branch != issueBranch {
+		return fmt.Errorf("unexpected branch %q: resume requires %q", branch, issueBranch)
+	}
+	status, err := commands.Output(root, "git", "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return fmt.Errorf("inspect working tree: %w", err)
+	}
+	if status == "" {
+		return errors.New("working tree has no interrupted candidate changes to resume")
+	}
+	ignored, err := commands.Output(root, "git", "ls-files", "--others", "--ignored", "--exclude-standard")
+	if err != nil {
+		return fmt.Errorf("inspect ignored files: %w", err)
+	}
+	if ignored != "" {
+		return errors.New("ignored files are present; resume refuses local data it cannot safely preserve")
+	}
+	if _, err := commands.Output(root, "git", "fetch", "--quiet", "origin", "main"); err != nil {
+		return fmt.Errorf("refresh origin/main: %w", err)
+	}
+	head, err := commands.Output(root, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("read interrupted branch revision: %w", err)
+	}
+	remoteMain, err := commands.Output(root, "git", "rev-parse", "origin/main")
+	if err != nil {
+		return fmt.Errorf("read origin/main revision: %w", err)
+	}
+	if head != remoteMain {
+		return fmt.Errorf("interrupted branch history is not exactly origin/main; refusing unrelated history (branch %s, main %s)", head, remoteMain)
+	}
+	remoteBranch, err := commands.Output(root, "git", "ls-remote", "--heads", "origin", "refs/heads/"+issueBranch)
+	if err != nil {
+		return fmt.Errorf("check remote issue branch: %w", err)
+	}
+	if remoteBranch != "" {
+		return fmt.Errorf("issue branch %q already exists on origin; refusing resume", issueBranch)
+	}
+	existingPRs, err := commands.Output(root, "gh", "pr", "list", "--repo", repository, "--state", "all", "--head", issueBranch, "--json", "number,url")
+	if err != nil {
+		return fmt.Errorf("check existing pull requests: %w", err)
+	}
+	var existing []pullRequest
+	if err := json.Unmarshal([]byte(existingPRs), &existing); err != nil {
+		return fmt.Errorf("decode existing pull requests: %w", err)
+	}
+	if len(existing) != 0 {
+		return fmt.Errorf("pull request for %q already exists: %s", issueBranch, existing[0].URL)
+	}
+	issueData, err := commands.Output(root, "gh", "issue", "view", rawNumber, "--repo", repository, "--json", "number,title,body,state,url")
+	if err != nil {
+		return fmt.Errorf("retrieve issue #%d: %w", number, err)
+	}
+	var target issue
+	if err := json.Unmarshal([]byte(issueData), &target); err != nil {
+		return fmt.Errorf("decode issue #%d: %w", number, err)
+	}
+	if target.Number != number || target.State != "OPEN" {
+		return fmt.Errorf("issue #%d is not an open matching issue", number)
+	}
+	return publishCandidate(root, number, issueBranch, target, runtime, nil, commands, stdout)
+}
+
+func publishCandidate(root string, number int, issueBranch string, target issue, runtime goRuntime, report *executorReport, commands commandRunner, stdout io.Writer) error {
+	checks, err := verifyBootstrapChecks(runtime)
+	if err != nil {
+		return err
+	}
 	if err := commands.Run(root, "git", "add", "--all"); err != nil {
-		return fmt.Errorf("stage Codex changes: %w", err)
+		return fmt.Errorf("stage candidate changes: %w", err)
 	}
 	if err := commands.Run(root, "git", "commit", "-m", fmt.Sprintf("Implement issue #%d", number)); err != nil {
-		return fmt.Errorf("commit Codex changes: %w", err)
+		return fmt.Errorf("commit candidate changes: %w", err)
 	}
 	head, err := commands.Output(root, "git", "rev-parse", "HEAD")
 	if err != nil {
@@ -317,7 +450,6 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	if err := commands.Run(root, "gh", "pr", "create", "--repo", repository, "--base", "main", "--head", issueBranch, "--title", fmt.Sprintf("Issue #%d: %s", number, target.Title), "--body-file", prBodyFile); err != nil {
 		return fmt.Errorf("create pull request: %w", err)
 	}
-
 	prData, err := commands.Output(root, "gh", "pr", "view", issueBranch, "--repo", repository, "--json", "number,url,state,headRefName,headRefOid,baseRefName,body")
 	if err != nil {
 		return fmt.Errorf("find required pull request for %q: %w", issueBranch, err)
@@ -332,8 +464,7 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	if !strings.Contains(strings.ToLower(pr.Body), strings.ToLower(fmt.Sprintf("closes #%d", number))) {
 		return fmt.Errorf("pull request must contain %q", fmt.Sprintf("Closes #%d", number))
 	}
-
-	commentFile, err := writeComment(target, issueBranch, pr, head, runtime, report)
+	commentFile, err := writeComment(target, issueBranch, pr, head, runtime, report, checks)
 	if err != nil {
 		return err
 	}
@@ -352,10 +483,10 @@ Before editing, read AGENTS.md, docs/principles.md, docs/architecture.md, all ac
 
 You are already on dedicated branch %s. Stay on it. Follow the issue acceptance criteria and run gofmt -l ., go vet ./..., and go test ./.... Do not commit, push, open or modify a PR, or merge; the bootstrap harness owns Git and GitHub publication.
 
-Report every validation command/result, architectural deviation, and unresolved question in the requested structured final response.`, number, number, contextFile, branch)
+Report executor observations using validation IDs format, vet, and test where applicable; record the actual command/environment used separately. Report every validation observation, architectural deviation, and unresolved question in the requested structured final response. The bootstrap harness independently reruns deterministic checks before publication.`, number, number, contextFile, branch)
 }
 
-const reportSchema = `{"type":"object","properties":{"validation":{"type":"array","minItems":1,"items":{"type":"object","properties":{"command":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}},"required":["command","result"],"additionalProperties":false}},"architectural_deviations":{"type":"array","items":{"type":"string"}},"unresolved_questions":{"type":"array","items":{"type":"string"}}},"required":["validation","architectural_deviations","unresolved_questions"],"additionalProperties":false}`
+const reportSchema = `{"type":"object","properties":{"validation":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"string","enum":["format","vet","test"]},"command":{"type":"string"},"result":{"type":"string","enum":["pass","fail","not_run"]}},"required":["id","command","result"],"additionalProperties":false}},"architectural_deviations":{"type":"array","items":{"type":"string"}},"unresolved_questions":{"type":"array","items":{"type":"string"}}},"required":["validation","architectural_deviations","unresolved_questions"],"additionalProperties":false}`
 
 func expectedOrigin(origin string) bool {
 	origin = strings.TrimSuffix(origin, ".git")
@@ -364,13 +495,39 @@ func expectedOrigin(origin string) bool {
 		origin == "ssh://git@github.com/"+repository
 }
 
-func validationPassed(results []validationResult, command string) bool {
-	for _, result := range results {
-		if result.Command == command && result.Result == "pass" {
-			return true
+func verifyBootstrapChecks(runtime goRuntime) ([]harnessCheck, error) {
+	completed := make([]harnessCheck, 0, len(bootstrapChecks))
+	for _, check := range bootstrapChecks {
+		var err error
+		if check.ID == "format" {
+			files, listErr := runtime.commands.Output(runtime.repositoryRoot, "git", "ls-files", "-z", "--", "*.go")
+			if listErr != nil {
+				return nil, fmt.Errorf("list tracked Go files for harness verification: %w", listErr)
+			}
+			goFiles := strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
+			if len(goFiles) == 1 && goFiles[0] == "" {
+				goFiles = nil
+			}
+			if len(goFiles) == 0 {
+				completed = append(completed, check)
+				continue
+			}
+			var output string
+			output, err = runtime.OutputTool("gofmt", append([]string{"-l"}, goFiles...)...)
+			if err == nil && strings.TrimSpace(output) != "" {
+				err = fmt.Errorf("gofmt reported unformatted files: %s", strings.TrimSpace(output))
+			}
+		} else if check.ID == "vet" {
+			err = runtime.Run("vet", "./...")
+		} else {
+			err = runtime.Run("test", "./...")
 		}
+		if err != nil {
+			return nil, fmt.Errorf("harness verification %q failed: %w", check.ID, err)
+		}
+		completed = append(completed, check)
 	}
-	return false
+	return completed, nil
 }
 
 func temporaryReportFiles() (string, string, func(), error) {
@@ -399,17 +556,26 @@ func temporaryReportFiles() (string, string, func(), error) {
 	return report.Name(), schema.Name(), cleanup, nil
 }
 
-func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report executorReport) (string, error) {
+func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, checks []harnessCheck) (string, error) {
 	file, err := os.CreateTemp("", "zenchron-handoff-*.md")
 	if err != nil {
 		return "", fmt.Errorf("create handoff comment: %w", err)
 	}
 	defer file.Close()
-	reportJSON, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode executor report: %w", err)
+	fmt.Fprintf(file, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Harness Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor-reported observations\n\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime)
+	if report == nil {
+		fmt.Fprintln(file, "Unavailable: the interrupted run did not preserve a durable executor report.")
+	} else {
+		reportJSON, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return "", fmt.Errorf("encode executor report: %w", err)
+		}
+		fmt.Fprintf(file, "```json\n%s\n```\n", reportJSON)
 	}
-	fmt.Fprintf(file, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor report\n\n```json\n%s\n```\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime, reportJSON)
+	fmt.Fprint(file, "\n### Harness-verified deterministic checks\n\n")
+	for _, check := range checks {
+		fmt.Fprintf(file, "- `%s` — pass (`%s`)\n", check.ID, check.Command)
+	}
 	return file.Name(), nil
 }
 
