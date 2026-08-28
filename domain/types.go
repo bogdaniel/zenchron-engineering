@@ -123,6 +123,7 @@ type PolicyRequirement struct {
 type PolicyEffect struct {
 	Obligations         *map[string]PolicyRequirement `json:"obligations,omitempty"`
 	Invariants          *map[string]PolicyRequirement `json:"invariants,omitempty"`
+	RequiredClaims      *map[string]RequiredClaim     `json:"required_claims,omitempty"`
 	Permissions         *[]Action                     `json:"permissions,omitempty"`
 	Prohibitions        *[]Action                     `json:"prohibitions,omitempty"`
 	AuthorityConditions *[]AuthorityCondition         `json:"authority_conditions,omitempty"`

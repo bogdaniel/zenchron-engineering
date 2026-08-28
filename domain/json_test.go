@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -183,9 +184,14 @@ func TestMapSerializationIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := first
-	second.Rules = map[string]domain.PolicyRule{
-		"SENSITIVE-DATA-UNKNOWN-001": first.Rules["SENSITIVE-DATA-UNKNOWN-001"],
-		"AUTH-BOUNDARY-001":          first.Rules["AUTH-BOUNDARY-001"],
+	second.Rules = make(map[string]domain.PolicyRule, len(first.Rules))
+	ruleIDs := make([]string, 0, len(first.Rules))
+	for id := range first.Rules {
+		ruleIDs = append(ruleIDs, id)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ruleIDs)))
+	for _, id := range ruleIDs {
+		second.Rules[id] = first.Rules[id]
 	}
 
 	firstJSON, err := domain.Encode(first)

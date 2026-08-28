@@ -3,12 +3,100 @@
   "id": "policy-engineering-baseline",
   "revision": "1",
   "rules": {
+    "TRIVIAL-CHANGE-001": {
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": false
+      },
+      "effect": {
+        "required_claims": {
+          "claim-trivial-validation": {
+            "evidence_class": "test_result",
+            "independent_from_change_producer": true
+          }
+        },
+        "obligations": {
+          "trivial-change-validation": {
+            "statement": "Basic change validation must pass.",
+            "required_claims": ["claim-trivial-validation"]
+          }
+        },
+        "permissions": [
+          {
+            "type": "git.pull_request.create",
+            "target": "main"
+          }
+        ],
+        "authority_conditions": [
+          {
+            "action": {
+              "type": "git.pull_request.create",
+              "target": "main"
+            },
+            "required_claims": ["claim-trivial-validation"]
+          }
+        ]
+      }
+    },
+    "API-BEHAVIOR-001": {
+      "when": {
+        "fact": "api.behavior_modified",
+        "equals": true
+      },
+      "effect": {
+        "required_claims": {
+          "claim-api-behavior-tests": {
+            "evidence_class": "test_result",
+            "independent_from_change_producer": true
+          },
+          "claim-api-contract-tests": {
+            "evidence_class": "test_result",
+            "independent_from_change_producer": true
+          }
+        },
+        "obligations": {
+          "api-behavior-tests": {
+            "statement": "API behavior and compatibility tests must pass.",
+            "required_claims": ["claim-api-behavior-tests", "claim-api-contract-tests"]
+          }
+        },
+        "permissions": [
+          {
+            "type": "git.pull_request.create",
+            "target": "main"
+          }
+        ],
+        "authority_conditions": [
+          {
+            "action": {
+              "type": "git.pull_request.create",
+              "target": "main"
+            },
+            "required_claims": ["claim-api-behavior-tests", "claim-api-contract-tests"]
+          }
+        ]
+      }
+    },
     "AUTH-BOUNDARY-001": {
       "when": {
         "fact": "authentication.boundary_modified",
         "equals": true
       },
       "effect": {
+        "required_claims": {
+          "claim-auth-regression-tests": {
+            "evidence_class": "test_result",
+            "independent_from_change_producer": true
+          },
+          "claim-security-review": {
+            "evidence_class": "security_review",
+            "independent_from_change_producer": true
+          },
+          "claim-security-owner-approval": {
+            "evidence_class": "human_approval",
+            "independent_from_change_producer": true
+          }
+        },
         "obligations": {
           "auth-regression-tests": {
             "statement": "Authentication regression tests must pass.",
