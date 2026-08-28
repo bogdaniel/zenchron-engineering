@@ -118,6 +118,9 @@ func TestDockerGoRuntimeGoTestUsesExecutableEphemeralTemporaryDirectory(t *testi
 
 func TestVerifyBootstrapChecksUsesResolvedDockerRuntime(t *testing.T) {
 	root := writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n")
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	commands := &runtimeCommands{dockerAvailable: true, dockerRunning: true, imageAvailable: true}
 	runtime, err := resolveGoRuntime(root, commands)
 	if err != nil {
@@ -135,6 +138,57 @@ func TestVerifyBootstrapChecksUsesResolvedDockerRuntime(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("Docker verification missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestVerifyBootstrapChecksSkipsDeletedTrackedGoFiles(t *testing.T) {
+	root := writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n")
+	for _, file := range []string{"tracked.go", "new.go"} {
+		if err := os.WriteFile(filepath.Join(root, file), []byte("package main\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commands := &runtimeCommands{
+		dockerAvailable: true,
+		dockerRunning:   true,
+		imageAvailable:  true,
+		goFiles:         "tracked.go\x00deleted.go\x00new.go\x00",
+	}
+	runtime, err := resolveGoRuntime(root, commands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyBootstrapChecks(runtime); err != nil {
+		t.Fatalf("verify checks with deleted tracked Go file: %v", err)
+	}
+
+	calls := strings.Join(commands.calls, "\n")
+	if !strings.Contains(calls, "sha256:test-image gofmt -l tracked.go new.go") {
+		t.Fatalf("gofmt did not receive existing tracked and untracked Go files:\n%s", calls)
+	}
+	if strings.Contains(calls, "sha256:test-image gofmt -l tracked.go deleted.go new.go") {
+		t.Fatalf("gofmt received deleted tracked Go file:\n%s", calls)
+	}
+}
+
+func TestVerifyBootstrapChecksRejectsUnformattedNewGoFile(t *testing.T) {
+	root := writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n")
+	if err := os.WriteFile(filepath.Join(root, "new.go"), []byte("package main\nfunc main(){}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commands := &runtimeCommands{
+		dockerAvailable: true,
+		dockerRunning:   true,
+		imageAvailable:  true,
+		goFiles:         "new.go\x00",
+		formatOutput:    "new.go",
+	}
+	runtime, err := resolveGoRuntime(root, commands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyBootstrapChecks(runtime); err == nil || !strings.Contains(err.Error(), "gofmt reported unformatted files: new.go") {
+		t.Fatalf("error = %v, want unformatted new Go file failure", err)
 	}
 }
 
@@ -227,6 +281,8 @@ type runtimeCommands struct {
 	dockerAvailable bool
 	dockerRunning   bool
 	imageAvailable  bool
+	goFiles         string
+	formatOutput    string
 	calls           []string
 }
 
@@ -243,13 +299,16 @@ func (c *runtimeCommands) Output(_ string, name string, args ...string) (string,
 	c.calls = append(c.calls, call)
 	switch {
 	case call == "git ls-files -z --cached --others --exclude-standard -- *.go":
-		return "cmd/zenchron-engineering/main.go", nil
+		if c.goFiles != "" {
+			return c.goFiles, nil
+		}
+		return "main.go", nil
 	case call == "docker info --format {{.ServerVersion}}" && c.dockerRunning:
 		return "28.0.0", nil
 	case call == "docker image inspect --format {{.Id}} golang:1.25" && c.imageAvailable:
 		return "sha256:test-image", nil
 	case strings.Contains(call, "sha256:test-image gofmt -l"):
-		return "", nil
+		return c.formatOutput, nil
 	default:
 		return "", errors.New("unavailable")
 	}

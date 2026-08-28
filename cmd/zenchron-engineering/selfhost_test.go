@@ -95,6 +95,9 @@ func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 
 func TestSelfhostIssueRefusesUnformattedUntrackedGoFile(t *testing.T) {
 	commands := newFakeCommands(t)
+	if err := os.WriteFile(filepath.Join(commands.root, "new.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	commands.goFiles = "changed.go\x00new.go\x00"
 	commands.formatOutput = "new.go"
 
@@ -212,6 +215,9 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/selfhost\n\ngo 1.25\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "changed.go"), []byte("package main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return &fakeCommands{

@@ -504,9 +504,9 @@ func verifyBootstrapChecks(runtime goRuntime) ([]harnessCheck, error) {
 			if listErr != nil {
 				return nil, fmt.Errorf("list publishable Go files for harness verification: %w", listErr)
 			}
-			goFiles := strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
-			if len(goFiles) == 1 && goFiles[0] == "" {
-				goFiles = nil
+			goFiles, listErr := existingGoFiles(runtime.repositoryRoot, files)
+			if listErr != nil {
+				return nil, fmt.Errorf("filter publishable Go files for harness verification: %w", listErr)
 			}
 			if len(goFiles) == 0 {
 				completed = append(completed, check)
@@ -528,6 +528,28 @@ func verifyBootstrapChecks(runtime goRuntime) ([]harnessCheck, error) {
 		completed = append(completed, check)
 	}
 	return completed, nil
+}
+
+func existingGoFiles(root, files string) ([]string, error) {
+	if files == "" {
+		return nil, nil
+	}
+
+	paths := strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
+	existing := make([]string, 0, len(paths))
+	for _, file := range paths {
+		if file == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, file)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("stat %q: %w", file, err)
+		}
+		existing = append(existing, file)
+	}
+	return existing, nil
 }
 
 func temporaryReportFiles() (string, string, func(), error) {
