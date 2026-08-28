@@ -118,9 +118,12 @@ func validateInput(input CompileInput) error {
 	if input.ProjectModel.Subject.Repository != input.Subject.Repository {
 		return fmt.Errorf("ProjectModel repository does not match contract subject")
 	}
+	if input.Scope.Stage == domain.StagePredicted && input.ProjectModel.Subject != input.Subject {
+		return fmt.Errorf("predicted contract subject does not match ProjectModel subject")
+	}
 	if input.PreviousContract != nil {
-		if input.PreviousContract.Subject != input.Subject {
-			return fmt.Errorf("previous contract subject does not match contract subject")
+		if input.PreviousContract.Subject.Repository != input.Subject.Repository {
+			return fmt.Errorf("previous contract repository does not match contract subject")
 		}
 		if input.PreviousContract.ID != input.ContractID {
 			return fmt.Errorf("previous contract id does not match contract id")

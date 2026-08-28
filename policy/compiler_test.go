@@ -105,14 +105,73 @@ func TestCompileRejectsConflicts(t *testing.T) {
 
 func TestCompileRejectsPermissionExpansionDuringRecompilation(t *testing.T) {
 	input := fixtureInput(t, "normal-behavior.engineering-fact.json")
+	input.ContractRevision = "2"
+	input.Subject.Revision = "rev-b"
+	input.Facts[0].Subject = input.Subject
 	input.PreviousContract = &domain.EngineeringWorkContract{
 		ID:       input.ContractID,
 		Revision: "1",
-		Subject:  input.Subject,
+		Subject: domain.Subject{
+			Repository: input.Subject.Repository,
+			Revision:   "rev-a",
+		},
 	}
 	if _, err := policy.Compile(input); err == nil {
-		t.Fatal("expected recompilation permission expansion to fail")
+		t.Fatal("expected cross-revision recompilation permission expansion to fail")
 	}
+}
+
+func TestCompileProjectModelSubjectBoundary(t *testing.T) {
+	t.Run("predicted revision mismatch is rejected", func(t *testing.T) {
+		input := fixtureInput(t, "normal-behavior.engineering-fact.json")
+		input.Scope.Stage = domain.StagePredicted
+		input.Subject.Revision = "rev-b"
+		input.Facts[0].Subject = input.Subject
+		if _, err := policy.Compile(input); err == nil {
+			t.Fatal("expected predicted ProjectModel revision mismatch to fail")
+		}
+	})
+
+	t.Run("observed later revision in same repository is accepted", func(t *testing.T) {
+		input := fixtureInput(t, "normal-behavior.engineering-fact.json")
+		input.Subject.Revision = "rev-b"
+		input.Facts[0].Subject = input.Subject
+		contract := compileInput(t, input)
+		if contract.Subject != input.Subject {
+			t.Fatalf("compiled subject = %#v, want %#v", contract.Subject, input.Subject)
+		}
+	})
+}
+
+func TestCompilePreviousContractBoundary(t *testing.T) {
+	t.Run("same repository later revision preserves permissions", func(t *testing.T) {
+		previousInput := fixtureInput(t, "normal-behavior.engineering-fact.json")
+		previousInput.ContractRevision = "1"
+		previous := compileInput(t, previousInput)
+
+		input := fixtureInput(t, "normal-behavior.engineering-fact.json")
+		input.ContractRevision = "2"
+		input.Subject.Revision = "rev-b"
+		input.Facts[0].Subject = input.Subject
+		input.PreviousContract = &previous
+
+		contract := compileInput(t, input)
+		if contract.Provenance.PreviousContractRevision == nil || *contract.Provenance.PreviousContractRevision != previous.Revision {
+			t.Fatalf("previous contract revision = %#v, want %q", contract.Provenance.PreviousContractRevision, previous.Revision)
+		}
+	})
+
+	t.Run("different repository is rejected", func(t *testing.T) {
+		input := fixtureInput(t, "normal-behavior.engineering-fact.json")
+		input.PreviousContract = &domain.EngineeringWorkContract{
+			ID:       input.ContractID,
+			Revision: "1",
+			Subject:  domain.Subject{Repository: "other/repository", Revision: "rev-a"},
+		}
+		if _, err := policy.Compile(input); err == nil {
+			t.Fatal("expected previous contract repository mismatch to fail")
+		}
+	})
 }
 
 func TestCompileRejectsRequirementsWithDifferentRequiredClaims(t *testing.T) {
