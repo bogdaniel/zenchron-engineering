@@ -181,13 +181,15 @@ func matchesAny(condition domain.PolicyCondition, facts []domain.EngineeringFact
 }
 
 type resolution struct {
-	invariants   map[string]domain.Requirement
-	obligations  map[string]domain.Requirement
-	claims       map[string]domain.RequiredClaim
-	permissions  map[domain.Action]string
-	prohibitions map[domain.Action]string
-	conditions   map[domain.Action]conditionEntry
-	references   map[string]string
+	invariants            map[string]domain.Requirement
+	invariantDefinitions  map[string]policyRequirement
+	obligations           map[string]domain.Requirement
+	obligationDefinitions map[string]policyRequirement
+	claims                map[string]domain.RequiredClaim
+	permissions           map[domain.Action]string
+	prohibitions          map[domain.Action]string
+	conditions            map[domain.Action]conditionEntry
+	references            map[string]string
 }
 
 type conditionEntry struct {
@@ -195,34 +197,43 @@ type conditionEntry struct {
 	rule   string
 }
 
+// policyRequirement is the normalized policy-only definition used to detect
+// conflicts before requirements are emitted in the WorkContract shape.
+type policyRequirement struct {
+	statement      string
+	requiredClaims []string
+}
+
 func newResolution() *resolution {
 	return &resolution{
-		invariants:   make(map[string]domain.Requirement),
-		obligations:  make(map[string]domain.Requirement),
-		claims:       make(map[string]domain.RequiredClaim),
-		permissions:  make(map[domain.Action]string),
-		prohibitions: make(map[domain.Action]string),
-		conditions:   make(map[domain.Action]conditionEntry),
-		references:   make(map[string]string),
+		invariants:            make(map[string]domain.Requirement),
+		invariantDefinitions:  make(map[string]policyRequirement),
+		obligations:           make(map[string]domain.Requirement),
+		obligationDefinitions: make(map[string]policyRequirement),
+		claims:                make(map[string]domain.RequiredClaim),
+		permissions:           make(map[domain.Action]string),
+		prohibitions:          make(map[domain.Action]string),
+		conditions:            make(map[domain.Action]conditionEntry),
+		references:            make(map[string]string),
 	}
 }
 
 func (r *resolution) addUnknownResolution(fact domain.EngineeringFact) error {
 	id := "resolve-uncertain-" + fact.ID
-	return r.addRequirement(r.obligations, id, domain.PolicyRequirement{Statement: "Resolve uncertainty for engineering fact " + fact.Key + "."}, "unknown fact "+fact.ID)
+	return r.addRequirement(r.obligations, r.obligationDefinitions, id, domain.PolicyRequirement{Statement: "Resolve uncertainty for engineering fact " + fact.Key + "."}, "unknown fact "+fact.ID)
 }
 
 func (r *resolution) addEffect(ruleID string, effect domain.PolicyEffect) error {
 	if effect.Invariants != nil {
 		for id, requirement := range *effect.Invariants {
-			if err := r.addRequirement(r.invariants, id, requirement, ruleID); err != nil {
+			if err := r.addRequirement(r.invariants, r.invariantDefinitions, id, requirement, ruleID); err != nil {
 				return err
 			}
 		}
 	}
 	if effect.Obligations != nil {
 		for id, requirement := range *effect.Obligations {
-			if err := r.addRequirement(r.obligations, id, requirement, ruleID); err != nil {
+			if err := r.addRequirement(r.obligations, r.obligationDefinitions, id, requirement, ruleID); err != nil {
 				return err
 			}
 		}
@@ -257,18 +268,29 @@ func (r *resolution) addEffect(ruleID string, effect domain.PolicyEffect) error 
 	return nil
 }
 
-func (r *resolution) addRequirement(target map[string]domain.Requirement, id string, requirement domain.PolicyRequirement, source string) error {
-	value := domain.Requirement{Statement: requirement.Statement}
-	if existing, exists := target[id]; exists && existing != value {
+func (r *resolution) addRequirement(target map[string]domain.Requirement, definitions map[string]policyRequirement, id string, requirement domain.PolicyRequirement, source string) error {
+	definition := normalizePolicyRequirement(requirement)
+	if existing, exists := definitions[id]; exists && !samePolicyRequirement(existing, definition) {
 		return fmt.Errorf("conflicting requirement %q from %s", id, source)
 	}
-	target[id] = value
-	if requirement.RequiredClaims != nil {
-		for _, claim := range *requirement.RequiredClaims {
-			r.references[claim] = source
-		}
+	definitions[id] = definition
+	target[id] = domain.Requirement{Statement: definition.statement}
+	for _, claim := range definition.requiredClaims {
+		r.references[claim] = source
 	}
 	return nil
+}
+
+func normalizePolicyRequirement(requirement domain.PolicyRequirement) policyRequirement {
+	var claims []string
+	if requirement.RequiredClaims != nil {
+		claims = sortedUnique(*requirement.RequiredClaims)
+	}
+	return policyRequirement{statement: requirement.Statement, requiredClaims: claims}
+}
+
+func samePolicyRequirement(left, right policyRequirement) bool {
+	return left.statement == right.statement && sameStrings(left.requiredClaims, right.requiredClaims)
 }
 
 func (r *resolution) validateReferences() error {
