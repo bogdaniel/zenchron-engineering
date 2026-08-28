@@ -101,6 +101,14 @@ type harnessCheck struct {
 	Command string
 }
 
+type codexExecution struct {
+	Provider    string
+	Model       string
+	AuthMode    string
+	Attempt     int
+	MaxAttempts int
+}
+
 var bootstrapChecks = []harnessCheck{
 	{ID: "format", Command: "gofmt -l <tracked and untracked non-ignored Go files>"},
 	{ID: "vet", Command: "go vet ./..."},
@@ -108,6 +116,10 @@ var bootstrapChecks = []harnessCheck{
 }
 
 func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) error {
+	return selfhostIssueWithModels(rawNumber, nil, commands, stdout)
+}
+
+func selfhostIssueWithModels(rawNumber string, configuredModels []string, commands commandRunner, stdout io.Writer) error {
 	number, err := strconv.Atoi(rawNumber)
 	if err != nil || number < 1 {
 		return fmt.Errorf("issue number must be a positive integer")
@@ -153,8 +165,17 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	if _, err := commands.Output(root, "gh", "auth", "status"); err != nil {
 		return fmt.Errorf("GitHub CLI authentication unavailable: %w", err)
 	}
-	if _, err := commands.Output(root, "codex", "login", "status"); err != nil {
+	loginStatus, err := commands.Output(root, "codex", "login", "status")
+	if err != nil {
 		return fmt.Errorf("Codex CLI authentication unavailable: %w", err)
+	}
+	authMode, err := classifyCodexAuth(loginStatus)
+	if err != nil {
+		return err
+	}
+	models, err := codexModels(authMode, configuredModels)
+	if err != nil {
+		return err
 	}
 	identity, err := commands.Output(root, "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
 	if err != nil {
@@ -266,8 +287,22 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	}
 	defer removeContext()
 	prompt := selfhostPrompt(number, issueBranch, contextFile)
-	if err := commands.Run(root, "codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--ignore-user-config", "--cd", root, "--add-dir", contextDir, "--output-schema", schemaFile, "--output-last-message", reportFile, prompt); err != nil {
-		return fmt.Errorf("Codex execution failed; work remains on %q for inspection: %w", issueBranch, err)
+	var execution codexExecution
+	for index, model := range models {
+		execution = codexExecution{Provider: "Codex CLI", Model: model, AuthMode: authMode, Attempt: index + 1, MaxAttempts: len(models)}
+		fmt.Fprintf(stdout, "Codex attempt %d/%d: model %s, auth mode %s\n", execution.Attempt, execution.MaxAttempts, model, authMode)
+		args := []string{"--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--ignore-user-config", "--model", model, "--cd", root, "--add-dir", contextDir, "--output-schema", schemaFile, "--output-last-message", reportFile, prompt}
+		_, runErr := commands.Output(root, "codex", args...)
+		if runErr == nil {
+			break
+		}
+		failure := classifyCodexFailure(runErr)
+		if failure != "transient_capacity" || index+1 == len(models) {
+			return fmt.Errorf("Codex execution failed (%s) on attempt %d/%d with model %q; work remains on %q for inspection: %w", failure, index+1, len(models), model, issueBranch, runErr)
+		}
+		if err := safeToRetryCodex(root, issueBranch, base, commands); err != nil {
+			return fmt.Errorf("Codex transient capacity failure cannot be retried safely: %w", err)
+		}
 	}
 
 	branch, err = commands.Output(root, "git", "branch", "--show-current")
@@ -303,7 +338,7 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	if err := json.Unmarshal(reportData, &report); err != nil {
 		return fmt.Errorf("decode Codex report: %w", err)
 	}
-	return publishCandidate(root, number, issueBranch, target, runtime, &report, commands, stdout)
+	return publishCandidate(root, number, issueBranch, target, runtime, &report, &execution, commands, stdout)
 }
 
 // selfhostResume publishes the uncommitted candidate left by an interrupted
@@ -421,10 +456,10 @@ func selfhostResume(rawNumber string, commands commandRunner, stdout io.Writer) 
 	if target.Number != number || target.State != "OPEN" {
 		return fmt.Errorf("issue #%d is not an open matching issue", number)
 	}
-	return publishCandidate(root, number, issueBranch, target, runtime, nil, commands, stdout)
+	return publishCandidate(root, number, issueBranch, target, runtime, nil, nil, commands, stdout)
 }
 
-func publishCandidate(root string, number int, issueBranch string, target issue, runtime goRuntime, report *executorReport, commands commandRunner, stdout io.Writer) error {
+func publishCandidate(root string, number int, issueBranch string, target issue, runtime goRuntime, report *executorReport, execution *codexExecution, commands commandRunner, stdout io.Writer) error {
 	checks, err := verifyBootstrapChecks(runtime)
 	if err != nil {
 		return err
@@ -464,7 +499,7 @@ func publishCandidate(root string, number int, issueBranch string, target issue,
 	if !strings.Contains(strings.ToLower(pr.Body), strings.ToLower(fmt.Sprintf("closes #%d", number))) {
 		return fmt.Errorf("pull request must contain %q", fmt.Sprintf("Closes #%d", number))
 	}
-	commentFile, err := writeComment(target, issueBranch, pr, head, runtime, report, checks)
+	commentFile, err := writeComment(target, issueBranch, pr, head, runtime, report, execution, checks)
 	if err != nil {
 		return err
 	}
@@ -493,6 +528,73 @@ func expectedOrigin(origin string) bool {
 	return origin == "https://github.com/"+repository ||
 		origin == "git@github.com:"+repository ||
 		origin == "ssh://git@github.com/"+repository
+}
+
+func classifyCodexAuth(status string) (string, error) {
+	lower := strings.ToLower(status)
+	switch {
+	case strings.Contains(lower, "chatgpt"):
+		return "chatgpt", nil
+	case strings.Contains(lower, "api key"), strings.Contains(lower, "openai api"):
+		return "api", nil
+	default:
+		return "", fmt.Errorf("Codex authentication mode is not recognizable; refusing to select a potentially incompatible model")
+	}
+}
+
+func codexModels(authMode string, configured []string) ([]string, error) {
+	if len(configured) != 0 {
+		return configured, nil
+	}
+	if authMode == "chatgpt" {
+		return []string{"gpt-5.6-terra", "gpt-5.6-luna"}, nil
+	}
+	return nil, fmt.Errorf("Codex API authentication requires explicit --model selection; API catalog availability is not inferred")
+}
+
+func classifyCodexFailure(err error) string {
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "not supported when using codex with a chatgpt account") {
+		return "incompatible_model"
+	}
+	for _, signal := range []string{"model is at capacity", "selected model is at capacity", "capacity. please try", "temporarily unavailable"} {
+		if strings.Contains(lower, signal) {
+			return "transient_capacity"
+		}
+	}
+	return "non_transient"
+}
+
+func safeToRetryCodex(root, branch, base string, commands commandRunner) error {
+	currentBranch, err := commands.Output(root, "git", "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("expected branch %q, got %q: %w", branch, currentBranch, err)
+	}
+	if currentBranch != branch {
+		return fmt.Errorf("expected branch %q, got %q", branch, currentBranch)
+	}
+	status, err := commands.Output(root, "git", "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return fmt.Errorf("working tree changed during failed attempt; candidate state was preserved and retry stopped: %w", err)
+	}
+	if status != "" {
+		return errors.New("working tree changed during failed attempt; candidate state was preserved and retry stopped")
+	}
+	head, err := commands.Output(root, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("Git history changed during failed attempt; retry stopped: %w", err)
+	}
+	if head != base {
+		return errors.New("Git history changed during failed attempt; retry stopped")
+	}
+	ignored, err := commands.Output(root, "git", "ls-files", "--others", "--ignored", "--exclude-standard")
+	if err != nil {
+		return fmt.Errorf("ignored state appeared during failed attempt; retry stopped: %w", err)
+	}
+	if ignored != "" {
+		return errors.New("ignored state appeared during failed attempt; retry stopped")
+	}
+	return nil
 }
 
 func verifyBootstrapChecks(runtime goRuntime) ([]harnessCheck, error) {
@@ -578,13 +680,18 @@ func temporaryReportFiles() (string, string, func(), error) {
 	return report.Name(), schema.Name(), cleanup, nil
 }
 
-func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, checks []harnessCheck) (string, error) {
+func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, execution *codexExecution, checks []harnessCheck) (string, error) {
 	file, err := os.CreateTemp("", "zenchron-handoff-*.md")
 	if err != nil {
 		return "", fmt.Errorf("create handoff comment: %w", err)
 	}
 	defer file.Close()
 	fmt.Fprintf(file, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Harness Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor-reported observations\n\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime)
+	if execution == nil {
+		fmt.Fprintln(file, "- Codex execution provenance: unavailable (interrupted-run resume)")
+	} else {
+		fmt.Fprintf(file, "- Execution provider: `%s`\n- Codex model: `%s`\n- Codex authentication mode: `%s`\n- Successful attempt: %d/%d\n", execution.Provider, execution.Model, execution.AuthMode, execution.Attempt, execution.MaxAttempts)
+	}
 	if report == nil {
 		fmt.Fprintln(file, "Unavailable: the interrupted run did not preserve a durable executor report.")
 	} else {

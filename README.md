@@ -73,12 +73,21 @@ The first milestone must prove that the same facts + policies can produce approp
 go test ./...
 go run ./cmd/zenchron-engineering version
 go run ./cmd/zenchron-engineering selfhost issue 4
+go run ./cmd/zenchron-engineering selfhost issue 4 --model gpt-5.6-terra --fallback-model gpt-5.6-luna
 go run ./cmd/zenchron-engineering selfhost resume issue 4
 ```
 
 `selfhost issue` requires authenticated local `gh` and `codex` CLIs. It only
 starts from a clean, synchronized `main`, creates a dedicated issue branch,
 requires an open PR and durable review handoff, and never merges it.
+
+Codex execution always uses an explicit model. ChatGPT-authenticated sessions
+default to the issue-scoped migration targets `gpt-5.6-terra` then
+`gpt-5.6-luna`; other authentication modes require `--model`. Up to two
+`--fallback-model` values may follow. Only recognizable transient capacity
+failures advance to the next model, and only while the issue branch, history,
+and working tree remain unchanged. The durable handoff records the successful
+model, authentication-mode class, and attempt count, never credentials.
 
 Go-backed bootstrap operations resolve one runtime before repository mutation:
 a compatible local Go installation is preferred, with automatic toolchain
