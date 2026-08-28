@@ -73,12 +73,21 @@ The first milestone must prove that the same facts + policies can produce approp
 go test ./...
 go run ./cmd/zenchron-engineering version
 go run ./cmd/zenchron-engineering selfhost issue 4
+go run ./cmd/zenchron-engineering selfhost issue 4 --model gpt-5.6-terra --fallback-model gpt-5.6-luna
 go run ./cmd/zenchron-engineering selfhost resume issue 4
 ```
 
 `selfhost issue` requires authenticated local `gh` and `codex` CLIs. It only
 starts from a clean, synchronized `main`, creates a dedicated issue branch,
 requires an open PR and durable review handoff, and never merges it.
+
+Codex execution always uses an explicit model. ChatGPT-authenticated sessions
+default to the issue-scoped migration targets `gpt-5.6-terra` then
+`gpt-5.6-luna`; other authentication modes require `--model`. Up to two
+`--fallback-model` values may follow. Only recognizable transient capacity
+failures advance to the next model, and only while the issue branch, history,
+and working tree remain unchanged. The durable handoff records the successful
+model, authentication-mode class, and attempt count, never credentials.
 
 Go-backed bootstrap operations resolve one runtime before repository mutation:
 a compatible local Go installation is preferred, with automatic toolchain
@@ -97,7 +106,9 @@ Executor-reported commands are retained as observations and need not use the
 same shell spelling. If execution is interrupted after creation of an
 `issue-N` branch but before publication, `selfhost resume issue N` can recover
 only an uncommitted candidate exactly based on `origin/main`; it refuses
-unrelated history, ignored local state, a remote branch, or a PR. Both paths
+unrelated history, ignored local state, a remote branch, or a PR. Successful
+Codex execution provenance is retained only in Git-local state for that
+interrupted candidate and is removed after the handoff is published. Both paths
 stop before merge.
 
 ## License

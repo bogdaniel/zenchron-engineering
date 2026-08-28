@@ -18,8 +18,11 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	if err := selfhostIssue("4", commands, &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(commands.prompt, "issue #4") || strings.Contains(commands.prompt, commands.target.Body) {
-		t.Fatalf("prompt must point to the issue without copying its body:\n%s", commands.prompt)
+	if len(commands.prompts) != 1 {
+		t.Fatalf("Codex prompts = %d, want 1", len(commands.prompts))
+	}
+	if !strings.Contains(commands.prompts[0], "issue #4") || strings.Contains(commands.prompts[0], commands.target.Body) {
+		t.Fatalf("prompt must point to the issue without copying its body:\n%s", commands.prompts[0])
 	}
 	for _, want := range []string{
 		"Target issue: #4",
@@ -133,6 +136,76 @@ func TestSelfhostIssueAcceptsDockerExecutorObservationWhenHarnessVerifiesChecks(
 	}
 }
 
+func TestSelfhostIssueRetriesTransientCapacityWithCompatibleFallback(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.codexErrors = []error{errors.New("ERROR: Selected model is at capacity. Please try a different model."), nil}
+	var output bytes.Buffer
+	if err := selfhostIssue("4", commands, &output); err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Join(commands.calls, "\n")
+	if !strings.Contains(calls, "--model gpt-5.6-terra") || !strings.Contains(calls, "--model gpt-5.6-luna") {
+		t.Fatalf("expected ordered ChatGPT-compatible attempts:\n%s", calls)
+	}
+	if !strings.Contains(commands.comment, "Codex model: `gpt-5.6-luna`") || !strings.Contains(commands.comment, "Successful attempt: 2/2") {
+		t.Fatalf("handoff missing fallback provenance:\n%s", commands.comment)
+	}
+	if !strings.Contains(output.String(), "attempt 1/2") || !strings.Contains(output.String(), "attempt 2/2") {
+		t.Fatalf("retries were not observable: %s", output.String())
+	}
+	if len(commands.prompts) != 2 {
+		t.Fatalf("Codex prompts = %d, want primary and fallback prompts", len(commands.prompts))
+	}
+	for attempt, prompt := range commands.prompts {
+		if !strings.Contains(prompt, "issue #4") || strings.Contains(prompt, commands.target.Body) {
+			t.Fatalf("attempt %d prompt must point to the issue without copying its body:\n%s", attempt+1, prompt)
+		}
+	}
+}
+
+func TestSelfhostIssueDoesNotRetryUnsupportedChatGPTModel(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.codexErrors = []error{errors.New("The 'api-model' model is not supported when using Codex with a ChatGPT account."), nil}
+	err := selfhostIssueWithModels("4", []string{"api-model", "gpt-5.6-luna"}, commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "incompatible_model") {
+		t.Fatalf("error = %v, want incompatible model classification", err)
+	}
+	if got := countCodexExecutions(commands.calls); got != 1 {
+		t.Fatalf("Codex attempts = %d, want 1", got)
+	}
+}
+
+func TestSelfhostIssueStopsRetryWhenFailedAttemptChangesState(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.codexErrors = []error{errors.New("model is at capacity"), nil}
+	commands.statusAfterCodexFailure = "?? partial.go"
+	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "candidate state was preserved and retry stopped") {
+		t.Fatalf("error = %v, want preserved-state refusal", err)
+	}
+	if got := countCodexExecutions(commands.calls); got != 1 {
+		t.Fatalf("Codex attempts = %d, want 1", got)
+	}
+}
+
+func TestSelfhostIssueRequiresExplicitAPIModel(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.codexLoginStatus = "Logged in using an API key"
+	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "requires explicit --model") {
+		t.Fatalf("error = %v, want explicit API model requirement", err)
+	}
+}
+
+func TestParseModelFlagsBoundsAttempts(t *testing.T) {
+	if _, err := parseModelFlags([]string{"--fallback-model", "luna"}); err == nil {
+		t.Fatal("fallback without primary model was accepted")
+	}
+	if _, err := parseModelFlags([]string{"--model", "one", "--fallback-model", "two", "--fallback-model", "three", "--fallback-model", "four"}); err == nil {
+		t.Fatal("more than three attempts were accepted")
+	}
+}
+
 func TestSelfhostResumePublishesInterruptedCandidate(t *testing.T) {
 	commands := newFakeCommands(t)
 	commands.branch = "issue-4"
@@ -146,6 +219,58 @@ func TestSelfhostResumePublishesInterruptedCandidate(t *testing.T) {
 	}
 	if !strings.Contains(commands.comment, "Harness-verified deterministic checks") {
 		t.Fatalf("resume handoff missing harness checks:\n%s", commands.comment)
+	}
+	if !strings.Contains(commands.comment, "Codex execution provenance: unavailable") {
+		t.Fatalf("legacy resume must report unavailable execution provenance:\n%s", commands.comment)
+	}
+}
+
+func TestSelfhostResumeRetainsSuccessfulExecutionProvenance(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.codexErrors = []error{errors.New("selected model is at capacity"), nil}
+	commands.formatOutput = "changed.go"
+
+	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "harness verification") {
+		t.Fatalf("initial execution error = %v, want harness verification failure", err)
+	}
+	statePath := filepath.Join(commands.root, ".git", "zenchron", "selfhost", "execution-issue-4.json")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("successful Codex execution provenance was not preserved: %v", err)
+	}
+
+	commands.formatOutput = ""
+	if err := selfhostResume("4", commands, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Execution provider: `Codex CLI`",
+		"Codex model: `gpt-5.6-luna`",
+		"Codex authentication mode: `chatgpt`",
+		"Successful attempt: 2/2",
+	} {
+		if !strings.Contains(commands.comment, want) {
+			t.Errorf("resumed handoff missing %q:\n%s", want, commands.comment)
+		}
+	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published handoff did not remove execution provenance: %v", err)
+	}
+}
+
+func TestSelfhostResumeRejectsMismatchedExecutionProvenance(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.branch = "issue-4"
+	commands.status = " M changed.go"
+	if _, err := persistInterruptedExecution(commands.root, 4, "issue-4", "different-base", codexExecution{
+		Provider: "Codex CLI", Model: "gpt-5.6-terra", AuthMode: "chatgpt", Attempt: 1, MaxAttempts: 2,
+	}, commands); err != nil {
+		t.Fatal(err)
+	}
+
+	err := selfhostResume("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "does not match the interrupted candidate") {
+		t.Fatalf("resume error = %v, want bound-provenance rejection", err)
 	}
 }
 
@@ -176,39 +301,44 @@ func TestSelfhostResumeRefusesUnsafeInterruptedState(t *testing.T) {
 }
 
 type fakeCommands struct {
-	t                 *testing.T
-	root              string
-	missing           string
-	goUnavailable     bool
-	dockerUnavailable bool
-	fail              string
-	identity          string
-	origin            string
-	pushOrigin        string
-	branch            string
-	status            string
-	finalStatus       string
-	ignored           string
-	finalIgnored      string
-	goFiles           string
-	formatOutput      string
-	base              string
-	remoteMain        string
-	head              string
-	target            issue
-	tracker           issue
-	localBranch       string
-	remoteBranch      string
-	existingPR        bool
-	codexErr          error
-	pr                pullRequest
-	report            executorReport
-	switched          bool
-	committed         bool
-	prompt            string
-	comment           string
-	prBody            string
-	calls             []string
+	t                       *testing.T
+	root                    string
+	missing                 string
+	goUnavailable           bool
+	dockerUnavailable       bool
+	fail                    string
+	identity                string
+	origin                  string
+	pushOrigin              string
+	branch                  string
+	status                  string
+	finalStatus             string
+	ignored                 string
+	finalIgnored            string
+	goFiles                 string
+	formatOutput            string
+	base                    string
+	remoteMain              string
+	head                    string
+	target                  issue
+	tracker                 issue
+	localBranch             string
+	remoteBranch            string
+	existingPR              bool
+	codexErr                error
+	codexErrors             []error
+	codexAttempts           int
+	lastCodexFailed         bool
+	codexLoginStatus        string
+	statusAfterCodexFailure string
+	pr                      pullRequest
+	report                  executorReport
+	switched                bool
+	committed               bool
+	prompts                 []string
+	comment                 string
+	prBody                  string
+	calls                   []string
 }
 
 func newFakeCommands(t *testing.T) *fakeCommands {
@@ -221,17 +351,18 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 		t.Fatal(err)
 	}
 	return &fakeCommands{
-		t:           t,
-		root:        root,
-		identity:    repository,
-		origin:      "https://github.com/bogdaniel/zenchron-engineering.git",
-		pushOrigin:  "https://github.com/bogdaniel/zenchron-engineering.git",
-		branch:      "main",
-		base:        "base123",
-		remoteMain:  "base123",
-		head:        "head456",
-		finalStatus: " M changed.go",
-		goFiles:     "changed.go",
+		t:                t,
+		root:             root,
+		identity:         repository,
+		origin:           "https://github.com/bogdaniel/zenchron-engineering.git",
+		pushOrigin:       "https://github.com/bogdaniel/zenchron-engineering.git",
+		branch:           "main",
+		base:             "base123",
+		remoteMain:       "base123",
+		head:             "head456",
+		finalStatus:      " M changed.go",
+		codexLoginStatus: "Logged in using ChatGPT",
+		goFiles:          "changed.go",
 		target: issue{
 			Number: 4,
 			Title:  "ProjectModel snapshot",
@@ -275,6 +406,24 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 	if call == f.fail {
 		return "", errors.New("failed")
 	}
+	if name == "codex" && len(args) > 0 && args[0] != "login" {
+		f.prompts = append(f.prompts, args[len(args)-1])
+		attempt := f.codexAttempts
+		f.codexAttempts++
+		var runErr error
+		if attempt < len(f.codexErrors) {
+			runErr = f.codexErrors[attempt]
+		} else {
+			runErr = f.codexErr
+		}
+		if runErr != nil {
+			f.lastCodexFailed = true
+			return "", runErr
+		}
+		f.lastCodexFailed = false
+		path := argumentAfter(f.t, args, "--output-last-message")
+		return "", os.WriteFile(path, []byte(mustJSON(f.t, f.report)), 0o600)
+	}
 	switch call {
 	case "go version":
 		return "go version go1.25.1 test/arch", nil
@@ -286,12 +435,16 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 		return f.formatOutput, nil
 	case "git rev-parse --show-toplevel":
 		return f.root, nil
+	case "git rev-parse --git-path zenchron/selfhost/execution-issue-4.json":
+		return filepath.Join(f.root, ".git", "zenchron", "selfhost", "execution-issue-4.json"), nil
 	case "git remote get-url origin":
 		return f.origin, nil
 	case "git remote get-url --push origin":
 		return f.pushOrigin, nil
-	case "gh auth status", "codex login status", "git fetch --quiet origin main":
+	case "gh auth status", "git fetch --quiet origin main":
 		return "", nil
+	case "codex login status":
+		return f.codexLoginStatus, nil
 	case "gh repo view --json nameWithOwner --jq .nameWithOwner":
 		return f.identity, nil
 	case "git branch --show-current":
@@ -300,6 +453,12 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 		}
 		return f.branch, nil
 	case "git status --porcelain --untracked-files=all":
+		if f.codexAttempts > 0 && f.statusAfterCodexFailure != "" {
+			return f.statusAfterCodexFailure, nil
+		}
+		if f.lastCodexFailed {
+			return f.status, nil
+		}
 		if f.switched {
 			return f.finalStatus, nil
 		}
@@ -336,6 +495,16 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 	}
 }
 
+func countCodexExecutions(calls []string) int {
+	count := 0
+	for _, call := range calls {
+		if strings.HasPrefix(call, "codex --ask-for-approval") {
+			count++
+		}
+	}
+	return count
+}
+
 func (f *fakeCommands) OutputEnv(dir string, _ []string, name string, args ...string) (string, error) {
 	return f.Output(dir, name, args...)
 }
@@ -351,7 +520,6 @@ func (f *fakeCommands) Run(_ string, name string, args ...string) error {
 		if f.codexErr != nil {
 			return f.codexErr
 		}
-		f.prompt = args[len(args)-1]
 		path := argumentAfter(f.t, args, "--output-last-message")
 		return os.WriteFile(path, []byte(mustJSON(f.t, f.report)), 0o600)
 	case name == "git" && slices.Equal(args, []string{"add", "--all"}):
