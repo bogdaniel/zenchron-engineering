@@ -35,10 +35,16 @@ func (r goRuntime) Run(args ...string) error {
 		return r.commands.RunEnv(r.repositoryRoot, []string{"GOTOOLCHAIN=local"}, "go", args...)
 	case dockerGoRuntime:
 		dockerArgs := []string{
-			"run", "--rm", "--network", "none",
+			"run", "--rm", "--network", "bridge",
 			"--user", strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
+			"--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
 			"--mount", "type=bind,src=" + r.repositoryRoot + ",dst=/workspace",
-			"--workdir", "/workspace", "--env", "GOTOOLCHAIN=local",
+			"--workdir", "/workspace",
+			"--env", "GOTOOLCHAIN=local",
+			"--env", "HOME=/tmp/zenchron-home",
+			"--env", "GOPATH=/tmp/zenchron-go",
+			"--env", "GOMODCACHE=/tmp/zenchron-go/pkg/mod",
+			"--env", "GOCACHE=/tmp/zenchron-go-build",
 			r.environmentIdentifier, "go",
 		}
 		return r.commands.Run(r.repositoryRoot, "docker", append(dockerArgs, args...)...)

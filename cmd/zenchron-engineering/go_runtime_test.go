@@ -70,15 +70,52 @@ func TestGoRuntimeRunsDockerWithBoundedDerivedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := commands.calls[len(commands.calls)-1]
-	for _, want := range []string{"docker run --rm", "--network none", "--mount type=bind,src=" + root + ",dst=/workspace", "--workdir /workspace", "sha256:test-image go test ./..."} {
+	for _, want := range []string{
+		"docker run --rm",
+		"--network bridge",
+		"--tmpfs /tmp:rw,nosuid,nodev,mode=1777",
+		"--mount type=bind,src=" + root + ",dst=/workspace",
+		"--workdir /workspace",
+		"--env HOME=/tmp/zenchron-home",
+		"--env GOPATH=/tmp/zenchron-go",
+		"--env GOMODCACHE=/tmp/zenchron-go/pkg/mod",
+		"--env GOCACHE=/tmp/zenchron-go-build",
+		"sha256:test-image go test ./...",
+	} {
 		if !strings.Contains(call, want) {
 			t.Errorf("Docker command missing %q:\n%s", want, call)
 		}
 	}
-	for _, forbidden := range []string{"--privileged", "/var/run/docker.sock"} {
+	for _, forbidden := range []string{"--privileged", "/var/run/docker.sock", "--network none"} {
 		if strings.Contains(call, forbidden) {
 			t.Errorf("Docker command contains forbidden %q:\n%s", forbidden, call)
 		}
+	}
+}
+
+func TestDockerGoRuntimeCanResolveRepositoryModules(t *testing.T) {
+	goMod, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(goMod), "github.com/santhosh-tekuri/jsonschema/v6") {
+		t.Fatal("regression requires this repository to declare a non-vendored external module")
+	}
+	if _, err := os.Stat(filepath.Join("..", "..", "vendor")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("regression requires no vendor directory; stat error = %v", err)
+	}
+
+	commands := &runtimeCommands{}
+	runtime := goRuntime{dockerGoRuntime, "1.25", "sha256:test-image", filepath.Join("..", ".."), commands}
+	if err := runtime.Run("vet", "./..."); err != nil {
+		t.Fatal(err)
+	}
+	call := commands.calls[len(commands.calls)-1]
+	if !strings.Contains(call, "--network bridge") {
+		t.Fatalf("non-vendored module resolution requires network access:\n%s", call)
+	}
+	if !strings.Contains(call, "--env GOMODCACHE=/tmp/zenchron-go/pkg/mod") {
+		t.Fatalf("module resolution requires a writable module cache:\n%s", call)
 	}
 }
 

@@ -84,8 +84,11 @@ a compatible local Go installation is preferred, with automatic toolchain
 downloads disabled. Otherwise Docker is used only when its daemon is reachable
 and the repository-derived `golang:<go.mod version>` image already exists
 locally. Bootstrap never pulls that image implicitly and executes the resolved
-immutable image ID. Docker Go commands use an unprivileged, network-disabled
-container with only the repository mounted.
+immutable image ID. Docker Go commands use an unprivileged container with only
+the repository mounted. The container has outbound network access so Go can
+resolve the non-vendored modules pinned by `go.mod` and `go.sum`; no host
+credentials or environment are forwarded. Go's home, module, and build caches
+live in an isolated writable tmpfs that is discarded after each command.
 
 ## License
 
