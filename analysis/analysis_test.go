@@ -45,7 +45,7 @@ func TestCriticalBoundaryFacts(t *testing.T) {
 			if fact.Stage != domain.StagePredicted || fact.Subject != model.Subject {
 				t.Fatalf("fact binding changed: %#v", fact)
 			}
-			if fact.Provenance.Type != "path_analysis" || fact.Provenance.Producer == "" {
+			if fact.Provenance.Type != "intent_analysis" || fact.Provenance.Producer == "" {
 				t.Fatalf("missing deterministic provenance: %#v", fact.Provenance)
 			}
 		})
@@ -62,8 +62,29 @@ func TestObservedFactsBindCandidateRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	fact := factByKey(t, facts, "authentication.boundary_modified")
-	if fact.Stage != domain.StageObserved || fact.Subject != subject || fact.Value != domain.FactTrue {
+	if fact.Stage != domain.StageObserved || fact.Subject != subject || fact.Value != domain.FactTrue || fact.Provenance.Type != "path_analysis" {
 		t.Fatalf("unexpected observed fact: %#v", fact)
+	}
+}
+
+func TestPredictedUnknownUsesIntentAnalysisProvenance(t *testing.T) {
+	model := projectModel()
+	facts, err := analysis.NewAnalyzer().Predict(model, model.Subject, analysis.Intent{PathsKnown: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact := factByKey(t, facts, "sensitive_data.boundary_modified")
+	if fact.Value != domain.FactUnknown || fact.Provenance.Type != "intent_analysis" {
+		t.Fatalf("unexpected predicted unknown: %#v", fact)
+	}
+}
+
+func TestAnalyzerRejectsPredictedRevisionMismatch(t *testing.T) {
+	model := projectModel()
+	subject := domain.Subject{Repository: model.Subject.Repository, Revision: "rev-b"}
+	_, err := analysis.NewAnalyzer().Predict(model, subject, analysis.Intent{PathsKnown: true})
+	if err == nil {
+		t.Fatal("expected predicted revision mismatch to fail")
 	}
 }
 
@@ -118,8 +139,8 @@ func projectModel() domain.ProjectModel {
 	}
 	return domain.ProjectModel{
 		SchemaVersion: domain.SchemaVersion,
-		ID: "project-acme-payments", Revision: "1",
-		Subject: domain.Subject{Repository: "acme/payments", Revision: "rev-a"},
+		ID:            "project-acme-payments", Revision: "1",
+		Subject:            domain.Subject{Repository: "acme/payments", Revision: "rev-a"},
 		CriticalBoundaries: &boundaries,
 	}
 }

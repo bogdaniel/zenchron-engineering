@@ -79,6 +79,9 @@ func NewAnalyzerWithDetectors(detectors ...Detector) Analyzer {
 
 // Predict derives predicted facts from normalized engineering intent.
 func (a Analyzer) Predict(model domain.ProjectModel, subject domain.Subject, intent Intent) (FactSet, error) {
+	if subject != model.Subject {
+		return nil, fmt.Errorf("predicted analysis subject %q@%q does not match ProjectModel subject %q@%q", subject.Repository, subject.Revision, model.Subject.Repository, model.Subject.Revision)
+	}
 	return a.analyze(model, Input{
 		Subject: subject, Stage: domain.StagePredicted,
 		Paths: intent.AffectedPaths, PathsKnown: intent.PathsKnown,
@@ -144,6 +147,10 @@ func (CriticalBoundaryDetector) Detect(model domain.ProjectModel, input Input) (
 	sort.Strings(types)
 
 	facts := make([]domain.EngineeringFact, 0, len(types))
+	provenanceType := "path_analysis"
+	if input.Stage == domain.StagePredicted {
+		provenanceType = "intent_analysis"
+	}
 	for _, boundaryType := range types {
 		value := domain.FactFalse
 		confidence := domain.ConfidenceHigh
@@ -163,7 +170,7 @@ func (CriticalBoundaryDetector) Detect(model domain.ProjectModel, input Input) (
 			Confidence:    confidence,
 			Subject:       input.Subject,
 			Provenance: domain.FactProvenance{
-				Type: "path_analysis", Producer: boundaryDetectorProducer,
+				Type: provenanceType, Producer: boundaryDetectorProducer,
 			},
 		})
 	}
