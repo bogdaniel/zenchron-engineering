@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 		"Target issue: #4",
 		"Branch: `issue-4`",
 		"Exact head: `head456`",
+		"Go runtime: `local Go 1.25.1 (host-go:1.25.1)`",
 		`"command": "go test ./..."`,
 		`"result": "pass"`,
 		"Stopped before merge: yes",
@@ -91,42 +93,48 @@ func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 }
 
 type fakeCommands struct {
-	t            *testing.T
-	root         string
-	missing      string
-	fail         string
-	identity     string
-	origin       string
-	pushOrigin   string
-	branch       string
-	status       string
-	finalStatus  string
-	ignored      string
-	finalIgnored string
-	base         string
-	remoteMain   string
-	head         string
-	target       issue
-	tracker      issue
-	localBranch  string
-	remoteBranch string
-	existingPR   bool
-	codexErr     error
-	pr           pullRequest
-	report       executorReport
-	switched     bool
-	committed    bool
-	prompt       string
-	comment      string
-	prBody       string
-	calls        []string
+	t                 *testing.T
+	root              string
+	missing           string
+	goUnavailable     bool
+	dockerUnavailable bool
+	fail              string
+	identity          string
+	origin            string
+	pushOrigin        string
+	branch            string
+	status            string
+	finalStatus       string
+	ignored           string
+	finalIgnored      string
+	base              string
+	remoteMain        string
+	head              string
+	target            issue
+	tracker           issue
+	localBranch       string
+	remoteBranch      string
+	existingPR        bool
+	codexErr          error
+	pr                pullRequest
+	report            executorReport
+	switched          bool
+	committed         bool
+	prompt            string
+	comment           string
+	prBody            string
+	calls             []string
 }
 
 func newFakeCommands(t *testing.T) *fakeCommands {
 	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/selfhost\n\ngo 1.25\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return &fakeCommands{
 		t:           t,
-		root:        t.TempDir(),
+		root:        root,
 		identity:    repository,
 		origin:      "https://github.com/bogdaniel/zenchron-engineering.git",
 		pushOrigin:  "https://github.com/bogdaniel/zenchron-engineering.git",
@@ -166,7 +174,7 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 
 func (f *fakeCommands) LookPath(name string) error {
 	f.calls = append(f.calls, "lookpath "+name)
-	if name == f.missing {
+	if name == f.missing || name == "go" && f.goUnavailable || name == "docker" && f.dockerUnavailable {
 		return errors.New("missing")
 	}
 	return nil
@@ -179,6 +187,8 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 		return "", errors.New("failed")
 	}
 	switch call {
+	case "go version":
+		return "go version go1.25.1 test/arch", nil
 	case "git rev-parse --show-toplevel":
 		return f.root, nil
 	case "git remote get-url origin":
@@ -231,6 +241,10 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 	}
 }
 
+func (f *fakeCommands) OutputEnv(dir string, _ []string, name string, args ...string) (string, error) {
+	return f.Output(dir, name, args...)
+}
+
 func (f *fakeCommands) Run(_ string, name string, args ...string) error {
 	call := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, call)
@@ -265,6 +279,10 @@ func (f *fakeCommands) Run(_ string, name string, args ...string) error {
 	default:
 		return fmt.Errorf("unexpected Run call: %s", call)
 	}
+}
+
+func (f *fakeCommands) RunEnv(dir string, _ []string, name string, args ...string) error {
+	return f.Run(dir, name, args...)
 }
 
 func argumentAfter(t *testing.T, args []string, name string) string {

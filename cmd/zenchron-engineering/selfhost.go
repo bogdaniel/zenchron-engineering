@@ -17,7 +17,9 @@ const repository = "bogdaniel/zenchron-engineering"
 type commandRunner interface {
 	LookPath(string) error
 	Output(string, string, ...string) (string, error)
+	OutputEnv(string, []string, string, ...string) (string, error)
 	Run(string, string, ...string) error
+	RunEnv(string, []string, string, ...string) error
 }
 
 type osCommands struct{}
@@ -28,8 +30,13 @@ func (osCommands) LookPath(name string) error {
 }
 
 func (osCommands) Output(dir, name string, args ...string) (string, error) {
+	return osCommands{}.OutputEnv(dir, nil, name, args...)
+}
+
+func (osCommands) OutputEnv(dir string, env []string, name string, args ...string) (string, error) {
 	command := exec.Command(name, args...)
 	command.Dir = dir
+	command.Env = append(os.Environ(), env...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return "", commandError(name, args, output, err)
@@ -38,8 +45,13 @@ func (osCommands) Output(dir, name string, args ...string) (string, error) {
 }
 
 func (osCommands) Run(dir, name string, args ...string) error {
+	return osCommands{}.RunEnv(dir, nil, name, args...)
+}
+
+func (osCommands) RunEnv(dir string, env []string, name string, args ...string) error {
 	command := exec.Command(name, args...)
 	command.Dir = dir
+	command.Env = append(os.Environ(), env...)
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
@@ -106,6 +118,11 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 	if err != nil {
 		return fmt.Errorf("resolve repository root: %w", err)
 	}
+	runtime, err := resolveGoRuntime(root, commands)
+	if err != nil {
+		return fmt.Errorf("resolve Go runtime before repository mutation: %w", err)
+	}
+	fmt.Fprintf(stdout, "Go runtime: %s\n", runtime)
 	origin, err := commands.Output(root, "git", "remote", "get-url", "origin")
 	if err != nil {
 		return fmt.Errorf("read origin remote: %w", err)
@@ -316,7 +333,7 @@ func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) e
 		return fmt.Errorf("pull request must contain %q", fmt.Sprintf("Closes #%d", number))
 	}
 
-	commentFile, err := writeComment(target, issueBranch, pr, head, report)
+	commentFile, err := writeComment(target, issueBranch, pr, head, runtime, report)
 	if err != nil {
 		return err
 	}
@@ -382,7 +399,7 @@ func temporaryReportFiles() (string, string, func(), error) {
 	return report.Name(), schema.Name(), cleanup, nil
 }
 
-func writeComment(target issue, branch string, pr pullRequest, head string, report executorReport) (string, error) {
+func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report executorReport) (string, error) {
 	file, err := os.CreateTemp("", "zenchron-handoff-*.md")
 	if err != nil {
 		return "", fmt.Errorf("create handoff comment: %w", err)
@@ -392,7 +409,7 @@ func writeComment(target issue, branch string, pr pullRequest, head string, repo
 	if err != nil {
 		return "", fmt.Errorf("encode executor report: %w", err)
 	}
-	fmt.Fprintf(file, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor report\n\n```json\n%s\n```\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, reportJSON)
+	fmt.Fprintf(file, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor report\n\n```json\n%s\n```\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime, reportJSON)
 	return file.Name(), nil
 }
 
