@@ -220,6 +220,58 @@ func TestSelfhostResumePublishesInterruptedCandidate(t *testing.T) {
 	if !strings.Contains(commands.comment, "Harness-verified deterministic checks") {
 		t.Fatalf("resume handoff missing harness checks:\n%s", commands.comment)
 	}
+	if !strings.Contains(commands.comment, "Codex execution provenance: unavailable") {
+		t.Fatalf("legacy resume must report unavailable execution provenance:\n%s", commands.comment)
+	}
+}
+
+func TestSelfhostResumeRetainsSuccessfulExecutionProvenance(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.codexErrors = []error{errors.New("selected model is at capacity"), nil}
+	commands.formatOutput = "changed.go"
+
+	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "harness verification") {
+		t.Fatalf("initial execution error = %v, want harness verification failure", err)
+	}
+	statePath := filepath.Join(commands.root, ".git", "zenchron", "selfhost", "execution-issue-4.json")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("successful Codex execution provenance was not preserved: %v", err)
+	}
+
+	commands.formatOutput = ""
+	if err := selfhostResume("4", commands, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Execution provider: `Codex CLI`",
+		"Codex model: `gpt-5.6-luna`",
+		"Codex authentication mode: `chatgpt`",
+		"Successful attempt: 2/2",
+	} {
+		if !strings.Contains(commands.comment, want) {
+			t.Errorf("resumed handoff missing %q:\n%s", want, commands.comment)
+		}
+	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published handoff did not remove execution provenance: %v", err)
+	}
+}
+
+func TestSelfhostResumeRejectsMismatchedExecutionProvenance(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.branch = "issue-4"
+	commands.status = " M changed.go"
+	if _, err := persistInterruptedExecution(commands.root, 4, "issue-4", "different-base", codexExecution{
+		Provider: "Codex CLI", Model: "gpt-5.6-terra", AuthMode: "chatgpt", Attempt: 1, MaxAttempts: 2,
+	}, commands); err != nil {
+		t.Fatal(err)
+	}
+
+	err := selfhostResume("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "does not match the interrupted candidate") {
+		t.Fatalf("resume error = %v, want bound-provenance rejection", err)
+	}
 }
 
 func TestSelfhostResumeRefusesUnsafeInterruptedState(t *testing.T) {
@@ -383,6 +435,8 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 		return f.formatOutput, nil
 	case "git rev-parse --show-toplevel":
 		return f.root, nil
+	case "git rev-parse --git-path zenchron/selfhost/execution-issue-4.json":
+		return filepath.Join(f.root, ".git", "zenchron", "selfhost", "execution-issue-4.json"), nil
 	case "git remote get-url origin":
 		return f.origin, nil
 	case "git remote get-url --push origin":

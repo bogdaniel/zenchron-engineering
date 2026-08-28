@@ -102,11 +102,22 @@ type harnessCheck struct {
 }
 
 type codexExecution struct {
-	Provider    string
-	Model       string
-	AuthMode    string
-	Attempt     int
-	MaxAttempts int
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	AuthMode    string `json:"auth_mode"`
+	Attempt     int    `json:"attempt"`
+	MaxAttempts int    `json:"max_attempts"`
+}
+
+// interruptedExecutionState is Git-local execution observation for a candidate
+// that completed Codex execution but has not yet been published. It is neither
+// authority evidence nor generic workflow state.
+type interruptedExecutionState struct {
+	Version      string         `json:"version"`
+	IssueNumber  int            `json:"issue_number"`
+	IssueBranch  string         `json:"issue_branch"`
+	BaseRevision string         `json:"base_revision"`
+	Execution    codexExecution `json:"execution"`
 }
 
 var bootstrapChecks = []harnessCheck{
@@ -288,12 +299,17 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 	defer removeContext()
 	prompt := selfhostPrompt(number, issueBranch, contextFile)
 	var execution codexExecution
+	var executionStatePath string
 	for index, model := range models {
 		execution = codexExecution{Provider: "Codex CLI", Model: model, AuthMode: authMode, Attempt: index + 1, MaxAttempts: len(models)}
 		fmt.Fprintf(stdout, "Codex attempt %d/%d: model %s, auth mode %s\n", execution.Attempt, execution.MaxAttempts, model, authMode)
 		args := []string{"--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--ignore-user-config", "--model", model, "--cd", root, "--add-dir", contextDir, "--output-schema", schemaFile, "--output-last-message", reportFile, prompt}
 		_, runErr := commands.Output(root, "codex", args...)
 		if runErr == nil {
+			executionStatePath, err = persistInterruptedExecution(root, number, issueBranch, base, execution, commands)
+			if err != nil {
+				return fmt.Errorf("preserve successful Codex execution provenance: %w", err)
+			}
 			break
 		}
 		failure := classifyCodexFailure(runErr)
@@ -338,7 +354,7 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 	if err := json.Unmarshal(reportData, &report); err != nil {
 		return fmt.Errorf("decode Codex report: %w", err)
 	}
-	return publishCandidate(root, number, issueBranch, target, runtime, &report, &execution, commands, stdout)
+	return publishCandidate(root, number, issueBranch, target, runtime, &report, &execution, executionStatePath, commands, stdout)
 }
 
 // selfhostResume publishes the uncommitted candidate left by an interrupted
@@ -456,10 +472,14 @@ func selfhostResume(rawNumber string, commands commandRunner, stdout io.Writer) 
 	if target.Number != number || target.State != "OPEN" {
 		return fmt.Errorf("issue #%d is not an open matching issue", number)
 	}
-	return publishCandidate(root, number, issueBranch, target, runtime, nil, nil, commands, stdout)
+	execution, executionStatePath, err := recoverInterruptedExecution(root, number, issueBranch, head, commands)
+	if err != nil {
+		return err
+	}
+	return publishCandidate(root, number, issueBranch, target, runtime, nil, execution, executionStatePath, commands, stdout)
 }
 
-func publishCandidate(root string, number int, issueBranch string, target issue, runtime goRuntime, report *executorReport, execution *codexExecution, commands commandRunner, stdout io.Writer) error {
+func publishCandidate(root string, number int, issueBranch string, target issue, runtime goRuntime, report *executorReport, execution *codexExecution, executionStatePath string, commands commandRunner, stdout io.Writer) error {
 	checks, err := verifyBootstrapChecks(runtime)
 	if err != nil {
 		return err
@@ -507,8 +527,97 @@ func publishCandidate(root string, number int, issueBranch string, target issue,
 	if err := commands.Run(root, "gh", "pr", "comment", strconv.Itoa(pr.Number), "--repo", repository, "--body-file", commentFile); err != nil {
 		return fmt.Errorf("publish durable pull request handoff: %w", err)
 	}
+	if executionStatePath != "" {
+		if err := os.Remove(executionStatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove published execution provenance: %w", err)
+		}
+	}
 	fmt.Fprintf(stdout, "Handoff published: %s\nHead: %s\nStopped before merge; external review is required.\n", pr.URL, head)
 	return nil
+}
+
+func persistInterruptedExecution(root string, number int, branch, base string, execution codexExecution, commands commandRunner) (string, error) {
+	path, err := interruptedExecutionPath(root, branch, commands)
+	if err != nil {
+		return "", err
+	}
+	state := interruptedExecutionState{
+		Version:      "1",
+		IssueNumber:  number,
+		IssueBranch:  branch,
+		BaseRevision: base,
+		Execution:    execution,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("encode execution provenance: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create Git-local provenance directory: %w", err)
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".execution-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create Git-local provenance file: %w", err)
+	}
+	temporaryPath := file.Name()
+	defer os.Remove(temporaryPath)
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return "", fmt.Errorf("protect Git-local provenance file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return "", fmt.Errorf("write Git-local provenance file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close Git-local provenance file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return "", fmt.Errorf("install Git-local provenance file: %w", err)
+	}
+	return path, nil
+}
+
+func recoverInterruptedExecution(root string, number int, branch, base string, commands commandRunner) (*codexExecution, string, error) {
+	path, err := interruptedExecutionPath(root, branch, commands)
+	if err != nil {
+		return nil, "", err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", nil // Legacy interrupted candidates did not retain execution observation.
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("read Git-local execution provenance: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var state interruptedExecutionState
+	if err := decoder.Decode(&state); err != nil {
+		return nil, "", fmt.Errorf("decode Git-local execution provenance: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, "", errors.New("decode Git-local execution provenance: unexpected trailing data")
+	}
+	if state.Version != "1" || state.IssueNumber != number || state.IssueBranch != branch || state.BaseRevision != base || !validCodexExecution(state.Execution) {
+		return nil, "", errors.New("Git-local execution provenance does not match the interrupted candidate")
+	}
+	return &state.Execution, path, nil
+}
+
+func interruptedExecutionPath(root, branch string, commands commandRunner) (string, error) {
+	path, err := commands.Output(root, "git", "rev-parse", "--git-path", filepath.Join("zenchron", "selfhost", "execution-"+branch+".json"))
+	if err != nil {
+		return "", fmt.Errorf("resolve Git-local execution provenance path: %w", err)
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	return path, nil
+}
+
+func validCodexExecution(execution codexExecution) bool {
+	return execution.Provider != "" && execution.Model != "" && (execution.AuthMode == "chatgpt" || execution.AuthMode == "api") && execution.Attempt > 0 && execution.MaxAttempts >= execution.Attempt
 }
 
 func selfhostPrompt(number int, branch, contextFile string) string {

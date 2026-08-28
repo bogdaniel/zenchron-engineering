@@ -106,7 +106,9 @@ Executor-reported commands are retained as observations and need not use the
 same shell spelling. If execution is interrupted after creation of an
 `issue-N` branch but before publication, `selfhost resume issue N` can recover
 only an uncommitted candidate exactly based on `origin/main`; it refuses
-unrelated history, ignored local state, a remote branch, or a PR. Both paths
+unrelated history, ignored local state, a remote branch, or a PR. Successful
+Codex execution provenance is retained only in Git-local state for that
+interrupted candidate and is removed after the handoff is published. Both paths
 stop before merge.
 
 ## License
