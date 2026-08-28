@@ -30,7 +30,7 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 		`"result": "pass"`,
 		"Executor-reported observations",
 		"Harness-verified deterministic checks",
-		"`format` — pass (`gofmt -l <tracked Go files>`)",
+		"`format` — pass (`gofmt -l <tracked and untracked non-ignored Go files>`)",
 		"Stopped before merge: yes",
 		"Authority: external review required",
 	} {
@@ -90,6 +90,28 @@ func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestSelfhostIssueRefusesUnformattedUntrackedGoFile(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.goFiles = "changed.go\x00new.go\x00"
+	commands.formatOutput = "new.go"
+
+	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "harness verification \"format\" failed") {
+		t.Fatalf("error = %v, want format verification failure", err)
+	}
+
+	calls := strings.Join(commands.calls, "\n")
+	if !strings.Contains(calls, "git ls-files -z --cached --others --exclude-standard -- *.go") {
+		t.Fatalf("format check did not enumerate tracked and untracked non-ignored Go files:\n%s", calls)
+	}
+	if !strings.Contains(calls, "gofmt -l changed.go new.go") {
+		t.Fatalf("format check did not include untracked Go file:\n%s", calls)
+	}
+	if strings.Contains(calls, "git add --all") || commands.committed {
+		t.Fatalf("unformatted untracked Go file must prevent publication:\n%s", calls)
 	}
 }
 
@@ -165,6 +187,7 @@ type fakeCommands struct {
 	finalStatus       string
 	ignored           string
 	finalIgnored      string
+	goFiles           string
 	formatOutput      string
 	base              string
 	remoteMain        string
@@ -202,6 +225,7 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 		remoteMain:  "base123",
 		head:        "head456",
 		finalStatus: " M changed.go",
+		goFiles:     "changed.go",
 		target: issue{
 			Number: 4,
 			Title:  "ProjectModel snapshot",
@@ -248,9 +272,11 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 	switch call {
 	case "go version":
 		return "go version go1.25.1 test/arch", nil
-	case "git ls-files -z -- *.go":
-		return "changed.go", nil
+	case "git ls-files -z --cached --others --exclude-standard -- *.go":
+		return f.goFiles, nil
 	case "gofmt -l changed.go":
+		return f.formatOutput, nil
+	case "gofmt -l changed.go new.go":
 		return f.formatOutput, nil
 	case "git rev-parse --show-toplevel":
 		return f.root, nil

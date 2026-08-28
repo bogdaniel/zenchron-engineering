@@ -242,7 +242,7 @@ func (c *runtimeCommands) Output(_ string, name string, args ...string) (string,
 	call := name + " " + strings.Join(args, " ")
 	c.calls = append(c.calls, call)
 	switch {
-	case call == "git ls-files -z -- *.go":
+	case call == "git ls-files -z --cached --others --exclude-standard -- *.go":
 		return "cmd/zenchron-engineering/main.go", nil
 	case call == "docker info --format {{.ServerVersion}}" && c.dockerRunning:
 		return "28.0.0", nil

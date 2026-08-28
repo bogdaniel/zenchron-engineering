@@ -102,7 +102,7 @@ type harnessCheck struct {
 }
 
 var bootstrapChecks = []harnessCheck{
-	{ID: "format", Command: "gofmt -l <tracked Go files>"},
+	{ID: "format", Command: "gofmt -l <tracked and untracked non-ignored Go files>"},
 	{ID: "vet", Command: "go vet ./..."},
 	{ID: "test", Command: "go test ./..."},
 }
@@ -500,9 +500,9 @@ func verifyBootstrapChecks(runtime goRuntime) ([]harnessCheck, error) {
 	for _, check := range bootstrapChecks {
 		var err error
 		if check.ID == "format" {
-			files, listErr := runtime.commands.Output(runtime.repositoryRoot, "git", "ls-files", "-z", "--", "*.go")
+			files, listErr := runtime.commands.Output(runtime.repositoryRoot, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.go")
 			if listErr != nil {
-				return nil, fmt.Errorf("list tracked Go files for harness verification: %w", listErr)
+				return nil, fmt.Errorf("list publishable Go files for harness verification: %w", listErr)
 			}
 			goFiles := strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
 			if len(goFiles) == 1 && goFiles[0] == "" {
