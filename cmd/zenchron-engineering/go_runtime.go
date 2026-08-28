@@ -30,27 +30,50 @@ func (r goRuntime) String() string {
 }
 
 func (r goRuntime) Run(args ...string) error {
+	return r.RunTool("go", args...)
+}
+
+// RunTool executes a Go tool selected by the resolved bootstrap runtime.
+// Keeping this boundary here ensures Docker fallback gets the same tool as a
+// compatible local installation, without reimplementing runtime selection.
+func (r goRuntime) RunTool(tool string, args ...string) error {
 	switch r.kind {
 	case localGoRuntime:
-		return r.commands.RunEnv(r.repositoryRoot, []string{"GOTOOLCHAIN=local"}, "go", args...)
+		return r.commands.RunEnv(r.repositoryRoot, []string{"GOTOOLCHAIN=local"}, tool, args...)
 	case dockerGoRuntime:
-		dockerArgs := []string{
-			"run", "--rm", "--network", "bridge",
-			"--user", strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
-			"--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
-			"--mount", "type=bind,src=" + r.repositoryRoot + ",dst=/workspace",
-			"--workdir", "/workspace",
-			"--env", "GOTOOLCHAIN=local",
-			"--env", "HOME=/tmp/zenchron-home",
-			"--env", "GOPATH=/tmp/zenchron-go",
-			"--env", "GOMODCACHE=/tmp/zenchron-go/pkg/mod",
-			"--env", "GOCACHE=/tmp/zenchron-go-build",
-			r.environmentIdentifier, "go",
-		}
-		return r.commands.Run(r.repositoryRoot, "docker", append(dockerArgs, args...)...)
+		return r.commands.Run(r.repositoryRoot, "docker", r.dockerToolArgs(tool, args...)...)
 	default:
 		return fmt.Errorf("unsupported Go runtime kind %q", r.kind)
 	}
+}
+
+// OutputTool is RunTool for checks whose successful output is meaningful.
+func (r goRuntime) OutputTool(tool string, args ...string) (string, error) {
+	switch r.kind {
+	case localGoRuntime:
+		return r.commands.OutputEnv(r.repositoryRoot, []string{"GOTOOLCHAIN=local"}, tool, args...)
+	case dockerGoRuntime:
+		return r.commands.Output(r.repositoryRoot, "docker", r.dockerToolArgs(tool, args...)...)
+	default:
+		return "", fmt.Errorf("unsupported Go runtime kind %q", r.kind)
+	}
+}
+
+func (r goRuntime) dockerToolArgs(tool string, args ...string) []string {
+	dockerArgs := []string{
+		"run", "--rm", "--network", "bridge",
+		"--user", strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
+		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,mode=1777",
+		"--mount", "type=bind,src=" + r.repositoryRoot + ",dst=/workspace",
+		"--workdir", "/workspace",
+		"--env", "GOTOOLCHAIN=local",
+		"--env", "HOME=/tmp/zenchron-home",
+		"--env", "GOPATH=/tmp/zenchron-go",
+		"--env", "GOMODCACHE=/tmp/zenchron-go/pkg/mod",
+		"--env", "GOCACHE=/tmp/zenchron-go-build",
+		r.environmentIdentifier, tool,
+	}
+	return append(dockerArgs, args...)
 }
 
 func resolveGoRuntime(root string, commands commandRunner) (goRuntime, error) {

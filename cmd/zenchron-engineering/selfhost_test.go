@@ -25,9 +25,12 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 		"Target issue: #4",
 		"Branch: `issue-4`",
 		"Exact head: `head456`",
-		"Go runtime: `local Go 1.25.1 (host-go:1.25.1)`",
+		"Harness Go runtime: `local Go 1.25.1 (host-go:1.25.1)`",
 		`"command": "go test ./..."`,
 		`"result": "pass"`,
+		"Executor-reported observations",
+		"Harness-verified deterministic checks",
+		"`format` — pass (`gofmt -l <tracked and untracked non-ignored Go files>`)",
 		"Stopped before merge: yes",
 		"Authority: external review required",
 	} {
@@ -73,9 +76,7 @@ func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 		{"Codex failure", "work remains on", func(f *fakeCommands) { f.codexErr = errors.New("agent failed") }},
 		{"no changes", "no working-tree change", func(f *fakeCommands) { f.finalStatus = "" }},
 		{"new ignored files", "produced ignored files", func(f *fakeCommands) { f.finalIgnored = "build/output" }},
-		{"missing validation", "required validation", func(f *fakeCommands) {
-			f.report.Validation = f.report.Validation[:1]
-		}},
+		{"failing harness check", "harness verification", func(f *fakeCommands) { f.formatOutput = "changed.go" }},
 		{"wrong PR head", "does not match", func(f *fakeCommands) { f.pr.HeadRefOID = "other" }},
 		{"missing issue reference", `must contain "Closes #4"`, func(f *fakeCommands) { f.pr.Body = "No link" }},
 	}
@@ -85,6 +86,88 @@ func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 			commands := newFakeCommands(t)
 			test.edit(commands)
 			err := selfhostIssue("4", commands, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestSelfhostIssueRefusesUnformattedUntrackedGoFile(t *testing.T) {
+	commands := newFakeCommands(t)
+	if err := os.WriteFile(filepath.Join(commands.root, "new.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commands.goFiles = "changed.go\x00new.go\x00"
+	commands.formatOutput = "new.go"
+
+	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "harness verification \"format\" failed") {
+		t.Fatalf("error = %v, want format verification failure", err)
+	}
+
+	calls := strings.Join(commands.calls, "\n")
+	if !strings.Contains(calls, "git ls-files -z --cached --others --exclude-standard -- *.go") {
+		t.Fatalf("format check did not enumerate tracked and untracked non-ignored Go files:\n%s", calls)
+	}
+	if !strings.Contains(calls, "gofmt -l changed.go new.go") {
+		t.Fatalf("format check did not include untracked Go file:\n%s", calls)
+	}
+	if strings.Contains(calls, "git add --all") || commands.committed {
+		t.Fatalf("unformatted untracked Go file must prevent publication:\n%s", calls)
+	}
+}
+
+func TestSelfhostIssueAcceptsDockerExecutorObservationWhenHarnessVerifiesChecks(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.report.Validation = []validationResult{
+		{ID: "format", Command: "docker run golang:1.25 gofmt -l .", Result: "pass"},
+		{ID: "vet", Command: "docker run golang:1.25 go vet ./...", Result: "pass"},
+		{ID: "test", Command: "docker run golang:1.25 go test ./...", Result: "pass"},
+	}
+	if err := selfhostIssue("4", commands, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(commands.comment, `"command": "docker run golang:1.25 go test ./..."`) {
+		t.Fatalf("executor observation was not retained:\n%s", commands.comment)
+	}
+}
+
+func TestSelfhostResumePublishesInterruptedCandidate(t *testing.T) {
+	commands := newFakeCommands(t)
+	commands.branch = "issue-4"
+	commands.status = " M changed.go"
+	var output bytes.Buffer
+	if err := selfhostResume("4", commands, &output); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(commands.calls, "\n"), "codex ") {
+		t.Fatal("resume must not invoke Codex")
+	}
+	if !strings.Contains(commands.comment, "Harness-verified deterministic checks") {
+		t.Fatalf("resume handoff missing harness checks:\n%s", commands.comment)
+	}
+}
+
+func TestSelfhostResumeRefusesUnsafeInterruptedState(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		edit func(*fakeCommands)
+	}{
+		{"wrong branch", "resume requires", func(f *fakeCommands) {}},
+		{"clean tree", "no interrupted candidate", func(f *fakeCommands) { f.branch = "issue-4" }},
+		{"history", "refusing unrelated history", func(f *fakeCommands) { f.branch, f.status, f.base = "issue-4", " M changed.go", "candidate" }},
+		{"remote branch", "already exists on origin", func(f *fakeCommands) {
+			f.branch, f.status, f.remoteBranch = "issue-4", " M changed.go", "head refs/heads/issue-4"
+		}},
+		{"existing PR", "pull request for", func(f *fakeCommands) { f.branch, f.status, f.existingPR = "issue-4", " M changed.go", true }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			commands := newFakeCommands(t)
+			test.edit(commands)
+			err := selfhostResume("4", commands, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
 			}
@@ -107,6 +190,8 @@ type fakeCommands struct {
 	finalStatus       string
 	ignored           string
 	finalIgnored      string
+	goFiles           string
+	formatOutput      string
 	base              string
 	remoteMain        string
 	head              string
@@ -132,6 +217,9 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/selfhost\n\ngo 1.25\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "changed.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return &fakeCommands{
 		t:           t,
 		root:        root,
@@ -143,6 +231,7 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 		remoteMain:  "base123",
 		head:        "head456",
 		finalStatus: " M changed.go",
+		goFiles:     "changed.go",
 		target: issue{
 			Number: 4,
 			Title:  "ProjectModel snapshot",
@@ -162,9 +251,9 @@ func newFakeCommands(t *testing.T) *fakeCommands {
 		},
 		report: executorReport{
 			Validation: []validationResult{
-				{Command: "gofmt -l .", Result: "pass"},
-				{Command: "go vet ./...", Result: "pass"},
-				{Command: "go test ./...", Result: "pass"},
+				{ID: "format", Command: "gofmt -l .", Result: "pass"},
+				{ID: "vet", Command: "go vet ./...", Result: "pass"},
+				{ID: "test", Command: "go test ./...", Result: "pass"},
 			},
 			ArchitecturalDeviations: []string{},
 			UnresolvedQuestions:     []string{},
@@ -189,6 +278,12 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 	switch call {
 	case "go version":
 		return "go version go1.25.1 test/arch", nil
+	case "git ls-files -z --cached --others --exclude-standard -- *.go":
+		return f.goFiles, nil
+	case "gofmt -l changed.go":
+		return f.formatOutput, nil
+	case "gofmt -l changed.go new.go":
+		return f.formatOutput, nil
 	case "git rev-parse --show-toplevel":
 		return f.root, nil
 	case "git remote get-url origin":
@@ -260,6 +355,8 @@ func (f *fakeCommands) Run(_ string, name string, args ...string) error {
 		path := argumentAfter(f.t, args, "--output-last-message")
 		return os.WriteFile(path, []byte(mustJSON(f.t, f.report)), 0o600)
 	case name == "git" && slices.Equal(args, []string{"add", "--all"}):
+		return nil
+	case name == "go" && (slices.Equal(args, []string{"vet", "./..."}) || slices.Equal(args, []string{"test", "./..."})):
 		return nil
 	case name == "git" && len(args) == 3 && args[0] == "commit" && args[1] == "-m":
 		f.committed = true

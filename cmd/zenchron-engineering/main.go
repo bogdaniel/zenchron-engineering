@@ -22,5 +22,8 @@ func run(args []string, commands commandRunner, stdout *os.File) error {
 	if len(args) == 3 && args[0] == "selfhost" && args[1] == "issue" {
 		return selfhostIssue(args[2], commands, stdout)
 	}
-	return fmt.Errorf("usage: zenchron-engineering {version|selfhost issue <number>}")
+	if len(args) == 4 && args[0] == "selfhost" && args[1] == "resume" && args[2] == "issue" {
+		return selfhostResume(args[3], commands, stdout)
+	}
+	return fmt.Errorf("usage: zenchron-engineering {version|selfhost issue <number>|selfhost resume issue <number>}")
 }

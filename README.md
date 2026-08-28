@@ -73,6 +73,7 @@ The first milestone must prove that the same facts + policies can produce approp
 go test ./...
 go run ./cmd/zenchron-engineering version
 go run ./cmd/zenchron-engineering selfhost issue 4
+go run ./cmd/zenchron-engineering selfhost resume issue 4
 ```
 
 `selfhost issue` requires authenticated local `gh` and `codex` CLIs. It only
@@ -89,6 +90,15 @@ the repository mounted. The container has outbound network access so Go can
 resolve the non-vendored modules pinned by `go.mod` and `go.sum`; no host
 credentials or environment are forwarded. Go's home, module, and build caches
 live in an isolated writable tmpfs that is discarded after each command.
+
+Before publishing a candidate PR, the bootstrap independently runs the
+deterministic `format`, `vet`, and `test` checks through that resolved runtime.
+Executor-reported commands are retained as observations and need not use the
+same shell spelling. If execution is interrupted after creation of an
+`issue-N` branch but before publication, `selfhost resume issue N` can recover
+only an uncommitted candidate exactly based on `origin/main`; it refuses
+unrelated history, ignored local state, a remote branch, or a PR. Both paths
+stop before merge.
 
 ## License
 
