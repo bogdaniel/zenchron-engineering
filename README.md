@@ -79,6 +79,14 @@ go run ./cmd/zenchron-engineering selfhost issue 4
 starts from a clean, synchronized `main`, creates a dedicated issue branch,
 requires an open PR and durable review handoff, and never merges it.
 
+Go-backed bootstrap operations resolve one runtime before repository mutation:
+a compatible local Go installation is preferred, with automatic toolchain
+downloads disabled. Otherwise Docker is used only when its daemon is reachable
+and the repository-derived `golang:<go.mod version>` image already exists
+locally. Bootstrap never pulls that image implicitly and executes the resolved
+immutable image ID. Docker Go commands use an unprivileged, network-disabled
+container with only the repository mounted.
+
 ## License
 
 No license has been selected yet. Do not assume permission to redistribute or reuse this code until an explicit license is committed.
