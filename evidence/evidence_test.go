@@ -10,7 +10,7 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/evidence"
 )
 
-func TestEvidenceForRevisionACannotSatisfyRevisionB(t *testing.T) {
+func TestEvidenceForRevisionAIsNotApplicableToRevisionB(t *testing.T) {
 	bundle := fixture(t, "stale-evidence.evidence-bundle.json")
 	target := evidence.Binding{
 		Subject:  domain.Subject{Repository: "acme/payments", Revision: "rev-b"},
@@ -18,12 +18,12 @@ func TestEvidenceForRevisionACannotSatisfyRevisionB(t *testing.T) {
 		Policy:   domain.ObjectRevision{ID: "policy-engineering-baseline", Revision: "1"},
 	}
 
-	satisfied, err := evidence.ClaimSatisfied(bundle, target, "claim-auth-regression-tests", requiredClaim("test_result"))
+	hasApplicablePassingEvidence, err := evidence.HasApplicablePassingEvidence(bundle, target, "claim-auth-regression-tests", "test_result")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if satisfied {
-		t.Fatal("revision A evidence satisfied a claim for revision B")
+	if hasApplicablePassingEvidence {
+		t.Fatal("revision A evidence was applicable to revision B")
 	}
 
 	stale, err := evidence.MarkStaleForBindingChange(bundle, target, "3")
@@ -39,7 +39,7 @@ func TestEvidenceForRevisionACannotSatisfyRevisionB(t *testing.T) {
 	}
 }
 
-func TestContractRevisionChangeStalesOtherwiseApplicableEvidence(t *testing.T) {
+func TestContractRevisionChangeMakesEvidenceInapplicable(t *testing.T) {
 	bundle := fixture(t, "security-sensitive.evidence-bundle.json")
 	target := evidence.BindingOf(bundle)
 	target.Contract.Revision = "2"
@@ -53,16 +53,16 @@ func TestContractRevisionChangeStalesOtherwiseApplicableEvidence(t *testing.T) {
 			t.Errorf("%s lifecycle = %q, want stale", id, item.Lifecycle.Status)
 		}
 	}
-	satisfied, err := evidence.ClaimSatisfied(stale, target, "claim-auth-regression-tests", requiredClaim("test_result"))
+	hasApplicablePassingEvidence, err := evidence.HasApplicablePassingEvidence(stale, target, "claim-auth-regression-tests", "test_result")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if satisfied {
-		t.Fatal("evidence from contract revision 1 satisfied a claim for revision 2")
+	if hasApplicablePassingEvidence {
+		t.Fatal("evidence from contract revision 1 was applicable to revision 2")
 	}
 }
 
-func TestNonValidEvidenceCannotSatisfyClaim(t *testing.T) {
+func TestNonValidEvidenceIsNotApplicable(t *testing.T) {
 	bundle := fixture(t, "trivial.evidence-bundle.json")
 	target := evidence.BindingOf(bundle)
 	item := bundle.Evidence["evidence-json-parse"]
@@ -71,33 +71,33 @@ func TestNonValidEvidenceCannotSatisfyClaim(t *testing.T) {
 		reason := "test lifecycle"
 		item.Lifecycle = domain.EvidenceLifecycle{Status: status, Reason: &reason}
 		bundle.Evidence["evidence-json-parse"] = item
-		satisfied, err := evidence.ClaimSatisfied(bundle, target, item.ClaimID, requiredClaim(item.EvidenceClass))
+		hasApplicablePassingEvidence, err := evidence.HasApplicablePassingEvidence(bundle, target, item.ClaimID, item.EvidenceClass)
 		if err != nil {
 			t.Fatalf("%s: %v", status, err)
 		}
-		if satisfied {
-			t.Errorf("%s evidence satisfied claim", status)
+		if hasApplicablePassingEvidence {
+			t.Errorf("%s evidence was applicable", status)
 		}
 	}
 }
 
-func TestWrongEvidenceClassCannotSupportClaim(t *testing.T) {
+func TestWrongEvidenceClassIsNotApplicable(t *testing.T) {
 	bundle := fixture(t, "trivial.evidence-bundle.json")
 	target := evidence.BindingOf(bundle)
 	item := bundle.Evidence["evidence-json-parse"]
 	item.ClaimID = "claim-security-owner-approval"
 	bundle.Evidence["evidence-json-parse"] = item
 
-	satisfied, err := evidence.ClaimSatisfied(bundle, target, item.ClaimID, requiredClaim("human_approval"))
+	hasApplicablePassingEvidence, err := evidence.HasApplicablePassingEvidence(bundle, target, item.ClaimID, "human_approval")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if satisfied {
-		t.Fatal("test-result evidence satisfied a human approval claim")
+	if hasApplicablePassingEvidence {
+		t.Fatal("test-result evidence was applicable as human approval")
 	}
 }
 
-func TestClaimSatisfiedRejectsMalformedEvidenceMetadata(t *testing.T) {
+func TestHasApplicablePassingEvidenceRejectsMalformedEvidenceMetadata(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*domain.EvidenceItem)
@@ -136,7 +136,7 @@ func TestClaimSatisfiedRejectsMalformedEvidenceMetadata(t *testing.T) {
 			test.mutate(&item)
 			bundle.Evidence["evidence-json-parse"] = item
 
-			if _, err := evidence.ClaimSatisfied(bundle, target, item.ClaimID, requiredClaim(item.EvidenceClass)); err == nil {
+			if _, err := evidence.HasApplicablePassingEvidence(bundle, target, item.ClaimID, item.EvidenceClass); err == nil {
 				t.Fatal("malformed evidence metadata was accepted")
 			}
 		})
@@ -166,8 +166,4 @@ func fixture(t *testing.T, name string) domain.EvidenceBundle {
 		t.Fatal(err)
 	}
 	return bundle
-}
-
-func requiredClaim(class domain.EvidenceClass) domain.RequiredClaim {
-	return domain.RequiredClaim{EvidenceClass: class}
 }
