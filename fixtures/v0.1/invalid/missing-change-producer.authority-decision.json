@@ -1,19 +1,16 @@
 {
   "schema_version": "0.1",
-  "id": "decision-invalid-authority",
+  "id": "decision-missing-change-producer",
   "revision": "1",
   "subject": { "repository": "acme/payments", "revision": "rev-b" },
   "contract": { "id": "contract-auth-session", "revision": "1" },
-  "basis": {
-    "change_producer": { "id": "change-executor", "type": "execution_provider" },
-    "evidence_bundles": {}
-  },
+  "basis": { "evidence_bundles": {} },
   "action": { "type": "git.merge", "target": "main" },
   "capability": { "status": "available" },
-  "permission": { "status": "denied" },
-  "status": "authorized",
-  "satisfied": ["claim-auth-regression-tests"],
-  "missing": [],
+  "permission": { "status": "granted" },
+  "status": "awaiting_authority",
+  "satisfied": [],
+  "missing": ["claim-security-owner-approval"],
   "stale": [],
   "blocking": []
 }

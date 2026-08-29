@@ -311,9 +311,11 @@ type Permission struct {
 	Status PermissionStatus `json:"status"`
 }
 
-// DecisionBasis records the exact evidence bundle revisions considered.
+// DecisionBasis records the exact evidence bundle revisions and change producer
+// identity considered by an authority evaluation.
 type DecisionBasis struct {
 	EvidenceBundles map[string]RevisionReference `json:"evidence_bundles"`
+	ChangeProducer  EvidenceProducer             `json:"change_producer"`
 }
 
 // AuthorityDecision records whether one protected action may happen now.

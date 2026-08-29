@@ -5,6 +5,7 @@
   "subject": { "repository": "acme/payments", "revision": "rev-b" },
   "contract": { "id": "contract-auth-session", "revision": "1" },
   "basis": {
+    "change_producer": { "id": "change-executor", "type": "execution_provider" },
     "evidence_bundles": [
       { "id": "evidence-auth-review", "revision": "1" },
       { "id": "evidence-auth-review", "revision": "2" }

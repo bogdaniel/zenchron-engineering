@@ -37,6 +37,7 @@ var invalidExpectations = map[string]invalidExpectation{
 	"fixed-agent-workflow.engineering-policy.json":              {"/rules/RULE-001", "additionalProperties"},
 	"fixed-agent-workflow.engineering-work-contract.json":       {"", "additionalProperties"},
 	"missing-environment.evidence-bundle.json":                  {"/evidence/evidence-security-review", "required"},
+	"missing-change-producer.authority-decision.json":           {"/basis", "required"},
 	"missing-evidence-class.evidence-bundle.json":               {"/evidence/evidence-json-parse", "required"},
 	"missing-subject-revision.evidence-bundle.json":             {"/subject", "required"},
 	"missing-subject-revision.project-model.json":               {"/subject", "required"},
