@@ -38,10 +38,13 @@ func Evaluate(input Input) (domain.AuthorityDecision, error) {
 		Revision:      input.DecisionRevision,
 		Subject:       input.Contract.Subject,
 		Contract:      domain.ObjectRevision{ID: input.Contract.ID, Revision: input.Contract.Revision},
-		Basis:         domain.DecisionBasis{EvidenceBundles: decisionBasis(input.EvidenceBundles)},
-		Action:        input.Action,
-		Capability:    domain.Capability{Status: input.Capability},
-		Permission:    domain.Permission{Status: permissionFor(input.Contract, input.Action)},
+		Basis: domain.DecisionBasis{
+			EvidenceBundles: decisionBasis(input.EvidenceBundles),
+			ChangeProducer:  input.ChangeProducer,
+		},
+		Action:     input.Action,
+		Capability: domain.Capability{Status: input.Capability},
+		Permission: domain.Permission{Status: permissionFor(input.Contract, input.Action)},
 	}
 
 	requiredClaims := requiredClaimsFor(input.Contract, input.Action)
@@ -206,7 +209,9 @@ func claimState(input Input, claimID string, claim domain.RequiredClaim) evidenc
 			if item.Result.Status == domain.EvidenceFailed {
 				hasFailed = true
 			}
-			if item.Result.Status == domain.EvidencePassed && (!claim.IndependentFromChangeProducer || item.Producer.ID != input.ChangeProducer.ID) {
+			if item.Result.Status == domain.EvidencePassed &&
+				(claim.EvidenceClass != "human_approval" || item.Producer.Type == domain.ProducerHuman) &&
+				(!claim.IndependentFromChangeProducer || item.Producer.ID != input.ChangeProducer.ID) {
 				hasPassing = true
 			}
 		}

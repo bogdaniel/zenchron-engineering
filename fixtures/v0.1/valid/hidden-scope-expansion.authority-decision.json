@@ -4,7 +4,10 @@
   "revision": "2",
   "subject": { "repository": "acme/payments", "revision": "rev-b" },
   "contract": { "id": "contract-retry-with-auth-impact", "revision": "2" },
-  "basis": { "evidence_bundles": {} },
+  "basis": {
+    "change_producer": { "id": "change-executor", "type": "execution_provider" },
+    "evidence_bundles": {}
+  },
   "action": { "type": "git.pull_request.create", "target": "main" },
   "capability": { "status": "available" },
   "permission": { "status": "granted" },

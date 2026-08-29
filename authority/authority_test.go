@@ -109,6 +109,85 @@ func TestEvaluateRejectsChangeProducerAsSoleIndependentEvidence(t *testing.T) {
 	}
 }
 
+func TestEvaluateRecordsChangeProducerUsedForIndependence(t *testing.T) {
+	contract := contractFixture(t, "security-sensitive.engineering-work-contract.json")
+	bundle := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	bundle.Evidence["evidence-security-owner-approval"] = humanApproval("security-owner-1")
+	action := domain.Action{Type: "git.merge", Target: "main"}
+
+	independent := evaluate(t, authority.Input{
+		DecisionID: "decision-independent-producer", DecisionRevision: "1", Contract: contract, Action: action,
+		Capability: domain.CapabilityAvailable, ChangeProducer: changeProducer(), EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
+	})
+	changeProducerIsTestTool := bundle.Evidence["evidence-auth-tests-passed"].Producer
+	dependent := evaluate(t, authority.Input{
+		DecisionID: "decision-dependent-producer", DecisionRevision: "1", Contract: contract, Action: action,
+		Capability: domain.CapabilityAvailable, ChangeProducer: changeProducerIsTestTool, EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
+	})
+
+	if independent.Status != domain.AuthorityAuthorized {
+		t.Fatalf("independent producer status = %q, want authorized", independent.Status)
+	}
+	if dependent.Status != domain.AuthorityIncomplete || !contains(dependent.Missing, "claim-auth-regression-tests") {
+		t.Fatalf("dependent producer decision = %#v, want incomplete with missing independent test evidence", dependent)
+	}
+	if independent.Basis.ChangeProducer != changeProducer() {
+		t.Fatalf("independent basis producer = %#v, want %#v", independent.Basis.ChangeProducer, changeProducer())
+	}
+	if dependent.Basis.ChangeProducer != changeProducerIsTestTool {
+		t.Fatalf("dependent basis producer = %#v, want %#v", dependent.Basis.ChangeProducer, changeProducerIsTestTool)
+	}
+}
+
+func TestEvaluateHumanApprovalRequiresHumanProducer(t *testing.T) {
+	contract := contractFixture(t, "security-sensitive.engineering-work-contract.json")
+	bundle := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	bundle.Evidence["evidence-security-owner-approval"] = humanApproval("approval-bot")
+	approval := bundle.Evidence["evidence-security-owner-approval"]
+	approval.Producer.Type = domain.ProducerDeterministicTool
+	bundle.Evidence["evidence-security-owner-approval"] = approval
+
+	decision := evaluate(t, authority.Input{
+		DecisionID: "decision-non-human-approval", DecisionRevision: "1", Contract: contract,
+		Action: domain.Action{Type: "git.merge", Target: "main"}, Capability: domain.CapabilityAvailable,
+		ChangeProducer: changeProducer(), EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
+	})
+	if decision.Status != domain.AuthorityAwaitingAuthority || !contains(decision.Missing, "claim-security-owner-approval") || contains(decision.Satisfied, "claim-security-owner-approval") {
+		t.Fatalf("decision = %#v, want non-human approval to remain awaiting authority", decision)
+	}
+}
+
+func TestEvaluateSecurityMergeRequiresTechnicalClaimsAndHumanApproval(t *testing.T) {
+	contract := contractFixture(t, "security-sensitive.engineering-work-contract.json")
+	action := domain.Action{Type: "git.merge", Target: "main"}
+
+	t.Run("all required claims", func(t *testing.T) {
+		bundle := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+		bundle.Evidence["evidence-security-owner-approval"] = humanApproval("security-owner-1")
+		decision := evaluate(t, authority.Input{
+			DecisionID: "decision-all-required-claims", DecisionRevision: "1", Contract: contract, Action: action,
+			Capability: domain.CapabilityAvailable, ChangeProducer: changeProducer(), EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
+		})
+		if decision.Status != domain.AuthorityAuthorized {
+			t.Fatalf("status = %q, want authorized", decision.Status)
+		}
+	})
+
+	t.Run("typed human approval without technical claims", func(t *testing.T) {
+		bundle := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+		delete(bundle.Evidence, "evidence-auth-tests-passed")
+		delete(bundle.Evidence, "evidence-security-review-approved")
+		bundle.Evidence["evidence-security-owner-approval"] = humanApproval("security-owner-1")
+		decision := evaluate(t, authority.Input{
+			DecisionID: "decision-missing-technical-claims", DecisionRevision: "1", Contract: contract, Action: action,
+			Capability: domain.CapabilityAvailable, ChangeProducer: changeProducer(), EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
+		})
+		if decision.Status != domain.AuthorityIncomplete || !contains(decision.Missing, "claim-auth-regression-tests") || !contains(decision.Missing, "claim-security-review") {
+			t.Fatalf("decision = %#v, want incomplete missing technical claims", decision)
+		}
+	})
+}
+
 func TestEvaluateIsDeterministicAndRecordsAllEvidenceRevisions(t *testing.T) {
 	input := inputFor(t, "security-sensitive.engineering-work-contract.json", domain.Action{Type: "git.merge", Target: "main"}, domain.CapabilityAvailable, "security-sensitive.evidence-bundle.json")
 	first := evaluate(t, input)
@@ -188,6 +267,18 @@ func evaluate(t *testing.T, input authority.Input) domain.AuthorityDecision {
 
 func changeProducer() domain.EvidenceProducer {
 	return domain.EvidenceProducer{ID: "change-executor", Type: domain.ProducerExecutionProvider}
+}
+
+func humanApproval(id string) domain.EvidenceItem {
+	return domain.EvidenceItem{
+		ClaimID:       "claim-security-owner-approval",
+		EvidenceClass: "human_approval",
+		Producer:      domain.EvidenceProducer{ID: id, Type: domain.ProducerHuman},
+		Environment:   domain.EvidenceEnvironment{Type: "code_review", Identifier: "review-record-57"},
+		Result:        domain.EvidenceResult{Status: domain.EvidencePassed},
+		Lifecycle:     domain.EvidenceLifecycle{Status: domain.EvidenceValid},
+		Provenance:    domain.EvidenceProvenance{Source: "review-record-57", RecordedAt: "2026-08-29T10:45:00Z"},
+	}
 }
 
 func contractFixture(t *testing.T, name string) domain.EngineeringWorkContract {

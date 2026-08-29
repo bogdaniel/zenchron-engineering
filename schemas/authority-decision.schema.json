@@ -99,13 +99,23 @@
     "decision_basis": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["evidence_bundles"],
+      "required": ["evidence_bundles", "change_producer"],
       "properties": {
         "evidence_bundles": {
           "type": "object",
           "propertyNames": { "$ref": "#/$defs/non_empty_string" },
           "additionalProperties": { "$ref": "#/$defs/revision_reference" }
-        }
+        },
+        "change_producer": { "$ref": "#/$defs/producer" }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "type": { "enum": ["execution_provider", "assurance_provider", "deterministic_tool", "human"] }
       }
     },
     "action": {
