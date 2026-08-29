@@ -59,11 +59,15 @@ func Reassess(input Input) (Result, error) {
 	if err := validateInput(input); err != nil {
 		return Result{}, err
 	}
+	observed, err := analysis.NormalizeObservedChange(input.ObservedChange)
+	if err != nil {
+		return Result{}, err
+	}
 	analyzer := input.Analyzer
 	if analyzer.IsZero() {
 		analyzer = analysis.NewAnalyzer()
 	}
-	facts, err := analyzer.Observe(input.Compile.ProjectModel, input.Compile.Subject, input.ObservedChange)
+	facts, err := analyzer.Observe(input.Compile.ProjectModel, input.Compile.Subject, observed)
 	if err != nil {
 		return Result{}, err
 	}
@@ -75,7 +79,7 @@ func Reassess(input Input) (Result, error) {
 	compileInput.Scope.Stage = domain.StageObserved
 	compileInput.Scope.ProhibitedPaths = append([]string(nil), input.CurrentContract.Scope.ProhibitedPaths...)
 	compileInput.Scope.AllowedPaths = append([]string(nil), input.CurrentContract.Scope.AllowedPaths...)
-	for _, path := range input.ObservedChange.Paths {
+	for _, path := range observed.Paths {
 		if !matchesAny(path, compileInput.Scope.ProhibitedPaths) {
 			compileInput.Scope.AllowedPaths = append(compileInput.Scope.AllowedPaths, path)
 		}
@@ -104,7 +108,7 @@ func Reassess(input Input) (Result, error) {
 		}
 	}
 
-	deviations := scopeDeviations(input.CurrentContract.Scope, input.ObservedChange)
+	deviations := scopeDeviations(input.CurrentContract.Scope, observed)
 	if input.Compile.Subject.Revision != input.CurrentContract.Subject.Revision {
 		deviations = append(deviations, Deviation{Kind: "subject_revision_changed", Detail: input.Compile.Subject.Revision})
 	}

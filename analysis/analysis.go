@@ -5,6 +5,7 @@ package analysis
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -23,10 +24,49 @@ type Intent struct {
 	PathsKnown       bool
 }
 
-// ObservedChange is the normalized repository change presented to detectors.
+// ObservedChange is a repository change presented to observed-stage detectors.
 type ObservedChange struct {
 	Paths      []string
 	PathsKnown bool
+}
+
+// NormalizeObservedChange validates and canonicalizes observed paths using
+// slash-based repository semantics. Paths are repository-relative; leading
+// "./" and redundant slash or dot segments are normalized, while traversal,
+// absolute, empty, dot-only, backslash, and NUL-containing paths are rejected.
+func NormalizeObservedChange(change ObservedChange) (ObservedChange, error) {
+	normalized := ObservedChange{PathsKnown: change.PathsKnown, Paths: make([]string, len(change.Paths))}
+	for i, raw := range change.Paths {
+		if raw == "" || raw == "." {
+			return ObservedChange{}, fmt.Errorf("observed path %q is not a repository file", raw)
+		}
+		if strings.ContainsRune(raw, '\x00') {
+			return ObservedChange{}, fmt.Errorf("observed path %q contains NUL", raw)
+		}
+		if strings.Contains(raw, "\\") {
+			return ObservedChange{}, fmt.Errorf("observed path %q uses unsupported backslash separator", raw)
+		}
+		if path.IsAbs(raw) || hasWindowsVolume(raw) {
+			return ObservedChange{}, fmt.Errorf("observed path %q must be repository-relative", raw)
+		}
+		for _, segment := range strings.Split(raw, "/") {
+			if segment == ".." {
+				return ObservedChange{}, fmt.Errorf("observed path %q contains traversal", raw)
+			}
+		}
+		cleaned := path.Clean(raw)
+		if cleaned == "." || cleaned == "" {
+			return ObservedChange{}, fmt.Errorf("observed path %q is not a repository file", raw)
+		}
+		normalized.Paths[i] = cleaned
+	}
+	return normalized, nil
+}
+
+func hasWindowsVolume(raw string) bool {
+	firstSegment, _, _ := strings.Cut(raw, "/")
+	return len(firstSegment) == 2 && firstSegment[1] == ':' &&
+		(firstSegment[0] >= 'A' && firstSegment[0] <= 'Z' || firstSegment[0] >= 'a' && firstSegment[0] <= 'z')
 }
 
 // Input is the stage-specific input shared by fact detectors.
@@ -95,9 +135,13 @@ func (a Analyzer) Predict(model domain.ProjectModel, subject domain.Subject, int
 
 // Observe derives observed facts from an actual repository change.
 func (a Analyzer) Observe(model domain.ProjectModel, subject domain.Subject, change ObservedChange) (FactSet, error) {
+	normalized, err := NormalizeObservedChange(change)
+	if err != nil {
+		return nil, err
+	}
 	return a.analyze(model, Input{
 		Subject: subject, Stage: domain.StageObserved,
-		Paths: change.Paths, PathsKnown: change.PathsKnown,
+		Paths: normalized.Paths, PathsKnown: normalized.PathsKnown,
 	})
 }
 

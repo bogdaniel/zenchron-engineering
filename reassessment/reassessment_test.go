@@ -35,7 +35,7 @@ func TestReassessSecurityScopeExpansionRevisesContractAndSuspendsActions(t *test
 			ContractRevision: "2",
 			Objective:        current.Objective,
 			AcceptanceIntent: current.AcceptanceIntent,
-			Subject:          domain.Subject{Repository: model.Subject.Repository, Revision: "rev-b"},
+			Subject:          model.Subject,
 			ProjectModel:     model, Policy: policyFixture,
 		},
 		ObservedChange: analysis.ObservedChange{Paths: []string{"internal/auth/session.go"}, PathsKnown: true},
@@ -51,6 +51,9 @@ func TestReassessSecurityScopeExpansionRevisesContractAndSuspendsActions(t *test
 	}
 	if _, ok := result.Contract.Obligations["auth-regression-tests"]; !ok {
 		t.Fatalf("security obligation was not added: %#v", result.Contract.Obligations)
+	}
+	if !hasDeviation(result, "scope_expansion", "internal/auth/session.go") {
+		t.Fatalf("security scope expansion was not recorded: %#v", result.Deviations)
 	}
 	if !result.Suspends(domain.Action{Type: "git.pull_request.create", Target: "main"}) || !result.Suspends(domain.Action{Type: "git.merge", Target: "main"}) {
 		t.Fatalf("affected actions were not suspended: %#v", result.SuspendedActions)
@@ -312,6 +315,28 @@ func TestReassessKeepsObservedProhibitedPathOutOfAllowedScope(t *testing.T) {
 	}
 	if matches(result.Contract.Scope.AllowedPaths, "internal/secrets/key.go") || !matches(result.Contract.Scope.ProhibitedPaths, "internal/secrets/key.go") {
 		t.Fatalf("prohibited path escaped scope boundary: %#v", result.Contract.Scope)
+	}
+}
+
+func TestReassessRejectsTraversalBeforeProhibitedPathHandling(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	current.Scope.ProhibitedPaths = []string{"internal/auth/**"}
+	result, err := reassessment.Reassess(reassessment.Input{
+		CurrentContract: current,
+		Compile: policy.CompileInput{
+			ContractID: current.ID, ContractRevision: "2", Objective: current.Objective,
+			AcceptanceIntent: current.AcceptanceIntent, Subject: current.Subject,
+			ProjectModel: model, Policy: policyFixture,
+		},
+		ObservedChange: analysis.ObservedChange{Paths: []string{"internal/worker/../auth/session.go"}, PathsKnown: true},
+	})
+	if err == nil || !strings.Contains(err.Error(), "traversal") {
+		t.Fatalf("expected traversal rejection, got result=%#v err=%v", result, err)
+	}
+	if result.Contract != nil {
+		t.Fatalf("invalid observed path entered a revised contract: %#v", result.Contract.Scope)
 	}
 }
 
