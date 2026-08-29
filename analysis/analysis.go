@@ -66,6 +66,11 @@ type Analyzer struct {
 	detectors []Detector
 }
 
+// IsZero reports whether no detectors were configured.
+func (a Analyzer) IsZero() bool {
+	return len(a.detectors) == 0
+}
+
 // NewAnalyzer constructs the baseline v0.1 deterministic analyzer.
 func NewAnalyzer() Analyzer {
 	return Analyzer{detectors: []Detector{CriticalBoundaryDetector{}}}
