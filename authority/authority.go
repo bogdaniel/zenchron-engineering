@@ -199,6 +199,12 @@ func claimState(input Input, claimID string, claim domain.RequiredClaim) evidenc
 			if item.ClaimID != claimID || item.EvidenceClass != claim.EvidenceClass {
 				continue
 			}
+			// A human approval is a typed human assertion. Non-human items that
+			// happen to use the human_approval evidence class are ineligible for
+			// this claim, regardless of their binding, lifecycle, or result.
+			if claim.EvidenceClass == "human_approval" && item.Producer.Type != domain.ProducerHuman {
+				continue
+			}
 			if !matchesContractBinding(bundle, input.Contract) || item.Lifecycle.Status == domain.EvidenceStale {
 				hasStale = true
 				continue
@@ -210,7 +216,6 @@ func claimState(input Input, claimID string, claim domain.RequiredClaim) evidenc
 				hasFailed = true
 			}
 			if item.Result.Status == domain.EvidencePassed &&
-				(claim.EvidenceClass != "human_approval" || item.Producer.Type == domain.ProducerHuman) &&
 				(!claim.IndependentFromChangeProducer || item.Producer.ID != input.ChangeProducer.ID) {
 				hasPassing = true
 			}

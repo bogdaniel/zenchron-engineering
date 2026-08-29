@@ -141,19 +141,43 @@ func TestEvaluateRecordsChangeProducerUsedForIndependence(t *testing.T) {
 
 func TestEvaluateHumanApprovalRequiresHumanProducer(t *testing.T) {
 	contract := contractFixture(t, "security-sensitive.engineering-work-contract.json")
-	bundle := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
-	bundle.Evidence["evidence-security-owner-approval"] = humanApproval("approval-bot")
-	approval := bundle.Evidence["evidence-security-owner-approval"]
-	approval.Producer.Type = domain.ProducerDeterministicTool
-	bundle.Evidence["evidence-security-owner-approval"] = approval
+	for _, test := range []struct {
+		name         string
+		producerType domain.ProducerType
+		result       domain.EvidenceResultStatus
+		wantStatus   domain.AuthorityStatus
+		wantMissing  bool
+		wantBlocking bool
+	}{
+		{
+			name: "deterministic tool passing approval remains missing", producerType: domain.ProducerDeterministicTool,
+			result: domain.EvidencePassed, wantStatus: domain.AuthorityAwaitingAuthority, wantMissing: true,
+		},
+		{
+			name: "deterministic tool failing approval remains missing", producerType: domain.ProducerDeterministicTool,
+			result: domain.EvidenceFailed, wantStatus: domain.AuthorityAwaitingAuthority, wantMissing: true,
+		},
+		{
+			name: "human failing approval blocks", producerType: domain.ProducerHuman,
+			result: domain.EvidenceFailed, wantStatus: domain.AuthorityBlocked, wantBlocking: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundle := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+			approval := humanApproval("approval-producer")
+			approval.Producer.Type = test.producerType
+			approval.Result.Status = test.result
+			bundle.Evidence["evidence-security-owner-approval"] = approval
 
-	decision := evaluate(t, authority.Input{
-		DecisionID: "decision-non-human-approval", DecisionRevision: "1", Contract: contract,
-		Action: domain.Action{Type: "git.merge", Target: "main"}, Capability: domain.CapabilityAvailable,
-		ChangeProducer: changeProducer(), EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
-	})
-	if decision.Status != domain.AuthorityAwaitingAuthority || !contains(decision.Missing, "claim-security-owner-approval") || contains(decision.Satisfied, "claim-security-owner-approval") {
-		t.Fatalf("decision = %#v, want non-human approval to remain awaiting authority", decision)
+			decision := evaluate(t, authority.Input{
+				DecisionID: "decision-human-approval", DecisionRevision: "1", Contract: contract,
+				Action: domain.Action{Type: "git.merge", Target: "main"}, Capability: domain.CapabilityAvailable,
+				ChangeProducer: changeProducer(), EvidenceBundles: map[string]domain.EvidenceBundle{bundle.ID: bundle},
+			})
+			if decision.Status != test.wantStatus || contains(decision.Missing, "claim-security-owner-approval") != test.wantMissing || contains(decision.Blocking, "claim-security-owner-approval") != test.wantBlocking {
+				t.Fatalf("decision = %#v", decision)
+			}
+		})
 	}
 }
 
