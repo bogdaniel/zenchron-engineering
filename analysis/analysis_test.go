@@ -2,6 +2,7 @@ package analysis_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
@@ -64,6 +65,55 @@ func TestObservedFactsBindCandidateRevision(t *testing.T) {
 	fact := factByKey(t, facts, "authentication.boundary_modified")
 	if fact.Stage != domain.StageObserved || fact.Subject != subject || fact.Value != domain.FactTrue || fact.Provenance.Type != "path_analysis" {
 		t.Fatalf("unexpected observed fact: %#v", fact)
+	}
+}
+
+func TestObservedPathsUseCanonicalRepositorySemantics(t *testing.T) {
+	model := projectModel()
+	subject := domain.Subject{Repository: model.Subject.Repository, Revision: "rev-b"}
+	facts, err := analysis.NewAnalyzer().Observe(model, subject, analysis.ObservedChange{
+		Paths: []string{"internal/auth/session.go"}, PathsKnown: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factByKey(t, facts, "authentication.boundary_modified").Value != domain.FactTrue {
+		t.Fatalf("canonical sensitive path did not intersect authentication boundary: %#v", facts)
+	}
+}
+
+func TestObservedPathsRejectUnsafeRepositorySpellings(t *testing.T) {
+	model := projectModel()
+	subject := domain.Subject{Repository: model.Subject.Repository, Revision: "rev-b"}
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "traversal", path: "internal/worker/../auth/session.go", want: "traversal"},
+		{name: "repository escape", path: "../outside.go", want: "traversal"},
+		{name: "absolute", path: "/tmp/outside.go", want: "repository-relative"},
+		{name: "windows volume", path: "C:/outside.go", want: "repository-relative"},
+		{name: "empty", path: "", want: "not a repository file"},
+		{name: "dot", path: ".", want: "not a repository file"},
+		{name: "backslash", path: "internal\\auth\\session.go", want: "backslash"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := analysis.NewAnalyzer().Observe(model, subject, analysis.ObservedChange{Paths: []string{test.path}, PathsKnown: true})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q rejection, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeObservedChangeCanonicalizesLeadingDotSlash(t *testing.T) {
+	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{"./internal/auth/session.go"}, PathsKnown: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized.Paths) != 1 || normalized.Paths[0] != "internal/auth/session.go" {
+		t.Fatalf("unexpected canonical paths: %#v", normalized.Paths)
 	}
 }
 
