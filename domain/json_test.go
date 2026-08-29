@@ -302,6 +302,7 @@ func duplicateEvidenceJSON() []byte {
   "evidence":{
     "evidence-security-review":{
       "claim_id":"claim-security-review",
+      "evidence_class":"security_review",
       "producer":{"id":"reviewer-1","type":"human"},
       "environment":{"type":"code_review","identifier":"review-1"},
       "result":{"status":"pass"},
@@ -310,6 +311,7 @@ func duplicateEvidenceJSON() []byte {
     },
     "evidence-security-review":{
       "claim_id":"claim-security-review",
+      "evidence_class":"security_review",
       "producer":{"id":"change-producer","type":"execution_provider"},
       "environment":{"type":"local_tooling","identifier":"untrusted-run"},
       "result":{"status":"fail"},

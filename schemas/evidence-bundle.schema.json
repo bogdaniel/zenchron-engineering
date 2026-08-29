@@ -109,9 +109,10 @@
     "evidence_item": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["claim_id", "producer", "environment", "result", "lifecycle", "provenance"],
+      "required": ["claim_id", "evidence_class", "producer", "environment", "result", "lifecycle", "provenance"],
       "properties": {
         "claim_id": { "$ref": "#/$defs/non_empty_string" },
+        "evidence_class": { "$ref": "#/$defs/non_empty_string" },
         "producer": { "$ref": "#/$defs/producer" },
         "environment": { "$ref": "#/$defs/environment" },
         "result": { "$ref": "#/$defs/result" },

@@ -29,19 +29,22 @@ func Matches(bundle domain.EvidenceBundle, target Binding) bool {
 	return BindingOf(bundle) == target
 }
 
-// ClaimSatisfied reports whether bundle contains applicable passing evidence
-// for claimID. Stale, invalid, incomplete, failing, and inconclusive evidence
-// never satisfies a claim. Producer types remain typed provenance only; this
-// function does not grant them any policy-defined trust.
-func ClaimSatisfied(bundle domain.EvidenceBundle, target Binding, claimID string) (bool, error) {
+// ClaimSatisfied reports whether bundle contains applicable passing support for
+// claimID with the required evidence class. Stale, invalid, incomplete,
+// failing, and inconclusive evidence never satisfies a claim. This evidence
+// boundary does not evaluate producer independence or action authority.
+func ClaimSatisfied(bundle domain.EvidenceBundle, target Binding, claimID string, required domain.RequiredClaim) (bool, error) {
 	if err := validateBundleAndBinding(bundle, target); err != nil {
 		return false, err
+	}
+	if required.EvidenceClass == "" {
+		return false, fmt.Errorf("required claim evidence class must not be empty")
 	}
 	if !Matches(bundle, target) {
 		return false, nil
 	}
 	for _, item := range bundle.Evidence {
-		if item.ClaimID == claimID && item.Result.Status == domain.EvidencePassed && item.Lifecycle.Status == domain.EvidenceValid {
+		if item.ClaimID == claimID && item.EvidenceClass == required.EvidenceClass && item.Result.Status == domain.EvidencePassed && item.Lifecycle.Status == domain.EvidenceValid {
 			return true, nil
 		}
 	}
