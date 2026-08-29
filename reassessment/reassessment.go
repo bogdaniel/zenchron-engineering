@@ -14,9 +14,10 @@ import (
 )
 
 // Input contains the current governance envelope and the candidate change to
-// assess. Compile supplies the stable work context for the next revision;
-// observed facts and observed scope are always derived here rather than
-// accepted from its Facts field.
+// assess. Compile supplies the subject, next revision, and pinned governance
+// inputs for the next revision. Objective, acceptance intent, and prohibited
+// scope remain stable from CurrentContract; observed facts and observed scope
+// are always derived here rather than accepted from its Facts field.
 type Input struct {
 	CurrentContract   domain.EngineeringWorkContract
 	Compile           policy.CompileInput
@@ -68,12 +69,11 @@ func Reassess(input Input) (Result, error) {
 	}
 
 	compileInput := input.Compile
+	compileInput.Objective = input.CurrentContract.Objective
+	compileInput.AcceptanceIntent = append([]string(nil), input.CurrentContract.AcceptanceIntent...)
 	compileInput.Facts = facts.Sorted()
 	compileInput.Scope.Stage = domain.StageObserved
-	compileInput.Scope.ProhibitedPaths = sortedUnique(append(
-		append([]string(nil), input.CurrentContract.Scope.ProhibitedPaths...),
-		compileInput.Scope.ProhibitedPaths...,
-	))
+	compileInput.Scope.ProhibitedPaths = append([]string(nil), input.CurrentContract.Scope.ProhibitedPaths...)
 	compileInput.Scope.AllowedPaths = append([]string(nil), input.CurrentContract.Scope.AllowedPaths...)
 	for _, path := range input.ObservedChange.Paths {
 		if !matchesAny(path, compileInput.Scope.ProhibitedPaths) {
@@ -105,6 +105,9 @@ func Reassess(input Input) (Result, error) {
 	}
 
 	deviations := scopeDeviations(input.CurrentContract.Scope, input.ObservedChange)
+	if input.Compile.Subject.Revision != input.CurrentContract.Subject.Revision {
+		deviations = append(deviations, Deviation{Kind: "subject_revision_changed", Detail: input.Compile.Subject.Revision})
+	}
 	deviations = append(deviations, impactDeviations(input.CurrentContract, candidate)...)
 	for _, action := range requestedPrivileges {
 		deviations = append(deviations, Deviation{Kind: "requested_privilege_expansion", Detail: actionKey(action)})
@@ -172,6 +175,15 @@ func validateInput(input Input) error {
 	}
 	if input.Compile.Subject.Repository != input.CurrentContract.Subject.Repository {
 		return fmt.Errorf("observed subject repository must match the current contract")
+	}
+	if input.Compile.Objective != input.CurrentContract.Objective {
+		return fmt.Errorf("reassessment objective must match the current contract")
+	}
+	if !sameStrings(sortedUnique(input.Compile.AcceptanceIntent), sortedUnique(input.CurrentContract.AcceptanceIntent)) {
+		return fmt.Errorf("reassessment acceptance intent must match the current contract")
+	}
+	if len(input.Compile.Scope.ProhibitedPaths) > 0 && !sameStrings(sortedUnique(input.Compile.Scope.ProhibitedPaths), sortedUnique(input.CurrentContract.Scope.ProhibitedPaths)) {
+		return fmt.Errorf("reassessment prohibited paths must match the current contract")
 	}
 	if got := (domain.ObjectRevision{ID: input.Compile.ProjectModel.ID, Revision: input.Compile.ProjectModel.Revision}); got != input.CurrentContract.Provenance.ProjectModel {
 		return fmt.Errorf("reassessment ProjectModel must match the current contract provenance")

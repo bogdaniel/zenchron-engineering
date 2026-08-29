@@ -112,6 +112,47 @@ func TestReassessIgnoresObservedPathsAlreadyWithinTheContract(t *testing.T) {
 	}
 }
 
+func TestReassessRefreshesContractForChangedSubjectRevision(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	bundle := validBundle(current)
+
+	result, err := reassessment.Reassess(reassessment.Input{
+		CurrentContract: current,
+		Compile: policy.CompileInput{
+			ContractID: current.ID, ContractRevision: "2", Objective: current.Objective,
+			AcceptanceIntent: current.AcceptanceIntent,
+			Subject:          domain.Subject{Repository: current.Subject.Repository, Revision: "rev-b"},
+			ProjectModel:     model, Policy: policyFixture,
+		},
+		ObservedChange:    analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true},
+		EvidenceBundles:   map[string]domain.EvidenceBundle{bundle.ID: bundle},
+		EvidenceRevisions: map[string]string{bundle.ID: "2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Material || result.Contract == nil || !hasDeviation(result, "subject_revision_changed", "rev-b") {
+		t.Fatalf("changed subject revision did not refresh the contract: %#v", result)
+	}
+	if result.Contract.Subject.Revision != "rev-b" || result.Contract.Revision != "2" || result.Contract.Provenance.PreviousContractRevision == nil || *result.Contract.Provenance.PreviousContractRevision != current.Revision {
+		t.Fatalf("revised contract has incorrect subject or provenance: %#v", result.Contract)
+	}
+	if !result.Suspends(current.Permissions[0]) {
+		t.Fatalf("current protected action was not suspended: %#v", result.SuspendedActions)
+	}
+	stale := result.StaleEvidence[bundle.ID]
+	if stale.Evidence["evidence-test"].Lifecycle.Status != domain.EvidenceStale {
+		t.Fatalf("prior evidence was not staled: %#v", stale)
+	}
+	target := evidence.Binding{Subject: result.Contract.Subject, Contract: domain.ObjectRevision{ID: result.Contract.ID, Revision: result.Contract.Revision}, Policy: result.Contract.Provenance.Policy}
+	has, err := evidence.HasApplicablePassingEvidence(stale, target, "claim-trivial-validation", "test_result")
+	if err != nil || has {
+		t.Fatalf("prior evidence was applicable to revised subject: has=%t err=%v", has, err)
+	}
+}
+
 func TestReassessStalesPriorEvidenceAcrossContractRevision(t *testing.T) {
 	model := projectModel()
 	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
@@ -274,6 +315,54 @@ func TestReassessKeepsObservedProhibitedPathOutOfAllowedScope(t *testing.T) {
 	}
 }
 
+func TestReassessRejectsStableWorkContextChanges(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	cases := []struct {
+		name   string
+		mutate func(*policy.CompileInput)
+		want   string
+	}{
+		{name: "objective", mutate: func(input *policy.CompileInput) { input.Objective = "Replace engineering intent." }, want: "objective"},
+		{name: "acceptance intent", mutate: func(input *policy.CompileInput) { input.AcceptanceIntent = []string{"Different acceptance."} }, want: "acceptance intent"},
+		{name: "prohibited paths", mutate: func(input *policy.CompileInput) { input.Scope.ProhibitedPaths = []string{"internal/new-governance/**"} }, want: "prohibited paths"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			compileInput := policy.CompileInput{ContractID: current.ID, ContractRevision: "2", Objective: current.Objective, AcceptanceIntent: current.AcceptanceIntent, Subject: current.Subject, ProjectModel: model, Policy: policyFixture}
+			testCase.mutate(&compileInput)
+			_, err := reassessment.Reassess(reassessment.Input{CurrentContract: current, Compile: compileInput, ObservedChange: analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true}})
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("expected %s rejection, got %v", testCase.want, err)
+			}
+		})
+	}
+}
+
+func TestReassessAcceptsOrderIndependentAcceptanceIntent(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := compile(t, policy.CompileInput{ContractID: "contract-session", ContractRevision: "1", Objective: "Update documentation.", AcceptanceIntent: []string{"Documentation is clear.", "Links resolve."}, Subject: model.Subject, Scope: domain.ContractScope{Stage: domain.StagePredicted, AllowedPaths: []string{"README.md"}}, ProjectModel: model, Policy: policyFixture, Facts: []domain.EngineeringFact{fact(model.Subject, domain.StagePredicted, domain.FactFalse)}})
+	result, err := reassessment.Reassess(reassessment.Input{CurrentContract: current, Compile: policy.CompileInput{ContractID: current.ID, ContractRevision: "2", Objective: current.Objective, AcceptanceIntent: []string{"Links resolve.", "Documentation is clear."}, Subject: current.Subject, ProjectModel: model, Policy: policyFixture}, ObservedChange: analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true}})
+	if err != nil || result.Material {
+		t.Fatalf("equivalent acceptance intent should remain non-material: result=%#v err=%v", result, err)
+	}
+}
+
+func TestReassessAddsLegitimateObservedPathWithoutChangingStableIntent(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	result := reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{"internal/worker.go"}, PathsKnown: true})
+	if !result.Material || result.Contract == nil || !matches(result.Contract.Scope.AllowedPaths, "internal/worker.go") {
+		t.Fatalf("legitimate observed path was not incorporated: %#v", result)
+	}
+	if result.Contract.Objective != current.Objective || !sameStringSet(result.Contract.AcceptanceIntent, current.AcceptanceIntent) {
+		t.Fatalf("stable work intent changed: %#v", result.Contract)
+	}
+}
+
 func trivialContract(t *testing.T, model domain.ProjectModel, policyFixture domain.EngineeringPolicy) domain.EngineeringWorkContract {
 	t.Helper()
 	return compile(t, policy.CompileInput{ContractID: "contract-session", ContractRevision: "1", Objective: "Update documentation.", AcceptanceIntent: []string{"Documentation is clear."}, Subject: model.Subject, Scope: domain.ContractScope{Stage: domain.StagePredicted, AllowedPaths: []string{"README.md"}}, ProjectModel: model, Policy: policyFixture, Facts: []domain.EngineeringFact{fact(model.Subject, domain.StagePredicted, domain.FactFalse)}})
@@ -313,6 +402,22 @@ func matches(patterns []string, path string) bool {
 		}
 	}
 	return false
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		seen[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := seen[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func compile(t *testing.T, input policy.CompileInput) domain.EngineeringWorkContract {
