@@ -12,6 +12,7 @@
     {
       "id": "evidence-auth",
       "claim_id": "claim-auth-regression-tests",
+      "evidence_class": "test_result",
       "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
       "environment": { "type": "ci", "identifier": "runner-1" },
       "result": { "status": "pass" },
@@ -21,6 +22,7 @@
     {
       "id": "evidence-auth",
       "claim_id": "claim-security-review",
+      "evidence_class": "security_review",
       "producer": { "id": "reviewer-1", "type": "human" },
       "environment": { "type": "code_review", "identifier": "review-1" },
       "result": { "status": "pass" },

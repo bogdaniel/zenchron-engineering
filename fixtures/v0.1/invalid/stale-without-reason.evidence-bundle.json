@@ -11,6 +11,7 @@
   "evidence": {
     "evidence-auth-tests": {
       "claim_id": "claim-auth-regression-tests",
+      "evidence_class": "test_result",
       "producer": { "id": "ci-go-tests", "type": "deterministic_tool" },
       "environment": {
         "type": "ci",

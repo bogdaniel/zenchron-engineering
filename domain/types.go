@@ -134,10 +134,14 @@ type Requirement struct {
 	Statement string `json:"statement"`
 }
 
+// EvidenceClass identifies an extensible, policy-defined class of supporting
+// evidence. Its values are non-empty strings validated by the JSON Schema.
+type EvidenceClass string
+
 // RequiredClaim describes evidence needed by a work contract.
 type RequiredClaim struct {
-	EvidenceClass                 string `json:"evidence_class"`
-	IndependentFromChangeProducer bool   `json:"independent_from_change_producer"`
+	EvidenceClass                 EvidenceClass `json:"evidence_class"`
+	IndependentFromChangeProducer bool          `json:"independent_from_change_producer"`
 }
 
 // AuthorityCondition identifies claims required for a protected action.
@@ -249,12 +253,13 @@ type EvidenceProvenance struct {
 
 // EvidenceItem supports one required claim; its identity is the containing map key.
 type EvidenceItem struct {
-	ClaimID     string              `json:"claim_id"`
-	Producer    EvidenceProducer    `json:"producer"`
-	Environment EvidenceEnvironment `json:"environment"`
-	Result      EvidenceResult      `json:"result"`
-	Lifecycle   EvidenceLifecycle   `json:"lifecycle"`
-	Provenance  EvidenceProvenance  `json:"provenance"`
+	ClaimID       string              `json:"claim_id"`
+	EvidenceClass EvidenceClass       `json:"evidence_class"`
+	Producer      EvidenceProducer    `json:"producer"`
+	Environment   EvidenceEnvironment `json:"environment"`
+	Result        EvidenceResult      `json:"result"`
+	Lifecycle     EvidenceLifecycle   `json:"lifecycle"`
+	Provenance    EvidenceProvenance  `json:"provenance"`
 }
 
 // EvidenceBundle binds evidence to exact subject, contract, and policy revisions.

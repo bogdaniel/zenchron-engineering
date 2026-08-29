@@ -11,6 +11,7 @@
   "evidence": {
     "evidence-security-review": {
       "claim_id": "claim-security-review",
+      "evidence_class": "security_review",
       "producer": { "id": "reviewer-security-1", "type": "human" },
       "result": { "status": "pass" },
       "lifecycle": { "status": "valid" },

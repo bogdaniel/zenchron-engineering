@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1",
-  "id": "evidence-docs-copy",
+  "id": "evidence-missing-class",
   "revision": "1",
   "subject": {
     "repository": "acme/payments",
@@ -11,13 +11,8 @@
   "evidence": {
     "evidence-json-parse": {
       "claim_id": "claim-json-valid",
-      "evidence_class": "test_result",
       "producer": { "id": "json-validator", "type": "deterministic_tool" },
-      "environment": {
-        "type": "local_tooling",
-        "identifier": "workspace-rev-a",
-        "toolchain": ["json-validator"]
-      },
+      "environment": { "type": "local_tooling", "identifier": "workspace-rev-a" },
       "result": { "status": "pass" },
       "lifecycle": { "status": "valid" },
       "provenance": {
