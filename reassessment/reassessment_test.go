@@ -1,8 +1,10 @@
 package reassessment_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
@@ -150,6 +152,167 @@ func TestReassessStalesPriorEvidenceAcrossContractRevision(t *testing.T) {
 	if err != nil || has {
 		t.Fatalf("stale evidence was applicable to revised contract: has=%t err=%v", has, err)
 	}
+}
+
+func TestReassessTreatsSameIDChangedClaimAsMaterial(t *testing.T) {
+	model := projectModel()
+	base := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, base)
+	candidatePolicy := base
+	rule := candidatePolicy.Rules["TRIVIAL-CHANGE-001"]
+	claims := *rule.Effect.RequiredClaims
+	claim := claims["claim-trivial-validation"]
+	claim.EvidenceClass = "independent_test_result"
+	claims["claim-trivial-validation"] = claim
+	rule.Effect.RequiredClaims = &claims
+	candidatePolicy.Rules["TRIVIAL-CHANGE-001"] = rule
+
+	result := reassess(t, current, model, candidatePolicy, analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true})
+	if !result.Material || result.Contract == nil || !hasDeviation(result, "changed_claim", "claim-trivial-validation") {
+		t.Fatalf("same-ID changed claim was not material: %#v", result)
+	}
+}
+
+func TestReassessTreatsSameIDChangedRequirementAsMaterial(t *testing.T) {
+	model := projectModel()
+	base := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, base)
+	candidatePolicy := base
+	rule := candidatePolicy.Rules["TRIVIAL-CHANGE-001"]
+	obligations := *rule.Effect.Obligations
+	requirement := obligations["trivial-change-validation"]
+	requirement.Statement = "A revised validation requirement must pass."
+	obligations["trivial-change-validation"] = requirement
+	rule.Effect.Obligations = &obligations
+	candidatePolicy.Rules["TRIVIAL-CHANGE-001"] = rule
+
+	result := reassess(t, current, model, candidatePolicy, analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true})
+	if !result.Material || !hasDeviation(result, "changed_obligation", "trivial-change-validation") {
+		t.Fatalf("same-ID changed requirement was not material: %#v", result)
+	}
+}
+
+func TestReassessTreatsRemovedPermissionAsMaterial(t *testing.T) {
+	model := projectModel()
+	base := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, base)
+	candidatePolicy := base
+	rule := candidatePolicy.Rules["TRIVIAL-CHANGE-001"]
+	rule.Effect.Permissions = nil
+	candidatePolicy.Rules["TRIVIAL-CHANGE-001"] = rule
+
+	result := reassess(t, current, model, candidatePolicy, analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true})
+	if !result.Material || result.Contract == nil || !hasDeviation(result, "removed_permission", "git.pull_request.create\x00main") {
+		t.Fatalf("removed permission was not material: %#v", result)
+	}
+	if len(result.Contract.Permissions) != 0 {
+		t.Fatalf("revised contract retained removed permission: %#v", result.Contract.Permissions)
+	}
+}
+
+func TestReassessSurfacesRequestedPrivilegeExpansionWithoutGrantingIt(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	candidatePolicy := policyFixture
+	rule := candidatePolicy.Rules["AUTH-BOUNDARY-001"]
+	permissions := []domain.Action{{Type: "git.merge", Target: "main"}}
+	rule.Effect.Permissions = &permissions
+	candidatePolicy.Rules["AUTH-BOUNDARY-001"] = rule
+
+	result := reassess(t, current, model, candidatePolicy, analysis.ObservedChange{Paths: []string{"internal/auth/session.go"}, PathsKnown: true})
+	requested := domain.Action{Type: "git.merge", Target: "main"}
+	if !result.Material || result.Contract == nil || !containsAction(result.RequestedPrivilegeExpansion, requested) || !hasDeviation(result, "requested_privilege_expansion", "git.merge\x00main") {
+		t.Fatalf("requested privilege expansion was not surfaced: %#v", result)
+	}
+	if containsAction(result.Contract.Permissions, requested) || !result.Suspends(requested) {
+		t.Fatalf("requested privilege was granted or not suspended: %#v", result)
+	}
+	encoded, err := domain.Encode(*result.Contract)
+	if err != nil {
+		t.Fatalf("permission-capped contract must remain schema-valid: %v", err)
+	}
+	if result.Contract.Permissions == nil || !bytes.Contains(encoded, []byte(`"permissions":[]`)) {
+		t.Fatalf("empty permission ceiling must encode as [], got permissions %#v in %s", result.Contract.Permissions, encoded)
+	}
+}
+
+func TestReassessRejectsGovernanceBaselineChanges(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	cases := []struct {
+		name   string
+		model  domain.ProjectModel
+		policy domain.EngineeringPolicy
+		want   string
+	}{
+		{name: "policy", model: model, policy: func() domain.EngineeringPolicy { changed := policyFixture; changed.Revision = "2"; return changed }(), want: "policy"},
+		{name: "project model", model: func() domain.ProjectModel { changed := model; changed.Revision = "2"; return changed }(), policy: policyFixture, want: "ProjectModel"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := reassessment.Reassess(reassessment.Input{CurrentContract: current, Compile: policy.CompileInput{ContractID: current.ID, ContractRevision: "2", Objective: current.Objective, AcceptanceIntent: current.AcceptanceIntent, Subject: current.Subject, ProjectModel: testCase.model, Policy: testCase.policy}, ObservedChange: analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true}})
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("expected %s baseline rejection, got %v", testCase.want, err)
+			}
+		})
+	}
+}
+
+func TestReassessKeepsObservedProhibitedPathOutOfAllowedScope(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	current.Scope.ProhibitedPaths = []string{"internal/secrets/**"}
+	result := reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{"internal/secrets/key.go"}, PathsKnown: true})
+	if !result.Material || result.Contract == nil || !hasDeviation(result, "prohibited_path", "internal/secrets/key.go") {
+		t.Fatalf("prohibited observed path was not material: %#v", result)
+	}
+	if matches(result.Contract.Scope.AllowedPaths, "internal/secrets/key.go") || !matches(result.Contract.Scope.ProhibitedPaths, "internal/secrets/key.go") {
+		t.Fatalf("prohibited path escaped scope boundary: %#v", result.Contract.Scope)
+	}
+}
+
+func trivialContract(t *testing.T, model domain.ProjectModel, policyFixture domain.EngineeringPolicy) domain.EngineeringWorkContract {
+	t.Helper()
+	return compile(t, policy.CompileInput{ContractID: "contract-session", ContractRevision: "1", Objective: "Update documentation.", AcceptanceIntent: []string{"Documentation is clear."}, Subject: model.Subject, Scope: domain.ContractScope{Stage: domain.StagePredicted, AllowedPaths: []string{"README.md"}}, ProjectModel: model, Policy: policyFixture, Facts: []domain.EngineeringFact{fact(model.Subject, domain.StagePredicted, domain.FactFalse)}})
+}
+
+func reassess(t *testing.T, current domain.EngineeringWorkContract, model domain.ProjectModel, policyFixture domain.EngineeringPolicy, observed analysis.ObservedChange) reassessment.Result {
+	t.Helper()
+	result, err := reassessment.Reassess(reassessment.Input{CurrentContract: current, Compile: policy.CompileInput{ContractID: current.ID, ContractRevision: "2", Objective: current.Objective, AcceptanceIntent: current.AcceptanceIntent, Subject: current.Subject, ProjectModel: model, Policy: policyFixture}, ObservedChange: observed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func containsAction(actions []domain.Action, target domain.Action) bool {
+	for _, action := range actions {
+		if action == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDeviation(result reassessment.Result, kind, detail string) bool {
+	for _, deviation := range result.Deviations {
+		if deviation.Kind == kind && deviation.Detail == detail {
+			return true
+		}
+	}
+	return false
+}
+
+func matches(patterns []string, path string) bool {
+	for _, pattern := range patterns {
+		if pattern == path || strings.HasSuffix(pattern, "/**") && strings.HasPrefix(path, strings.TrimSuffix(pattern, "/**")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func compile(t *testing.T, input policy.CompileInput) domain.EngineeringWorkContract {

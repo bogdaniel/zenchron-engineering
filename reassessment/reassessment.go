@@ -37,18 +37,23 @@ type Deviation struct {
 // true, Contract is the next contract revision and SuspendedActions must not
 // be attempted under the current contract.
 type Result struct {
-	ObservedFacts    analysis.FactSet
-	Material         bool
-	Deviations       []Deviation
-	Contract         *domain.EngineeringWorkContract
-	SuspendedActions []domain.Action
-	StaleEvidence    map[string]domain.EvidenceBundle
+	ObservedFacts analysis.FactSet
+	Material      bool
+	Deviations    []Deviation
+	// RequestedPrivilegeExpansion records permissions resolved from observed
+	// facts that exceed the current contract's permission ceiling. They remain
+	// ungranted in Contract and require authority outside reassessment.
+	RequestedPrivilegeExpansion []domain.Action
+	Contract                    *domain.EngineeringWorkContract
+	SuspendedActions            []domain.Action
+	StaleEvidence               map[string]domain.EvidenceBundle
 }
 
 // Reassess derives observed facts, compares them with the current governance
 // envelope, and recompiles only for a material expansion. It may add
-// obligations automatically, but delegates the prohibition on permission
-// expansion to policy.Compile.
+// obligations automatically. A newly resolved permission is returned as a
+// governed request while the revised contract retains the current permission
+// ceiling.
 func Reassess(input Input) (Result, error) {
 	if err := validateInput(input); err != nil {
 		return Result{}, err
@@ -65,28 +70,58 @@ func Reassess(input Input) (Result, error) {
 	compileInput := input.Compile
 	compileInput.Facts = facts.Sorted()
 	compileInput.Scope.Stage = domain.StageObserved
-	compileInput.Scope.AllowedPaths = append(append([]string(nil), input.CurrentContract.Scope.AllowedPaths...), input.ObservedChange.Paths...)
-	compileInput.Scope.AllowedPaths = sortedUnique(compileInput.Scope.AllowedPaths)
 	compileInput.Scope.ProhibitedPaths = sortedUnique(append(
 		append([]string(nil), input.CurrentContract.Scope.ProhibitedPaths...),
 		compileInput.Scope.ProhibitedPaths...,
 	))
-	compileInput.PreviousContract = &input.CurrentContract
+	compileInput.Scope.AllowedPaths = append([]string(nil), input.CurrentContract.Scope.AllowedPaths...)
+	for _, path := range input.ObservedChange.Paths {
+		if !matchesAny(path, compileInput.Scope.ProhibitedPaths) {
+			compileInput.Scope.AllowedPaths = append(compileInput.Scope.AllowedPaths, path)
+		}
+	}
+	compileInput.Scope.AllowedPaths = sortedUnique(compileInput.Scope.AllowedPaths)
+	// Resolve the observed policy outcome before enforcing the ceiling so a
+	// privilege request can be reported structurally rather than discarded as
+	// a compiler-error string.
+	compileInput.PreviousContract = nil
 	candidate, err := policy.Compile(compileInput)
 	if err != nil {
 		return Result{}, fmt.Errorf("recompile observed scope: %w", err)
 	}
+	requestedPrivileges := actionDifference(candidate.Permissions, input.CurrentContract.Permissions)
+	if len(requestedPrivileges) == 0 {
+		compileInput.PreviousContract = &input.CurrentContract
+		candidate, err = policy.Compile(compileInput)
+		if err != nil {
+			return Result{}, fmt.Errorf("recompile observed scope: %w", err)
+		}
+	} else {
+		candidate.Permissions = actionIntersection(candidate.Permissions, input.CurrentContract.Permissions)
+		candidate.Provenance.PreviousContractRevision = previousRevision(&input.CurrentContract)
+		if _, err := domain.Encode(candidate); err != nil {
+			return Result{}, fmt.Errorf("compile permission-capped contract: %w", err)
+		}
+	}
 
 	deviations := scopeDeviations(input.CurrentContract.Scope, input.ObservedChange)
 	deviations = append(deviations, impactDeviations(input.CurrentContract, candidate)...)
+	for _, action := range requestedPrivileges {
+		deviations = append(deviations, Deviation{Kind: "requested_privilege_expansion", Detail: actionKey(action)})
+	}
 	deviations = sortedDeviations(deviations)
-	result := Result{ObservedFacts: facts, Material: len(deviations) > 0, Deviations: deviations}
+	result := Result{ObservedFacts: facts, Material: len(deviations) > 0, Deviations: deviations, RequestedPrivilegeExpansion: requestedPrivileges}
 	if !result.Material {
 		return result, nil
 	}
 
 	result.Contract = &candidate
 	result.SuspendedActions = suspendedActions(input.CurrentContract, candidate)
+	result.SuspendedActions = append(result.SuspendedActions, requestedPrivileges...)
+	sort.Slice(result.SuspendedActions, func(i, j int) bool {
+		return actionKey(result.SuspendedActions[i]) < actionKey(result.SuspendedActions[j])
+	})
+	result.SuspendedActions = uniqueActions(result.SuspendedActions)
 	result.StaleEvidence = make(map[string]domain.EvidenceBundle, len(input.EvidenceBundles))
 	target := evidence.Binding{
 		Subject:  candidate.Subject,
@@ -138,6 +173,12 @@ func validateInput(input Input) error {
 	if input.Compile.Subject.Repository != input.CurrentContract.Subject.Repository {
 		return fmt.Errorf("observed subject repository must match the current contract")
 	}
+	if got := (domain.ObjectRevision{ID: input.Compile.ProjectModel.ID, Revision: input.Compile.ProjectModel.Revision}); got != input.CurrentContract.Provenance.ProjectModel {
+		return fmt.Errorf("reassessment ProjectModel must match the current contract provenance")
+	}
+	if got := (domain.ObjectRevision{ID: input.Compile.Policy.ID, Revision: input.Compile.Policy.Revision}); got != input.CurrentContract.Provenance.Policy {
+		return fmt.Errorf("reassessment policy must match the current contract provenance")
+	}
 	for id := range input.EvidenceRevisions {
 		if _, ok := input.EvidenceBundles[id]; !ok {
 			return fmt.Errorf("evidence revision supplied for unknown bundle %q", id)
@@ -165,29 +206,74 @@ func scopeDeviations(scope domain.ContractScope, observed analysis.ObservedChang
 
 func impactDeviations(current, candidate domain.EngineeringWorkContract) []Deviation {
 	var deviations []Deviation
-	for id := range candidate.Invariants {
-		if _, exists := current.Invariants[id]; !exists {
-			deviations = append(deviations, Deviation{Kind: "additional_invariant", Detail: id})
+	deviations = append(deviations, requirementDeviations("invariant", current.Invariants, candidate.Invariants)...)
+	deviations = append(deviations, requirementDeviations("obligation", current.Obligations, candidate.Obligations)...)
+	deviations = append(deviations, claimDeviations(current.RequiredClaims, candidate.RequiredClaims)...)
+	deviations = append(deviations, actionDeviations("permission", current.Permissions, candidate.Permissions)...)
+	deviations = append(deviations, actionDeviations("prohibition", current.Prohibitions, candidate.Prohibitions)...)
+	deviations = append(deviations, conditionDeviations(current.AuthorityConditions, candidate.AuthorityConditions)...)
+	return deviations
+}
+
+func requirementDeviations(kind string, current, candidate map[string]domain.Requirement) []Deviation {
+	var deviations []Deviation
+	for _, id := range sortedRequirementIDs(current, candidate) {
+		before, hadBefore := current[id]
+		after, hasAfter := candidate[id]
+		switch {
+		case !hadBefore:
+			deviations = append(deviations, Deviation{Kind: "additional_" + kind, Detail: id})
+		case !hasAfter:
+			deviations = append(deviations, Deviation{Kind: "removed_" + kind, Detail: id})
+		case before != after:
+			deviations = append(deviations, Deviation{Kind: "changed_" + kind, Detail: id})
 		}
 	}
-	for id := range candidate.Obligations {
-		if _, exists := current.Obligations[id]; !exists {
-			deviations = append(deviations, Deviation{Kind: "additional_obligation", Detail: id})
-		}
-	}
-	for id := range candidate.RequiredClaims {
-		if _, exists := current.RequiredClaims[id]; !exists {
+	return deviations
+}
+
+func claimDeviations(current, candidate map[string]domain.RequiredClaim) []Deviation {
+	var deviations []Deviation
+	for _, id := range sortedClaimIDs(current, candidate) {
+		before, hadBefore := current[id]
+		after, hasAfter := candidate[id]
+		switch {
+		case !hadBefore:
 			deviations = append(deviations, Deviation{Kind: "additional_claim", Detail: id})
+		case !hasAfter:
+			deviations = append(deviations, Deviation{Kind: "removed_claim", Detail: id})
+		case before != after:
+			deviations = append(deviations, Deviation{Kind: "changed_claim", Detail: id})
 		}
 	}
-	for _, action := range candidate.Prohibitions {
-		if !containsAction(current.Prohibitions, action) {
-			deviations = append(deviations, Deviation{Kind: "additional_prohibition", Detail: action.Type + ":" + action.Target})
-		}
+	return deviations
+}
+
+func actionDeviations(kind string, current, candidate []domain.Action) []Deviation {
+	var deviations []Deviation
+	for _, action := range actionDifference(candidate, current) {
+		deviations = append(deviations, Deviation{Kind: "additional_" + kind, Detail: actionKey(action)})
 	}
-	for _, condition := range candidate.AuthorityConditions {
-		if !containsCondition(current.AuthorityConditions, condition) {
-			deviations = append(deviations, Deviation{Kind: "additional_authority_condition", Detail: condition.Action.Type + ":" + condition.Action.Target})
+	for _, action := range actionDifference(current, candidate) {
+		deviations = append(deviations, Deviation{Kind: "removed_" + kind, Detail: actionKey(action)})
+	}
+	return deviations
+}
+
+func conditionDeviations(current, candidate []domain.AuthorityCondition) []Deviation {
+	before := conditionsByAction(current)
+	after := conditionsByAction(candidate)
+	var deviations []Deviation
+	for _, key := range sortedStringKeys(before, after) {
+		left, hadLeft := before[key]
+		right, hasRight := after[key]
+		switch {
+		case !hadLeft:
+			deviations = append(deviations, Deviation{Kind: "additional_authority_condition", Detail: key})
+		case !hasRight:
+			deviations = append(deviations, Deviation{Kind: "removed_authority_condition", Detail: key})
+		case !sameStrings(left.RequiredClaims, right.RequiredClaims):
+			deviations = append(deviations, Deviation{Kind: "changed_authority_condition", Detail: key})
 		}
 	}
 	return deviations
@@ -228,13 +314,96 @@ func containsAction(actions []domain.Action, target domain.Action) bool {
 	return false
 }
 
-func containsCondition(conditions []domain.AuthorityCondition, target domain.AuthorityCondition) bool {
-	for _, condition := range conditions {
-		if condition.Action == target.Action && sameStrings(condition.RequiredClaims, target.RequiredClaims) {
-			return true
+func actionDifference(left, right []domain.Action) []domain.Action {
+	available := make(map[domain.Action]struct{}, len(right))
+	for _, action := range right {
+		available[action] = struct{}{}
+	}
+	var result []domain.Action
+	for _, action := range left {
+		if _, exists := available[action]; !exists {
+			result = append(result, action)
 		}
 	}
-	return false
+	sort.Slice(result, func(i, j int) bool { return actionKey(result[i]) < actionKey(result[j]) })
+	return uniqueActions(result)
+}
+
+func actionIntersection(left, right []domain.Action) []domain.Action {
+	available := make(map[domain.Action]struct{}, len(right))
+	for _, action := range right {
+		available[action] = struct{}{}
+	}
+	// EngineeringWorkContract requires permissions to encode as a JSON array.
+	// Keep the empty intersection non-nil so a permission ceiling of zero
+	// serializes as [] rather than null.
+	result := make([]domain.Action, 0, len(left))
+	for _, action := range left {
+		if _, exists := available[action]; exists {
+			result = append(result, action)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return actionKey(result[i]) < actionKey(result[j]) })
+	return uniqueActions(result)
+}
+
+func sortedRequirementIDs(left, right map[string]domain.Requirement) []string {
+	ids := make(map[string]struct{}, len(left)+len(right))
+	for id := range left {
+		ids[id] = struct{}{}
+	}
+	for id := range right {
+		ids[id] = struct{}{}
+	}
+	return sortedMapKeys(ids)
+}
+
+func sortedClaimIDs(left, right map[string]domain.RequiredClaim) []string {
+	ids := make(map[string]struct{}, len(left)+len(right))
+	for id := range left {
+		ids[id] = struct{}{}
+	}
+	for id := range right {
+		ids[id] = struct{}{}
+	}
+	return sortedMapKeys(ids)
+}
+
+func conditionsByAction(conditions []domain.AuthorityCondition) map[string]domain.AuthorityCondition {
+	result := make(map[string]domain.AuthorityCondition, len(conditions))
+	for _, condition := range conditions {
+		condition.RequiredClaims = sortedUnique(condition.RequiredClaims)
+		result[actionKey(condition.Action)] = condition
+	}
+	return result
+}
+
+func sortedStringKeys(left, right map[string]domain.AuthorityCondition) []string {
+	keys := make(map[string]struct{}, len(left)+len(right))
+	for key := range left {
+		keys[key] = struct{}{}
+	}
+	for key := range right {
+		keys[key] = struct{}{}
+	}
+	return sortedMapKeys(keys)
+}
+
+func sortedMapKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func previousRevision(contract *domain.EngineeringWorkContract) *string {
+	if contract == nil {
+		return nil
+	}
+	revision := contract.Revision
+	return &revision
 }
 
 func sortedDeviations(deviations []Deviation) []Deviation {
