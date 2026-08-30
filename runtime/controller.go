@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,98 @@ import (
 // ---------------------------------------------------------------------------
 // Dependency set
 // ---------------------------------------------------------------------------
+
+// Controller kinds. The kind is the coarse trust classification of the binary
+// driving a run, and it is what makes "an unadopted build drove this run"
+// answerable from durable state alone.
+const (
+	// ControllerPreAdoptionBuild is a build of source that has NOT been adopted
+	// into the trusted default branch - the controller a self-hosting run uses
+	// to prove out its own change before that change is merged.
+	ControllerPreAdoptionBuild = "pre_adoption_build"
+	// ControllerAdopted is a build of source that HAS been adopted.
+	ControllerAdopted = "adopted"
+	// ControllerUnattested is the absence of build metadata: nothing was
+	// injected at build time, so the binary can make no provenance claim. It is
+	// never recorded as a payload; it is what a run without recorded provenance
+	// reads back as, so an unattested controller can never be mistaken for an
+	// adopted one.
+	ControllerUnattested = "unattested"
+)
+
+// ControllerBuild is the exact binary driving a run. It answers "which code is
+// this, and can I get it back" without consulting anything outside the run:
+// the kind classifies the trust of the source, the revision and tree identify
+// the exact source state the build came from, and BinarySHA256 identifies the
+// artifact that actually ran.
+//
+// Three properties are structural rather than conventional:
+//
+//   - It carries NO operator configuration. Controller provenance and
+//     configuration identity are separate facts, so a configuration change can
+//     never masquerade as a different binary. ConfigDigest is represented
+//     independently, and ControllerSHA256 binds both without merging them.
+//   - SourceRevision and SourceTree are injected by the controlled build
+//     (-ldflags -X) from the exact checkout that produced the binary. They are
+//     never discovered from ambient state at run time, where the checkout may
+//     have moved on.
+//   - BinarySHA256 is computed from the executable actually running, not read
+//     from an adjacent metadata file. A binary cannot contain its own final
+//     digest, so it is measured at startup instead of embedded.
+type ControllerBuild struct {
+	Kind           string `json:"kind"`
+	Version        string `json:"version"`
+	SourceRevision string `json:"source_revision"`
+	SourceTree     string `json:"source_tree"`
+	BinarySHA256   string `json:"binary_sha256"`
+}
+
+// Attested reports whether this build makes a provenance CLAIM. An unattested
+// controller is legal - it is what a plain `go build` produces - but it claims
+// nothing, records no provenance, and is distinguishable from both kinds that
+// do. Naming the unattested kind explicitly is still no claim; setting any
+// other field is.
+func (b ControllerBuild) Attested() bool {
+	return (b.Kind != "" && b.Kind != ControllerUnattested) ||
+		b.Version != "" || b.SourceRevision != "" || b.SourceTree != "" || b.BinarySHA256 != ""
+}
+
+// validate is the construction-time check: nothing injected is legal, but a
+// partially injected build is not. A binary that claims a source revision
+// without a binary digest is exactly the provenance gap this type exists to
+// close, so it is refused rather than recorded.
+func (b ControllerBuild) validate() error {
+	if !b.Attested() {
+		return nil
+	}
+	return b.validateAttested()
+}
+
+// validateAttested is also the run.created payload schema: a recorded
+// provenance is always complete.
+func (b ControllerBuild) validateAttested() error {
+	switch b.Kind {
+	case ControllerPreAdoptionBuild, ControllerAdopted:
+	default:
+		return fmt.Errorf("controller kind %q is neither %q nor %q", b.Kind, ControllerPreAdoptionBuild, ControllerAdopted)
+	}
+	if !isSHA256Hex(b.BinarySHA256) {
+		return errors.New("controller binary_sha256 must be the 64 lowercase hex digits of the running executable")
+	}
+	return errors.Join(
+		required("version", b.Version),
+		required("source_revision", b.SourceRevision),
+		required("source_tree", b.SourceTree),
+	)
+}
+
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 || strings.ToLower(s) != s {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
 
 // ConfigDigest is the operator configuration this run was created under. It is
 // part of the run identity: a run created under different governance settings
@@ -73,8 +166,11 @@ type Dependencies struct {
 	// constructs, so two runtimes in one process never share one authority.
 	Credentials  CredentialProvider
 	ControllerID string
-	ConfigDigest ConfigDigest
-	Budgets      RunBudgets
+	// ControllerBuild is this controller's provenance. It is injected by the
+	// composition root from build-time metadata, never discovered here.
+	ControllerBuild ControllerBuild
+	ConfigDigest    ConfigDigest
+	Budgets         RunBudgets
 	// MaxConcurrentRuns requests a ceiling on concurrently driven runs. It is
 	// clamped to OperatorMaxConcurrentRuns, so a CLI flag or repository
 	// configuration can only LOWER the ceiling; neither can raise it.
@@ -172,6 +268,9 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	if strings.TrimSpace(d.ControllerID) == "" {
 		return nil, &DependencyError{Detail: "a controller identity is required"}
 	}
+	if err := d.ControllerBuild.validate(); err != nil {
+		return nil, &DependencyError{Detail: "controller provenance: " + err.Error()}
+	}
 	if strings.TrimSpace(d.Owner) == "" {
 		return nil, &DependencyError{Detail: "a scheduler owner identity is required"}
 	}
@@ -199,10 +298,21 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		d.Clock = RealClock{}
 	}
 	d.Budgets = d.Budgets.defaults()
+	// ControllerSHA256 binds BOTH facts a run must not silently change under:
+	// the exact build and the operator configuration. They are separate members
+	// rather than one merged blob, so the structured provenance recorded beside
+	// this digest stays independent of configuration - and an unattested build
+	// contributes no member at all, which keeps the digest of a run created
+	// before provenance existed byte-identical to what it was.
+	var build *ControllerBuild
+	if d.ControllerBuild.Attested() {
+		build = &d.ControllerBuild
+	}
 	controller, err := Digest(struct {
-		Controller string       `json:"controller"`
-		Config     ConfigDigest `json:"config"`
-	}{d.ControllerID, d.ConfigDigest})
+		Controller string           `json:"controller"`
+		Build      *ControllerBuild `json:"build,omitempty"`
+		Config     ConfigDigest     `json:"config"`
+	}{d.ControllerID, build, d.ConfigDigest})
 	if err != nil {
 		return nil, err
 	}
@@ -334,12 +444,26 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 	if !claimed {
 		return runID, nil
 	}
+	// The genesis event is where the structured provenance becomes durable. The
+	// run row can only carry the digest (its shape is frozen), so the fields the
+	// digest is over are recorded here, in the same append-only, hash-chained
+	// journal - not in an adjacent metadata file that could be edited or lost.
+	// An unattested controller records nothing, which is exactly the claim it is
+	// entitled to make.
+	var provenance json.RawMessage
+	if r.deps.ControllerBuild.Attested() {
+		provenance, err = marshalPayloadJSON(r.deps.ControllerBuild)
+		if err != nil {
+			return "", err
+		}
+	}
 	if _, err := r.deps.Store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
 		ID:            runID + "-created",
 		RunID:         runID,
 		Type:          EventRunCreated,
 		OccurredAt:    now,
+		Payload:       provenance,
 	}); err != nil {
 		return "", err
 	}
@@ -360,13 +484,37 @@ func terminalDisposition(d Disposition) bool {
 // ---------------------------------------------------------------------------
 
 // ControllerIdentity is who is driving the run and under what configuration.
+// Build and ConfigDigest are reported side by side and never merged: an
+// operator can see that the binary is unchanged while the configuration moved,
+// or the reverse, instead of one digest that says only "something differs".
 type ControllerIdentity struct {
-	ID           string       `json:"id"`
-	SHA256       string       `json:"sha256"`
-	ConfigDigest ConfigDigest `json:"config_digest"`
+	ID     string `json:"id"`
+	SHA256 string `json:"sha256"`
+	// Build is the provenance recorded by the controller that CREATED this run,
+	// replayed from the journal. It is deliberately not this process's own
+	// build: the question a run has to answer is which binary drove it.
+	Build        ControllerBuild `json:"build"`
+	ConfigDigest ConfigDigest    `json:"config_digest"`
 	// Changed reports that the durable run was created by a different
 	// controller/configuration than the one reading it now.
 	Changed bool `json:"changed"`
+}
+
+// recordedControllerBuild replays the provenance the creating controller wrote
+// into the genesis event. A run created before provenance existed, or by an
+// unattested build, reads back as unattested - never as adopted.
+func (s *runState) recordedControllerBuild() ControllerBuild {
+	for _, event := range s.events {
+		if event.Type != EventRunCreated {
+			continue
+		}
+		var build ControllerBuild
+		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &build) == nil {
+			return build
+		}
+		break
+	}
+	return ControllerBuild{Kind: ControllerUnattested}
 }
 
 // OperationStatus is the operator's view of the current bounded operation.
@@ -454,6 +602,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Controller: ControllerIdentity{
 			ID:           r.deps.ControllerID,
 			SHA256:       state.run.ControllerSHA256,
+			Build:        state.recordedControllerBuild(),
 			ConfigDigest: r.deps.ConfigDigest,
 			Changed:      state.controllerChanged,
 		},

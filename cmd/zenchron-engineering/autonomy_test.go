@@ -1861,3 +1861,118 @@ func TestOperatorExitStatusIsTheRealProcessStatus(t *testing.T) {
 		}
 	})
 }
+
+// TestControllerBuildIsInjectedNotDiscovered covers the composition root's half
+// of the provenance repair. The build metadata is injected by the controlled
+// build (-ldflags -X), so it is resolved from arguments rather than read out of
+// the environment: a test asserts the exact production resolution without a
+// real ldflags build, and without hashing whatever binary is running the test.
+func TestControllerBuildIsInjectedNotDiscovered(t *testing.T) {
+	measured := 0
+	digest := func() (string, error) {
+		measured++
+		return strings.Repeat("ab", 32), nil
+	}
+	build, err := buildProvenance(runtime.ControllerPreAdoptionBuild, "v0.1.0", "rev-1", "tree-1", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := runtime.ControllerBuild{
+		Kind:           runtime.ControllerPreAdoptionBuild,
+		Version:        "v0.1.0",
+		SourceRevision: "rev-1",
+		SourceTree:     "tree-1",
+		BinarySHA256:   strings.Repeat("ab", 32),
+	}
+	if build != want {
+		t.Fatalf("resolved provenance %+v, want %+v", build, want)
+	}
+	if measured != 1 {
+		t.Fatalf("the running binary was measured %d times, want exactly 1", measured)
+	}
+	// A build with nothing injected claims nothing, and does not even measure
+	// the binary: an unattested controller has no claim to substantiate.
+	measured = 0
+	unattested, err := buildProvenance("", "v0.1.0", "", "", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unattested != (runtime.ControllerBuild{Kind: runtime.ControllerUnattested}) {
+		t.Fatalf("a build with no injected metadata claimed %+v", unattested)
+	}
+	if measured != 0 {
+		t.Fatal("an unattested controller measured the running binary")
+	}
+	// The default the process starts with is unattested, so a plain `go build`
+	// can never be reported as an adopted controller.
+	if buildKind != runtime.ControllerUnattested {
+		t.Fatalf("the default build kind is %q, want %q", buildKind, runtime.ControllerUnattested)
+	}
+}
+
+// TestStatusExposesTheStructuredControllerIdentity asserts what an operator can
+// actually read back. A digest alone is what made the #29 evidence useless, so
+// both projections must carry the fields the digest is over - and must keep the
+// configuration digest as a separate fact.
+func TestStatusExposesTheStructuredControllerIdentity(t *testing.T) {
+	build := runtime.ControllerBuild{
+		Kind:           runtime.ControllerPreAdoptionBuild,
+		Version:        "dev",
+		SourceRevision: "9f1d2b3c4e5f60718293a4b5c6d7e8f901234567",
+		SourceTree:     "1122334455667788990011223344556677889900",
+		BinarySHA256:   strings.Repeat("ab", 32),
+	}
+	engine := &scriptedRuntime{
+		runID: "run-1",
+		report: runtime.StatusReport{
+			SchemaVersion: runtime.SchemaVersion,
+			RunID:         "run-1",
+			Repository:    "zenchron/seeded",
+			Phase:         runtime.Contract,
+			Disposition:   runtime.Active,
+			Controller: runtime.ControllerIdentity{
+				ID:           "zenchron-engineering/dev",
+				SHA256:       strings.Repeat("c", 64),
+				Build:        build,
+				ConfigDigest: runtime.ConfigDigest{Global: "global-digest", Repository: "repository-digest"},
+			},
+		},
+	}
+	var out bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1"}, autonomyOverrides{Runtime: engine}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		Controller struct {
+			ID           string                  `json:"id"`
+			SHA256       string                  `json:"sha256"`
+			Build        runtime.ControllerBuild `json:"build"`
+			ConfigDigest runtime.ConfigDigest    `json:"config_digest"`
+		} `json:"controller"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+		t.Fatalf("status printed no view: %v\n%s", err, out.String())
+	}
+	if view.Controller.Build != build {
+		t.Fatalf("status reported build %+v, want %+v", view.Controller.Build, build)
+	}
+	if view.Controller.ConfigDigest != engine.report.Controller.ConfigDigest {
+		t.Fatalf("the configuration digest is not independently represented: %+v", view.Controller.ConfigDigest)
+	}
+	// The human projection carries the same facts; a digest on its own is what
+	// the forensic record already had.
+	var text bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &text); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		runtime.ControllerPreAdoptionBuild,
+		build.SourceRevision[:12],
+		build.SourceTree[:12],
+		build.BinarySHA256[:12],
+	} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("the text projection lost %q:\n%s", want, text.String())
+		}
+	}
+}

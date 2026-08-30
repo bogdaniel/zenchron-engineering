@@ -86,6 +86,14 @@ const (
 type ProviderStopError struct {
 	Reason ProviderStop
 	Detail string
+	// Status and Code are the SAFE control-plane facts about an HTTP exchange
+	// that actually happened: the response status, and the provider's own error
+	// code when it returned one. Both are absent when no exchange occurred.
+	// Neither is credential-bearing, and the response BODY is deliberately not
+	// here - it belongs in the redacted transcript artifact, never in a caller's
+	// durable diagnostic.
+	Status int
+	Code   string
 }
 
 func (e *ProviderStopError) Error() string {
@@ -346,6 +354,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	model, toolCalls := p.Model, 0
 	stop, detail := StopCompleted, ""
 	classification := FailureUnknown
+	httpStatus, providerCode := 0, ""
 
 	for iteration := 1; ; iteration++ {
 		if iteration > maxIterations {
@@ -362,6 +371,10 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		fmt.Fprintf(&transcript, "<-- response %d status=%d id=%s model=%s\n%s\n", iteration, status, response.ID, response.Model, raw)
 		if callErr != nil {
 			stop, detail = StopProviderError, callErr.Error()
+			httpStatus = status
+			if response.Error != nil {
+				providerCode = response.Error.Code
+			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				stop, detail = cancellationStop(ctxErr)
 			} else {
@@ -437,7 +450,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		result.Outcome = OperationCancelled
 	}
 	result.Failure = &ProviderFailure{Classification: classification, RawDiagnosticRef: artifacts[0].Path}
-	return result, &ProviderStopError{Reason: stop, Detail: detail}
+	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode}
 }
 
 func cancellationStop(err error) (ProviderStop, string) {

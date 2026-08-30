@@ -304,8 +304,18 @@ func TestProtectedExecutionProducesARuntimeOwnedCommit(t *testing.T) {
 	if request.CandidateDir != workspace {
 		t.Fatalf("the producer was given %q, want the runtime-owned workspace %q", request.CandidateDir, workspace)
 	}
-	if request.Candidate.Revision != "" || request.Purpose != InvocationInitial {
-		t.Fatalf("the initial invocation was handed a candidate revision: %#v", request.Candidate)
+	// The initial invocation is bound to the exact subject it will operate on -
+	// the pristine workspace head, which IS the trusted base - and to no
+	// runtime-owned candidate commit, because none exists yet.
+	if request.Purpose != InvocationInitial {
+		t.Fatalf("the initial invocation has purpose %q", request.Purpose)
+	}
+	baseTree := mustGit(t, fixture.origin, "rev-parse", fixture.base+"^{tree}")
+	if request.Candidate.Revision != fixture.base || request.Candidate.Tree != baseTree {
+		t.Fatalf("the initial invocation is not bound to the pristine workspace subject: %#v", request.Candidate)
+	}
+	if state.projection.CandidateRevision == request.Candidate.Revision {
+		t.Fatal("the workspace execution subject was mistaken for a runtime-owned candidate commit")
 	}
 
 	// candidate.changed is the producer's whole durable footprint. It records

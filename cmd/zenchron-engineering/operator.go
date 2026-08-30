@@ -622,6 +622,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	line := func(label string, value any) {
 		fmt.Fprintf(stdout, "%-22s %v\n", label+":", value)
 	}
+	build := view.Controller.Build
 	line("run", view.RunID)
 	line("repository", view.Repository)
 	if view.Source.Issue != 0 {
@@ -629,6 +630,13 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			view.Source.Issue, view.Source.URL, view.Source.State, short(view.Source.Digest), view.Source.IntentChanged))
 	}
 	line("controller", fmt.Sprintf("%s sha=%s changed=%t", view.Controller.ID, short(view.Controller.SHA256), view.Controller.Changed))
+	// The provenance of the build that CREATED the run, and the configuration
+	// digest, are shown as separate lines because they are separate facts: a
+	// digest alone cannot say whether the binary or the configuration moved.
+	line("controller build", fmt.Sprintf("%s version=%s source=%s tree=%s binary=%s",
+		build.Kind, build.Version, short(build.SourceRevision), short(build.SourceTree), short(build.BinarySHA256)))
+	line("controller config", fmt.Sprintf("global=%s repository=%s",
+		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
 	line("phase", view.Phase)
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))

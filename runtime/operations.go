@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -405,12 +406,31 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		purpose = InvocationRemediation
 		findings = state.findings()
 	}
+	// The execution SUBJECT is the exact workspace Git head the provider is
+	// about to be shown, observed through the governed runtime Git boundary. It
+	// always exists: on a pristine initial workspace it is the trusted base.
+	//
+	// It is NOT the runtime-owned produced candidate commit. That one is
+	// projection.CandidateRevision, it appears only after the runtime commits a
+	// real producer mutation, and nothing here writes it - which is why an
+	// initial invocation still has no candidate revision in the projection while
+	// carrying a complete, non-empty subject binding to the provider.
+	subject, err := workspace.head()
+	if err != nil {
+		return failed(err)
+	}
+	if err := assertExecutionSubject(state, workspace, purpose, subject); err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureWorkspaceIntegrity},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureWorkspaceIntegrity, ExecutionResult{}, err),
+		}}
+	}
 	result, execErr := r.deps.Provider.Execute(ctx, ExecutionRequest{
 		RunID:                 state.run.ID,
 		SourceSnapshot:        Ref{ID: sourceSnapshotID(state), Revision: state.source.Digest},
 		ControllerID:          r.deps.ControllerID,
 		Base:                  Ref{ID: r.deps.Repository.DefaultBranch, Revision: state.baseRevision()},
-		Candidate:             Candidate{Branch: candidateBranch(state.run.ID), Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree},
+		Candidate:             Candidate{Branch: candidateBranch(state.run.ID), Revision: subject.Commit, Tree: subject.Tree},
 		CandidateDir:          workspace.Dir,
 		Contract:              Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
 		Objective:             kernel.Contract.Objective,
@@ -431,7 +451,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		return failed(pathErr)
 	}
 	record := mutationResult{Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID}
-	produced := effect{result: record, state: Succeeded, events: []journalEntry{{
+	produced := effect{result: executionRecord{mutationResult: record}, state: Succeeded, events: []journalEntry{{
 		Type: EventCandidateChanged,
 		Payload: CandidateChangedPayload{
 			ProducerID: firstNonEmpty(result.ProviderID, "execution-provider"),
@@ -446,12 +466,116 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			class = result.Failure.Classification
 		}
 		record.FailureClass = class
-		produced.result = record
+		// A provider that reported a failure of its own reached at least its own
+		// result; one that only returned an error refused the request before it.
+		stage := execStageProviderRequest
+		if result.Failure != nil {
+			stage = execStageProviderResult
+		}
+		produced.result = executionRecord{
+			mutationResult: record,
+			Diagnostic:     r.executionDiagnostic(stage, class, result, execErr),
+		}
 		if !record.Mutated {
 			produced.state = OperationFailed
 		}
 	}
 	return produced
+}
+
+// assertExecutionSubject refuses to execute against a workspace that is not the
+// subject the invocation claims. For a remediation that subject is the recorded
+// candidate head and tree; for an initial implementation it is the trusted base,
+// because no runtime-owned candidate commit exists yet. Either disagreement is a
+// workspace_integrity_violation, never a silent proceed.
+func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purpose InvocationPurpose, subject CommitResult) error {
+	if subject.Commit == "" || subject.Tree == "" {
+		return &WorkspaceIntegrityError{Detail: "candidate workspace reported no head revision or tree"}
+	}
+	if purpose == InvocationRemediation {
+		if subject.Commit != state.projection.CandidateRevision {
+			return &WorkspaceIntegrityError{Detail: "observed candidate head " + subject.Commit + " is not the recorded candidate revision " + state.projection.CandidateRevision}
+		}
+		if state.projection.CandidateTree != "" && subject.Tree != state.projection.CandidateTree {
+			return &WorkspaceIntegrityError{Detail: "observed candidate tree " + subject.Tree + " is not the recorded candidate tree " + state.projection.CandidateTree}
+		}
+		return nil
+	}
+	if subject.Commit != workspace.BaseRevision {
+		return &WorkspaceIntegrityError{Detail: "pristine candidate head " + subject.Commit + " is not the trusted base " + workspace.BaseRevision}
+	}
+	return nil
+}
+
+// executionRecord is the durable operation result for execution.invoke. It
+// embeds mutationResult UNCHANGED - failure routing reads exactly that shape and
+// an older reader still decodes it - and adds the sanitized diagnostics a
+// restarted runtime needs to name a root cause without the process-local error.
+type executionRecord struct {
+	mutationResult
+	Diagnostic *executionDiagnostic `json:"diagnostic,omitempty"`
+}
+
+// executionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
+// bounded to one payload field, and the message is redacted with the same
+// redactor that guards transcript artifacts, so no API key, Authorization
+// header, forge token, or raw provider body can become a durable row. Bulk
+// material stays in the artifact store; ArtifactRef names it when one exists,
+// and is absent when no provider interaction produced one.
+type executionDiagnostic struct {
+	Stage             string       `json:"stage"`
+	Code              string       `json:"code,omitempty"`
+	Message           string       `json:"message,omitempty"`
+	Route             FailureRoute `json:"route,omitempty"`
+	ProviderKind      string       `json:"provider_kind,omitempty"`
+	Model             string       `json:"model,omitempty"`
+	HTTPStatus        int          `json:"http_status,omitempty"`
+	ProviderErrorCode string       `json:"provider_error_code,omitempty"`
+	ArtifactRef       string       `json:"artifact_ref,omitempty"`
+}
+
+// Stages name WHERE an execution died, which is the fact source archaeology was
+// otherwise needed for: a request the provider refused before any transport, a
+// bounded reasoning loop that stopped, a result the provider itself classified,
+// or the runtime's own pre-invocation subject check.
+const (
+	execStageWorkspaceSubject = "workspace_subject"
+	execStageProviderRequest  = "provider_request"
+	execStageProviderLoop     = "provider_loop"
+	execStageProviderResult   = "provider_result"
+)
+
+func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClass, result ExecutionResult, cause error) *executionDiagnostic {
+	diagnostic := &executionDiagnostic{
+		Stage:        stage,
+		Route:        RouteFailure(class),
+		ProviderKind: boundedDetail(fmt.Sprintf("%T", r.deps.Provider)),
+		Model:        boundedDetail(result.Model),
+	}
+	if cause != nil {
+		diagnostic.Message = sanitizedDetail(cause.Error())
+	}
+	// A typed stop is the richer answer: it names the bounded loop's own exit
+	// reason and, when an HTTP exchange actually happened, its status and the
+	// provider's error code. Neither carries a body or a credential.
+	var stop *ProviderStopError
+	if errors.As(cause, &stop) {
+		diagnostic.Stage, diagnostic.Code = execStageProviderLoop, string(stop.Reason)
+		diagnostic.Message = sanitizedDetail(stop.Detail)
+		diagnostic.HTTPStatus, diagnostic.ProviderErrorCode = stop.Status, boundedDetail(stop.Code)
+	}
+	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
+		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
+	} else if len(result.Artifacts) > 0 {
+		diagnostic.ArtifactRef = boundedDetail(result.Artifacts[0].Path)
+	}
+	return diagnostic
+}
+
+// sanitizedDetail is the only way error text becomes durable here: secrets are
+// removed with the transcript redactor, then the result is bounded.
+func sanitizedDetail(detail string) string {
+	return boundedDetail(string(redactTranscript([]byte(detail))))
 }
 
 func providerOutcome(result ExecutionResult, err error) OperationState {

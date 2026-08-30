@@ -40,7 +40,16 @@ func (p *haltingProvider) Execute(_ context.Context, request ExecutionRequest) (
 	if p.cancel != nil {
 		p.cancel()
 	}
-	return ExecutionResult{}, errors.New("halted: the controller process stopped")
+	// The controller process stopping is transient infrastructure, and saying
+	// so is what makes this fixture model a halt rather than a verdict about
+	// the work. It matters because a re-attempt now requires BOTH a failure
+	// class that routes to a retry and remaining budget: an unclassified halt
+	// would durably read as `unknown`, which fails closed, and the resumed
+	// process would never reach the tampered workspace this test is about.
+	return ExecutionResult{
+		ProviderID: "halting-provider",
+		Failure:    &ProviderFailure{Classification: FailureTransientInfrastructure},
+	}, errors.New("halted: the controller process stopped")
 }
 
 // runtimeOn builds a runtime over an independently opened store on the same

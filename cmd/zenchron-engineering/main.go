@@ -1,15 +1,80 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-const version = "dev"
+// Build identity. These are variables rather than constants because a constant
+// cannot be injected: the controlled build sets them with -ldflags -X from the
+// exact source checkout that produced the binary. See controllerBuild.
+//
+//	go build -trimpath -ldflags "\
+//	  -X main.buildKind=pre_adoption_build \
+//	  -X main.version=$(git rev-parse --short HEAD) \
+//	  -X main.sourceRevision=$(git rev-parse HEAD) \
+//	  -X main.sourceTree=$(git rev-parse HEAD^{tree})" \
+//	  -o bin/zenchron-engineering ./cmd/zenchron-engineering
+//
+// A build that injects nothing is unattested: it still runs, but it records no
+// provenance claim and can never be mistaken for an adopted controller.
+var (
+	version        = "dev"
+	buildKind      = runtime.ControllerUnattested
+	sourceRevision string
+	sourceTree     string
+)
+
+// controllerBuild is this process's provenance, resolved once from the injected
+// metadata plus a measurement of the executable that is actually running.
+func controllerBuild() (runtime.ControllerBuild, error) {
+	return buildProvenance(buildKind, version, sourceRevision, sourceTree, runningBinaryDigest)
+}
+
+// buildProvenance takes its inputs instead of reading the package variables, so
+// a test asserts the exact same resolution without a real -ldflags build and
+// without hashing whatever binary happens to be running.
+func buildProvenance(kind, version, revision, tree string, digest func() (string, error)) (runtime.ControllerBuild, error) {
+	if kind == "" || kind == runtime.ControllerUnattested {
+		return runtime.ControllerBuild{Kind: runtime.ControllerUnattested}, nil
+	}
+	binary, err := digest()
+	if err != nil {
+		return runtime.ControllerBuild{}, fmt.Errorf("cannot measure the running controller binary: %w", err)
+	}
+	return runtime.ControllerBuild{
+		Kind: kind, Version: version, SourceRevision: revision, SourceTree: tree, BinarySHA256: binary,
+	}, nil
+}
+
+// runningBinaryDigest hashes the executable this process was started from. A
+// binary cannot contain its own final digest, and an adjacent metadata file is
+// a claim rather than a measurement, so the only honest answer is to read the
+// running artifact back and hash it. It is computed at most once: the file
+// cannot change identity under a running process.
+var runningBinaryDigest = sync.OnceValues(func() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
+})
 
 // exitUsage is the historical exit status for a top-level usage or selfhost
 // failure. The autonomy subcommand reports the runtime exit codes instead.

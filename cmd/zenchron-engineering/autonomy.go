@@ -127,6 +127,11 @@ type autonomyOverrides struct {
 	Assurance runtime.AssuranceProvider
 	Runtime   engineeringRuntime
 	Watch     watchController
+	// ControllerBuild replaces this process's own provenance. Production
+	// resolves it from the injected build metadata and the running executable;
+	// a test supplies a fixed build so the identity under assertion is the one
+	// the test wrote, not whatever binary the test runner happens to be.
+	ControllerBuild *runtime.ControllerBuild
 	// WatchWait is the loop's only timing mechanism. Production waits on a
 	// real timer; a test supplies its own so the schedule is asserted instead
 	// of slept through.
@@ -315,6 +320,7 @@ type composition struct {
 	forge       runtime.GitHubAdapter
 	provider    runtime.ExecutionProvider
 	assurance   runtime.AssuranceProvider
+	build       runtime.ControllerBuild
 	release     func()
 }
 
@@ -327,6 +333,15 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	}
 	config, err := runtime.LoadConfig(flags.Config, cwd)
 	if err != nil {
+		return nil, err
+	}
+	// Provenance is resolved once, before anything durable is written: a
+	// controller that cannot say which binary it is has no business creating a
+	// run under a provenance claim it cannot substantiate.
+	build := runtime.ControllerBuild{Kind: runtime.ControllerUnattested}
+	if overrides.ControllerBuild != nil {
+		build = *overrides.ControllerBuild
+	} else if build, err = controllerBuild(); err != nil {
 		return nil, err
 	}
 	model, err := analysis.LoadProjectModel(config.ProjectModelPath)
@@ -385,7 +400,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	}
 	return &composition{
 		config: config, store: store, owner: owner, model: model, policy: policy,
-		artifacts: artifacts, credentials: credentials,
+		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, release: release,
 	}, nil
 }
@@ -398,23 +413,24 @@ func (c *composition) engine(target runtime.RepositoryTarget) (*runtime.Engineer
 		return nil, err
 	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
-		Store:        c.store,
-		Clock:        runtime.RealClock{},
-		Owner:        c.owner,
-		Liveness:     runtime.NewLockOwnerLiveness(c.config.StateDir),
-		GitHub:       c.forge,
-		Provider:     c.provider,
-		Assurance:    c.assurance,
-		Artifacts:    c.artifacts,
-		ProjectModel: c.model,
-		Policy:       c.policy,
-		StateDir:     c.config.StateDir,
-		Repository:   target,
-		Remote:       remote,
-		Credentials:  c.credentials,
-		ControllerID: "zenchron-engineering/" + version,
-		ConfigDigest: c.config.Digest,
-		Budgets:      c.config.RunBudgets(),
+		Store:           c.store,
+		Clock:           runtime.RealClock{},
+		Owner:           c.owner,
+		Liveness:        runtime.NewLockOwnerLiveness(c.config.StateDir),
+		GitHub:          c.forge,
+		Provider:        c.provider,
+		Assurance:       c.assurance,
+		Artifacts:       c.artifacts,
+		ProjectModel:    c.model,
+		Policy:          c.policy,
+		StateDir:        c.config.StateDir,
+		Repository:      target,
+		Remote:          remote,
+		Credentials:     c.credentials,
+		ControllerID:    "zenchron-engineering/" + version,
+		ControllerBuild: c.build,
+		ConfigDigest:    c.config.Digest,
+		Budgets:         c.config.RunBudgets(),
 	})
 }
 

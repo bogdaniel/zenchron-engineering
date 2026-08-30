@@ -38,7 +38,10 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
-	EventRunCreated: absentPayload,
+	// run.created carries the creating controller's provenance (ControllerBuild)
+	// when the build is attested. It is optional because an unattested build
+	// records no claim, and strict because a recorded claim must be complete.
+	EventRunCreated: optionalPayload(payloadSchema(ControllerBuild.validateAttested)),
 
 	EventRunWaiting:   dispositionPayload,
 	EventRunCompleted: dispositionPayload,
@@ -163,16 +166,6 @@ func validateEventPayload(e EngineeringEvent) error {
 		}
 	}
 	return validate(e.Payload)
-}
-
-// absentPayload is the schema for an event whose meaning is carried entirely by
-// its type, operation id, and artifact references. Nothing belongs in the
-// payload, so an empty object is not required either.
-func absentPayload(raw json.RawMessage) error {
-	if len(raw) > 0 {
-		return errors.New("event type carries no payload")
-	}
-	return nil
 }
 
 // dispositionPayload is what Reduce reads from the run disposition events.

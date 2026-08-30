@@ -220,6 +220,41 @@ func (s *runState) operationByKey(kind, binding string) (RunOperation, bool) {
 	return RunOperation{}, false
 }
 
+// lastFailure is the failure class an operation durably recorded the last time
+// it ran. It reads the journal's folded operation document - the same record
+// `satisfied` reads - so it reports what the run can prove, not what a
+// scheduler row happens to hold.
+//
+// It answers false in exactly two cases, and they are different absences.
+//
+// An operation whose last journalled outcome is not a failure recorded no
+// failure at all: a crash between operation.before and operation.after leaves
+// the operation mid-flight, and there is no failure to route for work nobody
+// watched finish. Such an operation is retry eligible exactly as before.
+//
+// A failure whose handler determined no class is a failure this boundary
+// cannot route. It is left under the attempt budget alone, which is the
+// behaviour it already had. Note that this is NOT the `unknown` class: a
+// handler that classified its failure as FailureUnknown said something durable,
+// and RouteFailure stops it.
+//
+// ponytail: a handler that records no class therefore keeps budget-only
+// retries. That is deliberate - withholding a retry needs a route to withhold
+// it by, and inventing one here would be this boundary redefining a
+// classification that belongs to the handler. Each handler that starts
+// recording a class comes under the route rule with no change here.
+func (s *runState) lastFailure(id string) (FailureClass, bool) {
+	op, ok := s.snapshot.Operations[id]
+	if !ok || op.State != OperationFailed {
+		return "", false
+	}
+	var result mutationResult
+	if decodeJSON(op.Result, &result) != nil || result.FailureClass == "" {
+		return "", false
+	}
+	return result.FailureClass, true
+}
+
 // currentOperation is the most recently started operation, for the status
 // report only. It is never consulted to decide what to do next.
 func (s *runState) currentOperation() (RunOperation, bool) {
@@ -989,6 +1024,38 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 			}
 			return true, Outcome{}, nil
 		}
+	}
+	// Re-attempting an operation requires BOTH conditions: the class of the
+	// failure its last attempt recorded must route to RouteRetry, AND the
+	// attempt budget must have room. Remaining budget on its own is NOT a
+	// reason to repeat a failure. That was the #29 defect: a deterministic
+	// provider failure recorded as `unknown` ran three identical attempts in
+	// under a hundred milliseconds, because `attempt < max_attempts` was the
+	// only question anyone asked and RouteFailure(FailureUnknown) -> RouteStop
+	// was never consulted.
+	//
+	// The rule is applied HERE, to the operation the scheduler actually handed
+	// back, because this is the one place every attempt of every kind passes
+	// through. It is deliberately not applied to the planned operation instead:
+	// Scheduler.Next scans every operation of the run and `attempt <
+	// max_attempts` is its whole eligibility rule, so a failed operation gets
+	// re-leased on passes that planned something else entirely - which is
+	// exactly how the failed run reached three attempts. It is equally
+	// deliberately not an execution.invoke special case: a failure that does
+	// not route to a retry stops the run whatever kind produced it.
+	//
+	// RouteFailure's other routes name a DIFFERENT operation - gofmt, provider
+	// remediation, reassessment, restore - or a wait. None of them means "run
+	// this same operation again", and the planner reaches them by binding that
+	// other operation, never by re-attempting this one.
+	if class, recorded := state.lastFailure(leased.ID); recorded && RouteFailure(class) != RouteRetry {
+		// The journal already records this operation as failed; releasing the
+		// lease keeps the scheduler row saying the same thing.
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Failed, leased.Kind+"_failure_not_retryable")
+		return false, outcome, err
 	}
 	started, err := r.scheduler.Start(leased.ID)
 	if err != nil {
