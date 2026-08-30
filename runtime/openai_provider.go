@@ -392,7 +392,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				stop, detail = cancellationStop(ctxErr)
 			} else {
-				classification = ClassifyProviderFailure(raw, nil)
+				classification = classifyOpenAIFailure(providerCode, raw)
 			}
 			break
 		}
@@ -477,6 +477,28 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	}
 	result.Failure = &ProviderFailure{Classification: classification, RawDiagnosticRef: artifacts[0].Path}
 	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode, Param: providerParam}
+}
+
+// openaiCreditBalanceExhausted is the one provider error code proven, by a real
+// run, to mean the OPERATOR'S ACCOUNT cannot execute work until a human acts on
+// it outside the runtime. It arrived as HTTP 429, but the status is not what
+// classifies it: a 429 is also ordinary throttling, and the two need opposite
+// handling - throttling may be retried, an exhausted balance never clears by
+// being asked again.
+const openaiCreditBalanceExhausted = "credit_balance_exhausted"
+
+// classifyOpenAIFailure classifies a failed exchange by the provider's own
+// error CODE first, then falls back to the existing narrow capacity
+// classification. Only the one code above is newly recognized: no other OpenAI
+// code has been observed here, and inventing classifications for codes we have
+// never seen would be guessing at another service's taxonomy. Everything else
+// - ordinary rate limiting, malformed requests, server errors, unknown codes -
+// keeps exactly the behaviour it had.
+func classifyOpenAIFailure(code string, raw []byte) FailureClass {
+	if code == openaiCreditBalanceExhausted {
+		return FailureProviderAccountUnavailable
+	}
+	return ClassifyProviderFailure(raw, nil)
 }
 
 func cancellationStop(err error) (ProviderStop, string) {

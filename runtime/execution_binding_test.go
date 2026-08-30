@@ -72,7 +72,7 @@ func (p *bindingProvider) Execute(ctx context.Context, request ExecutionRequest)
 // useRealProvider rebuilds the fixture's runtime around a real OpenAIProvider
 // bound to the run's own candidate workspace, with an operator key file that
 // lives outside that workspace.
-func useRealProvider(t *testing.T, fixture *phase8Fixture, runID string, api *scriptedTransport, configure func(*OpenAIProvider)) *bindingProvider {
+func useRealProvider(t *testing.T, fixture *phase8Fixture, runID string, api Doer, configure func(*OpenAIProvider)) *bindingProvider {
 	t.Helper()
 	control := filepath.Join(fixture.root, "control")
 	if err := os.MkdirAll(control, 0700); err != nil {

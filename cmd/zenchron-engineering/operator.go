@@ -576,6 +576,11 @@ func githubWaitOf(built *composition, repository string) *githubWaitView {
 	}
 }
 
+// providerAccountWaitReason is the durable run reason runtime settles into when
+// the execution provider refuses at its account boundary. It is matched by
+// value here because the CLI renders durable state; it does not re-derive it.
+const providerAccountWaitReason = "execution_provider_account_unavailable"
+
 // nextOperatorAction is the one interpretive field in the view, and it is a
 // total function of the rest of it: the same durable state always yields the
 // same sentence. It grants nothing and decides nothing.
@@ -586,6 +591,12 @@ func nextOperatorAction(view statusView) string {
 		return "none: the run reached its goal"
 	case view.Disposition == runtime.Cancelled:
 		return "none: the run was cancelled (" + view.Reason + "). Start new work with `autonomy run issue <number>`"
+	// The provider-account wait answers before the authority branch on purpose.
+	// It is an EXTERNAL account prerequisite, not a human-authority condition,
+	// and telling an operator that the authority boundary is refusing would
+	// send them to resolve a condition that does not exist.
+	case view.Reason == providerAccountWaitReason:
+		return "restore execution-provider account availability, then `autonomy resume " + run + "`"
 	case view.AuthorityRefusal != "":
 		return "the human-authority boundary is refusing to project a request (" + view.AuthorityRefusal + "); resolve the named condition first"
 	case view.AuthorityRequest != nil:
@@ -691,8 +702,12 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// local-only material and printing it would publish exactly what the
 	// sanitization exists to keep out of an operator-visible surface.
 	if d := view.ExecutionDiagnostic; d != nil {
-		line("execution failure", strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
-			d.Stage, d.FailureClass, d.Route, d.Code)))
+		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
+			d.Stage, d.FailureClass, d.Route, d.Code))
+		if d.FailureClass == runtime.FailureProviderAccountUnavailable {
+			failure = "provider account unavailable (" + failure + ")"
+		}
+		line("execution failure", failure)
 		line("execution provider", strings.TrimSpace(fmt.Sprintf("%s model=%s", d.ProviderKind, d.Model)))
 		if d.HTTPStatus != 0 || d.ProviderErrorCode != "" || d.ProviderErrorParam != "" {
 			line("execution response", strings.TrimSpace(fmt.Sprintf("http=%d provider_error=%s param=%s",

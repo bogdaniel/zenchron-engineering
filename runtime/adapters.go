@@ -153,11 +153,22 @@ const (
 	FailureTransientInfrastructure FailureClass = "transient_infrastructure"
 	FailureMaterialScope           FailureClass = "material_scope_change"
 	FailureAuthorityWait           FailureClass = "authority_wait"
-	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
-	FailureFlaky                   FailureClass = "flaky_verification"
-	FailureUnknown                 FailureClass = "unknown"
+	// FailureProviderAccountUnavailable is a recoverable EXTERNAL ACCOUNT
+	// prerequisite of the execution provider: the provider refused at its own
+	// account boundary before any reasoning happened. It is not transient (a
+	// retry cannot clear it), not a producer or code failure (no work was
+	// attempted), not an authority failure (nothing about permission changed),
+	// and not terminal (an operator restores the account and the same run
+	// continues). It is deliberately NOT FailureAuthorityWait: conflating an
+	// external billing prerequisite with the human-authority boundary would
+	// make status tell an operator to resolve an authority condition that does
+	// not exist.
+	FailureProviderAccountUnavailable FailureClass = "provider_account_unavailable"
+	FailureGovernanceMismatch         FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity         FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict    FailureClass = "base_integration_conflict"
+	FailureFlaky                      FailureClass = "flaky_verification"
+	FailureUnknown                    FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -184,7 +195,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
-	case FailureAuthorityWait:
+	case FailureAuthorityWait, FailureProviderAccountUnavailable:
 		return RouteWait
 	default:
 		return RouteStop

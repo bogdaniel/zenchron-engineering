@@ -523,7 +523,13 @@ func doctorProviderCredential(in DoctorInput) DoctorCheck {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return fail(doctorGroupProvider, id, fmt.Sprintf("the provider credential at %s is mode %#o and is readable by other users; run chmod 600 %s", path, perm, path))
 	}
-	return pass(doctorGroupProvider, id, "the provider credential referenced at "+path+" exists and is owner-only; its contents were not read")
+	// The distinction is stated in the PASS itself. A resolvable credential is
+	// not a fundable account: whether the provider will actually execute work
+	// can only be learned by asking it, and asking costs money and runs
+	// inference, which a preflight must never do. A run that meets an exhausted
+	// balance therefore waits on provider_account_unavailable at execution
+	// time; doctor cannot and does not promise otherwise.
+	return pass(doctorGroupProvider, id, "the provider credential referenced at "+path+" exists and is owner-only; its contents were not read. This proves the credential is CONFIGURED, not that the provider account can execute: account state is only observable by making a paid request, which this preflight never does")
 }
 
 // ---------------------------------------------------------------------------

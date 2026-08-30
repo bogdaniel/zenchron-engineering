@@ -1041,14 +1041,23 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// max_attempts` is its whole eligibility rule, so a failed operation gets
 	// re-leased on passes that planned something else entirely - which is
 	// exactly how the failed run reached three attempts. It is equally
-	// deliberately not an execution.invoke special case: a failure that does
-	// not route to a retry stops the run whatever kind produced it.
+	// deliberately not an execution.invoke special case: a failure that routes
+	// to neither a retry nor a wait stops the run whatever kind produced it.
 	//
-	// RouteFailure's other routes name a DIFFERENT operation - gofmt, provider
-	// remediation, reassessment, restore - or a wait. None of them means "run
-	// this same operation again", and the planner reaches them by binding that
-	// other operation, never by re-attempting this one.
-	if class, recorded := state.lastFailure(leased.ID); recorded && RouteFailure(class) != RouteRetry {
+	// RouteFailure's remaining routes name a DIFFERENT operation - gofmt,
+	// provider remediation, reassessment, restore. None of them means "run this
+	// same operation again", and the planner reaches them by binding that other
+	// operation, never by re-attempting this one.
+	//
+	// RouteWait is the one other route that leaves this operation attemptable.
+	// A wait does not mean "run it again now" - the pass that produced it ends
+	// immediately, below - but it does mean the condition is EXTERNAL and
+	// recoverable, so a later pass, after an operator has corrected it, must be
+	// able to find out. There is no free way to observe an execution provider's
+	// account state, so asking it again is the only honest re-derivation; the
+	// attempt that only re-observes the wait is given back by RestoreAttempt,
+	// which is what keeps repeated passes from spending the run's budget.
+	if class, recorded := state.lastFailure(leased.ID); recorded && !reattemptable(RouteFailure(class)) {
 		// The journal already records this operation as failed; releasing the
 		// lease keeps the scheduler row saying the same thing.
 		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
@@ -1087,7 +1096,58 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if _, err := r.scheduler.Finish(started.ID, produced.state); err != nil {
 		return false, Outcome{}, err
 	}
+	// A wait-routed failure settles the RUN, not just the operation: the
+	// external world refused, nothing here can change that, and the pass must
+	// end rather than immediately try again. The run stays waiting - it is not
+	// failed, it has lost no binding, and it owns everything it owned before -
+	// and the attempt is given back, because observing an external refusal is
+	// not work the run's budget should pay for.
+	if class, waiting := waitRoutedFailure(finished.Result); waiting {
+		if _, err := r.scheduler.RestoreAttempt(started.ID); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Waiting, waitReason(class))
+		return false, outcome, err
+	}
 	return true, Outcome{}, nil
+}
+
+// reattemptable reports whether a route leaves the SAME operation eligible to
+// run again. Retry means run it again now; wait means run it again once the
+// external condition it named has been corrected. Every other route names a
+// different operation, or none.
+func reattemptable(route FailureRoute) bool {
+	return route == RouteRetry || route == RouteWait
+}
+
+// waitRoutedFailure reads the class an operation result recorded and reports it
+// only when it routes to a wait. It reads the same one shared field lastFailure
+// does, so this is not an execution.invoke special case: any handler that
+// records a wait-routed class settles the run into that wait.
+func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
+	var result mutationResult
+	if len(raw) == 0 || decodeJSON(raw, &result) != nil || result.FailureClass == "" {
+		return "", false
+	}
+	if RouteFailure(result.FailureClass) != RouteWait {
+		return "", false
+	}
+	return result.FailureClass, true
+}
+
+// waitReasons names the durable run reason each wait-routed class settles into.
+// It is a stated table and not a formatted class name so that the identifier an
+// operator reads, and a later reader replays, cannot drift when a class is
+// renamed.
+var waitReasons = map[FailureClass]string{
+	FailureProviderAccountUnavailable: "execution_provider_account_unavailable",
+}
+
+func waitReason(class FailureClass) string {
+	if reason, ok := waitReasons[class]; ok {
+		return reason
+	}
+	return string(class) + "_wait"
 }
 
 // append records one typed event through the existing journal. Every Phase 8

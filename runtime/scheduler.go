@@ -388,6 +388,37 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 		return nil
 	})
 }
+
+// RestoreAttempt gives back the attempt an operation consumed when that attempt
+// did not exercise the run's work at all.
+//
+// It exists for exactly one situation: a wait-routed failure, where the
+// external world refused before any work happened - the execution provider
+// declined at its account boundary, so no reasoning ran, no candidate was
+// touched, and nothing about the run changed. Charging the run's execution
+// budget for that would mean an operator who corrects the external condition
+// finds the budget already spent by the passes that were only waiting, and a
+// watch loop polling a waiting run would exhaust it without ever doing work.
+//
+// The operation stays FAILED and its diagnostic stays in the journal: what the
+// attempt observed is still true and still readable. Only the budget counter
+// and the elapsed-time origin are given back, so the wall budget measures the
+// next real attempt rather than however long a human took to restore an
+// account.
+func (s Scheduler) RestoreAttempt(id string) (RunOperation, error) {
+	return s.transition(id, func(op *RunOperation, _ time.Time) error {
+		if op.State != OperationFailed {
+			return fmt.Errorf("only a failed operation can have an attempt restored")
+		}
+		if op.Attempt > 0 {
+			op.Attempt--
+		}
+		op.Lease = nil
+		op.StartedAt = nil
+		return nil
+	})
+}
+
 func (s Scheduler) RequestCancel(id string) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, _ time.Time) error { op.CancelRequested = true; return nil })
 }

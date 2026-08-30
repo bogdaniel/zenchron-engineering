@@ -2061,3 +2061,86 @@ func TestStatusSurfacesTheSanitizedExecutionDiagnostic(t *testing.T) {
 		t.Fatalf("a run without an execution failure rendered one:\n%s", clean.String())
 	}
 }
+
+// TestStatusNamesTheProviderAccountWaitInsteadOfBlamingAuthority is the
+// operator-experience half of the third #32 dogfood repair. The run is waiting
+// on an external execution-provider account prerequisite, so status must name
+// that condition and the action that clears it, and must NOT tell the operator
+// that the human-authority boundary is refusing something.
+func TestStatusNamesTheProviderAccountWaitInsteadOfBlamingAuthority(t *testing.T) {
+	engine := &scriptedRuntime{
+		runID: "run-1",
+		report: runtime.StatusReport{
+			SchemaVersion: runtime.SchemaVersion,
+			RunID:         "run-1",
+			Repository:    "zenchron/seeded",
+			Phase:         runtime.Execute,
+			Disposition:   runtime.Waiting,
+			Reason:        "execution_provider_account_unavailable",
+			ExecutionDiagnostic: &runtime.ExecutionDiagnostic{
+				Stage:             "provider_loop",
+				FailureClass:      runtime.FailureProviderAccountUnavailable,
+				Code:              "provider_error",
+				Message:           "provider returned status 429",
+				Route:             runtime.RouteWait,
+				ProviderKind:      "main.candidateBoundProvider",
+				Model:             "gpt-5.6-terra",
+				HTTPStatus:        429,
+				ProviderErrorCode: "credit_balance_exhausted",
+				ArtifactRef:       "artifacts/provider-openai-responses-run-1.txt",
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	code, err := autonomy([]string{"status", "run-1"}, autonomyOverrides{Runtime: engine}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != runtime.ExitWaiting {
+		t.Fatalf("status exit code %d, want %d: a waiting run is not a failed one", code, runtime.ExitWaiting)
+	}
+	var view struct {
+		Disposition string `json:"disposition"`
+		Reason      string `json:"reason"`
+		NextAction  string `json:"next_action"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+		t.Fatalf("status printed no view: %v\n%s", err, out.String())
+	}
+	if view.Disposition != string(runtime.Waiting) || view.Reason != "execution_provider_account_unavailable" {
+		t.Fatalf("the structured view lost the wait: %+v", view)
+	}
+	if strings.Contains(view.NextAction, "authority") {
+		t.Fatalf("status blamed the authority boundary for an external account condition: %q", view.NextAction)
+	}
+	for _, want := range []string{"restore execution-provider account availability", "autonomy resume run-1"} {
+		if !strings.Contains(view.NextAction, want) {
+			t.Fatalf("the next action does not tell the operator what to do: %q", view.NextAction)
+		}
+	}
+	// Nothing may suggest the runtime should buy anything.
+	for _, forbidden := range []string{"purchase", "buy", "top up", "add credit", "billing portal"} {
+		if strings.Contains(strings.ToLower(view.NextAction), forbidden) {
+			t.Fatalf("status told the runtime to fund the account: %q", view.NextAction)
+		}
+	}
+
+	var text bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &text); err != nil {
+		t.Fatal(err)
+	}
+	rendered := text.String()
+	for _, want := range []string{
+		"provider account unavailable", "route=wait",
+		"http=429", "credit_balance_exhausted",
+		"restore execution-provider account availability",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("the text projection does not surface %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "human-authority boundary is refusing") {
+		t.Fatalf("the text projection blamed the authority boundary:\n%s", rendered)
+	}
+}
