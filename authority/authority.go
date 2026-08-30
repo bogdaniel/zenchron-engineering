@@ -270,9 +270,10 @@ func sortedUnique(values []string) []string {
 	if len(values) == 0 {
 		return []string{}
 	}
-	sort.Strings(values)
-	result := values[:0]
-	for _, value := range values {
+	copied := append([]string(nil), values...)
+	sort.Strings(copied)
+	result := copied[:0]
+	for _, value := range copied {
 		if len(result) == 0 || value != result[len(result)-1] {
 			result = append(result, value)
 		}

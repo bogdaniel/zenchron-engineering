@@ -297,9 +297,14 @@ func samePolicyRequirement(left, right policyRequirement) bool {
 }
 
 func (r *resolution) validateReferences() error {
-	for action, permissionRule := range r.permissions {
+	permissionActions := make([]domain.Action, 0, len(r.permissions))
+	for action := range r.permissions {
+		permissionActions = append(permissionActions, action)
+	}
+	sort.Slice(permissionActions, func(i, j int) bool { return actionKey(permissionActions[i]) < actionKey(permissionActions[j]) })
+	for _, action := range permissionActions {
 		if prohibitionRule, prohibited := r.prohibitions[action]; prohibited {
-			return fmt.Errorf("conflicting permission and prohibition for %s:%s from rules %q and %q", action.Type, action.Target, permissionRule, prohibitionRule)
+			return fmt.Errorf("conflicting permission and prohibition for %s:%s from rules %q and %q", action.Type, action.Target, r.permissions[action], prohibitionRule)
 		}
 	}
 	for _, condition := range r.conditions {
@@ -307,9 +312,14 @@ func (r *resolution) validateReferences() error {
 			r.references[claim] = condition.rule
 		}
 	}
-	for claim, source := range r.references {
+	claims := make([]string, 0, len(r.references))
+	for claim := range r.references {
+		claims = append(claims, claim)
+	}
+	sort.Strings(claims)
+	for _, claim := range claims {
 		if _, exists := r.claims[claim]; !exists {
-			return fmt.Errorf("policy outcome from rule %q references undefined required claim %q", source, claim)
+			return fmt.Errorf("policy outcome from rule %q references undefined required claim %q", r.references[claim], claim)
 		}
 	}
 	return nil

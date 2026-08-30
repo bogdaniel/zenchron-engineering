@@ -321,15 +321,6 @@ func matchesAny(path string, patterns []string) bool {
 	return false
 }
 
-func containsAction(actions []domain.Action, target domain.Action) bool {
-	for _, action := range actions {
-		if action == target {
-			return true
-		}
-	}
-	return false
-}
-
 func actionDifference(left, right []domain.Action) []domain.Action {
 	available := make(map[domain.Action]struct{}, len(right))
 	for _, action := range right {

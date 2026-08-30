@@ -171,4 +171,18 @@ func goVersionParts(version string) (int, int, int, bool) {
 	return major, minor, patch, majorErr == nil && minorErr == nil && patchErr == nil
 }
 
-func dockerGoImage(version string) string { return "golang:" + version }
+// goCompatibilityLine reduces a Go version to its major.minor compatibility
+// line (e.g. "1.25.0" -> "1.25"). A patch release is not a distinct runtime
+// requirement: `go 1.25` and `go 1.25.0` in go.mod name the same compatible
+// toolchain, so `golang:1.25.0` is not a separate image from `golang:1.25`.
+// An exact pin (a future go.mod `toolchain` directive) is a stricter,
+// separate requirement and must not be derived from or folded into this line.
+func goCompatibilityLine(version string) string {
+	major, minor, _, ok := goVersionParts(version)
+	if !ok {
+		return version
+	}
+	return fmt.Sprintf("%d.%d", major, minor)
+}
+
+func dockerGoImage(version string) string { return "golang:" + goCompatibilityLine(version) }

@@ -249,6 +249,26 @@ func TestEvaluateFailingEvidenceWinsOverPassingEvidenceIndependentlyOfMapOrder(t
 	}
 }
 
+func TestEvaluateDoesNotMutateContractRequiredClaims(t *testing.T) {
+	contract := contractFixture(t, "security-sensitive.engineering-work-contract.json")
+	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
+	unsorted := []string{"claim-security-review", "claim-auth-regression-tests"}
+	contract.AuthorityConditions = append(contract.AuthorityConditions, domain.AuthorityCondition{
+		Action:         action,
+		RequiredClaims: unsorted,
+	})
+	want := append([]string(nil), unsorted...)
+
+	evaluate(t, authority.Input{
+		DecisionID: "decision-no-mutation", DecisionRevision: "1", Contract: contract, Action: action,
+		Capability: domain.CapabilityAvailable, ChangeProducer: changeProducer(), EvidenceBundles: nil,
+	})
+
+	if !reflect.DeepEqual(unsorted, want) {
+		t.Fatalf("caller's RequiredClaims slice was mutated: got %v, want %v", unsorted, want)
+	}
+}
+
 func TestEvaluateCapabilityStates(t *testing.T) {
 	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
 	for _, test := range []struct {

@@ -2,35 +2,55 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
+
+	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
 const version = "dev"
 
+// exitUsage is the historical exit status for a top-level usage or selfhost
+// failure. The autonomy subcommand reports the runtime exit codes instead.
+const exitUsage = 1
+
 func main() {
-	if err := run(os.Args[1:], osCommands{}, os.Stdout); err != nil {
+	code, err := run(os.Args[1:], osCommands{}, os.Stdout)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "zenchron-engineering:", err)
-		os.Exit(1)
 	}
+	os.Exit(code)
 }
 
-func run(args []string, commands commandRunner, stdout *os.File) error {
+// run returns the process exit status alongside the diagnostic error. main
+// passes the status to os.Exit unchanged, so the code a handler returns is the
+// code the process reports.
+func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) == 1 && args[0] == "version" {
 		fmt.Fprintln(stdout, version)
-		return nil
+		return runtime.ExitCompleted, nil
+	}
+	if len(args) >= 1 && args[0] == "autonomy" {
+		return autonomy(args[1:], autonomyOverrides{}, stdout)
 	}
 	if len(args) >= 3 && args[0] == "selfhost" && args[1] == "issue" {
 		models, err := parseModelFlags(args[3:])
 		if err != nil {
-			return err
+			return exitUsage, err
 		}
-		return selfhostIssueWithModels(args[2], models, commands, stdout)
+		if err := selfhostIssueWithModels(args[2], models, commands, stdout); err != nil {
+			return exitUsage, err
+		}
+		return runtime.ExitCompleted, nil
 	}
 	if len(args) == 4 && args[0] == "selfhost" && args[1] == "resume" && args[2] == "issue" {
-		return selfhostResume(args[3], commands, stdout)
+		if err := selfhostResume(args[3], commands, stdout); err != nil {
+			return exitUsage, err
+		}
+		return runtime.ExitCompleted, nil
 	}
-	return fmt.Errorf("usage: zenchron-engineering {version|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|autonomy ...|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
 }
 
 func parseModelFlags(args []string) ([]string, error) {
