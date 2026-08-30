@@ -41,6 +41,12 @@ type InvocationPurpose string
 const (
 	InvocationInitial     InvocationPurpose = "initial_implementation"
 	InvocationRemediation InvocationPurpose = "remediation"
+	// InvocationContinuation resumes work a bounded stop interrupted. It is
+	// exact-bound to the runtime-owned checkpoint commit and tree the previous
+	// invocation produced, so the provider sees a clean workspace at a known
+	// revision and never unbound dirty state. It carries no findings: nothing
+	// judged the work, it was simply cut off.
+	InvocationContinuation InvocationPurpose = "continuation"
 )
 
 type Finding struct {
@@ -164,11 +170,19 @@ const (
 	// make status tell an operator to resolve an authority condition that does
 	// not exist.
 	FailureProviderAccountUnavailable FailureClass = "provider_account_unavailable"
-	FailureGovernanceMismatch         FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity         FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict    FailureClass = "base_integration_conflict"
-	FailureFlaky                      FailureClass = "flaky_verification"
-	FailureUnknown                    FailureClass = "unknown"
+	// FailureExecutionIncomplete is a producer invocation that produced real
+	// work and then ran out of one of the runtime's own bounds. The work is
+	// preserved as a checkpoint; the OPERATION did not complete, which is why
+	// it is a failure at all. It routes to a retry because continuing is
+	// exactly what it needs, and routing it that way is what puts continuations
+	// under the ordinary execution attempt budget instead of a counter of their
+	// own.
+	FailureExecutionIncomplete     FailureClass = "execution_incomplete"
+	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
+	FailureFlaky                   FailureClass = "flaky_verification"
+	FailureUnknown                 FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -189,7 +203,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteGofmt
 	case FailureCompileTest, FailureBaseIntegrationConflict:
 		return RouteProviderRemediation
-	case FailureTransientProvider, FailureTransientInfrastructure:
+	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess

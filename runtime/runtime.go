@@ -63,19 +63,30 @@ const (
 )
 
 const (
-	EventRunCreated               = "run.created"
-	EventRunWaiting               = "run.waiting"
-	EventRunCompleted             = "run.completed"
-	EventRunFailed                = "run.failed"
-	EventRunCancelled             = "run.cancelled"
-	EventSourceIntentChanged      = "source.intent_changed"
-	EventSourceOptInRemoved       = "source.opt_in_removed"
-	EventSourceOptInRestored      = "source.opt_in_restored"
-	EventOperationPlanned         = "operation.planned"
-	EventOperationBefore          = "operation.before"
-	EventOperationAfter           = "operation.after"
-	EventCandidateChanged         = "candidate.changed"
-	EventCandidateCommitted       = "candidate.committed"
+	EventRunCreated          = "run.created"
+	EventRunWaiting          = "run.waiting"
+	EventRunCompleted        = "run.completed"
+	EventRunFailed           = "run.failed"
+	EventRunCancelled        = "run.cancelled"
+	EventSourceIntentChanged = "source.intent_changed"
+	EventSourceOptInRemoved  = "source.opt_in_removed"
+	EventSourceOptInRestored = "source.opt_in_restored"
+	EventOperationPlanned    = "operation.planned"
+	EventOperationBefore     = "operation.before"
+	EventOperationAfter      = "operation.after"
+	EventCandidateChanged    = "candidate.changed"
+	EventCandidateCommitted  = "candidate.committed"
+	// EventCandidateCheckpointed is a runtime-owned commit of work an
+	// interrupted producer left behind. It is deliberately NOT
+	// candidate.committed: every reader of that event treats it as an
+	// execution-complete, assurance-eligible candidate, and a checkpoint is
+	// neither. See RunProjection.CandidateComplete.
+	EventCandidateCheckpointed = "candidate.checkpointed"
+	// EventExecutionCompleted records that a producer invocation ended by
+	// finishing, rather than by running out of a bound. It is a producer
+	// COMPLETION OBSERVATION and nothing more: it asserts no acceptance, no
+	// evidence and no authority.
+	EventExecutionCompleted       = "execution.completed"
 	EventCandidateBaseIntegrated  = "candidate.base_integrated"
 	EventCandidateExternalChanged = "candidate.external_changed"
 	EventContractCompiled         = "contract.compiled"
@@ -88,7 +99,7 @@ const (
 	EventHumanAuthorityRecorded   = "human.authority_recorded"
 )
 
-var eventTypes = map[string]bool{EventRunCreated: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventRunCreated: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
 
 type Ref struct {
 	ID       string `json:"id"`

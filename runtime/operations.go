@@ -402,7 +402,14 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// operation record says.
 	purpose := InvocationInitial
 	var findings []Finding
-	if state.projection.CandidateRevision != "" {
+	switch {
+	case state.projection.CandidateRevision == "":
+	case !state.projection.CandidateComplete:
+		// The head is a runtime-owned checkpoint: work was interrupted, not
+		// judged. There are no findings to carry, because nothing found
+		// anything - the provider simply ran out of a bound.
+		purpose = InvocationContinuation
+	default:
 		purpose = InvocationRemediation
 		findings = state.findings()
 	}
@@ -451,21 +458,45 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		return failed(pathErr)
 	}
 	record := mutationResult{Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID}
-	produced := effect{result: executionRecord{mutationResult: record}, state: Succeeded, events: []journalEntry{{
+	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
+	events := []journalEntry{{
 		Type: EventCandidateChanged,
 		Payload: CandidateChangedPayload{
-			ProducerID: firstNonEmpty(result.ProviderID, "execution-provider"),
+			ProducerID: producerID,
 			Purpose:    purpose,
 			Outcome:    providerOutcome(result, execErr),
 		},
 		Artifacts: result.Artifacts,
-	}}}
+	}}
+	// A producer that FINISHED is the only thing that completes an execution.
+	// It is an observation about the producer, not about the work: it makes the
+	// exact subject eligible to be treated as a finished candidate, and it
+	// still proves nothing about whether the change is acceptable. Recording it
+	// on every normal completion is what lets a continuation that finds nothing
+	// left to do promote the checkpoint it inherited, without inventing a
+	// commit no mutation produced.
+	if execErr == nil && result.Failure == nil {
+		events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
+			ProducerID:    producerID,
+			Purpose:       purpose,
+			SubjectCommit: subject.Commit,
+			SubjectTree:   subject.Tree,
+		}})
+	}
+	produced := effect{result: executionRecord{mutationResult: record}, state: Succeeded, events: events}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
 		if result.Failure != nil {
 			class = result.Failure.Classification
 		}
 		record.FailureClass = class
+		// Work exists and one of the runtime's own bounds ended the invocation:
+		// that is INCOMPLETE, not merely unknown. Naming it is what routes the
+		// operation to a continuation under the ordinary execution budget.
+		if record.Mutated && continuationEligible(execErr) {
+			class = FailureExecutionIncomplete
+			record.FailureClass = class
+		}
 		// A provider that reported a failure of its own reached at least its own
 		// result; one that only returned an error refused the request before it.
 		stage := execStageProviderRequest
@@ -475,7 +506,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		produced.result = executionRecord{
 			mutationResult: record,
 			Diagnostic:     r.executionDiagnostic(stage, class, result, execErr),
+			// Real work exists but the producer did not finish, so what it left
+			// is a CHECKPOINT: preserved, exactly identified, reassessed, and
+			// deliberately not eligible for assurance or anything past it.
+			// Discarding it would throw away real work; promoting it would
+			// claim an execution that never completed. The fourth dogfood did
+			// the second: one blank README line, produced after eight failed
+			// patch attempts and an exhausted iteration budget, was committed
+			// and sent to assurance as if the objective had been addressed.
+			Checkpoint: record.Mutated && continuationEligible(execErr),
 		}
+		// A producer that left real work behind did its bounded job, so the
+		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
+		// is recorded as a checkpoint rather than as an operation failure. A
+		// producer that left nothing behind failed outright, exactly as before.
 		if !record.Mutated {
 			produced.state = OperationFailed
 		}
@@ -483,16 +527,36 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	return produced
 }
 
+// continuationEligible reports whether a provider stop is one the runtime knows
+// how to resume from. It is deliberately a stated allowlist rather than "any
+// stop with mutation": a cancelled run, a deadline, a refused request or a
+// no-progress loop are not interrupted work waiting to continue, and treating
+// them as continuable would turn a stuck run into an endless one.
+//
+// StopIterationBudget is the observed case and the only one this pass adds. The
+// provider reasoned, mutated the workspace, and was cut off by a bound the
+// runtime itself set - the one situation where continuing is exactly what a
+// human would do.
+func continuationEligible(cause error) bool {
+	var stop *ProviderStopError
+	if !errors.As(cause, &stop) {
+		return false
+	}
+	return stop.Reason == StopIterationBudget
+}
+
 // assertExecutionSubject refuses to execute against a workspace that is not the
-// subject the invocation claims. For a remediation that subject is the recorded
-// candidate head and tree; for an initial implementation it is the trusted base,
-// because no runtime-owned candidate commit exists yet. Either disagreement is a
-// workspace_integrity_violation, never a silent proceed.
+// subject the invocation claims. For a remediation or a continuation that
+// subject is the recorded candidate head and tree - a continuation is bound to
+// the exact checkpoint commit its predecessor produced - and for an initial
+// implementation it is the trusted base, because no runtime-owned candidate
+// commit exists yet. Either disagreement is a workspace_integrity_violation,
+// never a silent proceed.
 func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purpose InvocationPurpose, subject CommitResult) error {
 	if subject.Commit == "" || subject.Tree == "" {
 		return &WorkspaceIntegrityError{Detail: "candidate workspace reported no head revision or tree"}
 	}
-	if purpose == InvocationRemediation {
+	if purpose != InvocationInitial {
 		if subject.Commit != state.projection.CandidateRevision {
 			return &WorkspaceIntegrityError{Detail: "observed candidate head " + subject.Commit + " is not the recorded candidate revision " + state.projection.CandidateRevision}
 		}
@@ -514,6 +578,11 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 type executionRecord struct {
 	mutationResult
 	Diagnostic *ExecutionDiagnostic `json:"diagnostic,omitempty"`
+	// Checkpoint marks a mutation the producer did not finish. The commit the
+	// runtime makes for it is journalled as candidate.checkpointed rather than
+	// candidate.committed, which is the whole durable difference between
+	// preserved partial work and an execution-complete candidate.
+	Checkpoint bool `json:"checkpoint,omitempty"`
 }
 
 // ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
@@ -706,6 +775,19 @@ type commitRecord struct {
 // the runtime-owned commit, and immediately returns through the #8 bridge, so
 // commit -> normalized observation -> reassessment is one indivisible step.
 func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState, _ RunOperation) effect {
+	// Which mutation is being committed is the planner's binding, so the
+	// producing operation is re-derived the same way rather than re-encoded
+	// into this handler's own key. Its record says whether the producer
+	// finished; that is what decides the meaning of the commit about to be made.
+	checkpoint := false
+	if producing, wanted := bindCandidateCommit(state); wanted {
+		if op, ok := state.snapshot.Operations[producing]; ok {
+			var record executionRecord
+			if len(op.Result) > 0 && json.Unmarshal(op.Result, &record) == nil {
+				checkpoint = record.Checkpoint
+			}
+		}
+	}
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return failed(err)
@@ -737,13 +819,22 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	if err != nil {
 		return failed(err)
 	}
+	// Both events carry the same identity, because a checkpoint IS a real
+	// runtime-owned commit. Only the meaning differs, and it differs in the
+	// event NAME rather than in a flag inside a payload, so no existing reader
+	// of candidate.committed can mistake preserved partial work for a finished
+	// candidate.
+	commitEvent := EventCandidateCommitted
+	if checkpoint {
+		commitEvent = EventCandidateCheckpointed
+	}
 	return effect{
 		state: Succeeded,
 		// The commit succeeded and the workspace refreshed its own baseline;
 		// journalling it here is what makes the new baseline durable.
 		result: commitRecord{result.Commit, result.Tree, len(result.Paths), workspace.TrustedMetadata},
 		events: []journalEntry{
-			{Type: EventCandidateCommitted, Payload: CandidateCommittedPayload{
+			{Type: commitEvent, Payload: CandidateCommittedPayload{
 				Commit: result.Commit, Tree: result.Tree,
 				PathCount: len(result.Paths), PathsDigest: pathsDigest(result.Paths),
 			}},
@@ -843,11 +934,45 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		payload.FailureClass = ""
 		payload.Bundle = evidenceBundleRef(state.run.ID, commit, kernel.Contract.Revision)
 	}
-	return effect{
-		state:  Succeeded,
-		result: struct{}{},
-		events: []journalEntry{{Type: EventAssuranceObserved, Payload: payload, Artifacts: result.Artifacts}},
+	events := []journalEntry{{Type: EventAssuranceObserved, Payload: payload, Artifacts: result.Artifacts}}
+	// An assurance run that did not reach a verdict about the CANDIDATE has not
+	// satisfied this operation. The observation is journalled either way - it is
+	// true, and status must show it - but the OPERATION only succeeds when the
+	// verifier actually judged the tree.
+	//
+	// The distinction is the route of the class the verifier reported. A
+	// verification failure, a changed verification surface, a compile or test
+	// failure: those are verdicts about the candidate, they route to
+	// reassessment or to a producer, and recording them as a succeeded
+	// observation is what lets the planner act on them. A transient
+	// INFRASTRUCTURE failure is not a verdict at all - the sandbox could not
+	// run - and it routes to a retry of this same operation.
+	//
+	// The fourth dogfood recorded exactly that case as Succeeded. The exact
+	// binding then looked complete, base.integrate correctly refused to proceed
+	// without passing assurance, no operation was wanted, and the run settled
+	// waiting/goal_state_reached with an unjudged candidate. Failing the
+	// operation puts it back under the existing scheduler semantics: the same
+	// exact commit, tree and contract are retried, the attempt increments under
+	// max_assurance_attempts, and an exhausted budget settles with the bounded
+	// attempts_exhausted failure rather than a goal that was never reached.
+	if !result.Passed && RouteFailure(class) == RouteRetry {
+		return effect{
+			state:  OperationFailed,
+			result: assuranceRecord{FailureClass: class, Passed: false},
+			events: events,
+		}
 	}
+	return effect{state: Succeeded, result: struct{}{}, events: events}
+}
+
+// assuranceRecord is the durable result of an assurance operation that did not
+// satisfy itself. It carries the one shared field the retry boundary reads -
+// failure_class - so `lastFailure` routes it exactly like any other handler's
+// recorded class, with no assurance special case anywhere in the reconciler.
+type assuranceRecord struct {
+	FailureClass FailureClass `json:"failure_class,omitempty"`
+	Passed       bool         `json:"passed"`
 }
 
 // evidenceBundleRef binds evidence to the exact commit and contract revision it

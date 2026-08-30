@@ -280,8 +280,14 @@ func TestBrokeredPatchIsPreflightedBeforeItTouchesTheWorkspace(t *testing.T) {
 	if err == nil {
 		t.Fatal("a patch that cannot fully apply was accepted")
 	}
-	if !strings.Contains(err.Error(), "does not apply cleanly") {
+	// The refusal names the stage - preflight, before the mutation lock - and
+	// now also names the path Git could not apply, which is what a model needs
+	// to correct itself rather than re-send the same patch.
+	if !strings.Contains(err.Error(), "refused at check") {
 		t.Fatalf("patch was not refused by the preflight dry run: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sub/other.txt") {
+		t.Fatalf("the refusal does not name the path that failed: %v", err)
 	}
 	unchanged, readErr := os.ReadFile(filepath.Join(broker.CandidateDir, "hello.txt"))
 	if readErr != nil || string(unchanged) != "candidate-content-9c3\n" {

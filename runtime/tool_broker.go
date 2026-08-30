@@ -231,6 +231,14 @@ func (b ToolBroker) ApplyPatch(patch []byte) error {
 	if err != nil {
 		return err
 	}
+	// The one dialect this runtime refuses BY NAME. It is not translated: a
+	// second, permissive patch interpreter is exactly what would make the
+	// applied change something other than what Git parsed. Naming it is what
+	// lets a model correct itself in one turn instead of spending its whole
+	// iteration budget on a grammar Git will never accept.
+	if isBeginPatchDialect(patch) {
+		return &PatchError{Stage: "parse", Detail: beginPatchRefusal}
+	}
 	git := GitRunner{Dir: root}
 	file, err := os.CreateTemp("", "zenchron-brokered-*.patch")
 	if err != nil {
@@ -244,9 +252,20 @@ func (b ToolBroker) ApplyPatch(patch []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	listed, err := git.run("apply", "--numstat", "-z", file.Name())
+	// Every stage below uses the SAME flags, so what is discovered, what is
+	// checked, and what is applied cannot disagree about the patch.
+	//
+	// --recount tells Git to derive each hunk's line counts from the hunk BODY
+	// instead of trusting the @@ -old,count +new,count @@ header. The body stays
+	// authoritative and context is still verified exactly as before - a patch
+	// whose context does not match the workspace still fails - but a model that
+	// got the arithmetic in a header wrong no longer has an otherwise coherent
+	// diff rejected at parse time, which is what consumed most of the fourth
+	// dogfood's reasoning iterations. Git remains the only parser: nothing here
+	// interprets, rewrites, or repairs the patch text.
+	listed, err := git.run("apply", "--numstat", "-z", "--recount", file.Name())
 	if err != nil {
-		return fmt.Errorf("brokered patch is not a readable patch")
+		return &PatchError{Stage: "parse", Detail: sanitizeGitDiagnostic(err, root, file.Name())}
 	}
 	validated := map[string]bool{}
 	for _, record := range strings.Split(string(listed), "\x00") {
@@ -269,8 +288,8 @@ func (b ToolBroker) ApplyPatch(patch []byte) error {
 	// A real dry run. --check parses and tests every hunk against the
 	// workspace and writes nothing, so a patch that would fail half-applied is
 	// refused before the runtime takes the mutation lock.
-	if _, err := git.run("apply", "--check", file.Name()); err != nil {
-		return fmt.Errorf("brokered patch does not apply cleanly to the candidate workspace")
+	if _, err := git.run("apply", "--check", "--recount", file.Name()); err != nil {
+		return &PatchError{Stage: "check", Detail: sanitizeGitDiagnostic(err, root, file.Name())}
 	}
 	candidateMutation.Lock()
 	defer candidateMutation.Unlock()
@@ -278,8 +297,8 @@ func (b ToolBroker) ApplyPatch(patch []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := git.run("apply", file.Name()); err != nil {
-		return fmt.Errorf("brokered patch failed to apply")
+	if _, err := git.run("apply", "--recount", file.Name()); err != nil {
+		return &PatchError{Stage: "apply", Detail: sanitizeGitDiagnostic(err, root, file.Name())}
 	}
 	after, err := workspaceChanges(git)
 	if err != nil {
@@ -312,4 +331,79 @@ func (b ToolBroker) RunCommand(ctx context.Context, command []string) (CommandOu
 	}
 	args := append(dockerBase(root, false), "--workdir", "/candidate", b.Sandbox.Image)
 	return b.Sandbox.run(ctx, append(args, command...))
+}
+
+// PatchError is a brokered patch failure that carries a bounded, sanitized
+// diagnostic. The previous behaviour - "brokered patch is not a readable
+// patch" - threw away everything a model needed to recover, so it re-sent the
+// same broken patch until its iteration budget ran out. What is returned now is
+// Git's own message about the path and hunk, with every host detail removed.
+type PatchError struct {
+	// Stage is which of the three identical-flag Git invocations refused:
+	// parse (numstat), check (dry run), or apply.
+	Stage  string
+	Detail string
+}
+
+func (e *PatchError) Error() string {
+	if e.Detail == "" {
+		return "brokered patch refused at " + e.Stage
+	}
+	return "brokered patch refused at " + e.Stage + ": " + e.Detail
+}
+
+// beginPatchRefusal is deterministic text, not a template: the same refusal for
+// the same mistake every time, so a model sees a stable correction.
+const beginPatchRefusal = `candidate.apply_patch requires a git-compatible unified diff; ` +
+	`"*** Begin Patch"/"*** Update File" syntax is not accepted. ` +
+	`Send either "--- a/path", "+++ b/path", "@@ ..." or a full "diff --git a/path b/path" patch.`
+
+// isBeginPatchDialect recognizes the envelope markers of the *** Begin Patch
+// dialect. It only DETECTS: nothing translates it, and a patch carrying these
+// markers is refused whole rather than partially interpreted.
+func isBeginPatchDialect(patch []byte) bool {
+	for _, line := range strings.Split(string(patch), "\n") {
+		switch strings.TrimSpace(line) {
+		case "*** Begin Patch", "*** End Patch":
+			return true
+		}
+		trimmed := strings.TrimSpace(line)
+		for _, marker := range []string{"*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"} {
+			if strings.HasPrefix(trimmed, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sanitizeGitDiagnostic turns a trusted-Git failure into something safe to hand
+// back to a model. Git names the workspace root and the temporary patch file in
+// its messages, and both are host paths; they are replaced by placeholders, any
+// remaining absolute path is dropped, the existing transcript redactor removes
+// credential-shaped text, and the result is bounded by the same field ceiling
+// every durable diagnostic uses. Repository-relative paths and line numbers -
+// the part a model actually needs - survive.
+func sanitizeGitDiagnostic(err error, root, patchPath string) string {
+	if err == nil {
+		return ""
+	}
+	detail := err.Error()
+	for placeholder, actual := range map[string]string{"<patch>": patchPath, "<candidate>": root} {
+		if actual != "" {
+			detail = strings.ReplaceAll(detail, actual, placeholder)
+		}
+	}
+	detail = string(redactTranscript([]byte(detail)))
+	// Anything still absolute is a host path this boundary never promised to
+	// expose, so it is removed rather than trimmed.
+	fields := strings.Fields(detail)
+	kept := fields[:0]
+	for _, field := range fields {
+		if strings.HasPrefix(field, "/") || strings.Contains(field, "/.git/") {
+			field = "<path>"
+		}
+		kept = append(kept, field)
+	}
+	return boundedDetail(strings.Join(kept, " "))
 }

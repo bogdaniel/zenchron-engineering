@@ -49,6 +49,21 @@ type RunProjection struct {
 	// any process-local error state and without an operator opening runtime.db
 	// or knowing an artifact path.
 	ExecutionDiagnostic *ExecutionDiagnostic `json:"execution_diagnostic,omitempty"`
+	// CandidateComplete reports whether the CURRENT candidate head is
+	// execution-complete: a producer finished against it, rather than being cut
+	// off mid-invocation with its partial work preserved. It is what separates
+	// a runtime-owned checkpoint from a candidate anything downstream may act
+	// on, and it is why assurance cannot run on interrupted work.
+	//
+	// It is a fold, so the LAST event about the head decides: a commit or a
+	// base integration makes the head complete, a checkpoint makes it
+	// incomplete, and a producer completion observed against it completes it
+	// without inventing a commit that no mutation produced.
+	CandidateComplete bool `json:"candidate_complete"`
+	// Checkpoints is how many times a producer left work unfinished on this
+	// run. It only ever grows, which is what makes it a bound rather than a
+	// counter a stalling provider could reset by producing something new.
+	Checkpoints int `json:"checkpoints,omitempty"`
 }
 
 // Observation is the part of every latest-wins observation that is about the
@@ -148,6 +163,24 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 		}
 		p.CandidateRevision, p.CandidateTree = payload.Commit, payload.Tree
 		p.CandidateMetadata = ""
+		p.CandidateComplete = true
+	case EventCandidateCheckpointed:
+		payload, err := decodePayload[CandidateCommittedPayload](e.Payload)
+		if err != nil {
+			return err
+		}
+		// A checkpoint moves the head exactly as a commit does - it is a real
+		// commit - but it leaves the head INCOMPLETE, which is what keeps
+		// assurance and everything past it ineligible.
+		p.CandidateRevision, p.CandidateTree = payload.Commit, payload.Tree
+		p.CandidateMetadata = ""
+		p.CandidateComplete = false
+		p.Checkpoints++
+	case EventExecutionCompleted:
+		if _, err := decodePayload[ExecutionCompletedPayload](e.Payload); err != nil {
+			return err
+		}
+		p.CandidateComplete = true
 	case EventCandidateBaseIntegrated:
 		payload, err := decodePayload[CandidateBaseIntegratedPayload](e.Payload)
 		if err != nil {
@@ -156,6 +189,7 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 		p.BaseRevision = payload.BaseRevision
 		p.CandidateRevision, p.CandidateTree = payload.Commit, payload.Tree
 		p.CandidateMetadata = ""
+		p.CandidateComplete = true
 	case EventCandidateExternalChanged:
 		payload, err := decodePayload[CandidateExternalChangedPayload](e.Payload)
 		if err != nil {

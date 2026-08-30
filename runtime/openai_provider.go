@@ -300,7 +300,7 @@ func (p OpenAIProvider) validate(request ExecutionRequest) error {
 	if request.RunID == "" || request.CandidateDir == "" || request.Contract.ID == "" || request.Candidate.Revision == "" || request.Base.Revision == "" || request.ControllerID == "" || request.SourceSnapshot.ID == "" || request.Purpose == "" {
 		return fmt.Errorf("incomplete execution request binding")
 	}
-	if request.Purpose != InvocationInitial && request.Purpose != InvocationRemediation {
+	if request.Purpose != InvocationInitial && request.Purpose != InvocationRemediation && request.Purpose != InvocationContinuation {
 		return fmt.Errorf("invalid invocation purpose")
 	}
 	if request.Purpose == InvocationRemediation && len(request.Findings) == 0 {

@@ -83,8 +83,12 @@ func toolDefinitions() []toolDefinition {
 			Description: "Show the candidate's uncommitted diff, optionally restricted to paths.",
 			Parameters:  schema(map[string]any{"paths": stringsArray("Optional repository-relative paths.")}, "paths")},
 		{Type: "function", Name: ToolCandidateApplyPatch, Strict: true,
-			Description: "Apply a unified diff to the candidate workspace. Every affected path is validated before anything is written.",
-			Parameters:  schema(map[string]any{"patch": map[string]any{"type": "string", "description": "A unified diff."}}, "patch")},
+			Description: "Apply a git-compatible unified diff to the candidate workspace. Every affected path is validated before anything is written. " +
+				"ACCEPTED: a patch starting with \"--- a/path\" / \"+++ b/path\" / \"@@ ...\", or a full \"diff --git a/path b/path\" patch. " +
+				"REJECTED: \"*** Begin Patch\", \"*** Update File:\", \"*** Add File:\", \"*** Delete File:\", \"*** End Patch\" - that dialect is not a unified diff and is refused, not translated. " +
+				"Zenchron validates the patch with `git apply`, which is the only parser: the hunk BODY is authoritative and line counts in @@ headers are recounted, but context lines must match the file as it is on disk right now. " +
+				"After a context mismatch, repo.read the file again and rebuild the patch from what it actually contains.",
+			Parameters: schema(map[string]any{"patch": map[string]any{"type": "string", "description": "A git-compatible unified diff. Context lines must match the current file contents."}}, "patch")},
 		{Type: "function", Name: ToolCandidateRun, Strict: true,
 			Description: "Run one bounded command in the candidate sandbox: no network, only the candidate workspace mounted. This is an argv, not a shell.",
 			Parameters:  schema(map[string]any{"command": stringsArray("Command argv; the first element is the program.")}, "command")},

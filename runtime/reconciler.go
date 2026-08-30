@@ -509,6 +509,14 @@ func (s *runState) conditions() (Disposition, string) {
 	if pr := s.projection.PullRequest; pr != nil && pr.State == string(GitHubClosed) && !pr.Merged {
 		return Waiting, "pull_request_closed_unmerged"
 	}
+	// Continuations are bounded by the run's execution budget. Each checkpoint
+	// is different work against a different commit, so it earns its own
+	// operation and its own attempts; what must not be unbounded is how many
+	// times a provider may leave work unfinished. Exceeding it is a precise
+	// bounded failure, never a run that quietly concludes its goal was reached.
+	if limit := s.rt.deps.Budgets.MaxExecutionAttempts; limit > 0 && s.projection.Checkpoints > limit {
+		return Failed, "execution_continuations_exhausted"
+	}
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
 		return Waiting, "requested_privilege_expansion"
 	}
@@ -623,6 +631,15 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	if s.projection.CandidateRevision == "" {
 		return "initial|" + s.contractRevision() + "|" + s.pinnedBase(), true
 	}
+	// Continuation: the head is a runtime-owned checkpoint, so the producer was
+	// interrupted rather than finished. One continuation per checkpoint, bound
+	// to that exact commit, so a continuation can never be confused with a
+	// retry of the invocation that produced it. The count of checkpoints is
+	// what bounds this, in conditions(); an operation identity cannot, because
+	// each checkpoint is genuinely different work.
+	if !s.projection.CandidateComplete {
+		return "continuation|" + s.projection.CandidateRevision, true
+	}
 	// Bounded remediation: only a CURRENT-head failure that routes to a
 	// producer. An authority wait never reaches this branch, because
 	// RouteFailure never routes an authority wait to a provider.
@@ -670,8 +687,15 @@ func (s *runState) mutations() []RunOperation {
 	return sortOperations(out)
 }
 
+// bindAssuranceGo requires an EXECUTION-COMPLETE candidate. Assurance answers
+// "is this candidate acceptable"; asking it about work a bounded stop cut off
+// mid-invocation answers a question nobody asked, and a pass on preserved
+// partial work would carry the whole way to publication eligibility.
 func bindAssuranceGo(s *runState) (string, bool) {
 	if s.projection.CandidateRevision == "" || s.projection.Contract == (Ref{}) {
+		return "", false
+	}
+	if !s.projection.CandidateComplete {
 		return "", false
 	}
 	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision(), true
@@ -1102,6 +1126,16 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// failed, it has lost no binding, and it owns everything it owned before -
 	// and the attempt is given back, because observing an external refusal is
 	// not work the run's budget should pay for.
+	// A checkpoint ends the PASS. The work is preserved and committed, #8 has
+	// reassessed it, and the continuation is planned - but running it in the
+	// same call would let one reconciliation spend the entire execution budget
+	// on a provider that keeps stalling, and would leave no durable point at
+	// which an operator, a restart, or a watch tick sees the preserved work.
+	// The next reconciliation continues from the exact checkpoint.
+	if journalled(produced.events, EventCandidateCheckpointed) {
+		outcome, err := r.settle(state, Waiting, "execution_checkpointed")
+		return false, outcome, err
+	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
 		if _, err := r.scheduler.RestoreAttempt(started.ID); err != nil {
 			return false, Outcome{}, err
@@ -1110,6 +1144,16 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	return true, Outcome{}, nil
+}
+
+// journalled reports whether an effect appended one particular event type.
+func journalled(entries []journalEntry, eventType string) bool {
+	for _, entry := range entries {
+		if entry.Type == eventType {
+			return true
+		}
+	}
+	return false
 }
 
 // reattemptable reports whether a route leaves the SAME operation eligible to

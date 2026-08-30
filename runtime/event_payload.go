@@ -81,6 +81,23 @@ var eventPayloads = map[string]payloadValidator{
 			nonNegative("path_count", p.PathCount),
 			required("paths_digest", p.PathsDigest))
 	}),
+	// A checkpoint carries the same identity a commit does: it IS a real
+	// runtime-owned commit, and the difference is what it means, not what it
+	// records.
+	EventCandidateCheckpointed: payloadSchema(func(p CandidateCommittedPayload) error {
+		return errors.Join(
+			required("commit", p.Commit),
+			required("tree", p.Tree),
+			nonNegative("path_count", p.PathCount),
+			required("paths_digest", p.PathsDigest))
+	}),
+	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
+		return errors.Join(
+			required("producer_id", p.ProducerID),
+			required("purpose", string(p.Purpose)),
+			required("subject_commit", p.SubjectCommit),
+			required("subject_tree", p.SubjectTree))
+	}),
 	EventCandidateBaseIntegrated: payloadSchema(func(p CandidateBaseIntegratedPayload) error {
 		if p.Strategy != "rebase" && p.Strategy != "merge" {
 			return fmt.Errorf("base integration strategy %q must be rebase or merge", p.Strategy)
@@ -278,6 +295,18 @@ type CandidateCommittedPayload struct {
 	Tree        string `json:"tree"`
 	PathCount   int    `json:"path_count"`
 	PathsDigest string `json:"paths_digest"`
+}
+
+// ExecutionCompletedPayload records that the producer finished its invocation
+// against an exact subject, rather than being cut off by an iteration, tool
+// call, token or time bound. It is the observation that lets the runtime tell a
+// finished candidate from preserved partial work; it is not evidence, not a
+// verdict, and it authorizes nothing.
+type ExecutionCompletedPayload struct {
+	ProducerID    string            `json:"producer_id"`
+	Purpose       InvocationPurpose `json:"purpose"`
+	SubjectCommit string            `json:"subject_commit"`
+	SubjectTree   string            `json:"subject_tree"`
 }
 
 // CandidateBaseIntegratedPayload records a rebase or merge-from-base and the
