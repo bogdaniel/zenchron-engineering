@@ -140,11 +140,11 @@ func stopReason(t *testing.T, err error) ProviderStop {
 func TestOpenAIProviderDrivesEveryToolThroughTheBroker(t *testing.T) {
 	patch := "diff --git a/added.txt b/added.txt\nnew file mode 100644\n--- /dev/null\n+++ b/added.txt\n@@ -0,0 +1 @@\n+added-9c3\n"
 	api := &fakeResponsesAPI{bodies: []string{
-		scriptedToolCalls(t, "1", 10, [2]string{ToolRepoRead, `{"path":"hello.txt"}`}),
-		scriptedToolCalls(t, "2", 10, [2]string{ToolRepoSearch, `{"pattern":"candidate-content-9c3","scope":[]}`}),
-		scriptedToolCalls(t, "3", 10, [2]string{ToolCandidateApplyPatch, string(jsonArgs(t, map[string]any{"patch": patch}))}),
-		scriptedToolCalls(t, "4", 10, [2]string{ToolCandidateDiff, `{"paths":[]}`}),
-		scriptedToolCalls(t, "5", 10, [2]string{ToolCandidateRun, `{"command":["go","test","./..."]}`}),
+		scriptedToolCalls(t, "1", 10, [2]string{openaiToolRepoRead, `{"path":"hello.txt"}`}),
+		scriptedToolCalls(t, "2", 10, [2]string{openaiToolRepoSearch, `{"pattern":"candidate-content-9c3","scope":[]}`}),
+		scriptedToolCalls(t, "3", 10, [2]string{openaiToolCandidateApplyPatch, string(jsonArgs(t, map[string]any{"patch": patch}))}),
+		scriptedToolCalls(t, "4", 10, [2]string{openaiToolCandidateDiff, `{"paths":[]}`}),
+		scriptedToolCalls(t, "5", 10, [2]string{openaiToolCandidateRun, `{"command":["go","test","./..."]}`}),
 		scriptedFinalMessage(t, "6", 10),
 	}}
 	provider, request, fake, _ := openaiFixture(t, api)
@@ -176,7 +176,7 @@ func TestOpenAIProviderDrivesEveryToolThroughTheBroker(t *testing.T) {
 	}
 	// Every tool result was returned to the model as a function_call_output.
 	last := string(api.requests[len(api.requests)-1])
-	for _, want := range []string{ToolRepoRead, ToolRepoSearch, ToolCandidateApplyPatch, ToolCandidateDiff, ToolCandidateRun, "function_call_output", "candidate-content-9c3", "patch applied", "exit=0"} {
+	for _, want := range []string{openaiToolRepoRead, openaiToolRepoSearch, openaiToolCandidateApplyPatch, openaiToolCandidateDiff, openaiToolCandidateRun, "function_call_output", "candidate-content-9c3", "patch applied", "exit=0"} {
 		if !strings.Contains(last, want) {
 			t.Fatalf("tool round trip %q never reached the model: %s", want, last)
 		}
@@ -241,9 +241,9 @@ func TestOpenAIProviderBindsTheSessionToTheFullRunIdentity(t *testing.T) {
 func TestOpenAIProviderReturnsToolRefusalsToTheModel(t *testing.T) {
 	api := &fakeResponsesAPI{bodies: []string{
 		scriptedToolCalls(t, "1", 5, [2]string{"shell", `{"command":["sh","-c","cat /etc/passwd"]}`}),
-		scriptedToolCalls(t, "2", 5, [2]string{ToolRepoRead, `{"path":"hello.txt","follow_symlinks":true}`}),
-		scriptedToolCalls(t, "3", 5, [2]string{ToolRepoRead, `{"path":"../outside/data.txt"}`}),
-		scriptedToolCalls(t, "4", 5, [2]string{ToolRepoRead, `{"path":"hello.txt"}`}),
+		scriptedToolCalls(t, "2", 5, [2]string{openaiToolRepoRead, `{"path":"hello.txt","follow_symlinks":true}`}),
+		scriptedToolCalls(t, "3", 5, [2]string{openaiToolRepoRead, `{"path":"../outside/data.txt"}`}),
+		scriptedToolCalls(t, "4", 5, [2]string{openaiToolRepoRead, `{"path":"hello.txt"}`}),
 		scriptedFinalMessage(t, "5", 5),
 	}}
 	provider, request, fake, _ := openaiFixture(t, api)
@@ -277,8 +277,8 @@ func TestOpenAIProviderReturnsToolRefusalsToTheModel(t *testing.T) {
 // TestOpenAIProviderEndsOnEveryBound walks each bound and requires a typed
 // outcome. None of these may loop forever.
 func TestOpenAIProviderEndsOnEveryBound(t *testing.T) {
-	read := scriptedToolCalls(t, "loop", 5, [2]string{ToolRepoRead, `{"path":"hello.txt"}`})
-	fail := scriptedToolCalls(t, "loop", 5, [2]string{ToolRepoRead, `{"path":"../outside/data.txt"}`})
+	read := scriptedToolCalls(t, "loop", 5, [2]string{openaiToolRepoRead, `{"path":"hello.txt"}`})
+	fail := scriptedToolCalls(t, "loop", 5, [2]string{openaiToolRepoRead, `{"path":"../outside/data.txt"}`})
 
 	t.Run("iterations", func(t *testing.T) {
 		api := &fakeResponsesAPI{repeat: read}
@@ -295,9 +295,9 @@ func TestOpenAIProviderEndsOnEveryBound(t *testing.T) {
 
 	t.Run("tool calls", func(t *testing.T) {
 		api := &fakeResponsesAPI{repeat: scriptedToolCalls(t, "loop", 5,
-			[2]string{ToolRepoRead, `{"path":"hello.txt"}`},
-			[2]string{ToolRepoRead, `{"path":"hello.txt"}`},
-			[2]string{ToolRepoRead, `{"path":"hello.txt"}`})}
+			[2]string{openaiToolRepoRead, `{"path":"hello.txt"}`},
+			[2]string{openaiToolRepoRead, `{"path":"hello.txt"}`},
+			[2]string{openaiToolRepoRead, `{"path":"hello.txt"}`})}
 		provider, request, _, _ := openaiFixture(t, api)
 		provider.MaxIterations = 100
 		provider.MaxToolCalls = 2
@@ -307,7 +307,7 @@ func TestOpenAIProviderEndsOnEveryBound(t *testing.T) {
 	})
 
 	t.Run("tokens", func(t *testing.T) {
-		api := &fakeResponsesAPI{repeat: scriptedToolCalls(t, "loop", 5_000_000, [2]string{ToolRepoRead, `{"path":"hello.txt"}`})}
+		api := &fakeResponsesAPI{repeat: scriptedToolCalls(t, "loop", 5_000_000, [2]string{openaiToolRepoRead, `{"path":"hello.txt"}`})}
 		provider, request, _, _ := openaiFixture(t, api)
 		provider.MaxIterations = 100
 		if got := stopReason(t, mustFail(t, provider, request)); got != StopTokenBudget {
@@ -454,16 +454,16 @@ func TestOpenAIProviderCredentialNeverLeavesTheControlPlane(t *testing.T) {
 	api := &fakeResponsesAPI{bodies: []string{
 		// The model tries every way it has to ask for the credential.
 		scriptedToolCalls(t, "1", 5,
-			[2]string{ToolRepoRead, `{"path":"../openai.key"}`},
-			[2]string{ToolRepoRead, `{"path":"openai.key"}`},
-			[2]string{ToolRepoSearch, `{"pattern":"sk-zenchron","scope":[]}`},
-			[2]string{ToolCandidateRun, `{"command":["env"]}`},
-			[2]string{ToolCandidateRun, `{"command":["cat","/proc/self/environ"]}`}),
+			[2]string{openaiToolRepoRead, `{"path":"../openai.key"}`},
+			[2]string{openaiToolRepoRead, `{"path":"openai.key"}`},
+			[2]string{openaiToolRepoSearch, `{"pattern":"sk-zenchron","scope":[]}`},
+			[2]string{openaiToolCandidateRun, `{"command":["env"]}`},
+			[2]string{openaiToolCandidateRun, `{"command":["cat","/proc/self/environ"]}`}),
 		scriptedFinalMessage(t, "2", 5),
 	}}
 	provider, request, fake, keyFile := openaiFixture(t, api)
 	absolute := string(jsonArgs(t, map[string]any{"path": keyFile}))
-	api.bodies = append([]string{scriptedToolCalls(t, "0", 5, [2]string{ToolRepoRead, absolute})}, api.bodies...)
+	api.bodies = append([]string{scriptedToolCalls(t, "0", 5, [2]string{openaiToolRepoRead, absolute})}, api.bodies...)
 	result, err := provider.Execute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

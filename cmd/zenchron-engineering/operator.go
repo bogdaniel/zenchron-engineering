@@ -611,6 +611,10 @@ func nextOperatorAction(view statusView) string {
 		return "the forge rate-limit budget is exhausted until " + view.GitHub.RateLimit.ResetAt.UTC().Format(time.RFC3339) + "; no action is needed before then"
 	}
 	if view.Disposition == runtime.Failed {
+		if d := view.ExecutionDiagnostic; d != nil {
+			return "the run failed (" + view.Reason + ") at execution stage " + d.Stage +
+				"; the sanitized diagnostic is shown above and `autonomy events " + run + "` holds the full journal"
+		}
 		return "inspect `autonomy events " + run + "`; the run failed (" + view.Reason + ")"
 	}
 	return "`autonomy resume " + run + "` to ask the runtime to reconcile again"
@@ -680,6 +684,26 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	}
 	if attempts := sortedAttempts(view.Attempts); attempts != "" {
 		line("attempts", attempts)
+	}
+	// The execution diagnostic is rendered as bounded FIELDS, never as provider
+	// output: everything printed here is already sanitized and length-bounded
+	// where it was persisted. The artifact is named, never opened - it is
+	// local-only material and printing it would publish exactly what the
+	// sanitization exists to keep out of an operator-visible surface.
+	if d := view.ExecutionDiagnostic; d != nil {
+		line("execution failure", strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
+			d.Stage, d.FailureClass, d.Route, d.Code)))
+		line("execution provider", strings.TrimSpace(fmt.Sprintf("%s model=%s", d.ProviderKind, d.Model)))
+		if d.HTTPStatus != 0 || d.ProviderErrorCode != "" || d.ProviderErrorParam != "" {
+			line("execution response", strings.TrimSpace(fmt.Sprintf("http=%d provider_error=%s param=%s",
+				d.HTTPStatus, d.ProviderErrorCode, d.ProviderErrorParam)))
+		}
+		if d.Message != "" {
+			line("execution detail", d.Message)
+		}
+		if d.ArtifactRef != "" {
+			line("execution artifact", d.ArtifactRef+" (local-only, sanitized; not published)")
+		}
 	}
 	line("next action", view.NextAction)
 	return nil

@@ -582,8 +582,14 @@ type StatusReport struct {
 	// every read, exactly like the rest of this report.
 	AuthorityRequest *AuthorityRequest `json:"authority_request,omitempty"`
 	Attempts         map[string]int    `json:"attempts,omitempty"`
-	Budgets          RunBudgets        `json:"budgets"`
-	StateSHA256      string            `json:"state_sha256"`
+	// ExecutionDiagnostic is the latest sanitized execution failure, projected
+	// from the journal. It is the operator-facing answer to "why did execution
+	// fail", and it is bounded, redacted identity and classification only: the
+	// bulk provider material stays in the local-only artifact the ArtifactRef
+	// names and is never rendered here.
+	ExecutionDiagnostic *ExecutionDiagnostic `json:"execution_diagnostic,omitempty"`
+	Budgets             RunBudgets           `json:"budgets"`
+	StateSHA256         string               `json:"state_sha256"`
 }
 
 // Status replays the run and reports it. It performs no network call and no
@@ -622,6 +628,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Budgets:              r.deps.Budgets,
 		StateSHA256:          state.snapshot.StateSHA256,
 		PublicationAuthority: publicationAuthorityOf(state),
+		ExecutionDiagnostic:  state.projection.ExecutionDiagnostic,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{

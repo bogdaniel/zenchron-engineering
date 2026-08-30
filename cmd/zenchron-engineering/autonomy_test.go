@@ -1976,3 +1976,88 @@ func TestStatusExposesTheStructuredControllerIdentity(t *testing.T) {
 		}
 	}
 }
+
+// TestStatusSurfacesTheSanitizedExecutionDiagnostic is the operator-experience
+// half of the second #32 dogfood repair. Before it, `autonomy status --text`
+// printed only the failure reason, and an operator had to know the sanitized
+// artifact path and open it by hand to learn the stage, the HTTP status, and
+// which request field the provider rejected. Both projections must now carry
+// the bounded diagnostic, and neither may carry provider body text.
+func TestStatusSurfacesTheSanitizedExecutionDiagnostic(t *testing.T) {
+	diagnostic := &runtime.ExecutionDiagnostic{
+		Stage:              "provider_loop",
+		FailureClass:       "unknown",
+		Code:               "provider_error",
+		Message:            "provider returned status 400",
+		Route:              "failure_retry",
+		ProviderKind:       "main.candidateBoundProvider",
+		Model:              "gpt-5.6-terra",
+		HTTPStatus:         400,
+		ProviderErrorCode:  "invalid_value",
+		ProviderErrorParam: "tools[0].name",
+		ArtifactRef:        "artifacts/provider-openai-responses-run-1.txt",
+	}
+	engine := &scriptedRuntime{
+		runID: "run-1",
+		report: runtime.StatusReport{
+			SchemaVersion:       runtime.SchemaVersion,
+			RunID:               "run-1",
+			Repository:          "zenchron/seeded",
+			Phase:               runtime.Execute,
+			Disposition:         runtime.Failed,
+			Reason:              "execution.invoke_failure_not_retryable",
+			ExecutionDiagnostic: diagnostic,
+		},
+	}
+
+	var out bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1"}, autonomyOverrides{Runtime: engine}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		NextAction          string                       `json:"next_action"`
+		ExecutionDiagnostic *runtime.ExecutionDiagnostic `json:"execution_diagnostic"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+		t.Fatalf("status printed no view: %v\n%s", err, out.String())
+	}
+	if view.ExecutionDiagnostic == nil {
+		t.Fatalf("the structured status view hides the persisted diagnostic: %s", out.String())
+	}
+	if *view.ExecutionDiagnostic != *diagnostic {
+		t.Fatalf("the structured view changed the diagnostic: %#v", view.ExecutionDiagnostic)
+	}
+	if !strings.Contains(view.NextAction, "provider_loop") {
+		t.Fatalf("the next action does not name where execution died: %q", view.NextAction)
+	}
+
+	var text bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &text); err != nil {
+		t.Fatal(err)
+	}
+	rendered := text.String()
+	// Everything the operator previously had to dig for is now on the surface.
+	for _, want := range []string{
+		"provider_loop", "unknown", "failure_retry", "main.candidateBoundProvider",
+		"gpt-5.6-terra", "http=400", "invalid_value", "tools[0].name",
+		"provider returned status 400", diagnostic.ArtifactRef, "local-only",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("the text projection does not surface %q:\n%s", want, rendered)
+		}
+	}
+	// The artifact is NAMED, never opened: no provider body text is rendered.
+	if strings.Contains(rendered, "does not match pattern") {
+		t.Fatalf("the text projection printed raw provider material:\n%s", rendered)
+	}
+
+	// A run with no execution failure prints no diagnostic lines at all.
+	engine.report.ExecutionDiagnostic = nil
+	var clean bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &clean); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(clean.String(), "execution failure") {
+		t.Fatalf("a run without an execution failure rendered one:\n%s", clean.String())
+	}
+}

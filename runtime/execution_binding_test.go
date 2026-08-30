@@ -355,9 +355,11 @@ func TestHTTPExchangeFailuresRecordSafeProviderFacts(t *testing.T) {
 		"rate limited": {
 			status: http.StatusTooManyRequests,
 			body:   `{"error":{"message":"slow down ` + marker + `","type":"rate_limit","code":"rate_limit_exceeded"}}`,
-			// A non-200 is refused before the envelope is decoded, so the
-			// status is the only safe fact there is.
+			// A non-200 carries the same error envelope, and its bounded
+			// identity fields are safe: the free-form message is what stays
+			// out, and the marker assertion below proves it does.
 			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "rate_limit_exceeded",
 		},
 		"provider error envelope": {
 			status:     http.StatusOK,

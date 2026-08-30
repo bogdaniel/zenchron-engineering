@@ -43,6 +43,12 @@ type RunProjection struct {
 	CI                   *CIObservation                 `json:"ci,omitempty"`
 	Review               *ReviewObservation             `json:"review,omitempty"`
 	Attempts             map[string]int                 `json:"attempts,omitempty"`
+	// ExecutionDiagnostic is the LATEST sanitized execution failure the journal
+	// holds. It is projected from operation.after, exactly like the metadata
+	// baseline is, so a restarted process reports the same root cause without
+	// any process-local error state and without an operator opening runtime.db
+	// or knowing an artifact path.
+	ExecutionDiagnostic *ExecutionDiagnostic `json:"execution_diagnostic,omitempty"`
 }
 
 // Observation is the part of every latest-wins observation that is about the
@@ -230,6 +236,19 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 		if err != nil {
 			return err
 		}
+		// A failed execution is the one operation whose RESULT an operator has
+		// to be told about: the diagnostic is what names the root cause. It is
+		// read before the succeeded-only baseline rule below, because that rule
+		// exists to refuse an untrustworthy digest, not to hide a failure.
+		if operation.Kind == OpExecutionInvoke {
+			diagnostic, err := executionDiagnosticOf(operation.Result)
+			if err != nil {
+				return err
+			}
+			if diagnostic != nil {
+				p.ExecutionDiagnostic = diagnostic
+			}
+		}
 		// The ordering rule: a new baseline is adopted only from an operation
 		// that SUCCEEDED. operation.after is the last event an operation
 		// appends, so by the time this row exists the mutation and its own
@@ -291,4 +310,30 @@ func decodePayload[T any](raw json.RawMessage) (T, error) {
 	var payload T
 	err := strictJSON(raw, &payload)
 	return payload, err
+}
+
+// executionDiagnosticOf reads the sanitized diagnostic an execution.invoke
+// result recorded, if it recorded one. Like metadataBaseline it decodes the
+// fields it needs rather than the whole per-handler document, so an older row
+// written before a field existed still projects. failure_class is read from the
+// embedded mutationResult when the diagnostic itself does not carry one, which
+// is what keeps rows written by the previous controller readable.
+func executionDiagnosticOf(result json.RawMessage) (*ExecutionDiagnostic, error) {
+	if len(result) == 0 {
+		return nil, nil
+	}
+	var record struct {
+		FailureClass FailureClass         `json:"failure_class"`
+		Diagnostic   *ExecutionDiagnostic `json:"diagnostic"`
+	}
+	if err := json.Unmarshal(result, &record); err != nil {
+		return nil, fmt.Errorf("decode execution result: %w", err)
+	}
+	if record.Diagnostic == nil {
+		return nil, nil
+	}
+	if record.Diagnostic.FailureClass == "" {
+		record.Diagnostic.FailureClass = record.FailureClass
+	}
+	return record.Diagnostic, nil
 }

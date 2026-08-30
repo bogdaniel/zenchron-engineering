@@ -94,6 +94,11 @@ type ProviderStopError struct {
 	// durable diagnostic.
 	Status int
 	Code   string
+	// Param names WHICH request field the provider rejected. It is a short,
+	// provider-authored field path (the observed 400 named "tools[0].name"),
+	// never a message body: without it an operator has to open the raw
+	// transcript to learn what was actually wrong with the request.
+	Param string
 }
 
 func (e *ProviderStopError) Error() string {
@@ -277,6 +282,7 @@ type openaiResponse struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 		Code    string `json:"code"`
+		Param   string `json:"param"`
 	} `json:"error"`
 }
 
@@ -334,6 +340,14 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			Detail: "max_cost_micros was requested but no trusted cost oracle is configured; refusing before any provider inference rather than silently ignoring the budget",
 		}
 	}
+	// The advertised tool surface is validated BEFORE the credential is read
+	// and before any transport: a surface the provider would reject is a local
+	// defect, and spending an API request to be told so is what the observed
+	// 400 on tools[0].name cost us once already.
+	tools, err := openaiToolDefinitions()
+	if err != nil {
+		return ExecutionResult{}, &ProviderStopError{Reason: StopProviderError, Detail: err.Error()}
+	}
 	key, err := p.credential()
 	if err != nil {
 		return ExecutionResult{}, err
@@ -354,14 +368,14 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	model, toolCalls := p.Model, 0
 	stop, detail := StopCompleted, ""
 	classification := FailureUnknown
-	httpStatus, providerCode := 0, ""
+	httpStatus, providerCode, providerParam := 0, "", ""
 
 	for iteration := 1; ; iteration++ {
 		if iteration > maxIterations {
 			stop, detail = StopIterationBudget, fmt.Sprintf("reasoning iterations exceeded %d", maxIterations)
 			break
 		}
-		body, marshalErr := json.Marshal(openaiRequest{Model: p.Model, Input: input, Tools: toolDefinitions(), ToolChoice: "auto", Store: false})
+		body, marshalErr := json.Marshal(openaiRequest{Model: p.Model, Input: input, Tools: tools, ToolChoice: "auto", Store: false})
 		if marshalErr != nil {
 			stop, detail = StopProviderError, marshalErr.Error()
 			break
@@ -373,7 +387,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			stop, detail = StopProviderError, callErr.Error()
 			httpStatus = status
 			if response.Error != nil {
-				providerCode = response.Error.Code
+				providerCode, providerParam = response.Error.Code, response.Error.Param
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				stop, detail = cancellationStop(ctxErr)
@@ -414,8 +428,20 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 				stop, detail = StopToolCallBudget, fmt.Sprintf("tool calls exceeded %d", maxToolCalls)
 				break
 			}
-			result, failed := surface.Invoke(ctx, call.Name, []byte(call.Arguments))
-			fmt.Fprintf(&transcript, "  tool %s args=%s failed=%t\n%s\n", call.Name, call.Arguments, failed, result)
+			// The model answers with the OpenAI WIRE name. It is decoded back
+			// to the canonical capability before ToolSurface sees it, and a
+			// name the codec does not know is refused here rather than passed
+			// through: passing it through would let an unadvertised name reach
+			// dispatch and become a capability the surface never offered.
+			canonical, known := openaiCanonicalName(call.Name)
+			var result string
+			var failed bool
+			if !known {
+				result, failed = refusedOpenAIToolName(call.Name), true
+			} else {
+				result, failed = surface.Invoke(ctx, canonical, []byte(call.Arguments))
+			}
+			fmt.Fprintf(&transcript, "  tool %s (%s) args=%s failed=%t\n%s\n", call.Name, canonical, call.Arguments, failed, result)
 			// No-progress reuses the remediation fingerprint: the same failing
 			// tool request against the same candidate tree and contract is not
 			// progress, however many times the model repeats it.
@@ -450,7 +476,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		result.Outcome = OperationCancelled
 	}
 	result.Failure = &ProviderFailure{Classification: classification, RawDiagnosticRef: artifacts[0].Path}
-	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode}
+	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode, Param: providerParam}
 }
 
 func cancellationStop(err error) (ProviderStop, string) {
@@ -480,7 +506,15 @@ func (p OpenAIProvider) call(ctx context.Context, key string, body []byte) (open
 		return openaiResponse{}, httpResponse.StatusCode, raw, fmt.Errorf("provider response unreadable")
 	}
 	if httpResponse.StatusCode != http.StatusOK {
-		return openaiResponse{}, httpResponse.StatusCode, raw, fmt.Errorf("provider returned status %d", httpResponse.StatusCode)
+		// A non-200 still carries the provider's own error envelope, and its
+		// type/code/param are exactly the bounded identity an operator needs to
+		// name the fault. The MESSAGE is deliberately not promoted: it is
+		// free-form provider text and belongs only in the sanitized artifact.
+		var failure openaiResponse
+		if err := json.Unmarshal(raw, &failure); err != nil {
+			failure = openaiResponse{}
+		}
+		return failure, httpResponse.StatusCode, raw, fmt.Errorf("provider returned status %d", httpResponse.StatusCode)
 	}
 	var decoded openaiResponse
 	if err := json.Unmarshal(raw, &decoded); err != nil {

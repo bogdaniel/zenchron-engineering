@@ -513,25 +513,27 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 // restarted runtime needs to name a root cause without the process-local error.
 type executionRecord struct {
 	mutationResult
-	Diagnostic *executionDiagnostic `json:"diagnostic,omitempty"`
+	Diagnostic *ExecutionDiagnostic `json:"diagnostic,omitempty"`
 }
 
-// executionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
+// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
 // bounded to one payload field, and the message is redacted with the same
 // redactor that guards transcript artifacts, so no API key, Authorization
 // header, forge token, or raw provider body can become a durable row. Bulk
 // material stays in the artifact store; ArtifactRef names it when one exists,
 // and is absent when no provider interaction produced one.
-type executionDiagnostic struct {
-	Stage             string       `json:"stage"`
-	Code              string       `json:"code,omitempty"`
-	Message           string       `json:"message,omitempty"`
-	Route             FailureRoute `json:"route,omitempty"`
-	ProviderKind      string       `json:"provider_kind,omitempty"`
-	Model             string       `json:"model,omitempty"`
-	HTTPStatus        int          `json:"http_status,omitempty"`
-	ProviderErrorCode string       `json:"provider_error_code,omitempty"`
-	ArtifactRef       string       `json:"artifact_ref,omitempty"`
+type ExecutionDiagnostic struct {
+	Stage              string       `json:"stage"`
+	FailureClass       FailureClass `json:"failure_class,omitempty"`
+	Code               string       `json:"code,omitempty"`
+	Message            string       `json:"message,omitempty"`
+	Route              FailureRoute `json:"route,omitempty"`
+	ProviderKind       string       `json:"provider_kind,omitempty"`
+	Model              string       `json:"model,omitempty"`
+	HTTPStatus         int          `json:"http_status,omitempty"`
+	ProviderErrorCode  string       `json:"provider_error_code,omitempty"`
+	ProviderErrorParam string       `json:"provider_error_param,omitempty"`
+	ArtifactRef        string       `json:"artifact_ref,omitempty"`
 }
 
 // Stages name WHERE an execution died, which is the fact source archaeology was
@@ -545,9 +547,10 @@ const (
 	execStageProviderResult   = "provider_result"
 )
 
-func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClass, result ExecutionResult, cause error) *executionDiagnostic {
-	diagnostic := &executionDiagnostic{
+func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClass, result ExecutionResult, cause error) *ExecutionDiagnostic {
+	diagnostic := &ExecutionDiagnostic{
 		Stage:        stage,
+		FailureClass: class,
 		Route:        RouteFailure(class),
 		ProviderKind: boundedDetail(fmt.Sprintf("%T", r.deps.Provider)),
 		Model:        boundedDetail(result.Model),
@@ -563,6 +566,7 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		diagnostic.Stage, diagnostic.Code = execStageProviderLoop, string(stop.Reason)
 		diagnostic.Message = sanitizedDetail(stop.Detail)
 		diagnostic.HTTPStatus, diagnostic.ProviderErrorCode = stop.Status, boundedDetail(stop.Code)
+		diagnostic.ProviderErrorParam = boundedDetail(stop.Param)
 	}
 	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
 		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
