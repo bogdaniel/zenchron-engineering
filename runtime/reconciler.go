@@ -1185,6 +1185,7 @@ func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
 // renamed.
 var waitReasons = map[FailureClass]string{
 	FailureProviderAccountUnavailable: "execution_provider_account_unavailable",
+	FailureAssurancePrerequisite:      "assurance_dependency_unavailable",
 }
 
 func waitReason(class FailureClass) string {

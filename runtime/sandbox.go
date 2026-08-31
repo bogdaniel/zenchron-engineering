@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -453,7 +454,55 @@ func DiagnoseSandbox(p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
 	if s.ready() == nil {
 		assurance = "enforceable"
 	}
-	return SandboxDoctor{ProviderSandbox: provider, VerifierSandbox: assurance, OfflineVerification: assurance, DependencyPreparation: assurance}
+	// DependencyPreparation is NOT an alias of Docker readiness. A reachable
+	// daemon holding the pinned image proves a container can start; it proves
+	// nothing about whether that image resolves the verifier's toolchain under
+	// the runtime's own sandbox environment. The fifth dogfood passed doctor
+	// with FAIL=0 while every Go command inside that exact image exited 127.
+	preparation := "unavailable"
+	if assurance == "enforceable" {
+		if _, err := s.ProbeToolchain(context.Background()); err == nil {
+			preparation = "enforceable"
+		}
+	}
+	return SandboxDoctor{ProviderSandbox: provider, VerifierSandbox: assurance, OfflineVerification: assurance, DependencyPreparation: preparation}
+}
+
+// ProbeToolchain answers one question about the CONFIGURED image: does the
+// program the verifier depends on resolve, under exactly the environment the
+// runtime builds? It is the same dockerBase boundary as a real verification -
+// no network, read-only root, all capabilities dropped, the runtime's own PATH -
+// so a pass means the real thing will resolve too, and it is READ-ONLY: an
+// empty temporary directory is the only mount, no cache is attached, nothing is
+// downloaded, and no candidate is touched.
+func (s DockerSandbox) ProbeToolchain(ctx context.Context) (CommandOutput, error) {
+	probe, err := os.MkdirTemp("", "zenchron-toolchain-probe-")
+	if err != nil {
+		return CommandOutput{}, err
+	}
+	defer os.RemoveAll(probe)
+	// dockerBase masks /candidate/.git with a tmpfs, and Docker cannot create
+	// that mountpoint inside a read-only bind. A real checkout always has one;
+	// the probe makes one so it exercises the SAME boundary rather than a
+	// weaker variant of it.
+	if err := os.Mkdir(filepath.Join(probe, ".git"), 0700); err != nil {
+		return CommandOutput{}, err
+	}
+	if s.OperationID == "" {
+		s.OperationID = "toolchain-probe"
+	}
+	if s.StateDir == "" {
+		state, err := os.MkdirTemp("", "zenchron-toolchain-probe-state-")
+		if err != nil {
+			return CommandOutput{}, err
+		}
+		defer os.RemoveAll(state)
+		s.StateDir = state
+	}
+	args := append(dockerBase(probe, true), "--workdir", "/candidate")
+	args = append(args, envArgs("GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly")...)
+	args = append(args, s.Image, "sh", "-ec", "command -v go; command -v gofmt; go version")
+	return s.run(ctx, args)
 }
 
 // ArtifactStore keeps raw output local and records a separately sanitized
@@ -520,6 +569,61 @@ func providerPrompt(r ExecutionRequest) string {
 	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %v. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), r.Findings)
 }
 
+// sandboxPATH is the executable search path INSIDE the sandbox container. It is
+// ONE runtime-owned constant, used by every caller of dockerBase, so the
+// assurance verifier and a brokered candidate.run resolve programs identically
+// when they run the same configured image. It is stated here rather than
+// inherited: the host's PATH is never forwarded, and a candidate cannot add to
+// it because the container root is read-only and only /candidate is mounted.
+//
+// /usr/local/go/bin is the toolchain location of the pinned Go image this M0
+// sandbox is configured with. Omitting it is defect L1: the fifth dogfood's
+// verifier and every brokered Go command met "go: not found" and exited 127
+// inside an image that contained a working toolchain the whole time.
+//
+// Naming a path is not a promise that the program is there. Whether the
+// CONFIGURED image actually resolves a toolchain under exactly this environment
+// is a question doctor answers by running it, not one this constant asserts.
+const sandboxPATH = "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// sandboxGoEnv is the deterministic Go environment shared by every runtime-owned
+// Go invocation in the sandbox. GOTOOLCHAIN=local refuses a toolchain switch: a
+// candidate that raised the go directive in go.mod would otherwise make Go try
+// to fetch a toolchain, which with networking off is a confusing failure and
+// with networking on would be a candidate choosing the program that judges it.
+var sandboxGoEnv = []string{"GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "GOFLAGS=-mod=readonly " + sandboxBuildVCS}
+
+// sandboxBuildVCS disables Go's VCS stamping. dockerBase masks /candidate/.git
+// with a tmpfs - the candidate's Git metadata is runtime-owned and is
+// deliberately not shown to anything running in the sandbox - so Go finds a
+// directory that is not a repository and refuses with "error obtaining VCS
+// status". Stamping a revision into a verification build proves nothing anyway:
+// the exact commit and tree are already the assurance binding.
+const sandboxBuildVCS = "-buildvcs=false"
+
+// sandboxBuildDir is a small tmpfs the Go toolchain may EXECUTE from, and the
+// only path in the container that is executable and writable at once.
+//
+// Docker mounts every --tmpfs noexec unless told otherwise, so /tmp, /home and
+// the masked /candidate/.git are all noexec and stay that way. `go test`,
+// however, compiles a test binary and then runs it; with nowhere executable it
+// fails every package with "fork/exec ...: permission denied", which makes
+// `go test ./...` - the whole point of the baseline verifier - impossible.
+//
+// What contains a test binary is the rest of the boundary, not this: the root
+// filesystem is read-only, networking is off, every capability is dropped,
+// no-new-privileges is set, and the candidate workspace is the only host path
+// mounted. Running the candidate's own tests is the verifier's declared job.
+const sandboxBuildDir = "/gobuild"
+
+func envArgs(entries ...string) []string {
+	args := make([]string, 0, len(entries)*2)
+	for _, entry := range entries {
+		args = append(args, "--env", entry)
+	}
+	return args
+}
+
 // dockerBase creates the complete host boundary: only candidate is writable;
 // Docker's root is read-only, capabilities are dropped, networking is absent,
 // and the environment is an explicit empty allowlist. Callers state their own
@@ -529,13 +633,73 @@ func dockerBase(candidate string, candidateReadOnly bool) []string {
 	if candidateReadOnly {
 		mount += ",readonly"
 	}
-	return []string{"run", "--init", "--sig-proxy=true", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777", "--tmpfs", "/home:rw,nosuid,nodev,noexec,mode=0700", "--tmpfs", "/candidate/.git:rw,nosuid,nodev,noexec,mode=0700", "--env", "HOME=/home", "--env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--mount", mount}
+	return []string{"run", "--init", "--sig-proxy=true", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777", "--tmpfs", "/home:rw,nosuid,nodev,noexec,mode=0700", "--tmpfs", "/candidate/.git:rw,nosuid,nodev,noexec,mode=0700", "--tmpfs", sandboxBuildDir + ":rw,nosuid,nodev,exec,mode=0700", "--env", "HOME=/home", "--env", "PATH=" + sandboxPATH, "--env", "GOTMPDIR=" + sandboxBuildDir, "--env", "GOCACHE=" + sandboxBuildDir + "/cache", "--mount", mount}
 }
 
-type DependencyUnavailableError struct{ Detail string }
+// PrerequisiteKind names WHAT was missing when an assurance prerequisite could
+// not be met. It is a small closed set, not free text: it is what a durable
+// diagnostic and an operator both need, and the fifth dogfood proved a single
+// opaque string ("trusted offline cache cannot satisfy exact module graph")
+// cannot tell "the cache is empty" from "go is not on the PATH".
+type PrerequisiteKind string
+
+const (
+	// PrerequisiteToolchain is the configured image not resolving the program
+	// the verifier needs under the runtime's own sandbox environment.
+	PrerequisiteToolchain PrerequisiteKind = "toolchain_unavailable"
+	// PrerequisiteCache is the operator-provisioned dependency cache being
+	// absent, unreadable, or empty.
+	PrerequisiteCache PrerequisiteKind = "dependency_cache_unavailable"
+	// PrerequisiteModule is a module the exact tree needs that the trusted
+	// offline cache does not contain.
+	PrerequisiteModule PrerequisiteKind = "module_unavailable_offline"
+	// PrerequisiteSandbox is the Docker daemon or image being unavailable. It
+	// is the one kind that is genuinely transient.
+	PrerequisiteSandbox PrerequisiteKind = "sandbox_unavailable"
+	// PrerequisiteSource is the exact tree not carrying what preparation needs.
+	PrerequisiteSource PrerequisiteKind = "source_incomplete"
+)
+
+// DependencyUnavailableError is an assurance PREREQUISITE failure: the verifier
+// never judged the candidate, because the environment it needs was not there.
+// It is deliberately not a verification failure - no verdict about the tree was
+// reached - and, except for the sandbox kind, deliberately not transient:
+// re-running the identical command against the identical environment produces
+// the identical failure, which is exactly how the fifth dogfood spent three
+// assurance attempts in a few seconds.
+type DependencyUnavailableError struct {
+	Kind   PrerequisiteKind
+	Detail string
+}
 
 func (e *DependencyUnavailableError) Error() string {
-	return "dependency preparation unavailable: " + e.Detail
+	if e.Kind == "" {
+		return "dependency preparation unavailable: " + e.Detail
+	}
+	return "assurance prerequisite unavailable (" + string(e.Kind) + "): " + e.Detail
+}
+
+// Transient reports whether this prerequisite may clear on its own. Only the
+// sandbox kind can: a daemon comes back, an empty cache does not fill itself.
+func (e *DependencyUnavailableError) Transient() bool { return e.Kind == PrerequisiteSandbox }
+
+// classifyPreparationOutput reads the container's own output to name the
+// prerequisite. It matches on shell and Go diagnostics that are stable enough
+// to depend on, and falls back to the cache kind - the conservative answer for
+// an offline preparation that failed for a reason we cannot name.
+func classifyPreparationOutput(out CommandOutput) (PrerequisiteKind, string) {
+	combined := strings.ToLower(string(out.Stdout) + "\n" + string(out.Stderr))
+	switch {
+	case out.ExitCode == 127, strings.Contains(combined, "not found"), strings.Contains(combined, "no such file or directory"):
+		return PrerequisiteToolchain, "the configured image did not resolve the Go toolchain on the runtime sandbox path"
+	case strings.Contains(combined, "missing go.sum entry"), strings.Contains(combined, "module lookup disabled"),
+		strings.Contains(combined, "cannot find module"), strings.Contains(combined, "no required module provides"),
+		strings.Contains(combined, "proxy.golang.org"), strings.Contains(combined, "goproxy=off"):
+		return PrerequisiteModule, "the trusted offline cache does not contain a module the exact tree requires"
+	case strings.Contains(combined, "permission denied"), strings.Contains(combined, "read-only file system"):
+		return PrerequisiteCache, "the dependency cache is not usable by the verifier in this configuration"
+	}
+	return PrerequisiteCache, "offline dependency preparation failed against the trusted cache"
 }
 
 type BaselineGoVerifier struct {
@@ -568,10 +732,21 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		return AssuranceResult{}, fmt.Errorf("exact candidate commit unavailable")
 	}
 	if err := v.prepare(ctx, request.CheckoutDir); err != nil {
-		return AssuranceResult{ProviderID: "baseline-go", VerifierDefinition: v.Definition(), FailureClass: FailureTransientInfrastructure}, err
+		// A prerequisite failure is not a verdict about the candidate and,
+		// unless the sandbox itself was unavailable, not transient either.
+		// Classifying it as transient infrastructure is what let the same
+		// deterministic environment fault burn every assurance attempt.
+		class := FailureAssurancePrerequisite
+		var unavailable *DependencyUnavailableError
+		if errors.As(err, &unavailable) && unavailable.Transient() {
+			class = FailureTransientInfrastructure
+		}
+		return AssuranceResult{ProviderID: "baseline-go", VerifierDefinition: v.Definition(), FailureClass: class}, err
 	}
 	args := dockerBase(request.CheckoutDir, true)
-	args = append(args, "--mount", "type=bind,src="+v.DependencyCacheDir+",dst=/cache,readonly", "--workdir", "/candidate", "--env", "GOMODCACHE=/cache", "--env", "GOPROXY=off", "--env", "GOSUMDB=off", "--env", "GONOSUMDB=*", "--env", "GOFLAGS=-mod=readonly", v.Sandbox.Image, "sh", "-ec", "test -z \"$(gofmt -l .)\"; go vet ./...; go test ./...")
+	args = append(args, goModuleCacheMount(v.DependencyCacheDir), "--workdir", "/candidate")
+	args = append(args, envArgs(append([]string{"GOMODCACHE=/cache", "GONOSUMDB=*"}, sandboxGoEnv...)...)...)
+	args = append(args, v.Sandbox.Image, "sh", "-ec", "test -z \"$(gofmt -l .)\"; go vet ./...; go test ./...")
 	sandbox := v.Sandbox
 	sandbox.OperationID = "assurance-" + request.RunID + "-" + request.Commit
 	if sandbox.StateDir == "" {
@@ -596,26 +771,73 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 }
 func (v BaselineGoVerifier) prepare(ctx context.Context, checkout string) error {
 	if v.DependencyCacheDir == "" {
-		return &DependencyUnavailableError{Detail: "trusted pre-warmed module cache is required"}
+		return &DependencyUnavailableError{Kind: PrerequisiteCache, Detail: "no trusted pre-warmed module cache is configured"}
+	}
+	if info, err := os.Stat(v.DependencyCacheDir); err != nil || !info.IsDir() {
+		return &DependencyUnavailableError{Kind: PrerequisiteCache, Detail: "the configured dependency cache is not a readable directory"}
+	}
+	if empty, err := directoryIsEmpty(v.DependencyCacheDir); err != nil || empty {
+		return &DependencyUnavailableError{Kind: PrerequisiteCache, Detail: "the configured dependency cache is empty; a pre-warmed cache is operator-provisioned and this verification never downloads"}
 	}
 	if _, err := os.Stat(filepath.Join(checkout, "go.mod")); err != nil {
-		return &DependencyUnavailableError{Detail: "go.mod unavailable"}
+		return &DependencyUnavailableError{Kind: PrerequisiteSource, Detail: "the exact tree has no go.mod"}
 	}
 	if _, err := os.Stat(filepath.Join(checkout, "go.sum")); err != nil && !os.IsNotExist(err) {
-		return &DependencyUnavailableError{Detail: "go.sum unavailable"}
+		return &DependencyUnavailableError{Kind: PrerequisiteSource, Detail: "the exact tree's go.sum is unreadable"}
 	}
+	// The operator cache is mounted READ-ONLY here, exactly as it is during
+	// verification. See goModuleCacheMount: preparation used to mount it
+	// writable and run `go mod download` into it, which let the module graph of
+	// one candidate write into dependency state every other run reads.
 	args := dockerBase(checkout, true)
-	args = append(args, "--mount", "type=bind,src="+v.DependencyCacheDir+",dst=/cache", "--workdir", "/candidate", "--env", "GOMODCACHE=/cache", "--env", "GOPROXY=off", "--env", "GOSUMDB=off", "--env", "GOFLAGS=-mod=readonly", v.Sandbox.Image, "go", "mod", "download")
+	args = append(args, goModuleCacheMount(v.DependencyCacheDir), "--workdir", "/candidate")
+	args = append(args, envArgs(append([]string{"GOMODCACHE=/cache", "GOFLAGS=-mod=mod " + sandboxBuildVCS}, sandboxGoEnv[:3]...)...)...)
+	// `go list -deps` resolves the exact module graph from the cache and writes
+	// nothing into it. It answers the one question preparation exists to ask -
+	// can this tree be built offline from the trusted material - without the
+	// verification itself being what discovers the answer.
+	args = append(args, v.Sandbox.Image, "go", "list", "-deps", "./...")
 	sandbox := v.Sandbox
 	sandbox.OperationID = "dependency-preparation-" + filepath.Base(checkout)
 	if sandbox.StateDir == "" {
 		sandbox.StateDir = filepath.Join(v.ArtifactStore.Root, "docker-operations")
 	}
-	_, err := sandbox.run(ctx, args)
-	if err != nil {
-		return &DependencyUnavailableError{Detail: "trusted offline cache cannot satisfy exact module graph"}
+	out, err := sandbox.run(ctx, args)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// A daemon or image that is not there is the one genuinely transient case:
+	// no container ran, so there is no output to classify.
+	if errors.Is(err, ErrSandboxUnavailable) {
+		return &DependencyUnavailableError{Kind: PrerequisiteSandbox, Detail: "the assurance sandbox is unavailable"}
+	}
+	kind, detail := classifyPreparationOutput(out)
+	return &DependencyUnavailableError{Kind: kind, Detail: detail}
+}
+
+// goModuleCacheMount is the ONE place the operator dependency cache is attached
+// to a container, and it is always read-only.
+//
+// Before this repair, preparation mounted it writable and ran `go mod download`
+// against the CANDIDATE's go.mod. That is shared mutable dependency state: the
+// module graph a candidate declares decided what got written into a cache every
+// other run of every other candidate then reads. Nothing malicious is needed for
+// it to matter - it is simply not a trusted-material boundary if the thing being
+// verified can extend it. Read-only makes the operator the only writer, which
+// is what "operator-provisioned pre-warmed cache" always meant.
+func goModuleCacheMount(dir string) string {
+	return "--mount=type=bind,src=" + dir + ",dst=/cache,readonly"
+}
+
+// directoryIsEmpty reports whether a directory holds no entries. A configured
+// but empty cache is the fifth dogfood's exact condition and is a prerequisite
+// failure, never a candidate verdict.
+func directoryIsEmpty(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
 }
 
 // CreateAssuranceCheckout proves the checked out input before the verifier is

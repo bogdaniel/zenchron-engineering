@@ -32,8 +32,13 @@ const (
 // ---------------------------------------------------------------------------
 
 // doctorExecutor answers exactly the probes DiagnoseSandbox makes. available
-// false is a host with neither docker nor codex installed.
-type doctorExecutor struct{ available bool }
+// false is a host with neither docker nor codex installed; toolchainMissing
+// models the fifth dogfood's real image - one that starts containers happily
+// and then cannot resolve go on the runtime sandbox path.
+type doctorExecutor struct {
+	available        bool
+	toolchainMissing bool
+}
 
 func (e doctorExecutor) LookPath(name string) error {
 	if e.available && (name == "docker" || name == "codex") {
@@ -57,6 +62,21 @@ func (e doctorExecutor) Output(_ context.Context, name string, args []string, _ 
 		return CommandOutput{Stdout: []byte(doctorImage + "\n")}, nil
 	case name == "codex":
 		return CommandOutput{Stdout: []byte(strings.Join(append(append([]string{}, codexRequiredExecFlags...), codexRequiredRootFlags...), " "))}, nil
+	// The toolchain probe is a real container run, so the whole bounded
+	// lifecycle is modeled rather than special-cased.
+	case name == "docker" && strings.HasPrefix(joined, "create"):
+		return CommandOutput{}, nil
+	case name == "docker" && strings.HasPrefix(joined, "start"):
+		if e.toolchainMissing {
+			return CommandOutput{ExitCode: 127, Stderr: []byte("sh: 1: go: not found\n")}, errors.New("container exited 127")
+		}
+		return CommandOutput{Stdout: []byte("/usr/local/go/bin/go\n/usr/local/go/bin/gofmt\ngo version go1.25.14 linux/arm64\n")}, nil
+	case name == "docker" && strings.HasPrefix(joined, "inspect"):
+		// The container already exited and was removed, which is what ends the
+		// bounded run; the daemon says so on stderr.
+		return CommandOutput{ExitCode: 1, Stderr: []byte("Error: No such object\n")}, errors.New("no such object")
+	case name == "docker" && (strings.HasPrefix(joined, "wait") || strings.HasPrefix(joined, "rm")):
+		return CommandOutput{}, nil
 	}
 	return CommandOutput{ExitCode: 1}, errors.New("unexpected command " + name + " " + joined)
 }
@@ -172,6 +192,11 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		}
 	}
 	if err := os.WriteFile(f.credential, []byte("not-read-by-the-doctor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A healthy environment has a PROVISIONED cache. An empty directory is the
+	// fifth dogfood's exact condition and is deliberately not healthy.
+	if err := os.MkdirAll(filepath.Join(f.cacheDir, "download", "sumdb"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	f.writeOperatorConfig(nil)
@@ -293,7 +318,8 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"git.binary", "git.features", "git.remote", "git.credential", "git.isolation",
 		"provider.isolation", "provider.credential",
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
-		"assurance.boundaries", "assurance.dependency_preparation",
+		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache",
+		"assurance.dependency_preparation",
 		"github.credential", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",

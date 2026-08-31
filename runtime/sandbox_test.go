@@ -207,7 +207,7 @@ func TestVerifierUsesSeparateOfflinePreparationAndReadonlyCandidate(t *testing.T
 	checkout := filepath.Join(root, "checkout")
 	cache := filepath.Join(root, "cache")
 	_ = os.Mkdir(checkout, 0700)
-	_ = os.Mkdir(cache, 0700)
+	_ = os.MkdirAll(filepath.Join(cache, "download"), 0700)
 	// The git binding is deliberately allowed to fail after preparation in this
 	// command-shape test; direct preparation still proves its isolated command.
 	_ = os.WriteFile(filepath.Join(checkout, "go.mod"), []byte("module x\ngo 1.25\n"), 0600)
@@ -217,10 +217,16 @@ func TestVerifierUsesSeparateOfflinePreparationAndReadonlyCandidate(t *testing.T
 		t.Fatal(err)
 	}
 	text := commandText(fake.calls)
-	for _, want := range []string{"go mod download", "--network none", "src=" + checkout + ",dst=/candidate,readonly", "src=" + cache + ",dst=/cache", "GOPROXY=off", "GOFLAGS=-mod=readonly"} {
+	// The operator cache is mounted READ-ONLY and preparation only resolves the
+	// graph; it no longer writes the candidate's module downloads into shared
+	// dependency state.
+	for _, want := range []string{"go list -deps ./...", "--network none", "src=" + checkout + ",dst=/candidate,readonly", "src=" + cache + ",dst=/cache,readonly", "GOPROXY=off", "GOTOOLCHAIN=local", "PATH=" + sandboxPATH} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing verifier isolation %q: %s", want, text)
 		}
+	}
+	if strings.Contains(text, "go mod download") {
+		t.Fatalf("preparation still writes into the shared operator cache: %s", text)
 	}
 	if strings.Contains(text, "GITHUB_TOKEN") || strings.Contains(text, "runtime.db") {
 		t.Fatal("verifier received ambient secret/runtime")

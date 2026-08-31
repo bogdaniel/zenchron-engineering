@@ -177,7 +177,23 @@ const (
 	// exactly what it needs, and routing it that way is what puts continuations
 	// under the ordinary execution attempt budget instead of a counter of their
 	// own.
-	FailureExecutionIncomplete     FailureClass = "execution_incomplete"
+	FailureExecutionIncomplete FailureClass = "execution_incomplete"
+	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
+	// being there: the configured image resolves no toolchain, the
+	// operator-provisioned dependency cache is missing or empty, or the exact
+	// tree needs a module the trusted offline cache does not hold.
+	//
+	// No verdict about the candidate was reached, so it is not a verification
+	// failure. Re-running the identical command against the identical
+	// environment produces the identical result, so it is not transient either -
+	// classifying it as transient infrastructure is what let one deterministic
+	// fault consume every assurance attempt in seconds. It waits: an operator
+	// provisions what is missing and the same run re-derives assurance against
+	// the same exact commit, tree and contract.
+	//
+	// It is deliberately NOT FailureAuthorityWait. Nothing about human authority
+	// is involved.
+	FailureAssurancePrerequisite   FailureClass = "assurance_prerequisite_unavailable"
 	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
 	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
 	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
@@ -209,7 +225,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
-	case FailureAuthorityWait, FailureProviderAccountUnavailable:
+	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite:
 		return RouteWait
 	default:
 		return RouteStop

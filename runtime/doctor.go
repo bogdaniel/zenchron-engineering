@@ -127,7 +127,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorState(in)...)
 	checks = append(checks, doctorGit(in)...)
 	checks = append(checks, doctorProvider(in)...)
-	checks = append(checks, doctorAssurance(in)...)
+	checks = append(checks, doctorAssurance(ctx, in)...)
 	checks = append(checks, doctorGitHub(ctx, in)...)
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
@@ -538,7 +538,7 @@ func doctorProviderCredential(in DoctorInput) DoctorCheck {
 
 const doctorGroupAssurance = "assurance"
 
-func doctorAssurance(in DoctorInput) []DoctorCheck {
+func doctorAssurance(ctx context.Context, in DoctorInput) []DoctorCheck {
 	// The frozen diagnosis is called exactly once; the three Docker-derived
 	// fields are separate questions and are reported separately.
 	diagnosis := DiagnoseSandbox(in.Codex, in.Sandbox)
@@ -547,8 +547,81 @@ func doctorAssurance(in DoctorInput) []DoctorCheck {
 		doctorAssuranceImage(in),
 		doctorVerifierSandbox(diagnosis),
 		doctorSandboxBoundaries(diagnosis),
+		doctorAssuranceToolchain(ctx, in, diagnosis),
+		doctorDependencyCache(in),
 		doctorDependencyPreparation(in, diagnosis),
 	}
+}
+
+// doctorAssuranceToolchain proves the CONFIGURED image resolves the verifier's
+// toolchain under the runtime's exact sandbox environment. It is deliberately
+// not derived from Docker readiness: a reachable daemon holding the pinned image
+// says a container can start, and the fifth dogfood started containers all the
+// way to exit 127 on `go: not found`. The probe runs the same dockerBase
+// boundary with no network, mounts only an empty temporary directory, downloads
+// nothing, and touches no cache and no candidate.
+func doctorAssuranceToolchain(ctx context.Context, in DoctorInput, diagnosis SandboxDoctor) DoctorCheck {
+	const id = "assurance.toolchain"
+	if diagnosis.VerifierSandbox != "enforceable" {
+		return fail(doctorGroupAssurance, id, "the verifier sandbox is "+diagnosis.VerifierSandbox+", so the configured image could not be asked whether it resolves a Go toolchain")
+	}
+	out, err := in.Sandbox.ProbeToolchain(ctx)
+	if err != nil {
+		return fail(doctorGroupAssurance, id, "the pinned assurance image did not resolve the Go toolchain on the runtime sandbox path "+sandboxPATH+": "+boundedDetail(sanitizedDetail(probeDetail(out, err)))+". The image must carry a toolchain reachable on that path; the runtime never falls back to a host Go")
+	}
+	resolved := strings.Fields(strings.TrimSpace(string(out.Stdout)))
+	if len(resolved) < 3 {
+		return fail(doctorGroupAssurance, id, "the pinned assurance image answered the toolchain probe incompletely: "+boundedDetail(sanitizedDetail(strings.Join(resolved, " "))))
+	}
+	return pass(doctorGroupAssurance, id, "the pinned assurance image resolves go and gofmt on the runtime sandbox path "+sandboxPATH+" ("+boundedDetail(sanitizedDetail(strings.Join(resolved, " ")))+"), proven by running it with no network and nothing but an empty directory mounted")
+}
+
+// probeDetail keeps the container's own words when it has any, because "go: not
+// found" and "no such image" need different operator actions.
+func probeDetail(out CommandOutput, err error) string {
+	detail := strings.TrimSpace(string(out.Stderr))
+	if detail == "" {
+		detail = strings.TrimSpace(string(out.Stdout))
+	}
+	if detail == "" {
+		return err.Error()
+	}
+	return detail
+}
+
+// doctorDependencyCache proves the operator-provisioned cache is actually
+// provisioned. The frozen runtime contract is that verification is offline
+// against pre-warmed material it never downloads, so a cache that is absent,
+// not a directory, or EMPTY is a false readiness claim, not a warning: the
+// fifth dogfood's cache existed, held 0 bytes, and doctor reported FAIL=0.
+func doctorDependencyCache(in DoctorInput) DoctorCheck {
+	const id = "assurance.dependency_cache"
+	cache := strings.TrimSpace(in.DependencyCacheDir)
+	if cache == "" {
+		return fail(doctorGroupAssurance, id, "no assurance.dependency_cache_dir is configured; offline verification has no trusted module material to read and never downloads any")
+	}
+	if !filepath.IsAbs(cache) {
+		return fail(doctorGroupAssurance, id, "the dependency cache "+cache+" is not an absolute path")
+	}
+	info, err := os.Stat(cache)
+	if err != nil {
+		return fail(doctorGroupAssurance, id, "the dependency cache "+cache+" cannot be inspected: "+err.Error()+"; provision it from the trusted base module graph before a run")
+	}
+	if !info.IsDir() {
+		return fail(doctorGroupAssurance, id, cache+" is not a directory, so it cannot be the module cache")
+	}
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		return fail(doctorGroupAssurance, id, "the dependency cache "+cache+" cannot be read: "+err.Error())
+	}
+	if len(entries) == 0 {
+		return fail(doctorGroupAssurance, id, "the dependency cache "+cache+" is EMPTY. Offline verification reads pre-warmed operator-provisioned modules and downloads nothing, so an empty cache cannot verify any candidate; provision it from the trusted base module graph with the pinned image")
+	}
+	downloads := "no cache/download directory yet"
+	if _, err := os.Stat(filepath.Join(cache, "download")); err == nil {
+		downloads = "it holds a module download tree"
+	}
+	return pass(doctorGroupAssurance, id, fmt.Sprintf("the dependency cache %s exists and is provisioned (%d top-level entries; %s); nothing was downloaded or written to answer this", cache, len(entries), downloads))
 }
 
 func doctorDockerEndpoint(in DoctorInput) DoctorCheck {
@@ -605,23 +678,20 @@ func doctorSandboxBoundaries(diagnosis SandboxDoctor) DoctorCheck {
 	return pass(doctorGroupAssurance, id, "assurance containers run with no network, no Docker socket, a read-only root, all capabilities dropped, and no-new-privileges, and the daemon can enforce it")
 }
 
+// doctorDependencyPreparation is now the JOINT statement: preparation is
+// enforceable only when the sandbox can run AND the configured image proved it
+// resolves a toolchain. It no longer restates Docker readiness under a name that
+// implies more than it checked.
 func doctorDependencyPreparation(in DoctorInput, diagnosis SandboxDoctor) DoctorCheck {
 	const id = "assurance.dependency_preparation"
 	if diagnosis.DependencyPreparation != "enforceable" {
-		return fail(doctorGroupAssurance, id, "dependency preparation is "+diagnosis.DependencyPreparation+", so module dependencies cannot be fetched into the cache and offline verification would fail on the first uncached module")
+		return fail(doctorGroupAssurance, id, "dependency preparation is "+diagnosis.DependencyPreparation+": the sandbox and the pinned image together did not prove they can run the Go toolchain offline, so verification would fail before it judged anything")
 	}
 	cache := strings.TrimSpace(in.DependencyCacheDir)
 	if cache == "" {
-		return warn(doctorGroupAssurance, id, "the sandbox can prepare dependencies but no assurance.dependency_cache_dir is configured, so every run re-downloads modules and offline verification has nothing to read")
+		return fail(doctorGroupAssurance, id, "no assurance.dependency_cache_dir is configured, so offline verification has no trusted module material to read")
 	}
-	info, err := os.Stat(cache)
-	if err != nil {
-		return fail(doctorGroupAssurance, id, "the dependency cache directory "+cache+" cannot be inspected: "+err.Error())
-	}
-	if !info.IsDir() {
-		return fail(doctorGroupAssurance, id, cache+" is not a directory, so it cannot be the module cache")
-	}
-	return pass(doctorGroupAssurance, id, "dependency preparation is enforceable and the module cache at "+cache+" exists")
+	return pass(doctorGroupAssurance, id, "the pinned image runs the Go toolchain offline and the trusted module cache at "+cache+" is mounted read-only into every verification")
 }
 
 // ---------------------------------------------------------------------------

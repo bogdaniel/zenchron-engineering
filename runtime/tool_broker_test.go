@@ -181,8 +181,17 @@ func TestBrokeredCommandCarriesNoProviderCredentialOrAmbientSecret(t *testing.T)
 			env = append(env, args[i+1])
 		}
 	}
-	if len(env) != 2 || env[0] != "HOME=/home" || !strings.HasPrefix(env[1], "PATH=") {
+	// The allowlist is exact and every value is container-absolute: HOME and
+	// PATH, plus the two variables that tell the Go toolchain to build inside
+	// the sandbox's own exec-capable tmpfs rather than anywhere else.
+	want := []string{"HOME=/home", "PATH=" + sandboxPATH, "GOTMPDIR=" + sandboxBuildDir, "GOCACHE=" + sandboxBuildDir + "/cache"}
+	if len(env) != len(want) {
 		t.Fatalf("brokered command environment is not an explicit allowlist: %#v", env)
+	}
+	for i, entry := range want {
+		if env[i] != entry {
+			t.Fatalf("brokered command environment %d is %q, want %q", i, env[i], entry)
+		}
 	}
 }
 

@@ -946,7 +946,10 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// reassessment or to a producer, and recording them as a succeeded
 	// observation is what lets the planner act on them. A transient
 	// INFRASTRUCTURE failure is not a verdict at all - the sandbox could not
-	// run - and it routes to a retry of this same operation.
+	// run - and it routes to a retry of this same operation. Neither is an
+	// assurance PREREQUISITE failure, where the toolchain or the trusted
+	// dependency material the verifier needs was not there; that one waits for
+	// an operator instead of retrying, and waits without spending budget.
 	//
 	// The fourth dogfood recorded exactly that case as Succeeded. The exact
 	// binding then looked complete, base.integrate correctly refused to proceed
@@ -956,7 +959,11 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// exact commit, tree and contract are retried, the attempt increments under
 	// max_assurance_attempts, and an exhausted budget settles with the bounded
 	// attempts_exhausted failure rather than a goal that was never reached.
-	if !result.Passed && RouteFailure(class) == RouteRetry {
+	// BOTH routes that mean "no verdict was reached" leave the operation
+	// unsatisfied. Retry is a fault that may clear by itself; wait is one an
+	// operator has to clear. Recording either as a succeeded observation is
+	// defect G, and a wait-routed one would recreate it exactly.
+	if !result.Passed && (RouteFailure(class) == RouteRetry || RouteFailure(class) == RouteWait) {
 		return effect{
 			state:  OperationFailed,
 			result: assuranceRecord{FailureClass: class, Passed: false},

@@ -475,10 +475,22 @@ func TestNoConfigurationGrantsCandidateGitHubCredentials(t *testing.T) {
 			t.Fatalf("an ambient credential reached the provider environment through %s", name)
 		}
 	}
+	// The container environment is a stated allowlist. GOTMPDIR and GOCACHE are
+	// on it because the toolchain has to build and run somewhere the runtime
+	// chose; both point INSIDE the container, at the one exec-capable tmpfs, and
+	// neither can carry a host value.
 	args := dockerBase(t.TempDir(), true)
+	allowed := map[string]bool{"HOME": true, "PATH": true, "GOTMPDIR": true, "GOCACHE": true}
 	for i, arg := range args {
-		if arg == "--env" && !strings.HasPrefix(args[i+1], "HOME=") && !strings.HasPrefix(args[i+1], "PATH=") {
+		if arg != "--env" {
+			continue
+		}
+		name, value, _ := strings.Cut(args[i+1], "=")
+		if !allowed[name] {
 			t.Fatalf("assurance sandbox forwards %q, which is not on the allowlist", args[i+1])
+		}
+		if !strings.HasPrefix(value, "/") {
+			t.Fatalf("assurance sandbox environment %q is not a container-absolute value", args[i+1])
 		}
 	}
 	if !containsPair(args, "--network", "none") {
