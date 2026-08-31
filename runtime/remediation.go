@@ -42,11 +42,7 @@ func (f *FakeAssuranceProvider) ProducedEvidenceClasses() []domain.EvidenceClass
 	if len(f.Produces) > 0 {
 		return f.Produces
 	}
-	// The default double stands in for a configuration that has BOTH an
-	// automated verifier and an independent semantic producer, because that is
-	// what a contract with material acceptance obligations needs in order to
-	// reach a decision at all.
-	return []domain.EvidenceClass{AssuranceEvidenceClass, SemanticEvidenceClass}
+	return []domain.EvidenceClass{AssuranceEvidenceClass}
 }
 
 func (f *FakeAssuranceProvider) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {
@@ -186,4 +182,63 @@ func (c MutationCoordinator) RemediateFormat(ctx context.Context, formatter Dete
 		return state, CommitResult{}, err
 	}
 	return c.CommitAndObserve(state, model, policy, "zenchron: deterministic gofmt remediation")
+}
+
+// FakeSemanticAssuranceProvider is the deterministic stand-in for the
+// independent semantic producer. It answers every claim it is asked about with
+// Status, so a scenario can model pass, fail, inconclusive, or a verdict that
+// was never reached - without a network call and without a model.
+type FakeSemanticAssuranceProvider struct {
+	Requests []AssuranceRequest
+	Status   string
+	// Omit, when set, is a claim id the verdict leaves unanswered, which is how
+	// an incomplete answer is modelled.
+	Omit string
+	Err  error
+	// Class overrides the declared capability so a scenario can model a
+	// configuration whose semantic producer is absent or answers something else.
+	Class []domain.EvidenceClass
+}
+
+func (f *FakeSemanticAssuranceProvider) ProducedEvidenceClasses() []domain.EvidenceClass {
+	if len(f.Class) > 0 {
+		return f.Class
+	}
+	return []domain.EvidenceClass{SemanticEvidenceClass}
+}
+
+func (f *FakeSemanticAssuranceProvider) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {
+	f.Requests = append(f.Requests, r)
+	definition := SemanticVerifierDefinition()
+	if f.Err != nil {
+		return AssuranceResult{ProviderID: semanticProviderID, VerifierDefinition: definition, FailureClass: FailureTransientProvider}, f.Err
+	}
+	status := f.Status
+	if status == "" {
+		status = "pass"
+	}
+	claims := map[string]SemanticClaimVerdict{}
+	passed := true
+	for _, claim := range r.SemanticClaims {
+		if claim.ClaimID == f.Omit {
+			continue
+		}
+		claims[claim.ClaimID] = SemanticClaimVerdict{
+			ClaimID: claim.ClaimID, ObligationIDs: claim.ObligationIDs,
+			Status: status, Rationale: "fixture verdict",
+		}
+		if status != "pass" {
+			passed = false
+		}
+	}
+	if len(claims) == 0 {
+		return AssuranceResult{ProviderID: semanticProviderID, VerifierDefinition: definition, FailureClass: FailureVerification},
+			fmt.Errorf("semantic verdict answered no required claim")
+	}
+	return AssuranceResult{
+		ProviderID: semanticProviderID, VerifierDefinition: definition, Passed: passed,
+		SemanticClaims: claims, Model: "fixture-model",
+		Evidence: &EvidenceBinding{Commit: r.Commit, Tree: r.Tree, Contract: r.Contract, Policy: r.Policy,
+			Producer: Ref{ID: semanticProviderID, Revision: definition}},
+	}, nil
 }

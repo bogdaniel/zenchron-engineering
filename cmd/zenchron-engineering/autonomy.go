@@ -125,8 +125,11 @@ type autonomyOverrides struct {
 	GitHub    runtime.GitHubAdapter
 	Provider  runtime.ExecutionProvider
 	Assurance runtime.AssuranceProvider
-	Runtime   engineeringRuntime
-	Watch     watchController
+	// SemanticAssurance replaces the independent semantic producer, so a test
+	// can model a configuration with or without one.
+	SemanticAssurance runtime.AssuranceProvider
+	Runtime           engineeringRuntime
+	Watch             watchController
 	// ControllerBuild replaces this process's own provenance. Production
 	// resolves it from the injected build metadata and the running executable;
 	// a test supplies a fixed build so the identity under assertion is the one
@@ -320,6 +323,7 @@ type composition struct {
 	forge       runtime.GitHubAdapter
 	provider    runtime.ExecutionProvider
 	assurance   runtime.AssuranceProvider
+	semantic    runtime.AssuranceProvider
 	build       runtime.ControllerBuild
 	release     func()
 }
@@ -398,10 +402,14 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 			DependencyCacheDir: config.Assurance.DependencyCacheDir,
 		}
 	}
+	semantic := overrides.SemanticAssurance
+	if semantic == nil {
+		semantic = semanticAssuranceProvider(config, artifacts)
+	}
 	return &composition{
 		config: config, store: store, owner: owner, model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
-		forge: forge, provider: provider, assurance: assurance, release: release,
+		forge: forge, provider: provider, assurance: assurance, semantic: semantic, release: release,
 	}, nil
 }
 
@@ -413,24 +421,25 @@ func (c *composition) engine(target runtime.RepositoryTarget) (*runtime.Engineer
 		return nil, err
 	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
-		Store:           c.store,
-		Clock:           runtime.RealClock{},
-		Owner:           c.owner,
-		Liveness:        runtime.NewLockOwnerLiveness(c.config.StateDir),
-		GitHub:          c.forge,
-		Provider:        c.provider,
-		Assurance:       c.assurance,
-		Artifacts:       c.artifacts,
-		ProjectModel:    c.model,
-		Policy:          c.policy,
-		StateDir:        c.config.StateDir,
-		Repository:      target,
-		Remote:          remote,
-		Credentials:     c.credentials,
-		ControllerID:    "zenchron-engineering/" + version,
-		ControllerBuild: c.build,
-		ConfigDigest:    c.config.Digest,
-		Budgets:         c.config.RunBudgets(),
+		Store:             c.store,
+		Clock:             runtime.RealClock{},
+		Owner:             c.owner,
+		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
+		GitHub:            c.forge,
+		Provider:          c.provider,
+		Assurance:         c.assurance,
+		SemanticAssurance: c.semantic,
+		Artifacts:         c.artifacts,
+		ProjectModel:      c.model,
+		Policy:            c.policy,
+		StateDir:          c.config.StateDir,
+		Repository:        target,
+		Remote:            remote,
+		Credentials:       c.credentials,
+		ControllerID:      "zenchron-engineering/" + version,
+		ControllerBuild:   c.build,
+		ConfigDigest:      c.config.Digest,
+		Budgets:           c.config.RunBudgets(),
 	})
 }
 
@@ -490,6 +499,28 @@ func githubCredentials(mode string) runtime.CredentialProvider {
 	}
 	// Nil is the documented "github_auth_required" state, not anonymous access.
 	return nil
+}
+
+// semanticAssuranceProvider builds the INDEPENDENT semantic acceptance
+// producer. It is available exactly when the operator configured a brokered
+// OpenAI provider with a credential file: the same trusted controller
+// credential serves both providers, and no second mandatory secret is invented.
+// The candidate never receives it, and the two providers keep distinct
+// identities despite the shared account - which is why this file says M0
+// independence and never says vendor independence.
+func semanticAssuranceProvider(config runtime.Config, artifacts runtime.ArtifactStore) runtime.AssuranceProvider {
+	if config.Provider.Kind != runtime.ProviderOpenAI || strings.TrimSpace(config.Provider.CredentialPath) == "" {
+		return nil
+	}
+	return runtime.OpenAISemanticVerifier{
+		ArtifactStore: artifacts,
+		Model:         config.Provider.Model,
+		AuthMode:      config.Provider.AuthMode,
+		APIKeyFile:    config.Provider.CredentialPath,
+		Endpoint:      config.Provider.Endpoint,
+		HTTP:          &http.Client{Timeout: 5 * time.Minute},
+		Timeout:       5 * time.Minute,
+	}
 }
 
 // executionProvider builds the configured AI provider. The credential is only

@@ -227,6 +227,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Codex:                  NativeCodexProvider{Executor: executor},
 		Sandbox:                DockerSandbox{Image: doctorImage, Executor: executor},
 		DependencyCacheDir:     f.cacheDir,
+		SemanticAssurance:      &FakeSemanticAssuranceProvider{},
 		GitHub: doctorForge{result: DiscoveryResult{
 			Repo:      GitHubRepo{Owner: "acme", Name: "widgets"},
 			Label:     DefaultDiscoveryLabel,
@@ -328,7 +329,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"git.binary", "git.features", "git.remote", "git.credential", "git.isolation",
 		"provider.isolation", "provider.credential",
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
-		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache",
+		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache", "assurance.semantic",
 		"assurance.dependency_preparation",
 		"github.credential", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",

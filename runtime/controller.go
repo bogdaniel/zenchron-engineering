@@ -146,19 +146,24 @@ type RunBudgets struct {
 // Dependencies is the complete, explicit input to a runtime instance. Every
 // external system is a seam; nothing here is discovered from ambient state.
 type Dependencies struct {
-	Store        *SQLiteOperationStore
-	Clock        Clock
-	Owner        string
-	Liveness     OwnerLiveness
-	GitHub       GitHubAdapter
-	Provider     ExecutionProvider
-	Assurance    AssuranceProvider
-	Artifacts    ArtifactStore
-	ProjectModel domain.ProjectModel
-	Policy       domain.EngineeringPolicy
-	StateDir     string
-	Repository   RepositoryTarget
-	Remote       RemoteIdentity
+	Store     *SQLiteOperationStore
+	Clock     Clock
+	Owner     string
+	Liveness  OwnerLiveness
+	GitHub    GitHubAdapter
+	Provider  ExecutionProvider
+	Assurance AssuranceProvider
+	// SemanticAssurance is the INDEPENDENT semantic acceptance producer. It is
+	// optional: without it a contract requiring semantic_acceptance is refused
+	// as unfulfillable before any expensive work, which is the honest state of a
+	// configuration that cannot answer that question.
+	SemanticAssurance AssuranceProvider
+	Artifacts         ArtifactStore
+	ProjectModel      domain.ProjectModel
+	Policy            domain.EngineeringPolicy
+	StateDir          string
+	Repository        RepositoryTarget
+	Remote            RemoteIdentity
 	// Credentials is the single operator-controlled repository control-plane
 	// authority for this runtime: it authorizes the GitHub REST adapter, the
 	// runtime-owned base clone/fetch, and the runtime-owned push. It is

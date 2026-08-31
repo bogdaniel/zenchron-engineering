@@ -118,6 +118,13 @@ var eventPayloads = map[string]payloadValidator{
 			boundedList("deviation_kinds", p.DeviationKinds),
 			nonNegative("requested_privilege_count", p.RequestedPrivilegeCount))
 	}),
+	EventSemanticAssuranceObserved: payloadSchema(func(p AssuranceObservedPayload) error {
+		return errors.Join(
+			required("provider_id", p.ProviderID),
+			required("verifier_definition", p.VerifierDefinition),
+			required("commit", p.Commit),
+			required("tree", p.Tree))
+	}),
 	EventAssuranceObserved: optionalPayload(payloadSchema(func(p AssuranceObservedPayload) error {
 		return errors.Join(
 			required("provider_id", p.ProviderID),
@@ -347,6 +354,12 @@ type AssuranceObservedPayload struct {
 	Commit             string       `json:"commit"`
 	Tree               string       `json:"tree"`
 	Bundle             Ref          `json:"bundle,omitzero"`
+	// Semantic marks an observation produced by the independent semantic
+	// acceptance verifier rather than the automated one, and ClaimResults is its
+	// per-claim answer. A semantic verdict is claim-specific: one acceptance
+	// obligation may be discharged while another is not.
+	Semantic     bool              `json:"semantic,omitempty"`
+	ClaimResults map[string]string `json:"claim_results,omitempty"`
 }
 
 // AuthorityEvaluatedPayload records a #7 decision reference for one action.

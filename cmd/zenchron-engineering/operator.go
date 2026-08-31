@@ -1024,6 +1024,10 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 	in.StateDir = config.StateDir
 	in.Sandbox = sandbox
 	in.DependencyCacheDir = config.Assurance.DependencyCacheDir
+	in.SemanticAssurance = overrides.SemanticAssurance
+	if in.SemanticAssurance == nil {
+		in.SemanticAssurance = semanticAssuranceProvider(config, artifacts)
+	}
 	in.ProviderCredentialPath = config.Provider.CredentialPath
 	in.GitHubCredentialMode = config.GitHub.CredentialMode
 	in.DiscoveryLabel = config.Watch.Label

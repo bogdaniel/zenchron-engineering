@@ -483,7 +483,7 @@ func TestMaterialReassessmentRevisesTheContractAndGovernsWhatFollows(t *testing.
 	}
 
 	// The evidence the run can prove is bound to the revised contract too.
-	assured := onlyPayload[AssuranceObservedPayload](t, events, EventAssuranceObserved)
+	assured := onlyAutomatedAssurance(t, events)
 	if want := committed.Commit + "@" + reassessed.Contract.Revision; assured.Bundle.Revision != want {
 		t.Fatalf("evidence bundle revision = %q, want %q", assured.Bundle.Revision, want)
 	}
@@ -506,7 +506,7 @@ func TestAssuranceVerifiesTheExactTreeAndOnlyPassingResultsBecomeEvidence(t *tes
 		events := journalOf(t, fixture.runtime, runID)
 		state := fixture.state(runID)
 		committed := onlyPayload[CandidateCommittedPayload](t, events, EventCandidateCommitted)
-		assured := onlyPayload[AssuranceObservedPayload](t, events, EventAssuranceObserved)
+		assured := onlyAutomatedAssurance(t, events)
 
 		if assured.Commit != committed.Commit || assured.Tree != committed.Tree {
 			t.Fatalf("assurance.observed names %s/%s, want the recorded commit/tree %s/%s",
@@ -539,7 +539,7 @@ func TestAssuranceVerifiesTheExactTreeAndOnlyPassingResultsBecomeEvidence(t *tes
 		// One item per claim the OBSERVING producer declared it can answer.
 		// The fixture's provider stands in for a configuration with both an
 		// automated verifier and an independent semantic producer.
-		producible := ProducibleEvidenceClasses(fixture.deps.Assurance)
+		producible := ProducibleEvidenceClasses(fixture.deps.Assurance, fixture.deps.SemanticAssurance)
 		for id, item := range bundle.Evidence {
 			if item.Result.Status != domain.EvidencePassed || !producible[item.EvidenceClass] {
 				t.Fatalf("evidence item %q = %#v", id, item)
@@ -571,7 +571,7 @@ func TestAssuranceVerifiesTheExactTreeAndOnlyPassingResultsBecomeEvidence(t *tes
 		events := journalOf(t, fixture.runtime, runID)
 		state := fixture.state(runID)
 		committed := onlyPayload[CandidateCommittedPayload](t, events, EventCandidateCommitted)
-		assured := onlyPayload[AssuranceObservedPayload](t, events, EventAssuranceObserved)
+		assured := onlyAutomatedAssurance(t, events)
 
 		if assured.Commit != committed.Commit || assured.Tree != committed.Tree {
 			t.Fatalf("a failing result is not bound to the exact tree: %#v", assured)
@@ -723,7 +723,7 @@ func TestCurrentHeadCIFailureDrivesBoundedRemediationToANewHead(t *testing.T) {
 	if len(reassessments) != 2 || !reassessments[1].Material {
 		t.Fatalf("the remediated commit was not reassessed: %#v", reassessments)
 	}
-	assurances := journalPayloads[AssuranceObservedPayload](t, events, EventAssuranceObserved)
+	assurances := automatedAssurancePayloads(t, events)
 	if len(assurances) != 2 {
 		t.Fatalf("%d assurance observations, want one per head", len(assurances))
 	}
@@ -880,7 +880,7 @@ func TestReviewFindingDrivesBoundedRemediationAsTypedData(t *testing.T) {
 	if len(reassessments) != 2 || !reassessments[1].Material {
 		t.Fatalf("the remediated commit was not reassessed: %#v", reassessments)
 	}
-	assurances := journalPayloads[AssuranceObservedPayload](t, events, EventAssuranceObserved)
+	assurances := automatedAssurancePayloads(t, events)
 	if len(assurances) != 2 || assurances[1].Commit != second.Commit || assurances[1].Tree != second.Tree || !assurances[1].Passed {
 		t.Fatalf("the remediated tree was not verified from its exact commit: %#v", assurances)
 	}
@@ -916,4 +916,32 @@ func TestReviewFindingDrivesBoundedRemediationAsTypedData(t *testing.T) {
 	if !strings.Contains(body, second.Commit) || strings.Contains(body, comment) {
 		t.Fatalf("the published provenance is stale or leaks review text:\n%s", body)
 	}
+}
+
+// automatedAssurancePayloads are the observations produced by the AUTOMATED
+// verifier. The independent semantic verifier observes the same heads and is
+// deliberately excluded here: these assertions are about exact-tree automated
+// verification, and the two answer different questions.
+func automatedAssurancePayloads(t *testing.T, events []EngineeringEvent) []AssuranceObservedPayload {
+	t.Helper()
+	var out []AssuranceObservedPayload
+	for _, e := range events {
+		if e.Type != EventAssuranceObserved || len(e.Payload) == 0 {
+			continue
+		}
+		payload, err := decodePayload[AssuranceObservedPayload](e.Payload)
+		if err == nil && !payload.Semantic {
+			out = append(out, payload)
+		}
+	}
+	return out
+}
+
+func onlyAutomatedAssurance(t *testing.T, events []EngineeringEvent) AssuranceObservedPayload {
+	t.Helper()
+	payloads := automatedAssurancePayloads(t, events)
+	if len(payloads) != 1 {
+		t.Fatalf("journal holds %d automated assurance.observed events, want exactly one: %v", len(payloads), journalTypes(events))
+	}
+	return payloads[0]
 }

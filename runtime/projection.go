@@ -40,9 +40,14 @@ type RunProjection struct {
 	AuthorityDecisions   map[string]AuthorityEvaluation `json:"authority_decisions,omitempty"`
 	PullRequest          *PullRequestObservation        `json:"pull_request,omitempty"`
 	Assurance            *AssuranceObservation          `json:"assurance,omitempty"`
-	CI                   *CIObservation                 `json:"ci,omitempty"`
-	Review               *ReviewObservation             `json:"review,omitempty"`
-	Attempts             map[string]int                 `json:"attempts,omitempty"`
+	// SemanticAssurance is the latest INDEPENDENT semantic observation for a
+	// head. It is kept separately from the automated one because they answer
+	// different questions and are produced by different producers; collapsing
+	// them would let one stand in for the other.
+	SemanticAssurance *AssuranceObservation `json:"semantic_assurance,omitempty"`
+	CI                *CIObservation        `json:"ci,omitempty"`
+	Review            *ReviewObservation    `json:"review,omitempty"`
+	Attempts          map[string]int        `json:"attempts,omitempty"`
 	// ExecutionDiagnostic is the LATEST sanitized execution failure the journal
 	// holds. It is projected from operation.after, exactly like the metadata
 	// baseline is, so a restarted process reports the same root cause without
@@ -132,6 +137,9 @@ func Project(events []EngineeringEvent) (RunProjection, error) {
 	}
 	if p.Assurance != nil {
 		p.Assurance.Stale = p.Assurance.Commit != head
+	}
+	if p.SemanticAssurance != nil {
+		p.SemanticAssurance.Stale = p.SemanticAssurance.Commit != head
 	}
 	if p.CI != nil {
 		p.CI.Stale = p.CI.HeadRevision != head
@@ -226,6 +234,14 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 		}
 		if p.Assurance == nil || supersedes(p.Assurance.Commit, payload.Commit, p.Head()) {
 			p.Assurance = &AssuranceObservation{payload, Observation{Sequence: e.Sequence}}
+		}
+	case EventSemanticAssuranceObserved:
+		payload, err := decodePayload[AssuranceObservedPayload](e.Payload)
+		if err != nil {
+			return err
+		}
+		if p.SemanticAssurance == nil || supersedes(p.SemanticAssurance.Commit, payload.Commit, p.Head()) {
+			p.SemanticAssurance = &AssuranceObservation{payload, Observation{Sequence: e.Sequence}}
 		}
 	case EventGitHubPRObserved:
 		payload, err := decodePayload[GitHubPRObservedPayload](e.Payload)

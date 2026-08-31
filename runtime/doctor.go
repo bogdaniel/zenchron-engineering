@@ -100,6 +100,11 @@ type DoctorInput struct {
 	Sandbox DockerSandbox
 	// DependencyCacheDir is the operator's module cache, when configured.
 	DependencyCacheDir string
+	// SemanticAssurance is the independent semantic acceptance producer, when
+	// one is configured. Nil is a truthful answer, not a fault: it means
+	// semantic_acceptance is not producible and a contract requiring it is
+	// refused before any expensive work.
+	SemanticAssurance AssuranceProvider
 
 	// GitHub is the forge adapter. Nil means no read-only forge check is safe
 	// to make, which is reported as WARN, not PASS.
@@ -549,6 +554,7 @@ func doctorAssurance(ctx context.Context, in DoctorInput) []DoctorCheck {
 		doctorSandboxBoundaries(diagnosis),
 		doctorAssuranceToolchain(ctx, in, diagnosis),
 		doctorDependencyCache(in),
+		doctorSemanticAssurance(in),
 		doctorDependencyPreparation(in, diagnosis),
 	}
 }
@@ -587,6 +593,45 @@ func probeDetail(out CommandOutput, err error) string {
 		return err.Error()
 	}
 	return detail
+}
+
+// doctorSemanticAssurance reports whether the INDEPENDENT semantic acceptance
+// producer is configured and can actually initialize. It makes no model call:
+// a paid inference request is not a readiness check, and this one is free.
+//
+// Absent is reported, not failed - a configuration with no semantic producer is
+// coherent, and the runtime refuses a contract requiring that class before any
+// expensive work. What IS a failure is a producer that is configured, declares
+// the class, and then cannot initialize: that would let a contract pass
+// fulfillability and then fail after the work was done.
+func doctorSemanticAssurance(in DoctorInput) DoctorCheck {
+	const id = "assurance.semantic"
+	if in.SemanticAssurance == nil {
+		return warn(doctorGroupAssurance, id, "no independent semantic acceptance producer is configured, so evidence class "+
+			string(SemanticEvidenceClass)+" is not producible; a contract requiring it is refused before any execution rather than failing after the work")
+	}
+	producible := ProducibleEvidenceClasses(in.SemanticAssurance)
+	if !producible[SemanticEvidenceClass] {
+		return fail(doctorGroupAssurance, id, fmt.Sprintf("the configured semantic assurance provider %T does not declare %s, so it cannot discharge a semantic acceptance claim",
+			in.SemanticAssurance, SemanticEvidenceClass))
+	}
+	verifier, ok := in.SemanticAssurance.(OpenAISemanticVerifier)
+	if !ok {
+		return pass(doctorGroupAssurance, id, fmt.Sprintf("an independent semantic acceptance producer (%T) declares %s", in.SemanticAssurance, SemanticEvidenceClass))
+	}
+	if strings.TrimSpace(verifier.Model) == "" {
+		return fail(doctorGroupAssurance, id, "the semantic assurance provider declares "+string(SemanticEvidenceClass)+" but names no model, so it cannot answer")
+	}
+	if _, err := verifier.credential(""); err != nil {
+		return fail(doctorGroupAssurance, id, "the semantic assurance provider declares "+string(SemanticEvidenceClass)+
+			" but its credential is unavailable: "+err.Error()+"; its contents were not read")
+	}
+	if _, err := semanticToolDefinitions(); err != nil {
+		return fail(doctorGroupAssurance, id, "the semantic assurance read-only tool surface does not validate: "+err.Error())
+	}
+	return pass(doctorGroupAssurance, id, "the independent semantic acceptance producer "+semanticProviderID+" declares "+
+		string(SemanticEvidenceClass)+", resolves its credential, and advertises only read-only tools; verifier definition "+
+		SemanticVerifierDefinition()[:16]+", model "+verifier.Model+". No inference request was made")
 }
 
 // doctorDependencyCache proves the operator-provisioned cache is actually

@@ -30,6 +30,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -48,6 +49,7 @@ const (
 	OpRemediationGofmt  = "remediation.gofmt"
 	OpCandidateCommit   = "candidate.commit"
 	OpAssuranceGo       = "assurance.go"
+	OpAssuranceSemantic = "assurance.semantic"
 	OpAuthorityEvaluate = "authority.evaluate"
 	OpBaseIntegrate     = "base.integrate"
 	OpCandidatePush     = "candidate.push"
@@ -575,6 +577,7 @@ var operationSpecs = []operationSpec{
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
 	{OpAssuranceGo, bindAssuranceGo},
+	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
 	{OpAuthorityEvaluate, bindAuthorityEvaluate},
 	{OpCandidatePush, bindCandidatePush},
@@ -604,7 +607,7 @@ func (r *EngineeringRuntime) attemptsFor(kind string) int {
 		return r.deps.Budgets.MaxExecutionAttempts
 	case OpRemediationGofmt:
 		return r.deps.Budgets.MaxRemediationAttempts
-	case OpAssuranceGo:
+	case OpAssuranceGo, OpAssuranceSemantic:
 		return r.deps.Budgets.MaxAssuranceAttempts
 	default:
 		return 3
@@ -713,6 +716,67 @@ func bindAssuranceGo(s *runState) (string, bool) {
 		return "", false
 	}
 	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision(), true
+}
+
+// bindAssuranceSemantic plans an INDEPENDENT semantic assurance invocation when
+// the contract actually requires that class of evidence. It is derived from the
+// contract, never from a hardcoded issue: a contract with no semantic claim
+// plans no semantic operation, and a configuration with no semantic producer
+// plans none either - fulfillability has already refused such a contract before
+// any expensive work.
+//
+// It waits for the automated verifier to have judged the same exact head, so the
+// semantic verifier can be told the automated result rather than re-deriving it,
+// and so a candidate that does not even build is not sent to a model.
+func bindAssuranceSemantic(s *runState) (string, bool) {
+	key, wanted := bindAssuranceGo(s)
+	if !wanted || !s.satisfied(OpAssuranceGo, key) {
+		return "", false
+	}
+	assurance := s.projection.Assurance
+	if assurance == nil || assurance.Stale || !assurance.Passed {
+		return "", false
+	}
+	if s.rt.deps.SemanticAssurance == nil {
+		return "", false
+	}
+	if len(s.semanticClaims()) == 0 {
+		return "", false
+	}
+	return key, true
+}
+
+// semanticClaims are the contract's required claims of the semantic class, with
+// the material obligations each one discharges. It is the whole question the
+// semantic verifier is asked, derived from the exact contract.
+func (s *runState) semanticClaims() []SemanticClaimRequest {
+	contract, err := s.rt.contractFor(s)
+	if err != nil {
+		return nil
+	}
+	var requests []SemanticClaimRequest
+	for claimID, claim := range contract.RequiredClaims {
+		if claim.EvidenceClass != SemanticEvidenceClass {
+			continue
+		}
+		request := SemanticClaimRequest{ClaimID: claimID}
+		for obligationID, obligation := range contract.Obligations {
+			if !obligation.Material {
+				continue
+			}
+			for _, discharge := range obligation.RequiredClaims {
+				if discharge == claimID {
+					request.ObligationIDs = append(request.ObligationIDs, obligationID)
+					request.Statements = append(request.Statements, obligation.Statement)
+				}
+			}
+		}
+		sort.Strings(request.ObligationIDs)
+		sort.Strings(request.Statements)
+		requests = append(requests, request)
+	}
+	sort.Slice(requests, func(i, j int) bool { return requests[i].ClaimID < requests[j].ClaimID })
+	return requests
 }
 
 // bindBaseIntegrate is the base drift check. Its binding is the candidate head

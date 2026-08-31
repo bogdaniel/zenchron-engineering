@@ -176,6 +176,10 @@ func offlineOverrides() autonomyOverrides {
 		GitHub:    runtime.NewFakeGitHubAdapter(),
 		Provider:  provenProvider{FakeExecutionProvider: &runtime.FakeExecutionProvider{}},
 		Assurance: &runtime.FakeAssuranceProvider{},
+		// A configuration with an independent semantic producer, because a
+		// contract carrying material acceptance obligations needs one to reach
+		// any decision at all.
+		SemanticAssurance: &runtime.FakeSemanticAssuranceProvider{},
 	}
 }
 

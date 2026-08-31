@@ -92,14 +92,19 @@ const (
 	EventContractCompiled         = "contract.compiled"
 	EventReassessmentCompleted    = "reassessment.completed"
 	EventAssuranceObserved        = "assurance.observed"
-	EventAuthorityEvaluated       = "authority.evaluated"
-	EventGitHubCIObserved         = "github.ci_observed"
-	EventGitHubReviewObserved     = "github.review_observed"
-	EventGitHubPRObserved         = "github.pr_observed"
-	EventHumanAuthorityRecorded   = "human.authority_recorded"
+	// EventSemanticAssuranceObserved is the INDEPENDENT semantic verifier's own
+	// observation. It is a distinct event because it is a distinct producer
+	// answering a distinct question: every reader that means "the automated
+	// verifier judged this tree" keeps meaning exactly that.
+	EventSemanticAssuranceObserved = "assurance.semantic_observed"
+	EventAuthorityEvaluated        = "authority.evaluated"
+	EventGitHubCIObserved          = "github.ci_observed"
+	EventGitHubReviewObserved      = "github.review_observed"
+	EventGitHubPRObserved          = "github.pr_observed"
+	EventHumanAuthorityRecorded    = "human.authority_recorded"
 )
 
-var eventTypes = map[string]bool{EventRunCreated: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventRunCreated: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
 
 type Ref struct {
 	ID       string `json:"id"`

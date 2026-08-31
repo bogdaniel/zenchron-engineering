@@ -75,6 +75,7 @@ func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op Run
 		OpRemediationGofmt:  r.remediateFormat,
 		OpCandidateCommit:   r.commitCandidate,
 		OpAssuranceGo:       r.assureCandidate,
+		OpAssuranceSemantic: r.assureSemantics,
 		OpBaseIntegrate:     r.integrateBase,
 		OpAuthorityEvaluate: r.evaluateAuthority,
 		OpCandidatePush:     r.pushCandidate,
@@ -280,7 +281,7 @@ func (r *EngineeringRuntime) compileContract(_ context.Context, state *runState,
 	// the contract requires against the classes the configured producers
 	// DECLARE, and it never guesses that one class means another.
 	if action, ok := r.publicationAction(); ok {
-		producible := ProducibleEvidenceClasses(r.deps.Assurance)
+		producible := ProducibleEvidenceClasses(r.deps.Assurance, r.deps.SemanticAssurance)
 		if unsupported := UnfulfillableEvidence(kernel.Contract, action, producible); len(unsupported) > 0 {
 			return effect{state: OperationFailed, result: contractCompileResult{
 				FailureClass: FailureRequiredEvidenceUnsupported,
@@ -1016,6 +1017,102 @@ func (r *EngineeringRuntime) publicationAction() (domain.Action, bool) {
 	return domain.Action{Type: PublicationActionType, Target: branch}, true
 }
 
+// contractFor rebuilds the contract that governs the run's current head. It is
+// the same deterministic rebuild every handler uses; nothing here reads the
+// network or the clock.
+func (r *EngineeringRuntime) contractFor(state *runState) (domain.EngineeringWorkContract, error) {
+	kernel, err := r.buildKernel(state)
+	if err != nil {
+		return domain.EngineeringWorkContract{}, err
+	}
+	return kernel.Contract, nil
+}
+
+// assureSemantics asks the INDEPENDENT semantic producer whether the exact
+// candidate discharges the contract's material acceptance obligations. It runs
+// against the same detached, exact-tree verification checkout the automated
+// verifier uses - never a producer's writable workspace - and it can change
+// nothing: the provider it calls holds no broker, no sandbox, and no mutation
+// capability at all.
+func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runState, op RunOperation) effect {
+	if r.deps.SemanticAssurance == nil {
+		return failed(fmt.Errorf("no semantic assurance provider is configured"))
+	}
+	workspace, err := r.workspace(state)
+	if err != nil {
+		return failed(err)
+	}
+	commit, tree := state.projection.CandidateRevision, state.projection.CandidateTree
+	checkout := filepath.Join(r.deps.StateDir, "runs", state.run.ID, "semantic", commit+"-"+strconv.Itoa(op.Attempt))
+	if err := os.RemoveAll(checkout); err != nil {
+		return failed(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(checkout), 0700); err != nil {
+		return failed(err)
+	}
+	if err := CreateAssuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
+		return failed(err)
+	}
+	defer os.RemoveAll(checkout)
+
+	kernel, err := r.buildKernel(state)
+	if err != nil {
+		return failed(err)
+	}
+	claims := state.semanticClaims()
+	if len(claims) == 0 {
+		return failed(fmt.Errorf("no semantic claim is required by this contract"))
+	}
+	paths, err := candidatePaths(checkout, state.pinnedBase(), commit)
+	if err != nil {
+		return failed(err)
+	}
+	automated := "not observed"
+	if a := state.projection.Assurance; a != nil {
+		automated = fmt.Sprintf("verifier=%s passed=%t", a.VerifierDefinition, a.Passed)
+	}
+	result, assureErr := r.deps.SemanticAssurance.Assure(ctx, AssuranceRequest{
+		RunID: state.run.ID, Commit: commit, Tree: tree, CheckoutDir: checkout,
+		Contract:   Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
+		Policy:     Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
+		Producer:   Ref{ID: r.deps.ControllerID, Revision: r.controller},
+		Repository: r.deps.Repository.Identity, Base: state.pinnedBase(),
+		Objective: kernel.Contract.Objective, ChangedPaths: paths,
+		AutomatedAssurance: automated, SemanticClaims: claims,
+	})
+	if assureErr != nil && result.VerifierDefinition == "" {
+		return failed(assureErr)
+	}
+	payload := AssuranceObservedPayload{
+		ProviderID:         firstNonEmpty(result.ProviderID, semanticProviderID),
+		VerifierDefinition: firstNonEmpty(result.VerifierDefinition, "unknown-verifier"),
+		Passed:             result.Passed,
+		FailureClass:       result.FailureClass,
+		Commit:             commit,
+		Tree:               tree,
+		Semantic:           true,
+	}
+	if len(result.SemanticClaims) > 0 {
+		payload.ClaimResults = map[string]string{}
+		for id, verdict := range result.SemanticClaims {
+			payload.ClaimResults[id] = verdict.Status
+		}
+		payload.Bundle = evidenceBundleRef(state.run.ID, commit, kernel.Contract.Revision)
+	}
+	events := []journalEntry{{Type: EventSemanticAssuranceObserved, Payload: payload, Artifacts: result.Artifacts}}
+	// A verdict that was never reached leaves the operation unsatisfied, exactly
+	// as an unjudged automated verification does: retryable faults come back,
+	// prerequisite faults wait, and neither is recorded as an answer.
+	if len(result.SemanticClaims) == 0 {
+		class := result.FailureClass
+		if class == "" {
+			class = FailureVerification
+		}
+		return effect{state: OperationFailed, result: assuranceRecord{FailureClass: class, Passed: false}, events: events}
+	}
+	return effect{state: Succeeded, result: struct{}{}, events: events}
+}
+
 // evidenceBundleRef binds evidence to the exact commit and contract revision it
 // was produced for, so a moved tree can never look like it still has evidence.
 func evidenceBundleRef(runID, commit, contractRevision string) Ref {
@@ -1578,10 +1675,13 @@ func untrustedObjective(source sourceRecord, text untrustedSourceText) string {
 func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.EngineeringWorkContract) (map[string]domain.EvidenceBundle, error) {
 	bundles := map[string]domain.EvidenceBundle{}
 	assurance := state.projection.Assurance
-	if assurance == nil || assurance.Stale || !assurance.Passed || assurance.Commit != contract.Subject.Revision {
+	automated := assurance != nil && !assurance.Stale && assurance.Passed && assurance.Commit == contract.Subject.Revision
+	semantic := state.projection.SemanticAssurance
+	semanticApplies := semantic != nil && !semantic.Stale && semantic.Commit == contract.Subject.Revision
+	if !automated && !semanticApplies {
 		return bundles, nil
 	}
-	ref := evidenceBundleRef(state.run.ID, assurance.Commit, contract.Revision)
+	ref := evidenceBundleRef(state.run.ID, contract.Subject.Revision, contract.Revision)
 	// Which claims this observation can discharge is the PRODUCER's declared
 	// capability, not a hardcoded class. A configuration with an independent
 	// semantic producer discharges semantic claims; one with only the baseline
@@ -1590,7 +1690,7 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 	producible := ProducibleEvidenceClasses(r.deps.Assurance)
 	items := map[string]domain.EvidenceItem{}
 	for claimID, claim := range contract.RequiredClaims {
-		if claim.EvidenceClass == HumanEvidenceClass || !producible[claim.EvidenceClass] {
+		if !automated || claim.EvidenceClass == HumanEvidenceClass || claim.EvidenceClass == SemanticEvidenceClass || !producible[claim.EvidenceClass] {
 			continue
 		}
 		items["evidence-"+claimID] = domain.EvidenceItem{
@@ -1605,6 +1705,32 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 				RecordedAt: state.assuranceRecordedAt(assurance.Sequence),
 				Integrity:  &domain.EvidenceIntegrity{Method: "git-tree-sha", Value: assurance.Tree},
 			},
+		}
+	}
+	// Semantic items come from the INDEPENDENT semantic observation and carry
+	// its own producer identity, so #7's independence rule sees a producer that
+	// is not the change producer. They are claim-specific: a verdict of fail or
+	// inconclusive is recorded as such rather than being dropped, because
+	// "judged and not discharged" is not the same as "not judged".
+	if semanticApplies {
+		for claimID, status := range semantic.ClaimResults {
+			claim, required := contract.RequiredClaims[claimID]
+			if !required || claim.EvidenceClass != SemanticEvidenceClass {
+				continue
+			}
+			items["evidence-"+claimID] = domain.EvidenceItem{
+				ClaimID:       claimID,
+				EvidenceClass: claim.EvidenceClass,
+				Producer:      domain.EvidenceProducer{ID: semantic.ProviderID, Type: domain.ProducerAssuranceProvider},
+				Environment:   domain.EvidenceEnvironment{Type: "assurance_provider", Identifier: semantic.VerifierDefinition},
+				Result:        domain.EvidenceResult{Status: semanticEvidenceStatus(status)},
+				Lifecycle:     domain.EvidenceLifecycle{Status: domain.EvidenceValid},
+				Provenance: domain.EvidenceProvenance{
+					Source:     "zenchron-runtime",
+					RecordedAt: state.assuranceRecordedAt(semantic.Sequence),
+					Integrity:  &domain.EvidenceIntegrity{Method: "git-tree-sha", Value: semantic.Tree},
+				},
+			}
 		}
 	}
 	// An empty bundle is not a bundle: the schema requires at least one item,

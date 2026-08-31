@@ -171,12 +171,31 @@ func UnfulfillableEvidence(contract domain.EngineeringWorkContract, action domai
 	return unsupported
 }
 
+// SemanticClaimRequest is one acceptance question, stated by the runtime. The
+// verifier is told which claim and which obligations it is judging; it cannot
+// choose them.
+type SemanticClaimRequest struct {
+	ClaimID       string
+	ObligationIDs []string
+	Statements    []string
+}
+
 type AssuranceRequest struct {
 	RunID, Commit, Tree, CheckoutDir string
 	Contract                         Ref
 	Policy                           Ref
 	Producer                         Ref
 	VerifierDefinition               string
+	// The fields below are used by the semantic verifier. They are bounded,
+	// read-only context: identity, the exact base the diff is taken against, the
+	// changed-path inventory, a summary of the automated result, and the exact
+	// claims to judge. None of them is a capability.
+	Repository         string
+	Base               string
+	Objective          string
+	ChangedPaths       []string
+	AutomatedAssurance string
+	SemanticClaims     []SemanticClaimRequest
 }
 type AssuranceResult struct {
 	ProviderID, VerifierDefinition string
@@ -184,6 +203,14 @@ type AssuranceResult struct {
 	FailureClass                   FailureClass
 	Artifacts                      []Artifact
 	Evidence                       *EvidenceBinding
+	// Model and Tokens are recorded only when the producer actually reports
+	// them. Nothing here is invented when a provider does not expose usage.
+	Model  string
+	Tokens int64
+	// SemanticClaims is the per-claim observation of a semantic verifier. A
+	// verdict is claim-specific: one claim may be discharged while another is
+	// not, and a bundle must say so rather than collapsing to one boolean.
+	SemanticClaims map[string]SemanticClaimVerdict
 }
 
 // EvidenceBinding is adapter output, not an AuthorityDecision. The caller
