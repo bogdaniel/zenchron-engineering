@@ -487,7 +487,7 @@ func (v *switchableVerifier) provision() { v.provisioned = true }
 // stands in for: it answers the same kind of question, so it declares the same
 // evidence class.
 func (v *switchableVerifier) ProducedEvidenceClasses() []domain.EvidenceClass {
-	return []domain.EvidenceClass{AssuranceEvidenceClass}
+	return []domain.EvidenceClass{AssuranceEvidenceClass, SemanticEvidenceClass}
 }
 
 func (v *switchableVerifier) Assure(context.Context, AssuranceRequest) (AssuranceResult, error) {

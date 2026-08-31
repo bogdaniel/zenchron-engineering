@@ -29,6 +29,9 @@ type FakeAssuranceProvider struct {
 	Requests []AssuranceRequest
 	Results  []AssuranceResult
 	Err      error
+	// Produces overrides the declared capability, so a scenario can model a
+	// configuration that lacks a producer for some class.
+	Produces []domain.EvidenceClass
 }
 
 // ProducedEvidenceClasses makes the double faithful to what it stands in for:
@@ -36,7 +39,14 @@ type FakeAssuranceProvider struct {
 // declared there - a provider that states nothing produces nothing, and a
 // contract gated on evidence nothing produces is refused before any work.
 func (f *FakeAssuranceProvider) ProducedEvidenceClasses() []domain.EvidenceClass {
-	return []domain.EvidenceClass{AssuranceEvidenceClass}
+	if len(f.Produces) > 0 {
+		return f.Produces
+	}
+	// The default double stands in for a configuration that has BOTH an
+	// automated verifier and an independent semantic producer, because that is
+	// what a contract with material acceptance obligations needs in order to
+	// reach a decision at all.
+	return []domain.EvidenceClass{AssuranceEvidenceClass, SemanticEvidenceClass}
 }
 
 func (f *FakeAssuranceProvider) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {

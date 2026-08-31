@@ -228,10 +228,15 @@ func TestUnfulfillableContractIsRefusedBeforeAnyModelBudget(t *testing.T) {
 	action := domain.Action{Type: PublicationActionType, Target: fixture.branch}
 	claims := map[string]domain.RequiredClaim{
 		"claim-policy-vocabulary": {EvidenceClass: "test_result", IndependentFromChangeProducer: true},
+		"acceptance":              {EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true},
 	}
+	acceptanceDischarge := []string{"acceptance"}
 	permissions := []domain.Action{action}
 	conditions := []domain.AuthorityCondition{{Action: action, RequiredClaims: []string{"claim-policy-vocabulary"}}}
-	effect := domain.PolicyEffect{RequiredClaims: &claims, Permissions: &permissions, AuthorityConditions: &conditions}
+	effect := domain.PolicyEffect{
+		RequiredClaims: &claims, Permissions: &permissions, AuthorityConditions: &conditions,
+		AcceptanceDischargeClaims: &acceptanceDischarge,
+	}
 	rules := map[string]domain.PolicyRule{}
 	for name, value := range map[string]domain.FactValue{
 		"service-unknown": domain.FactUnknown,

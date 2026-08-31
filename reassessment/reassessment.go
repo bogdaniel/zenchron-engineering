@@ -241,11 +241,31 @@ func requirementDeviations(kind string, current, candidate map[string]domain.Req
 			deviations = append(deviations, Deviation{Kind: "additional_" + kind, Detail: id})
 		case !hasAfter:
 			deviations = append(deviations, Deviation{Kind: "removed_" + kind, Detail: id})
-		case before != after:
+		case !sameRequirement(before, after):
 			deviations = append(deviations, Deviation{Kind: "changed_" + kind, Detail: id})
 		}
 	}
 	return deviations
+}
+
+// sameRequirement compares an obligation or invariant by everything that can
+// change what it MEANS: its statement, whether it is material to acceptance,
+// and the claims that discharge it. A discharge set that moved is a changed
+// obligation, so reassessment sees it and evidence bound to the old shape is
+// treated as the stale evidence it is.
+func sameRequirement(before, after domain.Requirement) bool {
+	if before.Statement != after.Statement || before.Material != after.Material {
+		return false
+	}
+	if len(before.RequiredClaims) != len(after.RequiredClaims) {
+		return false
+	}
+	for i := range before.RequiredClaims {
+		if before.RequiredClaims[i] != after.RequiredClaims[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func claimDeviations(current, candidate map[string]domain.RequiredClaim) []Deviation {

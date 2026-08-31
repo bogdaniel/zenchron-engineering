@@ -24,22 +24,22 @@ func TestCompileCanonicalFixtureCasesDifferAndReplayDeterministically(t *testing
 	}{
 		{
 			name: "trivial", fact: "trivial.engineering-fact.json",
-			obligations: []string{"trivial-change-validation"},
-			claims:      []string{"claim-trivial-validation"},
+			obligations: []string{acceptanceObligation, "trivial-change-validation"},
+			claims:      []string{"claim-semantic-acceptance", "claim-trivial-validation"},
 			permission:  []domain.Action{{Type: "git.pull_request.create", Target: "main"}},
 			condition:   domain.AuthorityCondition{Action: domain.Action{Type: "git.pull_request.create", Target: "main"}, RequiredClaims: []string{"claim-trivial-validation"}},
 		},
 		{
 			name: "normal", fact: "normal-behavior.engineering-fact.json",
-			obligations: []string{"api-behavior-tests"},
-			claims:      []string{"claim-api-behavior-tests", "claim-api-contract-tests"},
+			obligations: []string{acceptanceObligation, "api-behavior-tests"},
+			claims:      []string{"claim-api-behavior-tests", "claim-api-contract-tests", "claim-semantic-acceptance"},
 			permission:  []domain.Action{{Type: "git.pull_request.create", Target: "main"}},
 			condition:   domain.AuthorityCondition{Action: domain.Action{Type: "git.pull_request.create", Target: "main"}, RequiredClaims: []string{"claim-api-behavior-tests", "claim-api-contract-tests"}},
 		},
 		{
 			name: "security-sensitive", fact: "security-sensitive.engineering-fact.json",
-			obligations: []string{"auth-regression-tests", "independent-security-review", "security-owner-approval"},
-			claims:      []string{"claim-auth-regression-tests", "claim-security-owner-approval", "claim-security-review"},
+			obligations: []string{acceptanceObligation, "auth-regression-tests", "independent-security-review", "security-owner-approval"},
+			claims:      []string{"claim-auth-regression-tests", "claim-security-owner-approval", "claim-security-review", "claim-semantic-acceptance"},
 			permission:  []domain.Action{},
 			condition:   domain.AuthorityCondition{Action: domain.Action{Type: "git.merge", Target: "main"}, RequiredClaims: []string{"claim-auth-regression-tests", "claim-security-owner-approval", "claim-security-review"}},
 		},
@@ -204,6 +204,11 @@ func TestCompileAcceptsRequirementClaimReferencesInDifferentOrder(t *testing.T) 
 		t.Fatalf("requirement claim ordering changed its definition: %v", err)
 	}
 }
+
+// acceptanceObligation is the stable, content-derived id of the fixture's own
+// acceptance criterion. It is computed rather than written out so the test
+// proves the derivation is stable, not that someone copied a hash.
+var acceptanceObligation = domain.AcceptanceObligationID("Works.")
 
 func compile(t *testing.T, facts ...domain.EngineeringFact) domain.EngineeringWorkContract {
 	t.Helper()

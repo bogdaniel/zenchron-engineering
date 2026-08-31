@@ -4,36 +4,79 @@
   "title": "EngineeringPolicy v0.1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "id", "revision", "rules"],
+  "required": [
+    "schema_version",
+    "id",
+    "revision",
+    "rules"
+  ],
   "properties": {
-    "schema_version": { "const": "0.1" },
-    "id": { "$ref": "#/$defs/non_empty_string" },
-    "revision": { "$ref": "#/$defs/non_empty_string" },
+    "schema_version": {
+      "const": "0.1"
+    },
+    "id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "revision": {
+      "$ref": "#/$defs/non_empty_string"
+    },
     "rules": {
       "type": "object",
       "minProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
-      "additionalProperties": { "$ref": "#/$defs/rule" }
+      "propertyNames": {
+        "$ref": "#/$defs/non_empty_string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/rule"
+      }
     }
   },
   "$defs": {
-    "non_empty_string": { "type": "string", "minLength": 1 },
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
     "fact_value": {
       "oneOf": [
-        { "type": "boolean" },
-        { "const": "unknown" }
+        {
+          "type": "boolean"
+        },
+        {
+          "const": "unknown"
+        }
       ]
     },
     "condition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["fact", "equals"],
+      "required": [
+        "fact",
+        "equals"
+      ],
       "properties": {
-        "fact": { "$ref": "#/$defs/non_empty_string" },
-        "equals": { "$ref": "#/$defs/fact_value" },
-        "stage": { "enum": ["predicted", "observed", "verified"] },
-        "confidence": { "enum": ["low", "medium", "high"] },
-        "provenance": { "$ref": "#/$defs/provenance_match" }
+        "fact": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "equals": {
+          "$ref": "#/$defs/fact_value"
+        },
+        "stage": {
+          "enum": [
+            "predicted",
+            "observed",
+            "verified"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance_match"
+        }
       }
     },
     "provenance_match": {
@@ -41,19 +84,29 @@
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
-        "type": { "$ref": "#/$defs/non_empty_string" },
-        "producer": { "$ref": "#/$defs/non_empty_string" }
+        "type": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "producer": {
+          "$ref": "#/$defs/non_empty_string"
+        }
       }
     },
     "requirement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["statement"],
+      "required": [
+        "statement"
+      ],
       "properties": {
-        "statement": { "$ref": "#/$defs/non_empty_string" },
+        "statement": {
+          "$ref": "#/$defs/non_empty_string"
+        },
         "required_claims": {
           "type": "array",
-          "items": { "$ref": "#/$defs/non_empty_string" },
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
           "uniqueItems": true
         }
       }
@@ -61,22 +114,36 @@
     "action": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "target"],
+      "required": [
+        "type",
+        "target"
+      ],
       "properties": {
-        "type": { "$ref": "#/$defs/non_empty_string" },
-        "target": { "$ref": "#/$defs/non_empty_string" }
+        "type": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "target": {
+          "$ref": "#/$defs/non_empty_string"
+        }
       }
     },
     "authority_condition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "required_claims"],
+      "required": [
+        "action",
+        "required_claims"
+      ],
       "properties": {
-        "action": { "$ref": "#/$defs/action" },
+        "action": {
+          "$ref": "#/$defs/action"
+        },
         "required_claims": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/non_empty_string" },
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
           "uniqueItems": true
         }
       }
@@ -84,44 +151,101 @@
     "requirements": {
       "type": "object",
       "minProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
-      "additionalProperties": { "$ref": "#/$defs/requirement" }
+      "propertyNames": {
+        "$ref": "#/$defs/non_empty_string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/requirement"
+      }
     },
     "required_claim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["evidence_class", "independent_from_change_producer"],
+      "required": [
+        "evidence_class",
+        "independent_from_change_producer"
+      ],
       "properties": {
-        "evidence_class": { "$ref": "#/$defs/non_empty_string" },
-        "independent_from_change_producer": { "type": "boolean" }
+        "evidence_class": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "independent_from_change_producer": {
+          "type": "boolean"
+        }
       }
     },
     "required_claims": {
       "type": "object",
       "minProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/non_empty_string" },
-      "additionalProperties": { "$ref": "#/$defs/required_claim" }
+      "propertyNames": {
+        "$ref": "#/$defs/non_empty_string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/required_claim"
+      }
     },
     "effect": {
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
-        "obligations": { "$ref": "#/$defs/requirements" },
-        "invariants": { "$ref": "#/$defs/requirements" },
-        "required_claims": { "$ref": "#/$defs/required_claims" },
-        "permissions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/action" } },
-        "prohibitions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/action" } },
-        "authority_conditions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/authority_condition" } }
+        "obligations": {
+          "$ref": "#/$defs/requirements"
+        },
+        "invariants": {
+          "$ref": "#/$defs/requirements"
+        },
+        "required_claims": {
+          "$ref": "#/$defs/required_claims"
+        },
+        "permissions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "prohibitions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "authority_conditions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/authority_condition"
+          }
+        },
+        "acceptance_discharge_claims": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          }
+        }
       }
     },
     "rule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["when", "effect"],
+      "required": [
+        "when",
+        "effect"
+      ],
       "properties": {
-        "when": { "$ref": "#/$defs/condition" },
-        "effect": { "$ref": "#/$defs/effect" }
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "effect": {
+          "$ref": "#/$defs/effect"
+        }
       }
     }
   }

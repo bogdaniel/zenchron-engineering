@@ -143,7 +143,17 @@ func doctorGovernanceFixture(grantAtUnknown bool) (domain.ProjectModel, domain.E
 		CriticalBoundaries: &boundaries,
 	}
 	permissions := []domain.Action{{Type: PublicationActionType, Target: "main"}}
-	effect := domain.PolicyEffect{Permissions: &permissions}
+	// A contract that can authorize something must say what discharges its
+	// acceptance criteria; doctor compiles a real predicted contract.
+	acceptanceClaims := map[string]domain.RequiredClaim{
+		"acceptance": {EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true},
+	}
+	acceptanceDischarge := []string{"acceptance"}
+	effect := domain.PolicyEffect{
+		Permissions:               &permissions,
+		RequiredClaims:            &acceptanceClaims,
+		AcceptanceDischargeClaims: &acceptanceDischarge,
+	}
 	rules := map[string]domain.PolicyRule{
 		"publish-when-clear": {
 			When:   domain.PolicyCondition{Fact: "service.boundary_modified", Equals: domain.FactFalse},

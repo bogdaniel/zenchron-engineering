@@ -77,6 +77,14 @@ const PublicationActionType = "git.pull_request.create"
 // person's behalf.
 const HumanEvidenceClass domain.EvidenceClass = "human_approval"
 
+// SemanticEvidenceClass is the class an INDEPENDENT semantic acceptance
+// producer answers: whether the candidate actually discharges the acceptance
+// criterion it was asked to, as opposed to whether it compiles and its tests
+// pass. It is deliberately distinct from AssuranceEvidenceClass - an automated
+// test suite does not answer it - and from a security review, and from a human
+// approval. Nothing aliases one to another.
+const SemanticEvidenceClass domain.EvidenceClass = "semantic_acceptance"
+
 // AssuranceEvidenceClass is the evidence class the runtime's verifier produces.
 // A required claim of any other class (a human approval, an external audit) is
 // simply not satisfied by a verifier run, which is what keeps #7 in charge.

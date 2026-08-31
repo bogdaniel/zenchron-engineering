@@ -45,6 +45,13 @@ func governedBy(policy domain.EngineeringPolicy, claims map[string]domain.Requir
 			RequiredClaims: required,
 		}}
 		effect := rule.Effect
+		// Acceptance discharge travels with the claim set: a material
+		// acceptance obligation with nothing to discharge it would refuse the
+		// contract, which is the point of the model but not what these
+		// scenarios are about.
+		acceptanceDischarge := []string{acceptanceClaim}
+		claimSet[acceptanceClaim] = domain.RequiredClaim{EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true}
+		effect.AcceptanceDischargeClaims = &acceptanceDischarge
 		effect.RequiredClaims = &claimSet
 		effect.Permissions = &permissions
 		effect.AuthorityConditions = &conditions
@@ -53,6 +60,11 @@ func governedBy(policy domain.EngineeringPolicy, claims map[string]domain.Requir
 	policy.Rules = rules
 	return policy
 }
+
+// acceptanceClaim discharges the run's own acceptance criteria in these
+// fixtures. It is a semantic_acceptance claim because that is what discharges
+// acceptance; an automated test suite answers a different question.
+const acceptanceClaim = "acceptance"
 
 // humanApprovalClaims is the ordinary Phase 10 governance: the runtime's own
 // verifier satisfies one claim, and a human has to answer the other.

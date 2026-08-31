@@ -146,8 +146,15 @@ func nextRevision(v string) string {
 	return v + "-next"
 }
 func RequireNoRemediationForAuthority(state KernelState) error {
-	d, r := NextDisposition(state)
-	if d == Waiting && (r == "awaiting_authority" || r == "requested_privilege_expansion") {
+	if len(state.Reassessment.RequestedPrivilegeExpansion) > 0 {
+		return nil
+	}
+	// Any status that leaves a protected action unauthorized is an authority
+	// requirement outstanding, and a producer must not be sent at it. That
+	// covers a human who has not answered AND evidence nobody has produced: the
+	// answer to an undischarged acceptance obligation is the evidence, not
+	// another round of the change producer editing the candidate.
+	if _, _, outstanding := AuthorityDisposition(state.Decision.Status); outstanding {
 		return nil
 	}
 	return fmt.Errorf("state is not an authority wait")

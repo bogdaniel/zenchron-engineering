@@ -46,8 +46,12 @@ func TestKernelFlowRevisionRefreshAwaitsAuthorityWithoutRemediation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Decision.Status != domain.AuthorityAwaitingAuthority {
-		t.Fatalf("want awaiting authority, got %s", state.Decision.Status)
+	// INCOMPLETE, not awaiting authority: the contract now carries a material
+	// acceptance obligation discharged by a semantic claim, and nothing has
+	// produced that evidence. A human is asked only once every non-human claim
+	// is satisfied - acceptance is not something an approval stands in for.
+	if state.Decision.Status != domain.AuthorityIncomplete {
+		t.Fatalf("want incomplete while acceptance is undischarged, got %s", state.Decision.Status)
 	}
 	if err := RequireNoRemediationForAuthority(state); err != nil {
 		t.Fatal(err)
@@ -64,5 +68,7 @@ func runtimeGovernance() (domain.ProjectModel, domain.EngineeringPolicy) {
 	permissions := []domain.Action{{Type: "git.merge", Target: "main"}}
 	conditions := []domain.AuthorityCondition{{Action: permissions[0], RequiredClaims: []string{"approval"}}}
 	stage := domain.StagePredicted
-	return model, domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "policy", Revision: "1", Rules: map[string]domain.PolicyRule{"auth": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions}}, "auth-observed": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue, Stage: &stage}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions}}}}
+	acceptanceDischarge := []string{"acceptance"}
+	claims["acceptance"] = domain.RequiredClaim{EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true}
+	return model, domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "policy", Revision: "1", Rules: map[string]domain.PolicyRule{"auth": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}, "auth-observed": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue, Stage: &stage}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}}}
 }

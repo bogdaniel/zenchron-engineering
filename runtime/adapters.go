@@ -131,12 +131,30 @@ type UnsupportedEvidenceRequirement struct {
 // An empty result means every required claim has SOME producer; it says nothing
 // about whether that producer will pass.
 func UnfulfillableEvidence(contract domain.EngineeringWorkContract, action domain.Action, producible map[domain.EvidenceClass]bool) []UnsupportedEvidenceRequirement {
-	var unsupported []UnsupportedEvidenceRequirement
+	// The claim set is the SAME union authority evaluates: the action's own
+	// condition plus the discharge claims of every material acceptance
+	// obligation. Checking only the condition would let a run spend its whole
+	// budget and then sit INCOMPLETE on an acceptance claim nothing can
+	// produce - the original defect, one level up.
+	var required []string
 	for _, condition := range contract.AuthorityConditions {
-		if condition.Action != action {
-			continue
+		if condition.Action == action {
+			required = append(required, condition.RequiredClaims...)
 		}
-		for _, claimID := range condition.RequiredClaims {
+	}
+	for _, obligation := range contract.Obligations {
+		if obligation.Material {
+			required = append(required, obligation.RequiredClaims...)
+		}
+	}
+	var unsupported []UnsupportedEvidenceRequirement
+	{
+		seen := map[string]bool{}
+		for _, claimID := range required {
+			if seen[claimID] {
+				continue
+			}
+			seen[claimID] = true
 			claim, defined := contract.RequiredClaims[claimID]
 			if !defined {
 				// An undefined claim is refused by the compiler long before

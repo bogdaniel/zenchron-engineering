@@ -113,10 +113,17 @@ func phase8Governance(repository, revision string) (domain.ProjectModel, domain.
 	}
 	claims := map[string]domain.RequiredClaim{
 		"verification": {EvidenceClass: AssuranceEvidenceClass, IndependentFromChangeProducer: true},
+		"acceptance":   {EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true},
 	}
 	permissions := []domain.Action{{Type: PublicationActionType, Target: "main"}}
 	conditions := []domain.AuthorityCondition{{Action: permissions[0], RequiredClaims: []string{"verification"}}}
-	effect := domain.PolicyEffect{RequiredClaims: &claims, Permissions: &permissions, AuthorityConditions: &conditions}
+	// Policy states what discharges the run's own acceptance criteria. Without
+	// it the compiled contract carries material obligations nothing can meet.
+	acceptanceDischarge := []string{"acceptance"}
+	effect := domain.PolicyEffect{
+		RequiredClaims: &claims, Permissions: &permissions, AuthorityConditions: &conditions,
+		AcceptanceDischargeClaims: &acceptanceDischarge,
+	}
 	rules := map[string]domain.PolicyRule{}
 	for name, value := range map[string]domain.FactValue{
 		"service-unknown": domain.FactUnknown,

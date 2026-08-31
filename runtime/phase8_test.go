@@ -536,9 +536,16 @@ func TestAssuranceVerifiesTheExactTreeAndOnlyPassingResultsBecomeEvidence(t *tes
 		if !ok || len(bundle.Evidence) == 0 {
 			t.Fatalf("the passing result produced no evidence bundle: %#v", kernel.Evidence)
 		}
+		// One item per claim the OBSERVING producer declared it can answer.
+		// The fixture's provider stands in for a configuration with both an
+		// automated verifier and an independent semantic producer.
+		producible := ProducibleEvidenceClasses(fixture.deps.Assurance)
 		for id, item := range bundle.Evidence {
-			if item.Result.Status != domain.EvidencePassed || item.EvidenceClass != AssuranceEvidenceClass {
+			if item.Result.Status != domain.EvidencePassed || !producible[item.EvidenceClass] {
 				t.Fatalf("evidence item %q = %#v", id, item)
+			}
+			if item.EvidenceClass == HumanEvidenceClass {
+				t.Fatalf("a human approval was produced by a verifier: %#v", item)
 			}
 			if item.Provenance.Integrity == nil || item.Provenance.Integrity.Value != committed.Tree {
 				t.Fatalf("evidence item %q is not bound to the exact tree: %#v", id, item.Provenance)

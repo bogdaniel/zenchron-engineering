@@ -1582,9 +1582,15 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 		return bundles, nil
 	}
 	ref := evidenceBundleRef(state.run.ID, assurance.Commit, contract.Revision)
+	// Which claims this observation can discharge is the PRODUCER's declared
+	// capability, not a hardcoded class. A configuration with an independent
+	// semantic producer discharges semantic claims; one with only the baseline
+	// verifier discharges only what that verifier answers, and a claim of any
+	// other class stays outstanding.
+	producible := ProducibleEvidenceClasses(r.deps.Assurance)
 	items := map[string]domain.EvidenceItem{}
 	for claimID, claim := range contract.RequiredClaims {
-		if claim.EvidenceClass != AssuranceEvidenceClass {
+		if claim.EvidenceClass == HumanEvidenceClass || !producible[claim.EvidenceClass] {
 			continue
 		}
 		items["evidence-"+claimID] = domain.EvidenceItem{
