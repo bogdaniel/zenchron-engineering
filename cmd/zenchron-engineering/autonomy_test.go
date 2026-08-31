@@ -2158,3 +2158,41 @@ func TestStatusNamesTheProviderAccountWaitInsteadOfBlamingAuthority(t *testing.T
 		t.Fatalf("the text projection blamed the authority boundary:\n%s", rendered)
 	}
 }
+
+// TestRunAcceptsAnExplicitNewGeneration proves the flag is parsed and reaches
+// the runtime as the mode it names. Defect P was two intentions sharing one
+// command; the mode is what separates them.
+func TestRunAcceptsAnExplicitNewGeneration(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want runtime.GenerationMode
+	}{
+		"default adopts a compatible generation": {
+			args: []string{"run", "issue", "32"}, want: runtime.AdoptCompatibleGeneration,
+		},
+		// Flags follow the positional arguments, as every other autonomy flag
+		// does; the parser is not being given a new convention here.
+		"explicit new generation": {
+			args: []string{"run", "issue", "32", "--new-generation"}, want: runtime.NewGeneration,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			engine := &scriptedRuntime{runID: "run-1", freshGeneration: tc.want == runtime.NewGeneration}
+			var out bytes.Buffer
+			if _, err := autonomy(tc.args, autonomyOverrides{Runtime: engine}, &out); err != nil {
+				t.Fatal(err)
+			}
+			if len(engine.generationModes) != 1 || engine.generationModes[0] != tc.want {
+				t.Fatalf("modes = %v, want %v", engine.generationModes, tc.want)
+			}
+			// The operator is told which run they got and whether it was new.
+			rendered := out.String()
+			if tc.want == runtime.NewGeneration && !strings.Contains(rendered, "created generation run-1") {
+				t.Fatalf("output does not report a created generation: %s", rendered)
+			}
+			if tc.want == runtime.AdoptCompatibleGeneration && !strings.Contains(rendered, "adopted existing generation run-1") {
+				t.Fatalf("output does not report an adoption: %s", rendered)
+			}
+		})
+	}
+}

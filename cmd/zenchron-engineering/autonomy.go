@@ -590,7 +590,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Text, args = true, args[1:]
 			continue
 		case "--new-generation":
-			flags.NewGeneration = true
+			flags.NewGeneration, args = true, args[1:]
+			continue
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
 			continue
