@@ -996,6 +996,10 @@ type baseIntegrateResult struct {
 	Strategy     string `json:"strategy"`
 	BaseRevision string `json:"base_revision"`
 	Moved        bool   `json:"moved"`
+	// FailureClass is the one shared field the retry boundary reads. It is set
+	// only when this handler determined a class; an absent class keeps the
+	// budget-only behaviour every other base.integrate failure already had.
+	FailureClass FailureClass `json:"failure_class,omitempty"`
 	// MetadataDigest is recorded only on the paths where the whole operation
 	// succeeded. A conflict leaves it empty even though the fetch that preceded
 	// it did move remote-tracking refs: a baseline is never established for an
@@ -1018,6 +1022,14 @@ func (r *EngineeringRuntime) integrateBase(_ context.Context, state *runState, _
 		return failed(err)
 	}
 	if err := workspace.FetchBase("origin"); err != nil {
+		// A governed-remote mismatch is deterministic: the same refusal answers
+		// the same question every time. Returning it untyped is what let one
+		// identity refusal consume all three attempts in about a second and a
+		// half, against a repository whose base had not moved at all.
+		var mismatch *GovernedRemoteMismatchError
+		if errors.As(err, &mismatch) {
+			return effect{state: OperationFailed, result: baseIntegrateResult{FailureClass: FailureGovernedRemoteMismatch}}
+		}
 		return failed(err)
 	}
 	ref := "origin/" + r.deps.Repository.DefaultBranch
@@ -1051,7 +1063,7 @@ func (r *EngineeringRuntime) integrateBase(_ context.Context, state *runState, _
 	}
 	return effect{
 		state:  Succeeded,
-		result: baseIntegrateResult{strategy, base, true, workspace.TrustedMetadata},
+		result: baseIntegrateResult{Strategy: strategy, BaseRevision: base, Moved: true, MetadataDigest: workspace.TrustedMetadata},
 		events: []journalEntry{{Type: EventCandidateBaseIntegrated, Payload: CandidateBaseIntegratedPayload{
 			Strategy: strategy, BaseRevision: base, Commit: result.Commit, Tree: result.Tree,
 		}}},

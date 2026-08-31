@@ -617,9 +617,11 @@ func doctorDependencyCache(in DoctorInput) DoctorCheck {
 	if len(entries) == 0 {
 		return fail(doctorGroupAssurance, id, "the dependency cache "+cache+" is EMPTY. Offline verification reads pre-warmed operator-provisioned modules and downloads nothing, so an empty cache cannot verify any candidate; provision it from the trusted base module graph with the pinned image")
 	}
-	downloads := "no cache/download directory yet"
-	if _, err := os.Stat(filepath.Join(cache, "download")); err == nil {
-		downloads = "it holds a module download tree"
+	// Go keeps downloaded module zips and their checksums under
+	// <GOMODCACHE>/cache/download, which is what a pre-warmed cache is FOR.
+	downloads := "no cache/download tree yet"
+	if _, err := os.Stat(filepath.Join(cache, "cache", "download")); err == nil {
+		downloads = "it holds a cache/download module tree"
 	}
 	return pass(doctorGroupAssurance, id, fmt.Sprintf("the dependency cache %s exists and is provisioned (%d top-level entries; %s); nothing was downloaded or written to answer this", cache, len(entries), downloads))
 }

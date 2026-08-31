@@ -193,7 +193,18 @@ const (
 	//
 	// It is deliberately NOT FailureAuthorityWait. Nothing about human authority
 	// is involved.
-	FailureAssurancePrerequisite   FailureClass = "assurance_prerequisite_unavailable"
+	FailureAssurancePrerequisite FailureClass = "assurance_prerequisite_unavailable"
+	// FailureGovernedRemoteMismatch is a deterministic trust refusal: the
+	// remote a workspace is bound to is not this run's governed remote.
+	//
+	// It routes to a STOP, not a retry and not a wait. Retrying cannot change
+	// the answer - the governed remote is configuration and nothing the runtime
+	// does alters it - and waiting would be a lie about what an operator can
+	// fix in place: changing the governed remote changes which repository the
+	// run is about, which is a different trusted subject and therefore a
+	// different run. It is not a producer failure, not a verification verdict,
+	// and not an authority condition.
+	FailureGovernedRemoteMismatch  FailureClass = "governed_remote_mismatch"
 	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
 	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
 	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"

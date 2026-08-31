@@ -221,7 +221,7 @@ func TestDoctorCacheAndToolchainChecksAreNotDockerAliases(t *testing.T) {
 	f := newDoctorFixture(t)
 	healthy := f.run()
 	toolchain := requireCheck(t, healthy, "assurance.toolchain", DoctorPass, "resolves go and gofmt", "no network")
-	cache := requireCheck(t, healthy, "assurance.dependency_cache", DoctorPass, "provisioned")
+	cache := requireCheck(t, healthy, "assurance.dependency_cache", DoctorPass, "provisioned", "cache/download module tree")
 	docker := requireCheck(t, healthy, "assurance.verifier_sandbox", DoctorPass)
 	if toolchain.Reason == docker.Reason || cache.Reason == docker.Reason {
 		t.Fatal("a new assurance check restates the Docker readiness reason")

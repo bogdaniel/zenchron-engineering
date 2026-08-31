@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -71,16 +72,62 @@ func (t gitTransport) String() string {
 }
 
 // RemoteIdentity is the exact remote a runtime network operation is permitted
-// to contact. Its transport is unexported on purpose: a RemoteIdentity can
-// only be produced by GovernedRemote from the governed run/repository model,
-// so a model, provider, or tool argument cannot forge one or widen the
-// transport set by supplying a URL.
+// to contact, in CANONICAL form. Its transport is unexported on purpose: a
+// RemoteIdentity can only be produced by GovernedRemote from the governed
+// run/repository model, so a model, provider, or tool argument cannot forge one
+// or widen the transport set by supplying a URL.
+//
+// URL is the one frozen spelling of the identity, not the caller's. That is the
+// whole point: GovernedRemote already treats
+// https://github.com/o/r and https://github.com/o/r.git as the same repository
+// when it validates them, so carrying the caller's spelling forward made two
+// remotes Zenchron itself calls identical behave as different authorities
+// later. The fifth-generation dogfood run met exactly that - the operator
+// checkout's origin carried .git, the run's candidate origin did not - and
+// every base.integrate attempt was refused as "not the governed remote" against
+// a repository that had not drifted at all.
+//
+// Owner and Name are the validated GitHub identity components. They exist so
+// equality is an identity comparison rather than a string comparison; for a
+// local filesystem repository they are empty and the cleaned path IS the
+// identity.
 type RemoteIdentity struct {
-	URL       string
-	transport gitTransport
+	URL         string
+	transport   gitTransport
+	owner, name string
 }
 
 func (i RemoteIdentity) Transport() string { return i.transport.String() }
+
+// Owner and Name expose the validated GitHub identity. They are empty for a
+// local filesystem repository, which has no owner/name identity to expose.
+func (i RemoteIdentity) Owner() string { return i.owner }
+func (i RemoteIdentity) Name() string  { return i.name }
+
+// Same reports whether two governed remotes are the SAME AUTHORITY.
+//
+// It compares the transport and the canonical identity - never a host string
+// alone, and never the caller's spelling. A different owner, a different
+// repository, a different transport, or a different local path is a different
+// authority and stays refused.
+func (i RemoteIdentity) Same(other RemoteIdentity) bool {
+	return i.transport == other.transport &&
+		i.owner == other.owner &&
+		i.name == other.name &&
+		i.URL == other.URL
+}
+
+// GovernedRemoteMismatchError is a DETERMINISTIC trust refusal: the remote a
+// workspace is bound to is not the governed remote of this run. It is typed so
+// an operation handler can route it as the identity refusal it is instead of
+// retrying an answer that cannot change: the governed remote is configuration,
+// nothing the runtime does alters it, and changing it would change the run's
+// trusted subject.
+type GovernedRemoteMismatchError struct{ Governed, Observed string }
+
+func (e *GovernedRemoteMismatchError) Error() string {
+	return "refused remote " + strconv.Quote(e.Observed) + ": not the governed remote " + strconv.Quote(e.Governed) + " for this workspace"
+}
 
 // GovernedRemote classifies a remote from the governed repository model and
 // fails closed. M0 supports exactly two shapes:
@@ -112,11 +159,23 @@ func GovernedRemote(remote string) (RemoteIdentity, error) {
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return RemoteIdentity{}, fmt.Errorf("refused remote %q: not owner/name", remote)
 		}
-		return RemoteIdentity{URL: remote, transport: transportHTTPS}, nil
+		// The identity is the validated owner and repository, and the URL is
+		// derived from them in one frozen spelling. The caller's optional .git
+		// suffix is accepted and then dropped, because it was never part of
+		// what makes this repository this repository.
+		owner, name := parts[0], parts[1]
+		return RemoteIdentity{
+			URL:       "https://github.com/" + owner + "/" + name,
+			transport: transportHTTPS, owner: owner, name: name,
+		}, nil
 	}
 	if filepath.IsAbs(remote) && !strings.Contains(remote, "://") {
-		if info, err := os.Stat(remote); err == nil && info.IsDir() {
-			return RemoteIdentity{URL: remote, transport: transportFile}, nil
+		// A local repository has no owner/name identity; its cleaned absolute
+		// path is the identity, and it is deliberately NOT canonicalized into
+		// anything GitHub-shaped.
+		cleaned := filepath.Clean(remote)
+		if info, err := os.Stat(cleaned); err == nil && info.IsDir() {
+			return RemoteIdentity{URL: cleaned, transport: transportFile}, nil
 		}
 		return RemoteIdentity{}, fmt.Errorf("refused remote %q: no such local repository", remote)
 	}

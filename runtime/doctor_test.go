@@ -196,7 +196,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	}
 	// A healthy environment has a PROVISIONED cache. An empty directory is the
 	// fifth dogfood's exact condition and is deliberately not healthy.
-	if err := os.MkdirAll(filepath.Join(f.cacheDir, "download", "sumdb"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(f.cacheDir, "cache", "download", "sumdb"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	f.writeOperatorConfig(nil)

@@ -156,8 +156,19 @@ func (w CandidateWorkspace) boundRemote(remote string) (RemoteIdentity, error) {
 	if err != nil {
 		return RemoteIdentity{}, err
 	}
-	if w.Remote != "" && identity.URL != w.Remote {
-		return RemoteIdentity{}, fmt.Errorf("refused remote %q: not the governed remote for this workspace", identity.URL)
+	if w.Remote == "" {
+		return identity, nil
+	}
+	// Both sides go through the SAME classifier and are compared as governed
+	// IDENTITIES. Comparing the strings instead is what made two spellings of
+	// one repository - the operator checkout's origin with .git, the run's
+	// candidate origin without - into two authorities.
+	governed, err := GovernedRemote(w.Remote)
+	if err != nil {
+		return RemoteIdentity{}, err
+	}
+	if !identity.Same(governed) {
+		return RemoteIdentity{}, &GovernedRemoteMismatchError{Governed: governed.URL, Observed: identity.URL}
 	}
 	return identity, nil
 }
