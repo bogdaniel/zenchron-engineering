@@ -1424,12 +1424,44 @@ func (r *EngineeringRuntime) publicationBody(state *runState) (Publication, erro
 		"| evidence | `" + firstNonEmpty(evidence, "none") + "` |",
 		"| authority decision | `" + firstNonEmpty(decision.Decision.ID, "none") + "` rev `" + firstNonEmpty(decision.Decision.Revision, "none") + "` (" + string(decision.Status) + ") |",
 	}
+	lines = append(lines, controllerBuildLines(state.recordedControllerBuild())...)
 	if issue := sourceIssue(state); issue > 0 && state.source != nil && state.source.State == string(GitHubOpen) {
 		lines = append(lines, "", "Closes #"+strconv.Itoa(issue))
 	}
 	// No artifact is passed: nothing produced by a provider or a verifier has
 	// been explicitly reviewed and marked publishable, so nothing is published.
 	return NewPublication(strings.Join(lines, "\n"))
+}
+
+// controllerBuildLines publishes WHICH BUILD governed this change, and says so
+// in the reviewer's own terms.
+//
+// The controller id alone is a name, and a name cannot answer the question a
+// reviewer actually has: was the runtime that governed this change itself
+// adopted? A pre-adoption build governing a change proves that the runtime
+// behaves, and proves nothing whatsoever about whether that runtime's own
+// source should be adopted. Leaving that distinction only in local run state
+// puts it exactly where the reviewer cannot see it, so it is stated on the
+// published artifact instead - as rows that are checkable against the binary,
+// and as one sentence that refuses the inference in words.
+func controllerBuildLines(build ControllerBuild) []string {
+	if !build.Attested() {
+		return []string{"| controller build | unattested (the controller recorded no provenance claim) |"}
+	}
+	lines := []string{
+		"| controller build | `" + build.Kind + "` |",
+		"| controller source | `" + build.SourceRevision + "` |",
+		"| controller tree | `" + build.SourceTree + "` |",
+		"| controller binary | `sha256:" + build.BinarySHA256 + "` |",
+	}
+	if build.Kind == ControllerAdopted {
+		return lines
+	}
+	return append(lines, "",
+		"The controller that governed this change is a `"+build.Kind+"`: a build of source",
+		"that has not itself been adopted. It demonstrates runtime behaviour on THIS change",
+		"only. It is not self-certification, and it confers no authority on the controller's",
+		"own source.")
 }
 
 func sourceIssue(state *runState) int {
