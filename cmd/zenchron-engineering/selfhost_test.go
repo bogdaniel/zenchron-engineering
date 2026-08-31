@@ -53,6 +53,7 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	if !strings.Contains(output.String(), "Stopped before merge") {
 		t.Fatalf("output did not confirm stop boundary: %s", output.String())
 	}
+	assertSelfhostPreflight(t, output.String())
 }
 
 func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
@@ -222,6 +223,35 @@ func TestSelfhostResumePublishesInterruptedCandidate(t *testing.T) {
 	}
 	if !strings.Contains(commands.comment, "Codex execution provenance: unavailable") {
 		t.Fatalf("legacy resume must report unavailable execution provenance:\n%s", commands.comment)
+	}
+	assertSelfhostPreflight(t, output.String())
+}
+
+func TestWriteSelfhostPreflightReportsResolvedInputs(t *testing.T) {
+	var output bytes.Buffer
+	writeSelfhostPreflight(&output, "example/engineering", "abc123", goRuntime{kind: localGoRuntime, goVersion: "1.25.1", environmentIdentifier: "host-go:1.25.1"})
+
+	for _, want := range []string{
+		`repository "example/engineering"`,
+		`trusted origin/main base "abc123"`,
+		`Go runtime "local Go 1.25.1 (host-go:1.25.1)"`,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("preflight missing %q: %s", want, output.String())
+		}
+	}
+}
+
+func assertSelfhostPreflight(t *testing.T, output string) {
+	t.Helper()
+	for _, want := range []string{
+		`Selfhost preflight: repository "bogdaniel/zenchron-engineering"`,
+		`trusted origin/main base "base123"`,
+		`Go runtime "local Go 1.25.1 (host-go:1.25.1)"`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("preflight missing %q: %s", want, output)
+		}
 	}
 }
 
