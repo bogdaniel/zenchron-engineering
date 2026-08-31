@@ -55,6 +55,42 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	}
 }
 
+func TestSelfhostPreflightReportsTrustedRunInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*fakeCommands, *bytes.Buffer) error
+	}{
+		{
+			name: "issue",
+			run: func(commands *fakeCommands, output *bytes.Buffer) error {
+				return selfhostIssue("4", commands, output)
+			},
+		},
+		{
+			name: "resume",
+			run: func(commands *fakeCommands, output *bytes.Buffer) error {
+				commands.branch = "issue-4"
+				commands.status = " M changed.go"
+				return selfhostResume("4", commands, output)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			commands := newFakeCommands(t)
+			var output bytes.Buffer
+			if err := test.run(commands, &output); err != nil {
+				t.Fatal(err)
+			}
+			want := "Selfhost preflight: repository bogdaniel/zenchron-engineering; trusted origin/main base base123; Go runtime local Go 1.25.1 (host-go:1.25.1)"
+			if got := strings.Count(output.String(), want); got != 1 {
+				t.Fatalf("preflight occurrences = %d, want 1; output:\n%s", got, output.String())
+			}
+		})
+	}
+}
+
 func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 	tests := []struct {
 		name string

@@ -100,6 +100,10 @@ the repository mounted. The container has outbound network access so Go can
 resolve the non-vendored modules pinned by `go.mod` and `go.sum`; no host
 credentials or environment are forwarded. Go's home, module, and build caches
 live in an isolated writable tmpfs that is discarded after each command.
+Before execution or publication, both `selfhost issue` and `selfhost resume`
+print one preflight line naming the resolved repository, exact trusted
+`origin/main` base revision, and selected Go runtime. The preflight identifies
+run inputs without changing authorization or publication behavior.
 
 Before publishing a candidate PR, the bootstrap independently runs the
 deterministic `format`, `vet`, and `test` checks through that resolved runtime.

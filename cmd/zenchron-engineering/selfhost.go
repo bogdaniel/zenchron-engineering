@@ -157,7 +157,6 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 	if err != nil {
 		return fmt.Errorf("resolve Go runtime before repository mutation: %w", err)
 	}
-	fmt.Fprintf(stdout, "Go runtime: %s\n", runtime)
 	origin, err := commands.Output(root, "git", "remote", "get-url", "origin")
 	if err != nil {
 		return fmt.Errorf("read origin remote: %w", err)
@@ -230,6 +229,8 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 	if base != remoteMain {
 		return fmt.Errorf("local main is not synchronized with origin/main: local %s, remote %s", base, remoteMain)
 	}
+	writeSelfhostPreflight(stdout, identity, remoteMain, runtime)
+
 
 	issueData, err := commands.Output(root, "gh", "issue", "view", rawNumber, "--repo", repository, "--json", "number,title,body,state,url")
 	if err != nil {
@@ -387,7 +388,6 @@ func selfhostResume(rawNumber string, commands commandRunner, stdout io.Writer) 
 	if err != nil {
 		return fmt.Errorf("resolve Go runtime before repository mutation: %w", err)
 	}
-	fmt.Fprintf(stdout, "Go runtime: %s\n", runtime)
 	for _, remote := range []struct {
 		args []string
 		name string
@@ -443,6 +443,8 @@ func selfhostResume(rawNumber string, commands commandRunner, stdout io.Writer) 
 	if head != remoteMain {
 		return fmt.Errorf("interrupted branch history is not exactly origin/main; refusing unrelated history (branch %s, main %s)", head, remoteMain)
 	}
+	writeSelfhostPreflight(stdout, identity, remoteMain, runtime)
+
 	remoteBranch, err := commands.Output(root, "git", "ls-remote", "--heads", "origin", "refs/heads/"+issueBranch)
 	if err != nil {
 		return fmt.Errorf("check remote issue branch: %w", err)
@@ -618,6 +620,12 @@ func interruptedExecutionPath(root, branch string, commands commandRunner) (stri
 
 func validCodexExecution(execution codexExecution) bool {
 	return execution.Provider != "" && execution.Model != "" && (execution.AuthMode == "chatgpt" || execution.AuthMode == "api") && execution.Attempt > 0 && execution.MaxAttempts >= execution.Attempt
+}
+
+// writeSelfhostPreflight records the trusted repository and base selected for
+// this run before an executor is invoked or a candidate is published.
+func writeSelfhostPreflight(stdout io.Writer, identity, base string, runtime goRuntime) {
+	fmt.Fprintf(stdout, "Selfhost preflight: repository %s; trusted origin/main base %s; Go runtime %s\n", identity, base, runtime)
 }
 
 func selfhostPrompt(number int, branch, contextFile string) string {
