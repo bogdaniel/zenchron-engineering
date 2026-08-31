@@ -578,11 +578,25 @@ func (a GitHubRESTAdapter) CommentOnPullRequest(ctx context.Context, repo GitHub
 // is a credential failure (*GitHubAuthError), and any other non-2xx or
 // unparseable response is an observation failure (*GitHubAPIError). Only the
 // 404 case is not an error.
+//
+// Endpoint choice matters here, and it is the whole reason this reads
+// /git/ref/heads/<branch> rather than the more obvious /commits/<ref>. GitHub
+// answers /commits/<ref> for an absent ref with 422, the same code it uses for
+// a request it merely disliked, so absence and malformed-request are not
+// separable by status alone on that endpoint - and this classifier is not
+// permitted to fall back to reading message text. /git/ref answers 404 for a
+// ref that is not there and nothing else does, which is exactly the
+// distinction the caller needs. Every caller asks about a branch, so the
+// heads/ namespace is hard-coded rather than guessed from the ref.
+//
+// The response is then checked for exactness in both directions: GitHub must
+// have answered about refs/heads/<branch> itself and about a commit. A
+// near-miss answer is refused rather than reported as the branch head.
 func (a GitHubRESTAdapter) RefSHA(ctx context.Context, repo GitHubRepo, ref string) (RefObservation, error) {
 	if err := safeRef(ref); err != nil {
 		return RefObservation{}, err
 	}
-	path := repoPath(repo) + "/commits/" + ref
+	path := repoPath(repo) + "/git/ref/heads/" + ref
 	status, raw, err := a.do(ctx, repo, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return RefObservation{}, err
@@ -596,15 +610,25 @@ func (a GitHubRESTAdapter) RefSHA(ctx context.Context, repo GitHubRepo, ref stri
 		return RefObservation{}, &GitHubAPIError{Status: status, Detail: "github GET " + path + " returned status " + strconv.Itoa(status)}
 	}
 	var wire struct {
-		SHA string `json:"sha"`
+		Ref    string `json:"ref"`
+		Object struct {
+			SHA  string `json:"sha"`
+			Type string `json:"type"`
+		} `json:"object"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return RefObservation{}, &GitHubAPIError{Status: status, Detail: "github returned an unexpected payload for ref " + ref}
 	}
-	if wire.SHA == "" {
+	if wire.Ref != "refs/heads/"+ref {
+		return RefObservation{}, &GitHubAPIError{Status: status, Detail: "github answered about a different ref than " + ref}
+	}
+	if wire.Object.Type != "commit" {
+		return RefObservation{}, &GitHubAPIError{Status: status, Detail: "github reported a non-commit object for ref " + ref}
+	}
+	if wire.Object.SHA == "" {
 		return RefObservation{}, &GitHubAPIError{Status: status, Detail: "github reported no sha for ref " + ref}
 	}
-	return RefObservation{Exists: true, SHA: wire.SHA}, nil
+	return RefObservation{Exists: true, SHA: wire.Object.SHA}, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -437,7 +437,7 @@ func restResponses() map[string]string {
 		"GET /repos/zenchron/fixture/pulls/5/reviews":                        `[{"id":1,"user":{"login":"reviewer","id":3},"state":"CHANGES_REQUESTED","body":"no","commit_id":"` + testHeadSHA + `","submitted_at":"2026-01-02T03:04:05Z"},{"id":2,"state":"APPROVED","commit_id":"` + testOtherSHA + `"}]`,
 		"GET /repos/zenchron/fixture/pulls/5/comments":                       `[{"id":4,"body":"fix this","path":"a.go","commit_id":"` + testHeadSHA + `","created_at":"2026-01-02T03:04:05Z"},{"id":5,"commit_id":"` + testOtherSHA + `"}]`,
 		"POST /repos/zenchron/fixture/issues/5/comments":                     `{}`,
-		"GET /repos/zenchron/fixture/commits/issue-7":                        `{"sha":"` + testHeadSHA + `"}`,
+		"GET /repos/zenchron/fixture/git/ref/heads/issue-7":                  `{"ref":"refs/heads/issue-7","object":{"sha":"` + testHeadSHA + `","type":"commit"}}`,
 	}
 }
 
@@ -498,7 +498,7 @@ func TestGitHubRESTAdapterShapesItsRequests(t *testing.T) {
 		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/reviews?per_page=100"},
 		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/comments?per_page=100"},
 		{"POST", "https://api.github.com/repos/zenchron/fixture/issues/5/comments"},
-		{"GET", "https://api.github.com/repos/zenchron/fixture/commits/issue-7"},
+		{"GET", "https://api.github.com/repos/zenchron/fixture/git/ref/heads/issue-7"},
 	}
 	if len(doer.requests) != len(want) {
 		t.Fatalf("recorded %d requests, want %d: %+v", len(doer.requests), len(want), doer.requests)
@@ -575,7 +575,7 @@ func TestFakeRefSHAObservationFailureNeverPresentsAsAbsence(t *testing.T) {
 // nil error.
 func TestRESTRefSHAReportsA404AsAbsenceWithNilError(t *testing.T) {
 	ctx := context.Background()
-	path := "/repos/zenchron/fixture/commits/never-pushed"
+	path := "/repos/zenchron/fixture/git/ref/heads/never-pushed"
 	doer := &fakeGitHubDoer{statuses: map[string]int{"GET " + path: http.StatusNotFound}}
 	adapter := GitHubRESTAdapter{HTTP: doer, Credentials: staticCredential{secret: testToken}}
 	observation, err := adapter.RefSHA(ctx, testRepo, "never-pushed")
@@ -592,7 +592,7 @@ func TestRESTRefSHAReportsA404AsAbsenceWithNilError(t *testing.T) {
 // distinct outcomes, told apart only by status code.
 func TestRESTRefSHADistinguishesStatusesByCodeNotMessage(t *testing.T) {
 	ctx := context.Background()
-	path := "/repos/zenchron/fixture/commits/some-ref"
+	path := "/repos/zenchron/fixture/git/ref/heads/some-ref"
 
 	notFound := GitHubRESTAdapter{
 		HTTP:        &fakeGitHubDoer{statuses: map[string]int{"GET " + path: http.StatusNotFound}},
@@ -1210,5 +1210,70 @@ func TestGitHubRESTAdapterAgainstRealGitHub(t *testing.T) {
 	}
 	if issue.Number != issueNumber || issue.URL == "" {
 		t.Fatalf("unexpected issue: %+v", issue)
+	}
+}
+
+// TestRESTRefSHAAsksTheEndpointThatCanSayAbsent is the regression for the
+// defect a real dogfood publication exposed: the adapter asked
+// /commits/<ref>, and GitHub answers an absent ref there with 422 - the same
+// code it uses for a request it merely disliked. Absence was therefore
+// indistinguishable from a bad request by status alone, so the very first
+// push of any run's branch failed as an observation error and the publication
+// never happened.
+//
+// The fix is the endpoint, not a looser classifier: /git/ref/heads/<branch>
+// answers 404 and only 404 for a ref that is not there. This test pins both
+// halves - that the adapter asks that endpoint, and that a 422 from it is
+// still an error rather than being read as absence.
+func TestRESTRefSHAAsksTheEndpointThatCanSayAbsent(t *testing.T) {
+	ctx := context.Background()
+	path := "/repos/zenchron/fixture/git/ref/heads/zenchron/run-1"
+
+	absent := &fakeGitHubDoer{statuses: map[string]int{"GET " + path: http.StatusNotFound}}
+	adapter := GitHubRESTAdapter{HTTP: absent, Credentials: staticCredential{secret: testToken}}
+	observation, err := adapter.RefSHA(ctx, testRepo, "zenchron/run-1")
+	if err != nil || observation.Exists {
+		t.Fatalf("an unpushed branch must be absence, got %+v / %v", observation, err)
+	}
+	if len(absent.requests) != 1 || absent.requests[0].URL != "https://api.github.com"+path {
+		t.Fatalf("adapter asked %+v, want GET %s", absent.requests, path)
+	}
+
+	// 422 is never absence. It is exactly the ambiguity the endpoint change
+	// removes, so reading it as "the branch is not there" would reintroduce
+	// the defect from the other side.
+	unprocessable := GitHubRESTAdapter{
+		HTTP:        &fakeGitHubDoer{statuses: map[string]int{"GET " + path: http.StatusUnprocessableEntity}},
+		Credentials: staticCredential{secret: testToken},
+	}
+	var apiErr *GitHubAPIError
+	if observation, err := unprocessable.RefSHA(ctx, testRepo, "zenchron/run-1"); !errors.As(err, &apiErr) || observation.Exists {
+		t.Fatalf("422 must be an observation failure, got %+v / %v", observation, err)
+	}
+}
+
+// TestRESTRefSHARefusesANearMissAnswer proves the adapter verifies GitHub
+// answered about the ref that was asked for, and about a commit. A ref that
+// resolves to something else is refused rather than reported as a branch head
+// that publication would then reason about.
+func TestRESTRefSHARefusesANearMissAnswer(t *testing.T) {
+	ctx := context.Background()
+	path := "GET /repos/zenchron/fixture/git/ref/heads/issue-7"
+	for name, body := range map[string]string{
+		"a different ref": `{"ref":"refs/heads/issue-70","object":{"sha":"` + testHeadSHA + `","type":"commit"}}`,
+		"a non-commit":    `{"ref":"refs/heads/issue-7","object":{"sha":"` + testHeadSHA + `","type":"tag"}}`,
+		"no sha":          `{"ref":"refs/heads/issue-7","object":{"type":"commit"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			adapter := GitHubRESTAdapter{
+				HTTP:        &fakeGitHubDoer{responses: map[string]string{path: body}},
+				Credentials: staticCredential{secret: testToken},
+			}
+			var apiErr *GitHubAPIError
+			observation, err := adapter.RefSHA(ctx, testRepo, "issue-7")
+			if !errors.As(err, &apiErr) || observation.Exists {
+				t.Fatalf("got %+v / %v, want a refusal", observation, err)
+			}
+		})
 	}
 }
