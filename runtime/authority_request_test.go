@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -411,23 +412,74 @@ func TestRecordedEvidenceCanStillBeBlockedByPolicy(t *testing.T) {
 	}
 }
 
-func TestRecordedEvidenceCanStillBeIncomplete(t *testing.T) {
-	// An external audit claim the runtime cannot produce. Human approval is not
-	// a substitute for independent assurance.
+// TestUnproducibleClaimIsRefusedBeforeAnyHumanIsAsked is what this scenario
+// became. It used to drive a run all the way to an INCOMPLETE decision over an
+// external-audit claim the runtime cannot produce, and assert that a human
+// approval did not substitute for it.
+//
+// Both halves still hold, and the second is now proven earlier and more
+// cheaply. The publication gate names an evidence class no configured producer
+// declares, so the contract is refused at compile time - before a candidate
+// workspace exists, before any model budget, and before any person is asked
+// anything. A human cannot substitute for independent assurance because there
+// is nothing for a human to answer: no request is ever projected.
+//
+// The authority-layer property itself - a recorded approval leaves an
+// unproduced non-human claim missing - is proven directly in
+// authority/authority_test.go against a contract, without a run.
+func TestUnproducibleClaimIsRefusedBeforeAnyHumanIsAsked(t *testing.T) {
 	claims := humanApprovalClaims()
 	claims[auditClaim] = domain.RequiredClaim{EvidenceClass: auditClass, IndependentFromChangeProducer: true}
 	fixture := newAuthorityFixtureWith(t, claims, []string{auditClaim, humanClaim, verifyClaim}, "")
-	runID, request := awaitAuthority(t, fixture)
-	if request.Status != domain.AuthorityIncomplete {
-		t.Fatalf("status = %q, want incomplete", request.Status)
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+	if outcome.Disposition != Failed {
+		t.Fatalf("a contract gated on unproducible evidence did not stop: %+v", outcome)
 	}
-	result := authorize(t, fixture, approval(runID, request))
-	if result.Status != domain.AuthorityIncomplete {
-		t.Fatalf("status after approval = %q, want incomplete: approval replaced independent assurance", result.Status)
+	if _, err := fixture.runtime.PendingAuthorityRequest(runID); err == nil {
+		t.Fatal("a human was asked to answer for evidence no producer can supply")
 	}
-	if !contains(result.Missing, auditClaim) {
-		t.Fatalf("missing = %v, want the external audit claim still outstanding", result.Missing)
+	events := journalOf(t, fixture.runtime, runID)
+	if countKindAttempts(events, OpExecutionInvoke) != 0 {
+		t.Fatalf("model budget was spent before the refusal: %v", journalTypes(events))
 	}
+	unsupported := unsupportedEvidenceOf(t, events)
+	if len(unsupported) == 0 {
+		t.Fatalf("the refusal named no unsupported evidence: %v", journalTypes(events))
+	}
+	named := false
+	for _, requirement := range unsupported {
+		if requirement.ClaimID == auditClaim && requirement.EvidenceClass == auditClass {
+			named = true
+		}
+		if requirement.EvidenceClass == HumanEvidenceClass {
+			t.Fatalf("a human approval was reported as unproducible: %+v", requirement)
+		}
+	}
+	if !named {
+		t.Fatalf("the refusal does not name the external audit claim: %+v", unsupported)
+	}
+}
+
+// unsupportedEvidenceOf reads the typed unfulfillable-contract result the
+// journal holds.
+func unsupportedEvidenceOf(t *testing.T, events []EngineeringEvent) []UnsupportedEvidenceRequirement {
+	t.Helper()
+	var out []UnsupportedEvidenceRequirement
+	for _, e := range events {
+		if e.Type != EventOperationAfter {
+			continue
+		}
+		var op RunOperation
+		if json.Unmarshal(e.Payload, &op) != nil || op.Kind != OpContractCompile || len(op.Result) == 0 {
+			continue
+		}
+		var result contractCompileResult
+		if json.Unmarshal(op.Result, &result) == nil && result.FailureClass == FailureRequiredEvidenceUnsupported {
+			out = append(out, result.Unsupported...)
+		}
+	}
+	return out
 }
 
 func TestRecordedRejectionIsFailedEvidenceAndBlocks(t *testing.T) {

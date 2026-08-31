@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // ExecutionProvider can change only the supplied candidate directory. It has
@@ -75,6 +78,81 @@ type ProviderFailure struct {
 type AssuranceProvider interface {
 	Assure(context.Context, AssuranceRequest) (AssuranceResult, error)
 }
+
+// EvidenceProducer is a provider that DECLARES which evidence classes it can
+// produce. It is the capability half of the evidence model: a policy names the
+// class of evidence a claim needs, and this names the classes the configured
+// system can actually obtain.
+//
+// The two vocabularies were never checked against each other. A run could
+// therefore compile a contract, spend a real model budget implementing it, pass
+// exact-tree assurance, and only then discover that the claim gating
+// publication asked for a class nothing configured could ever produce.
+// run-0943e257539346f8763db04505cbf322 did exactly that.
+//
+// Declaring a class is not a promise the evidence will PASS; it is a statement
+// that this producer can answer that kind of question at all.
+type EvidenceProducer interface {
+	ProducedEvidenceClasses() []domain.EvidenceClass
+}
+
+// ProducibleEvidenceClasses is the set of evidence classes the configured
+// providers declare, plus the classes a human records directly. A provider that
+// declares nothing contributes nothing: capability is stated, never assumed
+// from a type name.
+func ProducibleEvidenceClasses(providers ...any) map[domain.EvidenceClass]bool {
+	producible := map[domain.EvidenceClass]bool{
+		// A human approval is obtained by a person through the operator
+		// authority boundary, not by a provider.
+		HumanEvidenceClass: true,
+	}
+	for _, provider := range providers {
+		if declaring, ok := provider.(EvidenceProducer); ok {
+			for _, class := range declaring.ProducedEvidenceClasses() {
+				if class != "" {
+					producible[class] = true
+				}
+			}
+		}
+	}
+	return producible
+}
+
+// UnsupportedEvidenceRequirement names one required claim whose evidence class
+// no configured producer can supply. It is bounded, typed identity - a claim id
+// and a class - and never free text.
+type UnsupportedEvidenceRequirement struct {
+	ClaimID       string               `json:"claim_id"`
+	EvidenceClass domain.EvidenceClass `json:"evidence_class"`
+}
+
+// UnfulfillableEvidence reports the required claims for one protected action
+// that no configured producer and no human can satisfy, in deterministic order.
+// An empty result means every required claim has SOME producer; it says nothing
+// about whether that producer will pass.
+func UnfulfillableEvidence(contract domain.EngineeringWorkContract, action domain.Action, producible map[domain.EvidenceClass]bool) []UnsupportedEvidenceRequirement {
+	var unsupported []UnsupportedEvidenceRequirement
+	for _, condition := range contract.AuthorityConditions {
+		if condition.Action != action {
+			continue
+		}
+		for _, claimID := range condition.RequiredClaims {
+			claim, defined := contract.RequiredClaims[claimID]
+			if !defined {
+				// An undefined claim is refused by the compiler long before
+				// here; treating it as unsupported keeps this total.
+				unsupported = append(unsupported, UnsupportedEvidenceRequirement{ClaimID: claimID})
+				continue
+			}
+			if !producible[claim.EvidenceClass] {
+				unsupported = append(unsupported, UnsupportedEvidenceRequirement{ClaimID: claimID, EvidenceClass: claim.EvidenceClass})
+			}
+		}
+	}
+	sort.Slice(unsupported, func(i, j int) bool { return unsupported[i].ClaimID < unsupported[j].ClaimID })
+	return unsupported
+}
+
 type AssuranceRequest struct {
 	RunID, Commit, Tree, CheckoutDir string
 	Contract                         Ref
@@ -204,12 +282,23 @@ const (
 	// run is about, which is a different trusted subject and therefore a
 	// different run. It is not a producer failure, not a verification verdict,
 	// and not an authority condition.
-	FailureGovernedRemoteMismatch  FailureClass = "governed_remote_mismatch"
-	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
-	FailureFlaky                   FailureClass = "flaky_verification"
-	FailureUnknown                 FailureClass = "unknown"
+	FailureGovernedRemoteMismatch FailureClass = "governed_remote_mismatch"
+	// FailureRequiredEvidenceUnsupported is a contract this configured system
+	// can never satisfy: the claim gating a protected action names an evidence
+	// class no configured producer declares and no human records.
+	//
+	// It routes to a STOP, and it is detected BEFORE any model budget is spent.
+	// Retrying cannot conjure a producer, and waiting would imply an operator
+	// could clear it in place - they cannot: the fix is a different policy or a
+	// different configured producer, either of which changes the terms the run
+	// is governed by and therefore needs a new run. Discovering it after the
+	// work is done, as run-0943e257539346f8763db04505cbf322 did, is the defect.
+	FailureRequiredEvidenceUnsupported FailureClass = "required_evidence_unsupported"
+	FailureGovernanceMismatch          FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity          FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict     FailureClass = "base_integration_conflict"
+	FailureFlaky                       FailureClass = "flaky_verification"
+	FailureUnknown                     FailureClass = "unknown"
 )
 
 type FailureRoute string

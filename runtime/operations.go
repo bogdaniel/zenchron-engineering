@@ -260,10 +260,33 @@ func issueNumberOf(goal string) (int, error) {
 // compileContract records which contract revision governs which exact subject
 // revision. The compile itself is the frozen deterministic kernel bridge; this
 // handler only journals the resulting binding.
+// contractCompileResult records why a compiled contract was refused. An
+// operation that succeeded records nothing, exactly as before.
+type contractCompileResult struct {
+	FailureClass FailureClass                     `json:"failure_class,omitempty"`
+	Unsupported  []UnsupportedEvidenceRequirement `json:"unsupported_evidence,omitempty"`
+}
+
 func (r *EngineeringRuntime) compileContract(_ context.Context, state *runState, _ RunOperation) effect {
 	kernel, err := r.buildKernel(state)
 	if err != nil {
 		return failed(err)
+	}
+	// FULFILLABILITY, checked here because here is before the expensive part.
+	// contract.compile runs before the candidate workspace exists and long
+	// before a model is asked to do anything, so a contract whose publication
+	// gate asks for evidence nothing configured can produce is refused while it
+	// still costs nothing. The check is deterministic: it compares the classes
+	// the contract requires against the classes the configured producers
+	// DECLARE, and it never guesses that one class means another.
+	if action, ok := r.publicationAction(); ok {
+		producible := ProducibleEvidenceClasses(r.deps.Assurance)
+		if unsupported := UnfulfillableEvidence(kernel.Contract, action, producible); len(unsupported) > 0 {
+			return effect{state: OperationFailed, result: contractCompileResult{
+				FailureClass: FailureRequiredEvidenceUnsupported,
+				Unsupported:  unsupported,
+			}}
+		}
 	}
 	return effect{
 		state: Succeeded,
@@ -980,6 +1003,17 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 type assuranceRecord struct {
 	FailureClass FailureClass `json:"failure_class,omitempty"`
 	Passed       bool         `json:"passed"`
+}
+
+// publicationAction is the one protected action the runtime asks #7 about. It
+// is absent only when no default branch is configured, in which case there is
+// no action to check fulfillability against.
+func (r *EngineeringRuntime) publicationAction() (domain.Action, bool) {
+	branch := strings.TrimSpace(r.deps.Repository.DefaultBranch)
+	if branch == "" {
+		return domain.Action{}, false
+	}
+	return domain.Action{Type: PublicationActionType, Target: branch}, true
 }
 
 // evidenceBundleRef binds evidence to the exact commit and contract revision it

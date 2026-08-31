@@ -33,6 +33,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -480,6 +482,13 @@ type switchableVerifier struct {
 }
 
 func (v *switchableVerifier) provision() { v.provisioned = true }
+
+// ProducedEvidenceClasses keeps the double faithful to the baseline verifier it
+// stands in for: it answers the same kind of question, so it declares the same
+// evidence class.
+func (v *switchableVerifier) ProducedEvidenceClasses() []domain.EvidenceClass {
+	return []domain.EvidenceClass{AssuranceEvidenceClass}
+}
 
 func (v *switchableVerifier) Assure(context.Context, AssuranceRequest) (AssuranceResult, error) {
 	if v.provisioned {

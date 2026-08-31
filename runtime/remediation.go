@@ -31,6 +31,14 @@ type FakeAssuranceProvider struct {
 	Err      error
 }
 
+// ProducedEvidenceClasses makes the double faithful to what it stands in for:
+// the baseline verifier. Capability is declared here for the same reason it is
+// declared there - a provider that states nothing produces nothing, and a
+// contract gated on evidence nothing produces is refused before any work.
+func (f *FakeAssuranceProvider) ProducedEvidenceClasses() []domain.EvidenceClass {
+	return []domain.EvidenceClass{AssuranceEvidenceClass}
+}
+
 func (f *FakeAssuranceProvider) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {
 	f.Requests = append(f.Requests, r)
 	if len(f.Results) == 0 {

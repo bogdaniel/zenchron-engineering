@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,13 @@ import (
 type alwaysFailingVerifier struct {
 	class FailureClass
 	calls int
+}
+
+// ProducedEvidenceClasses keeps the double faithful to the baseline verifier it
+// stands in for: it answers the same kind of question, so it declares the same
+// evidence class.
+func (v *alwaysFailingVerifier) ProducedEvidenceClasses() []domain.EvidenceClass {
+	return []domain.EvidenceClass{AssuranceEvidenceClass}
 }
 
 func (v *alwaysFailingVerifier) Assure(context.Context, AssuranceRequest) (AssuranceResult, error) {

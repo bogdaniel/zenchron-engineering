@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 var ErrSandboxUnavailable = fmt.Errorf("required sandbox capability is unavailable or unenforceable")
@@ -706,6 +708,15 @@ type BaselineGoVerifier struct {
 	Sandbox            DockerSandbox
 	ArtifactStore      ArtifactStore
 	DependencyCacheDir string
+}
+
+// ProducedEvidenceClasses declares what this verifier can answer. It runs
+// gofmt, go vet and go test on an exact tree offline, so the one class it
+// produces is AssuranceEvidenceClass. It deliberately declares nothing else: a
+// security review, an external audit or a human approval are different
+// questions, and answering them is not what running a test suite does.
+func (v BaselineGoVerifier) ProducedEvidenceClasses() []domain.EvidenceClass {
+	return []domain.EvidenceClass{AssuranceEvidenceClass}
 }
 
 func (v BaselineGoVerifier) Definition() string {

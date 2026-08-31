@@ -92,20 +92,52 @@ func NextDisposition(state KernelState) (Disposition, string) {
 	if len(state.Reassessment.RequestedPrivilegeExpansion) > 0 {
 		return Waiting, "requested_privilege_expansion"
 	}
-	switch state.Decision.Status {
-	case domain.AuthorityAwaitingAuthority:
-		return Waiting, "awaiting_authority"
-	case domain.AuthorityStale:
-		return Active, "fresh_evidence_required"
-	case domain.AuthorityIncomplete:
-		return Active, "evidence_required"
-	case domain.AuthorityBlocked:
-		return Waiting, "authority_blocked"
-	case domain.AuthorityAuthorized:
+	disposition, reason, _ := AuthorityDisposition(state.Decision.Status)
+	if reason == "" {
+		// Authorized is the one status that names no outstanding condition.
 		return Active, "authorized"
-	default:
-		return Waiting, "authority_unknown"
 	}
+	return disposition, reason
+}
+
+// AuthorityDisposition is THE mapping from an AuthorityStatus to what it means
+// for a run. It is one function because it was previously two: this kernel
+// helper knew the whole matrix, and the live reconciler's conditions() knew two
+// entries of it. A current INCOMPLETE decision therefore matched nothing there,
+// no operation was wanted, and the run settled waiting/goal_state_reached over
+// an unauthorized protected action - which is what
+// run-0943e257539346f8763db04505cbf322 did with a passing exact-tree assurance
+// and an incomplete decision.
+//
+// The third result is the invariant: outstanding reports whether this status
+// leaves a protected action UNAUTHORIZED. While it is true the run has not
+// reached its goal, whatever else is or is not wanted, so goal_state_reached is
+// unreachable.
+//
+// Authorized is the only status that returns no reason: it names no outstanding
+// condition, so it must not displace the terminal reason a finished run has.
+// An unrecognized status fails closed - a wait naming the status - rather than
+// falling through to a generic success or a generic wait.
+func AuthorityDisposition(status domain.AuthorityStatus) (disposition Disposition, reason string, outstanding bool) {
+	switch status {
+	case domain.AuthorityAuthorized:
+		return Active, "", false
+	case domain.AuthorityAwaitingAuthority:
+		// The only human-authority state. It is reached exactly when every
+		// missing requirement is a human_approval claim; a machine claim that
+		// nothing produced is INCOMPLETE, never this.
+		return Waiting, "awaiting_authority", true
+	case domain.AuthorityBlocked:
+		return Waiting, "authority_blocked", true
+	case domain.AuthorityIncomplete:
+		// Evidence is missing that is not a human approval. The run may still
+		// be able to produce it, so the disposition stays Active; if nothing is
+		// wanted, the reason is what the run settles on.
+		return Active, "evidence_required", true
+	case domain.AuthorityStale:
+		return Active, "fresh_evidence_required", true
+	}
+	return Waiting, "authority_unknown", true
 }
 func nextRevision(v string) string {
 	if v == "" {

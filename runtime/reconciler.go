@@ -72,6 +72,11 @@ var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreat
 // the whole publication, evaluated against the exact candidate commit.
 const PublicationActionType = "git.pull_request.create"
 
+// HumanEvidenceClass is the class a person records through the operator
+// authority boundary. No provider produces it, and nothing may produce it on a
+// person's behalf.
+const HumanEvidenceClass domain.EvidenceClass = "human_approval"
+
 // AssuranceEvidenceClass is the evidence class the runtime's verifier produces.
 // A required claim of any other class (a human approval, an external audit) is
 // simply not satisfied by a verifier run, which is what keeps #7 in charge.
@@ -520,12 +525,13 @@ func (s *runState) conditions() (Disposition, string) {
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
 		return Waiting, "requested_privilege_expansion"
 	}
+	// ONE mapping, shared with the kernel. Every non-authorized status names an
+	// outstanding condition, and naming it is what makes goal_state_reached
+	// unreachable while a current protected action is unauthorized: the settle
+	// path prefers this reason over its own fallback.
 	if decision, ok := s.unansweredPublicationDecision(); ok {
-		switch decision.Status {
-		case domain.AuthorityAwaitingAuthority:
-			return Waiting, "awaiting_authority"
-		case domain.AuthorityBlocked:
-			return Waiting, "authority_blocked"
+		if disposition, reason, outstanding := AuthorityDisposition(decision.Status); outstanding {
+			return disposition, reason
 		}
 	}
 	return Active, ""
