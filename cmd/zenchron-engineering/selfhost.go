@@ -231,7 +231,6 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 	}
 	writeSelfhostPreflight(stdout, identity, remoteMain, runtime)
 
-
 	issueData, err := commands.Output(root, "gh", "issue", "view", rawNumber, "--repo", repository, "--json", "number,title,body,state,url")
 	if err != nil {
 		return fmt.Errorf("retrieve issue #%d: %w", number, err)
