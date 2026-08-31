@@ -392,34 +392,113 @@ func issueGoal(repository string, issue int) string {
 // and only an unused identity creates a run. A durable row that disagrees with
 // the requested work is a typed refusal, never a silent second run.
 func (r *EngineeringRuntime) StartOrResumeIssueRun(ctx context.Context, issue int) (string, error) {
+	outcome, err := r.StartIssueRun(ctx, issue, AdoptCompatibleGeneration)
+	return outcome.RunID, err
+}
+
+// GenerationMode states what a caller MEANT by asking to work on an issue.
+//
+// It exists because the two meanings were one command. `run issue <n>` derives a
+// deterministic identity and adopted whatever non-terminal run it found there,
+// whichever controller had created it - so an invocation intended to start a
+// fresh generation under a new controller silently reconciled a historical run
+// instead. That is how run-0943e257539346f8763db04505cbf322 gained an event
+// from a batch that believed it was starting something new.
+type GenerationMode int
+
+const (
+	// AdoptCompatibleGeneration continues an existing non-terminal generation
+	// when it was created by THIS controller, and refuses - naming the run -
+	// when it was created by another. It never creates a second generation
+	// alongside a live one.
+	AdoptCompatibleGeneration GenerationMode = iota
+	// NewGeneration always creates a new run with a new id. An existing
+	// generation is left exactly as it is: append-only journal, candidate
+	// workspace, disposition, all untouched.
+	NewGeneration
+)
+
+// StartOutcome says WHICH run a caller got and whether it is new. A caller that
+// asked for fresh work and received an adopted run would otherwise have no way
+// to tell, which is the whole defect.
+type StartOutcome struct {
+	RunID   string
+	Adopted bool
+	// AdoptedFrom is the controller identity that created an adopted run. It is
+	// this controller's own digest whenever adoption happened at all, because
+	// adoption across controllers is refused.
+	AdoptedFrom string
+}
+
+// RunAdoptionRefusedError is the typed refusal for a live generation this
+// controller did not create. It names the run so an operator can inspect it,
+// and says what to do: continue it with the controller that owns it, or ask for
+// a new generation explicitly.
+type RunAdoptionRefusedError struct {
+	RunID, Owner, Detail string
+}
+
+func (e *RunAdoptionRefusedError) Error() string {
+	return "run " + e.RunID + " is a live generation created by a different controller (" + short12(e.Owner) +
+		"): " + e.Detail + ". Continue it with that controller, or create a new generation explicitly"
+}
+
+func short12(digest string) string {
+	if len(digest) > 12 {
+		return digest[:12]
+	}
+	return digest
+}
+
+// StartIssueRun is the one entry point for beginning work on an issue. Which
+// generation a caller gets is stated by the mode, never inferred.
+func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode GenerationMode) (StartOutcome, error) {
 	if issue <= 0 {
-		return "", fmt.Errorf("issue number must be positive")
+		return StartOutcome{}, fmt.Errorf("issue number must be positive")
 	}
 	goal := issueGoal(r.deps.Repository.Identity, issue)
 	for generation := 0; generation < maxRunGenerations; generation++ {
 		runID, err := issueRunID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest, generation)
 		if err != nil {
-			return "", err
+			return StartOutcome{}, err
 		}
 		existing, ok, err := r.deps.Store.Run(runID)
 		if err != nil {
-			return "", err
+			return StartOutcome{}, err
 		}
 		if !ok {
-			return r.createRun(ctx, runID, goal)
+			// A free slot. Under either mode this is a NEW run, and the source
+			// claim below is what keeps two writers from taking the same one.
+			created, err := r.createRun(ctx, runID, goal)
+			return StartOutcome{RunID: created}, err
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
-			return "", &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
+			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
 		}
 		snapshot, err := r.deps.Store.Replay(runID)
 		if err != nil {
-			return "", &RunConflictError{RunID: runID, Detail: err.Error()}
+			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: err.Error()}
 		}
-		if !terminalDisposition(snapshot.Disposition) {
-			return runID, nil
+		if terminalDisposition(snapshot.Disposition) {
+			// A finished generation is a boundary: the next slot is the next
+			// generation, under either mode.
+			continue
 		}
+		if mode == NewGeneration {
+			// A live generation is never adopted by a caller that asked for a
+			// fresh one, and it is never disturbed either. The search moves to
+			// the next slot, leaving this run exactly as it is.
+			continue
+		}
+		if existing.ControllerSHA256 != r.controller {
+			return StartOutcome{}, &RunAdoptionRefusedError{
+				RunID: runID, Owner: existing.ControllerSHA256,
+				Detail: "adopting it would reconcile another controller's work under this one",
+			}
+		}
+		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
-	return "", fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
 }
 
 func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {

@@ -33,7 +33,7 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-const autonomyUsage = "usage: zenchron-engineering autonomy {run issue <number>|status <run> [--text]|events <run> [--follow]|resume <run>|refresh <run>|authorize <run> <request-id> --approve|--reject [--note <text>]|stop <run>|watch|doctor [--text]|gc [--dry-run]} [--repo owner/name] [--config <path>]"
+const autonomyUsage = "usage: zenchron-engineering autonomy {run issue <number> [--new-generation]|status <run> [--text]|events <run> [--follow]|resume <run>|refresh <run>|authorize <run> <request-id> --approve|--reject [--note <text>]|stop <run>|watch|doctor [--text]|gc [--dry-run]} [--repo owner/name] [--config <path>]"
 
 // Exit statuses this CLI adds to the run-mode exits in runtime.go. They are
 // values runtime.go deliberately does not define, because they classify an
@@ -99,6 +99,7 @@ const watchedDefaultBranch = "main"
 // always returns the real *runtime.EngineeringRuntime.
 type engineeringRuntime interface {
 	StartOrResumeIssueRun(ctx context.Context, issue int) (string, error)
+	StartIssueRun(ctx context.Context, issue int, mode runtime.GenerationMode) (runtime.StartOutcome, error)
 	Reconcile(ctx context.Context, runID string) (runtime.Outcome, error)
 	Status(runID string) (runtime.StatusReport, error)
 	Journal(runID string) ([]runtime.EngineeringEvent, error)
@@ -160,6 +161,10 @@ type autonomyFlags struct {
 	// Note is an optional, untrusted operator annotation. It is an input to
 	// nothing.
 	Note string
+	// NewGeneration asks for a genuinely new run rather than continuing a live
+	// generation. It is explicit because the two are different intentions and
+	// were previously one command.
+	NewGeneration bool
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -240,11 +245,25 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 	ctx := context.Background()
 	switch command {
 	case "run":
-		id, err := engine.StartOrResumeIssueRun(ctx, issue)
-		if err != nil {
-			return runtime.ExitFailed, err
+		// Which generation the operator meant is STATED, never inferred. Without
+		// --new-generation this continues a live generation only when this
+		// controller created it, and refuses - naming the run - when another
+		// did. With it, a new run id is always created and the existing
+		// generation is left untouched.
+		mode := runtime.AdoptCompatibleGeneration
+		if flags.NewGeneration {
+			mode = runtime.NewGeneration
 		}
-		return reconcile(ctx, engine, id, stdout)
+		outcome, err := engine.StartIssueRun(ctx, issue, mode)
+		if err != nil {
+			return exitFor(err, runtime.ExitFailed), err
+		}
+		if outcome.Adopted {
+			fmt.Fprintf(stdout, "adopted existing generation %s (this controller created it)\n", outcome.RunID)
+		} else {
+			fmt.Fprintf(stdout, "created generation %s\n", outcome.RunID)
+		}
+		return reconcile(ctx, engine, outcome.RunID, stdout)
 	case "resume":
 		return autonomyResume(ctx, engine, built, runID, stdout)
 	case "refresh":
@@ -570,6 +589,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 		case "--text":
 			flags.Text, args = true, args[1:]
 			continue
+		case "--new-generation":
+			flags.NewGeneration = true
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
 			continue

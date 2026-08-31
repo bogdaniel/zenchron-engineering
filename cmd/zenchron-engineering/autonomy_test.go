@@ -118,6 +118,10 @@ type scriptedRuntime struct {
 	startErr error
 	issues   []int
 	runIDs   []string
+	// generationModes records what each start actually asked for, which is the
+	// distinction defect P existed for.
+	generationModes []runtime.GenerationMode
+	freshGeneration bool
 
 	request         *runtime.AuthorityRequest
 	requestErr      error
@@ -129,6 +133,12 @@ type scriptedRuntime struct {
 func (s *scriptedRuntime) StartOrResumeIssueRun(_ context.Context, issue int) (string, error) {
 	s.issues = append(s.issues, issue)
 	return s.runID, s.startErr
+}
+
+func (s *scriptedRuntime) StartIssueRun(_ context.Context, issue int, mode runtime.GenerationMode) (runtime.StartOutcome, error) {
+	s.issues = append(s.issues, issue)
+	s.generationModes = append(s.generationModes, mode)
+	return runtime.StartOutcome{RunID: s.runID, Adopted: mode == runtime.AdoptCompatibleGeneration && !s.freshGeneration}, s.startErr
 }
 
 func (s *scriptedRuntime) Reconcile(_ context.Context, runID string) (runtime.Outcome, error) {
