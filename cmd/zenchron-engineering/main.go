@@ -96,6 +96,9 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		fmt.Fprintln(stdout, version)
 		return runtime.ExitCompleted, nil
 	}
+	if len(args) >= 2 && args[0] == "controller" && args[1] == "build-adopted" {
+		return controllerBuildAdopted(args[2:], autonomyOverrides{}, stdout)
+	}
 	if len(args) >= 1 && args[0] == "autonomy" {
 		return autonomy(args[1:], autonomyOverrides{}, stdout)
 	}

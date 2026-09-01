@@ -631,6 +631,78 @@ func (a GitHubRESTAdapter) RefSHA(ctx context.Context, repo GitHubRepo, ref stri
 	return RefObservation{Exists: true, SHA: wire.Object.SHA}, nil
 }
 
+// Rulesets reads the repository's branch rulesets. It is READ ONLY and is the
+// only way the adopted-controller builder learns whether a trust root exists:
+// the builder never assumes protection from a branch name, and never takes an
+// operator's word for it.
+//
+// The listing gives ids and names only, so each ruleset is then fetched
+// individually for the rules themselves. That is one request per ruleset, and
+// a repository has a handful, not thousands.
+func (a GitHubRESTAdapter) Rulesets(ctx context.Context, repo GitHubRepo) ([]TrustedMainRuleset, error) {
+	var listing []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := a.call(ctx, repo, http.MethodGet, repoPath(repo)+"/rulesets", nil, nil, &listing); err != nil {
+		return nil, err
+	}
+	rulesets := make([]TrustedMainRuleset, 0, len(listing))
+	for _, entry := range listing {
+		var wire struct {
+			ID          int64  `json:"id"`
+			Name        string `json:"name"`
+			Enforcement string `json:"enforcement"`
+			Conditions  struct {
+				RefName struct {
+					Include []string `json:"include"`
+				} `json:"ref_name"`
+			} `json:"conditions"`
+			BypassActors []json.RawMessage `json:"bypass_actors"`
+			Rules        []struct {
+				Type       string `json:"type"`
+				Parameters struct {
+					AllowedMergeMethods []string `json:"allowed_merge_methods"`
+					RequiredApprovals   int      `json:"required_approving_review_count"`
+					Strict              bool     `json:"strict_required_status_checks_policy"`
+					Checks              []struct {
+						Context       string `json:"context"`
+						IntegrationID int64  `json:"integration_id"`
+					} `json:"required_status_checks"`
+				} `json:"parameters"`
+			} `json:"rules"`
+		}
+		if err := a.call(ctx, repo, http.MethodGet, repoPath(repo)+"/rulesets/"+strconv.FormatInt(entry.ID, 10), nil, nil, &wire); err != nil {
+			return nil, err
+		}
+		observed := TrustedMainRuleset{
+			ID: wire.ID, Name: wire.Name, Enforcement: wire.Enforcement,
+			Targets: wire.Conditions.RefName.Include, BypassActors: len(wire.BypassActors),
+		}
+		for _, rule := range wire.Rules {
+			switch rule.Type {
+			case "deletion":
+				observed.Deletion = true
+			case "non_fast_forward":
+				observed.NonFastForward = true
+			case "pull_request":
+				observed.PullRequest = &PullRequestRule{
+					AllowedMergeMethods: rule.Parameters.AllowedMergeMethods,
+					RequiredApprovals:   rule.Parameters.RequiredApprovals,
+				}
+			case "required_status_checks":
+				checks := make([]RequiredCheck, 0, len(rule.Parameters.Checks))
+				for _, c := range rule.Parameters.Checks {
+					checks = append(checks, RequiredCheck{Context: c.Context, IntegrationID: c.IntegrationID})
+				}
+				observed.RequiredChecks = &RequiredChecksRule{Strict: rule.Parameters.Strict, Checks: checks}
+			}
+		}
+		rulesets = append(rulesets, observed)
+	}
+	return rulesets, nil
+}
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------

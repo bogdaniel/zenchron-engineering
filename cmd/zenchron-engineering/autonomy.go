@@ -169,6 +169,11 @@ type autonomyFlags struct {
 	// generation. It is explicit because the two are different intentions and
 	// were previously one command.
 	NewGeneration bool
+	// Output and Revision serve `controller build-adopted` only. Revision is
+	// still proven contained in trusted main, so naming one pins a build
+	// rather than asserting anything about it.
+	Output   string
+	Revision string
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -595,6 +600,17 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			continue
 		case "--new-generation":
 			flags.NewGeneration, args = true, args[1:]
+			continue
+		case "--output", "--revision":
+			if len(args) < 2 {
+				return autonomyFlags{}, fmt.Errorf("%s requires a value", args[0])
+			}
+			if args[0] == "--output" {
+				flags.Output = args[1]
+			} else {
+				flags.Revision = args[1]
+			}
+			args = args[2:]
 			continue
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
