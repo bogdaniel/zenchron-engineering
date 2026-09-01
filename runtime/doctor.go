@@ -207,7 +207,7 @@ func doctorController(in DoctorInput) DoctorCheck {
 	build := in.ControllerBuild
 	if !build.Attested() {
 		return warn(doctorGroupController, id,
-			"this controller makes no provenance claim: it is an unattested build, which is legal but records nothing about which source produced it")
+			"this controller's build provenance is unattested: it records nothing about which source produced it, which is legal")
 	}
 	// The SAME validation the runtime constructor trusts, not a second opinion.
 	// A partial or malformed claim is refused rather than displayed as a
@@ -218,7 +218,7 @@ func doctorController(in DoctorInput) DoctorCheck {
 			"this controller states a provenance that is not complete or not well formed: "+err.Error()+
 				". A partial claim is refused rather than shown as a healthy build")
 	}
-	detail := fmt.Sprintf("this controller is a %s build: version %s, source %s, tree %s, binary sha256:%s",
+	detail := fmt.Sprintf("this controller's build provenance is %s: version %s, source %s, tree %s, binary sha256:%s",
 		build.Kind, build.Version, build.SourceRevision, build.SourceTree, build.BinarySHA256)
 	if build.Kind != ControllerAdopted {
 		return pass(doctorGroupController, id, detail+
