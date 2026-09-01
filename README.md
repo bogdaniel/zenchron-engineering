@@ -101,6 +101,11 @@ resolve the non-vendored modules pinned by `go.mod` and `go.sum`; no host
 credentials or environment are forwarded. Go's home, module, and build caches
 live in an isolated writable tmpfs that is discarded after each command.
 
+Before either `selfhost issue` executes Codex or `selfhost resume` publishes an
+interrupted candidate, selfhost writes a preflight diagnostic identifying the
+resolved repository, exact trusted `origin/main` base revision, and selected Go
+runtime.
+
 Before publishing a candidate PR, the bootstrap independently runs the
 deterministic `format`, `vet`, and `test` checks through that resolved runtime.
 Executor-reported commands are retained as observations and need not use the
