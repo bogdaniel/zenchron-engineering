@@ -228,6 +228,12 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Sandbox:                DockerSandbox{Image: doctorImage, Executor: executor},
 		DependencyCacheDir:     f.cacheDir,
 		SemanticAssurance:      &FakeSemanticAssuranceProvider{},
+		// A healthy environment includes a controller that can say what it is.
+		ControllerBuild: ControllerBuild{
+			Kind: ControllerAdopted, Version: "main-fixture",
+			SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
+			BinarySHA256: strings.Repeat("c", 64),
+		},
 		GitHub: doctorForge{result: DiscoveryResult{
 			Repo:      GitHubRepo{Owner: "acme", Name: "widgets"},
 			Label:     DefaultDiscoveryLabel,
@@ -334,6 +340,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"github.credential", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
+		"controller.build",
 	}
 	if len(report.Checks) != len(want) {
 		t.Fatalf("report has %d checks, want %d", len(report.Checks), len(want))

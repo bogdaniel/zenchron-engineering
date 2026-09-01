@@ -122,6 +122,18 @@ type DoctorInput struct {
 	// ProjectModel and Policy drive the governance diagnosis.
 	ProjectModel domain.ProjectModel
 	Policy       domain.EngineeringPolicy
+
+	// ControllerBuild is the provenance of the binary running this preflight.
+	// The zero value is the truthful answer for an unattested build.
+	//
+	// ControllerBuildError is set instead when resolving that provenance
+	// FAILED. The two are different answers and must stay different: an
+	// unattested build is one that deliberately claims nothing, while a
+	// resolution failure means the preflight could not establish what it is
+	// running. Collapsing the second into the first would report a measurement
+	// failure as a deliberate design choice.
+	ControllerBuild      ControllerBuild
+	ControllerBuildError error
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -136,6 +148,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorGitHub(ctx, in)...)
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
+	checks = append(checks, doctorController(in))
 
 	report := DoctorReport{Status: DoctorPass, Checks: checks}
 	for _, check := range checks {
@@ -158,6 +171,61 @@ func warn(group, id, reason string) DoctorCheck {
 }
 func fail(group, id, reason string) DoctorCheck {
 	return DoctorCheck{ID: id, Group: group, Status: DoctorFail, Reason: reason}
+}
+
+// ---------------------------------------------------------------------------
+// Controller provenance
+// ---------------------------------------------------------------------------
+
+const doctorGroupController = "controller"
+
+// doctorController reports WHICH BINARY is running the preflight.
+//
+// Every other check answers a question about the environment. This one answers
+// the question an operator has about the tool asking them: is this an adopted
+// runtime, or a build of source that has not itself been adopted? The
+// distinction already exists in the model and is already recorded on every run
+// the runtime creates, but it was not observable from any read-only command, so
+// the one moment it matters most - standing in front of a freshly built
+// controller and asking what it is - had no answer.
+//
+// It is a report, never a gate. An unattested build is legal and says so; a
+// pre-adoption build is legal and says so. Neither is a FAIL, because which
+// build you are running is a fact about your situation, not a fault in it.
+func doctorController(in DoctorInput) DoctorCheck {
+	const id = "controller.build"
+	// A resolution failure is not an unattested build. "I claim nothing" is a
+	// deliberate, legal property of a plain go build; "I could not find out
+	// what I am" is a broken preflight reporting on itself. Reporting the
+	// second as the first would turn a measurement failure into a design
+	// choice, and an operator would read WARN where they should read FAIL.
+	if in.ControllerBuildError != nil {
+		return fail(doctorGroupController, id,
+			"the provenance of the running binary could not be established: "+in.ControllerBuildError.Error()+
+				". This is not an unattested build - a build that claims nothing says so, and this one could not be measured at all")
+	}
+	build := in.ControllerBuild
+	if !build.Attested() {
+		return warn(doctorGroupController, id,
+			"this controller makes no provenance claim: it is an unattested build, which is legal but records nothing about which source produced it")
+	}
+	// The SAME validation the runtime constructor trusts, not a second opinion.
+	// A partial or malformed claim is refused rather than displayed as a
+	// healthy build: provenance that does not survive its own rules is worse
+	// than none, because it reads as proof.
+	if err := build.validateAttested(); err != nil {
+		return fail(doctorGroupController, id,
+			"this controller states a provenance that is not complete or not well formed: "+err.Error()+
+				". A partial claim is refused rather than shown as a healthy build")
+	}
+	detail := fmt.Sprintf("this controller is a %s build: version %s, source %s, tree %s, binary sha256:%s",
+		build.Kind, build.Version, build.SourceRevision, build.SourceTree, build.BinarySHA256)
+	if build.Kind != ControllerAdopted {
+		return pass(doctorGroupController, id, detail+
+			". A build of source that has not itself been adopted demonstrates runtime behaviour only; it confers no authority on its own source")
+	}
+	return pass(doctorGroupController, id, detail+
+		". Its source is adopted, which is a fact established by external merge and never by the runtime itself")
 }
 
 // ---------------------------------------------------------------------------

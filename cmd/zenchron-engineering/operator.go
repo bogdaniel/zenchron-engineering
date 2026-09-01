@@ -1012,6 +1012,21 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		GitHub:             overrides.GitHub,
 		Provider:           overrides.Provider,
 	}
+	// The running binary's own provenance. A resolution failure is carried
+	// through as itself rather than discarded: doctor must be able to say "I
+	// could not establish what I am running", which is a different answer from
+	// "I am a build that claims nothing".
+	resolve := controllerBuild
+	if overrides.ControllerBuildResolver != nil {
+		resolve = overrides.ControllerBuildResolver
+	}
+	if overrides.ControllerBuild != nil {
+		in.ControllerBuild = *overrides.ControllerBuild
+	} else if build, err := resolve(); err != nil {
+		in.ControllerBuildError = err
+	} else {
+		in.ControllerBuild = build
+	}
 	if target, err := repositoryTarget(cwd, flags.Repo); err == nil {
 		in.Repository = target
 	}
