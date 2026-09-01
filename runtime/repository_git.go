@@ -645,6 +645,39 @@ func writeAskpass(dir, username, secret string) (string, error) {
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
+// runExecProbe runs the probe. It is a variable because the condition it
+// detects is a MOUNT FLAG, which no test can create portably and which root
+// cannot bypass either - so the refusal branch is reachable in a test only by
+// substituting the exec itself.
+var runExecProbe = func(path string) error { return exec.Command(path).Run() }
+
+// assertTempExecutable proves the private root can actually run a program
+// before the credential seam depends on one.
+//
+// GIT_ASKPASS is a PROGRAM, and the runtime writes it into a private directory
+// under TMPDIR. A host that mounts its temp filesystem noexec - ordinary
+// hardening, and exactly what this runtime's own assurance sandbox does to
+// /tmp - cannot execute it. Git's report of that is "could not read Username
+// for <remote>": credential-shaped, and wrong. The credential is present and
+// correct; the filesystem refused to run the messenger.
+//
+// So the condition is proven here, with a probe that carries no secret, and
+// named for what it is. The runtime does not relocate the directory: TMPDIR is
+// the operator's own control for this, and silently moving runtime-owned
+// material somewhere the operator did not choose is a worse answer than saying
+// which directory is the problem.
+func assertTempExecutable(dir string) error {
+	probe := filepath.Join(dir, "exec-probe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		return err
+	}
+	defer os.Remove(probe)
+	if err := runExecProbe(probe); err != nil {
+		return fmt.Errorf("temp directory %s does not permit execution, so the runtime-owned Git askpass program cannot run; set TMPDIR to a directory that allows execution: %w", os.TempDir(), err)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
@@ -680,6 +713,9 @@ func (r RepositoryGitRunner) run(args ...string) ([]byte, error) {
 	}
 	askpass := ""
 	if r.Remote != nil && r.Remote.Credentials != nil {
+		if err := assertTempExecutable(root); err != nil {
+			return nil, err
+		}
 		user, secret, err := r.Remote.Credentials.Credential(r.Remote.Identity)
 		if err != nil {
 			return nil, fmt.Errorf("git credential unavailable")

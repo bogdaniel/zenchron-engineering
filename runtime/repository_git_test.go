@@ -476,6 +476,8 @@ func TestRemoteCredentialSeamAuthenticatesWithoutLeaking(t *testing.T) {
 	}))
 	defer server.Close()
 
+	requireExecutableTemp(t)
+
 	credentials := &fixedCredential{username: user, secret: secret}
 	identity := RemoteIdentity{URL: server.URL + "/", transport: transportInsecureHTTP}
 	destination := filepath.Join(root, "clone")
@@ -525,7 +527,26 @@ func TestRemoteCredentialSeamAuthenticatesWithoutLeaking(t *testing.T) {
 	}
 }
 
+// requireExecutableTemp skips a test that has to RUN a program it wrote into
+// the temp filesystem. This runtime's own assurance sandbox mounts /tmp noexec
+// on purpose - only the Go toolchain gets an exec-capable writable mount - so
+// inside it these tests cannot execute their own fixture. Skipping names that
+// condition instead of reporting the sandbox's boundary as a defect in the
+// credential seam, and the tests still run wherever exec is permitted, which
+// includes the host and CI.
+//
+// assertTempExecutable is the same check the runtime itself makes before the
+// credential seam depends on an askpass program, so the test skips exactly
+// when the runtime would refuse.
+func requireExecutableTemp(t *testing.T) {
+	t.Helper()
+	if err := assertTempExecutable(t.TempDir()); err != nil {
+		t.Skipf("this environment does not permit executing a program from the temp filesystem: %v", err)
+	}
+}
+
 func TestAskpassProgramIsPrivateAndAnswersOnlyGit(t *testing.T) {
+	requireExecutableTemp(t)
 	dir := t.TempDir()
 	path, err := writeAskpass(dir, "user'name", "se'cret")
 	if err != nil {
@@ -679,5 +700,34 @@ func TestTwoRuntimesNeverCrossUseGitCredentials(t *testing.T) {
 		if resolution != b.deps.Remote.URL {
 			t.Fatalf("runtime B's credential was resolved for an ungoverned remote %q", resolution)
 		}
+	}
+}
+
+// TestCredentialSeamNamesANoexecTempDirectory is the regression for the defect
+// the #29 adoption assurance surfaced: GIT_ASKPASS is a program, and a host
+// that mounts its temp filesystem noexec cannot run it. Git reports that as
+// "could not read Username", which points at the credential - the one thing
+// that is not wrong. The runtime must name the filesystem instead.
+func TestCredentialSeamNamesANoexecTempDirectory(t *testing.T) {
+	// A noexec mount is a filesystem flag: it cannot be created portably in a
+	// test, and root does not bypass it either. Substituting the exec is the
+	// only way to reach the branch, so that is what this does.
+	original := runExecProbe
+	runExecProbe = func(string) error { return fmt.Errorf("permission denied") }
+	defer func() { runExecProbe = original }()
+
+	err := assertTempExecutable(t.TempDir())
+	if err == nil {
+		t.Fatal("a temp directory that cannot run a program must be refused")
+	}
+	// The refusal must be about execution and must name the directory an
+	// operator can change, not about a credential.
+	for _, want := range []string{"does not permit execution", "TMPDIR", os.TempDir()} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "credential unavailable") {
+		t.Fatalf("an execution failure must not be reported as a credential failure: %v", err)
 	}
 }
