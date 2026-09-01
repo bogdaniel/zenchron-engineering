@@ -72,10 +72,14 @@ type AdoptedBuildDeps struct {
 	Rulesets func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error)
 	RefSHA   func(context.Context, GitHubRepo, string) (RefObservation, error)
 	Git      func(dir string, args ...string) (string, error)
-	Build    func(spec AdoptedBuildSpec) error
-	Measure  func(path string) (string, error)
-	Probe    func(binary, config string) (DoctorCheck, error)
-	Now      func() time.Time
+	// Fetch is separate from Git because it is the one step that reaches the
+	// network, and it must be bound to the governed remote exactly like every
+	// other remote operation the runtime performs.
+	Fetch   func(dir, revision, branch string) error
+	Build   func(spec AdoptedBuildSpec) error
+	Measure func(path string) (string, error)
+	Probe   func(binary, config string) (DoctorCheck, error)
+	Now     func() time.Time
 }
 
 // AdoptedBuildSpec is the exact compilation, separated from the proof so a test
@@ -167,12 +171,8 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	trustedMain := observed.SHA
 
 	// 4. Fetch that exact revision, then prove containment against it.
-	if _, err := deps.Git(request.RepositoryDir, "fetch", "origin", trustedMain); err != nil {
-		// A shallow or restricted remote may refuse a bare-SHA fetch; the
-		// branch fetch is the fallback, and containment is still proven below.
-		if _, branchErr := deps.Git(request.RepositoryDir, "fetch", "origin", branch); branchErr != nil {
-			return out, fmt.Errorf("the trusted revision could not be fetched: %w", err)
-		}
+	if err := deps.Fetch(request.RepositoryDir, trustedMain, branch); err != nil {
+		return out, fmt.Errorf("the trusted revision could not be fetched: %w", err)
 	}
 	source := strings.TrimSpace(request.Revision)
 	if source == "" {
@@ -402,6 +402,9 @@ func (d AdoptedBuildDeps) withDefaults() AdoptedBuildDeps {
 	if d.Git == nil {
 		d.Git = gitOutput
 	}
+	if d.Fetch == nil {
+		d.Fetch = fetchTrustedRevision
+	}
 	if d.Build == nil {
 		d.Build = runAdoptedBuild
 	}
@@ -415,6 +418,29 @@ func (d AdoptedBuildDeps) withDefaults() AdoptedBuildDeps {
 		d.Now = time.Now
 	}
 	return d
+}
+
+// fetchTrustedRevision brings the exact trusted revision into the local
+// repository through the GOVERNED remote, so the object containment is later
+// proven against came from the remote GitHub named, not from whatever the
+// local clone happened to be holding.
+func fetchTrustedRevision(dir, revision, branch string) error {
+	origin, err := gitOutput(dir, "remote", "get-url", "origin")
+	if err != nil {
+		return fmt.Errorf("the repository has no origin remote to fetch the trusted revision from: %w", err)
+	}
+	remote, err := GovernedRemote(strings.TrimSpace(origin))
+	if err != nil {
+		return err
+	}
+	runner := RepositoryGitRunner{Dir: dir, Local: controlPolicy(), Remote: &RemotePolicy{Identity: remote}}
+	if _, err := runner.run("fetch", remote.URL, revision); err == nil {
+		return nil
+	}
+	// A remote may refuse a bare-SHA fetch. The branch fetch is the fallback,
+	// and containment is still proven against the remote-observed head below.
+	_, err = runner.run("fetch", remote.URL, branch)
+	return err
 }
 
 func runAdoptedBuild(spec AdoptedBuildSpec) error {

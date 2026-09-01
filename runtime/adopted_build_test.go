@@ -76,14 +76,10 @@ func newAdoptedFixture(t *testing.T) *adoptedFixture {
 		RefSHA: func(context.Context, GitHubRepo, string) (RefObservation, error) {
 			return RefObservation{Exists: true, SHA: f.head}, nil
 		},
-		Git: func(dir string, args ...string) (string, error) {
-			// The fetch is a no-op here: the fixture remote is the repository
-			// itself, and every revision is already local.
-			if len(args) > 0 && args[0] == "fetch" {
-				return "", nil
-			}
-			return gitOutput(dir, args...)
-		},
+		Git: gitOutput,
+		// The fixture repository is its own source of truth, so there is
+		// nothing to fetch; the proof that follows is unchanged.
+		Fetch: func(string, string, string) error { return nil },
 		Build: func(spec AdoptedBuildSpec) error {
 			f.built = append(f.built, spec)
 			return os.WriteFile(spec.Output, []byte("binary for "+spec.Revision), 0600)

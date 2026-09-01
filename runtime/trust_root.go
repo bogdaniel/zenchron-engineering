@@ -56,8 +56,8 @@ type RequiredChecksRule struct {
 }
 
 type RequiredCheck struct {
-	Context       string
-	IntegrationID int64
+	Context       string `json:"context"`
+	IntegrationID int64  `json:"integration_id"`
 }
 
 // TrustPolicy is what an adopted build requires of the trust root. It is data
@@ -65,10 +65,10 @@ type RequiredCheck struct {
 // it, and so the exact expectation appears in the provenance artifact rather
 // than only in code.
 type TrustPolicy struct {
-	Ref                 string
-	RequiredCheck       RequiredCheck
-	AllowedMergeMethods []string
-	RequireStrictChecks bool
+	Ref                 string        `json:"ref"`
+	RequiredCheck       RequiredCheck `json:"required_check"`
+	AllowedMergeMethods []string      `json:"allowed_merge_methods"`
+	RequireStrictChecks bool          `json:"require_strict_checks"`
 }
 
 // DefaultTrustPolicy is the frozen M1-B trust root.
