@@ -649,6 +649,10 @@ func (c *scopedCredential) Credential(identity RemoteIdentity) (string, string, 
 // neither runtime's operations resolve the provider it was constructed with, so
 // the "did not resolve its own credential" assertions fail.
 func TestTwoRuntimesNeverCrossUseGitCredentials(t *testing.T) {
+	// Both runtimes drive a REAL credentialed clone, which needs an askpass
+	// program the temp filesystem must be able to run.
+	requireExecutableTemp(t)
+
 	a, b := newPhase8Fixture(t), newPhase8Fixture(t)
 	if a.deps.Remote.URL == b.deps.Remote.URL {
 		t.Fatal("the two runtimes must govern different repositories")
