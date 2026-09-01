@@ -194,7 +194,12 @@ type FakeSemanticAssuranceProvider struct {
 	// Omit, when set, is a claim id the verdict leaves unanswered, which is how
 	// an incomplete answer is modelled.
 	Omit string
-	Err  error
+	// Answer, when set, builds a raw model-shaped verdict for the request, which
+	// this fake then decodes through the REAL gate. It is how a scenario models
+	// what a provider does with an answer the runtime must refuse - a narrowed
+	// obligation set, say - without the fixture deciding the refusal itself.
+	Answer func(AssuranceRequest) string
+	Err    error
 	// Class overrides the declared capability so a scenario can model a
 	// configuration whose semantic producer is absent or answers something else.
 	Class []domain.EvidenceClass
@@ -212,6 +217,27 @@ func (f *FakeSemanticAssuranceProvider) Assure(_ context.Context, r AssuranceReq
 	definition := SemanticVerifierDefinition()
 	if f.Err != nil {
 		return AssuranceResult{ProviderID: semanticProviderID, VerifierDefinition: definition, FailureClass: FailureTransientProvider}, f.Err
+	}
+	if f.Answer != nil {
+		results, err := decodeSemanticVerdict([]byte(f.Answer(r)), r.SemanticClaims)
+		if err != nil {
+			return AssuranceResult{ProviderID: semanticProviderID, VerifierDefinition: definition, FailureClass: FailureVerification}, err
+		}
+		passed := true
+		for _, result := range results {
+			if result.Status != "pass" {
+				passed = false
+			}
+		}
+		return AssuranceResult{
+			ProviderID: semanticProviderID, VerifierDefinition: definition, Passed: passed,
+			SemanticClaims: results, Model: "fixture-model",
+			Evidence: &EvidenceBinding{
+				Commit: r.Commit, Tree: r.Tree, Contract: r.Contract, Policy: r.Policy,
+				Producer:    Ref{ID: semanticProviderID, Revision: definition},
+				Environment: Ref{ID: "fixture-control-plane", Revision: "fixture-model"},
+			},
+		}, nil
 	}
 	status := f.Status
 	if status == "" {

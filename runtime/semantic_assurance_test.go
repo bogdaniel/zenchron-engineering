@@ -89,15 +89,18 @@ func TestReadOnlyViewCannotEscapeTheVerificationCheckout(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSemanticVerdictRefusesEverythingItCannotVouchFor(t *testing.T) {
-	required := []string{"claim-a", "claim-b"}
+	required := []SemanticClaimRequest{
+		{ClaimID: "claim-a", ObligationIDs: []string{"o1"}},
+		{ClaimID: "claim-b", ObligationIDs: []string{"o2"}},
+	}
 	for name, raw := range map[string]string{
-		"unknown claim":   `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"pass","rationale":"x"},{"claim_id":"claim-b","obligation_ids":[],"status":"pass","rationale":"x"},{"claim_id":"claim-z","obligation_ids":[],"status":"pass","rationale":"x"}]}`,
-		"missing claim":   `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"pass","rationale":"x"}]}`,
-		"duplicate claim": `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"pass","rationale":"x"},{"claim_id":"claim-a","obligation_ids":[],"status":"fail","rationale":"x"},{"claim_id":"claim-b","obligation_ids":[],"status":"pass","rationale":"x"}]}`,
-		"invalid status":  `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"approved","rationale":"x"},{"claim_id":"claim-b","obligation_ids":[],"status":"pass","rationale":"x"}]}`,
+		"unknown claim":   `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"x"},{"claim_id":"claim-b","obligation_ids":["o2"],"status":"pass","rationale":"x"},{"claim_id":"claim-z","obligation_ids":[],"status":"pass","rationale":"x"}]}`,
+		"missing claim":   `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"x"}]}`,
+		"duplicate claim": `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"x"},{"claim_id":"claim-a","obligation_ids":["o1"],"status":"fail","rationale":"x"},{"claim_id":"claim-b","obligation_ids":["o2"],"status":"pass","rationale":"x"}]}`,
+		"invalid status":  `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"approved","rationale":"x"},{"claim_id":"claim-b","obligation_ids":["o2"],"status":"pass","rationale":"x"}]}`,
 		"unknown field":   `{"claims":[{"claim_id":"claim-a","status":"pass","authorized":true}]}`,
 		"not json":        `I judge this candidate acceptable.`,
-		"trailing value":  `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"pass","rationale":"x"},{"claim_id":"claim-b","obligation_ids":[],"status":"pass","rationale":"x"}]} {"claims":[]}`,
+		"trailing value":  `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"x"},{"claim_id":"claim-b","obligation_ids":["o2"],"status":"pass","rationale":"x"}]} {"claims":[]}`,
 		"empty":           ``,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -122,7 +125,7 @@ func TestSemanticVerdictRefusesEverythingItCannotVouchFor(t *testing.T) {
 		t.Fatal("evidence status mapping is wrong")
 	}
 	// An oversized rationale is bounded rather than trusted to be short.
-	oversized := `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"pass","rationale":"` + strings.Repeat("x", 5000) + `"},{"claim_id":"claim-b","obligation_ids":[],"status":"pass","rationale":"x"}]}`
+	oversized := `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"` + strings.Repeat("x", 5000) + `"},{"claim_id":"claim-b","obligation_ids":["o2"],"status":"pass","rationale":"x"}]}`
 	bounded, err := decodeSemanticVerdict([]byte(oversized), required)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +140,8 @@ func TestSemanticVerdictRefusesEverythingItCannotVouchFor(t *testing.T) {
 // attached by the runtime afterwards.
 func TestSemanticVerdictCannotChooseItsOwnBinding(t *testing.T) {
 	raw := `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"x"}]}`
-	results, err := decodeSemanticVerdict([]byte(raw), []string{"claim-a"})
+	asked := []SemanticClaimRequest{{ClaimID: "claim-a", ObligationIDs: []string{"o1"}}}
+	results, err := decodeSemanticVerdict([]byte(raw), asked)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,8 +157,8 @@ func TestSemanticVerdictCannotChooseItsOwnBinding(t *testing.T) {
 		}
 	}
 	// A verdict that tries to name a binding is refused outright.
-	forged := `{"claims":[{"claim_id":"claim-a","obligation_ids":[],"status":"pass","rationale":"x","commit":"deadbeef","producer":"baseline-go"}]}`
-	if _, err := decodeSemanticVerdict([]byte(forged), []string{"claim-a"}); err == nil {
+	forged := `{"claims":[{"claim_id":"claim-a","obligation_ids":["o1"],"status":"pass","rationale":"x","commit":"deadbeef","producer":"baseline-go"}]}`
+	if _, err := decodeSemanticVerdict([]byte(forged), asked); err == nil {
 		t.Fatal("a verdict naming its own subject binding was accepted")
 	}
 }
@@ -501,4 +505,128 @@ func evaluateFor(t *testing.T, contract domain.EngineeringWorkContract, bundle d
 		t.Fatalf("evaluate: %v", err)
 	}
 	return decision
+}
+
+// ---------------------------------------------------------------------------
+// Scope ownership
+// ---------------------------------------------------------------------------
+
+// TestSemanticVerdictCannotNarrowItsOwnScope is the regression for defect U,
+// found in independent external review of #34.
+//
+// A claim can gate several material obligations at once. The decoder validated
+// the claim id and merely sorted whatever obligation ids came back, so a model
+// could answer the shared claim while naming only one of its obligations - and
+// because authority is satisfied per CLAIM, that discharged the other one too.
+// The narrower question is strictly easier to answer "pass" to, so this was not
+// a hypothetical incentive.
+//
+// The set the model returns must now be exactly the set the runtime asked
+// about: order-independent, duplicate-rejecting, no omissions, no additions, no
+// substitutions, and never empty when the runtime named obligations.
+func TestSemanticVerdictCannotNarrowItsOwnScope(t *testing.T) {
+	asked := []SemanticClaimRequest{{ClaimID: "acceptance", ObligationIDs: []string{"o1", "o2"}}}
+	verdict := func(ids string) []byte {
+		return []byte(`{"claims":[{"claim_id":"acceptance","obligation_ids":` + ids + `,"status":"pass","rationale":"x"}]}`)
+	}
+
+	for name, ids := range map[string]string{
+		"empty when two were asked": `[]`,
+		"omission":                  `["o1"]`,
+		"substitution":              `["o1","o3"]`,
+		"addition":                  `["o1","o2","o3"]`,
+		"duplicate padding":         `["o1","o2","o2"]`,
+		"duplicate only":            `["o1","o1"]`,
+		"wrong obligation entirely": `["o9","o8"]`,
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			results, err := decodeSemanticVerdict(verdict(ids), asked)
+			if err == nil {
+				t.Fatalf("a verdict that chose its own scope was accepted: %s", ids)
+			}
+			if len(results) != 0 {
+				t.Fatalf("a refused verdict produced %d result(s)", len(results))
+			}
+		})
+	}
+
+	// Order carries no meaning, so the same set in another order is the same
+	// answer.
+	results, err := decodeSemanticVerdict(verdict(`["o2","o1"]`), asked)
+	if err != nil {
+		t.Fatalf("the exact set in another order was refused: %v", err)
+	}
+	if got := results["acceptance"].ObligationIDs; len(got) != 2 || got[0] != "o1" || got[1] != "o2" {
+		t.Fatalf("stored obligations = %v, want the runtime's own sorted set", got)
+	}
+
+	// Several claims are matched independently: a set that is correct for one
+	// claim does not make it correct for another.
+	two := []SemanticClaimRequest{
+		{ClaimID: "claim-a", ObligationIDs: []string{"o1", "o2"}},
+		{ClaimID: "claim-b", ObligationIDs: []string{"o3"}},
+	}
+	swapped := []byte(`{"claims":[{"claim_id":"claim-a","obligation_ids":["o3"],"status":"pass","rationale":"x"},` +
+		`{"claim_id":"claim-b","obligation_ids":["o1","o2"],"status":"pass","rationale":"x"}]}`)
+	if _, err := decodeSemanticVerdict(swapped, two); err == nil {
+		t.Fatal("obligation sets belonging to another claim were accepted")
+	}
+	correct := []byte(`{"claims":[{"claim_id":"claim-a","obligation_ids":["o2","o1"],"status":"pass","rationale":"x"},` +
+		`{"claim_id":"claim-b","obligation_ids":["o3"],"status":"pass","rationale":"x"}]}`)
+	if _, err := decodeSemanticVerdict(correct, two); err != nil {
+		t.Fatalf("independently exact sets were refused: %v", err)
+	}
+
+	// The model does not get to restate the obligation text it was given, so
+	// there is nothing to compare and nothing to be talked out of.
+	withStatements := []byte(`{"claims":[{"claim_id":"acceptance","obligation_ids":["o1","o2"],"status":"pass",` +
+		`"rationale":"x","statements":["I was asked something easier"]}]}`)
+	if _, err := decodeSemanticVerdict(withStatements, asked); err == nil {
+		t.Fatal("a verdict restating its own obligation statements was accepted")
+	}
+}
+
+// TestNarrowedSemanticVerdictProducesNoEvidenceAtTheProviderBoundary drives the
+// REAL verifier over a stubbed control plane. It is the provider half of the
+// end-to-end: a narrowed answer must leave the provider with no verdict at all,
+// not a partial one.
+func TestNarrowedSemanticVerdictProducesNoEvidenceAtTheProviderBoundary(t *testing.T) {
+	shared := []SemanticClaimRequest{{
+		ClaimID:       "acceptance",
+		ObligationIDs: []string{"acceptance-a", "acceptance-b"},
+		Statements:    []string{"the change addresses the issue", "the checks pass on the exact tree"},
+	}}
+
+	narrowed := &semanticTransport{repeat: semanticAnswer(
+		`{"claims":[{"claim_id":"acceptance","obligation_ids":["acceptance-a"],"status":"pass","rationale":"the first one is done"}]}`)}
+	verifier, request := semanticFixture(t, narrowed)
+	request.SemanticClaims = shared
+	result, err := verifier.Assure(context.Background(), request)
+	if err == nil {
+		t.Fatal("a narrowed verdict was accepted by the provider")
+	}
+	if result.Passed || len(result.SemanticClaims) != 0 {
+		t.Fatalf("a narrowed verdict produced evidence: %#v", result)
+	}
+	if result.FailureClass != FailureVerification {
+		t.Fatalf("failure class = %q, want %q", result.FailureClass, FailureVerification)
+	}
+	// The transcript is still kept: a refused answer is evidence about the
+	// verifier, even though it is not evidence about the candidate.
+	if len(result.Artifacts) == 0 {
+		t.Fatal("a refused verdict discarded its transcript")
+	}
+
+	// The same answer covering both obligations is accepted.
+	complete := &semanticTransport{repeat: semanticAnswer(
+		`{"claims":[{"claim_id":"acceptance","obligation_ids":["acceptance-b","acceptance-a"],"status":"pass","rationale":"both are done"}]}`)}
+	verifier, request = semanticFixture(t, complete)
+	request.SemanticClaims = shared
+	result, err = verifier.Assure(context.Background(), request)
+	if err != nil {
+		t.Fatalf("a complete verdict was refused: %v", err)
+	}
+	if !result.Passed || result.SemanticClaims["acceptance"].Status != "pass" {
+		t.Fatalf("a complete verdict did not produce evidence: %#v", result)
+	}
 }

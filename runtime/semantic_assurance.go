@@ -75,6 +75,11 @@ Rules you must follow:
 6. You cannot choose the candidate, the contract, or the claims you are judging.
 7. If the evidence available to you is not sufficient to decide, answer
    "inconclusive". Do not guess, and do not answer "pass" to be helpful.
+8. A claim may carry several obligations. You judge ALL of them together: answer
+   "pass" only if every obligation listed under that claim is discharged. You
+   cannot narrow the question by answering about some of them. Echo that claim's
+   obligation ids back exactly as given - all of them, unchanged. An answer that
+   lists any other set is refused and produces no verdict at all.
 
 Answer with a single JSON object and nothing else:
 
@@ -249,12 +254,56 @@ type semanticVerdict struct {
 // durable field rather than trusted to be short.
 const maxSemanticRationaleBytes = 1024
 
+// sameObligationSet reports whether returned is EXACTLY expected: every id
+// present once, nothing added, nothing omitted, order irrelevant. It is set
+// equality rather than slice equality because the order a model lists ids in
+// carries no meaning - but membership does.
+func sameObligationSet(expected, returned []string) bool {
+	want := map[string]bool{}
+	for _, id := range expected {
+		want[id] = true
+	}
+	if len(returned) != len(want) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, id := range returned {
+		if !want[id] || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return len(seen) == len(want)
+}
+
 // decodeSemanticVerdict is the strict gate between a model answer and evidence.
 // It refuses everything the envelope cannot vouch for: an unknown claim, a
-// missing claim, a duplicate claim, an unrecognized status, or a payload that is
-// not exactly one JSON object of the expected shape. A refused verdict produces
-// NO evidence - never a fabricated one.
-func decodeSemanticVerdict(raw []byte, required []string) (map[string]SemanticClaimVerdict, error) {
+// missing claim, a duplicate claim, an unrecognized status, an obligation set
+// that is not exactly the one asked about, or a payload that is not exactly one
+// JSON object of the expected shape. A refused verdict produces NO evidence -
+// never a fabricated one.
+//
+// SCOPE OWNERSHIP is why this takes the whole runtime-authored request set and
+// not a list of claim ids. A claim can gate several material obligations at
+// once: the policy's two acceptance obligations both discharge through
+// claim-semantic-acceptance. Validating only the claim id let a model answer
+//
+//	claim_id=claim-semantic-acceptance obligation_ids=[A] status=pass
+//
+// and satisfy the claim - which discharged B as well, an obligation the model
+// never claimed to have judged. The narrower answer was strictly easier to
+// justify than the one actually asked for, so the model had every reason to
+// give it, and the runtime had no way to tell the difference.
+//
+// A verdict is now accepted only when it answers exactly the obligations the
+// runtime named for that claim, so pass means "all of them", never "the
+// convenient subset". The stored ids are then replaced with the runtime's own,
+// because an echo that merely matched is still the model's bytes.
+//
+// The refusal deliberately does not quote the ids the model returned. Everything
+// the model produces is untrusted text, and a refusal is not the place to start
+// copying it into diagnostics.
+func decodeSemanticVerdict(raw []byte, requested []SemanticClaimRequest) (map[string]SemanticClaimVerdict, error) {
 	var verdict semanticVerdict
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -264,13 +313,14 @@ func decodeSemanticVerdict(raw []byte, required []string) (map[string]SemanticCl
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("semantic verdict must contain exactly one JSON value")
 	}
-	expected := map[string]bool{}
-	for _, id := range required {
-		expected[id] = true
+	expected := map[string][]string{}
+	for _, request := range requested {
+		expected[request.ClaimID] = request.ObligationIDs
 	}
 	results := map[string]SemanticClaimVerdict{}
 	for _, claim := range verdict.Claims {
-		if !expected[claim.ClaimID] {
+		obligations, asked := expected[claim.ClaimID]
+		if !asked {
 			return nil, fmt.Errorf("semantic verdict names claim %q, which was not asked about", claim.ClaimID)
 		}
 		if _, duplicate := results[claim.ClaimID]; duplicate {
@@ -281,13 +331,19 @@ func decodeSemanticVerdict(raw []byte, required []string) (map[string]SemanticCl
 		default:
 			return nil, fmt.Errorf("semantic verdict for %q has unrecognized status %q", claim.ClaimID, claim.Status)
 		}
+		if !sameObligationSet(obligations, claim.ObligationIDs) {
+			return nil, fmt.Errorf("semantic verdict for %q does not answer exactly the %d obligation(s) it was asked about",
+				claim.ClaimID, len(obligations))
+		}
 		claim.Rationale = boundedTo(claim.Rationale, maxSemanticRationaleBytes)
+		// Runtime-authored, not the model's echo of them.
+		claim.ObligationIDs = append([]string(nil), obligations...)
 		sort.Strings(claim.ObligationIDs)
 		results[claim.ClaimID] = claim
 	}
-	for _, id := range required {
-		if _, answered := results[id]; !answered {
-			return nil, fmt.Errorf("semantic verdict did not answer required claim %q", id)
+	for _, request := range requested {
+		if _, answered := results[request.ClaimID]; !answered {
+			return nil, fmt.Errorf("semantic verdict did not answer required claim %q", request.ClaimID)
 		}
 	}
 	return results, nil
@@ -439,12 +495,6 @@ func (v OpenAISemanticVerifier) Assure(ctx context.Context, request AssuranceReq
 	defer cancel()
 	view := ReadOnlyView{Dir: request.CheckoutDir, Base: request.Base, MaxResultBytes: v.MaxResultBytes}
 
-	claimIDs := make([]string, 0, len(request.SemanticClaims))
-	for _, claim := range request.SemanticClaims {
-		claimIDs = append(claimIDs, claim.ClaimID)
-	}
-	sort.Strings(claimIDs)
-
 	input := []any{
 		openaiMessage{Role: "system", Content: semanticVerifierInstruction},
 		openaiMessage{Role: "user", Content: semanticPrompt(request)},
@@ -517,7 +567,7 @@ func (v OpenAISemanticVerifier) Assure(ctx context.Context, request AssuranceReq
 	if artifactErr != nil {
 		return fail(FailureUnknown, artifactErr)
 	}
-	results, decodeErr := decodeSemanticVerdict([]byte(answer), claimIDs)
+	results, decodeErr := decodeSemanticVerdict([]byte(answer), request.SemanticClaims)
 	if decodeErr != nil {
 		// A malformed answer is a deterministic verifier failure. It produces no
 		// evidence at all rather than a guess about what the model meant.
