@@ -36,27 +36,31 @@ func TestDoctorNamesTheRunningControllerBuild(t *testing.T) {
 		build   ControllerBuild
 		err     error
 		status  DoctorStatus
+		prefix  string
 		says    []string
 		saysNot []string
 	}{
 		"adopted": {
 			build:  adopted,
 			status: DoctorPass,
-			says: []string{"adopted build", "main-49736da0", adopted.SourceRevision, adopted.SourceTree,
+			prefix: "this controller's build provenance is adopted:",
+			says: []string{"main-49736da0", adopted.SourceRevision, adopted.SourceTree,
 				"sha256:" + adopted.BinarySHA256, "established by external merge and never by the runtime itself"},
-			saysNot: []string{"confers no authority"},
+			saysNot: []string{"confers no authority", "a adopted build"},
 		},
 		"pre-adoption": {
 			build:  preAdoption,
 			status: DoctorPass,
-			says: []string{"pre_adoption_build build", "issue-29-b63d3148",
+			prefix: "this controller's build provenance is pre_adoption_build:",
+			says: []string{"issue-29-b63d3148",
 				"confers no authority on its own source"},
-			saysNot: []string{"established by external merge"},
+			saysNot: []string{"established by external merge", "a pre_adoption_build build"},
 		},
 		"unattested": {
 			build:   ControllerBuild{Kind: ControllerUnattested},
 			status:  DoctorWarn,
-			says:    []string{"no provenance claim", "unattested"},
+			prefix:  "this controller's build provenance is unattested:",
+			says:    []string{"unattested", "records nothing about which source produced it"},
 			saysNot: []string{"sha256:"},
 		},
 		// A build that could not be MEASURED is not a build that claims
@@ -95,6 +99,9 @@ func TestDoctorNamesTheRunningControllerBuild(t *testing.T) {
 			}
 			if check.Status != tc.status {
 				t.Fatalf("status = %q, want %q: %s", check.Status, tc.status, check.Reason)
+			}
+			if tc.prefix != "" && !strings.HasPrefix(check.Reason, tc.prefix) {
+				t.Fatalf("reason = %q, want prefix %q", check.Reason, tc.prefix)
 			}
 			for _, want := range tc.says {
 				if !strings.Contains(check.Reason, want) {
