@@ -136,6 +136,10 @@ type autonomyOverrides struct {
 	// a test supplies a fixed build so the identity under assertion is the one
 	// the test wrote, not whatever binary the test runner happens to be.
 	ControllerBuild *runtime.ControllerBuild
+	// ControllerBuildResolver replaces the real provenance measurement in
+	// doctor. It exists so a test can exercise the one branch the real
+	// resolver will not produce on demand: the failure to measure at all.
+	ControllerBuildResolver func() (runtime.ControllerBuild, error)
 	// WatchWait is the loop's only timing mechanism. Production waits on a
 	// real timer; a test supplies its own so the schedule is asserted instead
 	// of slept through.

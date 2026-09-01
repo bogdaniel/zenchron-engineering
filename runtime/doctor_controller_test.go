@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -24,8 +25,16 @@ func TestDoctorNamesTheRunningControllerBuild(t *testing.T) {
 	preAdoption.Kind = ControllerPreAdoptionBuild
 	preAdoption.Version = "issue-29-b63d3148"
 
+	partial := adopted
+	partial.SourceTree = ""
+	unknownKind := adopted
+	unknownKind.Kind = "trusted"
+	badDigest := adopted
+	badDigest.BinarySHA256 = strings.ToUpper(strings.Repeat("c", 64))
+
 	for name, tc := range map[string]struct {
 		build   ControllerBuild
+		err     error
 		status  DoctorStatus
 		says    []string
 		saysNot []string
@@ -50,9 +59,37 @@ func TestDoctorNamesTheRunningControllerBuild(t *testing.T) {
 			says:    []string{"no provenance claim", "unattested"},
 			saysNot: []string{"sha256:"},
 		},
+		// A build that could not be MEASURED is not a build that claims
+		// nothing. Reporting the first as the second turns a broken preflight
+		// into a design choice, and an operator reads WARN where the truth is
+		// that nothing is known at all.
+		"measurement failure": {
+			err:     fmt.Errorf("cannot read the running executable: permission denied"),
+			status:  DoctorFail,
+			says:    []string{"could not be established", "permission denied", "not an unattested build"},
+			saysNot: []string{"makes no provenance claim", "is a  build"},
+		},
+		"unknown kind": {
+			build:   unknownKind,
+			status:  DoctorFail,
+			says:    []string{"not complete or not well formed", "trusted"},
+			saysNot: []string{"confers no authority", "established by external merge"},
+		},
+		"partial attestation": {
+			build:   partial,
+			status:  DoctorFail,
+			says:    []string{"not complete or not well formed", "source_tree"},
+			saysNot: []string{"established by external merge"},
+		},
+		"malformed binary digest": {
+			build:   badDigest,
+			status:  DoctorFail,
+			says:    []string{"not complete or not well formed", "binary_sha256"},
+			saysNot: []string{"established by external merge"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			check := doctorController(DoctorInput{ControllerBuild: tc.build})
+			check := doctorController(DoctorInput{ControllerBuild: tc.build, ControllerBuildError: tc.err})
 			if check.ID != "controller.build" || check.Group != doctorGroupController {
 				t.Fatalf("check identity = %q/%q", check.Group, check.ID)
 			}
@@ -77,5 +114,20 @@ func TestDoctorNamesTheRunningControllerBuild(t *testing.T) {
 	report := Doctor(context.Background(), DoctorInput{})
 	if _, found := report.Check("controller.build"); !found {
 		t.Fatal("the doctor report does not include the controller check")
+	}
+
+	// A provenance that cannot be established, or that does not survive its own
+	// validation rules, fails the WHOLE preflight. A diagnostic that reports a
+	// broken claim as healthy is worse than no diagnostic, because it reads as
+	// proof.
+	for name, in := range map[string]DoctorInput{
+		"unmeasurable": {ControllerBuildError: fmt.Errorf("boom")},
+		"invalid":      {ControllerBuild: unknownKind},
+	} {
+		t.Run("report fails on "+name, func(t *testing.T) {
+			if got := Doctor(context.Background(), in); got.Status != DoctorFail {
+				t.Fatalf("report status = %q, want %q", got.Status, DoctorFail)
+			}
+		})
 	}
 }
