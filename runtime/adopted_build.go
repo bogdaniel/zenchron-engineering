@@ -304,7 +304,13 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	}
 	reported, err := deps.Probe(output)
 	if err != nil {
-		return out, fmt.Errorf("the built binary could not report its own provenance, so it may not claim adoption: %w", err)
+		// One expected cause is bootstrapping: a trusted revision that predates
+		// `controller inspect-self` cannot answer, and the builder refuses
+		// rather than recording an unverified artifact. That is the corrected
+		// law working, and it clears as soon as a revision carrying the command
+		// is the one being built from.
+		return out, fmt.Errorf("the built binary could not report its own provenance, so it may not claim adoption "+
+			"(a source revision predating `controller inspect-self` cannot answer): %w", err)
 	}
 	expected := ControllerBuild{Kind: ControllerAdopted, Version: version, SourceRevision: source, SourceTree: tree, BinarySHA256: digest}
 	if reported != expected {
@@ -650,6 +656,16 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 	if empty, err := directoryIsEmpty(spec.CacheDir); err != nil || empty {
 		return BuildEnvironment{}, fmt.Errorf("the trusted module cache %s is empty or unreadable; an adopted build compiles offline and cannot provision it", spec.CacheDir)
 	}
+	// dockerBase masks /candidate/.git with a tmpfs, which needs the mount
+	// point to exist inside a read-only bind. A git-archive export has no
+	// .git, so the empty directory is created here purely as that mount point.
+	// It is created AFTER the tree was recomputed, so it cannot affect the
+	// content the build was approved for, and the tmpfs hides it from the
+	// compiler anyway.
+	if err := os.MkdirAll(filepath.Join(spec.SourceDir, ".git"), 0700); err != nil {
+		return BuildEnvironment{}, fmt.Errorf("the build checkout could not be prepared for the sandbox boundary: %w", err)
+	}
+
 	sandbox := spec.Sandbox
 	sandbox.OperationID = "adopted-build-" + spec.Revision
 
