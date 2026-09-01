@@ -107,6 +107,22 @@ func validateInput(input Input) error {
 }
 
 func validateContractReferences(contract domain.EngineeringWorkContract) error {
+	// A material obligation must name claims the contract defines, and must
+	// name at least one: an obligation nothing can discharge would otherwise
+	// read as satisfied.
+	for id, obligation := range contract.Obligations {
+		if !obligation.Material {
+			continue
+		}
+		if len(obligation.RequiredClaims) == 0 {
+			return fmt.Errorf("material obligation %q has no discharge claim", id)
+		}
+		for _, claimID := range obligation.RequiredClaims {
+			if _, exists := contract.RequiredClaims[claimID]; !exists {
+				return fmt.Errorf("material obligation %q references undefined required claim %q", id, claimID)
+			}
+		}
+	}
 	conditions := make(map[domain.Action]struct{}, len(contract.AuthorityConditions))
 	for _, condition := range contract.AuthorityConditions {
 		if _, exists := conditions[condition.Action]; exists {
@@ -148,13 +164,29 @@ func permissionFor(contract domain.EngineeringWorkContract, action domain.Action
 	return domain.PermissionDenied
 }
 
+// requiredClaimsFor is the UNION of two things a protected action depends on:
+// the claims its authority condition names, and the claims that discharge the
+// contract's material acceptance obligations.
+//
+// The second half is the point. An action used to be authorized on its
+// condition alone, so a contract could carry an outstanding acceptance
+// obligation and still authorize publication - "the tests passed" standing in
+// for "the work was done". A material obligation is one policy marked as
+// acceptance-bearing, and until its discharge claims are satisfied and
+// applicable, nothing protected is authorized.
 func requiredClaimsFor(contract domain.EngineeringWorkContract, action domain.Action) []string {
+	var required []string
 	for _, condition := range contract.AuthorityConditions {
 		if condition.Action == action {
-			return sortedUnique(condition.RequiredClaims)
+			required = append(required, condition.RequiredClaims...)
 		}
 	}
-	return nil
+	for _, obligation := range contract.Obligations {
+		if obligation.Material {
+			required = append(required, obligation.RequiredClaims...)
+		}
+	}
+	return sortedUnique(required)
 }
 
 type claimClassification struct {
@@ -270,9 +302,10 @@ func sortedUnique(values []string) []string {
 	if len(values) == 0 {
 		return []string{}
 	}
-	sort.Strings(values)
-	result := values[:0]
-	for _, value := range values {
+	copied := append([]string(nil), values...)
+	sort.Strings(copied)
+	result := copied[:0]
+	for _, value := range copied {
 		if len(result) == 0 || value != result[len(result)-1] {
 			result = append(result, value)
 		}

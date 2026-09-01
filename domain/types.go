@@ -1,5 +1,11 @@
 package domain
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+)
+
 // SchemaVersion is the only schema version implemented by this package.
 const SchemaVersion = "0.1"
 
@@ -114,24 +120,61 @@ type ProvenanceMatch struct {
 }
 
 // PolicyRequirement describes an invariant or obligation emitted by policy.
+//
+// Material marks an obligation as ACCEPTANCE-BEARING: something that must be
+// discharged before a protected action may be authorized, rather than a
+// statement recorded for a reader. It is stated by policy because deciding what
+// is material to acceptance is governance, not something a runtime may infer.
 type PolicyRequirement struct {
 	Statement      string    `json:"statement"`
 	RequiredClaims *[]string `json:"required_claims,omitempty"`
+	Material       bool      `json:"material,omitempty"`
 }
 
 // PolicyEffect contains outcomes emitted when a rule matches.
+//
+// AcceptanceDischargeClaims names the claims that discharge the SOURCE-DERIVED
+// acceptance criteria of a contract. The criteria themselves come from the run,
+// not from policy - policy decides what it takes to believe they were met. It is
+// stated here rather than inferred because "what discharges acceptance" is a
+// governance decision, and leaving it unstated is what let acceptance intent
+// remain inert prose that nothing ever checked.
 type PolicyEffect struct {
-	Obligations         *map[string]PolicyRequirement `json:"obligations,omitempty"`
-	Invariants          *map[string]PolicyRequirement `json:"invariants,omitempty"`
-	RequiredClaims      *map[string]RequiredClaim     `json:"required_claims,omitempty"`
-	Permissions         *[]Action                     `json:"permissions,omitempty"`
-	Prohibitions        *[]Action                     `json:"prohibitions,omitempty"`
-	AuthorityConditions *[]AuthorityCondition         `json:"authority_conditions,omitempty"`
+	AcceptanceDischargeClaims *[]string                     `json:"acceptance_discharge_claims,omitempty"`
+	Obligations               *map[string]PolicyRequirement `json:"obligations,omitempty"`
+	Invariants                *map[string]PolicyRequirement `json:"invariants,omitempty"`
+	RequiredClaims            *map[string]RequiredClaim     `json:"required_claims,omitempty"`
+	Permissions               *[]Action                     `json:"permissions,omitempty"`
+	Prohibitions              *[]Action                     `json:"prohibitions,omitempty"`
+	AuthorityConditions       *[]AuthorityCondition         `json:"authority_conditions,omitempty"`
 }
 
 // Requirement states a contract invariant or obligation.
+//
+// RequiredClaims is how the obligation is DISCHARGED. The compiler used to drop
+// the relationship that policy already expressed, so a compiled contract could
+// state an obligation with no way to tell whether it had been met - and a
+// protected action could be authorized while it was outstanding. Passing an
+// automated verification is not, by itself, evidence that an acceptance
+// obligation was discharged.
+//
+// Material marks an obligation whose discharge participates in authorizing a
+// protected action. A material obligation with no discharge claim can never be
+// discharged, so the compiler refuses it rather than letting it read as
+// satisfied.
 type Requirement struct {
-	Statement string `json:"statement"`
+	Statement      string   `json:"statement"`
+	RequiredClaims []string `json:"required_claims,omitempty"`
+	Material       bool     `json:"material,omitempty"`
+}
+
+// AcceptanceObligationID is the stable identity of a source-derived acceptance
+// criterion. It is derived from the criterion's own text so the same criterion
+// is the same obligation in every contract that carries it, across runs and
+// across recompilations - never a generated or positional name.
+func AcceptanceObligationID(criterion string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(criterion)))
+	return "acceptance-" + hex.EncodeToString(sum[:])[:16]
 }
 
 // EvidenceClass identifies an extensible, policy-defined class of supporting

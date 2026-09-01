@@ -5,6 +5,7 @@ package policy
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -63,7 +64,22 @@ func Compile(input CompileInput) (domain.EngineeringWorkContract, error) {
 			return domain.EngineeringWorkContract{}, err
 		}
 	}
+	// Source-derived acceptance becomes EXPLICIT OBLIGATIONS. Acceptance intent
+	// used to travel through a contract as prose that nothing could test, so a
+	// run could satisfy every claim policy named and still have discharged
+	// nothing about the work it was asked to do. Each criterion becomes an
+	// obligation with a content-derived stable id, marked material, discharged
+	// by the claims policy designated for acceptance.
+	if err := state.addAcceptanceObligations(input.AcceptanceIntent); err != nil {
+		return domain.EngineeringWorkContract{}, err
+	}
 	if err := state.validateReferences(); err != nil {
+		return domain.EngineeringWorkContract{}, err
+	}
+	// Fail closed: a material obligation nothing can discharge would read as
+	// satisfied forever, which is exactly the silence this model exists to
+	// remove.
+	if err := state.validateMaterialDischarge(); err != nil {
 		return domain.EngineeringWorkContract{}, err
 	}
 	if err := rejectPermissionExpansion(input.PreviousContract, state.permissions); err != nil {
@@ -193,6 +209,9 @@ type resolution struct {
 	prohibitions          map[domain.Action]string
 	conditions            map[domain.Action]conditionEntry
 	references            map[string]string
+	// acceptanceDischarge is what policy says it takes to believe the run's own
+	// acceptance criteria were met.
+	acceptanceDischarge []string
 }
 
 type conditionEntry struct {
@@ -205,6 +224,7 @@ type conditionEntry struct {
 type policyRequirement struct {
 	statement      string
 	requiredClaims []string
+	material       bool
 }
 
 func newResolution() *resolution {
@@ -227,6 +247,9 @@ func (r *resolution) addUnknownResolution(fact domain.EngineeringFact) error {
 }
 
 func (r *resolution) addEffect(ruleID string, effect domain.PolicyEffect) error {
+	if effect.AcceptanceDischargeClaims != nil {
+		r.acceptanceDischarge = append(r.acceptanceDischarge, *effect.AcceptanceDischargeClaims...)
+	}
 	if effect.Invariants != nil {
 		for id, requirement := range *effect.Invariants {
 			if err := r.addRequirement(r.invariants, r.invariantDefinitions, id, requirement, ruleID); err != nil {
@@ -277,7 +300,15 @@ func (r *resolution) addRequirement(target map[string]domain.Requirement, defini
 		return fmt.Errorf("conflicting requirement %q from %s", id, source)
 	}
 	definitions[id] = definition
-	target[id] = domain.Requirement{Statement: definition.statement}
+	// The discharge relationship policy already expressed is CARRIED into the
+	// contract instead of being dropped. Without it a compiled obligation is a
+	// sentence nobody can test, and a protected action can be authorized while
+	// it is outstanding.
+	target[id] = domain.Requirement{
+		Statement:      definition.statement,
+		RequiredClaims: definition.requiredClaims,
+		Material:       definition.material,
+	}
 	for _, claim := range definition.requiredClaims {
 		r.references[claim] = source
 	}
@@ -289,17 +320,24 @@ func normalizePolicyRequirement(requirement domain.PolicyRequirement) policyRequ
 	if requirement.RequiredClaims != nil {
 		claims = sortedUnique(*requirement.RequiredClaims)
 	}
-	return policyRequirement{statement: requirement.Statement, requiredClaims: claims}
+	return policyRequirement{statement: requirement.Statement, requiredClaims: claims, material: requirement.Material}
 }
 
 func samePolicyRequirement(left, right policyRequirement) bool {
-	return left.statement == right.statement && sameStrings(left.requiredClaims, right.requiredClaims)
+	return left.statement == right.statement &&
+		left.material == right.material &&
+		sameStrings(left.requiredClaims, right.requiredClaims)
 }
 
 func (r *resolution) validateReferences() error {
-	for action, permissionRule := range r.permissions {
+	permissionActions := make([]domain.Action, 0, len(r.permissions))
+	for action := range r.permissions {
+		permissionActions = append(permissionActions, action)
+	}
+	sort.Slice(permissionActions, func(i, j int) bool { return actionKey(permissionActions[i]) < actionKey(permissionActions[j]) })
+	for _, action := range permissionActions {
 		if prohibitionRule, prohibited := r.prohibitions[action]; prohibited {
-			return fmt.Errorf("conflicting permission and prohibition for %s:%s from rules %q and %q", action.Type, action.Target, permissionRule, prohibitionRule)
+			return fmt.Errorf("conflicting permission and prohibition for %s:%s from rules %q and %q", action.Type, action.Target, r.permissions[action], prohibitionRule)
 		}
 	}
 	for _, condition := range r.conditions {
@@ -307,9 +345,14 @@ func (r *resolution) validateReferences() error {
 			r.references[claim] = condition.rule
 		}
 	}
-	for claim, source := range r.references {
+	claims := make([]string, 0, len(r.references))
+	for claim := range r.references {
+		claims = append(claims, claim)
+	}
+	sort.Strings(claims)
+	for _, claim := range claims {
 		if _, exists := r.claims[claim]; !exists {
-			return fmt.Errorf("policy outcome from rule %q references undefined required claim %q", source, claim)
+			return fmt.Errorf("policy outcome from rule %q references undefined required claim %q", r.references[claim], claim)
 		}
 	}
 	return nil
@@ -399,4 +442,74 @@ func sortedConditions(conditions map[domain.Action]conditionEntry) []domain.Auth
 
 func actionKey(action domain.Action) string {
 	return action.Type + "\x00" + action.Target
+}
+
+// addAcceptanceObligations turns each source acceptance criterion into a stable,
+// material obligation. The id is derived from the criterion's own text, so the
+// same criterion is the same obligation in every contract that carries it and
+// across every recompilation - never positional and never generated.
+//
+// A criterion whose discharge policy has not designated is left with NO claims
+// on purpose: validateMaterialDischarge then refuses the contract. Silence about
+// how something is proven is not the same as it being proven.
+func (r *resolution) addAcceptanceObligations(criteria []string) error {
+	discharge := sortedUnique(r.acceptanceDischarge)
+	for _, criterion := range sortedUnique(criteria) {
+		if strings.TrimSpace(criterion) == "" {
+			continue
+		}
+		id := domain.AcceptanceObligationID(criterion)
+		requirement := domain.PolicyRequirement{Statement: criterion, Material: true}
+		if len(discharge) > 0 {
+			claims := append([]string(nil), discharge...)
+			requirement.RequiredClaims = &claims
+		}
+		if err := r.addRequirement(r.obligations, r.obligationDefinitions, id, requirement, "source acceptance criterion"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateMaterialDischarge refuses a contract carrying a material obligation
+// with no discharge claim. Such an obligation can never be met, so authorizing
+// a protected action past it would be authorizing past an unanswerable
+// question.
+func (r *resolution) validateMaterialDischarge() error {
+	// The rule is scoped to contracts that can actually authorize something. A
+	// contract granting no permission and naming no authority condition cannot
+	// authorize anything whatever its obligations say, so refusing to compile
+	// it would refuse a run the facts simply did not govern. Where a protected
+	// action DOES exist, a material obligation nothing can discharge is refused
+	// outright rather than left to read as satisfied.
+	if len(r.permissions) == 0 && len(r.conditions) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(r.obligations))
+	for id := range r.obligations {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		obligation := r.obligations[id]
+		if obligation.Material && len(obligation.RequiredClaims) == 0 {
+			return fmt.Errorf("material obligation %q has no discharge claim: policy must name what discharges it", id)
+		}
+	}
+	return nil
+}
+
+// MaterialDischargeClaims are the claims that must be satisfied before ANY
+// protected action may be authorized, because they discharge obligations the
+// contract marks material to acceptance. In M0 a material obligation applies to
+// every protected action: that is the conservative reading, and narrowing it
+// would need policy to say which actions an obligation gates.
+func MaterialDischargeClaims(contract domain.EngineeringWorkContract) []string {
+	var claims []string
+	for _, obligation := range contract.Obligations {
+		if obligation.Material {
+			claims = append(claims, obligation.RequiredClaims...)
+		}
+	}
+	return sortedUnique(claims)
 }

@@ -238,8 +238,64 @@ func TestRequiredGoVersionComesFromGoMod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != "1.27.2" || dockerGoImage(version) != "golang:1.27.2" {
+	if version != "1.27.2" || dockerGoImage(version) != "golang:1.27" {
 		t.Fatalf("version/image = %q/%q", version, dockerGoImage(version))
+	}
+}
+
+func TestDockerGoImageUsesCompatibilityLineNotExactPatch(t *testing.T) {
+	if dockerGoImage("1.25") != "golang:1.25" || dockerGoImage("1.25.0") != "golang:1.25" {
+		t.Fatalf("images = %q/%q, want both golang:1.25", dockerGoImage("1.25"), dockerGoImage("1.25.0"))
+	}
+}
+
+func TestResolveGoRuntimeGoModPatchZeroUsesCompatibilityLineImage(t *testing.T) {
+	root := writeGoMod(t, "module example.test/runtime\n\ngo 1.25.0\n")
+	commands := &runtimeCommands{dockerAvailable: true, dockerRunning: true, imageAvailable: true}
+	runtime, err := resolveGoRuntime(root, commands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.kind != dockerGoRuntime || runtime.environmentIdentifier != "sha256:test-image" {
+		t.Fatalf("runtime = %+v, want docker runtime resolved against golang:1.25", runtime)
+	}
+}
+
+func TestResolveGoRuntimeRecordsImmutableImageIdentityNotTag(t *testing.T) {
+	root := writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n")
+	commands := &runtimeCommands{dockerAvailable: true, dockerRunning: true, imageAvailable: true}
+	runtime, err := resolveGoRuntime(root, commands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.environmentIdentifier != "sha256:test-image" {
+		t.Fatalf("environmentIdentifier = %q, want the immutable sha256 image ID, not the tag", runtime.environmentIdentifier)
+	}
+	if !strings.Contains(runtime.String(), "sha256:test-image") {
+		t.Fatalf("String() = %q, want recorded provenance to include the immutable image ID", runtime.String())
+	}
+	if err := runtime.Run("test", "./..."); err != nil {
+		t.Fatal(err)
+	}
+	if call := commands.calls[len(commands.calls)-1]; !strings.Contains(call, "sha256:test-image go test") {
+		t.Fatalf("docker run must execute the immutable image ID, not the tag:\n%s", call)
+	}
+}
+
+func TestResolveGoRuntimeRejectsNonImmutableImageInspectResult(t *testing.T) {
+	root := writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n")
+	commands := &runtimeCommands{dockerAvailable: true, dockerRunning: true, imageAvailable: true, imageInspectResult: "golang:1.25"}
+	if _, err := resolveGoRuntime(root, commands); err == nil || !strings.Contains(err.Error(), "did not resolve to an immutable image ID") {
+		t.Fatalf("error = %v, want refusal of a non-sha256 image inspect result", err)
+	}
+}
+
+func TestCompatibleGoVersionStillComparesInstalledAgainstRequiredExactly(t *testing.T) {
+	if compatibleGoVersion("1.25.0", "1.25.3") {
+		t.Fatal("installed patch older than required patch must still be rejected")
+	}
+	if !compatibleGoVersion("1.26.0", "1.25.0") {
+		t.Fatal("installed newer than required must still be accepted")
 	}
 }
 
@@ -277,13 +333,14 @@ func writeGoMod(t *testing.T, content string) string {
 }
 
 type runtimeCommands struct {
-	goVersion       string
-	dockerAvailable bool
-	dockerRunning   bool
-	imageAvailable  bool
-	goFiles         string
-	formatOutput    string
-	calls           []string
+	goVersion          string
+	dockerAvailable    bool
+	dockerRunning      bool
+	imageAvailable     bool
+	imageInspectResult string
+	goFiles            string
+	formatOutput       string
+	calls              []string
 }
 
 func (c *runtimeCommands) LookPath(name string) error {
@@ -306,6 +363,9 @@ func (c *runtimeCommands) Output(_ string, name string, args ...string) (string,
 	case call == "docker info --format {{.ServerVersion}}" && c.dockerRunning:
 		return "28.0.0", nil
 	case call == "docker image inspect --format {{.Id}} golang:1.25" && c.imageAvailable:
+		if c.imageInspectResult != "" {
+			return c.imageInspectResult, nil
+		}
 		return "sha256:test-image", nil
 	case strings.Contains(call, "sha256:test-image gofmt -l"):
 		return c.formatOutput, nil
