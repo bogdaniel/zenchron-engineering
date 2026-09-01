@@ -80,9 +80,24 @@ func newAdoptedFixture(t *testing.T) *adoptedFixture {
 		// The fixture repository is its own source of truth, so there is
 		// nothing to fetch; the proof that follows is unchanged.
 		Fetch: func(string, string, string) error { return nil },
-		Build: func(spec AdoptedBuildSpec) error {
+		Build: func(_ context.Context, spec AdoptedBuildSpec) (BuildEnvironment, error) {
 			f.built = append(f.built, spec)
-			return os.WriteFile(spec.Output, []byte("binary for "+spec.Revision), 0600)
+			if err := os.WriteFile(spec.Output, []byte("binary for "+spec.Revision), 0600); err != nil {
+				return BuildEnvironment{}, err
+			}
+			return BuildEnvironment{Kind: "pinned-container", Image: "sha256:fixture", Network: "none",
+				SourceMount: "read-only", CacheMount: "read-only", Digest: "sha256:env"}, nil
+		},
+		// The fixture binary reports exactly what it was built as, so the
+		// self-probe is exercised on every path rather than skipped.
+		Probe: func(binary string) (ControllerBuild, error) {
+			digest, err := measureExecutable(binary)
+			if err != nil {
+				return ControllerBuild{}, err
+			}
+			spec := f.built[len(f.built)-1]
+			return ControllerBuild{Kind: spec.Kind, Version: spec.Version,
+				SourceRevision: spec.Revision, SourceTree: spec.Tree, BinarySHA256: digest}, nil
 		},
 		Now: func() time.Time { return time.Unix(1800000000, 0).UTC() },
 	}
@@ -93,8 +108,8 @@ func (f *adoptedFixture) request(t *testing.T) AdoptedBuildRequest {
 	t.Helper()
 	return AdoptedBuildRequest{
 		Repository:    GitHubRepo{Owner: "acme", Name: "widgets"},
-		RepositoryDir: f.dir, OutputDir: t.TempDir(),
-		GOOS: "linux", GOARCH: "amd64", Policy: DefaultTrustPolicy(),
+		RepositoryDir: f.dir, OutputRoot: t.TempDir(),
+		Policy: DefaultTrustPolicy(),
 	}
 }
 
@@ -105,7 +120,7 @@ func (f *adoptedFixture) request(t *testing.T) AdoptedBuildRequest {
 func TestAdoptedBuildProvesBeforeItBuilds(t *testing.T) {
 	f := newAdoptedFixture(t)
 	got, err := BuildAdoptedController(context.Background(), f.request(t), f.deps,
-		ControllerBuild{Kind: ControllerAdopted, Version: "builder-1"})
+		BuilderRecord{Kind: ControllerUnattested})
 	if err != nil {
 		t.Fatalf("the intended build was refused: %v", err)
 	}
@@ -138,12 +153,18 @@ func TestAdoptedBuildProvesBeforeItBuilds(t *testing.T) {
 		t.Fatalf("built %d times", len(f.built))
 	}
 	spec := f.built[0]
-	if !spec.TrimPath || !spec.CGODisabled || spec.Kind != ControllerAdopted ||
-		spec.Revision != f.head || spec.Tree != f.headTree {
+	if spec.Kind != ControllerAdopted || spec.Revision != f.head || spec.Tree != f.headTree {
 		t.Fatalf("build spec = %+v", spec)
 	}
-	if got.SelfReport == "" {
-		t.Fatal("provenance does not say whether the binary was probed")
+	if !got.SelfProbe.Matched || got.SelfProbe.Kind != ControllerAdopted || got.SelfProbe.BinarySHA256 != measured {
+		t.Fatalf("self probe = %+v", got.SelfProbe)
+	}
+	// The trusted main tree is recorded, not left empty.
+	if got.TrustedMain.Tree == "" || got.TrustedMain.Tree != f.headTree {
+		t.Fatalf("trusted main tree = %q, want %s", got.TrustedMain.Tree, f.headTree)
+	}
+	if got.BuildEnv.Network != "none" || got.BuildEnv.SourceMount != "read-only" || got.BuildEnv.CacheMount != "read-only" {
+		t.Fatalf("build environment = %+v", got.BuildEnv)
 	}
 }
 
@@ -155,7 +176,7 @@ func TestAdoptedBuildAcceptsAnEarlierContainedRevision(t *testing.T) {
 	parent := adoptedGit(t, f.dir, "rev-parse", f.head+"^")
 	request := f.request(t)
 	request.Revision = parent
-	got, err := BuildAdoptedController(context.Background(), request, f.deps, ControllerBuild{})
+	got, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
 	if err != nil {
 		t.Fatalf("an earlier contained revision was refused: %v", err)
 	}
@@ -244,12 +265,16 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 		},
 		"build failure": {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
-				f.deps.Build = func(AdoptedBuildSpec) error { return fmt.Errorf("compile error") }
+				f.deps.Build = func(context.Context, AdoptedBuildSpec) (BuildEnvironment, error) {
+					return BuildEnvironment{}, fmt.Errorf("compile error")
+				}
 			}, "no binary was produced",
 		},
 		"digest cannot be measured": {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
-				f.deps.Build = func(AdoptedBuildSpec) error { return nil } // writes nothing
+				f.deps.Build = func(context.Context, AdoptedBuildSpec) (BuildEnvironment, error) {
+					return BuildEnvironment{}, nil // writes nothing
+				}
 			}, "could not be measured",
 		},
 	} {
@@ -257,7 +282,7 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 			f := newAdoptedFixture(t)
 			request := f.request(t)
 			tc.arrange(f, &request)
-			got, err := BuildAdoptedController(context.Background(), request, f.deps, ControllerBuild{})
+			got, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
 			if err == nil {
 				t.Fatalf("an unprovable build succeeded: %+v", got)
 			}
@@ -265,13 +290,7 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 				t.Fatalf("refusal does not explain %q: %v", tc.says, err)
 			}
 			// Nothing may be installed by a refused build.
-			if entries, _ := os.ReadDir(request.OutputDir); len(entries) > 0 {
-				for _, e := range entries {
-					if e.Name() == "zenchron-engineering" {
-						t.Fatalf("a refused build left a binary behind")
-					}
-				}
-			}
+			assertNothingInstalled(t, request.OutputRoot)
 		})
 	}
 }
@@ -292,9 +311,25 @@ func TestAdoptedBuildRefusesATreeThatIsNotTheRevisionsTree(t *testing.T) {
 		}
 		return realGit(dir, args...)
 	}
-	if _, err := BuildAdoptedController(context.Background(), request, f.deps, ControllerBuild{}); err == nil ||
+	if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
 		!strings.Contains(err.Error(), "holds tree") {
 		t.Fatalf("a checkout that is not the revision's tree was accepted: %v", err)
+	}
+}
+
+// assertNothingInstalled proves a refused build published nothing and left no
+// staging debris behind.
+func assertNothingInstalled(t *testing.T, root string) {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".staging-") {
+			t.Fatalf("a refused build published %q", entry.Name())
+		}
+		t.Fatalf("a refused build left staging debris %q", entry.Name())
 	}
 }
 
@@ -302,27 +337,251 @@ func TestAdoptedBuildRefusesATreeThatIsNotTheRevisionsTree(t *testing.T) {
 // build whose ldflags did not take effect produces a working binary that lies
 // about what it is, and nothing downstream would notice.
 func TestAdoptedBuildRefusesABinaryThatMisreportsItself(t *testing.T) {
+	for name, probe := range map[string]func(string) (ControllerBuild, error){
+		"claims to be unattested": func(string) (ControllerBuild, error) {
+			return ControllerBuild{Kind: ControllerUnattested}, nil
+		},
+		"names another revision": func(binary string) (ControllerBuild, error) {
+			digest, _ := measureExecutable(binary)
+			return ControllerBuild{Kind: ControllerAdopted, Version: "main-deadbeef",
+				SourceRevision: strings.Repeat("d", 40), SourceTree: strings.Repeat("e", 40), BinarySHA256: digest}, nil
+		},
+		"reports a digest that is not the file": func(string) (ControllerBuild, error) {
+			return ControllerBuild{Kind: ControllerAdopted, BinarySHA256: strings.Repeat("f", 64)}, nil
+		},
+		"cannot report at all": func(string) (ControllerBuild, error) {
+			return ControllerBuild{}, fmt.Errorf("exec format error")
+		},
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			f := newAdoptedFixture(t)
+			request := f.request(t)
+			f.deps.Probe = probe
+			if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil {
+				t.Fatal("a binary that misreports its own provenance was accepted")
+			}
+			assertNothingInstalled(t, request.OutputRoot)
+		})
+	}
+}
+
+// TestAdoptedBuildRevalidatesTrustBeforePublishing closes the window between
+// proving the gate and publishing under it. A trust root that changed while
+// the build ran is not the gate that was proven, and a source that is no
+// longer contained is not adopted however it started.
+func TestAdoptedBuildRevalidatesTrustBeforePublishing(t *testing.T) {
+	t.Run("refuse a trust root that changed mid-build", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		calls := 0
+		f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+			calls++
+			r := goodRuleset()
+			if calls > 1 {
+				r.Name = "loosened-after-the-build-started"
+			}
+			return []TrustedMainRuleset{r}, nil
+		}
+		if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
+			!strings.Contains(err.Error(), "trust root changed while the build ran") {
+			t.Fatalf("a changed trust root was published under: %v", err)
+		}
+		assertNothingInstalled(t, request.OutputRoot)
+	})
+
+	t.Run("refuse a source that left trusted main", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		calls := 0
+		f.deps.RefSHA = func(context.Context, GitHubRepo, string) (RefObservation, error) {
+			calls++
+			if calls > 1 {
+				// main is now an unrelated history; the source is not in it.
+				return RefObservation{Exists: true, SHA: f.orphan}, nil
+			}
+			return RefObservation{Exists: true, SHA: f.head}, nil
+		}
+		if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
+			!strings.Contains(err.Error(), "is not contained in trusted main") {
+			t.Fatalf("a source that left trusted main was published: %v", err)
+		}
+		assertNothingInstalled(t, request.OutputRoot)
+	})
+
+	// A concurrent legitimate merge is NOT a failure: the source is still
+	// contained, and the provenance simply states the trust state at
+	// publication rather than the one the build started under.
+	t.Run("accept a main that legitimately advanced", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		advanced := adoptedGit(t, f.dir, "commit-tree", f.headTree, "-p", f.head, "-m", "later")
+		calls := 0
+		f.deps.RefSHA = func(context.Context, GitHubRepo, string) (RefObservation, error) {
+			calls++
+			if calls > 1 {
+				return RefObservation{Exists: true, SHA: advanced}, nil
+			}
+			return RefObservation{Exists: true, SHA: f.head}, nil
+		}
+		got, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+		if err != nil {
+			t.Fatalf("a legitimate concurrent merge was treated as a failure: %v", err)
+		}
+		if got.TrustedMain.Revision != advanced {
+			t.Fatalf("provenance names trusted main %s, want the observation at publication %s", got.TrustedMain.Revision, advanced)
+		}
+	})
+}
+
+// TestAdoptedBuildPublishesAtomicallyAndNeverReplaces covers defect X: a
+// failure after the binary is in place must not leave an installed controller
+// with incomplete provenance, and an existing version directory is the
+// provenance of every run it has already governed.
+func TestAdoptedBuildPublishesAtomicallyAndNeverReplaces(t *testing.T) {
+	// Permission-based failures are not used here: these tests run as root in
+	// the verification sandbox, where a mode bit stops nothing. These two
+	// force the failure structurally instead, which is true everywhere.
+	t.Run("an unusable output root installs nothing", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		blocked := filepath.Join(t.TempDir(), "root")
+		if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		request.OutputRoot = blocked
+		if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil {
+			t.Fatal("a build that could not stage its artifact reported success")
+		}
+		data, err := os.ReadFile(blocked)
+		if err != nil || string(data) != "not a directory" {
+			t.Fatalf("the unusable output root was disturbed: %q / %v", data, err)
+		}
+	})
+
+	t.Run("a publish failure leaves no partial final directory", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		// A regular file where the version directory belongs: the rename
+		// cannot succeed, and nothing may be left half-installed.
+		occupied := filepath.Join(request.OutputRoot, "main-"+f.head[:8])
+		if err := os.WriteFile(occupied, []byte("occupied"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+		if err == nil {
+			t.Fatal("a build published over an occupied path")
+		}
+		data, readErr := os.ReadFile(occupied)
+		if readErr != nil || string(data) != "occupied" {
+			t.Fatalf("the occupied path was replaced: %q / %v", data, readErr)
+		}
+		// No staging debris either.
+		entries, _ := os.ReadDir(request.OutputRoot)
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".staging-") {
+				t.Fatalf("a failed publish left staging debris %q", entry.Name())
+			}
+		}
+	})
+
+	t.Run("an identical existing version is idempotent", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		first, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := measureExecutable(first.OutputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err != nil {
+			t.Fatalf("rebuilding the same artifact was refused: %v", err)
+		}
+		after, err := measureExecutable(first.OutputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if before != after {
+			t.Fatal("an existing controller binary was replaced")
+		}
+	})
+
+	t.Run("a different artifact for an existing version is refused", func(t *testing.T) {
+		f := newAdoptedFixture(t)
+		request := f.request(t)
+		first, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		installedBefore, err := measureExecutable(first.OutputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provenanceBefore, err := os.ReadFile(filepath.Join(filepath.Dir(first.OutputPath), "provenance.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The same version, different content: exactly what must never
+		// silently replace an installed controller.
+		f.deps.Build = func(_ context.Context, spec AdoptedBuildSpec) (BuildEnvironment, error) {
+			f.built = append(f.built, spec)
+			return BuildEnvironment{}, os.WriteFile(spec.Output, []byte("a different binary"), 0600)
+		}
+		_, err = BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+		if err == nil || !strings.Contains(err.Error(), "version directories are immutable") {
+			t.Fatalf("an installed controller was replaced: %v", err)
+		}
+		installedAfter, err := measureExecutable(first.OutputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if installedAfter != installedBefore {
+			t.Fatal("the installed binary changed")
+		}
+		provenanceAfter, err := os.ReadFile(filepath.Join(filepath.Dir(first.OutputPath), "provenance.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(provenanceAfter) != string(provenanceBefore) {
+			t.Fatal("the installed provenance changed")
+		}
+	})
+}
+
+// TestAdoptedBuildRefusesMissingProductionDependencies proves the API fails
+// closed rather than panicking: there is no honest default for "which forge
+// tells me what the trust root is".
+func TestAdoptedBuildRefusesMissingProductionDependencies(t *testing.T) {
+	f := newAdoptedFixture(t)
+	for name, mutate := range map[string]func(*AdoptedBuildDeps){
+		"no ruleset reader": func(d *AdoptedBuildDeps) { d.Rulesets = nil },
+		"no ref observer":   func(d *AdoptedBuildDeps) { d.RefSHA = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps := f.deps
+			mutate(&deps)
+			if _, err := BuildAdoptedController(context.Background(), f.request(t), deps, BuilderRecord{}); err == nil ||
+				!strings.Contains(err.Error(), "no way to observe") {
+				t.Fatalf("a builder with no trust source did not fail closed: %v", err)
+			}
+		})
+	}
+}
+
+// TestAdoptedBuildRefusesCrossTargetAdoption: a binary that cannot run here
+// cannot be asked what it thinks it is, and an unprobed adopted artifact is
+// exactly what this command exists to refuse. Cross-compiling stays available
+// for unattested builds, which is where it belongs.
+func TestAdoptedBuildRefusesCrossTargetAdoption(t *testing.T) {
 	f := newAdoptedFixture(t)
 	request := f.request(t)
-	request.GOOS, request.GOARCH = "", "" // probe only runs for a native build
-	request.DoctorConfig = filepath.Join(t.TempDir(), "config.json")
-
-	f.deps.Probe = func(string, string) (DoctorCheck, error) {
-		return DoctorCheck{ID: "controller.build", Status: DoctorPass,
-			Reason: "this controller's build provenance is unattested"}, nil
+	request.GOOS, request.GOARCH = "plan9", "mips"
+	if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
+		!strings.Contains(err.Error(), "cross-target adoption is refused") {
+		t.Fatalf("a cross-target adopted build was accepted: %v", err)
 	}
-	_, err := BuildAdoptedController(context.Background(), request, f.deps, ControllerBuild{})
-	if err == nil || !strings.Contains(err.Error(), "does not report") {
-		t.Fatalf("a binary that misreports its own provenance was accepted: %v", err)
-	}
-
-	f.deps.Probe = func(string, string) (DoctorCheck, error) {
-		return DoctorCheck{ID: "controller.build", Status: DoctorFail, Reason: "provenance could not be established"}, nil
-	}
-	if _, err := BuildAdoptedController(context.Background(), request, f.deps, ControllerBuild{}); err == nil ||
-		!strings.Contains(err.Error(), "reports controller.build FAIL") {
-		t.Fatalf("a binary failing its own check was accepted: %v", err)
-	}
+	assertNothingInstalled(t, request.OutputRoot)
 }
 
 // TestAdoptedBuildProvenanceIsWrittenOwnerOnly: the record is not a secret, but

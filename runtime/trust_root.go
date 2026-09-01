@@ -34,7 +34,14 @@ type TrustedMainRuleset struct {
 	ID          int64
 	Name        string
 	Enforcement string
-	Targets     []string
+	// Targets and Excluded are the ref conditions. Both matter: an include that
+	// also appears in exclude governs nothing, and reading only the include
+	// would report a gate where there is none.
+	Targets  []string
+	Excluded []string
+	// TargetType is GitHub's ruleset target ("branch", "tag", "push"). A
+	// ruleset that governs tags does not govern the trusted branch.
+	TargetType string
 	// BypassActors is a COUNT, deliberately. Which actor could bypass the gate
 	// does not change the answer: a trust root with any bypass at all is not a
 	// trust root, and naming the actor would invite arguing about exceptions.
@@ -100,8 +107,24 @@ func VerifyTrustRoot(ruleset TrustedMainRuleset, policy TrustPolicy) error {
 	if !strings.EqualFold(ruleset.Enforcement, "active") {
 		add("enforcement is %q, not active", ruleset.Enforcement)
 	}
+	if ruleset.TargetType != "" && ruleset.TargetType != "branch" {
+		add("it targets %q, not branches, so it does not govern %s", ruleset.TargetType, policy.Ref)
+	}
 	if !trustRootContains(ruleset.Targets, policy.Ref) {
 		add("it targets %v, which does not include %s", ruleset.Targets, policy.Ref)
+	}
+	// An exclusion beats an inclusion. Reading only the include list is how a
+	// ruleset that governs nothing gets reported as a gate.
+	if trustRootContains(ruleset.Excluded, policy.Ref) {
+		add("%s is explicitly excluded from it, so it does not govern the trusted branch", policy.Ref)
+	}
+	// Zenchron matches ref conditions EXACTLY and refuses anything else. A
+	// half-written pattern matcher that quietly disagrees with GitHub's is
+	// worse than no matcher: it would report a gate GitHub is not enforcing.
+	for _, condition := range append(append([]string{}, ruleset.Targets...), ruleset.Excluded...) {
+		if !strings.HasPrefix(condition, "refs/heads/") || strings.ContainsAny(condition, "*?[]") {
+			add("ref condition %q is a pattern this trust root cannot prove; only exact refs/heads/ names are accepted", condition)
+		}
 	}
 	if ruleset.BypassActors > 0 {
 		add("%d bypass actor(s) can evade it, so it gates nothing", ruleset.BypassActors)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,22 +41,19 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 		return runtime.ExitInvalid, fmt.Errorf("repository %q is not owner/name", target.Identity)
 	}
 
-	config, configErr := runtime.LoadConfig(flags.Config, cwd)
-	doctorConfig := ""
-	if configErr == nil {
-		doctorConfig = config.OperatorPath
+	// The controlled build environment is not optional, so a configuration
+	// that will not load is a refusal rather than a quiet downgrade to
+	// whatever `go` happens to be on the PATH.
+	config, err := runtime.LoadConfig(flags.Config, cwd)
+	if err != nil {
+		return runtime.ExitInvalid, fmt.Errorf("an adopted build needs the operator configuration for its pinned build environment: %w", err)
 	}
 	forge := overrides.GitHub
 	if forge == nil {
-		endpoint := ""
-		mode := runtime.GitHubCredentialCLI
-		if configErr == nil {
-			endpoint, mode = config.GitHub.Endpoint, config.GitHub.CredentialMode
-		}
 		forge = runtime.GitHubRESTAdapter{
 			HTTP:        &http.Client{Timeout: 30 * time.Second},
-			Endpoint:    endpoint,
-			Credentials: githubCredentials(mode),
+			Endpoint:    config.GitHub.Endpoint,
+			Credentials: githubCredentials(config.GitHub.CredentialMode),
 		}
 	}
 	rulesetReader, ok := forge.(interface {
@@ -64,6 +62,7 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	if !ok {
 		return runtime.ExitFailed, fmt.Errorf("the configured forge adapter cannot observe repository rulesets, so no trust root can be established")
 	}
+	deps := runtime.AdoptedBuildDeps{Rulesets: rulesetReader.Rulesets, RefSHA: forge.RefSHA}
 
 	output := strings.TrimSpace(flags.Output)
 	if output == "" {
@@ -74,49 +73,31 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 		output = filepath.Join(home, ".zenchron-adopted-controller")
 	}
 
-	deps := runtime.AdoptedBuildDeps{
-		Rulesets: rulesetReader.Rulesets,
-		RefSHA:   forge.RefSHA,
+	// The builder's own identity is recorded truthfully. It need not be
+	// adopted - it usually is not - but a failed measurement is recorded as a
+	// failed measurement, never laundered into "unattested", which would claim
+	// a deliberate absence of provenance where there is a broken one.
+	builder := runtime.BuilderRecord{Kind: runtime.ControllerUnattested}
+	if self, selfErr := controllerBuild(); selfErr != nil {
+		builder.ResolutionError = selfErr.Error()
+	} else {
+		builder = runtime.BuilderRecord{Kind: self.Kind, Version: self.Version, SourceRevision: self.SourceRevision}
+		if builder.Kind == "" {
+			builder.Kind = runtime.ControllerUnattested
+		}
 	}
-	self, _ := controllerBuild()
+
 	request := runtime.AdoptedBuildRequest{
-		Repository:    runtime.GitHubRepo{Owner: owner, Name: name},
-		Revision:      strings.TrimSpace(flags.Revision),
-		RepositoryDir: cwd,
-		DoctorConfig:  doctorConfig,
-		Policy:        runtime.DefaultTrustPolicy(),
+		Repository:         runtime.GitHubRepo{Owner: owner, Name: name},
+		Revision:           strings.TrimSpace(flags.Revision),
+		RepositoryDir:      cwd,
+		OutputRoot:         output,
+		Sandbox:            runtime.DockerSandbox{Image: config.Assurance.Image, Endpoint: runtime.DockerEndpoint{Host: config.Assurance.DockerHost}, StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations")},
+		DependencyCacheDir: config.Assurance.DependencyCacheDir,
+		Policy:             runtime.DefaultTrustPolicy(),
 	}
 
-	// The output directory is derived from the revision only AFTER the proof
-	// resolves it, so a caller cannot pick a directory that implies a revision
-	// the builder did not verify. The two-phase call keeps that honest: the
-	// first pass proves and builds into a staging directory, and installation
-	// is the last step.
-	staging, err := os.MkdirTemp("", "zenchron-adopted-stage-")
-	if err != nil {
-		return runtime.ExitFailed, err
-	}
-	defer os.RemoveAll(staging)
-	request.OutputDir = staging
-
-	provenance, err := runtime.BuildAdoptedController(context.Background(), request, deps, self)
-	if err != nil {
-		return runtime.ExitFailed, err
-	}
-
-	installDir := filepath.Join(output, provenance.Version)
-	if err := os.MkdirAll(installDir, 0700); err != nil {
-		return runtime.ExitFailed, err
-	}
-	installed := filepath.Join(installDir, "zenchron-engineering")
-	if err := moveFile(provenance.OutputPath, installed); err != nil {
-		return runtime.ExitFailed, err
-	}
-	if err := os.Chmod(installed, 0500); err != nil {
-		return runtime.ExitFailed, err
-	}
-	provenance.OutputPath = installed
-	digest, err := runtime.WriteAdoptedBuildProvenance(filepath.Join(installDir, "provenance.json"), provenance)
+	provenance, err := runtime.BuildAdoptedController(context.Background(), request, deps, builder)
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -125,24 +106,37 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	fmt.Fprintf(stdout, "version:           %s\n", provenance.Version)
 	fmt.Fprintf(stdout, "source:            %s\n", provenance.Source.Revision)
 	fmt.Fprintf(stdout, "tree:              %s\n", provenance.Source.Tree)
-	fmt.Fprintf(stdout, "trusted main:      %s\n", provenance.TrustedMain.Revision)
+	fmt.Fprintf(stdout, "trusted main:      %s (tree %s)\n", provenance.TrustedMain.Revision, provenance.TrustedMain.Tree)
 	fmt.Fprintf(stdout, "trust root:        ruleset %d %q %s\n", provenance.TrustRoot.RulesetID, provenance.TrustRoot.Name, provenance.TrustRoot.Digest)
+	fmt.Fprintf(stdout, "build environment: %s %s (%s), network %s, source %s, cache %s\n",
+		provenance.BuildEnv.Kind, provenance.BuildEnv.Image, provenance.BuildEnv.Toolchain,
+		provenance.BuildEnv.Network, provenance.BuildEnv.SourceMount, provenance.BuildEnv.CacheMount)
+	fmt.Fprintf(stdout, "build env digest:  %s\n", provenance.BuildEnv.Digest)
 	fmt.Fprintf(stdout, "binary sha256:     %s\n", provenance.BinarySHA256)
 	fmt.Fprintf(stdout, "binary:            %s\n", provenance.OutputPath)
-	fmt.Fprintf(stdout, "provenance sha256: %s\n", digest)
-	fmt.Fprintf(stdout, "self report:       %s\n", provenance.SelfReport)
+	fmt.Fprintf(stdout, "self probe:        %s %s matched=%t\n", provenance.SelfProbe.Kind, provenance.SelfProbe.Version, provenance.SelfProbe.Matched)
+	fmt.Fprintf(stdout, "builder:           kind=%s version=%s\n", provenance.Builder.Kind, provenance.Builder.Version)
 	return runtime.ExitCompleted, nil
 }
 
-// moveFile prefers a rename and falls back to a copy, because the staging
-// directory and the install directory may be on different filesystems.
-func moveFile(from, to string) error {
-	if err := os.Rename(from, to); err == nil {
-		return nil
-	}
-	data, err := os.ReadFile(from)
+// controllerInspectSelf reports this binary's own build provenance and nothing
+// else.
+//
+// It exists so the adopted builder can always verify what it just produced.
+// The full doctor needs an operator configuration, a Docker daemon and two
+// credentials - none of which bear on whether a binary's embedded metadata
+// matches the executable it is embedded in. Requiring them turned a missing
+// config into a skipped probe, and a skipped probe into an adopted artifact
+// nobody had checked.
+func controllerInspectSelf(args []string, stdout io.Writer) (int, error) {
+	build, err := controllerBuild()
 	if err != nil {
-		return err
+		return runtime.ExitFailed, fmt.Errorf("this binary cannot establish its own provenance: %w", err)
 	}
-	return os.WriteFile(to, data, 0600)
+	encoded, err := json.MarshalIndent(build, "", "  ")
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	fmt.Fprintln(stdout, string(encoded))
+	return runtime.ExitCompleted, nil
 }

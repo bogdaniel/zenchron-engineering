@@ -653,9 +653,11 @@ func (a GitHubRESTAdapter) Rulesets(ctx context.Context, repo GitHubRepo) ([]Tru
 			ID          int64  `json:"id"`
 			Name        string `json:"name"`
 			Enforcement string `json:"enforcement"`
+			Target      string `json:"target"`
 			Conditions  struct {
 				RefName struct {
 					Include []string `json:"include"`
+					Exclude []string `json:"exclude"`
 				} `json:"ref_name"`
 			} `json:"conditions"`
 			BypassActors []json.RawMessage `json:"bypass_actors"`
@@ -677,7 +679,8 @@ func (a GitHubRESTAdapter) Rulesets(ctx context.Context, repo GitHubRepo) ([]Tru
 		}
 		observed := TrustedMainRuleset{
 			ID: wire.ID, Name: wire.Name, Enforcement: wire.Enforcement,
-			Targets: wire.Conditions.RefName.Include, BypassActors: len(wire.BypassActors),
+			Targets: wire.Conditions.RefName.Include, Excluded: wire.Conditions.RefName.Exclude,
+			TargetType: wire.Target, BypassActors: len(wire.BypassActors),
 		}
 		for _, rule := range wire.Rules {
 			switch rule.Type {
