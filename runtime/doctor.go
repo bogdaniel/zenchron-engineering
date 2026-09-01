@@ -122,6 +122,10 @@ type DoctorInput struct {
 	// ProjectModel and Policy drive the governance diagnosis.
 	ProjectModel domain.ProjectModel
 	Policy       domain.EngineeringPolicy
+
+	// ControllerBuild is the provenance of the binary running this preflight.
+	// The zero value is the truthful answer for an unattested build.
+	ControllerBuild ControllerBuild
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -136,6 +140,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorGitHub(ctx, in)...)
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
+	checks = append(checks, doctorController(in))
 
 	report := DoctorReport{Status: DoctorPass, Checks: checks}
 	for _, check := range checks {
@@ -158,6 +163,42 @@ func warn(group, id, reason string) DoctorCheck {
 }
 func fail(group, id, reason string) DoctorCheck {
 	return DoctorCheck{ID: id, Group: group, Status: DoctorFail, Reason: reason}
+}
+
+// ---------------------------------------------------------------------------
+// Controller provenance
+// ---------------------------------------------------------------------------
+
+const doctorGroupController = "controller"
+
+// doctorController reports WHICH BINARY is running the preflight.
+//
+// Every other check answers a question about the environment. This one answers
+// the question an operator has about the tool asking them: is this an adopted
+// runtime, or a build of source that has not itself been adopted? The
+// distinction already exists in the model and is already recorded on every run
+// the runtime creates, but it was not observable from any read-only command, so
+// the one moment it matters most - standing in front of a freshly built
+// controller and asking what it is - had no answer.
+//
+// It is a report, never a gate. An unattested build is legal and says so; a
+// pre-adoption build is legal and says so. Neither is a FAIL, because which
+// build you are running is a fact about your situation, not a fault in it.
+func doctorController(in DoctorInput) DoctorCheck {
+	const id = "controller.build"
+	build := in.ControllerBuild
+	if !build.Attested() {
+		return warn(doctorGroupController, id,
+			"this controller makes no provenance claim: it is an unattested build, which is legal but records nothing about which source produced it")
+	}
+	detail := fmt.Sprintf("this controller is a %s build: version %s, source %s, tree %s, binary sha256:%s",
+		build.Kind, build.Version, build.SourceRevision, build.SourceTree, build.BinarySHA256)
+	if build.Kind != ControllerAdopted {
+		return pass(doctorGroupController, id, detail+
+			". A build of source that has not itself been adopted demonstrates runtime behaviour only; it confers no authority on its own source")
+	}
+	return pass(doctorGroupController, id, detail+
+		". Its source is adopted, which is a fact established by external merge and never by the runtime itself")
 }
 
 // ---------------------------------------------------------------------------

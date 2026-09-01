@@ -1012,6 +1012,14 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		GitHub:             overrides.GitHub,
 		Provider:           overrides.Provider,
 	}
+	// The running binary's own provenance. A build that cannot resolve it
+	// reports the unattested zero value rather than nothing, because "I do not
+	// know what I am" is itself the answer to the check.
+	if overrides.ControllerBuild != nil {
+		in.ControllerBuild = *overrides.ControllerBuild
+	} else if build, err := controllerBuild(); err == nil {
+		in.ControllerBuild = build
+	}
 	if target, err := repositoryTarget(cwd, flags.Repo); err == nil {
 		in.Repository = target
 	}
