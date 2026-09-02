@@ -20,7 +20,14 @@ type ExecutionProvider interface {
 	Execute(context.Context, ExecutionRequest) (ExecutionResult, error)
 }
 type ExecutionRequest struct {
-	RunID                 string
+	RunID string
+	// OperationID is the runtime operation that authorized this invocation.
+	// It is OPERATIONAL IDENTITY, not provider metadata: a brokered candidate
+	// command is a runtime-owned side effect, so its Docker lifecycle has to be
+	// bound to the exact operation that caused it. Without it a crashed
+	// controller has no durable name it alone may reconcile, and recovery would
+	// have to guess by prefix or label.
+	OperationID           string
 	SourceSnapshot        Ref
 	ControllerID          string
 	Base                  Ref

@@ -399,7 +399,22 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	release = func() { _ = lock.Release(); _ = store.Close() }
 
 	artifacts := runtime.ArtifactStore{Root: filepath.Join(config.StateDir, "artifacts")}
-	sandbox := runtime.DockerSandbox{Image: config.Assurance.Image, Endpoint: runtime.DockerEndpoint{Host: config.Assurance.DockerHost}}
+	// StateDir is where a runtime-owned Docker operation RECORD is written, so
+	// a crashed controller retains the exact container name it alone may
+	// reconcile. It is host controller state: it lives beside the artifact
+	// store, is never mounted into a candidate, and holds no credential.
+	//
+	// Omitting it is what disabled candidate.run in production. The assurance
+	// verifier sets both fields inside Assure and therefore worked; the tool
+	// broker received this shared value and refused every brokered command with
+	// "runtime-owned Docker operation identity and state directory are
+	// required", so the model was offered a verification tool that could never
+	// run.
+	sandbox := runtime.DockerSandbox{
+		Image:    config.Assurance.Image,
+		Endpoint: runtime.DockerEndpoint{Host: config.Assurance.DockerHost},
+		StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations"),
+	}
 
 	credentials := githubCredentials(config.GitHub.CredentialMode)
 	forge := overrides.GitHub
@@ -577,10 +592,39 @@ type candidateBoundProvider struct{ base runtime.OpenAIProvider }
 
 func (p candidateBoundProvider) Isolation() runtime.ProviderIsolation { return p.base.Isolation() }
 
+// Execute binds the two things the broker cannot supply itself: WHICH workspace
+// this invocation may touch, and WHICH runtime operation owns the Docker
+// lifecycle of anything it brokers.
+//
+// Both are refused when absent rather than defaulted. A brokered command with
+// no owning operation has no durable record a crashed controller could
+// reconcile against, and the alternatives - a fixed global id, the process id,
+// a random or model-supplied string - would each let recovery target a
+// container this operation does not own.
 func (p candidateBoundProvider) Execute(ctx context.Context, request runtime.ExecutionRequest) (runtime.ExecutionResult, error) {
+	bound, err := p.bind(request)
+	if err != nil {
+		return runtime.ExecutionResult{}, err
+	}
+	return bound.Execute(ctx, request)
+}
+
+// bind is the binding itself, separated so a test can assert what the provider
+// would have been given without contacting a model or a daemon.
+func (p candidateBoundProvider) bind(request runtime.ExecutionRequest) (runtime.OpenAIProvider, error) {
+	if strings.TrimSpace(request.CandidateDir) == "" {
+		return runtime.OpenAIProvider{}, fmt.Errorf("brokered execution requires the runtime-owned candidate workspace")
+	}
+	if strings.TrimSpace(request.OperationID) == "" {
+		return runtime.OpenAIProvider{}, fmt.Errorf("brokered execution requires the runtime operation that authorized it; without it a brokered container has no exact identity to reconcile")
+	}
+	if strings.TrimSpace(p.base.Broker.Sandbox.StateDir) == "" {
+		return runtime.OpenAIProvider{}, fmt.Errorf("brokered execution requires a runtime-owned state directory for its Docker operation record")
+	}
 	bound := p.base
 	bound.Broker.CandidateDir = request.CandidateDir
-	return bound.Execute(ctx, request)
+	bound.Broker.Sandbox.OperationID = request.OperationID
+	return bound, nil
 }
 
 func parseAutonomyFlags(args []string) (autonomyFlags, error) {
