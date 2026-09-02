@@ -45,11 +45,17 @@ type TrustedMainRuleset struct {
 	// BypassActors is a COUNT, deliberately. Which actor could bypass the gate
 	// does not change the answer: a trust root with any bypass at all is not a
 	// trust root, and naming the actor would invite arguing about exceptions.
-	BypassActors   int
-	PullRequest    *PullRequestRule
-	RequiredChecks *RequiredChecksRule
-	Deletion       bool
-	NonFastForward bool
+	//
+	// BypassActorsKnown is separate because an OMITTED field is not an empty
+	// one. A response that never mentions bypass_actors has told us nothing
+	// about bypasses, and reading that silence as "there are none" is the
+	// difference between a gate and the belief in a gate.
+	BypassActors      int
+	BypassActorsKnown bool
+	PullRequest       *PullRequestRule
+	RequiredChecks    *RequiredChecksRule
+	Deletion          bool
+	NonFastForward    bool
 }
 
 type PullRequestRule struct {
@@ -126,7 +132,10 @@ func VerifyTrustRoot(ruleset TrustedMainRuleset, policy TrustPolicy) error {
 			add("ref condition %q is a pattern this trust root cannot prove; only exact refs/heads/ names are accepted", condition)
 		}
 	}
-	if ruleset.BypassActors > 0 {
+	switch {
+	case !ruleset.BypassActorsKnown:
+		add("it does not disclose its bypass actors, and an undisclosed bypass is not the same as no bypass")
+	case ruleset.BypassActors > 0:
 		add("%d bypass actor(s) can evade it, so it gates nothing", ruleset.BypassActors)
 	}
 	if !ruleset.Deletion {

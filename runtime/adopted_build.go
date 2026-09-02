@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -64,7 +65,6 @@ type AdoptedBuildRequest struct {
 	// same pinned image and read-only operator cache exact-tree assurance uses.
 	Sandbox            DockerSandbox
 	DependencyCacheDir string
-	Policy             TrustPolicy
 }
 
 // AdoptedBuildDeps are the seams. Every field defaults, so production callers
@@ -190,10 +190,12 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if deps.Rulesets == nil || deps.RefSHA == nil {
 		return out, fmt.Errorf("the builder has no way to observe the trust root or trusted main, so nothing may be called adopted")
 	}
-	policy := request.Policy
-	if policy.Ref == "" {
-		policy = DefaultTrustPolicy()
-	}
+	// The adoption policy is FROZEN, not a parameter. A caller that could
+	// weaken the trusted ref, the required check, the allowed merge methods or
+	// the strict-check rule and still receive an artifact labelled adopted
+	// would make the label mean whatever the caller wanted. There is exactly
+	// one adoption policy, and this is where it comes from.
+	policy := DefaultTrustPolicy()
 	// A cross-target build cannot be asked what it thinks it is, and an
 	// unprobed adopted artifact is refused. Cross-compiling stays available
 	// for unattested builds, which is where it belongs.
@@ -210,7 +212,10 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if err != nil {
 		return out, err
 	}
-	startingDigest := trustRootDigest(root)
+	startingDigest, err := trustRootDigest(root)
+	if err != nil {
+		return out, err
+	}
 
 	// 2. Trusted main as GITHUB reports it, not as the local clone remembers.
 	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
@@ -247,16 +252,9 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if err != nil {
 		return out, err
 	}
-	defer os.RemoveAll(checkout)
-	if err := exportRevision(deps, request.RepositoryDir, source, checkout); err != nil {
+	defer func() { _ = os.RemoveAll(checkout) }() // best-effort: a leftover temp dir is not a proof failure
+	if err := materializeTree(deps, request.RepositoryDir, tree, checkout); err != nil {
 		return out, err
-	}
-	recomputed, err := recomputeTree(deps, checkout)
-	if err != nil {
-		return out, err
-	}
-	if recomputed != tree {
-		return out, fmt.Errorf("the build checkout holds tree %s, not the %s that revision %s names", recomputed, tree, source)
 	}
 
 	// 5. Staging INSIDE the controller root, so publication is a
@@ -276,7 +274,7 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	published := false
 	defer func() {
 		if !published {
-			os.RemoveAll(staging)
+			_ = os.RemoveAll(staging) // best-effort: the refusal already stands
 		}
 	}()
 	output := filepath.Join(staging, "zenchron-engineering")
@@ -326,7 +324,10 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if err != nil {
 		return out, fmt.Errorf("the trust root could not be revalidated before publication: %w", err)
 	}
-	finalDigest := trustRootDigest(finalRoot)
+	finalDigest, err := trustRootDigest(finalRoot)
+	if err != nil {
+		return out, err
+	}
 	if finalDigest != startingDigest {
 		return out, fmt.Errorf("the trust root changed while the build ran (%s -> %s); refusing to publish under a gate that is not the one proven", startingDigest, finalDigest)
 	}
@@ -386,7 +387,7 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	// 10. Publish the whole version directory atomically. Version directories
 	// are immutable: an existing one is verified, never replaced, because it
 	// is the provenance of every run it has already governed.
-	if err := publishControllerVersion(staging, final, out); err != nil {
+	if err := publishControllerVersion(staging, final); err != nil {
 		return AdoptedBuildProvenance{}, err
 	}
 	published = true
@@ -399,9 +400,9 @@ func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRep
 	if err != nil {
 		return TrustedMainRuleset{}, fmt.Errorf("the trust root could not be observed, so nothing may be called adopted: %w", err)
 	}
-	root, found := selectTrustRoot(rulesets, policy.Ref)
-	if !found {
-		return TrustedMainRuleset{}, ErrNoTrustRoot
+	root, err := selectTrustRoot(rulesets, policy.Ref)
+	if err != nil {
+		return TrustedMainRuleset{}, err
 	}
 	if err := VerifyTrustRoot(root, policy); err != nil {
 		return TrustedMainRuleset{}, err
@@ -442,123 +443,174 @@ func revisionTree(deps AdoptedBuildDeps, dir, revision string) (string, error) {
 // controller it holds has already governed, and replacing its binary would
 // retroactively change what those runs were driven by. If it is byte-identical
 // to what was just built, this is idempotent; if it differs, it is a refusal.
-func publishControllerVersion(staging, final string, built AdoptedBuildProvenance) error {
-	if existing, err := os.Stat(final); err == nil && existing.IsDir() {
-		return reconcileExistingVersion(final, built)
+func publishControllerVersion(staging, final string) error {
+	if _, err := os.Lstat(final); err == nil {
+		return errImmutableVersion(final)
 	}
 	if err := os.Rename(staging, final); err != nil {
-		// A concurrent publisher may have created it between the check and
-		// the rename; that is the same immutability question, not a race to
-		// win.
-		if existing, statErr := os.Stat(final); statErr == nil && existing.IsDir() {
-			return reconcileExistingVersion(final, built)
+		// A concurrent publisher may have created it between the check and the
+		// rename. That is the same immutability answer, not a race to win.
+		if _, statErr := os.Lstat(final); statErr == nil {
+			return errImmutableVersion(final)
 		}
 		return fmt.Errorf("the controller version directory could not be published atomically, so nothing was installed: %w", err)
 	}
 	return nil
 }
 
-func reconcileExistingVersion(final string, built AdoptedBuildProvenance) error {
-	installed, err := measureExecutable(filepath.Join(final, "zenchron-engineering"))
-	if err != nil {
-		return fmt.Errorf("%s already exists and cannot be verified; refusing to touch an installed controller: %w", final, err)
-	}
-	if installed != built.BinarySHA256 {
-		return fmt.Errorf("%s already holds a different controller (installed %s, built %s); version directories are immutable and this one is not replaced",
-			final, installed, built.BinarySHA256)
-	}
-	return nil
+// errImmutableVersion is the whole existing-version policy.
+//
+// It deliberately does not compare the installed artifact and declare a match
+// idempotent. Two builds of the same source differ in their timestamps and in
+// the trust observations they were published under, so "equivalent" would have
+// to be a semantic judgement about two historical records - and a wrong
+// judgement silently replaces the provenance of every run the installed
+// controller has already governed. Refusing is both safer and simpler, and an
+// operator who wants another proof run can name a different output root.
+func errImmutableVersion(final string) error {
+	return fmt.Errorf("%s already exists; controller version directories are immutable and are never inspected, replaced or reconciled. Use a different --output root for another proof run", final)
 }
 
 // selectTrustRoot picks the ruleset governing the branch. More than one may
 // exist; the one that targets the ref is the one that matters.
-func selectTrustRoot(rulesets []TrustedMainRuleset, ref string) (TrustedMainRuleset, bool) {
+// It requires EXACTLY ONE. Zero means there is no gate. More than one means
+// GitHub is composing rules whose combined effect this builder would have to
+// guess, and guessing the composition of overlapping rulesets is how a gate
+// gets reported that is not the gate being enforced. M1-B refuses instead of
+// implementing a rules engine it cannot prove.
+func selectTrustRoot(rulesets []TrustedMainRuleset, ref string) (TrustedMainRuleset, error) {
+	var applicable []TrustedMainRuleset
 	for _, r := range rulesets {
-		if trustRootContains(r.Targets, ref) {
-			return r, true
+		if trustRootContains(r.Targets, ref) && !trustRootContains(r.Excluded, ref) {
+			applicable = append(applicable, r)
 		}
 	}
-	return TrustedMainRuleset{}, false
+	switch len(applicable) {
+	case 0:
+		return TrustedMainRuleset{}, ErrNoTrustRoot
+	case 1:
+		return applicable[0], nil
+	default:
+		return TrustedMainRuleset{}, fmt.Errorf("%d rulesets govern %s; their combined effect is not something this builder can prove, so no source under them is called adopted", len(applicable), ref)
+	}
 }
 
 // trustRootDigest is a canonical digest of the trust root as observed, so the
 // provenance names WHICH gate was in force and a later reader can tell whether
 // it has since changed.
-func trustRootDigest(root TrustedMainRuleset) string {
-	encoded, err := json.Marshal(root)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(sum[:])
+func trustRootDigest(root TrustedMainRuleset) (string, error) {
+	return canonicalDigest(root)
 }
 
-func exportRevision(deps AdoptedBuildDeps, repoDir, revision, into string) error {
-	// git archive is the export: it writes exactly the revision's content and
-	// leaves no .git behind, which is what makes the checkout clean by
-	// construction rather than by inspection afterwards.
-	archive := exec.Command("git", "-C", repoDir, "archive", revision)
-	untar := exec.Command("tar", "-x", "-C", into)
-	pipe, err := archive.StdoutPipe()
+// materializeTree writes the EXACT bytes the commit tree names.
+//
+// This replaces `git archive | tar`, which was wrong twice over. It ran two
+// programs found on the ambient PATH, and archive is a PRESENTATION of a tree
+// rather than the tree itself: export-ignore drops paths, export-subst
+// rewrites content, and working-tree encoding transforms bytes. A build
+// approved against tree T could therefore be compiled from something that is
+// not T while every later check still named T.
+//
+// Instead the tree is read through the controlled Git seam - the trusted
+// binary, an environment built from scratch, no system or global
+// configuration, no external diff or filters - and each blob is written here
+// by Go. Nothing consults .gitattributes because nothing checks anything out:
+// there is no working tree for a smudge filter to act on.
+//
+// Each blob is then verified against the object id the tree named, so the
+// materialization is not trusted either.
+func materializeTree(deps AdoptedBuildDeps, repoDir, tree, into string) error {
+	// Object ids are verified by recomputing them, so the hash must be the one
+	// this code knows how to compute. Anything else fails closed.
+	format, err := deps.Git(repoDir, "rev-parse", "--show-object-format")
 	if err != nil {
-		return err
+		return fmt.Errorf("the repository object format could not be established: %w", err)
 	}
-	untar.Stdin = pipe
-	var stderr strings.Builder
-	archive.Stderr = &stderr
-	if err := archive.Start(); err != nil {
-		return err
+	if strings.TrimSpace(format) != "sha1" {
+		return fmt.Errorf("this builder verifies sha1 object ids; the repository uses %q", strings.TrimSpace(format))
 	}
-	if err := untar.Run(); err != nil {
-		_ = archive.Wait()
-		return fmt.Errorf("the build checkout could not be exported: %w", err)
+	listing, err := deps.Git(repoDir, "ls-tree", "-r", "-z", "--full-tree", tree)
+	if err != nil {
+		return fmt.Errorf("the tree %s could not be listed: %w", tree, err)
 	}
-	if err := archive.Wait(); err != nil {
-		return fmt.Errorf("the build checkout could not be exported: %w: %s", err, strings.TrimSpace(stderr.String()))
+	entries := strings.Split(strings.TrimRight(listing, "\x00"), "\x00")
+	written := 0
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		meta, path, found := strings.Cut(entry, "\t")
+		if !found {
+			return fmt.Errorf("the tree listing is malformed")
+		}
+		fields := strings.Fields(meta)
+		if len(fields) != 3 {
+			return fmt.Errorf("the tree listing is malformed")
+		}
+		mode, object := fields[0], fields[2]
+		if err := safeTreePath(path); err != nil {
+			return err
+		}
+		target := filepath.Join(into, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+			return err
+		}
+		content, err := deps.Git(repoDir, "cat-file", "blob", object)
+		if err != nil {
+			return fmt.Errorf("object %s could not be read: %w", object, err)
+		}
+		if got := blobID(content); got != object {
+			return fmt.Errorf("object %s materialized as %s; the checkout is not the tree it claims", object, got)
+		}
+		switch mode {
+		case "100644", "100755":
+			perm := os.FileMode(0600)
+			if mode == "100755" {
+				perm = 0700
+			}
+			if err := os.WriteFile(target, []byte(content), perm); err != nil {
+				return err
+			}
+		case "120000":
+			if err := os.Symlink(content, target); err != nil {
+				return err
+			}
+		case "160000":
+			// A submodule is a pointer to another repository. Its content is
+			// not in this tree, so a build from it is not a build of this tree.
+			return fmt.Errorf("tree %s contains submodule %q, whose content this tree does not name", tree, path)
+		default:
+			return fmt.Errorf("tree %s contains %q with unsupported mode %s", tree, path, mode)
+		}
+		written++
+	}
+	if written == 0 {
+		return fmt.Errorf("tree %s materialized no files", tree)
 	}
 	return nil
 }
 
-// recomputeTree hashes the exported checkout with Git's own object rules, in a
-// throwaway repository that shares nothing with the source. The comparison is
-// therefore against the same tree identity the commit names, derived from the
-// bytes on disk rather than from what the source repository claims.
-func recomputeTree(deps AdoptedBuildDeps, dir string) (string, error) {
-	gitDir, err := os.MkdirTemp("", "zenchron-tree-git-")
-	if err != nil {
-		return "", err
+// safeTreePath refuses any path that would escape the build checkout or write
+// into Git's own metadata.
+func safeTreePath(path string) error {
+	if path == "" || strings.HasPrefix(path, "/") || filepath.IsAbs(path) {
+		return fmt.Errorf("refused tree path %q", path)
 	}
-	defer os.RemoveAll(gitDir)
-	index := filepath.Join(gitDir, "index")
-	env := append(os.Environ(),
-		"GIT_DIR="+gitDir, "GIT_WORK_TREE="+dir, "GIT_INDEX_FILE="+index,
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-	// init runs WITHOUT the work-tree variables: Git refuses to create a
-	// repository while they are set.
-	if err := runIn(dir, os.Environ(), "git", "init", "-q", "--bare", gitDir); err != nil {
-		return "", fmt.Errorf("the tree could not be recomputed: %w", err)
+	for _, element := range strings.Split(path, "/") {
+		if element == "" || element == "." || element == ".." || element == ".git" {
+			return fmt.Errorf("refused tree path %q", path)
+		}
 	}
-	if err := runIn(dir, env, "git", "add", "-A", "."); err != nil {
-		return "", fmt.Errorf("the tree could not be recomputed: %w", err)
-	}
-	out, err := outputIn(dir, env, "git", "write-tree")
-	if err != nil {
-		return "", fmt.Errorf("the tree could not be recomputed: %w", err)
-	}
-	return strings.TrimSpace(out), nil
+	return nil
 }
 
-func runIn(dir string, env []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir, cmd.Env = dir, env
-	return cmd.Run()
-}
-
-func outputIn(dir string, env []string, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Dir, cmd.Env = dir, env
-	out, err := cmd.Output()
-	return string(out), err
+// blobID recomputes Git's object id for content, so a materialized file is
+// checked against the id the tree named rather than assumed correct.
+func blobID(content string) string {
+	sum := sha1.New()
+	fmt.Fprintf(sum, "blob %d\x00", len(content))
+	_, _ = io.WriteString(sum, content)
+	return hex.EncodeToString(sum.Sum(nil))
 }
 
 func shortSHA(sha string) string {
@@ -569,6 +621,15 @@ func shortSHA(sha string) string {
 }
 
 // WriteAdoptedBuildProvenance stores the record owner-only beside the binary.
+//
+// The returned digest is an EXACT-FILE digest of the bytes written, not a
+// canonical digest of the document's meaning. The file is indented for a human
+// reader, so re-serializing it differently would produce different bytes and
+// the same meaning. The semantic sub-object digests inside it - the trust root
+// and the build environment - go through CanonicalJSON and are comparable
+// across observations; this one answers "is this file the file that was
+// written", which is a different and equally useful question. Calling it
+// canonical would be calling it something it is not.
 func WriteAdoptedBuildProvenance(path string, provenance AdoptedBuildProvenance) (string, error) {
 	encoded, err := json.MarshalIndent(provenance, "", "  ")
 	if err != nil {
@@ -687,7 +748,11 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 		CacheMount:  "read-only",
 		Environment: adoptedBuildEnvironment(spec),
 	}
-	built.Digest = canonicalDigest(built)
+	digest, err := canonicalDigest(built)
+	if err != nil {
+		return BuildEnvironment{}, err
+	}
+	built.Digest = digest
 	return built, nil
 }
 
@@ -735,17 +800,16 @@ func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec Adop
 }
 
 // canonicalDigest hashes a value through the repository's existing canonical
-// JSON convention rather than inventing a second hashing dialect.
-func canonicalDigest(value any) string {
+// JSON convention. A canonicalization failure is an ERROR, never a fallback to
+// encoding/json: a digest that silently stopped being canonical still looks
+// like one, and two records that should compare equal would not.
+func canonicalDigest(value any) (string, error) {
 	encoded, err := CanonicalJSON(value)
 	if err != nil {
-		encoded, err = json.Marshal(value)
-		if err != nil {
-			return ""
-		}
+		return "", fmt.Errorf("a trust-relevant digest could not be canonicalized: %w", err)
 	}
 	sum := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func measureExecutable(path string) (string, error) {
@@ -753,7 +817,7 @@ func measureExecutable(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	sum := sha256.New()
 	if _, err := io.Copy(sum, file); err != nil {
 		return "", err

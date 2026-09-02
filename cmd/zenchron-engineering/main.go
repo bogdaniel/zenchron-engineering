@@ -121,7 +121,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|autonomy ...|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|controller inspect-self [--json]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|autonomy ...|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
 }
 
 func parseModelFlags(args []string) ([]string, error) {

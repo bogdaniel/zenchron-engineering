@@ -24,7 +24,7 @@ import (
 // the proof already has one: `go build` produces an unattested controller,
 // which is legal, honest, and says so when asked.
 func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
-	flags, err := parseAutonomyFlags(args)
+	flags, err := parseControllerFlags(args)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
@@ -94,7 +94,6 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 		OutputRoot:         output,
 		Sandbox:            runtime.DockerSandbox{Image: config.Assurance.Image, Endpoint: runtime.DockerEndpoint{Host: config.Assurance.DockerHost}, StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations")},
 		DependencyCacheDir: config.Assurance.DependencyCacheDir,
-		Policy:             runtime.DefaultTrustPolicy(),
 	}
 
 	provenance, err := runtime.BuildAdoptedController(context.Background(), request, deps, builder)
@@ -129,6 +128,13 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 // config into a skipped probe, and a skipped probe into an adopted artifact
 // nobody had checked.
 func controllerInspectSelf(args []string, stdout io.Writer) (int, error) {
+	// The syntax is exactly one optional flag. Silently ignoring anything else
+	// would let a typo look like it worked.
+	for _, arg := range args {
+		if arg != "--json" {
+			return runtime.ExitInvalid, fmt.Errorf("controller inspect-self accepts only --json, got %q", arg)
+		}
+	}
 	build, err := controllerBuild()
 	if err != nil {
 		return runtime.ExitFailed, fmt.Errorf("this binary cannot establish its own provenance: %w", err)
@@ -139,4 +145,37 @@ func controllerInspectSelf(args []string, stdout io.Writer) (int, error) {
 	}
 	fmt.Fprintln(stdout, string(encoded))
 	return runtime.ExitCompleted, nil
+}
+
+// controllerFlags are the ONLY flags `controller build-adopted` accepts. It
+// deliberately does not reuse the autonomy parser: that one understands
+// --new-generation, --dry-run, --follow and the rest, and quietly accepting a
+// run flag on a build command would suggest it did something.
+type controllerFlags struct {
+	Repo, Config, Output, Revision string
+}
+
+func parseControllerFlags(args []string) (controllerFlags, error) {
+	var flags controllerFlags
+	for len(args) > 0 {
+		name := args[0]
+		target := map[string]*string{
+			"--repo": &flags.Repo, "--config": &flags.Config,
+			"--output": &flags.Output, "--revision": &flags.Revision,
+		}[name]
+		if target == nil {
+			return controllerFlags{}, fmt.Errorf("controller build-adopted does not accept %q; it takes --repo, --config, --output and --revision", name)
+		}
+		// A blank value is not a value. Without this, --output "" silently
+		// selects the default controller root and --revision "" silently
+		// selects whatever trusted main happens to be.
+		if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+			return controllerFlags{}, fmt.Errorf("%s requires a non-empty value", name)
+		}
+		if *target != "" {
+			return controllerFlags{}, fmt.Errorf("%s was given more than once", name)
+		}
+		*target, args = strings.TrimSpace(args[1]), args[2:]
+	}
+	return flags, nil
 }

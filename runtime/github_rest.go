@@ -660,7 +660,9 @@ func (a GitHubRESTAdapter) Rulesets(ctx context.Context, repo GitHubRepo) ([]Tru
 					Exclude []string `json:"exclude"`
 				} `json:"ref_name"`
 			} `json:"conditions"`
-			BypassActors []json.RawMessage `json:"bypass_actors"`
+			// A POINTER, so an omitted or null bypass_actors stays
+			// distinguishable from a disclosed empty list.
+			BypassActors *[]json.RawMessage `json:"bypass_actors"`
 			Rules        []struct {
 				Type       string `json:"type"`
 				Parameters struct {
@@ -680,7 +682,10 @@ func (a GitHubRESTAdapter) Rulesets(ctx context.Context, repo GitHubRepo) ([]Tru
 		observed := TrustedMainRuleset{
 			ID: wire.ID, Name: wire.Name, Enforcement: wire.Enforcement,
 			Targets: wire.Conditions.RefName.Include, Excluded: wire.Conditions.RefName.Exclude,
-			TargetType: wire.Target, BypassActors: len(wire.BypassActors),
+			TargetType: wire.Target,
+		}
+		if wire.BypassActors != nil {
+			observed.BypassActors, observed.BypassActorsKnown = len(*wire.BypassActors), true
 		}
 		for _, rule := range wire.Rules {
 			switch rule.Type {

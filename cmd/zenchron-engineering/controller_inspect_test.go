@@ -58,3 +58,63 @@ func TestInspectSelfReportsOnlyItsOwnProvenance(t *testing.T) {
 		}
 	}
 }
+
+// TestControllerCommandsRefuseArgumentsTheyDoNotOwn covers the CLI findings.
+// A build command that silently accepts a run flag suggests it did something,
+// and a blank flag value silently selects a default the operator did not ask
+// for.
+func TestControllerCommandsRefuseArgumentsTheyDoNotOwn(t *testing.T) {
+	for name, args := range map[string][]string{
+		"an autonomy run flag": {"--new-generation"},
+		"a dry-run flag":       {"--dry-run"},
+		"a watch flag":         {"--follow"},
+		"an unknown flag":      {"--adopted"},
+		"a bare positional":    {"main"},
+		"a blank output":       {"--output", "   "},
+		"a blank revision":     {"--revision", ""},
+		"a blank repo":         {"--repo", " "},
+		"a value-less output":  {"--output"},
+		"a repeated flag":      {"--repo", "a/b", "--repo", "c/d"},
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			if _, err := parseControllerFlags(args); err == nil {
+				t.Fatalf("controller build-adopted accepted %v", args)
+			}
+		})
+	}
+
+	flags, err := parseControllerFlags([]string{"--repo", "acme/widgets", "--config", "/tmp/c.json",
+		"--output", " /tmp/out ", "--revision", " abc123 "})
+	if err != nil {
+		t.Fatalf("the intended arguments were refused: %v", err)
+	}
+	if flags.Repo != "acme/widgets" || flags.Config != "/tmp/c.json" ||
+		flags.Output != "/tmp/out" || flags.Revision != "abc123" {
+		t.Fatalf("flags = %+v", flags)
+	}
+
+	// inspect-self has one optional flag and refuses anything else rather than
+	// letting a typo look like it worked.
+	var out bytes.Buffer
+	if _, err := controllerInspectSelf([]string{"--verbose"}, &out); err == nil {
+		t.Fatal("inspect-self accepted an unknown argument")
+	}
+	if _, err := controllerInspectSelf([]string{"--json"}, &out); err != nil {
+		t.Fatalf("inspect-self refused its own flag: %v", err)
+	}
+}
+
+// TestUsageNamesTheControllerCommands: a command a user cannot discover is a
+// command they will not use.
+func TestUsageNamesTheControllerCommands(t *testing.T) {
+	var out bytes.Buffer
+	_, err := run([]string{"nonsense"}, nil, &out)
+	if err == nil {
+		t.Fatal("an unknown command was accepted")
+	}
+	for _, want := range []string{"controller inspect-self", "controller build-adopted"} {
+		if !bytes.Contains([]byte(err.Error()), []byte(want)) {
+			t.Fatalf("usage does not mention %q: %v", want, err)
+		}
+	}
+}

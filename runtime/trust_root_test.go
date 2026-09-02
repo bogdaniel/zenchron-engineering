@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -11,7 +12,8 @@ import (
 func goodRuleset() TrustedMainRuleset {
 	return TrustedMainRuleset{
 		ID: 22043609, Name: "trusted-main-adoption", Enforcement: "active",
-		Targets: []string{"refs/heads/main"}, BypassActors: 0,
+		Targets: []string{"refs/heads/main"}, BypassActors: 0, BypassActorsKnown: true,
+		TargetType:     "branch",
 		PullRequest:    &PullRequestRule{AllowedMergeMethods: []string{"merge"}},
 		RequiredChecks: &RequiredChecksRule{Strict: true, Checks: []RequiredCheck{{Context: "go", IntegrationID: 15368}}},
 		Deletion:       true, NonFastForward: true,
@@ -38,6 +40,21 @@ func TestTrustRootAcceptsOnlyAGateWorthTrusting(t *testing.T) {
 		},
 		"a bypass actor": {
 			func(r *TrustedMainRuleset) { r.BypassActors = 1 }, "gates nothing",
+		},
+		// An OMITTED bypass list has told us nothing about bypasses, and
+		// reading that silence as "there are none" is the difference between a
+		// gate and the belief in a gate.
+		"undisclosed bypass actors": {
+			func(r *TrustedMainRuleset) { r.BypassActorsKnown = false }, "does not disclose its bypass actors",
+		},
+		"excluded ref": {
+			func(r *TrustedMainRuleset) { r.Excluded = []string{"refs/heads/main"} }, "explicitly excluded",
+		},
+		"pattern ref condition": {
+			func(r *TrustedMainRuleset) { r.Targets = []string{"refs/heads/*"} }, "cannot prove",
+		},
+		"non-branch target": {
+			func(r *TrustedMainRuleset) { r.TargetType = "tag" }, "not branches",
 		},
 		"deletion allowed": {
 			func(r *TrustedMainRuleset) { r.Deletion = false }, "deletion is not prohibited",
@@ -121,16 +138,62 @@ func asTrustRootError(err error, target **TrustRootError) bool {
 	return false
 }
 
-// TestNoTrustRootIsDistinctFromAWeakOne proves the two failures stay apart:
-// "there is no gate" and "the gate is wrong" are different things to fix.
-func TestNoTrustRootIsDistinctFromAWeakOne(t *testing.T) {
-	if _, found := selectTrustRoot(nil, "refs/heads/main"); found {
-		t.Fatal("a trust root was found where none exists")
+// TestTrustRootSelectionRequiresExactlyOne proves the three answers stay
+// apart: "there is no gate", "the gate is wrong", and "several rulesets govern
+// this branch and their combined effect is not something this builder can
+// prove". The last one is a refusal rather than a guess, because guessing how
+// overlapping rulesets compose is how a gate gets reported that GitHub is not
+// actually enforcing.
+func TestTrustRootSelectionRequiresExactlyOne(t *testing.T) {
+	if _, err := selectTrustRoot(nil, "refs/heads/main"); !errors.Is(err, ErrNoTrustRoot) {
+		t.Fatalf("no ruleset should be ErrNoTrustRoot, got %v", err)
 	}
-	if _, found := selectTrustRoot([]TrustedMainRuleset{{Targets: []string{"refs/heads/other"}}}, "refs/heads/main"); found {
-		t.Fatal("a ruleset for another branch was accepted as the trust root")
+	other := goodRuleset()
+	other.Targets = []string{"refs/heads/other"}
+	if _, err := selectTrustRoot([]TrustedMainRuleset{other}, "refs/heads/main"); !errors.Is(err, ErrNoTrustRoot) {
+		t.Fatalf("a ruleset for another branch should be ErrNoTrustRoot, got %v", err)
 	}
-	if _, found := selectTrustRoot([]TrustedMainRuleset{goodRuleset()}, "refs/heads/main"); !found {
-		t.Fatal("the governing ruleset was not selected")
+	// An excluded ref is not governed, however many includes name it.
+	excluded := goodRuleset()
+	excluded.Excluded = []string{"refs/heads/main"}
+	if _, err := selectTrustRoot([]TrustedMainRuleset{excluded}, "refs/heads/main"); !errors.Is(err, ErrNoTrustRoot) {
+		t.Fatalf("an excluded ref should be ErrNoTrustRoot, got %v", err)
+	}
+	second := goodRuleset()
+	second.ID, second.Name = 999, "another-one"
+	if _, err := selectTrustRoot([]TrustedMainRuleset{goodRuleset(), second}, "refs/heads/main"); err == nil ||
+		!strings.Contains(err.Error(), "not something this builder can prove") {
+		t.Fatalf("two applicable rulesets should be an ambiguity refusal, got %v", err)
+	}
+	// Exactly one, and one that does not apply alongside it, is fine.
+	if got, err := selectTrustRoot([]TrustedMainRuleset{other, goodRuleset()}, "refs/heads/main"); err != nil ||
+		got.Name != "trusted-main-adoption" {
+		t.Fatalf("the governing ruleset was not selected: %+v / %v", got, err)
+	}
+}
+
+// TestTrustRootDigestIsCanonical proves the digest goes through the
+// repository's JCS path, so two observations that are the same trust root
+// produce the same digest regardless of field order in the wire response.
+func TestTrustRootDigestIsCanonical(t *testing.T) {
+	first, err := trustRootDigest(goodRuleset())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := trustRootDigest(goodRuleset())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || !strings.HasPrefix(first, "sha256:") {
+		t.Fatalf("digest is not a stable canonical digest: %q / %q", first, second)
+	}
+	weakened := goodRuleset()
+	weakened.PullRequest.AllowedMergeMethods = []string{"merge", "squash"}
+	changed, err := trustRootDigest(weakened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == first {
+		t.Fatal("a weakened trust root produced the same digest")
 	}
 }

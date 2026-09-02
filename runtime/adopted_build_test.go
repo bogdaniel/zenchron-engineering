@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +112,6 @@ func (f *adoptedFixture) request(t *testing.T) AdoptedBuildRequest {
 	return AdoptedBuildRequest{
 		Repository:    GitHubRepo{Owner: "acme", Name: "widgets"},
 		RepositoryDir: f.dir, OutputRoot: t.TempDir(),
-		Policy: DefaultTrustPolicy(),
 	}
 }
 
@@ -295,28 +297,6 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 	}
 }
 
-// TestAdoptedBuildRefusesATreeThatIsNotTheRevisionsTree covers the one check
-// nothing else would catch: an export that silently produced different content
-// than the commit names. The build directory is corrupted between export and
-// comparison by making the export write the wrong revision.
-func TestAdoptedBuildRefusesATreeThatIsNotTheRevisionsTree(t *testing.T) {
-	f := newAdoptedFixture(t)
-	request := f.request(t)
-	// Report the head's tree for a revision whose content differs, which is
-	// exactly the shape of a mis-exported checkout.
-	realGit := f.deps.Git
-	f.deps.Git = func(dir string, args ...string) (string, error) {
-		if len(args) == 2 && args[0] == "rev-parse" && strings.HasSuffix(args[1], "^{tree}") {
-			return strings.Repeat("0", 40), nil
-		}
-		return realGit(dir, args...)
-	}
-	if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
-		!strings.Contains(err.Error(), "holds tree") {
-		t.Fatalf("a checkout that is not the revision's tree was accepted: %v", err)
-	}
-}
-
 // assertNothingInstalled proves a refused build published nothing and left no
 // staging debris behind.
 func assertNothingInstalled(t *testing.T, root string) {
@@ -326,11 +306,29 @@ func assertNothingInstalled(t *testing.T, root string) {
 		return
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), ".staging-") {
-			t.Fatalf("a refused build published %q", entry.Name())
-		}
-		t.Fatalf("a refused build left staging debris %q", entry.Name())
+		t.Fatalf("a refused build left %q behind", entry.Name())
 	}
+}
+
+// TestAdoptedBuildRefusesATreeThatIsNotTheRevisionsTree covers the check
+// nothing else would catch: a materialization that produced different content
+// than the commit's tree names.
+func TestAdoptedBuildRefusesATreeThatIsNotTheRevisionsTree(t *testing.T) {
+	f := newAdoptedFixture(t)
+	request := f.request(t)
+	realGit := f.deps.Git
+	f.deps.Git = func(dir string, args ...string) (string, error) {
+		// Hand back content that is not the object the tree named.
+		if len(args) == 3 && args[0] == "cat-file" && args[1] == "blob" {
+			return "content that is not this object", nil
+		}
+		return realGit(dir, args...)
+	}
+	if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
+		!strings.Contains(err.Error(), "the checkout is not the tree it claims") {
+		t.Fatalf("a checkout that is not the revision's tree was accepted: %v", err)
+	}
+	assertNothingInstalled(t, request.OutputRoot)
 }
 
 // TestAdoptedBuildRefusesABinaryThatMisreportsItself proves the last gate: a
@@ -484,69 +482,78 @@ func TestAdoptedBuildPublishesAtomicallyAndNeverReplaces(t *testing.T) {
 		}
 	})
 
-	t.Run("an identical existing version is idempotent", func(t *testing.T) {
-		f := newAdoptedFixture(t)
-		request := f.request(t)
-		first, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		before, err := measureExecutable(first.OutputPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err != nil {
-			t.Fatalf("rebuilding the same artifact was refused: %v", err)
-		}
-		after, err := measureExecutable(first.OutputPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if before != after {
-			t.Fatal("an existing controller binary was replaced")
-		}
-	})
+	// AD: an existing version directory is refused outright. Two builds of the
+	// same source differ in timestamps and in the trust observations they were
+	// published under, so "equivalent" would be a semantic judgement about two
+	// historical records - and a wrong judgement silently replaces the
+	// provenance of every run the installed controller has already governed.
+	for name, arrange := range map[string]func(t *testing.T, final string){
+		"complete and correct": func(*testing.T, string) {},
+		"binary only": func(t *testing.T, final string) {
+			if err := os.Remove(filepath.Join(final, "provenance.json")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"tampered provenance": func(t *testing.T, final string) {
+			if err := os.WriteFile(filepath.Join(final, "provenance.json"), []byte("{}"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"binary removed": func(t *testing.T, final string) {
+			if err := os.Remove(filepath.Join(final, "zenchron-engineering")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run("refuse an existing version that is "+name, func(t *testing.T) {
+			f := newAdoptedFixture(t)
+			request := f.request(t)
+			first, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := filepath.Dir(first.OutputPath)
+			arrange(t, final)
+			before := snapshotDir(t, final)
 
-	t.Run("a different artifact for an existing version is refused", func(t *testing.T) {
-		f := newAdoptedFixture(t)
-		request := f.request(t)
-		first, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
-		if err != nil {
-			t.Fatal(err)
+			if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil ||
+				!strings.Contains(err.Error(), "immutable") {
+				t.Fatalf("an existing version directory was not refused: %v", err)
+			}
+			if after := snapshotDir(t, final); after != before {
+				t.Fatalf("an installed controller directory changed:\n%s\n%s", before, after)
+			}
+			entries, _ := os.ReadDir(request.OutputRoot)
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".staging-") {
+					t.Fatalf("a refused rebuild left staging debris %q", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+// snapshotDir renders a directory's exact contents, so a test can prove an
+// installed artifact was not touched at all rather than merely that its binary
+// still hashes the same.
+func snapshotDir(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "ABSENT: " + err.Error()
+	}
+	var rendered []string
+	for _, entry := range entries {
+		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			rendered = append(rendered, entry.Name()+": "+readErr.Error())
+			continue
 		}
-		installedBefore, err := measureExecutable(first.OutputPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		provenanceBefore, err := os.ReadFile(filepath.Join(filepath.Dir(first.OutputPath), "provenance.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		// The same version, different content: exactly what must never
-		// silently replace an installed controller.
-		f.deps.Build = func(_ context.Context, spec AdoptedBuildSpec) (BuildEnvironment, error) {
-			f.built = append(f.built, spec)
-			return BuildEnvironment{}, os.WriteFile(spec.Output, []byte("a different binary"), 0600)
-		}
-		_, err = BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
-		if err == nil || !strings.Contains(err.Error(), "version directories are immutable") {
-			t.Fatalf("an installed controller was replaced: %v", err)
-		}
-		installedAfter, err := measureExecutable(first.OutputPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if installedAfter != installedBefore {
-			t.Fatal("the installed binary changed")
-		}
-		provenanceAfter, err := os.ReadFile(filepath.Join(filepath.Dir(first.OutputPath), "provenance.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(provenanceAfter) != string(provenanceBefore) {
-			t.Fatal("the installed provenance changed")
-		}
-	})
+		sum := sha256.Sum256(data)
+		rendered = append(rendered, fmt.Sprintf("%s %x", entry.Name(), sum))
+	}
+	sort.Strings(rendered)
+	return strings.Join(rendered, "\n")
 }
 
 // TestAdoptedBuildRefusesMissingProductionDependencies proves the API fails
@@ -612,5 +619,60 @@ func TestAdoptedBuildProvenanceIsWrittenOwnerOnly(t *testing.T) {
 		if strings.Contains(strings.ToLower(string(data)), strings.ToLower(forbidden)) {
 			t.Fatalf("the provenance artifact names %q", forbidden)
 		}
+	}
+}
+
+// TestFrozenAdoptionPolicyIsNotCallerWeakenable is defect AA.
+//
+// The policy used to arrive in the request, and only an empty Ref triggered the
+// default. A programmatic caller could therefore weaken the trusted ref, the
+// required check, the allowed merge methods or the strict-check rule and still
+// receive an artifact labelled adopted - which would make the label mean
+// whatever the caller wanted it to.
+//
+// There is now exactly one adoption policy and no way to pass another. The
+// request type has no policy field at all, which is the strongest form of this
+// guarantee: it is not validated, it is unrepresentable.
+func TestFrozenAdoptionPolicyIsNotCallerWeakenable(t *testing.T) {
+	if fields := reflect.TypeOf(AdoptedBuildRequest{}); true {
+		for i := 0; i < fields.NumField(); i++ {
+			if fields.Field(i).Type == reflect.TypeOf(TrustPolicy{}) {
+				t.Fatalf("AdoptedBuildRequest carries a caller-supplied trust policy in field %q", fields.Field(i).Name)
+			}
+		}
+	}
+
+	// And the frozen policy is the one the build actually demands: a trust
+	// root that satisfies anything weaker is refused.
+	frozen := DefaultTrustPolicy()
+	for name, weaken := range map[string]func(*TrustedMainRuleset){
+		"squash allowed":    func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = []string{"merge", "squash"} },
+		"rebase allowed":    func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = []string{"rebase"} },
+		"checks not strict": func(r *TrustedMainRuleset) { r.RequiredChecks.Strict = false },
+		"another check": func(r *TrustedMainRuleset) {
+			r.RequiredChecks.Checks = []RequiredCheck{{Context: "lint", IntegrationID: 15368}}
+		},
+		"another ref":        func(r *TrustedMainRuleset) { r.Targets = []string{"refs/heads/release"} },
+		"undisclosed bypass": func(r *TrustedMainRuleset) { r.BypassActorsKnown = false },
+	} {
+		t.Run("refuse a trust root with "+name, func(t *testing.T) {
+			f := newAdoptedFixture(t)
+			weakened := goodRuleset()
+			weaken(&weakened)
+			f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+				return []TrustedMainRuleset{weakened}, nil
+			}
+			request := f.request(t)
+			if _, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{}); err == nil {
+				t.Fatal("a weakened trust root produced an adopted artifact")
+			}
+			assertNothingInstalled(t, request.OutputRoot)
+		})
+	}
+
+	// The exact frozen policy is accepted, so the refusals above are about the
+	// weakening and not about the check being impossible to satisfy.
+	if err := VerifyTrustRoot(goodRuleset(), frozen); err != nil {
+		t.Fatalf("the frozen policy refuses its own intended trust root: %v", err)
 	}
 }
