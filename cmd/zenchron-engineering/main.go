@@ -96,6 +96,12 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		fmt.Fprintln(stdout, version)
 		return runtime.ExitCompleted, nil
 	}
+	if len(args) >= 2 && args[0] == "controller" && args[1] == "inspect-self" {
+		return controllerInspectSelf(args[2:], stdout)
+	}
+	if len(args) >= 2 && args[0] == "controller" && args[1] == "build-adopted" {
+		return controllerBuildAdopted(args[2:], autonomyOverrides{}, stdout)
+	}
 	if len(args) >= 1 && args[0] == "autonomy" {
 		return autonomy(args[1:], autonomyOverrides{}, stdout)
 	}
@@ -115,7 +121,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|autonomy ...|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|controller inspect-self [--json]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|autonomy ...|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
 }
 
 func parseModelFlags(args []string) ([]string, error) {
