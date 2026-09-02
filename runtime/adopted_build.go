@@ -608,7 +608,7 @@ func safeTreePath(path string) error {
 // checked against the id the tree named rather than assumed correct.
 func blobID(content string) string {
 	sum := sha1.New()
-	fmt.Fprintf(sum, "blob %d\x00", len(content))
+	_, _ = fmt.Fprintf(sum, "blob %d\x00", len(content))
 	_, _ = io.WriteString(sum, content)
 	return hex.EncodeToString(sum.Sum(nil))
 }

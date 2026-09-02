@@ -99,6 +99,9 @@ func TestControllerCommandsRefuseArgumentsTheyDoNotOwn(t *testing.T) {
 	if _, err := controllerInspectSelf([]string{"--verbose"}, &out); err == nil {
 		t.Fatal("inspect-self accepted an unknown argument")
 	}
+	if _, err := controllerInspectSelf([]string{"--json", "--json"}, &out); err == nil {
+		t.Fatal("inspect-self accepted a repeated flag")
+	}
 	if _, err := controllerInspectSelf([]string{"--json"}, &out); err != nil {
 		t.Fatalf("inspect-self refused its own flag: %v", err)
 	}

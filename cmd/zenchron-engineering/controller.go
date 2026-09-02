@@ -130,10 +130,15 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 func controllerInspectSelf(args []string, stdout io.Writer) (int, error) {
 	// The syntax is exactly one optional flag. Silently ignoring anything else
 	// would let a typo look like it worked.
+	seenJSON := false
 	for _, arg := range args {
 		if arg != "--json" {
 			return runtime.ExitInvalid, fmt.Errorf("controller inspect-self accepts only --json, got %q", arg)
 		}
+		if seenJSON {
+			return runtime.ExitInvalid, fmt.Errorf("controller inspect-self accepts --json at most once")
+		}
+		seenJSON = true
 	}
 	build, err := controllerBuild()
 	if err != nil {
