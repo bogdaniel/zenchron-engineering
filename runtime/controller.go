@@ -514,6 +514,7 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 
 func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {
 	now := r.deps.Clock.Now()
+	budgets := r.deps.Budgets.defaults()
 	run := EngineeringRun{
 		SchemaVersion:    SchemaVersion,
 		ID:               runID,
@@ -524,10 +525,13 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		Base:             Ref{ID: r.deps.Repository.DefaultBranch},
 		Candidate:        Candidate{Branch: candidateBranch(runID)},
 		ControllerSHA256: r.controller,
-		// A new run persists the bounds it is judged under, so replaying it
-		// later reproduces its terminal decision from durable state rather
-		// than from whatever the operator configured afterwards.
-		Budgets:   r.deps.Budgets.defaults(),
+		// A new run persists the bounds it was created under. Today the
+		// continuation bound is the one runState reads back from here, so it
+		// is the one whose terminal decision replays from durable state rather
+		// than from whatever is configured afterwards; the wall limit and the
+		// attempt ceilings are still read live. Persisting the whole record
+		// now is what lets the rest follow without another schema change.
+		Budgets:   &budgets,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

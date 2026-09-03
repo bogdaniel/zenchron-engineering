@@ -705,11 +705,13 @@ func (s *runState) startedContinuationBindings() map[string]bool {
 // reproduce that. The oldest runs persisted no budgets at all, and for those
 // the attempt budget is the configured one, exactly as it was when they ran.
 func (s *runState) continuationLimit() int {
-	if limit := s.run.Budgets.MaxExecutionContinuations; limit > 0 {
-		return limit
-	}
-	if legacy := s.run.Budgets.MaxExecutionAttempts; legacy > 0 {
-		return legacy
+	if budgets := s.run.Budgets; budgets != nil {
+		if limit := budgets.MaxExecutionContinuations; limit > 0 {
+			return limit
+		}
+		if legacy := budgets.MaxExecutionAttempts; legacy > 0 {
+			return legacy
+		}
 	}
 	return s.rt.deps.Budgets.MaxExecutionAttempts
 }

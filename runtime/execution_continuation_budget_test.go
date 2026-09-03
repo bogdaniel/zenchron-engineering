@@ -36,9 +36,18 @@ type continuationFixture struct {
 func (f continuationFixture) state(t *testing.T) *runState {
 	t.Helper()
 	budgets := RunBudgets{WallLimit: time.Hour, MaxExecutionAttempts: f.attempts, MaxAssuranceAttempts: 2, MaxRemediationAttempts: 2}
-	persisted := budgets
+	// A legacy run has NO persisted budgets at all - the field did not exist -
+	// so the fixture leaves the pointer nil rather than storing zeroes.
+	var persisted *RunBudgets
 	if !f.legacy {
-		persisted.MaxExecutionContinuations = f.limit
+		stated := budgets
+		stated.MaxExecutionContinuations = f.limit
+		persisted = &stated
+	} else if f.attempts > 0 {
+		// A record persisted by a build that stored budgets but had no
+		// continuation field: zero there is the legacy rule, not the default.
+		legacy := budgets
+		persisted = &legacy
 	}
 	operations := map[string]RunOperation{}
 	for _, op := range f.operations {
@@ -317,18 +326,27 @@ func TestNewRunsPersistAnExplicitContinuationBudget(t *testing.T) {
 	if budgets.MaxExecutionContinuations != DefaultMaxExecutionContinuations {
 		t.Fatalf("default continuation budget = %d, want %d", budgets.MaxExecutionContinuations, DefaultMaxExecutionContinuations)
 	}
-	encoded, err := json.Marshal(EngineeringRun{ID: "run-new", Budgets: budgets})
+	encoded, err := json.Marshal(EngineeringRun{ID: "run-new", Budgets: &budgets})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(encoded), `"max_execution_continuations":8`) {
 		t.Fatalf("a new run did not persist an explicit continuation budget: %s", encoded)
 	}
+	// A run that predates the field must serialize exactly as it did before it
+	// existed, or every historical state digest silently changes.
+	historical, err := json.Marshal(EngineeringRun{ID: "run-historical"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(historical), "budgets") {
+		t.Fatalf("a pre-#54 run gained a budgets member in its durable document: %s", historical)
+	}
 	var restored EngineeringRun
 	if err := json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.Budgets.MaxExecutionContinuations != DefaultMaxExecutionContinuations {
+	if restored.Budgets == nil || restored.Budgets.MaxExecutionContinuations != DefaultMaxExecutionContinuations {
 		t.Fatal("the persisted continuation budget did not survive a round trip")
 	}
 	// An explicit operator value is persisted verbatim rather than defaulted.
