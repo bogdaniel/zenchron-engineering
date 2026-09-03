@@ -222,6 +222,11 @@ func TestNormalCompletionWithNoDeltaNeedsNoFakeCommit(t *testing.T) {
 	if fixture.state(runID).projection.CandidateRevision == "" {
 		t.Fatal("the inherited checkpoint was lost")
 	}
+	// Inheriting the revision is only half of it: a run that completes has to
+	// arrive at a COMPLETE candidate, not a permanently checkpointed one.
+	if !fixture.state(runID).projection.CandidateComplete {
+		t.Fatal("a completed zero-delta continuation left its candidate incomplete")
+	}
 }
 
 // TestUnknownProviderFailuresStayUnknown is cases G and H. A previous
