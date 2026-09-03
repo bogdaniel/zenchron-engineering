@@ -520,10 +520,24 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			class = result.Failure.Classification
 		}
 		record.FailureClass = class
-		// Work exists and one of the runtime's own bounds ended the invocation:
-		// that is INCOMPLETE, not merely unknown. Naming it is what routes the
-		// operation to a continuation under the ordinary execution budget.
-		if record.Mutated && continuationEligible(execErr) {
+		// One of the runtime's OWN bounds ended the invocation: that is
+		// INCOMPLETE, not unknown. The runtime set the ceiling, the runtime
+		// observed it being reached, and there is nothing undiagnosed about it.
+		//
+		// This deliberately does not depend on whether THIS invocation changed
+		// anything. Tying the classification to mutation conflated two
+		// questions - "is there work to check point?" and "do we know what
+		// happened?" - and answered the second with the first. The cost was
+		// exact: an initial invocation that reasoned its way through the budget
+		// without writing a patch was called unknown and stopped the run at
+		// attempt 1 of 3, so the configured execution budget was unreachable
+		// for the one failure it most obviously exists for; and a continuation
+		// that added nothing stranded checkpoints the run had already
+		// committed and reassessed.
+		//
+		// Whether a checkpoint exists is still answered by mutation, just
+		// below. These are separate facts and they are now recorded separately.
+		if continuationEligible(execErr) {
 			class = FailureExecutionIncomplete
 			record.FailureClass = class
 		}
@@ -548,8 +562,18 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 		// A producer that left real work behind did its bounded job, so the
 		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
-		// is recorded as a checkpoint rather than as an operation failure. A
-		// producer that left nothing behind failed outright, exactly as before.
+		// is recorded as a checkpoint rather than as an operation failure.
+		//
+		// A producer that left nothing behind did not satisfy this operation,
+		// so the operation fails - and with the class above it now fails INTO
+		// the existing attempt budget rather than out of the run. The next
+		// attempt binds to the same identity bindExecutionInvoke already
+		// derives: the trusted base for an initial invocation, and the exact
+		// checkpoint commit for a continuation. Nothing new counts anything:
+		// the scheduler's existing per-operation attempts bound the retries,
+		// and the checkpoint ceiling still bounds how much unfinished work one
+		// run may accumulate, because a zero-delta invocation creates no
+		// checkpoint.
 		if !record.Mutated {
 			produced.state = OperationFailed
 		}
