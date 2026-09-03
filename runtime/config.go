@@ -119,10 +119,40 @@ type GitHubConfig struct {
 
 // BudgetConfig is the operator ceiling for one run.
 type BudgetConfig struct {
-	WallLimitSeconds       int `json:"wall_limit_seconds"`
-	MaxExecutionAttempts   int `json:"max_execution_attempts"`
-	MaxRemediationAttempts int `json:"max_remediation_attempts"`
-	MaxAssuranceAttempts   int `json:"max_assurance_attempts"`
+	WallLimitSeconds     int `json:"wall_limit_seconds"`
+	MaxExecutionAttempts int `json:"max_execution_attempts"`
+	// MaxExecutionContinuations bounds how many DISTINCT continuation
+	// execution bindings one run may start. It is a different resource from
+	// MaxExecutionAttempts, which bounds retries of ONE binding, and the two
+	// were conflated until #54: productive continuation depth was spent out of
+	// the retry budget, so a run doing four pieces of real work in a row was
+	// terminated by a ceiling meant for four failures of the same work.
+	//
+	// It is the one budget that may be absent from an existing operator
+	// configuration, because it did not exist when those files were written.
+	// Absent means "the operator has not stated one", which resolves to the M1
+	// default in RunBudgets.defaults - a finite positive number that the run
+	// then persists explicitly. A NEGATIVE value is refused like any other
+	// malformed bound. There is no spelling of this field that means unbounded.
+	MaxExecutionContinuations int `json:"max_execution_continuations,omitempty"`
+	MaxRemediationAttempts    int `json:"max_remediation_attempts"`
+	MaxAssuranceAttempts      int `json:"max_assurance_attempts"`
+}
+
+// DefaultMaxExecutionContinuations is the M1 continuation depth for a new run.
+// It is deliberately larger than the retry budget: retries repeat one piece of
+// work, continuations are successive pieces of it, and a task needing eight
+// productive steps is ordinary rather than pathological.
+const DefaultMaxExecutionContinuations = 8
+
+// resolved fills in the budget an operator configuration may omit. It is the
+// only defaulting the configuration layer does, and it produces a finite
+// positive bound, never an unbounded one.
+func (b BudgetConfig) resolved() BudgetConfig {
+	if b.MaxExecutionContinuations == 0 {
+		b.MaxExecutionContinuations = DefaultMaxExecutionContinuations
+	}
+	return b
 }
 
 // WatchConfig is the operator's watch enrolment. Repositories is the complete
@@ -186,10 +216,11 @@ type OperatorConfig struct {
 // member is a pointer so "absent" is distinguishable from "zero"; zero would
 // otherwise read as a request to tighten to nothing.
 type RepositoryBudgets struct {
-	WallLimitSeconds       *int `json:"wall_limit_seconds,omitempty"`
-	MaxExecutionAttempts   *int `json:"max_execution_attempts,omitempty"`
-	MaxRemediationAttempts *int `json:"max_remediation_attempts,omitempty"`
-	MaxAssuranceAttempts   *int `json:"max_assurance_attempts,omitempty"`
+	WallLimitSeconds          *int `json:"wall_limit_seconds,omitempty"`
+	MaxExecutionAttempts      *int `json:"max_execution_attempts,omitempty"`
+	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
+	MaxRemediationAttempts    *int `json:"max_remediation_attempts,omitempty"`
+	MaxAssuranceAttempts      *int `json:"max_assurance_attempts,omitempty"`
 }
 
 // RepositoryWatch is the only part of watch a repository may address, and both
@@ -234,10 +265,11 @@ type Config struct {
 // RunBudgets is the runtime-facing form of the effective budgets.
 func (c Config) RunBudgets() RunBudgets {
 	return RunBudgets{
-		WallLimit:              time.Duration(c.Budgets.WallLimitSeconds) * time.Second,
-		MaxExecutionAttempts:   c.Budgets.MaxExecutionAttempts,
-		MaxRemediationAttempts: c.Budgets.MaxRemediationAttempts,
-		MaxAssuranceAttempts:   c.Budgets.MaxAssuranceAttempts,
+		WallLimit:                 time.Duration(c.Budgets.WallLimitSeconds) * time.Second,
+		MaxExecutionAttempts:      c.Budgets.MaxExecutionAttempts,
+		MaxExecutionContinuations: c.Budgets.MaxExecutionContinuations,
+		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
+		MaxAssuranceAttempts:      c.Budgets.MaxAssuranceAttempts,
 	}
 }
 
@@ -310,6 +342,12 @@ func LoadOperatorConfig(path string) (OperatorConfig, string, error) {
 	if err := operator.validate(path); err != nil {
 		return OperatorConfig{}, "", err
 	}
+	// Resolve the one budget that may legitimately be absent BEFORE the digest
+	// and before repository tightening, so every later reader - the tighten
+	// ceiling, RunBudgets, provenance - sees the same effective number the run
+	// will be bounded by. An absent field and an explicit 8 are the same
+	// configuration and digest identically, because they are.
+	operator.Budgets = operator.Budgets.resolved()
 	digest, err := Digest(operator)
 	if err != nil {
 		return OperatorConfig{}, "", &ConfigError{Path: path, Detail: err.Error()}
@@ -388,6 +426,7 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	}{
 		{"budgets.wall_limit_seconds", budgets.WallLimitSeconds, &tightened.Budgets.WallLimitSeconds},
 		{"budgets.max_execution_attempts", budgets.MaxExecutionAttempts, &tightened.Budgets.MaxExecutionAttempts},
+		{"budgets.max_execution_continuations", budgets.MaxExecutionContinuations, &tightened.Budgets.MaxExecutionContinuations},
 		{"budgets.max_remediation_attempts", budgets.MaxRemediationAttempts, &tightened.Budgets.MaxRemediationAttempts},
 		{"budgets.max_assurance_attempts", budgets.MaxAssuranceAttempts, &tightened.Budgets.MaxAssuranceAttempts},
 	}
@@ -565,6 +604,15 @@ func (c OperatorConfig) validate(path string) error {
 		if bound.value < 1 {
 			return refuse(bound.name + " must be at least 1")
 		}
+	}
+	// max_execution_continuations is bounded exactly like its neighbours, with
+	// one difference: absent is allowed, because operator configurations
+	// written before #54 cannot contain it and refusing them would make the
+	// field's introduction an outage. Absent resolves to the M1 default in
+	// BudgetConfig.resolved. Zero written explicitly, or any negative value,
+	// is malformed and refused - neither is a way to ask for unbounded.
+	if c.Budgets.MaxExecutionContinuations < 0 {
+		return refuse("budgets.max_execution_continuations must be at least 1")
 	}
 	if c.GC.RetentionHours < 0 {
 		return refuse("gc.retention_hours must not be negative")

@@ -524,12 +524,17 @@ func (s *runState) conditions() (Disposition, string) {
 	if pr := s.projection.PullRequest; pr != nil && pr.State == string(GitHubClosed) && !pr.Merged {
 		return Waiting, "pull_request_closed_unmerged"
 	}
-	// Continuations are bounded by the run's execution budget. Each checkpoint
-	// is different work against a different commit, so it earns its own
-	// operation and its own attempts; what must not be unbounded is how many
-	// times a provider may leave work unfinished. Exceeding it is a precise
-	// bounded failure, never a run that quietly concludes its goal was reached.
-	if limit := s.rt.deps.Budgets.MaxExecutionAttempts; limit > 0 && s.projection.Checkpoints > limit {
+	// Continuation depth is its own finite resource, spent by STARTING a new
+	// distinct continuation binding and by nothing else.
+	//
+	// This used to read projection.Checkpoints > MaxExecutionAttempts, which
+	// was wrong twice over. It spent the retry budget on productive work, so a
+	// run that did four different things in a row was stopped by a ceiling
+	// meant for four failures of the same thing; and it counted CHECKPOINTS,
+	// which are not continuation bindings. Run
+	// run-1b876b78f20d83195e6b503831fcc9c7 is the proof: 4 checkpoints, 3
+	// distinct continuation bindings, terminated while still productive.
+	if s.continuationCeilingReached() {
 		return Failed, "execution_continuations_exhausted"
 	}
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
@@ -649,13 +654,12 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 		return "initial|" + s.contractRevision() + "|" + s.pinnedBase(), true
 	}
 	// Continuation: the head is a runtime-owned checkpoint, so the producer was
-	// interrupted rather than finished. One continuation per checkpoint, bound
-	// to that exact commit, so a continuation can never be confused with a
-	// retry of the invocation that produced it. The count of checkpoints is
-	// what bounds this, in conditions(); an operation identity cannot, because
-	// each checkpoint is genuinely different work.
+	// interrupted rather than finished. One continuation per checkpoint commit,
+	// bound to that exact commit, so a continuation can never be confused with
+	// a retry of the invocation that produced it. How many DISTINCT bindings of
+	// this shape a run may start is bounded in conditions().
 	if !s.projection.CandidateComplete {
-		return "continuation|" + s.projection.CandidateRevision, true
+		return invocationContinuationPrefix + s.projection.CandidateRevision, true
 	}
 	// Bounded remediation: only a CURRENT-head failure that routes to a
 	// producer. An authority wait never reaches this branch, because
@@ -665,6 +669,82 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 		return "", false
 	}
 	return "remediation|" + s.projection.CandidateRevision + "|" + string(class), true
+}
+
+// invocationContinuationPrefix marks an execution binding as continuing
+// interrupted work on an exact checkpoint commit. It is part of the durable
+// operation identity, which is what makes continuation depth replayable.
+const invocationContinuationPrefix = "continuation|"
+
+// startedContinuationBindings is the set of DISTINCT continuation execution
+// bindings durable state shows this run has already started.
+//
+// It reads operations, not events, because an operation IS the binding: every
+// retry of continuation|A reuses one operation with one idempotency key, so
+// counting operations counts bindings and counting attempts does not. Nothing
+// here looks at checkpoints, commits, provider invocations or reassessments.
+func (s *runState) startedContinuationBindings() map[string]bool {
+	started := map[string]bool{}
+	for _, op := range s.snapshot.Operations {
+		if op.Kind != OpExecutionInvoke {
+			continue
+		}
+		if binding := bindingOf(op); strings.HasPrefix(binding, invocationContinuationPrefix) {
+			started[binding] = true
+		}
+	}
+	return started
+}
+
+// continuationLimit is the run's continuation bound, taken from durable state.
+//
+// A run created after #54 persisted an explicit positive budget and is judged
+// by it forever, whatever the operator configures later. A run created BEFORE
+// #54 persisted nothing, and its absence is not "use the new default": it means
+// the run was bounded by the execution-attempt budget, so replaying it has to
+// reproduce that. The oldest runs persisted no budgets at all, and for those
+// the attempt budget is the configured one, exactly as it was when they ran.
+func (s *runState) continuationLimit() int {
+	if limit := s.run.Budgets.MaxExecutionContinuations; limit > 0 {
+		return limit
+	}
+	if legacy := s.run.Budgets.MaxExecutionAttempts; legacy > 0 {
+		return legacy
+	}
+	return s.rt.deps.Budgets.MaxExecutionAttempts
+}
+
+// continuationCeilingReached answers the only question the ceiling is about:
+// may this run START one more distinct continuation binding?
+//
+// It asks the planner what binding it wants rather than predicting anything.
+// That matters because whether an invocation mutates, completes, or does
+// neither is not knowable before it runs - which is exactly why counting
+// checkpoints in advance could never express this rule.
+//
+// Consequences, all of them deliberate:
+//
+//   - retries of an already-started binding are not refused here at all; they
+//     are bounded by that binding's own MaxExecutionAttempts;
+//   - a candidate that COMPLETES is never retroactively failed, because a
+//     complete head asks for no continuation binding;
+//   - the last permitted continuation may finish and go on to assurance;
+//   - only a genuinely NEW binding beyond the ceiling is refused, and the
+//     checkpoint that asked for it is preserved by not being touched.
+func (s *runState) continuationCeilingReached() bool {
+	limit := s.continuationLimit()
+	if limit <= 0 {
+		return false
+	}
+	binding, wanted := bindExecutionInvoke(s)
+	if !wanted || !strings.HasPrefix(binding, invocationContinuationPrefix) {
+		return false
+	}
+	started := s.startedContinuationBindings()
+	if started[binding] {
+		return false
+	}
+	return len(started) >= limit
 }
 
 func bindRemediationGofmt(s *runState) (string, bool) {

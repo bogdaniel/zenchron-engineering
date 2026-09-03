@@ -100,6 +100,7 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"github.endpoint",
 		"budgets.wall_limit_seconds",
 		"budgets.max_execution_attempts",
+		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
 		"watch.repositories",
@@ -122,6 +123,7 @@ func TestRepositoryLayerReachesOnlyTightenableBounds(t *testing.T) {
 	requireMembers(t, "RepositoryConfig", reflect.TypeOf(RepositoryConfig{}), []string{
 		"budgets.wall_limit_seconds",
 		"budgets.max_execution_attempts",
+		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
 		"watch.poll_interval_seconds",

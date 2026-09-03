@@ -140,9 +140,14 @@ type EngineeringRun struct {
 	Candidate        Candidate   `json:"candidate"`
 	Contract         Ref         `json:"contract"`
 	ControllerSHA256 string      `json:"controller_sha256"`
-	CreatedAt        time.Time   `json:"created_at"`
-	UpdatedAt        time.Time   `json:"updated_at"`
-	Cursor           Cursor      `json:"journal_cursor"`
+	// Budgets are the bounds this run is judged under, captured when it was
+	// created. A run created before this field existed has the zero value, and
+	// runState.continuationLimit reads that absence as the legacy rule rather
+	// than as today's configuration.
+	Budgets   RunBudgets `json:"budgets,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	Cursor    Cursor     `json:"journal_cursor"`
 }
 type RunOperation struct {
 	SchemaVersion    string          `json:"schema_version"`
