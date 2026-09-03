@@ -456,6 +456,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureWorkspaceIntegrity, ExecutionResult{}, err),
 		}}
 	}
+	// PROVIDER ADMISSION. The confidentiality decision has to be made before
+	// the producer exists, because admission is what it actually controls: once
+	// a provider is running against this workspace, candidate.run can read
+	// every byte in it, so refusing an individual repo.read afterwards decides
+	// nothing. The gate is the mount, not the tool.
+	//
+	// It is also why this is here rather than one frame later: discovering a
+	// local prerequisite defect by spending a reasoning budget on it is the
+	// same mistake #46 was about, in a different place.
+	if err := ScanCandidateForCredentialValues(workspace.Dir); err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureCandidateCredentialMaterial},
+			Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureCandidateCredentialMaterial, ExecutionResult{}, err),
+		}}
+	}
 	result, execErr := r.deps.Provider.Execute(ctx, ExecutionRequest{
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
@@ -664,10 +679,11 @@ type ExecutionDiagnostic struct {
 // bounded reasoning loop that stopped, a result the provider itself classified,
 // or the runtime's own pre-invocation subject check.
 const (
-	execStageWorkspaceSubject = "workspace_subject"
-	execStageProviderRequest  = "provider_request"
-	execStageProviderLoop     = "provider_loop"
-	execStageProviderResult   = "provider_result"
+	execStageWorkspaceSubject   = "workspace_subject"
+	execStageCandidateAdmission = "candidate_admission"
+	execStageProviderRequest    = "provider_request"
+	execStageProviderLoop       = "provider_loop"
+	execStageProviderResult     = "provider_result"
 )
 
 func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClass, result ExecutionResult, cause error) *ExecutionDiagnostic {

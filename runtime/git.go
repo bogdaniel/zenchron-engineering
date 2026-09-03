@@ -230,6 +230,15 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if err := GuardCandidate(w.Dir, paths, maxBytes); err != nil {
 		return CommitResult{}, err
 	}
+	// The OUTPUT half of the credential boundary. Admission proved the
+	// workspace was clean before the producer was shown it; this proves the
+	// producer did not introduce a credential value into what is about to
+	// become a runtime-owned commit. A value found here is REFUSED, not
+	// redacted and not ignored: redacting it would commit a rewritten version
+	// of the producer's work, and ignoring it would publish the secret.
+	if err := scanPathsForCredentialValues(w.Dir, paths); err != nil {
+		return CommitResult{}, err
+	}
 	if _, err := runGit(w.Dir, "add", "-A", "--"); err != nil {
 		return CommitResult{}, err
 	}

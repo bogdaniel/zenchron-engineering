@@ -114,6 +114,21 @@ func decodeToolArguments(raw []byte, into any) error {
 // returns an error to the caller and never panics out: a refusal or a broker
 // failure comes back as an ordinary tool result with failed=true, which the
 // reasoning loop feeds to the model and counts toward no-progress detection.
+//
+// It is also the ONE place model-visible text is redacted, and that is why
+// redaction lives here rather than in each capability: a file read, a search
+// hit, a diff hunk and a command's stdout are all just text on its way to the
+// same provider, and a boundary with five entrances is a boundary with four
+// gaps. candidate.run was the gap - it could print a file the broker refused
+// to read.
+//
+// The failure path is redacted too. A diagnostic is text the model sees, so an
+// unredacted error message is simply a second, quieter channel for the same
+// secret.
+//
+// Redaction happens BEFORE bounding. Truncating first would leave the decision
+// to chance: whether a secret reached the model would depend on how far down
+// the output it happened to sit.
 func (s ToolSurface) Invoke(ctx context.Context, name string, arguments []byte) (result string, failed bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -122,9 +137,9 @@ func (s ToolSurface) Invoke(ctx context.Context, name string, arguments []byte) 
 	}()
 	output, err := s.dispatch(ctx, name, arguments)
 	if err != nil {
-		return "tool error: " + err.Error(), true
+		return s.bound(RedactCredentialValues("tool error: " + err.Error())), true
 	}
-	return s.bound(output), false
+	return s.bound(RedactCredentialValues(output)), false
 }
 
 func (s ToolSurface) dispatch(ctx context.Context, name string, arguments []byte) (string, error) {
