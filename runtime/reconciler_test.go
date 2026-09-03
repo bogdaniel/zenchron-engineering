@@ -162,11 +162,29 @@ type phase8Fixture struct {
 
 const phase8Issue = 41
 
-func newPhase8Fixture(t *testing.T) *phase8Fixture {
+// newPhase8Fixture builds the standard governed-run fixture. The optional seed
+// functions run against the origin repository BEFORE the base revision is
+// bound, so a test can start from a base that already contains something -
+// which is the only way to observe what the runtime does with content a
+// producer has not yet been shown.
+func newPhase8Fixture(t *testing.T, seed ...func(origin string)) *phase8Fixture {
 	t.Helper()
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin")
 	base := initFixtureRepo(t, origin, "README.md", "base\n")
+	for _, apply := range seed {
+		apply(origin)
+		for _, args := range [][]string{{"add", "-A"}, {"commit", "--no-gpg-sign", "-m", "fixture seed"}} {
+			if _, err := runGit(origin, args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		head, err := gitOutput(origin, "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		base = strings.TrimSpace(head)
+	}
 	branch, err := gitOutput(origin, "branch", "--show-current")
 	if err != nil {
 		t.Fatal(err)
