@@ -48,7 +48,12 @@ func detectorVocabulary() string {
 // runtime classified its own scanner source as credential material.
 func TestCredentialDetectorSeparatesVocabularyFromValues(t *testing.T) {
 	for name, text := range map[string]string{
-		"a bare fine-grained prefix":   "const githubFineGrained = \"github_pat_\"",
+		"a bare fine-grained prefix": "const githubFineGrained = \"github_pat_\"",
+		// A documentation placeholder is long enough to look like a token body
+		// but has no separator. Treating it as a credential would be the same
+		// false positive one layer down.
+		"a documentation placeholder":  "GITHUB_TOKEN=github_pat_REPLACE_WITH_YOUR_TOKEN",
+		"a near-miss without the tail": "github_pat_" + strings.Repeat("F", 22),
 		"a bare classic prefix":        "if strings.HasPrefix(token, \"ghp_\") {",
 		"an environment variable name": "for _, key := range []string{\"AWS_SECRET_ACCESS_KEY\", \"aws_secret_access_key\"} {",
 		"a lone PEM marker":            "const pemHeader = \"-----BEGIN PRIVATE KEY-----\"",
@@ -203,6 +208,74 @@ func TestProviderAdmissionRefusesCredentialMaterialBeforeInference(t *testing.T)
 	}
 }
 
+// TestAdmissionRefusesCredentialFilesWhateverTheyContain is the second half of
+// the bypass. A .env holding an opaque value matches no detector, the path gate
+// refuses to BROKER it, and candidate.run reads it anyway from the bind mount -
+// so admission is the only layer where refusing it means anything.
+func TestAdmissionRefusesCredentialFilesWhateverTheyContain(t *testing.T) {
+	for name, body := range map[string]string{
+		".env":        "TOKEN=hunter2\n",
+		"id_rsa":      "opaque key material\n",
+		"store.p12":   "binary-ish\n",
+		"deploy.env":  "API_KEY=abc\n",
+		"server.pem":  "not even a PEM\n",
+		"credentials": "[default]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := ScanCandidateForCredentialValues(root)
+			if err == nil {
+				t.Fatalf("admission accepted a candidate containing %q", name)
+			}
+			var material *CredentialMaterialError
+			if !asCredentialMaterial(err, &material) || material.Kind != CredentialMaterialFile {
+				t.Fatalf("admission refusal was not a credential-file finding: %#v", err)
+			}
+		})
+	}
+	// Committed documentation is not a credential, and refusing it would make a
+	// very large share of repositories unworkable.
+	for _, name := range []string{".env.example", ".env.sample", ".env.template"} {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, name), []byte("TOKEN=changeme\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ScanCandidateForCredentialValues(root); err != nil {
+			t.Errorf("admission refused committed documentation %q: %v", name, err)
+		}
+	}
+}
+
+// TestProviderAdmissionRefusesCredentialFilesBeforeInference proves the same
+// through the runtime, with the provider counting its own invocations.
+func TestProviderAdmissionRefusesCredentialFilesBeforeInference(t *testing.T) {
+	fixture := newPhase8Fixture(t, func(origin string) {
+		if err := os.WriteFile(filepath.Join(origin, ".env"), []byte("TOKEN=hunter2\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	provider := &countingProvider{}
+	fixture.deps.Provider = provider
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+	for pass := 0; pass < 10; pass++ {
+		fixture.reconcile(runID)
+		if terminalDisposition(fixture.state(runID).snapshot.Disposition) {
+			break
+		}
+	}
+	if provider.calls != 0 {
+		t.Fatalf("provider was invoked %d time(s) despite a .env in the candidate", provider.calls)
+	}
+	class, found := executionFailureClass(t, fixture.state(runID))
+	if !found || class != FailureCandidateCredentialMaterial {
+		t.Fatalf("execution failure class = %q found=%v, want %q", class, found, FailureCandidateCredentialMaterial)
+	}
+}
+
 // TestProviderAdmissionAcceptsDetectorVocabulary is the other half: a candidate
 // full of scanner source is admitted normally.
 func TestProviderAdmissionAcceptsDetectorVocabulary(t *testing.T) {
@@ -221,8 +294,8 @@ func TestProviderAdmissionAcceptsDetectorVocabulary(t *testing.T) {
 		t.Fatal("admission accepted a candidate containing a token value")
 	}
 	var material *CredentialMaterialError
-	if !asCredentialMaterial(err, &material) || material.Path != "leaked.txt" {
-		t.Fatalf("admission refusal did not name the path: %#v", err)
+	if !asCredentialMaterial(err, &material) || material.Path != "leaked.txt" || material.Kind != CredentialMaterialValue {
+		t.Fatalf("admission refusal did not name the path and kind: %#v", err)
 	}
 	// The diagnostic must not quote the secret it is refusing.
 	if strings.Contains(err.Error(), githubClassicTokenValue()) {
