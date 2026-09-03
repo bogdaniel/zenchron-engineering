@@ -29,9 +29,9 @@ func toolBrokerFixture(t *testing.T) (ToolBroker, string) {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
-		"hello.txt":     "candidate-content-9c3\n",
-		"deploy.env":    "TOKEN=fixture-9c3\n",
-		"sub/notes.txt": "-----BEGIN PRIVATE KEY-----\nfixture-9c3\n",
+		"hello.txt":      "candidate-content-9c3\n",
+		"deploy.env":     "TOKEN=fixture-9c3\n",
+		"sub/id_ed25519": "-----BEGIN PRIVATE KEY-----\nfixture-9c3\n",
 	} {
 		if err := os.WriteFile(filepath.Join(candidate, filepath.FromSlash(name)), []byte(body), 0600); err != nil {
 			t.Fatal(err)
@@ -70,9 +70,10 @@ func TestToolBrokerConfinesEveryPathCapabilityToTheCandidateWorkspace(t *testing
 			t.Fatalf("brokered diff escaped the workspace via %q: %q", unsafe, diff)
 		}
 	}
-	// Credential-shaped names and contents are refused even inside the
-	// workspace, so a brokered read cannot surface them.
-	for _, sensitive := range []string{"deploy.env", "sub/notes.txt"} {
+	// Credential FILES are refused even inside the workspace, so a brokered
+	// read cannot surface them. What is no longer refused is a file that merely
+	// mentions a credential format: see credential_boundary_test.go.
+	for _, sensitive := range []string{"deploy.env", "sub/id_ed25519"} {
 		if data, err := broker.ReadFile(sensitive); err == nil {
 			t.Fatalf("brokered read exposed credential-shaped path %q: %q", sensitive, data)
 		}

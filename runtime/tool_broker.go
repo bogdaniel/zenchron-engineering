@@ -49,14 +49,20 @@ func (b ToolBroker) root() (string, error) {
 	return resolved, nil
 }
 
-// resolve is the single validation gate. It reuses
+// resolve is the single PATH validation gate. It reuses
 // analysis.NormalizeObservedChange (absolute, traversal, backslash, NUL, and
-// Windows-volume paths) and GuardCandidate (sensitive names, symlinked leaves,
-// size ceiling, credential-shaped content), then additionally proves that the
+// Windows-volume paths) and GuardCandidate (credential-file shapes, symlinked
+// leaves, size ceiling), then additionally proves that the
 // deepest existing ancestor does not symlink out of the workspace, which is
 // what an intermediate-directory link would otherwise do. It returns both the
 // absolute path and the normalized workspace-relative path; only the latter is
 // ever handed to Git, so an unnormalized spelling never reaches a subcommand.
+//
+// It answers PATH safety only. Whether the bytes behind that path may reach the
+// model is a different question, answered after the capability runs, by
+// RedactCredentialValues at the one place every tool result passes through.
+// Deciding it here instead is what made the runtime unable to read its own
+// sandbox source while candidate.run printed the same file with sed.
 func (b ToolBroker) resolve(rel string) (string, string, error) {
 	root, err := b.root()
 	if err != nil {

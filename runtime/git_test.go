@@ -50,13 +50,28 @@ func TestCandidateCloneCommitAndMetadataIntegrity(t *testing.T) {
 		t.Fatal("accepted producer Git metadata mutation")
 	}
 }
-func TestCandidateGuardRejectsSecretAndSymlink(t *testing.T) {
+
+// TestCandidateGuardRejectsCredentialFilesAndSymlinks pins what the PATH gate
+// answers, which is no longer "does this file contain a credential?".
+//
+// It used to refuse any file whose bytes contained "github_pat_", which made
+// the source of a secret scanner unreadable while candidate.run printed the
+// same file anyway. Credential VALUES are refused where that refusal is
+// enforceable: provider admission, tool-result redaction and the commit gate.
+// See credential_boundary_test.go.
+func TestCandidateGuardRejectsCredentialFilesAndSymlinks(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "token.txt"), []byte("github_pat_secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := GuardCandidate(root, []string{"token.txt"}, 1024); err == nil {
-		t.Fatal("secret content accepted")
+	if err := GuardCandidate(root, []string{"token.txt"}, 1024); err != nil {
+		t.Fatalf("the path gate refused a file that merely names a token format: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "id_rsa"), []byte("x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := GuardCandidate(root, []string{"id_rsa"}, 1024); err == nil {
+		t.Fatal("credential file name accepted")
 	}
 	if err := os.Symlink("token.txt", filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)

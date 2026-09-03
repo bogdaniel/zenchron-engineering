@@ -227,8 +227,19 @@ type EvidenceBinding struct {
 	Contract, Policy, Producer, Environment Ref
 }
 
-// GuardCandidate rejects unsafe additions but never removes otherwise safe,
-// out-of-contract changes: those must be reassessed by the kernel.
+// GuardCandidate is the PATH layer, and only the PATH layer: normalization,
+// credential-file shapes, symlinked leaves and the size ceiling. It rejects
+// unsafe additions but never removes otherwise safe, out-of-contract changes:
+// those must be reassessed by the kernel.
+//
+// It deliberately no longer reads file CONTENT. A content predicate here was
+// answering a different question - "is this a credential value?" - at a layer
+// that cannot enforce the answer: candidate.run mounts the same workspace and
+// reads whatever it likes, so refusing a path here never protected anything it
+// appeared to protect. That question is asked where it can be enforced:
+// ScanCandidateForCredentialValues before a producer is admitted,
+// RedactCredentialValues on every model-visible tool result, and the commit
+// gate in CandidateWorkspace.Commit. See credential_boundary.go.
 func GuardCandidate(root string, paths []string, maxBytes int64) error {
 	var total int64
 	for _, p := range paths {
@@ -237,8 +248,12 @@ func GuardCandidate(root string, paths []string, maxBytes int64) error {
 			return fmt.Errorf("unsafe candidate path %q", p)
 		}
 		p = normalized.Paths[0]
-		lower := strings.ToLower(filepath.Base(p))
-		if strings.Contains(lower, ".env") || strings.Contains(lower, "credential") || strings.Contains(lower, "id_rsa") || strings.Contains(lower, "private") || strings.Contains(lower, "secret") {
+		// Credential-file SHAPES, not substrings. The predicate here used to
+		// match "secret", "private" and "credential" anywhere in a base name,
+		// which made secret_scanner.go, private_key_parser.go and
+		// credential_policy.go permanently unopenable by the engineering
+		// system that has to maintain them.
+		if sensitiveCredentialFilename(filepath.Base(p)) {
 			return fmt.Errorf("sensitive candidate path %q", p)
 		}
 		info, err := os.Lstat(filepath.Join(root, p))
@@ -251,16 +266,6 @@ func GuardCandidate(root string, paths []string, maxBytes int64) error {
 		total += info.Size()
 		if maxBytes > 0 && total > maxBytes {
 			return fmt.Errorf("candidate exceeds size ceiling")
-		}
-		if info.Mode().IsRegular() {
-			data, readErr := os.ReadFile(filepath.Join(root, p))
-			if readErr != nil {
-				return readErr
-			}
-			content := strings.ToLower(string(data))
-			if strings.Contains(content, "-----begin private key-----") || strings.Contains(content, "aws_secret_access_key") || strings.Contains(content, "github_pat_") {
-				return fmt.Errorf("sensitive candidate content %q", p)
-			}
 		}
 	}
 	return nil
@@ -346,6 +351,19 @@ const (
 	// is governed by and therefore needs a new run. Discovering it after the
 	// work is done, as run-0943e257539346f8763db04505cbf322 did, is the defect.
 	FailureRequiredEvidenceUnsupported FailureClass = "required_evidence_unsupported"
+	// FailureCandidateCredentialMaterial is a high-confidence credential VALUE
+	// present in candidate-visible content. It is a local prerequisite defect,
+	// detected BEFORE any producer is admitted, so no reasoning iteration is
+	// spent discovering it and no provider request is made.
+	//
+	// It is not a producer failure, not provider capacity, and not iteration
+	// exhaustion - calling it any of those would tell an operator to look at
+	// the model when the fact to look at is a secret in the workspace. It
+	// routes to a STOP: retrying reads the same bytes, and the candidate is
+	// runtime-owned, so there is nothing an operator clears in place. What
+	// clears it is removing the material from what the run is about, which is
+	// a different subject and therefore a different run.
+	FailureCandidateCredentialMaterial FailureClass = "candidate_credential_material"
 	FailureGovernanceMismatch          FailureClass = "governance_mismatch"
 	FailureWorkspaceIntegrity          FailureClass = "workspace_integrity_violation"
 	FailureBaseIntegrationConflict     FailureClass = "base_integration_conflict"
