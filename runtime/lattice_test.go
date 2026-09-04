@@ -477,12 +477,16 @@ func TestNoConfigurationGrantsCandidateGitHubCredentials(t *testing.T) {
 			t.Fatalf("an ambient credential reached the provider environment through %s", name)
 		}
 	}
-	// The container environment is a stated allowlist. GOTMPDIR and GOCACHE are
-	// on it because the toolchain has to build and run somewhere the runtime
-	// chose; both point INSIDE the container, at the one exec-capable tmpfs, and
-	// neither can carry a host value.
+	// The container environment is a stated allowlist. Every Go variable on it
+	// is there because the toolchain has to put writable state SOMEWHERE the
+	// runtime chose: leaving one unnamed is how the module cache and then the
+	// build cache ended up inside a candidate workspace. All of them point
+	// INSIDE the container, and none can carry a host value.
 	args := dockerBase(t.TempDir(), true)
-	allowed := map[string]bool{"HOME": true, "PATH": true, "GOTMPDIR": true, "GOCACHE": true}
+	allowed := map[string]bool{
+		"HOME": true, "PATH": true, "GOTMPDIR": true, "GOCACHE": true,
+		"GOPATH": true, "GOMODCACHE": true, "GOENV": true,
+	}
 	for i, arg := range args {
 		if arg != "--env" {
 			continue
