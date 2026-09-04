@@ -357,57 +357,111 @@ func TestNewRunsPersistAnExplicitContinuationBudget(t *testing.T) {
 }
 
 // TestContinuationBudgetIsConfigurableAndTightenOnly is acceptance P and Q.
+// TestContinuationBudgetIsConfigurableAndTightenOnly is acceptance P and Q.
+//
+// Every configuration below is built from ONE base string over ONE directory,
+// so state_dir and the other absolute paths are byte-identical and the
+// continuation budget is the only thing that can move the digest. Building the
+// comparands over separate temporary directories - as this test first did -
+// made the digest assertion pass for the wrong reason: the paths differed, so
+// the digests would have differed whatever the budget said.
 func TestContinuationBudgetIsConfigurableAndTightenOnly(t *testing.T) {
-	// Absent resolves to the M1 default, so a pre-#54 operator configuration -
-	// which cannot contain this field - stays loadable instead of being refused.
-	absentDir := t.TempDir()
-	absent, absentDigest, err := LoadOperatorConfig(writeOperatorConfig(t, absentDir))
-	if err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	base := operatorConfigJSON(dir)
+	withContinuations := func(value string) string {
+		stated := strings.Replace(base, `"max_execution_attempts": 3`,
+			`"max_execution_attempts": 3, "max_execution_continuations": `+value, 1)
+		if stated == base {
+			t.Fatal("the fixture configuration no longer contains the anchor field")
+		}
+		return stated
 	}
-	if absent.Budgets.MaxExecutionContinuations != DefaultMaxExecutionContinuations {
-		t.Fatalf("absent continuation budget resolved to %d, want %d", absent.Budgets.MaxExecutionContinuations, DefaultMaxExecutionContinuations)
+	load := func(name, body string) (OperatorConfig, string) {
+		t.Helper()
+		config, digest, err := LoadOperatorConfig(writeFile(t, filepath.Join(dir, name), body))
+		if err != nil {
+			t.Fatalf("loading %s: %v", name, err)
+		}
+		return config, digest
+	}
+
+	// Absent stays loadable - a pre-#54 operator configuration cannot contain
+	// the field - and resolves to the M1 default.
+	absent, absentDigest := load("config.json", base)
+	if absent.Budgets.continuations() != DefaultMaxExecutionContinuations {
+		t.Fatalf("absent continuation budget resolved to %d, want %d", absent.Budgets.continuations(), DefaultMaxExecutionContinuations)
 	}
 	if budgets := (Config{OperatorConfig: absent}).RunBudgets(); budgets.MaxExecutionContinuations <= 0 {
 		t.Fatal("an absent continuation budget produced an unbounded run budget")
 	}
 
-	// An explicit operator value is carried through unchanged.
-	statedDir := t.TempDir()
-	stated := strings.Replace(operatorConfigJSON(statedDir), `"max_execution_attempts": 3`, `"max_execution_attempts": 3, "max_execution_continuations": 6`, 1)
-	operator, statedDigest, err := LoadOperatorConfig(writeFile(t, filepath.Join(statedDir, "config.json"), stated))
-	if err != nil {
-		t.Fatal(err)
+	// Acceptance Q: changing ONLY the continuation budget changes the digest.
+	stated, statedDigest := load("stated.json", withContinuations("6"))
+	if stated.Budgets.continuations() != 6 {
+		t.Fatalf("operator continuation budget = %d, want 6", stated.Budgets.continuations())
 	}
-	if operator.Budgets.MaxExecutionContinuations != 6 {
-		t.Fatalf("operator continuation budget = %d, want 6", operator.Budgets.MaxExecutionContinuations)
-	}
-	// Acceptance Q: the configuration digest is about the effective bounds.
 	if statedDigest == absentDigest {
-		t.Fatal("changing the continuation budget did not change the configuration digest")
+		t.Fatal("changing only the continuation budget did not change the configuration digest")
+	}
+
+	// The other half of the same property: the same EFFECTIVE bound digests the
+	// same, however it was spelled. Absent resolves to 8 before the digest is
+	// taken, so an explicit 8 is the same configuration and must hash alike.
+	_, explicitDefaultDigest := load("explicit-default.json", withContinuations("8"))
+	if explicitDefaultDigest != absentDigest {
+		t.Fatal("an explicit 8 and an absent field are the same effective configuration but digested differently")
 	}
 
 	// Acceptance P: a repository may tighten the operator bound, never widen it.
-	tightened, err := operator.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{MaxExecutionContinuations: intPointer(4)}})
+	tightened, err := stated.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{MaxExecutionContinuations: intPointer(4)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tightened.Budgets.MaxExecutionContinuations != 4 {
-		t.Fatalf("repository tightening produced %d, want 4", tightened.Budgets.MaxExecutionContinuations)
+	if tightened.Budgets.continuations() != 4 {
+		t.Fatalf("repository tightening produced %d, want 4", tightened.Budgets.continuations())
 	}
-	if _, err := operator.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{MaxExecutionContinuations: intPointer(9)}}); err == nil {
+	// Tightening must not reach back into the operator configuration it derived
+	// from, which a shared pointer would let it do.
+	if stated.Budgets.continuations() != 6 {
+		t.Fatalf("tightening mutated the operator configuration: %d", stated.Budgets.continuations())
+	}
+	if _, err := stated.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{MaxExecutionContinuations: intPointer(9)}}); err == nil {
 		t.Fatal("a repository widened the operator continuation bound")
 	}
 }
 
-func intPointer(v int) *int { return &v }
-
-// TestNegativeContinuationBudgetIsRefused proves there is no spelling that
-// means unbounded.
-func TestNegativeContinuationBudgetIsRefused(t *testing.T) {
+// TestMalformedContinuationBudgetsAreRefused proves there is no spelling that
+// means unbounded, and that an explicit zero is malformed rather than absent.
+func TestMalformedContinuationBudgetsAreRefused(t *testing.T) {
+	for name, value := range map[string]string{
+		"an explicit zero": "0",
+		"a negative value": "-1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := strings.Replace(operatorConfigJSON(dir), `"max_execution_attempts": 3`,
+				`"max_execution_attempts": 3, "max_execution_continuations": `+value, 1)
+			_, _, err := LoadOperatorConfig(writeFile(t, filepath.Join(dir, "config.json"), body))
+			if err == nil {
+				t.Fatalf("%s was accepted as a continuation budget", name)
+			}
+			if !strings.Contains(err.Error(), "max_execution_continuations must be at least 1") {
+				t.Fatalf("refusal did not name the bound: %v", err)
+			}
+		})
+	}
+	// An explicit positive value is accepted, so the refusal above is about
+	// the malformed spelling rather than about stating the field at all.
 	dir := t.TempDir()
-	body := strings.Replace(operatorConfigJSON(dir), `"max_execution_attempts": 3`, `"max_execution_attempts": 3, "max_execution_continuations": -1`, 1)
-	if _, _, err := LoadOperatorConfig(writeFile(t, filepath.Join(dir, "config.json"), body)); err == nil {
-		t.Fatal("a negative continuation budget was accepted")
+	body := strings.Replace(operatorConfigJSON(dir), `"max_execution_attempts": 3`,
+		`"max_execution_attempts": 3, "max_execution_continuations": 5`, 1)
+	config, _, err := LoadOperatorConfig(writeFile(t, filepath.Join(dir, "config.json"), body))
+	if err != nil {
+		t.Fatalf("an explicit positive continuation budget was refused: %v", err)
+	}
+	if config.Budgets.continuations() != 5 {
+		t.Fatalf("stated continuation budget = %d, want 5", config.Budgets.continuations())
 	}
 }
+
+func intPointer(v int) *int { return &v }

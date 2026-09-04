@@ -128,15 +128,19 @@ type BudgetConfig struct {
 	// the retry budget, so a run doing four pieces of real work in a row was
 	// terminated by a ceiling meant for four failures of the same work.
 	//
-	// It is the one budget that may be absent from an existing operator
-	// configuration, because it did not exist when those files were written.
-	// Absent means "the operator has not stated one", which resolves to the M1
-	// default in RunBudgets.defaults - a finite positive number that the run
-	// then persists explicitly. A NEGATIVE value is refused like any other
-	// malformed bound. There is no spelling of this field that means unbounded.
-	MaxExecutionContinuations int `json:"max_execution_continuations,omitempty"`
-	MaxRemediationAttempts    int `json:"max_remediation_attempts"`
-	MaxAssuranceAttempts      int `json:"max_assurance_attempts"`
+	// It is a POINTER so that ABSENT and an explicit 0 are different facts.
+	// They have to be: this is the one budget an operator configuration written
+	// before #54 cannot contain, so absent must stay loadable and resolve to
+	// the M1 default - but an operator who writes 0 has stated a malformed
+	// bound, and every neighbouring budget refuses one. A plain int cannot tell
+	// those two apart and would silently accept the malformed spelling.
+	//
+	// Absent resolves to DefaultMaxExecutionContinuations in resolved; explicit
+	// zero and any negative value are refused in validate. No spelling of this
+	// field means unbounded.
+	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
+	MaxRemediationAttempts    int  `json:"max_remediation_attempts"`
+	MaxAssuranceAttempts      int  `json:"max_assurance_attempts"`
 }
 
 // DefaultMaxExecutionContinuations is the M1 continuation depth for a new run.
@@ -148,11 +152,24 @@ const DefaultMaxExecutionContinuations = 8
 // resolved fills in the budget an operator configuration may omit. It is the
 // only defaulting the configuration layer does, and it produces a finite
 // positive bound, never an unbounded one.
+//
+// The default is allocated fresh rather than shared, so a later tighten can
+// never write through it into the configuration it was derived from.
 func (b BudgetConfig) resolved() BudgetConfig {
-	if b.MaxExecutionContinuations == 0 {
-		b.MaxExecutionContinuations = DefaultMaxExecutionContinuations
+	if b.MaxExecutionContinuations == nil {
+		fallback := DefaultMaxExecutionContinuations
+		b.MaxExecutionContinuations = &fallback
 	}
 	return b
+}
+
+// continuations is the effective bound. It tolerates an unresolved
+// configuration so that no reader can panic on a value it did not set.
+func (b BudgetConfig) continuations() int {
+	if b.MaxExecutionContinuations == nil {
+		return DefaultMaxExecutionContinuations
+	}
+	return *b.MaxExecutionContinuations
 }
 
 // WatchConfig is the operator's watch enrolment. Repositories is the complete
@@ -267,7 +284,7 @@ func (c Config) RunBudgets() RunBudgets {
 	return RunBudgets{
 		WallLimit:                 time.Duration(c.Budgets.WallLimitSeconds) * time.Second,
 		MaxExecutionAttempts:      c.Budgets.MaxExecutionAttempts,
-		MaxExecutionContinuations: c.Budgets.MaxExecutionContinuations,
+		MaxExecutionContinuations: c.Budgets.continuations(),
 		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
 		MaxAssuranceAttempts:      c.Budgets.MaxAssuranceAttempts,
 	}
@@ -419,6 +436,10 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	if budgets == nil {
 		budgets = &RepositoryBudgets{}
 	}
+	// The continuation ceiling is tightened through a local copy: the operator
+	// value is behind a pointer that `tightened := c` shares with c, so writing
+	// through it would silently retighten the configuration it came from.
+	continuations := tightened.Budgets.continuations()
 	proposals := []struct {
 		name     string
 		proposed *int
@@ -426,7 +447,7 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	}{
 		{"budgets.wall_limit_seconds", budgets.WallLimitSeconds, &tightened.Budgets.WallLimitSeconds},
 		{"budgets.max_execution_attempts", budgets.MaxExecutionAttempts, &tightened.Budgets.MaxExecutionAttempts},
-		{"budgets.max_execution_continuations", budgets.MaxExecutionContinuations, &tightened.Budgets.MaxExecutionContinuations},
+		{"budgets.max_execution_continuations", budgets.MaxExecutionContinuations, &continuations},
 		{"budgets.max_remediation_attempts", budgets.MaxRemediationAttempts, &tightened.Budgets.MaxRemediationAttempts},
 		{"budgets.max_assurance_attempts", budgets.MaxAssuranceAttempts, &tightened.Budgets.MaxAssuranceAttempts},
 	}
@@ -442,6 +463,7 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		}
 		*proposal.ceiling = *proposal.proposed
 	}
+	tightened.Budgets.MaxExecutionContinuations = &continuations
 	if err := tightened.tightenWatch(repository.Watch); err != nil {
 		return OperatorConfig{}, err
 	}
@@ -605,13 +627,13 @@ func (c OperatorConfig) validate(path string) error {
 			return refuse(bound.name + " must be at least 1")
 		}
 	}
-	// max_execution_continuations is bounded exactly like its neighbours, with
-	// one difference: absent is allowed, because operator configurations
-	// written before #54 cannot contain it and refusing them would make the
-	// field's introduction an outage. Absent resolves to the M1 default in
-	// BudgetConfig.resolved. Zero written explicitly, or any negative value,
-	// is malformed and refused - neither is a way to ask for unbounded.
-	if c.Budgets.MaxExecutionContinuations < 0 {
+	// max_execution_continuations is bounded exactly like its neighbours: a
+	// STATED value must be at least 1, so an explicit 0 is refused like an
+	// explicit 0 anywhere else in this block. The single difference is that it
+	// may be ABSENT, because operator configurations written before #54 cannot
+	// contain it and refusing those files would make the field's introduction
+	// an outage. Absent resolves to the M1 default in BudgetConfig.resolved.
+	if stated := c.Budgets.MaxExecutionContinuations; stated != nil && *stated < 1 {
 		return refuse("budgets.max_execution_continuations must be at least 1")
 	}
 	if c.GC.RetentionHours < 0 {
