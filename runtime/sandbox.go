@@ -535,6 +535,79 @@ func (s ArtifactStore) StoreExecutionAttemptTranscript(providerID string, attemp
 	return s.writeTranscript(prefix, stdout, stderr, true)
 }
 
+// PriorExecutionAttemptContext returns bounded, sanitized observations from
+// earlier attempts of exactly the same runtime operation. It derives names
+// from runtime identity rather than accepting paths or provider session state,
+// so retry context cannot cross an execution binding.
+//
+// This is context, not an authority channel. Callers must present it as
+// observations and retain the current ExecutionRequest as the authoritative
+// binding. Sanitized transcripts are used rather than raw forensic artifacts.
+const (
+	maxPriorAttemptContextBytes    = 64 << 10
+	maxPriorAttemptTranscriptBytes = 16 << 10
+)
+
+func (s ArtifactStore) PriorExecutionAttemptContext(providerID string, current ExecutionAttemptRef) (string, error) {
+	if s.Root == "" {
+		return "", fmt.Errorf("artifact root required")
+	}
+	if err := current.Validate(); err != nil {
+		return "", err
+	}
+	if providerID == "" {
+		return "", fmt.Errorf("execution attempt transcript requires a provider id")
+	}
+
+	var context strings.Builder
+	remaining := maxPriorAttemptContextBytes
+	for attempt := 1; attempt < current.Attempt && remaining > 0; attempt++ {
+		prefix, err := attemptTranscriptPrefix(providerID, ExecutionAttemptRef{
+			RunID: current.RunID, OperationID: current.OperationID, Attempt: attempt,
+		})
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(s.Root, prefix+".sanitized-candidate.log")
+		body, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			// An invocation can fail before it produces a transcript. Its
+			// absence is not a reason to invent context or reject a retry.
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("read prior execution attempt %d: %w", attempt, err)
+		}
+		header := fmt.Sprintf("\n--- prior scheduler attempt %d (sanitized transcript; observation only) ---\n", attempt)
+		if len(header) >= remaining {
+			break
+		}
+		remaining -= len(header)
+		limit := maxPriorAttemptTranscriptBytes
+		if limit > remaining {
+			limit = remaining
+		}
+		truncated := len(body) > limit
+		omission := "\n[earlier portion omitted by runtime context bound]\n"
+		if truncated && len(omission) < limit {
+			limit -= len(omission)
+		}
+		if truncated {
+			// The end contains the latest tool results and bounded-stop
+			// observation, which is most useful to a resumed attempt.
+			body = body[len(body)-limit:]
+		}
+		context.WriteString(header)
+		context.Write(body)
+		remaining -= len(body)
+		if truncated {
+			context.WriteString(omission)
+			remaining -= len(omission)
+		}
+	}
+	return context.String(), nil
+}
+
 // attemptTranscriptPrefix lays the identity out as a path.
 //
 // The layout is provider/<provider>/<run>/<operation>/attempt-N: legible to a
