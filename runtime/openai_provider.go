@@ -300,6 +300,13 @@ func (p OpenAIProvider) validate(request ExecutionRequest) error {
 	if request.RunID == "" || request.CandidateDir == "" || request.Contract.ID == "" || request.Candidate.Revision == "" || request.Base.Revision == "" || request.ControllerID == "" || request.SourceSnapshot.ID == "" || request.Purpose == "" {
 		return fmt.Errorf("incomplete execution request binding")
 	}
+	// The attempt identity is checked HERE, with the other preconditions,
+	// rather than when the transcript is written: a missing scheduler attempt
+	// is a wiring defect in this runtime, and discovering it after an
+	// invocation has already run would spend a real provider call to learn it.
+	if err := request.AttemptRef().Validate(); err != nil {
+		return err
+	}
 	if request.Purpose != InvocationInitial && request.Purpose != InvocationRemediation && request.Purpose != InvocationContinuation {
 		return fmt.Errorf("invalid invocation purpose")
 	}
@@ -462,12 +469,15 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		}
 	}
 
-	artifacts, artifactErr := p.ArtifactStore.StoreTranscript("provider-"+openaiProviderID+"-"+request.RunID, redactCredential(transcript.Bytes(), key), nil)
+	// Redaction happens per attempt, on this attempt's bytes, before anything
+	// is persisted under this attempt's identity. Splitting transcripts per
+	// attempt must not turn one redaction pass into a shared one.
+	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(openaiProviderID, request.AttemptRef(), redactCredential(transcript.Bytes(), key), nil)
 	if artifactErr != nil {
 		return ExecutionResult{}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: 1, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts}
+	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts}
 	if stop == StopCompleted {
 		return result, nil
 	}

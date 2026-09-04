@@ -477,7 +477,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// are strictly sequential and each container is created, waited on and
 		// removed before the next, so one identity per invocation is exact
 		// rather than merely unique.
-		OperationID:           operation.ID,
+		OperationID: operation.ID,
+		// The scheduler incremented this when it started the operation, so it
+		// is the real attempt this invocation IS - never a provider-local
+		// default. It is what makes this attempt's transcript addressable.
+		Attempt:               operation.Attempt,
 		RunID:                 state.run.ID,
 		SourceSnapshot:        Ref{ID: sourceSnapshotID(state), Revision: state.source.Digest},
 		ControllerID:          r.deps.ControllerID,

@@ -37,7 +37,7 @@ func nativeCodexFixture(t *testing.T) (NativeCodexProvider, ExecutionRequest, *f
 	}
 	fake := &fakeCommandExecutor{found: true, codexHelp: codexCapableHelp}
 	provider := NativeCodexProvider{ArtifactStore: ArtifactStore{Root: filepath.Join(root, "artifacts")}, Model: "model", AuthMode: "chatgpt", CodexHome: home, Executor: fake}
-	request := ExecutionRequest{RunID: "run", SourceSnapshot: Ref{ID: "issue-snapshot", Revision: "1"}, ControllerID: "controller", Base: Ref{ID: "base", Revision: "base-sha"}, Candidate: Candidate{Revision: "candidate-sha", Tree: "tree-sha"}, CandidateDir: candidate, Contract: Ref{ID: "contract", Revision: "4"}, Objective: "fix", AcceptanceObligations: []string{"test"}, Constraints: []string{"bounded"}, Prohibitions: []string{"no publish"}, Permissions: []string{"edit"}, TrustedInstructions: "trusted-only", Purpose: InvocationInitial}
+	request := ExecutionRequest{RunID: "run", OperationID: "run:execution.invoke:execution.invoke#initial|1|base-sha", Attempt: 1, SourceSnapshot: Ref{ID: "issue-snapshot", Revision: "1"}, ControllerID: "controller", Base: Ref{ID: "base", Revision: "base-sha"}, Candidate: Candidate{Revision: "candidate-sha", Tree: "tree-sha"}, CandidateDir: candidate, Contract: Ref{ID: "contract", Revision: "4"}, Objective: "fix", AcceptanceObligations: []string{"test"}, Constraints: []string{"bounded"}, Prohibitions: []string{"no publish"}, Permissions: []string{"edit"}, TrustedInstructions: "trusted-only", Purpose: InvocationInitial}
 	return provider, request, fake
 }
 

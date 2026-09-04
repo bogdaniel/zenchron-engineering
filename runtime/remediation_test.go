@@ -85,7 +85,7 @@ func TestRemediationRequestPreservesFindingsAndAuthorityWaitNeverInvokesProvider
 	if RouteFailure(FailureAuthorityWait) == RouteProviderRemediation {
 		t.Fatal("authority wait routed to producer")
 	}
-	_, _ = fake.Execute(context.Background(), ExecutionRequest{Purpose: InvocationRemediation, Findings: []Finding{{Classification: FailureCompileTest, Signature: "compile"}}})
+	_, _ = fake.Execute(context.Background(), ExecutionRequest{RunID: "run", OperationID: "run:execution.invoke:execution.invoke#remediation", Attempt: 1, Purpose: InvocationRemediation, Findings: []Finding{{Classification: FailureCompileTest, Signature: "compile"}}})
 	if fake.Request.Findings[0].Signature != "compile" {
 		t.Fatal("remediation finding lost")
 	}

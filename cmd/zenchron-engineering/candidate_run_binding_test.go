@@ -53,6 +53,7 @@ func TestProductionCompositionCanBrokerACandidateCommand(t *testing.T) {
 	request := runtime.ExecutionRequest{
 		RunID:        "run-fixture",
 		OperationID:  "run-fixture:execution.invoke:execution.invoke#initial|1|abc",
+		Attempt:      1,
 		CandidateDir: candidate,
 	}
 	seen, err := captureBoundBroker(bound, request)
@@ -86,9 +87,10 @@ func TestBrokeredExecutionRefusesAnUnboundOperation(t *testing.T) {
 	bound := built.provider.(candidateBoundProvider)
 
 	for name, request := range map[string]runtime.ExecutionRequest{
-		"no operation identity":    {RunID: "r", CandidateDir: t.TempDir()},
-		"no candidate workspace":   {RunID: "r", OperationID: "op"},
-		"blank operation identity": {RunID: "r", CandidateDir: t.TempDir(), OperationID: "   "},
+		"no operation identity":    {RunID: "r", Attempt: 1, CandidateDir: t.TempDir()},
+		"no candidate workspace":   {RunID: "r", Attempt: 1, OperationID: "op"},
+		"blank operation identity": {RunID: "r", Attempt: 1, CandidateDir: t.TempDir(), OperationID: "   "},
+		"no scheduler attempt":     {RunID: "r", CandidateDir: t.TempDir(), OperationID: "op"},
 	} {
 		t.Run("refuse "+name, func(t *testing.T) {
 			if _, err := bound.Execute(context.Background(), request); err == nil {
@@ -102,7 +104,7 @@ func TestBrokeredExecutionRefusesAnUnboundOperation(t *testing.T) {
 	stripped := bound
 	stripped.base.Broker.Sandbox.StateDir = ""
 	if _, err := stripped.Execute(context.Background(), runtime.ExecutionRequest{
-		RunID: "r", CandidateDir: t.TempDir(), OperationID: "op",
+		RunID: "r", CandidateDir: t.TempDir(), OperationID: "op", Attempt: 1,
 	}); err == nil || !strings.Contains(err.Error(), "state directory") {
 		t.Fatalf("a sandbox with no operation record location was accepted: %v", err)
 	}
