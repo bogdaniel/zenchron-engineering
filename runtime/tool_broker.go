@@ -380,11 +380,32 @@ func (b ToolBroker) dependencyCache(root string) (string, error) {
 	if err != nil || !info.IsDir() {
 		return "", fmt.Errorf("brokered dependency cache is not a readable directory")
 	}
-	separator := string(os.PathSeparator)
-	if cache == root || strings.HasPrefix(cache, root+separator) || strings.HasPrefix(root, cache+separator) {
+	// Containment is decided with filepath.Rel rather than string prefixes.
+	// Prefix arithmetic gets the filesystem root wrong: "/" + separator is
+	// "//", which no real path begins with, so "/" passed the check and the
+	// whole host would have been mounted read-only at /cache.
+	if cache == string(os.PathSeparator) {
+		return "", fmt.Errorf("brokered dependency cache must not be the filesystem root")
+	}
+	if pathContains(cache, root) || pathContains(root, cache) {
 		return "", fmt.Errorf("brokered dependency cache must be outside the candidate workspace")
 	}
 	return cache, nil
+}
+
+// pathContains reports whether parent is an ancestor of child, or the same
+// directory. Both are already symlink-resolved absolute paths.
+func pathContains(parent, child string) bool {
+	if parent == child {
+		return true
+	}
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		// Different volumes cannot contain one another, and an unrelatable
+		// pair is not a containment this code should guess at.
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 // PatchError is a brokered patch failure that carries a bounded, sanitized

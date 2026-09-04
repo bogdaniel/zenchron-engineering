@@ -196,6 +196,21 @@ func TestBrokeredDependencyCacheCannotBeTheCandidate(t *testing.T) {
 	if _, err := missing.RunCommand(context.Background(), []string{"go", "list", "./..."}); err == nil {
 		t.Fatal("an unreadable dependency cache was accepted")
 	}
+	// The filesystem root contains every candidate, but prefix arithmetic said
+	// otherwise: "/" + separator is "//", which no real path begins with. It
+	// would have mounted the whole host read-only at /cache.
+	rooted := broker
+	rooted.DependencyCacheDir = string(os.PathSeparator)
+	if _, err := rooted.RunCommand(context.Background(), []string{"go", "list", "./..."}); err == nil {
+		t.Fatal("the filesystem root was accepted as a dependency cache")
+	}
+	// A legitimate cache elsewhere on the same filesystem is still accepted, so
+	// the containment rule did not become "refuse everything".
+	ordinary := broker
+	ordinary.DependencyCacheDir = t.TempDir()
+	if _, err := ordinary.RunCommand(context.Background(), []string{"go", "list", "./..."}); err != nil {
+		t.Fatalf("an ordinary dependency cache outside the candidate was refused: %v", err)
+	}
 }
 
 // TestBrokeredSandboxBoundaryIsUnchanged is acceptance H and J: the isolation
