@@ -628,19 +628,33 @@ func (e *TranscriptConflictError) Error() string {
 	return "refusing to overwrite the durable transcript at " + e.Path + " with different content"
 }
 
+// writeTranscriptFile publishes one transcript file.
+//
+// The create-once path writes to a temporary file in the SAME directory,
+// flushes it, and only then claims the durable name with a link, which fails
+// rather than replacing anything. Creating the durable path first and filling
+// it afterwards would leave a truncated transcript at that name if the
+// controller stopped mid-write - and a later attempt to publish the real bytes
+// would then be refused as a conflict with the fragment. Evidence is published
+// complete or not at all.
 func writeTranscriptFile(path string, body []byte, createOnce bool) error {
 	if !createOnce {
 		return os.WriteFile(path, body, 0600)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err == nil {
-		_, writeErr := file.Write(body)
-		if closeErr := file.Close(); writeErr == nil {
-			writeErr = closeErr
-		}
-		return writeErr
+	staged, err := os.CreateTemp(filepath.Dir(path), ".partial-"+filepath.Base(path)+"-")
+	if err != nil {
+		return err
 	}
-	if !errors.Is(err, os.ErrExist) {
+	stagedPath := staged.Name()
+	defer os.Remove(stagedPath)
+	if err := publishStagedTranscript(staged, body); err != nil {
+		return err
+	}
+	// Link never replaces an existing name, so two controllers racing on the
+	// same attempt cannot both believe they published it.
+	if err := os.Link(stagedPath, path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	existing, readErr := os.ReadFile(path)
@@ -651,6 +665,22 @@ func writeTranscriptFile(path string, body []byte, createOnce bool) error {
 		return &TranscriptConflictError{Path: path}
 	}
 	return nil
+}
+
+func publishStagedTranscript(staged *os.File, body []byte) error {
+	if _, err := staged.Write(body); err != nil {
+		staged.Close()
+		return err
+	}
+	if err := staged.Sync(); err != nil {
+		staged.Close()
+		return err
+	}
+	if err := staged.Chmod(0600); err != nil {
+		staged.Close()
+		return err
+	}
+	return staged.Close()
 }
 
 var transcriptSecrets = regexp.MustCompile(`(?i)(github_pat_[a-z0-9_]+|ghp_[a-z0-9]+|aws_secret_access_key\s*=\s*[^\s]+|authorization:\s*bearer\s+[^\s]+)`)

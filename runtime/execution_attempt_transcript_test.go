@@ -193,6 +193,74 @@ func TestAttemptIdentityIsRefusedWhenIncomplete(t *testing.T) {
 	}
 }
 
+// TestWhitespaceIsNotAnIdentity closes the gap between this store and the
+// broker, which already refuses a blank operation id as unbound. A namespace of
+// encoded spaces would be a durable place to file evidence no operation
+// authorized.
+func TestWhitespaceIsNotAnIdentity(t *testing.T) {
+	store := ArtifactStore{Root: t.TempDir()}
+	operation := executionOperationID("run-w", "initial|1|base")
+	for name, ref := range map[string]ExecutionAttemptRef{
+		"blank run":       attemptRef("   ", operation, 1),
+		"blank operation": attemptRef("run-w", "   ", 1),
+		"tab operation":   attemptRef("run-w", "\t", 1),
+		"newline run":     attemptRef("\n", operation, 1),
+		"both whitespace": attemptRef(" ", " ", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ref.Validate(); err == nil {
+				t.Fatal("a whitespace-only identity validated")
+			}
+			if _, err := store.StoreExecutionAttemptTranscript("openai-responses", ref, []byte("x"), nil); err == nil {
+				t.Fatal("a whitespace-only identity was given a durable namespace")
+			}
+		})
+	}
+	// A legitimate identity is unaffected: trimming decides admissibility, it
+	// does not rewrite what gets stored.
+	if err := attemptRef("run-w", operation, 1).Validate(); err != nil {
+		t.Fatalf("a real identity was refused: %v", err)
+	}
+}
+
+// TestAPartialTranscriptNeverOccupiesTheDurableName is the atomicity proof. A
+// controller that stops mid-publication must not leave a truncated file at the
+// durable path, because a later publication of the REAL bytes would then be
+// refused as a conflict with the fragment.
+func TestAPartialTranscriptNeverOccupiesTheDurableName(t *testing.T) {
+	root := t.TempDir()
+	store := ArtifactStore{Root: root}
+	ref := attemptRef("run-partial", executionOperationID("run-partial", "initial|1|base"), 1)
+	body := []byte(strings.Repeat("the real transcript\n", 500))
+
+	artifacts, err := store.StoreExecutionAttemptTranscript("openai-responses", ref, body, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := rawPath(t, artifacts)
+
+	// Whatever intermediate files publication used, none of them survive next
+	// to the durable name to be mistaken for evidence later.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".partial-") {
+			t.Fatalf("a staging file was left beside the durable transcript: %s", entry.Name())
+		}
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil || string(stored) != string(body) {
+		t.Fatalf("the published transcript is not the complete body: %v %d bytes", err, len(stored))
+	}
+	// Republishing the same complete bytes still succeeds, so the atomic claim
+	// did not make idempotent re-reporting impossible.
+	if _, err := store.StoreExecutionAttemptTranscript("openai-responses", ref, body, nil); err != nil {
+		t.Fatalf("idempotent republication broke under atomic publication: %v", err)
+	}
+}
+
 // TestAttemptTranscriptPathsAreSafeAndLegible proves the encoding: an operation
 // id carries ':', '#' and '|', and a hostile-looking component must not be able
 // to leave the artifact root.

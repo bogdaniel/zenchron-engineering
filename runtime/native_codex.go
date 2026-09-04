@@ -156,6 +156,12 @@ func (p NativeCodexProvider) Execute(ctx context.Context, request ExecutionReque
 	if request.RunID == "" || request.CandidateDir == "" || request.Contract.ID == "" || request.Candidate.Revision == "" || request.Base.Revision == "" || request.ControllerID == "" || request.SourceSnapshot.ID == "" || request.Purpose == "" {
 		return ExecutionResult{}, fmt.Errorf("incomplete execution request binding")
 	}
+	// Checked before the probe and before Codex runs: an incomplete attempt
+	// identity is a local wiring defect, and an invocation must not happen at
+	// all if its evidence could not be filed under a real identity.
+	if err := request.AttemptRef().Validate(); err != nil {
+		return ExecutionResult{}, err
+	}
 	if request.Purpose != InvocationInitial && request.Purpose != InvocationRemediation {
 		return ExecutionResult{}, fmt.Errorf("invalid invocation purpose")
 	}

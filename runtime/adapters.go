@@ -112,10 +112,13 @@ func (r ExecutionRequest) AttemptRef() ExecutionAttemptRef {
 // attempt means a request producer was never wired to the scheduler, which is
 // a defect in this runtime rather than a condition of the run.
 func (a ExecutionAttemptRef) Validate() error {
-	if a.RunID == "" {
+	// Whitespace is not an identity. ToolBroker already refuses a blank
+	// operation id as unbound, and a namespace of encoded spaces would be a
+	// durable place to file evidence that no operation authorized.
+	if strings.TrimSpace(a.RunID) == "" {
 		return fmt.Errorf("execution attempt identity requires a run")
 	}
-	if a.OperationID == "" {
+	if strings.TrimSpace(a.OperationID) == "" {
 		return fmt.Errorf("execution attempt identity requires an authorizing operation")
 	}
 	if a.Attempt < 1 {

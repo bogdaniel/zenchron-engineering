@@ -300,6 +300,13 @@ func (p OpenAIProvider) validate(request ExecutionRequest) error {
 	if request.RunID == "" || request.CandidateDir == "" || request.Contract.ID == "" || request.Candidate.Revision == "" || request.Base.Revision == "" || request.ControllerID == "" || request.SourceSnapshot.ID == "" || request.Purpose == "" {
 		return fmt.Errorf("incomplete execution request binding")
 	}
+	// The attempt identity is checked HERE, with the other preconditions,
+	// rather than when the transcript is written: a missing scheduler attempt
+	// is a wiring defect in this runtime, and discovering it after an
+	// invocation has already run would spend a real provider call to learn it.
+	if err := request.AttemptRef().Validate(); err != nil {
+		return err
+	}
 	if request.Purpose != InvocationInitial && request.Purpose != InvocationRemediation && request.Purpose != InvocationContinuation {
 		return fmt.Errorf("invalid invocation purpose")
 	}
