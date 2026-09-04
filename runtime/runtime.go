@@ -140,9 +140,19 @@ type EngineeringRun struct {
 	Candidate        Candidate   `json:"candidate"`
 	Contract         Ref         `json:"contract"`
 	ControllerSHA256 string      `json:"controller_sha256"`
-	CreatedAt        time.Time   `json:"created_at"`
-	UpdatedAt        time.Time   `json:"updated_at"`
-	Cursor           Cursor      `json:"journal_cursor"`
+	// Budgets are the bounds this run was created under. It is a POINTER
+	// because encoding/json does not honour omitempty on a struct: a value
+	// field would emit "budgets":{...zeroes...} for every run that predates it,
+	// changing the canonical document - and therefore the state digest - of
+	// runs already on disk. Absent must stay absent.
+	//
+	// Nil is a run created before this field existed, and
+	// runState.continuationLimit reads that absence as the legacy rule rather
+	// than as today's configuration.
+	Budgets   *RunBudgets `json:"budgets,omitempty"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	Cursor    Cursor      `json:"journal_cursor"`
 }
 type RunOperation struct {
 	SchemaVersion    string          `json:"schema_version"`

@@ -137,10 +137,18 @@ type ConfigDigest struct {
 // the attempt ceilings bound each bounded operation kind independently, so a
 // failing verifier cannot consume the execution provider's budget.
 type RunBudgets struct {
-	WallLimit              time.Duration `json:"wall_limit"`
-	MaxExecutionAttempts   int           `json:"max_execution_attempts"`
-	MaxRemediationAttempts int           `json:"max_remediation_attempts"`
-	MaxAssuranceAttempts   int           `json:"max_assurance_attempts"`
+	WallLimit            time.Duration `json:"wall_limit"`
+	MaxExecutionAttempts int           `json:"max_execution_attempts"`
+	// MaxExecutionContinuations bounds DISTINCT continuation execution
+	// bindings for one run. MaxExecutionAttempts bounds retries of ONE
+	// binding. They are independent resources: three retries of continuation|A
+	// spend three attempts and one continuation.
+	//
+	// It is omitempty because a run persisted before #54 has no value for it,
+	// and that absence is meaningful - see runState.continuationLimit.
+	MaxExecutionContinuations int `json:"max_execution_continuations,omitempty"`
+	MaxRemediationAttempts    int `json:"max_remediation_attempts"`
+	MaxAssuranceAttempts      int `json:"max_assurance_attempts"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -341,6 +349,9 @@ func (b RunBudgets) defaults() RunBudgets {
 	if b.MaxExecutionAttempts <= 0 {
 		b.MaxExecutionAttempts = 2
 	}
+	if b.MaxExecutionContinuations <= 0 {
+		b.MaxExecutionContinuations = DefaultMaxExecutionContinuations
+	}
 	if b.MaxRemediationAttempts <= 0 {
 		b.MaxRemediationAttempts = 2
 	}
@@ -503,6 +514,7 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 
 func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {
 	now := r.deps.Clock.Now()
+	budgets := r.deps.Budgets.defaults()
 	run := EngineeringRun{
 		SchemaVersion:    SchemaVersion,
 		ID:               runID,
@@ -513,8 +525,15 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		Base:             Ref{ID: r.deps.Repository.DefaultBranch},
 		Candidate:        Candidate{Branch: candidateBranch(runID)},
 		ControllerSHA256: r.controller,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		// A new run persists the bounds it was created under. Today the
+		// continuation bound is the one runState reads back from here, so it
+		// is the one whose terminal decision replays from durable state rather
+		// than from whatever is configured afterwards; the wall limit and the
+		// attempt ceilings are still read live. Persisting the whole record
+		// now is what lets the rest follow without another schema change.
+		Budgets:   &budgets,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	// ClaimRun is the cross-process source claim: one conditional INSERT on the
 	// derived identity, so the database decides which process created this run.
