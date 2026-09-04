@@ -179,12 +179,12 @@ func (p NativeCodexProvider) Execute(ctx context.Context, request ExecutionReque
 		return ExecutionResult{}, err
 	}
 	output, runErr := p.executor().Run(ctx, "codex", p.codexArgs(request, codexPrompt(request)), request.CandidateDir, p.env(), p.grace())
-	artifacts, artifactErr := p.ArtifactStore.StoreTranscript("provider-"+request.RunID, output.Stdout, output.Stderr)
+	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript("native-codex", request.AttemptRef(), output.Stdout, output.Stderr)
 	if artifactErr != nil {
 		return ExecutionResult{}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: "native-codex", Model: p.Model, AuthMode: p.AuthMode, Attempt: 1, Outcome: Succeeded, Artifacts: artifacts}
+	result := ExecutionResult{ProviderID: "native-codex", Model: p.Model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts}
 	if runErr != nil || ctx.Err() != nil {
 		result.Outcome = OperationFailed
 		result.Failure = &ProviderFailure{Classification: ClassifyProviderFailure(output.Stdout, output.Stderr), RawDiagnosticRef: artifacts[0].Path}

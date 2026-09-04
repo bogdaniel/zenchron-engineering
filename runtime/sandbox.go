@@ -8,6 +8,7 @@ package runtime
 // native_codex.go, whose control plane must reach a remote AI provider.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -512,23 +513,100 @@ func (s DockerSandbox) ProbeToolchain(ctx context.Context) (CommandOutput, error
 type ArtifactStore struct{ Root string }
 
 func (s ArtifactStore) StoreTranscript(prefix string, stdout, stderr []byte) ([]Artifact, error) {
+	return s.writeTranscript(prefix, stdout, stderr, false)
+}
+
+// StoreExecutionAttemptTranscript stores the forensic transcript of ONE
+// provider invocation under the runtime's own identity for it.
+//
+// Two properties separate it from StoreTranscript, and both are the point of
+// #55. The identity distinguishes every attempt of every operation of every
+// run, so a retry cannot address the attempt before it. And the write is
+// CREATE-ONCE: durable evidence of an attempt that already happened is never
+// replaced, however many times a restarted controller re-enters this code.
+//
+// Callers pass the identity rather than a formatted string, so no provider can
+// substitute a value of its own for any component of it.
+func (s ArtifactStore) StoreExecutionAttemptTranscript(providerID string, attempt ExecutionAttemptRef, stdout, stderr []byte) ([]Artifact, error) {
+	prefix, err := attemptTranscriptPrefix(providerID, attempt)
+	if err != nil {
+		return nil, err
+	}
+	return s.writeTranscript(prefix, stdout, stderr, true)
+}
+
+// attemptTranscriptPrefix lays the identity out as a path.
+//
+// The layout is provider/<provider>/<run>/<operation>/attempt-N: legible to a
+// human reading the artifact directory, and derived only from durable runtime
+// identity. Operation ids carry ':', '#' and '|', so every component is
+// percent-encoded rather than trusted - an identity is not a path until
+// something makes it one, and "..", a separator or a NUL inside a component
+// must not be able to become one.
+func attemptTranscriptPrefix(providerID string, attempt ExecutionAttemptRef) (string, error) {
+	if err := attempt.Validate(); err != nil {
+		return "", err
+	}
+	if providerID == "" {
+		return "", fmt.Errorf("execution attempt transcript requires a provider id")
+	}
+	return filepath.Join(
+		"provider",
+		encodePathComponent(providerID),
+		encodePathComponent(attempt.RunID),
+		encodePathComponent(attempt.OperationID),
+		fmt.Sprintf("attempt-%d", attempt.Attempt),
+	), nil
+}
+
+// encodePathComponent makes one identity component a single safe file name.
+// Everything outside an explicit allowlist becomes %XX, so the result contains
+// no separator, cannot be "." or "..", and is reversible for an operator
+// reading it back.
+func encodePathComponent(component string) string {
+	var out strings.Builder
+	for i := 0; i < len(component); i++ {
+		c := component[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+			out.WriteByte(c)
+		case c == '.' && component != "." && component != "..":
+			out.WriteByte(c)
+		default:
+			fmt.Fprintf(&out, "%%%02X", c)
+		}
+	}
+	return out.String()
+}
+
+// writeTranscript persists the raw and sanitized halves of one transcript.
+//
+// createOnce is what makes an execution attempt's evidence immutable. A second
+// write of the SAME bytes is accepted, because a controller that crashed
+// between writing the file and journalling it must be able to finish reporting
+// what it already did; a second write of DIFFERENT bytes is refused, because
+// exactly one invocation produced this identity and disagreement about what it
+// said is not something to resolve by overwriting.
+func (s ArtifactStore) writeTranscript(prefix string, stdout, stderr []byte, createOnce bool) ([]Artifact, error) {
 	if s.Root == "" {
 		return nil, fmt.Errorf("artifact root required")
 	}
-	if err := os.MkdirAll(s.Root, 0700); err != nil {
-		return nil, err
-	}
 	raw := append(append([]byte{}, stdout...), stderr...)
-	rawPath := filepath.Join(s.Root, prefix+".raw.log")
-	if err := os.WriteFile(rawPath, raw, 0600); err != nil {
-		return nil, err
-	}
-	sanitizedPath := filepath.Join(s.Root, prefix+".sanitized-candidate.log")
 	// Generic replacement is intentionally conservative: a later explicit
 	// publication review must set Publishable after inspecting this candidate.
 	sanitized := redactTranscript(raw)
-	if err := os.WriteFile(sanitizedPath, sanitized, 0600); err != nil {
+	rawPath := filepath.Join(s.Root, prefix+".raw.log")
+	sanitizedPath := filepath.Join(s.Root, prefix+".sanitized-candidate.log")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0700); err != nil {
 		return nil, err
+	}
+	for _, write := range []struct {
+		path string
+		body []byte
+	}{{rawPath, raw}, {sanitizedPath, sanitized}} {
+		if err := writeTranscriptFile(write.path, write.body, createOnce); err != nil {
+			return nil, err
+		}
 	}
 	rawArtifact, err := artifact(rawPath, false, false)
 	if err != nil {
@@ -539,6 +617,40 @@ func (s ArtifactStore) StoreTranscript(prefix string, stdout, stderr []byte) ([]
 		return nil, err
 	}
 	return []Artifact{rawArtifact, sanitizedArtifact}, nil
+}
+
+// TranscriptConflictError is the refusal to replace durable attempt evidence.
+// It names the path and nothing about the content: what differed is in the two
+// files, and an operator comparing them is the correct next step.
+type TranscriptConflictError struct{ Path string }
+
+func (e *TranscriptConflictError) Error() string {
+	return "refusing to overwrite the durable transcript at " + e.Path + " with different content"
+}
+
+func writeTranscriptFile(path string, body []byte, createOnce bool) error {
+	if !createOnce {
+		return os.WriteFile(path, body, 0600)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err == nil {
+		_, writeErr := file.Write(body)
+		if closeErr := file.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		return writeErr
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	existing, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return readErr
+	}
+	if !bytes.Equal(existing, body) {
+		return &TranscriptConflictError{Path: path}
+	}
+	return nil
 }
 
 var transcriptSecrets = regexp.MustCompile(`(?i)(github_pat_[a-z0-9_]+|ghp_[a-z0-9]+|aws_secret_access_key\s*=\s*[^\s]+|authorization:\s*bearer\s+[^\s]+)`)

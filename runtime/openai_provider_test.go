@@ -107,6 +107,8 @@ func openaiFixture(t *testing.T, api *fakeResponsesAPI) (OpenAIProvider, Executi
 	tokens := int64(1_000_000)
 	request := ExecutionRequest{
 		RunID:                 "run-9c3",
+		OperationID:           "run-9c3:execution.invoke:execution.invoke#initial|1|base-rev-9c3",
+		Attempt:               1,
 		SourceSnapshot:        Ref{ID: "issue-29", Revision: "snap-9c3"},
 		ControllerID:          "controller-9c3",
 		Base:                  Ref{ID: "main", Revision: "base-rev-9c3"},

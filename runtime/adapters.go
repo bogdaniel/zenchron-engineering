@@ -27,7 +27,17 @@ type ExecutionRequest struct {
 	// bound to the exact operation that caused it. Without it a crashed
 	// controller has no durable name it alone may reconcile, and recovery would
 	// have to guess by prefix or label.
-	OperationID           string
+	OperationID string
+	// Attempt is the scheduler's attempt number for OperationID. The scheduler
+	// increments it when it starts the operation, so it is a fact the runtime
+	// already owns; a provider must never invent, default, or carry it over.
+	//
+	// Together with RunID and OperationID it is the complete identity of ONE
+	// invocation, and therefore of the forensic transcript that invocation
+	// produces. Before this existed a transcript was keyed by run alone, so a
+	// retry silently overwrote the evidence of the attempt before it and the
+	// history of a bounded retry could not be read back at all.
+	Attempt               int
 	SourceSnapshot        Ref
 	ControllerID          string
 	Base                  Ref
@@ -78,6 +88,42 @@ type ExecutionResult struct {
 	ChangedPaths                []string
 	Failure                     *ProviderFailure
 }
+
+// ExecutionAttemptRef is the runtime-owned identity of one provider
+// invocation: which run, which authorizing operation, which attempt of it.
+//
+// It is deliberately built only from durable scheduler facts. A timestamp, a
+// model response id, a random provider id or anything derived from candidate
+// text would all be unusable here for the same reason: replay has to arrive at
+// the same identity from the journal alone, and none of those are in it.
+type ExecutionAttemptRef struct {
+	RunID       string
+	OperationID string
+	Attempt     int
+}
+
+// AttemptRef is the identity of the invocation this request authorizes.
+func (r ExecutionRequest) AttemptRef() ExecutionAttemptRef {
+	return ExecutionAttemptRef{RunID: r.RunID, OperationID: r.OperationID, Attempt: r.Attempt}
+}
+
+// Validate refuses an identity a provider cannot honestly write evidence
+// under. It is a PLUMBING check, not a policy one: reaching it with a zero
+// attempt means a request producer was never wired to the scheduler, which is
+// a defect in this runtime rather than a condition of the run.
+func (a ExecutionAttemptRef) Validate() error {
+	if a.RunID == "" {
+		return fmt.Errorf("execution attempt identity requires a run")
+	}
+	if a.OperationID == "" {
+		return fmt.Errorf("execution attempt identity requires an authorizing operation")
+	}
+	if a.Attempt < 1 {
+		return fmt.Errorf("execution attempt identity requires the scheduler attempt for operation %q, got %d", a.OperationID, a.Attempt)
+	}
+	return nil
+}
+
 type ProviderFailure struct {
 	Classification   FailureClass
 	RawDiagnosticRef string

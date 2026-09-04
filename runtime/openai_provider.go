@@ -462,12 +462,15 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		}
 	}
 
-	artifacts, artifactErr := p.ArtifactStore.StoreTranscript("provider-"+openaiProviderID+"-"+request.RunID, redactCredential(transcript.Bytes(), key), nil)
+	// Redaction happens per attempt, on this attempt's bytes, before anything
+	// is persisted under this attempt's identity. Splitting transcripts per
+	// attempt must not turn one redaction pass into a shared one.
+	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(openaiProviderID, request.AttemptRef(), redactCredential(transcript.Bytes(), key), nil)
 	if artifactErr != nil {
 		return ExecutionResult{}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: 1, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts}
+	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts}
 	if stop == StopCompleted {
 		return result, nil
 	}
