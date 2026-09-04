@@ -760,6 +760,39 @@ const sandboxBuildVCS = "-buildvcs=false"
 // mounted. Running the candidate's own tests is the verifier's declared job.
 const sandboxBuildDir = "/gobuild"
 
+// The rest of the writable state a Go command creates, each given a
+// runtime-owned home OUTSIDE the candidate.
+//
+// Naming only GOCACHE and GOTMPDIR was not enough, and the gap was not
+// theoretical. With GOMODCACHE and GOPATH unset, Go fell back to the image's
+// GOPATH on the read-only root, `go test` failed with "could not create module
+// cache", and the obvious way around that from inside /candidate - pointing the
+// caches at a relative path - put the module cache and then the whole build
+// cache into the engineering workspace. Run
+// run-fd69fe24ac1e30377d6aa0934756428c committed 412 .gocache files and 3
+// .gomodcache files alongside five real source changes.
+//
+// So the environment is stated rather than defaulted. Every variable Go
+// consults for a writable location is bound here, and each one resolves to a
+// tmpfs this runtime owns.
+const (
+	// sandboxGoPathDir is GOPATH. Go derives GOMODCACHE, and several smaller
+	// caches, from it whenever they are not set themselves.
+	sandboxGoPathDir = "/gopath"
+	// sandboxModuleCacheDir is the DEFAULT module cache: writable, ephemeral,
+	// and empty. It is what a command gets when no operator dependency cache is
+	// configured, so an offline build fails honestly for want of modules rather
+	// than by trying to create a cache somewhere it must not.
+	sandboxModuleCacheDir = "/gomodcache"
+	// sandboxGoEnvFile is GOENV. Unset, Go reads the environment file under the
+	// user configuration directory, which is how ambient operator Go settings
+	// would otherwise reach a sandboxed command; pointed at a path in a tmpfs
+	// that nothing creates, there is no such file and no such influence.
+	sandboxGoEnvFile = sandboxBuildDir + "/goenv"
+	// sandboxHomeDir is HOME. The operator's real home is never visible.
+	sandboxHomeDir = "/home"
+)
+
 func envArgs(entries ...string) []string {
 	args := make([]string, 0, len(entries)*2)
 	for _, entry := range entries {
@@ -777,7 +810,40 @@ func dockerBase(candidate string, candidateReadOnly bool) []string {
 	if candidateReadOnly {
 		mount += ",readonly"
 	}
-	return []string{"run", "--init", "--sig-proxy=true", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777", "--tmpfs", "/home:rw,nosuid,nodev,noexec,mode=0700", "--tmpfs", "/candidate/.git:rw,nosuid,nodev,noexec,mode=0700", "--tmpfs", sandboxBuildDir + ":rw,nosuid,nodev,exec,mode=0700", "--env", "HOME=/home", "--env", "PATH=" + sandboxPATH, "--env", "GOTMPDIR=" + sandboxBuildDir, "--env", "GOCACHE=" + sandboxBuildDir + "/cache", "--mount", mount}
+	args := []string{"run", "--init", "--sig-proxy=true", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256",
+		"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777",
+		"--tmpfs", sandboxHomeDir + ":rw,nosuid,nodev,noexec,mode=0700",
+		"--tmpfs", "/candidate/.git:rw,nosuid,nodev,noexec,mode=0700",
+		"--tmpfs", sandboxBuildDir + ":rw,nosuid,nodev,exec,mode=0700",
+		// GOPATH and the default module cache are runtime-owned tmpfs like the
+		// build directory. They are noexec: a module cache is data, and nothing
+		// should be running out of one.
+		"--tmpfs", sandboxGoPathDir + ":rw,nosuid,nodev,noexec,mode=0700",
+		"--tmpfs", sandboxModuleCacheDir + ":rw,nosuid,nodev,noexec,mode=0700",
+		"--env", "PATH=" + sandboxPATH,
+	}
+	args = append(args, envArgs(sandboxGoScratchEnv(sandboxModuleCacheDir)...)...)
+	return append(args, "--mount", mount)
+}
+
+// sandboxGoScratchEnv is every environment variable that decides WHERE a Go
+// command writes. It is one list because the failure mode is omission: a
+// variable nobody named is a variable Go resolves for itself, and the place it
+// resolves to has twice now been inside the candidate.
+//
+// A caller that owns a better module cache - the assurance verifier and the
+// adopted builder both mount an operator-provisioned one read-only - passes it
+// here or overrides GOMODCACHE afterwards; Docker takes the last --env of a
+// name, so a later, stricter value wins.
+func sandboxGoScratchEnv(moduleCache string) []string {
+	return []string{
+		"HOME=" + sandboxHomeDir,
+		"GOTMPDIR=" + sandboxBuildDir,
+		"GOCACHE=" + sandboxBuildDir + "/cache",
+		"GOPATH=" + sandboxGoPathDir,
+		"GOMODCACHE=" + moduleCache,
+		"GOENV=" + sandboxGoEnvFile,
+	}
 }
 
 // PrerequisiteKind names WHAT was missing when an assurance prerequisite could

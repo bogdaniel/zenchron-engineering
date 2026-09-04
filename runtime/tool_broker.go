@@ -34,6 +34,16 @@ type ToolBroker struct {
 	Sandbox DockerSandbox
 	// MaxBytes bounds what a single brokered path may expose; 0 is unbounded.
 	MaxBytes int64
+	// DependencyCacheDir is the operator-provisioned module cache, when one is
+	// configured. It is the ONE dependency input a brokered command may have,
+	// it is runtime configuration rather than anything the candidate can name,
+	// and goModuleCacheMount attaches it read-only - the same boundary the
+	// assurance verifier uses, not a second one invented here.
+	//
+	// Absent, a brokered Go command still runs with a writable module cache on
+	// runtime tmpfs; it simply has nothing in it, so an offline build fails for
+	// want of modules instead of trying to create a cache in the candidate.
+	DependencyCacheDir string
 }
 
 // root is the symlink-resolved candidate workspace. Confinement is always
@@ -335,8 +345,46 @@ func (b ToolBroker) RunCommand(ctx context.Context, command []string) (CommandOu
 	if err != nil {
 		return CommandOutput{}, err
 	}
-	args := append(dockerBase(root, false), "--workdir", "/candidate", b.Sandbox.Image)
+	args := dockerBase(root, false)
+	// The controlled dependency input, when the operator provisioned one. It is
+	// mounted read-only, so a brokered command may READ modules from it and can
+	// neither extend it nor write anywhere else for want of it.
+	cache, err := b.dependencyCache(root)
+	if err != nil {
+		return CommandOutput{}, err
+	}
+	if cache != "" {
+		args = append(args, goModuleCacheMount(cache), "--env", "GOMODCACHE=/cache")
+	}
+	// The same Go execution law the verifier runs under: no proxy, no sum
+	// database, no toolchain download, no VCS stamping. Networking is already
+	// off, so these turn a confusing network error into an honest refusal.
+	args = append(args, envArgs(sandboxGoEnv...)...)
+	args = append(args, "--workdir", "/candidate", b.Sandbox.Image)
 	return b.Sandbox.run(ctx, append(args, command...))
+}
+
+// dependencyCache resolves the operator dependency cache and proves it is not
+// the candidate. A cache path that resolved inside the workspace would let
+// candidate-controlled files arrive as trusted dependency input, which is a
+// different failure from the one #50 is about and just as unacceptable.
+func (b ToolBroker) dependencyCache(root string) (string, error) {
+	if b.DependencyCacheDir == "" {
+		return "", nil
+	}
+	cache, err := filepath.EvalSymlinks(b.DependencyCacheDir)
+	if err != nil {
+		return "", fmt.Errorf("brokered dependency cache is not resolvable")
+	}
+	info, err := os.Stat(cache)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("brokered dependency cache is not a readable directory")
+	}
+	separator := string(os.PathSeparator)
+	if cache == root || strings.HasPrefix(cache, root+separator) || strings.HasPrefix(root, cache+separator) {
+		return "", fmt.Errorf("brokered dependency cache must be outside the candidate workspace")
+	}
+	return cache, nil
 }
 
 // PatchError is a brokered patch failure that carries a bounded, sanitized

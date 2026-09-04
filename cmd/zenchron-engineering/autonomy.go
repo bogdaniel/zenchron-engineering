@@ -579,8 +579,14 @@ func executionProvider(config runtime.Config, artifacts runtime.ArtifactStore, s
 		APIKeyFile:    config.Provider.CredentialPath,
 		Endpoint:      config.Provider.Endpoint,
 		HTTP:          &http.Client{Timeout: 10 * time.Minute},
-		Broker:        runtime.ToolBroker{Sandbox: sandbox},
-		Timeout:       10 * time.Minute,
+		Broker: runtime.ToolBroker{
+			Sandbox: sandbox,
+			// The same operator cache assurance verifies against, attached to
+			// brokered commands read-only. Without it a brokered `go test` has
+			// no offline module source at all.
+			DependencyCacheDir: config.Assurance.DependencyCacheDir,
+		},
+		Timeout: 10 * time.Minute,
 	}}
 }
 
