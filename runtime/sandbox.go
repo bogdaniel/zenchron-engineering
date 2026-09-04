@@ -582,26 +582,36 @@ func (s ArtifactStore) PriorExecutionAttemptContext(providerID string, current E
 		if len(header) >= remaining {
 			break
 		}
-		remaining -= len(header)
+		available := remaining - len(header)
+		omission := "\n[earlier portion omitted by runtime context bound]\n"
 		limit := maxPriorAttemptTranscriptBytes
-		if limit > remaining {
-			limit = remaining
+		if limit > available {
+			limit = available
 		}
 		truncated := len(body) > limit
-		omission := "\n[earlier portion omitted by runtime context bound]\n"
-		if truncated && len(omission) < limit {
-			limit -= len(omission)
-		}
 		if truncated {
+			// Reserve the omission marker before accepting the header. Without
+			// that reservation, a nearly exhausted aggregate budget could append
+			// both the last few transcript bytes and the marker, exceeding the
+			// promised context ceiling.
+			if available <= len(omission) {
+				break
+			}
+			limit = available - len(omission)
+			if limit > maxPriorAttemptTranscriptBytes {
+				limit = maxPriorAttemptTranscriptBytes
+			}
 			// The end contains the latest tool results and bounded-stop
 			// observation, which is most useful to a resumed attempt.
 			body = body[len(body)-limit:]
 		}
 		context.WriteString(header)
 		context.Write(body)
-		remaining -= len(body)
 		if truncated {
 			context.WriteString(omission)
+		}
+		remaining -= len(header) + len(body)
+		if truncated {
 			remaining -= len(omission)
 		}
 	}
