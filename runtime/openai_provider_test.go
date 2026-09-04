@@ -276,6 +276,22 @@ func TestOpenAIProviderSuppliesSameBindingPriorAttemptObservations(t *testing.T)
 	if strings.Contains(string(api.requests[0]), "PRIOR-ATTEMPT") {
 		t.Fatal("attempt one was given invented prior-attempt context")
 	}
+	// The current authority envelope follows the untrusted observation. This is
+	// significant when a prior transcript contains model-authored prose: current
+	// runtime instructions must be the final instruction-like input rather than
+	// allowing a transcript to look more recent than the current binding.
+	var wire openaiRequest
+	if err := json.Unmarshal(api.requests[1], &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Input) != 2 {
+		t.Fatalf("retry input has %d messages, want prior observations plus current binding", len(wire.Input))
+	}
+	prior, priorOK := wire.Input[0].(map[string]any)
+	current, currentOK := wire.Input[1].(map[string]any)
+	if !priorOK || !currentOK || !strings.Contains(prior["content"].(string), "PRIOR-ATTEMPT") || !strings.Contains(current["content"].(string), "trusted-9c3") {
+		t.Fatalf("retry did not place untrusted history before the current runtime binding: %#v", wire.Input)
+	}
 }
 
 // TestPriorAttemptContextDoesNotCrossOperationBindings pins the continuation
