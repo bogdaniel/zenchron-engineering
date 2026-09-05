@@ -471,6 +471,10 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureCandidateCredentialMaterial, ExecutionResult{}, err),
 		}}
 	}
+	// The previous attempt of THIS operation, read from durable state. It is
+	// the same typed provenance the reattemptability rule consults, so nothing
+	// new decides what a retry may inherit, and a first attempt reads empty.
+	priorFailure, _ := state.lastFailure(operation.ID)
 	result, execErr := r.deps.Provider.Execute(ctx, ExecutionRequest{
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
@@ -482,6 +486,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// is the real attempt this invocation IS - never a provider-local
 		// default. It is what makes this attempt's transcript addressable.
 		Attempt:               operation.Attempt,
+		PriorAttemptFailure:   priorFailure,
 		RunID:                 state.run.ID,
 		SourceSnapshot:        Ref{ID: sourceSnapshotID(state), Revision: state.source.Digest},
 		ControllerID:          r.deps.ControllerID,
@@ -532,7 +537,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			SubjectTree:   subject.Tree,
 		}})
 	}
-	produced := effect{result: executionRecord{mutationResult: record}, state: Succeeded, events: events}
+	produced := effect{result: executionRecord{mutationResult: record, PriorContext: result.PriorContext}, state: Succeeded, events: events}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
 		if result.Failure != nil {
@@ -568,6 +573,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 		produced.result = executionRecord{
 			mutationResult: record,
+			PriorContext:   result.PriorContext,
 			Diagnostic:     r.executionDiagnostic(stage, class, result, execErr),
 			// Real work exists but the producer did not finish, so what it left
 			// is a CHECKPOINT: preserved, exactly identified, reassessed, and
@@ -651,6 +657,11 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 type executionRecord struct {
 	mutationResult
 	Diagnostic *ExecutionDiagnostic `json:"diagnostic,omitempty"`
+	// PriorContext explains the prior-attempt observations this invocation
+	// inherited, or is absent when it inherited none. It records WHICH earlier
+	// attempts were supplied rather than a copy of what they said, so a replay
+	// can account for a retry without the durable row growing with the prompt.
+	PriorContext *PriorAttemptObservations `json:"prior_attempt_context,omitempty"`
 	// Checkpoint marks a mutation the producer did not finish. The commit the
 	// runtime makes for it is journalled as candidate.checkpointed rather than
 	// candidate.committed, which is the whole durable difference between

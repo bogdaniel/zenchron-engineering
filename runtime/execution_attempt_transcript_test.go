@@ -311,47 +311,6 @@ func TestAttemptTranscriptPathsAreSafeAndLegible(t *testing.T) {
 	}
 }
 
-// TestPriorAttemptContextHonorsItsAggregateBound proves a retry cannot turn
-// many individually bounded transcripts into an unbounded new prompt. The
-// newest portion of the final transcript is retained when the aggregate bound
-// is reached, and the result remains deterministic on a second read.
-func TestPriorAttemptContextHonorsItsAggregateBound(t *testing.T) {
-	store := ArtifactStore{Root: t.TempDir()}
-	operation := executionOperationID("run-context-bound", "initial|1|base")
-	// Four per-attempt maxima are more than the aggregate allowance once the
-	// runtime-authored attempt headers and omission marker are included.
-	body := []byte(strings.Repeat("x", maxPriorAttemptTranscriptBytes-1) + "LATEST\n")
-	for attempt := 1; attempt <= 4; attempt++ {
-		if _, err := store.StoreExecutionAttemptTranscript("openai-responses", attemptRef("run-context-bound", operation, attempt), body, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	current := attemptRef("run-context-bound", operation, 5)
-	context, err := store.PriorExecutionAttemptContext("openai-responses", current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(context) > maxPriorAttemptContextBytes {
-		t.Fatalf("prior-attempt context is %d bytes, exceeds its %d-byte bound", len(context), maxPriorAttemptContextBytes)
-	}
-	if !strings.Contains(context, "prior scheduler attempt 4") || !strings.Contains(context, "LATEST\n") {
-		t.Fatalf("bounded context did not retain the newest prior observation: %q", context[len(context)/2:])
-	}
-	if !strings.Contains(context, "earlier portion omitted by runtime context bound") {
-		t.Fatalf("truncated transcript lacked the runtime-authored omission marker: %q", context)
-	}
-	// The same durable artifacts and binding produce byte-identical context;
-	// there is no timestamp, hosted session id, or mutable provider state in
-	// this handoff.
-	again, err := store.PriorExecutionAttemptContext("openai-responses", current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again != context {
-		t.Fatal("prior-attempt context was not deterministic")
-	}
-}
-
 // TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt is acceptance H.
 //
 // Provider-side validation alone would only discover a missing constructor

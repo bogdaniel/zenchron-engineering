@@ -631,6 +631,20 @@ func nextOperatorAction(view statusView) string {
 	return "`autonomy resume " + run + "` to ask the runtime to reconcile again"
 }
 
+// attemptNumbers renders an attempt list for the status line. "none" is stated
+// rather than left blank: an empty field would read as a missing value, and
+// "which earlier attempts were dropped: none" is a real answer.
+func attemptNumbers(attempts []int) string {
+	if len(attempts) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		parts = append(parts, strconv.Itoa(attempt))
+	}
+	return strings.Join(parts, ",")
+}
+
 // renderStatusText is the human projection over the SAME structure the JSON
 // carries. It adds no field and hides no refusal.
 func renderStatusText(stdout io.Writer, view statusView) error {
@@ -701,6 +715,14 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// where it was persisted. The artifact is named, never opened - it is
 	// local-only material and printing it would publish exactly what the
 	// sanitization exists to keep out of an operator-visible surface.
+	// The prior-attempt handoff is rendered for its OWN sake, not as part of a
+	// failure: a retry that succeeded because it inherited observations is
+	// exactly the case an operator needs explained. Only attempt numbers, byte
+	// counts and a digest are printed - never the inherited material.
+	if c := view.ExecutionPriorContext; c != nil {
+		line("execution prior context", fmt.Sprintf("attempt=%d supplied=%s omitted=%s truncated=%s bytes=%d digest=%s",
+			c.Attempt, attemptNumbers(c.Supplied), attemptNumbers(c.Omitted), attemptNumbers(c.Truncated), c.Bytes, short(c.Digest)))
+	}
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
 			d.Stage, d.FailureClass, d.Route, d.Code))

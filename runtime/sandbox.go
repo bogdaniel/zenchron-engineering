@@ -535,6 +535,43 @@ func (s ArtifactStore) StoreExecutionAttemptTranscript(providerID string, attemp
 	return s.writeTranscript(prefix, stdout, stderr, true)
 }
 
+// PriorAttemptObservations is the runtime's bounded, deterministic account of
+// what an eligible retry inherited from earlier attempts of the SAME execution
+// binding - and, just as importantly, of what it did not.
+//
+// It is PROVENANCE, not content. Text is the model-visible material and is
+// deliberately not persisted: the observations themselves already exist as the
+// immutable per-attempt artifacts #55 established, and a durable row that
+// duplicated them would grow without bound. What is persisted answers the
+// operator's question - which earlier attempts were supplied, which were
+// dropped by the aggregate bound, which were individually truncated, how many
+// bytes crossed, and a digest proving the assembly was deterministic.
+type PriorAttemptObservations struct {
+	RunID       string `json:"run_id"`
+	OperationID string `json:"operation_id"`
+	Attempt     int    `json:"attempt"`
+	// Supplied, Omitted and Truncated are ascending attempt numbers. Omitted
+	// names an attempt that HAD observations and did not fit the aggregate
+	// bound; Truncated names one whose own observations were cut to the
+	// per-attempt bound. An attempt that observed nothing appears in neither,
+	// because nothing about it was dropped.
+	Supplied  []int  `json:"supplied_attempts,omitempty"`
+	Omitted   []int  `json:"omitted_attempts,omitempty"`
+	Truncated []int  `json:"truncated_attempts,omitempty"`
+	Bytes     int    `json:"bytes"`
+	Digest    string `json:"digest,omitempty"`
+
+	// Text is the assembled model-visible context. It is excluded from the
+	// durable record on purpose; see the type comment.
+	Text string `json:"-"`
+}
+
+const (
+	maxPriorAttemptContextBytes    = 64 << 10
+	maxPriorAttemptTranscriptBytes = 16 << 10
+	priorAttemptOmissionMarker     = "[earlier portion omitted by runtime context bound]\n"
+)
+
 // PriorExecutionAttemptContext returns bounded, sanitized observations from
 // earlier attempts of exactly the same runtime operation. It derives names
 // from runtime identity rather than accepting paths or provider session state,
@@ -543,79 +580,141 @@ func (s ArtifactStore) StoreExecutionAttemptTranscript(providerID string, attemp
 // This is context, not an authority channel. Callers must present it as
 // observations and retain the current ExecutionRequest as the authoritative
 // binding. Sanitized transcripts are used rather than raw forensic artifacts.
-const (
-	maxPriorAttemptContextBytes    = 64 << 10
-	maxPriorAttemptTranscriptBytes = 16 << 10
-)
-
-func (s ArtifactStore) PriorExecutionAttemptContext(providerID string, current ExecutionAttemptRef) (string, error) {
+//
+// Two bounds apply and they retain opposite ends on purpose. WITHIN one
+// attempt the newest bytes are kept, because the end of a transcript holds the
+// latest tool results. ACROSS attempts the newest ATTEMPTS are kept, because
+// the immediately preceding attempt is the whole reason this exists. Filling
+// the aggregate oldest-first satisfied the ceiling while evicting exactly the
+// attempt a retry most needs, which is the defect this selection law replaces.
+func (s ArtifactStore) PriorExecutionAttemptContext(providerID string, current ExecutionAttemptRef) (PriorAttemptObservations, error) {
 	if s.Root == "" {
-		return "", fmt.Errorf("artifact root required")
+		return PriorAttemptObservations{}, fmt.Errorf("artifact root required")
 	}
 	if err := current.Validate(); err != nil {
-		return "", err
+		return PriorAttemptObservations{}, err
 	}
 	if providerID == "" {
-		return "", fmt.Errorf("execution attempt transcript requires a provider id")
+		return PriorAttemptObservations{}, fmt.Errorf("execution attempt transcript requires a provider id")
 	}
+	record := PriorAttemptObservations{RunID: current.RunID, OperationID: current.OperationID, Attempt: current.Attempt}
 
-	var context strings.Builder
-	remaining := maxPriorAttemptContextBytes
-	for attempt := 1; attempt < current.Attempt && remaining > 0; attempt++ {
+	// Selection runs newest to oldest against the aggregate allowance; the
+	// blocks are rendered back in chronological order below, so what the model
+	// reads is still a history rather than a reversed one.
+	var blocks []string
+	remaining, exhausted := maxPriorAttemptContextBytes, false
+	for attempt := current.Attempt - 1; attempt >= 1; attempt-- {
 		prefix, err := attemptTranscriptPrefix(providerID, ExecutionAttemptRef{
 			RunID: current.RunID, OperationID: current.OperationID, Attempt: attempt,
 		})
 		if err != nil {
-			return "", err
+			return PriorAttemptObservations{}, err
 		}
-		path := filepath.Join(s.Root, prefix+".sanitized-candidate.log")
-		body, err := os.ReadFile(path)
+		raw, err := os.ReadFile(filepath.Join(s.Root, prefix+".sanitized-candidate.log"))
 		if os.IsNotExist(err) {
 			// An invocation can fail before it produces a transcript. Its
 			// absence is not a reason to invent context or reject a retry.
 			continue
 		}
 		if err != nil {
-			return "", fmt.Errorf("read prior execution attempt %d: %w", attempt, err)
+			return PriorAttemptObservations{}, fmt.Errorf("read prior execution attempt %d: %w", attempt, err)
 		}
-		header := fmt.Sprintf("\n--- prior scheduler attempt %d (sanitized transcript; observation only) ---\n", attempt)
-		if len(header) >= remaining {
-			break
+		body := attemptObservations(raw)
+		if len(body) == 0 {
+			// The attempt reached no brokered capability, so it observed
+			// nothing an engineer could reuse. Emitting an empty header for it
+			// would add noise and claim a handoff that did not happen.
+			continue
 		}
-		available := remaining - len(header)
-		omission := "\n[earlier portion omitted by runtime context bound]\n"
-		limit := maxPriorAttemptTranscriptBytes
-		if limit > available {
-			limit = available
-		}
-		truncated := len(body) > limit
+		header := fmt.Sprintf("\n--- prior scheduler attempt %d (runtime-extracted observations; observation only) ---\n", attempt)
+		truncated := len(body) > maxPriorAttemptTranscriptBytes
 		if truncated {
-			// Reserve the omission marker before accepting the header. Without
-			// that reservation, a nearly exhausted aggregate budget could append
-			// both the last few transcript bytes and the marker, exceeding the
-			// promised context ceiling.
-			if available <= len(omission) {
-				break
-			}
-			limit = available - len(omission)
-			if limit > maxPriorAttemptTranscriptBytes {
-				limit = maxPriorAttemptTranscriptBytes
-			}
-			// The end contains the latest tool results and bounded-stop
-			// observation, which is most useful to a resumed attempt.
-			body = body[len(body)-limit:]
+			body = body[len(body)-maxPriorAttemptTranscriptBytes:]
+			header += priorAttemptOmissionMarker
 		}
-		context.WriteString(header)
-		context.Write(body)
-		if truncated {
-			context.WriteString(omission)
+		block := header + string(body)
+		// Once one attempt does not fit, every OLDER attempt is omitted too.
+		// Skipping past a large attempt to admit a smaller, older one would
+		// hand the model a gapped history whose shape depended on byte sizes.
+		if exhausted || len(block) > remaining {
+			exhausted = true
+			record.Omitted = append(record.Omitted, attempt)
+			continue
 		}
-		remaining -= len(header) + len(body)
+		remaining -= len(block)
+		blocks = append(blocks, block)
+		record.Supplied = append(record.Supplied, attempt)
 		if truncated {
-			remaining -= len(omission)
+			record.Truncated = append(record.Truncated, attempt)
 		}
 	}
-	return context.String(), nil
+
+	var text strings.Builder
+	for i := len(blocks) - 1; i >= 0; i-- {
+		text.WriteString(blocks[i])
+	}
+	record.Text = text.String()
+	record.Bytes = len(record.Text)
+	ascending(record.Supplied)
+	ascending(record.Omitted)
+	ascending(record.Truncated)
+	if record.Bytes > 0 {
+		sum := sha256.Sum256([]byte(record.Text))
+		record.Digest = hex.EncodeToString(sum[:])
+	}
+	return record, nil
+}
+
+// ascending reverses the newest-first order selection produces, in place, so
+// every reported attempt list reads chronologically.
+func ascending(attempts []int) {
+	for i, j := 0, len(attempts)-1; i < j; i, j = i+1, j-1 {
+		attempts[i], attempts[j] = attempts[j], attempts[i]
+	}
+}
+
+// attemptObservations reduces one attempt's sanitized transcript to the
+// engineering observations the model already saw: which brokered capability
+// ran, with which normalized arguments, and the bounded result it returned.
+//
+// The request and response envelopes are DROPPED rather than replayed. They
+// carry the provider's own response ids and a verbatim copy of the current
+// prompt - and, from the third attempt onwards, a copy of the previous
+// attempt's own prior-attempt context. Replaying them would put provider
+// session identity into a later prompt and let the handoff accumulate a nested
+// copy of itself inside a bound meant for observations, squeezing out the tool
+// results that are the only part worth inheriting.
+//
+// The transcript format this reads is written by this package a few hundred
+// lines away, so the shape is runtime-owned rather than parsed from a foreign
+// source. Repository text echoed inside a tool result can at worst make the
+// extractor keep or drop a section: it is presented as untrusted observation
+// either way and grants nothing.
+func attemptObservations(transcript []byte) []byte {
+	var out strings.Builder
+	keep := false
+	// Scanned by index rather than split: a transcript holds whole JSON bodies
+	// on single lines, so neither a line slice nor bufio's line ceiling is a
+	// good fit for material this code must never truncate by accident.
+	for rest := string(transcript); rest != ""; {
+		line := rest
+		if end := strings.IndexByte(rest, '\n'); end >= 0 {
+			line, rest = rest[:end+1], rest[end+1:]
+		} else {
+			rest = ""
+		}
+		switch {
+		case strings.HasPrefix(line, "--> request "), strings.HasPrefix(line, "<-- response "):
+			keep = false
+		case strings.HasPrefix(line, "  tool "):
+			keep = true
+		}
+		if keep {
+			out.WriteString(line)
+		}
+	}
+	return []byte(out.String())
 }
 
 // attemptTranscriptPrefix lays the identity out as a path.
