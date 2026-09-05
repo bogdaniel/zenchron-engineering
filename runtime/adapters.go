@@ -37,7 +37,14 @@ type ExecutionRequest struct {
 	// produces. Before this existed a transcript was keyed by run alone, so a
 	// retry silently overwrote the evidence of the attempt before it and the
 	// history of a bounded retry could not be read back at all.
-	Attempt               int
+	Attempt int
+	// PriorAttemptFailure is the runtime's own typed classification of the
+	// PREVIOUS attempt of this exact operation, or empty on attempt 1. It comes
+	// from durable scheduler state - the same provenance the reattemptability
+	// rule reads - never from a diagnostic string, and it is what decides
+	// whether this retry may inherit that attempt's observations. See
+	// PriorAttemptContextEligible.
+	PriorAttemptFailure   FailureClass
 	SourceSnapshot        Ref
 	ControllerID          string
 	Base                  Ref
@@ -87,6 +94,12 @@ type ExecutionResult struct {
 	ChangeSummary               string
 	ChangedPaths                []string
 	Failure                     *ProviderFailure
+	// PriorContext is the runtime's account of the prior-attempt observations
+	// this invocation was actually given, or nil when it was given none. It is
+	// an observation about the handoff, not about the work, and it exists so a
+	// replayed run can explain a retry rather than leaving an operator to infer
+	// what the model saw.
+	PriorContext *PriorAttemptObservations
 }
 
 // ExecutionAttemptRef is the runtime-owned identity of one provider
@@ -449,6 +462,25 @@ func RouteFailure(c FailureClass) FailureRoute {
 	default:
 		return RouteStop
 	}
+}
+
+// PriorAttemptContextEligible reports whether a retry of the same execution
+// binding may inherit the previous attempt's observations.
+//
+// Only a runtime-bounded incomplete execution qualifies. That class means the
+// runtime itself cut a reasoning loop short with work still to do, so the next
+// attempt continues the same engineering task and re-reading the same files is
+// pure waste - which is the finding this rule exists for.
+//
+// The other reattemptable classes are excluded deliberately. A transient
+// provider or infrastructure failure says nothing about the work: the attempt
+// it ended may have reached no capability at all, and policy is that such a
+// retry starts fresh. Every remaining class either routes to a DIFFERENT
+// operation or stops the run. An empty classification is not eligible either,
+// so a retry can never acquire history by having no recorded reason - unknown
+// failures stay fail-closed here exactly as they do in RouteFailure.
+func PriorAttemptContextEligible(prior FailureClass) bool {
+	return prior == FailureExecutionIncomplete
 }
 
 // MergePrecedence is deliberately observation-only: merged always wins over

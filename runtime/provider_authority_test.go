@@ -28,6 +28,11 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		"ChangeSummary",
 		"ChangedPaths",
 		"Failure",
+		// PriorContext is an observation ABOUT THE HANDOFF, not about the
+		// work: which earlier attempts of this binding supplied context, what
+		// the runtime bound dropped, and a digest of what crossed. It asserts
+		// nothing an authority evaluator reads and satisfies no claim.
+		"PriorContext",
 	}
 	typ := reflect.TypeOf(ExecutionResult{})
 	var got []string

@@ -54,6 +54,11 @@ type RunProjection struct {
 	// any process-local error state and without an operator opening runtime.db
 	// or knowing an artifact path.
 	ExecutionDiagnostic *ExecutionDiagnostic `json:"execution_diagnostic,omitempty"`
+	// ExecutionPriorContext is the LATEST prior-attempt handoff an
+	// execution.invoke recorded. It is projected from the same operation.after
+	// row the diagnostic is, so replay explains a retry's inherited context
+	// from the journal alone rather than from process-local provider state.
+	ExecutionPriorContext *PriorAttemptObservations `json:"execution_prior_attempt_context,omitempty"`
 	// CandidateComplete reports whether the CURRENT candidate head is
 	// execution-complete: a producer finished against it, rather than being cut
 	// off mid-invocation with its partial work preserved. It is what separates
@@ -298,6 +303,13 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 			if diagnostic != nil {
 				p.ExecutionDiagnostic = diagnostic
 			}
+			prior, err := executionPriorContextOf(operation.Result)
+			if err != nil {
+				return err
+			}
+			if prior != nil {
+				p.ExecutionPriorContext = prior
+			}
 		}
 		// The ordering rule: a new baseline is adopted only from an operation
 		// that SUCCEEDED. operation.after is the last event an operation
@@ -352,6 +364,23 @@ func metadataBaseline(result json.RawMessage) (string, error) {
 		return "", fmt.Errorf("invalid operation result: %w", err)
 	}
 	return baseline.MetadataDigest, nil
+}
+
+// executionPriorContextOf reads the prior-attempt handoff an execution.invoke
+// result recorded, if it recorded one. Like executionDiagnosticOf it decodes
+// only the field it needs, so a row written before this field existed - every
+// row the runtime has written so far - still projects.
+func executionPriorContextOf(result json.RawMessage) (*PriorAttemptObservations, error) {
+	if len(result) == 0 {
+		return nil, nil
+	}
+	var record struct {
+		PriorContext *PriorAttemptObservations `json:"prior_attempt_context"`
+	}
+	if err := json.Unmarshal(result, &record); err != nil {
+		return nil, fmt.Errorf("decode execution result: %w", err)
+	}
+	return record.PriorContext, nil
 }
 
 // decodePayload reuses the registry's strict decode, so the projection reads a

@@ -691,8 +691,13 @@ type StatusReport struct {
 	// bulk provider material stays in the local-only artifact the ArtifactRef
 	// names and is never rendered here.
 	ExecutionDiagnostic *ExecutionDiagnostic `json:"execution_diagnostic,omitempty"`
-	Budgets             RunBudgets           `json:"budgets"`
-	StateSHA256         string               `json:"state_sha256"`
+	// ExecutionPriorContext explains which earlier attempts of the last
+	// execution operation supplied observations to a retry, and what the
+	// runtime bound dropped. It names attempt numbers and byte counts only;
+	// the observations themselves stay in the local-only attempt artifacts.
+	ExecutionPriorContext *PriorAttemptObservations `json:"execution_prior_attempt_context,omitempty"`
+	Budgets               RunBudgets                `json:"budgets"`
+	StateSHA256           string                    `json:"state_sha256"`
 }
 
 // Status replays the run and reports it. It performs no network call and no
@@ -715,23 +720,24 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ConfigDigest: r.deps.ConfigDigest,
 			Changed:      state.controllerChanged,
 		},
-		Phase:                state.phase(),
-		Disposition:          state.snapshot.Disposition,
-		Reason:               state.snapshot.Reason,
-		Base:                 Ref{ID: r.deps.Repository.DefaultBranch, Revision: state.baseRevision()},
-		Candidate:            Candidate{Branch: candidateBranch(state.run.ID), Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree},
-		Contract:             state.projection.Contract,
-		CreatedAt:            state.run.CreatedAt,
-		Now:                  now,
-		Elapsed:              now.Sub(state.run.CreatedAt),
-		Evidence:             state.projection.EvidenceBundles,
-		Assurance:            state.projection.Assurance,
-		PullRequest:          state.projection.PullRequest,
-		Attempts:             state.projection.Attempts,
-		Budgets:              r.deps.Budgets,
-		StateSHA256:          state.snapshot.StateSHA256,
-		PublicationAuthority: publicationAuthorityOf(state),
-		ExecutionDiagnostic:  state.projection.ExecutionDiagnostic,
+		Phase:                 state.phase(),
+		Disposition:           state.snapshot.Disposition,
+		Reason:                state.snapshot.Reason,
+		Base:                  Ref{ID: r.deps.Repository.DefaultBranch, Revision: state.baseRevision()},
+		Candidate:             Candidate{Branch: candidateBranch(state.run.ID), Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree},
+		Contract:              state.projection.Contract,
+		CreatedAt:             state.run.CreatedAt,
+		Now:                   now,
+		Elapsed:               now.Sub(state.run.CreatedAt),
+		Evidence:              state.projection.EvidenceBundles,
+		Assurance:             state.projection.Assurance,
+		PullRequest:           state.projection.PullRequest,
+		Attempts:              state.projection.Attempts,
+		Budgets:               r.deps.Budgets,
+		StateSHA256:           state.snapshot.StateSHA256,
+		PublicationAuthority:  publicationAuthorityOf(state),
+		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,
+		ExecutionPriorContext: state.projection.ExecutionPriorContext,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{

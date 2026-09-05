@@ -1991,6 +1991,81 @@ func TestStatusExposesTheStructuredControllerIdentity(t *testing.T) {
 	}
 }
 
+// TestStatusExplainsTheInheritedPriorAttemptContext is the operator half of
+// #59 acceptance H. A retry that inherited observations from earlier attempts
+// of its binding must be explainable from `autonomy status` alone: which
+// attempts supplied context, which the aggregate bound dropped, which were
+// individually truncated, how many bytes crossed, and under which digest.
+//
+// The observations themselves are never rendered. They are local-only attempt
+// artifacts, and printing them here would publish exactly what the per-attempt
+// sanitation boundary exists to keep off an operator surface.
+func TestStatusExplainsTheInheritedPriorAttemptContext(t *testing.T) {
+	handoff := &runtime.PriorAttemptObservations{
+		RunID:       "run-1",
+		OperationID: "run-1:execution.invoke:execution.invoke#continuation|abc123",
+		Attempt:     3,
+		Supplied:    []int{2},
+		Omitted:     []int{1},
+		Truncated:   []int{2},
+		Bytes:       16512,
+		Digest:      "4f1c0e2ab9d7c6155ee3a08b7d2f9c41aa6b5e3720d84c9f0b1e6a2d3c4f5081",
+	}
+	engine := &scriptedRuntime{
+		runID: "run-1",
+		report: runtime.StatusReport{
+			SchemaVersion:         runtime.SchemaVersion,
+			RunID:                 "run-1",
+			Repository:            "zenchron/seeded",
+			Phase:                 runtime.Execute,
+			Disposition:           runtime.Active,
+			ExecutionPriorContext: handoff,
+		},
+	}
+
+	var out bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1"}, autonomyOverrides{Runtime: engine}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		ExecutionPriorContext *runtime.PriorAttemptObservations `json:"execution_prior_attempt_context"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+		t.Fatalf("status printed no view: %v\n%s", err, out.String())
+	}
+	if view.ExecutionPriorContext == nil {
+		t.Fatalf("the structured status view hides the prior-attempt handoff: %s", out.String())
+	}
+	got := view.ExecutionPriorContext
+	if got.RunID != handoff.RunID || got.OperationID != handoff.OperationID || got.Attempt != handoff.Attempt ||
+		got.Bytes != handoff.Bytes || got.Digest != handoff.Digest ||
+		fmt.Sprint(got.Supplied) != "[2]" || fmt.Sprint(got.Omitted) != "[1]" || fmt.Sprint(got.Truncated) != "[2]" {
+		t.Fatalf("the structured view changed the handoff: %#v", got)
+	}
+
+	var text bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &text); err != nil {
+		t.Fatal(err)
+	}
+	rendered := text.String()
+	for _, want := range []string{"execution prior context", "attempt=3", "supplied=2", "omitted=1", "truncated=2", "bytes=16512", handoff.Digest[:12]} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("the text projection does not surface %q:\n%s", want, rendered)
+		}
+	}
+
+	// A retry that inherited nothing, and a run with no execution at all, print
+	// no handoff line: "none" is reserved for a handoff that really happened.
+	engine.report.ExecutionPriorContext = nil
+	var clean bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &clean); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(clean.String(), "execution prior context") {
+		t.Fatalf("a run with no inherited context rendered one:\n%s", clean.String())
+	}
+}
+
 // TestStatusSurfacesTheSanitizedExecutionDiagnostic is the operator-experience
 // half of the second #32 dogfood repair. Before it, `autonomy status --text`
 // printed only the failure reason, and an operator had to know the sanitized
