@@ -847,76 +847,14 @@ func autonomyStop(flags autonomyFlags, overrides autonomyOverrides, runID string
 	return runtime.ExitCancelled, nil
 }
 
-// cancelRun records durable operator cancellation intent for one run and stops
-// its scheduling. It is shared by `stop` and by the generation boundary
-// `refresh` records, so there is exactly one cancellation path and both are
-// idempotent in the same way.
-//
-// Three things happen, in this order, and nothing else does:
-//
-//  1. run.cancelled is appended through the journal, which is the authority
-//     every later replay reads. Because it is durable, the run is still
-//     cancelled after a restart.
-//  2. the run document is settled as cancelled, which is what stops the
-//     scheduler from handing this run out again.
-//  3. every operation the store still believes is active has cancellation
-//     REQUESTED on it through the scheduler's existing mechanism. That is the
-//     one the runtime already honours: Scheduler.Next refuses to hand out an
-//     operation with cancel_requested set, so the bounded operation stops
-//     being scheduled and a controller still holding it unwinds through the
-//     cancellation semantics it already implements. No second cancellation
-//     mechanism is introduced here, and no lease another process owns is
-//     written out from under it.
+// cancelRun records durable operator cancellation intent for one run. The
+// mechanism lives in the runtime, because `stop RUN` and the supervisor's
+// explicit stop-all action must be one cancellation path rather than two
+// answers to "is this run cancelled".
 func cancelRun(built *composition, runID, reason string) (runtime.Outcome, error) {
-	run, err := requireRun(built, runID)
-	if err != nil {
+	if _, err := requireRun(built, runID); err != nil {
 		return runtime.Outcome{}, err
-	}
-	outcome := runtime.Outcome{RunID: runID, Disposition: runtime.Cancelled, Reason: reason}
-	// Cancelling an already cancelled run is a no-op rather than a second
-	// journal entry, so a retried command reports the same answer.
-	if run.Disposition == runtime.Cancelled {
-		outcome.Reason = run.Reason
-		return outcome, nil
-	}
-	now := time.Now().UTC()
-	if _, err := built.store.AppendEvent(runtime.EngineeringEvent{
-		SchemaVersion: runtime.SchemaVersion,
-		ID:            fmt.Sprintf("%s-%s-%d", runID, reason, now.UnixNano()),
-		RunID:         runID,
-		Type:          runtime.EventRunCancelled,
-		OccurredAt:    now,
-		Payload:       json.RawMessage(`{"reason":"` + reason + `"}`),
-	}); err != nil {
-		return runtime.Outcome{}, err
-	}
-	run.Disposition, run.Reason, run.UpdatedAt = runtime.Cancelled, reason, now
-	if err := built.store.PutRun(run); err != nil {
-		return runtime.Outcome{}, err
-	}
-	if err := cancelActiveOperations(built, runID); err != nil {
-		return runtime.Outcome{}, err
-	}
-	return outcome, nil
-}
-
-// cancelActiveOperations requests cancellation of the run's leased or running
-// operations through the scheduler, which is the mechanism the runtime already
-// has for exactly this. It writes no lease and finishes no operation another
-// process may still be executing.
-func cancelActiveOperations(built *composition, runID string) error {
-	operations, err := built.store.Operations(runID)
-	if err != nil {
-		return err
 	}
 	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
-	for _, op := range operations {
-		if op.State != runtime.Leased && op.State != runtime.Running {
-			continue
-		}
-		if _, err := scheduler.RequestCancel(op.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return runtime.CancelRun(built.store, scheduler, time.Now().UTC(), runID, reason)
 }

@@ -117,6 +117,49 @@ type GitHubConfig struct {
 	Endpoint       string `json:"endpoint,omitempty"`
 }
 
+// FeedbackConfig is the operator's admission rule for model-visible GitHub
+// feedback. It is operator authority for the same reason a credential is: it
+// decides WHO may direct a coding agent that runs under the operator's own
+// account, and a repository that could widen it would be choosing its own
+// reviewers.
+//
+// Every member is omitempty, so a configuration that says nothing about
+// feedback canonicalizes exactly as it did before this member existed and
+// still gets the safe default: collaborator-equivalent write permission, no
+// allowlisted automation.
+type FeedbackConfig struct {
+	// MinPermission is the repository permission an actor must hold. Empty
+	// means DefaultFeedbackPermission. Setting it to "read" on a public
+	// repository would admit the entire internet, which is why the default is
+	// not that.
+	MinPermission string `json:"min_permission,omitempty"`
+	// AllowedBots are automation logins the operator explicitly admits.
+	AllowedBots []string `json:"allowed_bots,omitempty"`
+	// SelfLogins are identities the operator knows to be this system - the
+	// account the runtime publishes under, and any coding-agent service
+	// account. The runtime also resolves its own credential identity at
+	// startup; this member exists for the identities it cannot discover.
+	SelfLogins []string `json:"self_logins,omitempty"`
+}
+
+// FeedbackPolicy resolves the operator layer into the runtime-facing rule.
+func (c OperatorConfig) FeedbackPolicy() (FeedbackPolicy, error) {
+	policy := FeedbackPolicy{
+		AllowedBots: append([]string(nil), c.Feedback.AllowedBots...),
+		SelfLogins:  append([]string(nil), c.Feedback.SelfLogins...),
+	}
+	stated := strings.ToLower(strings.TrimSpace(c.Feedback.MinPermission))
+	if stated == "" {
+		return policy, nil
+	}
+	permission := GitHubPermission(stated)
+	if _, known := permissionRank[permission]; !known {
+		return FeedbackPolicy{}, &ConfigError{Detail: fmt.Sprintf("feedback.min_permission %q is not a GitHub repository permission", c.Feedback.MinPermission)}
+	}
+	policy.MinPermission = permission
+	return policy, nil
+}
+
 // BudgetConfig is the operator ceiling for one run.
 type BudgetConfig struct {
 	WallLimitSeconds     int `json:"wall_limit_seconds"`
@@ -234,8 +277,10 @@ type OperatorConfig struct {
 	// account, does their work.
 	DefaultAgent string       `json:"default_agent,omitempty"`
 	GitHub       GitHubConfig `json:"github"`
-	Budgets      BudgetConfig `json:"budgets"`
-	Watch        WatchConfig  `json:"watch,omitempty"`
+	// Feedback is the admission rule for model-visible GitHub feedback.
+	Feedback FeedbackConfig `json:"feedback,omitzero"`
+	Budgets  BudgetConfig   `json:"budgets"`
+	Watch    WatchConfig    `json:"watch,omitempty"`
 	// GC is the operator's reclamation window for `autonomy gc`.
 	GC GCConfig `json:"gc,omitempty"`
 	// Operator names who a run is recorded as having been authorized by. It is
@@ -673,6 +718,9 @@ func (c OperatorConfig) validate(path string) error {
 		return refuse("gc.retention_hours must not be negative")
 	}
 	if _, err := c.WatchSettings(); err != nil {
+		return refuse(err.Error())
+	}
+	if _, err := c.FeedbackPolicy(); err != nil {
 		return refuse(err.Error())
 	}
 	return nil

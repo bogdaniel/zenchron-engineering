@@ -154,12 +154,30 @@ type RunBudgets struct {
 // Dependencies is the complete, explicit input to a runtime instance. Every
 // external system is a seam; nothing here is discovered from ambient state.
 type Dependencies struct {
-	Store     *SQLiteOperationStore
-	Clock     Clock
-	Owner     string
-	Liveness  OwnerLiveness
-	GitHub    GitHubAdapter
-	Provider  ExecutionProvider
+	Store    *SQLiteOperationStore
+	Clock    Clock
+	Owner    string
+	Liveness OwnerLiveness
+	GitHub   GitHubAdapter
+	Provider ExecutionProvider
+	// Agent is the named execution agent Provider implements. It is supplied
+	// alongside the provider rather than discovered from it: the composition
+	// root chose both, and a provider that could name itself would be stating
+	// its own trust mode, which is exactly the claim configuration owns.
+	//
+	// The zero value is a runtime driving a pre-#63 single-provider
+	// configuration; nothing is invented for it.
+	Agent ResolvedAgent
+	// Agents is the registry an operator command resolves an agent id
+	// against. It is optional: a runtime constructed to drive exactly one run
+	// needs only Agent, and only the handoff path consults the registry.
+	Agents AgentRegistry
+	// Feedback is the operator's admission rule for model-visible GitHub
+	// feedback. Its zero value is the SAFE default - collaborator-equivalent
+	// write permission, no allowlisted automation - so a configuration that
+	// says nothing about feedback admits only actors who could already push to
+	// the repository.
+	Feedback  FeedbackPolicy
 	Assurance AssuranceProvider
 	// SemanticAssurance is the INDEPENDENT semantic acceptance producer. It is
 	// optional: without it a contract requiring semantic_acceptance is refused
@@ -247,6 +265,7 @@ type EngineeringRuntime struct {
 	scheduler  Scheduler
 	flow       KernelFlow
 	repo       GitHubRepo
+	agents     AgentRegistry
 	controller string // digest binding controller identity to configuration
 }
 
@@ -330,7 +349,8 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		return nil, err
 	}
 	return &EngineeringRuntime{
-		deps: d,
+		deps:   d,
+		agents: d.Agents,
 		scheduler: Scheduler{
 			Store: d.Store, Clock: d.Clock, Owner: d.Owner, Liveness: d.Liveness,
 			LeaseDuration:     time.Minute,
@@ -507,6 +527,21 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 				Detail: "adopting it would reconcile another controller's work under this one",
 			}
 		}
+		// A live generation keeps the agent it was created with. Adopting it
+		// under a different worker would be a silent provider handoff, which
+		// is the one thing an agent binding exists to prevent - so it goes
+		// through the same typed transition an explicit handoff request
+		// produces, which records the attempt and points at a new generation.
+		//
+		// An EMPTY recorded agent is a run created before the registry
+		// existed. Its documented legacy meaning is "whichever single provider
+		// the operator configuration named at the time", so it is adopted
+		// rather than refused; refusing it would make upgrading strand every
+		// run already in flight.
+		if existing.AgentID != "" && r.deps.Agent.ID != "" && existing.AgentID != r.deps.Agent.ID {
+			_, err := r.RequestAgentHandoff(runID, r.deps.Agent.ID, "adoption of a live generation by a different agent")
+			return StartOutcome{}, err
+		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
@@ -532,6 +567,7 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		// attempt ceilings are still read live. Persisting the whole record
 		// now is what lets the rest follow without another schema change.
 		Budgets:   &budgets,
+		AgentID:   r.deps.Agent.ID,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -569,6 +605,34 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		Payload:       provenance,
 	}); err != nil {
 		return "", err
+	}
+	// The agent binding is journalled immediately after genesis, so a replay
+	// answers "which worker is this run's" from the append-only log rather
+	// than from a mutable row or from whatever the operator's default agent
+	// happens to be today. A runtime driving a pre-#63 single-provider
+	// configuration has no named agent and records none: the absence is the
+	// documented legacy meaning, and inventing an id for it would fabricate
+	// provenance for runs that never had any.
+	if r.deps.Agent.ID != "" {
+		assignment, err := marshalPayloadJSON(AgentAssignedPayload{
+			AgentID:      r.deps.Agent.ID,
+			ProviderKind: r.deps.Agent.Kind,
+			TrustMode:    r.deps.Agent.TrustMode,
+			Model:        r.deps.Agent.Model,
+		})
+		if err != nil {
+			return "", err
+		}
+		if _, err := r.deps.Store.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion,
+			ID:            runID + "-agent-assigned",
+			RunID:         runID,
+			Type:          EventRunAgentAssigned,
+			OccurredAt:    now,
+			Payload:       assignment,
+		}); err != nil {
+			return "", err
+		}
 	}
 	return runID, nil
 }

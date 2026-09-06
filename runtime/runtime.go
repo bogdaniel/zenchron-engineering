@@ -63,7 +63,32 @@ const (
 )
 
 const (
-	EventRunCreated          = "run.created"
+	EventRunCreated = "run.created"
+	// EventRunAgentAssigned is the durable, immutable record of WHICH named
+	// execution agent a run was created to be worked by. The run row also
+	// carries the id, but the row is mutable and this is not: the journal is
+	// where "this run has always been a codex run" is answered, including
+	// after the operator's default agent changes underneath it.
+	EventRunAgentAssigned = "run.agent_assigned"
+	// EventRunAgentHandoffRefused records an attempt to move an existing run
+	// to a different execution agent, and the typed refusal it produced. It is
+	// journalled rather than merely returned because a refusal is an
+	// engineering fact about the run: it names the exact candidate, the two
+	// agents, the two trust modes, the reason and the budgets that were NOT
+	// reset, so an operator can explain later why the work continued where it
+	// did.
+	EventRunAgentHandoffRefused = "run.agent_handoff_refused"
+	// EventFeedbackObserved is one ADMISSION decision about one piece of
+	// GitHub feedback: who wrote it, what permission they hold, whether it
+	// applies to the current head, and whether it may reach a worker. It is
+	// recorded for refused items too, because "why was my comment ignored" is
+	// an operator question the runtime has to be able to answer.
+	EventFeedbackObserved = "feedback.observed"
+	// EventFeedbackConsumed is DELIVERY: admitted items were actually given to
+	// an exact invocation. It is a separate event from admission so a crash
+	// between observing a review and acting on it can neither lose it nor
+	// deliver it twice.
+	EventFeedbackConsumed    = "feedback.consumed"
 	EventRunWaiting          = "run.waiting"
 	EventRunCompleted        = "run.completed"
 	EventRunFailed           = "run.failed"
@@ -104,7 +129,7 @@ const (
 	EventHumanAuthorityRecorded    = "human.authority_recorded"
 )
 
-var eventTypes = map[string]bool{EventRunCreated: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
 
 type Ref struct {
 	ID       string `json:"id"`
@@ -149,10 +174,21 @@ type EngineeringRun struct {
 	// Nil is a run created before this field existed, and
 	// runState.continuationLimit reads that absence as the legacy rule rather
 	// than as today's configuration.
-	Budgets   *RunBudgets `json:"budgets,omitempty"`
-	CreatedAt time.Time   `json:"created_at"`
-	UpdatedAt time.Time   `json:"updated_at"`
-	Cursor    Cursor      `json:"journal_cursor"`
+	Budgets *RunBudgets `json:"budgets,omitempty"`
+	// AgentID is the named execution agent this run is worked by. It is a
+	// PROJECTION of the run.agent_assigned event, kept on the row so the
+	// all-runs operator view can be answered without replaying every journal;
+	// the journal remains the authority, exactly as it is for the candidate
+	// revision this row also carries.
+	//
+	// It is omitempty because a run created before the agent registry existed
+	// has none, and that absence has a documented legacy meaning: the run was
+	// worked by whichever single provider the operator configuration named at
+	// the time. No identity is backfilled for it.
+	AgentID   string    `json:"agent_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Cursor    Cursor    `json:"journal_cursor"`
 }
 type RunOperation struct {
 	SchemaVersion    string          `json:"schema_version"`

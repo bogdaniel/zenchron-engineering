@@ -206,13 +206,127 @@ func safeSHA(sha string) error {
 type ghActor struct {
 	Login string `json:"login"`
 	ID    int64  `json:"id"`
+	// Type is GitHub's own classification: "User", "Bot", "Organization". It
+	// is the forge's answer to "is this a person", which feedback admission
+	// needs and which a login string cannot supply.
+	Type string `json:"type"`
 }
 
 func (a *ghActor) normalize() GitHubActor {
 	if a == nil {
 		return GitHubActor{}
 	}
-	return GitHubActor{Login: a.Login, ID: a.ID}
+	// A GitHub App comment is reported with type "Bot" and, conventionally, a
+	// login ending in "[bot]". Both are checked: the type is authoritative
+	// where present, and the suffix catches an App whose type the endpoint
+	// omitted. Neither is a text match on the COMMENT, which an author
+	// controls; both are properties of the identity.
+	return GitHubActor{
+		Login: a.Login, ID: a.ID,
+		Bot: strings.EqualFold(a.Type, "Bot") || strings.HasSuffix(strings.ToLower(a.Login), "[bot]"),
+	}
+}
+
+// RepositoryPermission resolves an actor's current permission. GitHub answers
+// 404 for an identity that is not a collaborator, which is a real answer - no
+// permission - rather than a failed observation, so it is normalized to
+// PermissionNone with a nil error.
+func (a GitHubRESTAdapter) RepositoryPermission(ctx context.Context, repo GitHubRepo, login string) (GitHubPermission, error) {
+	if err := safeLogin(login); err != nil {
+		return PermissionUnresolved, err
+	}
+	status, body, err := a.do(ctx, repo, http.MethodGet, repoPath(repo)+"/collaborators/"+url.PathEscape(login)+"/permission", nil, nil)
+	if err != nil {
+		return PermissionUnresolved, err
+	}
+	if status == http.StatusNotFound {
+		return PermissionNone, nil
+	}
+	if err := classifyGitHubStatus(status, RateLimitObservation{}, false, "repository permission"); err != nil {
+		return PermissionUnresolved, err
+	}
+	var payload struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return PermissionUnresolved, &GitHubAPIError{Status: status, Detail: "unreadable repository permission response"}
+	}
+	permission := GitHubPermission(strings.ToLower(strings.TrimSpace(payload.Permission)))
+	if _, known := permissionRank[permission]; !known {
+		// An unrecognized spelling is UNRESOLVED, not a guess. Ranking it
+		// would be this adapter inventing a rung on GitHub's ladder.
+		return PermissionUnresolved, nil
+	}
+	return permission, nil
+}
+
+// Viewer names the identity this adapter's credential acts as. It is how the
+// runtime recognizes its own comments without matching on their text.
+func (a GitHubRESTAdapter) Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error) {
+	var actor ghActor
+	if err := a.call(ctx, repo, http.MethodGet, "/user", nil, nil, &actor); err != nil {
+		return GitHubActor{}, err
+	}
+	return actor.normalize(), nil
+}
+
+// safeLogin bounds the one path component this adapter interpolates from an
+// observed identity. GitHub logins are alphanumeric with hyphens, plus the
+// "[bot]" suffix Apps carry; nothing else may reach a URL path.
+func safeLogin(login string) error {
+	if login == "" || len(login) > 64 {
+		return fmt.Errorf("invalid actor login")
+	}
+	for _, r := range login {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '[', r == ']':
+		default:
+			return fmt.Errorf("invalid actor login")
+		}
+	}
+	return nil
+}
+
+// PullRequestComments and IssueComments both read GitHub's issue-comment
+// endpoint, because a pull request IS an issue there. They are separate methods
+// because they answer different engineering questions - what a reviewer said
+// about this change, and what someone added to the source issue afterwards -
+// and feedback admission records which one an item came from.
+func (a GitHubRESTAdapter) PullRequestComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	return a.issueComments(ctx, repo, number)
+}
+
+func (a GitHubRESTAdapter) IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	return a.issueComments(ctx, repo, number)
+}
+
+func (a GitHubRESTAdapter) issueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	if number <= 0 {
+		return nil, fmt.Errorf("issue or pull request number must be positive")
+	}
+	var wire []struct {
+		ID        int64    `json:"id"`
+		User      *ghActor `json:"user"`
+		Body      string   `json:"body"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
+	}
+	query := url.Values{"per_page": {"100"}}
+	if err := a.call(ctx, repo, http.MethodGet, repoPath(repo)+"/issues/"+strconv.Itoa(number)+"/comments", query, nil, &wire); err != nil {
+		return nil, err
+	}
+	comments := make([]GitHubComment, 0, len(wire))
+	for _, c := range wire {
+		comment := GitHubComment{ID: c.ID, Author: c.User.normalize(), Body: UntrustedText(c.Body)}
+		if at, ok := parseTime(c.CreatedAt); ok {
+			comment.CreatedAt = at
+		}
+		if at, ok := parseTime(c.UpdatedAt); ok {
+			comment.UpdatedAt = at
+		}
+		comments = append(comments, comment)
+	}
+	return comments, nil
 }
 
 type ghIssue struct {

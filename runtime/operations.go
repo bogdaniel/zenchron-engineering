@@ -471,6 +471,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureCandidateCredentialMaterial, ExecutionResult{}, err),
 		}}
 	}
+	// Admitted, applicable, undelivered reviewer feedback. It is assembled
+	// BEFORE the invocation so the same set that is delivered is the set that
+	// is recorded as consumed afterwards; deriving it twice could deliver one
+	// set and record another.
+	//
+	// Feedback also makes an otherwise-initial invocation a remediation: the
+	// worker is being asked to change something in response to a finding, and
+	// the invocation contract requires a remediation to carry findings.
+	pending := state.feedbackState().Pending(state.projection.Head())
+	feedback := r.feedbackContext(state.run.ID, pending)
+	if len(feedback) > 0 && purpose != InvocationContinuation {
+		purpose = InvocationRemediation
+		findings = append(findings, feedbackFindings(feedback)...)
+	}
 	// The previous attempt of THIS operation, read from durable state. It is
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
@@ -502,6 +516,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		TrustedInstructions:   trustedProviderInstructions,
 		Purpose:               purpose,
 		Findings:              findings,
+		Feedback:              feedback,
 		Budgets:               ProviderBudget{WallLimit: r.deps.Budgets.WallLimit},
 	})
 	if err := workspace.AssertIntegrity(); err != nil {
@@ -535,6 +550,22 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Purpose:       purpose,
 			SubjectCommit: subject.Commit,
 			SubjectTree:   subject.Tree,
+		}})
+	}
+	// The worker has now been shown the feedback, so its delivery is recorded.
+	// Delivery is journalled whether or not the invocation went on to succeed:
+	// what the record means is "these items were given to this attempt", and
+	// re-delivering a human's review because the run failed afterwards would
+	// duplicate it rather than preserve it. The items remain visible in the
+	// journal as admitted-and-consumed, which is what a later transition
+	// carries forward.
+	if len(feedback) > 0 {
+		keys := make([]string, 0, len(feedback))
+		for _, item := range feedback {
+			keys = append(keys, item.Key)
+		}
+		events = append(events, journalEntry{Type: EventFeedbackConsumed, Payload: FeedbackConsumedPayload{
+			Keys: keys, AgentID: r.deps.Agent.ID, OperationID: operation.ID, Attempt: operation.Attempt,
 		}})
 	}
 	produced := effect{result: executionRecord{mutationResult: record, PriorContext: result.PriorContext}, state: Succeeded, events: events}

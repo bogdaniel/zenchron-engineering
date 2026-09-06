@@ -59,7 +59,14 @@ type ExecutionRequest struct {
 	TrustedInstructions   string
 	Purpose               InvocationPurpose
 	Findings              []Finding
-	Budgets               ProviderBudget
+	// Feedback is the admitted, applicable, undelivered reviewer feedback this
+	// invocation is being given. It is UNTRUSTED DATA: it reaches the worker
+	// inside explicit delimiters, framed by the runtime-owned trusted
+	// instructions as third-party description of desired behaviour, and it
+	// expands no permission. Every item in it has already passed the actor
+	// admission gate; nothing that failed that gate is ever placed here.
+	Feedback []FeedbackContext
+	Budgets  ProviderBudget
 }
 
 // InvocationPurpose is deliberately operational rather than a provider role.

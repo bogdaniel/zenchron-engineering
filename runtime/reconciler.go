@@ -28,6 +28,8 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -664,11 +666,43 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	// Bounded remediation: only a CURRENT-head failure that routes to a
 	// producer. An authority wait never reaches this branch, because
 	// RouteFailure never routes an authority wait to a provider.
-	class, ok := s.currentHeadFailure()
-	if !ok || RouteFailure(class) != RouteProviderRemediation {
-		return "", false
+	if class, ok := s.currentHeadFailure(); ok && RouteFailure(class) == RouteProviderRemediation {
+		return "remediation|" + s.projection.CandidateRevision + "|" + string(class), true
 	}
-	return "remediation|" + s.projection.CandidateRevision + "|" + string(class), true
+	// Admitted, applicable, undelivered reviewer feedback. It is the LAST
+	// producer branch deliberately: a candidate that does not build is fixed
+	// before a reviewer's request is acted on, and the feedback stays pending
+	// rather than being consumed by an invocation that was about something
+	// else.
+	//
+	// The binding is the exact set of items, so delivering them satisfies this
+	// operation forever and a later comment produces a different binding
+	// rather than a retry of this one. That is what makes "the same comment is
+	// never sent to the worker twice" a property of the planner rather than of
+	// a cursor someone has to remember to advance.
+	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
+		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	return "", false
+}
+
+// pendingFeedbackKeys is the admitted, applicable, undelivered feedback for the
+// current head, in stable order.
+func (s *runState) pendingFeedbackKeys() []string {
+	var keys []string
+	for _, decision := range s.feedbackState().Pending(s.projection.Head()) {
+		keys = append(keys, decision.Key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// digestOfKeys is a stable identity for a SET of feedback items. The keys
+// themselves would make an unbounded idempotency key; their digest is fixed
+// width and just as exact.
+func digestOfKeys(keys []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
+	return hex.EncodeToString(sum[:])[:32]
 }
 
 // invocationContinuationPrefix marks an execution binding as continuing
