@@ -489,3 +489,85 @@ func TestStateStorageCeilingRefusesBeforeAllocating(t *testing.T) {
 		t.Fatalf("a full disk stops a run instead of waiting: %v", RouteFailure(FailureStateStorageExhausted))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Base drift under parallel work
+// ---------------------------------------------------------------------------
+
+// TestOneRunsBaseDriftDoesNotTouchItsSiblings is the parallel-work law: with
+// several pull requests open against one base, one of them merging is normal
+// operation. The runs that did not merge observe the base moving and integrate
+// it through their OWN candidate; nothing reaches across and mutates a sibling.
+func TestOneRunsBaseDriftDoesNotTouchItsSiblings(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	first := fixture.start()
+	fixture.reconcile(first)
+
+	fixture.issue = phase8Issue + 7
+	fixture.forge.Issues[fixture.issue] = GitHubIssue{
+		Number: fixture.issue, URL: "https://github.com/acme/repo/issues/48",
+		Title: "sibling", Body: "sibling body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+	}
+	second := fixture.start()
+	fixture.reconcile(second)
+
+	before := fixture.state(second)
+	beforeRevision := before.projection.CandidateRevision
+	beforeEvents := len(before.events)
+
+	// Somebody merges. The base moves under everything that is still open.
+	fixture.moveBase("merged.md", "another run landed\n")
+
+	// Driving the FIRST run is the only thing that may touch the first run.
+	supervisor := supervisorFixture(t, fixture, 1)
+	if _, err := supervisor.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	after := fixture.state(second)
+	if after.projection.CandidateRevision != beforeRevision {
+		t.Fatalf("a sibling's candidate moved because another run's base advanced: %q -> %q",
+			beforeRevision, after.projection.CandidateRevision)
+	}
+	if len(after.events) < beforeEvents {
+		t.Fatal("a sibling's journal lost events")
+	}
+	// The two candidates are separate workspaces, which is what makes the
+	// isolation structural rather than a matter of ordering.
+	if candidateDir(fixture.stateDir, first) == candidateDir(fixture.stateDir, second) {
+		t.Fatal("two runs share one candidate workspace")
+	}
+}
+
+// TestConcurrentDrivingOfOneRunIsSerializedByTheScheduler proves two controller
+// actions cannot race one candidate. The lease is the mechanism, and it already
+// existed: what matters here is that the supervisor drives THROUGH it rather
+// than around it.
+func TestConcurrentDrivingOfOneRunIsSerializedByTheScheduler(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	supervisor := supervisorFixture(t, fixture, 2)
+
+	var wait sync.WaitGroup
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := supervisor.Tick(context.Background()); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent driving of one run failed: %v", err)
+	}
+	// The journal is still a valid chain: replay is what would break if two
+	// writers had raced the same candidate.
+	state := fixture.state(runID)
+	if _, err := Reduce(state.run, state.events); err != nil {
+		t.Fatalf("concurrent driving corrupted the journal: %v", err)
+	}
+}
