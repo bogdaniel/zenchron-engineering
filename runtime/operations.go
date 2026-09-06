@@ -334,6 +334,13 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		}
 		return effect{state: Succeeded, result: candidateCreateResult{dir, state.pinnedBase(), adopted}}
 	}
+	// The storage ceiling is checked HERE, immediately before the clone, and
+	// nowhere else: this is the one place the runtime allocates a workspace,
+	// and a bound checked anywhere earlier would be checking a number that
+	// could have changed by the time it mattered.
+	if err := r.deps.Storage.Admit(); err != nil {
+		return effect{state: OperationFailed, result: mutationResult{FailureClass: FailureStateStorageExhausted}}
+	}
 	workspace, err := CreateCandidateClone(r.deps.StateDir, state.run.ID, r.deps.Remote.URL, state.pinnedBase(), r.deps.Credentials)
 	if err != nil {
 		return failed(err)

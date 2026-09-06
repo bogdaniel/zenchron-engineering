@@ -224,10 +224,23 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Credentials:            doctorCredential{secret: doctorSecret},
 		Provider:               doctorProviderFake{isolation: doctorProvenIsolation()},
 		ProviderCredentialPath: f.credential,
-		Codex:                  NativeCodexProvider{Executor: executor},
-		Sandbox:                DockerSandbox{Image: doctorImage, Executor: executor},
-		DependencyCacheDir:     f.cacheDir,
-		SemanticAssurance:      &FakeSemanticAssuranceProvider{},
+		// A healthy #63 environment has at least one named worker that can
+		// actually be invoked. Readiness is supplied rather than probed, for
+		// the same reason the git seams are: the report must not depend on
+		// which coding CLIs the test machine happens to have installed.
+		Agents: []AgentStatus{{
+			ID: "openai", Kind: AgentKindOpenAIResponses, TrustMode: TrustProtected,
+			Endpoint: "brokered API (provider default endpoint)", Default: true,
+			AgentReadiness: AgentReadiness{
+				Available: true, Detail: "the operator credential exists and is owner-only",
+				AuthMode: AuthModeAPIKeyFile, AuthModeSource: AuthSourceConfigured,
+			},
+			Eligible: true, Unattended: true,
+		}},
+		Codex:              NativeCodexProvider{Executor: executor},
+		Sandbox:            DockerSandbox{Image: doctorImage, Executor: executor},
+		DependencyCacheDir: f.cacheDir,
+		SemanticAssurance:  &FakeSemanticAssuranceProvider{},
 		// A healthy environment includes a controller that can say what it is.
 		ControllerBuild: ControllerBuild{
 			Kind: ControllerAdopted, Version: "main-fixture",
@@ -341,6 +354,8 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",
+		"agent.openai", "agents.usable",
+		"supervisor.endpoint", "state.storage",
 	}
 	if len(report.Checks) != len(want) {
 		t.Fatalf("report has %d checks, want %d", len(report.Checks), len(want))

@@ -23,6 +23,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -513,4 +514,122 @@ func defaultAgentCommand(kind string) string {
 	default:
 		return ""
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Operator-facing readiness
+// ---------------------------------------------------------------------------
+
+// AgentStatus is one configured worker as `autonomy agents` shows it. It exists
+// so an operator can answer "can I actually give work to this" without starting
+// a run and without spending an inference call finding out.
+type AgentStatus struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	TrustMode TrustMode `json:"trust_mode"`
+	// Endpoint classifies WHAT is contacted: a local executable by name, or a
+	// remote brokered API. It is a classification and never a credential.
+	Endpoint string `json:"endpoint"`
+	Model    string `json:"model,omitempty"`
+	Default  bool   `json:"default"`
+	AgentReadiness
+	// Eligible reports whether an operator may give this agent work
+	// explicitly, and Unattended whether the supervisor's automatic intake may
+	// start work on it. They are separate because they are separate decisions:
+	// an operator running an agent by hand is not the same as leaving it to
+	// start work on its own.
+	Eligible   bool `json:"eligible_for_explicit_work"`
+	Unattended bool `json:"eligible_for_unattended_work"`
+	// PermissionBypassAllowed surfaces standing operator permission for the
+	// provider's unsafe mode. It is shown even when no run has used it,
+	// because a standing permission is itself a posture an operator should see.
+	PermissionBypassAllowed bool `json:"permission_bypass_allowed,omitempty"`
+	// Legacy marks an agent synthesized from a pre-#63 provider block.
+	Legacy bool `json:"legacy,omitempty"`
+}
+
+// DescribeAgents answers readiness for every configured agent. The prober is
+// injected so this stays free of provider construction - and so a test answers
+// it without any executable at all.
+//
+// Nothing here spends money. Readiness is an executable being found, a
+// capability being advertised, a version string being printed and a credential
+// file existing; a paid call is never made to establish that a worker exists.
+func DescribeAgents(ctx context.Context, registry AgentRegistry, prober func(ResolvedAgent) AgentProber) []AgentStatus {
+	statuses := make([]AgentStatus, 0, len(registry.IDs()))
+	for _, agent := range registry.All() {
+		status := AgentStatus{
+			ID: agent.ID, Kind: agent.Kind, TrustMode: agent.TrustMode,
+			Endpoint: agentEndpoint(agent), Model: agent.Model,
+			Default: agent.ID == registry.Default(), Legacy: agent.Legacy,
+			PermissionBypassAllowed: agent.AllowPermissionBypass,
+		}
+		if prober != nil {
+			if probe := prober(agent); probe != nil {
+				status.AgentReadiness = probe.Probe(ctx)
+			}
+		}
+		if status.Detail == "" && !status.Available {
+			status.Detail = "no readiness probe is configured for this agent kind"
+		}
+		status.Eligible = status.Available
+		status.Unattended = status.Available && agent.Unattended
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
+// agentEndpoint classifies what the agent contacts, without naming a
+// credential or a secret-bearing URL.
+func agentEndpoint(agent ResolvedAgent) string {
+	if agent.NativeCLI() {
+		return "local executable " + agent.Command
+	}
+	if agent.Endpoint != "" {
+		return "brokered API (operator-configured endpoint)"
+	}
+	return "brokered API (provider default endpoint)"
+}
+
+// credentialFileProber is the readiness of a brokered provider: the operator
+// credential the runtime itself presents exists and is owner-only. Its contents
+// are never read, and no request is made - an account's ability to execute work
+// can only be learned by making a paid call, which a readiness listing must
+// never do.
+type credentialFileProber struct{ Path string }
+
+func (p credentialFileProber) Probe(context.Context) AgentReadiness {
+	readiness := AgentReadiness{AuthMode: AuthModeAPIKeyFile, AuthModeSource: AuthSourceConfigured}
+	if strings.TrimSpace(p.Path) == "" {
+		readiness.Detail = "no provider credential is configured"
+		return readiness
+	}
+	info, err := os.Stat(p.Path)
+	switch {
+	case err != nil:
+		readiness.Detail = "the configured provider credential cannot be inspected"
+	case !info.Mode().IsRegular():
+		readiness.Detail = "the configured provider credential is not a regular file"
+	case info.Mode().Perm()&0o077 != 0:
+		readiness.Detail = "the configured provider credential is readable by other users; run chmod 600 on it"
+	default:
+		readiness.Available = true
+		readiness.Detail = "the operator credential exists and is owner-only; its contents were not read, and no request was made, so this proves the credential is CONFIGURED and not that the account can execute work"
+	}
+	return readiness
+}
+
+// AgentProberFor builds the readiness probe for one agent. It is the composition
+// root's provider-specific surface for readiness, and it is the ONLY place
+// outside agent_specs.go that has to know a kind exists: a native CLI is probed
+// by finding it and reading what it advertises, a brokered provider by
+// inspecting the operator credential the runtime itself would present.
+func AgentProberFor(agent ResolvedAgent, artifacts ArtifactStore, operatorHome string) AgentProber {
+	if agent.NativeCLI() {
+		return CLIAgentProvider{
+			Agent: agent, ArtifactStore: artifacts, OperatorHome: operatorHome,
+			LegacyEnvironment: agent.Legacy && agent.Kind == AgentKindCodexCLI,
+		}
+	}
+	return credentialFileProber{Path: agent.CredentialPath}
 }

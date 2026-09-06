@@ -1384,8 +1384,9 @@ var waitReasons = map[FailureClass]string{
 	// action differs: a quota comes back on the provider's own schedule, while
 	// repeated rate limiting means the configured concurrency is above what
 	// that account tolerates.
-	FailureProviderQuota:       "execution_provider_quota",
-	FailureProviderRateLimited: "execution_provider_rate_limited",
+	FailureProviderQuota:         "execution_provider_quota",
+	FailureProviderRateLimited:   "execution_provider_rate_limited",
+	FailureStateStorageExhausted: "state_storage_exhausted",
 }
 
 func waitReason(class FailureClass) string {

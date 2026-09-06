@@ -400,6 +400,17 @@ const (
 	// configured concurrency is above what that account tolerates - and an
 	// operator cannot see that difference through one merged class.
 	FailureProviderRateLimited FailureClass = "provider_rate_limited"
+	// FailureStateStorageExhausted is the operator's local state ceiling being
+	// reached before a candidate workspace was allocated. It is detected BEFORE
+	// the clone, so nothing is half-written and the run's existing state is
+	// untouched.
+	//
+	// It waits rather than fails: the engineering work is fine, the machine is
+	// full. An operator frees space or raises the bound and the same run
+	// continues against the same candidate. Nothing is ever reclaimed
+	// automatically to make room - trading one active run's evidence for
+	// another's progress is not a decision a scheduler gets to make.
+	FailureStateStorageExhausted FailureClass = "state_storage_exhausted"
 	// FailureExecutionIncomplete is a producer invocation that produced real
 	// work and then ran out of one of the runtime's own bounds. The work is
 	// preserved as a checkpoint; the OPERATION did not complete, which is why
@@ -491,7 +502,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
-		FailureProviderQuota, FailureProviderRateLimited:
+		FailureProviderQuota, FailureProviderRateLimited, FailureStateStorageExhausted:
 		return RouteWait
 	default:
 		return RouteStop

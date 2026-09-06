@@ -177,7 +177,11 @@ type Dependencies struct {
 	// write permission, no allowlisted automation - so a configuration that
 	// says nothing about feedback admits only actors who could already push to
 	// the repository.
-	Feedback  FeedbackPolicy
+	Feedback FeedbackPolicy
+	// Storage is the operator's bound on local runtime state. Its zero value
+	// is unbounded, which is the behaviour every configuration had before the
+	// bound existed.
+	Storage   StateStorage
 	Assurance AssuranceProvider
 	// SemanticAssurance is the INDEPENDENT semantic acceptance producer. It is
 	// optional: without it a contract requiring semantic_acceptance is refused
@@ -380,6 +384,10 @@ func (b RunBudgets) defaults() RunBudgets {
 	}
 	return b
 }
+
+// ParseGitHubRepo is the exported form for composition roots that hold an
+// owner/name identity and need the typed repository.
+func ParseGitHubRepo(identity string) (GitHubRepo, error) { return parseGitHubRepo(identity) }
 
 func parseGitHubRepo(identity string) (GitHubRepo, error) {
 	parts := strings.Split(identity, "/")

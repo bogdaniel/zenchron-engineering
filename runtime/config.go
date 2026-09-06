@@ -117,6 +117,22 @@ type GitHubConfig struct {
 	Endpoint       string `json:"endpoint,omitempty"`
 }
 
+// StorageConfig is the operator's bound on local runtime state. Parallel
+// candidate clones make disk an operator-level resource, and a bound checked
+// before allocation is what turns "the machine filled up mid-clone" into a
+// typed wait an operator can act on.
+//
+// It is operator authority and absent from repositoryScope: a repository that
+// could raise it would be choosing how much of the operator's disk its own work
+// may consume.
+type StorageConfig struct {
+	// MaxStateBytes is the ceiling on the state directory. Zero means
+	// UNBOUNDED, which is the behaviour every configuration had before this
+	// member existed; introducing a bound nobody configured would start
+	// refusing work that used to run.
+	MaxStateBytes int64 `json:"max_state_bytes,omitempty"`
+}
+
 // FeedbackConfig is the operator's admission rule for model-visible GitHub
 // feedback. It is operator authority for the same reason a credential is: it
 // decides WHO may direct a coding agent that runs under the operator's own
@@ -279,8 +295,10 @@ type OperatorConfig struct {
 	GitHub       GitHubConfig `json:"github"`
 	// Feedback is the admission rule for model-visible GitHub feedback.
 	Feedback FeedbackConfig `json:"feedback,omitzero"`
-	Budgets  BudgetConfig   `json:"budgets"`
-	Watch    WatchConfig    `json:"watch,omitempty"`
+	// Storage is the bound on local runtime state.
+	Storage StorageConfig `json:"storage,omitzero"`
+	Budgets BudgetConfig  `json:"budgets"`
+	Watch   WatchConfig   `json:"watch,omitempty"`
 	// GC is the operator's reclamation window for `autonomy gc`.
 	GC GCConfig `json:"gc,omitempty"`
 	// Operator names who a run is recorded as having been authorized by. It is
@@ -722,6 +740,9 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if _, err := c.FeedbackPolicy(); err != nil {
 		return refuse(err.Error())
+	}
+	if c.Storage.MaxStateBytes < 0 {
+		return refuse("storage.max_state_bytes must not be negative")
 	}
 	return nil
 }

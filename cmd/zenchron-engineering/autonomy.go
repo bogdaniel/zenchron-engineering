@@ -33,7 +33,13 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-const autonomyUsage = "usage: zenchron-engineering autonomy {run issue <number> [--new-generation]|status <run> [--text]|events <run> [--follow]|resume <run>|refresh <run>|authorize <run> <request-id> --approve|--reject [--note <text>]|stop <run>|watch|doctor [--text]|gc [--dry-run]} [--repo owner/name] [--config <path>]"
+const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
+	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
+	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
+	"agent set <run> --agent <id> --reason <text>|" +
+	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
+	"stop <run>|stop-all [--reason <text>]|drain|shutdown|watch|doctor [--text]|gc [--dry-run]} " +
+	"[--repo owner/name] [--config <path>]"
 
 // Exit statuses this CLI adds to the run-mode exits in runtime.go. They are
 // values runtime.go deliberately does not define, because they classify an
@@ -169,6 +175,21 @@ type autonomyFlags struct {
 	// generation. It is explicit because the two are different intentions and
 	// were previously one command.
 	NewGeneration bool
+	// Agent selects the named execution agent. Empty resolves the operator's
+	// configured default, which is what makes `run issue N` work unchanged.
+	Agent string
+	// Assign binds issues to agents for a batch, as issue -> agent id.
+	Assign map[int]string
+	// PermissionBypass explicitly requests the provider's unsafe permission
+	// mode for this invocation. It is refused unless the operator's
+	// configuration ALSO allows it for that agent: the bypass needs two
+	// independent statements, and this flag is only one of them.
+	PermissionBypass bool
+	// Reason is the operator's stated cause for a governed transition.
+	Reason string
+	// Detached submits work to a running supervisor instead of driving it in
+	// this terminal. It is implied when a supervisor owns the state directory.
+	Detached bool
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -182,6 +203,24 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 	switch command {
 	case "doctor":
 		return autonomyDoctor(rest, overrides, stdout)
+	case "agents":
+		return autonomyAgents(rest, overrides, stdout)
+	case "drain", "shutdown":
+		flags, err := parseAutonomyFlags(rest)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		verb := runtime.ControlDrain
+		if command == "shutdown" {
+			verb = runtime.ControlShutdown
+		}
+		return requireSupervisor(flags, overrides, runtime.ControlRequest{Command: verb}, stdout)
+	case "stop-all":
+		flags, err := parseAutonomyFlags(rest)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		return autonomyStopAll(flags, overrides, stdout)
 	case "watch":
 		flags, err := parseAutonomyFlags(rest)
 		if err != nil {
@@ -198,7 +237,33 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 	var runID, requestID string
 	switch command {
 	case "run":
-		if len(rest) < 2 || rest[0] != "issue" {
+		if len(rest) < 2 {
+			return runtime.ExitInvalid, errors.New(autonomyUsage)
+		}
+		// `run issues N M ...` is the batch form. It is a separate subject
+		// shape rather than a flag, because "start one issue here" and "hand
+		// several issues to the supervisor" are different operator intentions
+		// with different terminals attached to them.
+		if rest[0] == "issues" {
+			var issues []int
+			rest = rest[1:]
+			for len(rest) > 0 {
+				number, err := strconv.Atoi(rest[0])
+				if err != nil || number <= 0 {
+					break
+				}
+				issues, rest = append(issues, number), rest[1:]
+			}
+			if len(issues) == 0 {
+				return runtime.ExitInvalid, errors.New(autonomyUsage)
+			}
+			flags, err := parseAutonomyFlags(rest)
+			if err != nil {
+				return runtime.ExitInvalid, err
+			}
+			return autonomyRunIssues(context.Background(), flags, overrides, sortedIssues(issues), stdout)
+		}
+		if rest[0] != "issue" {
 			return runtime.ExitInvalid, errors.New(autonomyUsage)
 		}
 		number, err := strconv.Atoi(rest[1])
@@ -206,12 +271,46 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 			return runtime.ExitInvalid, fmt.Errorf("issue number must be a positive integer, got %q", rest[1])
 		}
 		issue, rest = number, rest[2:]
+	case "agent":
+		// `agent set RUN` is the explicit governed transition. It is spelled as
+		// a subcommand rather than a flag on `run` so that changing a live
+		// run's worker can never be something an operator does by accident.
+		if len(rest) < 2 || rest[0] != "set" || strings.TrimSpace(rest[1]) == "" {
+			return runtime.ExitInvalid, errors.New(autonomyUsage)
+		}
+		runID, rest = rest[1], rest[2:]
+		flags, err := parseAutonomyFlags(rest)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		return autonomyAgentSet(flags, overrides, runID, stdout)
+	case "logs":
+		if len(rest) < 1 || strings.TrimSpace(rest[0]) == "" {
+			return runtime.ExitInvalid, errors.New(autonomyUsage)
+		}
+		runID, rest = rest[0], rest[1:]
+		flags, err := parseAutonomyFlags(rest)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		return autonomyLogs(context.Background(), flags, overrides, runID, stdout)
 	case "authorize":
 		if len(rest) < 2 || strings.TrimSpace(rest[0]) == "" || strings.TrimSpace(rest[1]) == "" {
 			return runtime.ExitInvalid, errors.New(autonomyUsage)
 		}
 		runID, requestID, rest = rest[0], rest[1], rest[2:]
-	case "status", "events", "resume", "refresh", "stop":
+	case "status":
+		// `status` with no run is the control-room view over every run, which
+		// is the question an operator with several workers actually has.
+		if len(rest) == 0 || strings.HasPrefix(rest[0], "--") {
+			flags, err := parseAutonomyFlags(rest)
+			if err != nil {
+				return runtime.ExitInvalid, err
+			}
+			return autonomyFleet(flags, overrides, stdout)
+		}
+		runID, rest = rest[0], rest[1:]
+	case "events", "resume", "refresh", "stop":
 		if len(rest) < 1 || strings.TrimSpace(rest[0]) == "" {
 			return runtime.ExitInvalid, errors.New(autonomyUsage)
 		}
@@ -261,6 +360,14 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		outcome, err := engine.StartIssueRun(ctx, issue, mode)
 		if err != nil {
 			return exitFor(err, runtime.ExitFailed), err
+		}
+		// A supervisor that owns this state directory owns the work too. The
+		// operator's terminal is not the thing that has to stay alive for the
+		// run to make progress - that is the whole point of `serve` - so the
+		// run is left to it rather than driven here as well.
+		if built != nil && runtime.SupervisorRunning(built.config.StateDir) {
+			fmt.Fprintf(stdout, "submitted to the running supervisor; follow it with `autonomy status --text` or `autonomy logs %s --follow`\n", outcome.RunID)
+			return runtime.ExitWaiting, nil
 		}
 		if outcome.Adopted {
 			fmt.Fprintf(stdout, "adopted existing generation %s (this controller created it)\n", outcome.RunID)
@@ -348,7 +455,14 @@ type composition struct {
 	assurance   runtime.AssuranceProvider
 	semantic    runtime.AssuranceProvider
 	build       runtime.ControllerBuild
-	release     func()
+	// agents is the operator's registry, and agent is the one this invocation
+	// resolved. Both are here because the two are different questions: which
+	// workers exist, and which one this command is driving.
+	agents   runtime.AgentRegistry
+	agent    runtime.ResolvedAgent
+	feedback runtime.FeedbackPolicy
+	storage  runtime.StateStorage
+	release  func()
 }
 
 // newComposition is the wiring. Every failure here is a configuration or usage
@@ -426,11 +540,26 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		}
 	}
 
+	registry, err := config.AgentRegistry()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	agent, err := registry.Agent(flags.Agent)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	feedback, err := config.FeedbackPolicy()
+	if err != nil {
+		release()
+		return nil, err
+	}
 	// NewEngineeringRuntime fails closed on provider isolation, so there is no
 	// second check here.
 	provider := overrides.Provider
 	if provider == nil {
-		provider = executionProvider(config, artifacts, sandbox)
+		provider = executionProvider(config, agent, artifacts, sandbox, flags.PermissionBypass)
 	}
 	assurance := overrides.Assurance
 	if assurance == nil {
@@ -447,7 +576,10 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	return &composition{
 		config: config, store: store, owner: owner, model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
-		forge: forge, provider: provider, assurance: assurance, semantic: semantic, release: release,
+		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
+		agents: registry, agent: agent, feedback: feedback,
+		storage: runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
+		release: release,
 	}, nil
 }
 
@@ -458,8 +590,13 @@ func (c *composition) engine(target runtime.RepositoryTarget) (*runtime.Engineer
 	if err != nil {
 		return nil, err
 	}
+	feedback := c.feedbackPolicyFor(target.Identity)
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
+		Agent:             c.agent,
+		Agents:            c.agents,
+		Feedback:          feedback,
+		Storage:           c.storage,
 		Clock:             runtime.RealClock{},
 		Owner:             c.owner,
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
@@ -479,6 +616,34 @@ func (c *composition) engine(target runtime.RepositoryTarget) (*runtime.Engineer
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
 	})
+}
+
+// feedbackPolicyFor adds the identity this runtime's own credential acts as in
+// THIS repository to the self-loop set.
+//
+// It is resolved per repository because the credential is repository-scoped:
+// there is no ambient forge session, and asking for a viewer without naming a
+// repository would be asking a question the credential boundary does not
+// answer. A lookup that fails simply leaves the operator-configured self logins
+// in place - the gate still refuses everything below the permission threshold,
+// so a failed lookup narrows what the runtime can recognize about itself rather
+// than widening what it admits.
+func (c *composition) feedbackPolicyFor(identity string) runtime.FeedbackPolicy {
+	policy := c.feedback
+	viewer, ok := c.forge.(runtime.ForgeViewer)
+	if !ok {
+		return policy
+	}
+	repo, err := runtime.ParseGitHubRepo(identity)
+	if err != nil {
+		return policy
+	}
+	actor, err := viewer.Viewer(context.Background(), repo)
+	if err != nil || actor.Login == "" {
+		return policy
+	}
+	policy.SelfLogins = append(append([]string(nil), policy.SelfLogins...), actor.Login)
+	return policy
 }
 
 // buildEngine is the single-repository entry point: the repository comes from
@@ -531,6 +696,18 @@ func repositoryTarget(cwd, explicit string) (runtime.RepositoryTarget, error) {
 	return target, nil
 }
 
+// operatorHome is the directory holding the operator's own already-
+// authenticated CLI state. It is read once, here in the composition root,
+// rather than inside an adapter: which account's session a worker uses is a
+// wiring decision, and an adapter that discovered it from the environment would
+// be making that decision itself.
+func operatorHome() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return os.Getenv("HOME")
+}
+
 func githubCredentials(mode string) runtime.CredentialProvider {
 	if mode == runtime.GitHubCredentialCLI {
 		return runtime.GitHubCLICredential{}
@@ -561,23 +738,30 @@ func semanticAssuranceProvider(config runtime.Config, artifacts runtime.Artifact
 	}
 }
 
-// executionProvider builds the configured AI provider. The credential is only
-// ever a path from the operator layer; no token value passes through here.
-func executionProvider(config runtime.Config, artifacts runtime.ArtifactStore, sandbox runtime.DockerSandbox) runtime.ExecutionProvider {
-	if config.Provider.Kind == runtime.ProviderNativeCodex {
-		return runtime.NativeCodexProvider{
-			ArtifactStore: artifacts,
-			Model:         config.Provider.Model,
-			AuthMode:      config.Provider.AuthMode,
-			CodexHome:     config.Provider.CredentialPath,
+// executionProvider builds the adapter for ONE resolved agent. It is the
+// composition root's whole provider-specific surface: adding a provider adds a
+// case here, an adapter, and configuration - and touches nothing in the
+// scheduler, the kernel or the authority evaluator.
+//
+// The credential is only ever a path from the operator layer; no token value
+// passes through here, and a native CLI is handed none at all because it
+// authenticates itself.
+func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artifacts runtime.ArtifactStore, sandbox runtime.DockerSandbox, bypass bool) runtime.ExecutionProvider {
+	if agent.NativeCLI() {
+		return runtime.CLIAgentProvider{
+			Agent:             agent,
+			ArtifactStore:     artifacts,
+			OperatorHome:      operatorHome(),
+			PermissionBypass:  bypass,
+			LegacyEnvironment: agent.Legacy && agent.Kind == runtime.AgentKindCodexCLI,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{
 		ArtifactStore: artifacts,
-		Model:         config.Provider.Model,
-		AuthMode:      config.Provider.AuthMode,
-		APIKeyFile:    config.Provider.CredentialPath,
-		Endpoint:      config.Provider.Endpoint,
+		Model:         agent.Model,
+		AuthMode:      agent.DeclaredAuthMode,
+		APIKeyFile:    agent.CredentialPath,
+		Endpoint:      agent.Endpoint,
 		HTTP:          &http.Client{Timeout: 10 * time.Minute},
 		Broker: runtime.ToolBroker{
 			Sandbox: sandbox,
@@ -646,6 +830,16 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 		case "--new-generation":
 			flags.NewGeneration, args = true, args[1:]
 			continue
+		case "--detached":
+			flags.Detached, args = true, args[1:]
+			continue
+		case "--dangerous-permission-bypass":
+			// Named for what it is. It is one half of the two independent
+			// statements an unsafe provider mode requires; without standing
+			// operator configuration for that agent it is refused before any
+			// process starts.
+			flags.PermissionBypass, args = true, args[1:]
+			continue
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
 			continue
@@ -669,6 +863,20 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Config = args[1]
 		case "--note":
 			flags.Note = args[1]
+		case "--agent":
+			flags.Agent = args[1]
+		case "--reason":
+			flags.Reason = args[1]
+		case "--assign":
+			issue, agent, ok := strings.Cut(args[1], "=")
+			number, err := strconv.Atoi(strings.TrimSpace(issue))
+			if !ok || err != nil || number <= 0 || strings.TrimSpace(agent) == "" {
+				return autonomyFlags{}, fmt.Errorf("--assign must be ISSUE=AGENT, got %q", args[1])
+			}
+			if flags.Assign == nil {
+				flags.Assign = map[int]string{}
+			}
+			flags.Assign[number] = strings.TrimSpace(agent)
 		default:
 			return autonomyFlags{}, errors.New(autonomyUsage)
 		}

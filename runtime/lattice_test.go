@@ -77,12 +77,18 @@ func requireMembers(t *testing.T, label string, typ reflect.Type, want []string)
 	}
 }
 
-// TestOperatorLayerCarriesNoUnsafeOverrideMember is the §15 audit assertion.
-// M0 has no configurable unsafe runtime bypass, so the operator layer must
-// stay exactly this set. Adding a member that permits an unsafe capability
-// fails here first, which is the point: the frozen rule requires operator
-// policy AND an explicit CLI invocation AND durable provenance, and none of
-// that exists to be wired to yet.
+// TestOperatorLayerCarriesNoUnsafeOverrideMember is the audit assertion: the
+// operator layer's whole surface, stated, so a new member is a deliberate act
+// rather than an emergent property of a struct.
+//
+// ONE member here permits an unsafe capability -
+// agents.<id>.allow_permission_bypass, asserted separately below - and it is
+// wired to exactly the rule that exists for it. Operator policy alone does not
+// reach the provider's bypass mode: an invocation must ALSO request it, the
+// adapter refuses before starting a process when either statement is missing,
+// and an authorized bypass is recorded forever in that attempt's durable
+// provenance. See TestPermissionBypassNeedsTwoIndependentStatements and
+// TestAgentLayerNamesItsOneUnsafeOverride.
 func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 	requireMembers(t, "OperatorConfig", reflect.TypeOf(OperatorConfig{}), []string{
 		"state_dir",
@@ -110,7 +116,53 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"gc.retention_hours",
 		"operator.id",
 		"operator.require_configured_id",
+		// The named worker registry. It is a map, so the members INSIDE an
+		// agent are asserted separately - a map cannot be walked structurally,
+		// and an unasserted map is exactly where an authority would hide.
+		"agents",
+		"default_agent",
+		// Who may direct a coding agent through GitHub. It is operator
+		// authority because it decides whose text reaches a worker running
+		// under the operator's own account.
+		"feedback.min_permission",
+		"feedback.allowed_bots",
+		"feedback.self_logins",
+		// How much local state parallel candidate clones may consume.
+		"storage.max_state_bytes",
 	})
+}
+
+// TestAgentLayerNamesItsOneUnsafeOverride states the inside of the agent
+// registry, which the structural walk above cannot reach through a map.
+//
+// allow_permission_bypass is the one member in this configuration that permits
+// an unsafe capability. It is listed here deliberately, and the rule it is
+// wired to is the frozen one: operator policy AND an explicit invocation AND
+// durable provenance. Neither statement alone reaches the provider's bypass
+// mode, and the adapter refuses before any process starts when only one is
+// present.
+func TestAgentLayerNamesItsOneUnsafeOverride(t *testing.T) {
+	requireMembers(t, "AgentConfig", reflect.TypeOf(AgentConfig{}), []string{
+		"kind",
+		"trust_mode",
+		"command",
+		"model",
+		"home",
+		"credential_path",
+		"endpoint",
+		"allow_permission_bypass",
+		"unattended",
+	})
+	// Standing permission is not a grant. An agent an operator allowed the
+	// bypass for still runs constrained unless an invocation asks for it.
+	allowed := ResolvedAgent{
+		ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted,
+		AllowPermissionBypass: true,
+	}
+	provider := CLIAgentProvider{Agent: allowed}
+	if provider.PermissionBypass {
+		t.Fatal("an agent's standing permission became an invocation request by itself")
+	}
 }
 
 // TestRepositoryLayerReachesOnlyTightenableBounds is the other half: the

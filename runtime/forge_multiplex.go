@@ -1,0 +1,308 @@
+package runtime
+
+// One repository, one observation stream.
+//
+// Every active run asks the forge the same questions about the repository it
+// lives in, and with several runs in one repository those questions multiply:
+// N runs polling a pull request list, N permission lookups for the same
+// reviewer, N rate-limit budgets spent on one answer. Worse, when the forge
+// starts refusing, N independent callers each discover that separately and each
+// keep asking.
+//
+// MultiplexedForge is the supervisor's shared reading of that state. It is a
+// DECORATOR over the existing adapter rather than a new observation subsystem:
+// no new persistence, no message bus, no second normalization. Reads inside one
+// short window are answered once and fanned out; writes pass straight through
+// and invalidate what they changed; a rate-limit refusal becomes shared
+// backoff, so one run learning that the forge wants to be left alone is every
+// run learning it.
+//
+// It is deliberately NOT a cache with a long life. The window is short enough
+// that a run never acts on a stale head - the runtime's own staleness rules
+// already govern that - and long enough that one supervisor tick over ten runs
+// is one set of calls rather than ten.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// DefaultForgeWindow is the coalescing window. It bounds how long one answer
+// may serve several runs, and it is short because an observation that is old
+// enough to matter is one the runtime should re-derive.
+const DefaultForgeWindow = 10 * time.Second
+
+// MultiplexedForge shares one repository's observations across every run.
+type MultiplexedForge struct {
+	Inner  GitHubAdapter
+	Clock  Clock
+	Window time.Duration
+
+	mu sync.Mutex
+	// answers holds one in-window answer per exact question.
+	answers map[string]forgeAnswer
+	// backoff is per REPOSITORY, because that is the scope the forge refuses
+	// at: a rate limit is about the credential's budget against that
+	// repository, not about the run that happened to hit it.
+	backoff map[string]forgeBackoff
+	// calls counts underlying calls per method, which is what makes "runs
+	// share one poll" a testable property rather than a claim.
+	calls map[string]int
+}
+
+type forgeAnswer struct {
+	value any
+	err   error
+	at    time.Time
+}
+
+type forgeBackoff struct {
+	until time.Time
+	err   error
+}
+
+// NewMultiplexedForge wraps an adapter.
+func NewMultiplexedForge(inner GitHubAdapter, clock Clock) *MultiplexedForge {
+	if clock == nil {
+		clock = RealClock{}
+	}
+	return &MultiplexedForge{
+		Inner: inner, Clock: clock, Window: DefaultForgeWindow,
+		answers: map[string]forgeAnswer{}, backoff: map[string]forgeBackoff{}, calls: map[string]int{},
+	}
+}
+
+// Calls reports how many underlying calls each method actually made.
+func (m *MultiplexedForge) Calls() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counted := make(map[string]int, len(m.calls))
+	for method, count := range m.calls {
+		counted[method] = count
+	}
+	return counted
+}
+
+func (m *MultiplexedForge) window() time.Duration {
+	if m.Window <= 0 {
+		return DefaultForgeWindow
+	}
+	return m.Window
+}
+
+// observe is the one shared read path. Everything it does is stated here so
+// each wrapped method stays a one-line binding of a key to a call.
+//
+// The generic parameter keeps the cached value typed: a cached
+// GitHubCheckObservation can never be handed back as a GitHubReviewObservation,
+// which a map[string]any without it would make a runtime question.
+func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, call func() (T, error)) (T, error) {
+	var zero T
+	now := m.Clock.Now()
+
+	m.mu.Lock()
+	// A repository the forge asked us to leave alone is not asked again, by
+	// ANY run, until the instant it named.
+	if wait, ok := m.backoff[repo.String()]; ok {
+		if now.Before(wait.until) {
+			m.mu.Unlock()
+			return zero, wait.err
+		}
+		delete(m.backoff, repo.String())
+	}
+	if answer, ok := m.answers[key]; ok && now.Sub(answer.at) < m.window() {
+		m.mu.Unlock()
+		if answer.err != nil {
+			return zero, answer.err
+		}
+		typed, ok := answer.value.(T)
+		if ok {
+			return typed, nil
+		}
+		// A key collision across types would be a defect in this file, not a
+		// condition of the run, so it is surfaced rather than silently re-read.
+		return zero, fmt.Errorf("multiplexed forge answer for %q is not a %T", key, zero)
+	}
+	m.calls[method]++
+	m.mu.Unlock()
+
+	value, err := call()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.answers[key] = forgeAnswer{value: value, err: err, at: now}
+	// A transient refusal that carries retry timing becomes shared backoff. The
+	// forge's own instruction is honoured once for the whole repository instead
+	// of being rediscovered by every run.
+	var transient *GitHubTransientError
+	if errors.As(err, &transient) {
+		if until := retryInstant(now, transient.RateLimit); until.After(now) {
+			m.backoff[repo.String()] = forgeBackoff{until: until, err: err}
+		}
+	}
+	return value, err
+}
+
+// retryInstant is when the forge said to come back, bounded so a malformed or
+// hostile header cannot park a repository indefinitely.
+func retryInstant(now time.Time, rate RateLimitObservation) time.Time {
+	until := now
+	if rate.RetryAfter > 0 {
+		until = now.Add(rate.RetryAfter)
+	}
+	if !rate.ResetAt.IsZero() && rate.ResetAt.After(until) {
+		until = rate.ResetAt
+	}
+	if ceiling := now.Add(watchMaxBackoff); until.After(ceiling) {
+		return ceiling
+	}
+	return until
+}
+
+// invalidate drops every cached answer about one repository. A write changed
+// the state those answers describe, so serving them afterwards would be
+// serving a view the runtime itself has already moved past.
+func (m *MultiplexedForge) invalidate() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.answers = map[string]forgeAnswer{}
+}
+
+func forgeKey(repo GitHubRepo, parts ...string) string {
+	key := repo.String()
+	for _, part := range parts {
+		key += "|" + part
+	}
+	return key
+}
+
+// ---------------------------------------------------------------------------
+// GitHubAdapter
+// ---------------------------------------------------------------------------
+
+var _ GitHubAdapter = (*MultiplexedForge)(nil)
+
+func (m *MultiplexedForge) Issue(ctx context.Context, repo GitHubRepo, number int) (GitHubIssue, error) {
+	return observe(m, repo, "Issue", forgeKey(repo, "issue", itoa(number)), func() (GitHubIssue, error) {
+		return m.Inner.Issue(ctx, repo, number)
+	})
+}
+
+func (m *MultiplexedForge) DiscoverIssues(ctx context.Context, query DiscoveryQuery) (DiscoveryResult, error) {
+	return observe(m, query.Repo, "DiscoverIssues", forgeKey(query.Repo, "discover", query.Label, query.ETag), func() (DiscoveryResult, error) {
+		return m.Inner.DiscoverIssues(ctx, query)
+	})
+}
+
+func (m *MultiplexedForge) FindPullRequests(ctx context.Context, repo GitHubRepo, headRef, baseRef string) ([]GitHubPullRequest, error) {
+	return observe(m, repo, "FindPullRequests", forgeKey(repo, "find", headRef, baseRef), func() ([]GitHubPullRequest, error) {
+		return m.Inner.FindPullRequests(ctx, repo, headRef, baseRef)
+	})
+}
+
+func (m *MultiplexedForge) PullRequest(ctx context.Context, repo GitHubRepo, number int) (GitHubPullRequest, error) {
+	return observe(m, repo, "PullRequest", forgeKey(repo, "pr", itoa(number)), func() (GitHubPullRequest, error) {
+		return m.Inner.PullRequest(ctx, repo, number)
+	})
+}
+
+func (m *MultiplexedForge) Checks(ctx context.Context, repo GitHubRepo, headSHA string) (GitHubCheckObservation, error) {
+	return observe(m, repo, "Checks", forgeKey(repo, "checks", headSHA), func() (GitHubCheckObservation, error) {
+		return m.Inner.Checks(ctx, repo, headSHA)
+	})
+}
+
+func (m *MultiplexedForge) Reviews(ctx context.Context, repo GitHubRepo, number int, headSHA string) (GitHubReviewObservation, error) {
+	return observe(m, repo, "Reviews", forgeKey(repo, "reviews", itoa(number), headSHA), func() (GitHubReviewObservation, error) {
+		return m.Inner.Reviews(ctx, repo, number, headSHA)
+	})
+}
+
+func (m *MultiplexedForge) RefSHA(ctx context.Context, repo GitHubRepo, ref string) (RefObservation, error) {
+	return observe(m, repo, "RefSHA", forgeKey(repo, "ref", ref), func() (RefObservation, error) {
+		return m.Inner.RefSHA(ctx, repo, ref)
+	})
+}
+
+// The write path is never coalesced and always invalidates. A publication is a
+// side effect, not an observation: performing it once per caller is the point,
+// and every cached answer about the repository is about to be wrong.
+
+func (m *MultiplexedForge) CreatePullRequest(ctx context.Context, repo GitHubRepo, request GitHubPullRequestCreate) (GitHubPullRequest, error) {
+	defer m.invalidate()
+	return m.Inner.CreatePullRequest(ctx, repo, request)
+}
+
+func (m *MultiplexedForge) UpdatePullRequest(ctx context.Context, repo GitHubRepo, number int, update GitHubPullRequestUpdate) (GitHubPullRequest, error) {
+	defer m.invalidate()
+	return m.Inner.UpdatePullRequest(ctx, repo, number, update)
+}
+
+func (m *MultiplexedForge) CommentOnPullRequest(ctx context.Context, repo GitHubRepo, number int, body Publication) error {
+	defer m.invalidate()
+	return m.Inner.CommentOnPullRequest(ctx, repo, number, body)
+}
+
+// ---------------------------------------------------------------------------
+// Optional capabilities
+// ---------------------------------------------------------------------------
+//
+// Each is forwarded only when the wrapped adapter actually has it. A decorator
+// that implemented these unconditionally would claim a capability the real
+// adapter may not have, and feedback admission decides what it does from
+// exactly that claim.
+
+func (m *MultiplexedForge) RepositoryPermission(ctx context.Context, repo GitHubRepo, login string) (GitHubPermission, error) {
+	inner, ok := m.Inner.(ForgeActorPermissions)
+	if !ok {
+		return PermissionUnresolved, fmt.Errorf("the configured forge adapter cannot resolve actor permissions")
+	}
+	return observe(m, repo, "RepositoryPermission", forgeKey(repo, "permission", login), func() (GitHubPermission, error) {
+		return inner.RepositoryPermission(ctx, repo, login)
+	})
+}
+
+func (m *MultiplexedForge) PullRequestComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	inner, ok := m.Inner.(ForgeConversation)
+	if !ok {
+		return nil, fmt.Errorf("the configured forge adapter cannot read conversation comments")
+	}
+	return observe(m, repo, "PullRequestComments", forgeKey(repo, "pr-comments", itoa(number)), func() ([]GitHubComment, error) {
+		return inner.PullRequestComments(ctx, repo, number)
+	})
+}
+
+func (m *MultiplexedForge) IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	inner, ok := m.Inner.(ForgeConversation)
+	if !ok {
+		return nil, fmt.Errorf("the configured forge adapter cannot read conversation comments")
+	}
+	return observe(m, repo, "IssueComments", forgeKey(repo, "issue-comments", itoa(number)), func() ([]GitHubComment, error) {
+		return inner.IssueComments(ctx, repo, number)
+	})
+}
+
+func (m *MultiplexedForge) Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error) {
+	inner, ok := m.Inner.(ForgeViewer)
+	if !ok {
+		return GitHubActor{}, fmt.Errorf("the configured forge adapter cannot name its own identity")
+	}
+	return observe(m, repo, "Viewer", forgeKey(repo, "viewer"), func() (GitHubActor, error) {
+		return inner.Viewer(ctx, repo)
+	})
+}
+
+// SupportsFeedbackAdmission reports whether the wrapped adapter can answer the
+// questions feedback admission needs. It exists so the composition root can
+// decide truthfully whether to advertise the capability at all, rather than
+// wrapping and then failing every lookup.
+func (m *MultiplexedForge) SupportsFeedbackAdmission() bool {
+	_, permissions := m.Inner.(ForgeActorPermissions)
+	return permissions
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

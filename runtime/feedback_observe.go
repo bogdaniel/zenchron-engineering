@@ -79,6 +79,14 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		return observation, nil
 	}
 	permissions, ok := r.deps.GitHub.(ForgeActorPermissions)
+	// A DECORATOR around the adapter satisfies the interface whether or not
+	// the thing it wraps can answer, so a decorator is asked directly. Without
+	// this the gate would still fail closed - an unanswerable lookup is never
+	// an admission - but the operator would be told "nobody was permitted"
+	// when the truth is "nothing could be asked".
+	if capable, declares := r.deps.GitHub.(feedbackAdmissionCapable); declares && !capable.SupportsFeedbackAdmission() {
+		ok = false
+	}
 	if !ok {
 		observation.Unavailable = "the configured forge adapter cannot resolve actor permissions, so no feedback can pass the admission gate"
 		return observation, nil
@@ -154,6 +162,12 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		observation.Decisions = append(observation.Decisions, decision)
 	}
 	return observation, nil
+}
+
+// feedbackAdmissionCapable is implemented by an adapter WRAPPER that can say
+// whether the adapter underneath it actually answers permission lookups.
+type feedbackAdmissionCapable interface {
+	SupportsFeedbackAdmission() bool
 }
 
 func findFeedbackItem(items []FeedbackItem, key string) (FeedbackItem, bool) {

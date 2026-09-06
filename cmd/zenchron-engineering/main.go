@@ -105,6 +105,12 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 1 && args[0] == "autonomy" {
 		return autonomy(args[1:], autonomyOverrides{}, stdout)
 	}
+	// `serve` is top level rather than under `autonomy`, because it is not one
+	// more operation on a run: it is the persistent runtime the rest of the
+	// commands talk to.
+	if len(args) >= 1 && args[0] == "serve" {
+		return serveCommand(args[1:], autonomyOverrides{}, stdout)
+	}
 	if len(args) >= 3 && args[0] == "selfhost" && args[1] == "issue" {
 		models, err := parseModelFlags(args[3:])
 		if err != nil {
@@ -121,7 +127,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|controller inspect-self [--json]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|autonomy ...|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}")
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
 }
 
 func parseModelFlags(args []string) ([]string, error) {
