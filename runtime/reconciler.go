@@ -1346,6 +1346,12 @@ func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
 var waitReasons = map[FailureClass]string{
 	FailureProviderAccountUnavailable: "execution_provider_account_unavailable",
 	FailureAssurancePrerequisite:      "assurance_dependency_unavailable",
+	// The two capacity waits are reported separately because the operator
+	// action differs: a quota comes back on the provider's own schedule, while
+	// repeated rate limiting means the configured concurrency is above what
+	// that account tolerates.
+	FailureProviderQuota:       "execution_provider_quota",
+	FailureProviderRateLimited: "execution_provider_rate_limited",
 }
 
 func waitReason(class FailureClass) string {

@@ -100,6 +100,13 @@ type ExecutionResult struct {
 	// replayed run can explain a retry rather than leaving an operator to infer
 	// what the model saw.
 	PriorContext *PriorAttemptObservations
+	// Invocation is the non-secret record of HOW this attempt was invoked:
+	// which executable, which version, which permission and sandbox mode, and
+	// which security-relevant arguments. It is a POINTER because a provider
+	// that cannot state it truthfully must state nothing rather than a zero
+	// value that would read as "no sandbox, no bypass, unknown auth" - three
+	// claims it did not make.
+	Invocation *InvocationProvenance
 }
 
 // ExecutionAttemptRef is the runtime-owned identity of one provider
@@ -367,6 +374,25 @@ const (
 	// make status tell an operator to resolve an authority condition that does
 	// not exist.
 	FailureProviderAccountUnavailable FailureClass = "provider_account_unavailable"
+	// FailureProviderQuota is an execution worker refused by its own plan or
+	// account QUOTA: the allowance is spent and returns on that provider's own
+	// schedule. It is deliberately distinct from
+	// FailureProviderAccountUnavailable, which is an account prerequisite an
+	// operator must repair, and from FailureTransientProvider, which is
+	// capacity that clears in seconds.
+	//
+	// It is a CAPACITY WAIT, not an engineering attempt: no reasoning happened,
+	// no candidate moved, no evidence or authority changed. Routing it to a
+	// wait is what stops several concurrent workers sharing one subscription
+	// from burning a run's remediation budget on an allowance that will simply
+	// come back.
+	FailureProviderQuota FailureClass = "provider_quota"
+	// FailureProviderRateLimited is the same shape at a shorter timescale: the
+	// provider asked to be called less often. It is kept separate from quota
+	// because the operator action differs - one waits, the other means the
+	// configured concurrency is above what that account tolerates - and an
+	// operator cannot see that difference through one merged class.
+	FailureProviderRateLimited FailureClass = "provider_rate_limited"
 	// FailureExecutionIncomplete is a producer invocation that produced real
 	// work and then ran out of one of the runtime's own bounds. The work is
 	// preserved as a checkpoint; the OPERATION did not complete, which is why
@@ -457,7 +483,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
-	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite:
+	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
+		FailureProviderQuota, FailureProviderRateLimited:
 		return RouteWait
 	default:
 		return RouteStop
