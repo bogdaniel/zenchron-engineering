@@ -280,7 +280,8 @@ func autonomyAgents(args []string, overrides autonomyOverrides, stdout io.Writer
 		}
 		return runtime.ExitCompleted, nil
 	}
-	fmt.Fprintf(stdout, "%-14s %-18s %-17s %-9s %-10s %s\n", "AGENT", "KIND", "TRUST", "READY", "VERSION", "DETAIL")
+	fmt.Fprintf(stdout, "%-12s %-14s %-17s %-6s %-24s %-20s %s\n",
+		"AGENT", "KIND", "TRUST", "READY", "VERSION", "AUTH", "DETAIL")
 	for _, status := range statuses {
 		name := status.ID
 		if status.Default {
@@ -290,17 +291,23 @@ func autonomyAgents(args []string, overrides autonomyOverrides, stdout io.Writer
 		if status.Available {
 			ready = "yes"
 		}
-		fmt.Fprintf(stdout, "%-14s %-18s %-17s %-9s %-10s %s\n",
-			name, status.Kind, status.TrustMode, ready, shortVersion(status.Version), status.Detail)
+		fmt.Fprintf(stdout, "%-12s %-14s %-17s %-6s %-24s %-20s %s\n",
+			name, status.Kind, status.TrustMode, ready,
+			shortVersion(status.Version), orDash(status.AuthMode), status.Detail)
 	}
-	fmt.Fprintln(stdout, "\n* is the default agent. `ready` means the worker can be invoked, not that its account has budget:")
-	fmt.Fprintln(stdout, "account state is only observable by making a paid request, which this command never does.")
+	fmt.Fprintln(stdout, "\n* is the default agent.")
+	fmt.Fprintln(stdout, "`ready` means the worker can be invoked, not that its account has budget: account state is only")
+	fmt.Fprintln(stdout, "observable by making a paid request, which this command never does. `auth` is what was OBSERVED of")
+	fmt.Fprintln(stdout, "each CLI's own state; `unknown` is a truthful answer and is never guessed into `subscription`.")
 	return runtime.ExitCompleted, nil
 }
 
 func shortVersion(version string) string {
-	if len(version) > 10 {
-		return version[:10]
+	if version == "" {
+		return "-"
+	}
+	if len(version) > 23 {
+		return version[:23]
 	}
 	return version
 }

@@ -104,6 +104,11 @@ type Supervisor struct {
 	// it, so a slow run never blocks an operator command.
 	mu       sync.Mutex
 	draining bool
+	// enginesMu guards the engine cache, which several run goroutines reach
+	// concurrently inside one tick. It is separate from mu on purpose: the
+	// lifecycle flags are read by operator commands, and a slow engine
+	// construction must not block those.
+	enginesMu sync.Mutex
 	// engines caches one repository-bound engine per repository. Building one
 	// opens nothing and contacts nothing, but caching keeps a tick from
 	// rebuilding the same value for every run.
@@ -140,6 +145,8 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 // engine returns the repository-bound engine, refusing a repository this
 // supervisor was not constructed to govern.
 func (s *Supervisor) engine(identity string) (*EngineeringRuntime, error) {
+	s.enginesMu.Lock()
+	defer s.enginesMu.Unlock()
 	if engine, ok := s.engines[identity]; ok {
 		return engine, nil
 	}

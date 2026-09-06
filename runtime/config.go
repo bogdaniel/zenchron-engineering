@@ -117,6 +117,25 @@ type GitHubConfig struct {
 	Endpoint       string `json:"endpoint,omitempty"`
 }
 
+// SupervisorConfig is the persistent supervisor's own bounds.
+//
+// They exist as their own members because the concurrency ceiling and the poll
+// interval are properties of the RUNTIME, not of the optional issue-discovery
+// policy they used to live under. `watch` keeps naming them so a configuration
+// written before `serve` existed still works, and when both are stated the
+// STRICTER value wins - fewer concurrent runs, longer interval between polls -
+// so neither member can be used to loosen the other, and a repository that
+// tightens the watch bound still tightens the effective one.
+type SupervisorConfig struct {
+	// MaxConcurrentRuns is the operator-authorized ceiling on runs driven at
+	// once. Zero means "not stated here", which falls back to the watch bound
+	// and then to the M0 default of one.
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// PollIntervalSeconds is how often a quiet supervisor looks again. Zero
+	// means "not stated here".
+	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
+}
+
 // StorageConfig is the operator's bound on local runtime state. Parallel
 // candidate clones make disk an operator-level resource, and a bound checked
 // before allocation is what turns "the machine filled up mid-clone" into a
@@ -297,8 +316,10 @@ type OperatorConfig struct {
 	Feedback FeedbackConfig `json:"feedback,omitzero"`
 	// Storage is the bound on local runtime state.
 	Storage StorageConfig `json:"storage,omitzero"`
-	Budgets BudgetConfig  `json:"budgets"`
-	Watch   WatchConfig   `json:"watch,omitempty"`
+	// Supervisor is the persistent runtime's own bounds.
+	Supervisor SupervisorConfig `json:"supervisor,omitzero"`
+	Budgets    BudgetConfig     `json:"budgets"`
+	Watch      WatchConfig      `json:"watch,omitempty"`
 	// GC is the operator's reclamation window for `autonomy gc`.
 	GC GCConfig `json:"gc,omitempty"`
 	// Operator names who a run is recorded as having been authorized by. It is
@@ -618,15 +639,31 @@ func validRepositoryPart(part string) bool {
 }
 
 func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
+	// The supervisor bounds and the watch bounds are combined by taking the
+	// STRICTER of the two, so stating one can never loosen the other and a
+	// repository that tightens the watch bound still tightens the effective
+	// one.
+	ceiling := c.Watch.MaxConcurrentRuns
+	if stated := c.Supervisor.MaxConcurrentRuns; stated > 0 && (ceiling <= 0 || stated < ceiling) {
+		ceiling = stated
+	}
+	interval := time.Duration(c.Watch.PollIntervalSeconds) * time.Second
+	// Only a STATED supervisor interval participates. Treating an unset zero
+	// as a candidate would let the absence of one member erase a malformed
+	// value in the other, and a malformed bound must be refused rather than
+	// replaced by a default.
+	if stated := time.Duration(c.Supervisor.PollIntervalSeconds) * time.Second; stated > 0 && stated > interval {
+		interval = stated
+	}
 	settings := WatchSettings{
 		Label:             strings.TrimSpace(c.Watch.Label),
-		PollInterval:      time.Duration(c.Watch.PollIntervalSeconds) * time.Second,
-		MaxConcurrentRuns: resolveMaxConcurrentRuns(0, c.Watch.MaxConcurrentRuns),
+		PollInterval:      interval,
+		MaxConcurrentRuns: resolveMaxConcurrentRuns(0, ceiling),
 	}
 	if settings.Label == "" {
 		settings.Label = DefaultWatchLabel
 	}
-	if c.Watch.PollIntervalSeconds == 0 {
+	if interval == 0 {
 		settings.PollInterval = DefaultWatchPollSeconds * time.Second
 	}
 	if settings.PollInterval < MinWatchPollSeconds*time.Second {
@@ -743,6 +780,12 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if c.Storage.MaxStateBytes < 0 {
 		return refuse("storage.max_state_bytes must not be negative")
+	}
+	if c.Supervisor.MaxConcurrentRuns < 0 {
+		return refuse("supervisor.max_concurrent_runs must not be negative")
+	}
+	if seconds := c.Supervisor.PollIntervalSeconds; seconds != 0 && seconds < MinWatchPollSeconds {
+		return refuse(fmt.Sprintf("supervisor.poll_interval_seconds must be at least %d", MinWatchPollSeconds))
 	}
 	return nil
 }

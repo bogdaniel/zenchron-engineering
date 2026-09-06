@@ -155,7 +155,7 @@ var geminiSpec = cliAgentSpec{
 		{Args: []string{"--help"}, Required: []string{"--prompt", "--approval-mode", "--model"}},
 	},
 	VersionArgs:    []string{"--version"},
-	AuthStatePaths: []string{".gemini/oauth_creds.json", ".gemini/settings.json", ".gemini"},
+	AuthStatePaths: []string{".gemini/oauth_creds.json", ".gemini/settings.json"},
 	Permission:     cliPermissionModes{Safe: "auto_edit", Bypass: "yolo"},
 	Signals: []diagnosticSignal{
 		{"resource_exhausted", FailureProviderQuota},

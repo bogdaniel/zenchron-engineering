@@ -129,6 +129,11 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"feedback.self_logins",
 		// How much local state parallel candidate clones may consume.
 		"storage.max_state_bytes",
+		// The persistent runtime's own bounds. They are combined with the
+		// watch bounds by taking the stricter of the two, so stating one can
+		// never loosen the other.
+		"supervisor.max_concurrent_runs",
+		"supervisor.poll_interval_seconds",
 	})
 }
 

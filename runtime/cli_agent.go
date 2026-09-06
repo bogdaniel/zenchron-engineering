@@ -403,12 +403,18 @@ func (p CLIAgentProvider) Probe(ctx context.Context) AgentReadiness {
 	if homeErr != nil {
 		return AgentReadiness{Detail: boundedDetail(homeErr.Error()), AuthMode: AuthModeUnknown, AuthModeSource: AuthSourceUnobserved}
 	}
+	// The executable is resolved FIRST. An authentication observation is a
+	// statement about a CLI that exists; reporting one for a program that is
+	// not installed would attribute somebody else's leftover state directory to
+	// a worker this machine cannot run.
+	if err := p.executor().LookPath(p.command()); err != nil {
+		return AgentReadiness{
+			Detail:   "executable " + p.command() + " was not found on PATH",
+			AuthMode: AuthModeUnknown, AuthModeSource: AuthSourceUnobserved,
+		}
+	}
 	authMode, authSource := p.observeAuthMode(spec, home)
 	readiness := AgentReadiness{AuthMode: authMode, AuthModeSource: authSource}
-	if err := p.executor().LookPath(p.command()); err != nil {
-		readiness.Detail = "executable " + p.command() + " was not found on PATH"
-		return readiness
-	}
 	readiness.Version = p.version(ctx, spec, home)
 	if err := p.probe(ctx, spec, home); err != nil {
 		readiness.Detail = "the installed " + p.command() + " does not advertise the sandbox, permission and working-directory capabilities this runtime requires, so it is refused rather than run with weaker constraints"
