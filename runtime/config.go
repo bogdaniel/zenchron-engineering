@@ -217,10 +217,25 @@ type OperatorConfig struct {
 	ProjectModelPath string          `json:"project_model_path"`
 	PolicyPath       string          `json:"policy_path"`
 	Assurance        AssuranceConfig `json:"assurance"`
-	Provider         ProviderConfig  `json:"provider"`
-	GitHub           GitHubConfig    `json:"github"`
-	Budgets          BudgetConfig    `json:"budgets"`
-	Watch            WatchConfig     `json:"watch,omitempty"`
+	// Provider is the pre-#63 SINGLE execution provider. It remains supported
+	// so an existing operator configuration keeps working unchanged, and it is
+	// migrated into a one-agent registry by AgentRegistry. It is mutually
+	// exclusive with Agents: two statements of which worker does the work are
+	// two sources of truth, and the runtime refuses rather than picking one.
+	Provider ProviderConfig `json:"provider,omitzero"`
+	// Agents is the named worker registry. Every member is omitempty/omitzero,
+	// so a configuration written before #63 canonicalizes - and therefore
+	// digests, and therefore derives run identities - exactly as it did before
+	// these members existed.
+	Agents map[string]AgentConfig `json:"agents,omitempty"`
+	// DefaultAgent is the agent `autonomy run issue N` uses when the operator
+	// names none. It is required whenever more than one agent is configured:
+	// picking one for the operator would be choosing which worker, and which
+	// account, does their work.
+	DefaultAgent string       `json:"default_agent,omitempty"`
+	GitHub       GitHubConfig `json:"github"`
+	Budgets      BudgetConfig `json:"budgets"`
+	Watch        WatchConfig  `json:"watch,omitempty"`
 	// GC is the operator's reclamation window for `autonomy gc`.
 	GC GCConfig `json:"gc,omitempty"`
 	// Operator names who a run is recorded as having been authorized by. It is
@@ -602,14 +617,32 @@ func (c OperatorConfig) validate(path string) error {
 	if c.Assurance.DependencyCacheDir != "" && !filepath.IsAbs(c.Assurance.DependencyCacheDir) {
 		return refuse("assurance.dependency_cache_dir must be an absolute path")
 	}
-	if c.Provider.Kind != ProviderOpenAI && c.Provider.Kind != ProviderNativeCodex {
-		return refuse(fmt.Sprintf("provider.kind must be %q or %q", ProviderOpenAI, ProviderNativeCodex))
-	}
-	if strings.TrimSpace(c.Provider.Model) == "" {
-		return refuse("provider.model is required")
-	}
-	if !filepath.IsAbs(c.Provider.CredentialPath) {
-		return refuse("provider.credential_path must be an absolute path to an operator-controlled credential")
+	// Exactly one statement of which workers exist. An `agents` block is the
+	// #63 registry; its absence is a pre-#63 configuration whose `provider`
+	// block is migrated into a one-agent registry under that provider's own
+	// historical identity and trust mode. Both together would be two sources
+	// of truth for the same question, so it is refused rather than resolved by
+	// a precedence rule nobody wrote down.
+	if len(c.Agents) > 0 {
+		if c.Provider != (ProviderConfig{}) {
+			return refuse("provider and agents are mutually exclusive: move the provider entry into the agents registry")
+		}
+		if _, err := c.AgentRegistry(); err != nil {
+			return refuse(err.Error())
+		}
+	} else {
+		if c.Provider.Kind != ProviderOpenAI && c.Provider.Kind != ProviderNativeCodex {
+			return refuse(fmt.Sprintf("provider.kind must be %q or %q, or configure an agents registry", ProviderOpenAI, ProviderNativeCodex))
+		}
+		if strings.TrimSpace(c.Provider.Model) == "" {
+			return refuse("provider.model is required")
+		}
+		if !filepath.IsAbs(c.Provider.CredentialPath) {
+			return refuse("provider.credential_path must be an absolute path to an operator-controlled credential")
+		}
+		if strings.TrimSpace(c.DefaultAgent) != "" {
+			return refuse("default_agent requires an agents registry")
+		}
 	}
 	if c.GitHub.CredentialMode != GitHubCredentialCLI && c.GitHub.CredentialMode != GitHubCredentialNone {
 		return refuse(fmt.Sprintf("github.credential_mode must be %q or %q", GitHubCredentialCLI, GitHubCredentialNone))
