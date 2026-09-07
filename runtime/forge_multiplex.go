@@ -440,7 +440,12 @@ func (m *MultiplexedForge) SupportsFeedbackAdmission() bool {
 	// truth is a configuration that simply cannot carry feedback.
 	_, permissions := m.Inner.(ForgeActorPermissions)
 	_, conversation := m.Inner.(ForgeConversation)
-	return permissions && conversation
+	// The VIEWER capability is required too. Without it the runtime cannot
+	// learn which account it publishes as, and the self-loop guard has nothing
+	// to recognize itself by - so it would admit its own comments as ordinary
+	// permitted feedback rather than refusing them.
+	_, viewer := m.Inner.(ForgeViewer)
+	return permissions && conversation && viewer
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

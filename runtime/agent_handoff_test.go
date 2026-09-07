@@ -169,7 +169,7 @@ func TestHandoffNeverLowersTheTrustARunWasGovernedUnder(t *testing.T) {
 // the record, so it could never be replayed as new input.
 func TestConsumedFeedbackIsCarriedIntoTheTransition(t *testing.T) {
 	fixture, runID := handoffFixture(t)
-	fixture.deps.Feedback = FeedbackPolicy{}
+	fixture.deps.Feedback = FeedbackPolicy{PublicationIdentityResolved: true}
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 	fixture.forge.Permissions["maintainer"] = PermissionWrite
 	number := fixture.state(runID).projection.PullRequest.Number

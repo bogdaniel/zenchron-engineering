@@ -883,15 +883,44 @@ func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 // It is a WARN rather than a FAIL because runs still execute, publish and
 // verify; what is unavailable is the remediation loop. The fix is a separate
 // publication identity, not a weaker guard.
+// doctorViewer resolves the account the runtime publishes as, when the adapter
+// can answer. It is a read; doctor makes no write.
+func doctorViewer(in DoctorInput) (GitHubActor, bool) {
+	viewer, ok := in.GitHub.(ForgeViewer)
+	if !ok || strings.TrimSpace(in.Repository.Identity) == "" {
+		return GitHubActor{}, false
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return GitHubActor{}, false
+	}
+	actor, err := viewer.Viewer(context.Background(), repo)
+	if err != nil || strings.TrimSpace(actor.Login) == "" {
+		return GitHubActor{}, false
+	}
+	return actor, true
+}
+
 func doctorPublicationIdentity(in DoctorInput) DoctorCheck {
 	const id = "github.publication_identity"
 	switch in.GitHubCredentialMode {
 	case GitHubCredentialNone:
 		return warn(doctorGroupGitHub, id, "github.credential_mode is \"none\", so the runtime publishes nothing and no publication identity exists")
 	case GitHubCredentialToken:
-		return pass(doctorGroupGitHub, id,
-			"the runtime publishes with its own operator-provisioned token, so it is a DIFFERENT GitHub actor from you. Your reviews and comments are "+
-				"admissible feedback, and the runtime's own are still refused by identity")
+		// The mode proves a SEPARATE CREDENTIAL, not a separate account: a
+		// personal access token for the operator's own login sits in that file
+		// just as happily as a dedicated runtime account's. Claiming
+		// distinctness from the mode alone would be the same kind of untrue
+		// statement this check exists to make.
+		if actor, ok := doctorViewer(in); ok {
+			return pass(doctorGroupGitHub, id, fmt.Sprintf(
+				"the runtime publishes as %q from its own operator-provisioned token. Compare that with your own GitHub login: where they differ, your "+
+					"reviews are admissible feedback and the runtime's own are refused by identity; where they are the SAME account, the runtime is still "+
+					"acting as you and your reviews will not reach a worker", actor.Login))
+		}
+		return warn(doctorGroupGitHub, id,
+			"the runtime is configured with its own publication token, but the account it authenticates as could not be resolved, so this check cannot "+
+				"say whether it is a different actor from you - and feedback admission fails closed until that identity resolves")
 	}
 	return warn(doctorGroupGitHub, id,
 		"the runtime publishes with your own `gh` credential, so it acts as YOU on GitHub. Feedback authored by the publishing identity is refused so the "+

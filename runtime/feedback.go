@@ -112,7 +112,28 @@ type FeedbackPolicy struct {
 	// about. They are refused as feedback so the runtime cannot talk itself
 	// into a loop.
 	SelfLogins []string
+	// PublicationIdentityResolved states that the runtime's ACTUAL publishing
+	// account was established, not merely that some logins were configured.
+	//
+	// It exists because the self-loop guard fails OPEN without it. Resolving
+	// the publishing viewer is a network call; when it failed, the policy was
+	// previously returned with that login simply missing, on the reasoning that
+	// permission is still checked. It is not a safe fallback: the runtime's own
+	// publisher is normally a collaborator on the repository it publishes to, so
+	// it passes the permission threshold, is not a bot, and is not in SelfLogins
+	// - and the gate then admits the runtime's own comment as ordinary
+	// permitted feedback.
+	//
+	// Unresolved therefore means feedback admission is UNAVAILABLE, not
+	// unrestricted. Operator-declared SelfLogins are additive and never a
+	// substitute: they are what the operator believes, not what the credential
+	// proves.
+	PublicationIdentityResolved bool
 }
+
+// identified reports whether the runtime knows who it publishes as. Admission
+// is refused wholesale when it does not.
+func (p FeedbackPolicy) identified() bool { return p.PublicationIdentityResolved }
 
 func (p FeedbackPolicy) threshold() GitHubPermission {
 	if p.MinPermission == PermissionUnresolved {
@@ -206,6 +227,9 @@ const (
 	feedbackRefusedEmpty        = "carries no text, so there is nothing to deliver"
 	feedbackAdmittedAllowedBot  = "authored by an operator-allowlisted automation account"
 	feedbackRefusedUnauthorized = "actor has no permission on this repository"
+	// The runtime could not establish which account it publishes as, so it
+	// cannot recognize its own comments and admits nothing at all.
+	feedbackRefusedUnidentifiedRuntime = "the runtime's own publication identity is unresolved, so its own comments could not be told apart from anyone else's"
 )
 
 // AdmitFeedback decides every item against the policy and the current head. It
@@ -220,6 +244,23 @@ const (
 func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[string]GitHubPermission, head string) []FeedbackDecision {
 	decisions := make([]FeedbackDecision, 0, len(items))
 	for _, item := range items {
+		// Fail closed on the whole set before judging anyone: without a proven
+		// publication identity the runtime cannot recognize its OWN comments,
+		// and its publisher passes every other check.
+		if !policy.identified() {
+			decision := FeedbackDecision{
+				Key: item.Key(), Class: item.Class,
+				Actor: item.Actor.Login, ActorID: item.Actor.ID,
+				HeadRevision: head, Commit: item.Commit,
+				Applicable: feedbackApplies(item, head),
+				Reason:     feedbackRefusedUnidentifiedRuntime,
+			}
+			if !item.CreatedAt.IsZero() {
+				decision.CreatedAt = item.CreatedAt.UTC().Format(time.RFC3339)
+			}
+			decisions = append(decisions, decision)
+			continue
+		}
 		decision := FeedbackDecision{
 			Key: item.Key(), Class: item.Class,
 			Actor: item.Actor.Login, ActorID: item.Actor.ID,

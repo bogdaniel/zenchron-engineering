@@ -168,8 +168,21 @@ request not reviewed inside the execution budget died, so the review loop could
 not survive human-paced review at any budget that also bounded runaway work.
 
 Active time is derived from the journal, not from a stopwatch. An external wait
-runs from the `run.waiting` event that declared it until the next event that is
-not that wait, so a restart re-derives the same number from the same rows.
+is a **state**: it opens at the `run.waiting` that declared it and closes only at
+the next *disposition* event — a different wait, or a terminal one. It does not
+close on an operation event, because the runtime writes `run.waiting` only when
+the disposition or reason CHANGES:
+
+```text
+t0  run.waiting(goal_state_reached)     the human's turn begins
+t1  operation.planned/before/after      a poll; still goal_state_reached, so no
+                                        second wait event is ever written
+t2  hours later, still waiting
+```
+
+An accounting model that closed the wait at `t1` would find no new wait event and
+charge `t1..t2` to the execution budget — the original defect, returning after
+the first polling tick. A restart re-derives the same number from the same rows.
 Observation performed while waiting - re-reading the pull request, re-reading
 the issue - is real work and is counted; only the idle gap between ticks is
 excluded.

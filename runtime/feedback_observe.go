@@ -96,6 +96,13 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		observation.Unavailable = "the configured forge adapter cannot resolve actor permissions, so no feedback can pass the admission gate"
 		return observation, nil
 	}
+	// Without a proven publication identity the runtime cannot tell its own
+	// comments from anyone else's, and its publisher normally holds enough
+	// permission to be admitted. Report that rather than admitting anything.
+	if !r.deps.Feedback.identified() {
+		observation.Unavailable = "the runtime's own publication identity could not be resolved, so feedback admission is unavailable until it can be"
+		return observation, nil
+	}
 	items, err := r.collectFeedback(ctx, state)
 	if err != nil {
 		return FeedbackObservation{}, err

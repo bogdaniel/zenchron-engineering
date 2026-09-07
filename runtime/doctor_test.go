@@ -118,6 +118,17 @@ type doctorForge struct {
 	GitHubAdapter
 	result DiscoveryResult
 	err    error
+	// viewer is the account the credential acts as. Doctor reports it rather
+	// than inferring distinctness from the credential mode, so a fixture that
+	// leaves it empty models an environment that cannot answer the question.
+	viewer GitHubActor
+}
+
+func (f doctorForge) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
+	if f.viewer.Login == "" {
+		return GitHubActor{}, &GitHubAuthError{Detail: "no viewer configured"}
+	}
+	return f.viewer, nil
 }
 
 func (f doctorForge) DiscoverIssues(context.Context, DiscoveryQuery) (DiscoveryResult, error) {
@@ -247,7 +258,10 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
 			BinarySHA256: strings.Repeat("c", 64),
 		},
-		GitHub: doctorForge{result: DiscoveryResult{
+		// A healthy environment can also say WHO it publishes as: doctor reports
+		// the resolved account rather than inferring distinctness from the
+		// credential mode, so the fixture has to supply one.
+		GitHub: doctorForge{viewer: GitHubActor{Login: "zenchron-runtime", ID: 4242}, result: DiscoveryResult{
 			Repo:      GitHubRepo{Owner: "acme", Name: "widgets"},
 			Label:     DefaultDiscoveryLabel,
 			Pages:     1,

@@ -160,6 +160,7 @@ type runState struct {
 	// External-wait accounting, folded from the journal once; see externalWait.
 	waitExcluded  time.Duration
 	waitOpenSince time.Time
+	waitOpenWork  time.Duration
 	waitComputed  bool
 }
 
@@ -342,8 +343,15 @@ var externalWaitReasons = map[string]bool{
 	// Waiting for the operator's own accounts and tools.
 	"execution_provider_account_unavailable": true,
 	"execution_provider_quota":               true,
-	"assurance_dependency_unavailable":       true,
-	WatchWaitingGitHubAuth:                   true,
+	// Rate limiting is the other capacity wait. It is the provider declining to
+	// be asked yet, not the runtime working, and leaving it out charged an
+	// operator for their provider's backoff.
+	"execution_provider_rate_limited":  true,
+	"assurance_dependency_unavailable": true,
+	// The operator has to free disk before anything can proceed; the run is not
+	// working while it waits for them.
+	"state_storage_exhausted": true,
+	WatchWaitingGitHubAuth:    true,
 	// Waiting for a human decision about the source or the pull request.
 	WatchWaitingOptInRemoved:       true,
 	"source_intent_changed":        true,
@@ -364,13 +372,13 @@ var externalWaitReasons = map[string]bool{
 // counted; only the idle gap between ticks is excluded.
 func (s *runState) activeElapsed(now time.Time) time.Duration {
 	elapsed := now.Sub(s.run.CreatedAt)
-	excluded, openWait := s.externalWait()
-	// An external wait that is still open runs to now, which is the only part
-	// of the answer that depends on the clock - and therefore the only part
-	// that cannot be computed once.
-	if !openWait.IsZero() {
-		if delta := now.Sub(openWait); delta > 0 {
-			excluded += delta
+	excluded, openSince, openWork := s.externalWait()
+	// An open wait runs to now, less the work already performed inside it. This
+	// is the only part of the answer that depends on the clock, and therefore
+	// the only part that cannot be computed once.
+	if !openSince.IsZero() {
+		if idle := now.Sub(openSince) - openWork; idle > 0 {
+			excluded += idle
 		}
 	}
 	if excluded > elapsed {
@@ -380,35 +388,78 @@ func (s *runState) activeElapsed(now time.Time) time.Duration {
 }
 
 // externalWait folds the journal once: the total of the CLOSED external-wait
-// intervals, and the start of an open one if the run is in a wait now.
+// intervals, the start of an open one, and the work performed inside it.
 //
-// It is memoized because the events of a loaded runState never change, while
-// conditions() is called several times per reconcile pass and a long-lived run
-// accumulates thousands of events. Walking the whole journal on each call would
-// make the cost of asking "how long has this been working" grow with how long it
-// has been alive.
-func (s *runState) externalWait() (time.Duration, time.Time) {
+// An external wait is a STATE, not the gap between two adjacent events. It opens
+// at the run.waiting that declared an external reason and closes only at the
+// next DISPOSITION event - a wait for a different reason, or a terminal event.
+// It deliberately does not close on operation events, because recordDisposition
+// appends run.waiting only when the disposition or reason CHANGES:
+//
+//	t0  run.waiting(goal_state_reached)     <- the human's turn begins
+//	t1  operation.planned/before/after      <- a poll; still goal_state_reached,
+//	                                           so NO second run.waiting is written
+//	t2  hours later, still waiting
+//
+// An earlier version closed the interval at t1 and, finding no new wait event,
+// charged t1..t2 to the execution budget. That reproduced the original defect
+// after the first polling tick, and the unit tests missed it because they
+// synthesized a fresh run.waiting before every observation - a journal
+// production never writes.
+//
+// Work performed WHILE waiting is still work: operation.before/after pairs
+// inside the state are added back, so a poll costs its own duration and no more.
+//
+// Memoized because a loaded runState's events never change, while conditions()
+// is called several times per pass and a long-lived run accumulates thousands of
+// events.
+func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, openWork time.Duration) {
 	if s.waitComputed {
-		return s.waitExcluded, s.waitOpenSince
+		return s.waitExcluded, s.waitOpenSince, s.waitOpenWork
 	}
-	var excluded time.Duration
 	var waitingSince time.Time
-	for _, event := range s.events {
-		if event.Type == EventRunWaiting && externalWaitReasons[payloadReason(event.Payload)] {
-			if waitingSince.IsZero() {
-				waitingSince = event.OccurredAt
-			}
-			continue
+	var work time.Duration
+	started := map[string]time.Time{}
+	closeWait := func(at time.Time) {
+		if waitingSince.IsZero() {
+			return
 		}
-		if !waitingSince.IsZero() {
-			if delta := event.OccurredAt.Sub(waitingSince); delta > 0 {
-				excluded += delta
+		if idle := at.Sub(waitingSince) - work; idle > 0 {
+			excluded += idle
+		}
+		waitingSince, work = time.Time{}, 0
+		started = map[string]time.Time{}
+	}
+	for _, event := range s.events {
+		switch event.Type {
+		case EventRunWaiting:
+			if externalWaitReasons[payloadReason(event.Payload)] {
+				if waitingSince.IsZero() {
+					waitingSince = event.OccurredAt
+				}
+				continue
 			}
-			waitingSince = time.Time{}
+			closeWait(event.OccurredAt)
+		case EventRunCompleted, EventRunFailed, EventRunCancelled:
+			closeWait(event.OccurredAt)
+		case EventOperationBefore:
+			if !waitingSince.IsZero() && event.OperationID != "" {
+				started[event.OperationID] = event.OccurredAt
+			}
+		case EventOperationAfter:
+			if waitingSince.IsZero() || event.OperationID == "" {
+				continue
+			}
+			if at, ok := started[event.OperationID]; ok {
+				if spent := event.OccurredAt.Sub(at); spent > 0 {
+					work += spent
+				}
+				delete(started, event.OperationID)
+			}
 		}
 	}
-	s.waitExcluded, s.waitOpenSince, s.waitComputed = excluded, waitingSince, true
-	return excluded, waitingSince
+	s.waitExcluded, s.waitOpenSince, s.waitOpenWork, s.waitComputed = excluded, waitingSince, work, true
+	return excluded, waitingSince, work
 }
 
 // pinnedBase is the base revision the run was compiled and cloned against. It

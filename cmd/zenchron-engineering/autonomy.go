@@ -727,9 +727,16 @@ func (c *composition) feedbackPolicyFor(identity string) runtime.FeedbackPolicy 
 	}
 	actor, err := viewer.Viewer(context.Background(), repo)
 	if err != nil || actor.Login == "" {
+		// Fail CLOSED. A failed lookup does not narrow what the runtime
+		// recognizes about itself, it removes the only fact that lets it
+		// recognize itself at all - and its own publisher passes every other
+		// check, so the gate would admit the runtime's own comments. The policy
+		// is returned without a resolved identity, which makes admission report
+		// unavailable rather than run unguarded.
 		return policy
 	}
 	policy.SelfLogins = append(append([]string(nil), policy.SelfLogins...), actor.Login)
+	policy.PublicationIdentityResolved = true
 	return policy
 }
 

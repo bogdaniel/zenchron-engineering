@@ -7,6 +7,7 @@ package runtime
 // guard.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,12 +97,30 @@ func TestDoctorStatesWhetherTheOperatorCanGiveFeedback(t *testing.T) {
 		}
 	}
 
-	separate := doctorPublicationIdentity(DoctorInput{GitHubCredentialMode: GitHubCredentialToken})
-	if separate.Status != DoctorPass {
-		t.Fatalf("a separate publication identity reported %s: %s", separate.Status, separate.Reason)
+	// A separate CREDENTIAL is not a separate ACCOUNT: a personal access token
+	// for the operator's own login lives in that file just as happily. Doctor
+	// must report the account it resolved and let the operator compare, not
+	// infer distinctness from the mode.
+	unresolvable := doctorPublicationIdentity(DoctorInput{GitHubCredentialMode: GitHubCredentialToken})
+	if unresolvable.Status != DoctorWarn {
+		t.Fatalf("an unresolvable publication account reported %s: %s", unresolvable.Status, unresolvable.Reason)
 	}
-	if !strings.Contains(separate.Reason, "DIFFERENT GitHub actor") {
-		t.Fatalf("the pass does not state what was proven: %s", separate.Reason)
+	if strings.Contains(unresolvable.Reason, "DIFFERENT") {
+		t.Fatalf("doctor claimed distinctness it did not resolve: %s", unresolvable.Reason)
+	}
+
+	forge := NewFakeGitHubAdapter()
+	forge.ViewerActor = GitHubActor{Login: "zenchron-runtime", ID: 4242}
+	resolved := doctorPublicationIdentity(DoctorInput{
+		GitHubCredentialMode: GitHubCredentialToken,
+		GitHub:               forge,
+		Repository:           RepositoryTarget{Identity: "acme/repo"},
+	})
+	if resolved.Status != DoctorPass {
+		t.Fatalf("a resolvable publication account reported %s: %s", resolved.Status, resolved.Reason)
+	}
+	if !strings.Contains(resolved.Reason, "zenchron-runtime") {
+		t.Fatalf("doctor did not name the account it resolved: %s", resolved.Reason)
 	}
 }
 
@@ -119,4 +138,99 @@ func TestDoctorClaimsNoProtectedExecutionPolicy(t *testing.T) {
 	if !strings.Contains(check.Reason, "UNPROVEN") {
 		t.Fatalf("doctor stopped stating the residual risk: %s", check.Reason)
 	}
+}
+
+// TestAnUnresolvedPublicationIdentityAdmitsNothing is the fail-closed law for
+// the self-loop guard.
+//
+// The dangerous case is not a bot and not a stranger: it is the runtime's OWN
+// publisher, a dedicated non-bot account that is a collaborator on the
+// repository it publishes to. It passes the permission threshold, it is not
+// automation, and it is not in SelfLogins when the viewer lookup failed - so
+// every other check waves it through and the system feeds itself.
+//
+// Narrowing what the runtime knows about itself is not a safe fallback. It
+// removes the ONLY fact that lets it recognize itself.
+func TestAnUnresolvedPublicationIdentityAdmitsNothing(t *testing.T) {
+	publisher := GitHubActor{Login: "zenchron-runtime", ID: 424242} // a real account, not a bot
+	own := FeedbackItem{
+		Class: FeedbackPullRequestComment, ID: 1, Actor: publisher,
+		Body: "the runtime's own status comment", Commit: "head-sha",
+	}
+	// The publisher holds write on the repository it publishes to, which is
+	// exactly why permission cannot be the thing that stops this.
+	permissions := map[string]GitHubPermission{"zenchron-runtime": PermissionWrite}
+
+	unresolved := FeedbackPolicy{MinPermission: PermissionWrite}
+	for _, decision := range AdmitFeedback([]FeedbackItem{own}, unresolved, permissions, "head-sha") {
+		if decision.Admitted {
+			t.Fatalf("the runtime's own comment was admitted while its identity was unresolved: %+v", decision)
+		}
+		if decision.Reason != feedbackRefusedUnidentifiedRuntime {
+			t.Fatalf("refused for the wrong reason: %q", decision.Reason)
+		}
+	}
+
+	// Resolved, and knowing itself: still refused, now BY identity.
+	resolved := FeedbackPolicy{
+		MinPermission: PermissionWrite, SelfLogins: []string{"zenchron-runtime"},
+		PublicationIdentityResolved: true,
+	}
+	for _, decision := range AdmitFeedback([]FeedbackItem{own}, resolved, permissions, "head-sha") {
+		if decision.Admitted || decision.Reason != feedbackRefusedSelf {
+			t.Fatalf("a resolved runtime did not refuse its own comment by identity: %+v", decision)
+		}
+	}
+
+	// ...and a human is still admitted, so this is fail-closed rather than
+	// refuse-everything.
+	human := FeedbackItem{
+		Class: FeedbackReview, ID: 2,
+		Actor: GitHubActor{Login: "operator", ID: 7}, Body: "please change this", Commit: "head-sha",
+	}
+	permissions["operator"] = PermissionWrite
+	decisions := AdmitFeedback([]FeedbackItem{human}, resolved, permissions, "head-sha")
+	if len(decisions) != 1 || !decisions[0].Admitted {
+		t.Fatalf("a permitted human review was not admitted: %+v", decisions)
+	}
+}
+
+// TestAdmissionIsNotAdvertisedWithoutAViewer. An adapter that cannot report who
+// the runtime publishes as must not claim it can run the admission gate: the
+// gate would then be asked to recognize an identity nothing can supply.
+func TestAdmissionIsNotAdvertisedWithoutAViewer(t *testing.T) {
+	full := NewMultiplexedForge(NewFakeGitHubAdapter(), newSteppingClock())
+	if !full.SupportsFeedbackAdmission() {
+		t.Fatal("a complete adapter stopped advertising feedback admission")
+	}
+	fake := NewFakeGitHubAdapter()
+	blind := NewMultiplexedForge(viewerlessForge{GitHubAdapter: fake, permissions: fake, conversation: fake}, newSteppingClock())
+	if _, isViewer := interface{}(viewerlessForge{}).(ForgeViewer); isViewer {
+		t.Fatal("the fixture still satisfies ForgeViewer, so this test proves nothing")
+	}
+	if blind.SupportsFeedbackAdmission() {
+		t.Fatal("an adapter that cannot resolve its own viewer advertised feedback admission")
+	}
+}
+
+// viewerlessForge can answer permissions and conversations but genuinely lacks
+// the viewer capability. It embeds the ADAPTER INTERFACE rather than the fake
+// struct: embedding the struct would promote Viewer and the capability
+// assertion would still succeed, so the test would be asserting nothing.
+type viewerlessForge struct {
+	GitHubAdapter
+	permissions  ForgeActorPermissions
+	conversation ForgeConversation
+}
+
+func (f viewerlessForge) RepositoryPermission(ctx context.Context, repo GitHubRepo, login string) (GitHubPermission, error) {
+	return f.permissions.RepositoryPermission(ctx, repo, login)
+}
+
+func (f viewerlessForge) PullRequestComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	return f.conversation.PullRequestComments(ctx, repo, number)
+}
+
+func (f viewerlessForge) IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	return f.conversation.IssueComments(ctx, repo, number)
 }

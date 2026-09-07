@@ -135,6 +135,24 @@ identities it cannot discover — a coding-agent service account, a second bot y
 publish under. Nothing here inspects a message body, because a body is written
 by whoever is talking.
 
+### Admission fails closed without a known publication identity
+
+The guard can only refuse the runtime's own comments if the runtime knows which
+account it publishes as. Resolving that is a network call, and when it failed the
+policy used to be returned with the identity simply missing — on the reasoning
+that permission is still checked.
+
+That is not a safe fallback. The runtime's own publisher is normally a
+collaborator on the repository it publishes to, so it clears the permission
+threshold, is not automation, and is not in `self_logins` — and the gate then
+admits the runtime's own comment as ordinary permitted feedback.
+
+So an unresolved publication identity means feedback admission is
+**unavailable**, not unrestricted, and the adapter must be able to answer
+"who am I" before it may advertise admission at all. `feedback.self_logins` is
+additive and never a substitute: it is what the operator believes, not what the
+credential proves.
+
 ### Give the runtime an identity of its own
 
 That guard has a consequence worth stating before you meet it:

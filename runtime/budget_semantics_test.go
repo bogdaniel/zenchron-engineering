@@ -7,6 +7,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -20,6 +21,17 @@ func waitEvent(at time.Time, reason string) EngineeringEvent {
 
 func progressEvent(at time.Time) EngineeringEvent {
 	return EngineeringEvent{Type: EventOperationAfter, OccurredAt: at}
+}
+
+// operationPair is what the runtime actually writes for one operation: a before
+// and an after, sharing an operation id. Work performed during a wait is
+// measured between them, so a fixture that emits a lone `after` models nothing
+// and would report every poll as instantaneous.
+func operationPair(id string, start time.Time, took time.Duration) []EngineeringEvent {
+	return []EngineeringEvent{
+		{Type: EventOperationBefore, OperationID: id, OccurredAt: start},
+		{Type: EventOperationAfter, OperationID: id, OccurredAt: start.Add(took)},
+	}
 }
 
 // TestWaitingOnAHumanDoesNotSpendTheExecutionBudget is the semantic fix. A run
@@ -72,13 +84,14 @@ func TestAnInternalWaitStillSpendsTheBudget(t *testing.T) {
 // between ticks is excluded.
 func TestObservationDuringAWaitIsStillWork(t *testing.T) {
 	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	events := []EngineeringEvent{}
+	events := []EngineeringEvent{waitEvent(start, "goal_state_reached")}
 	at := start
-	// Ten ticks, each: a long idle gap, then a second of observation.
+	// Ten ticks, each: a long idle gap, then a second of observation. The wait
+	// event is written ONCE, because the reason never changes - which is what
+	// production does.
 	for i := 0; i < 10; i++ {
-		events = append(events, waitEvent(at, "goal_state_reached"))
 		at = at.Add(10 * time.Minute)
-		events = append(events, progressEvent(at))
+		events = append(events, operationPair(fmt.Sprintf("poll-%d", i), at, time.Second)...)
 		at = at.Add(time.Second)
 	}
 	state := &runState{run: EngineeringRun{CreatedAt: start}, events: events}
@@ -172,5 +185,97 @@ func TestTheLifecycleDeadlineIsSeparateAndOptional(t *testing.T) {
 	disposition, reason := bounded.conditions()
 	if disposition != Failed || reason != "run_lifecycle_deadline_exhausted" {
 		t.Fatalf("a stated lifecycle deadline did not bound total elapsed time: %s/%s", disposition, reason)
+	}
+}
+
+// TestAWaitSurvivesThePollsTakenDuringIt is the PRODUCTION-PATH regression, and
+// it is the one that matters.
+//
+// recordDisposition appends run.waiting only when the disposition or reason
+// CHANGES, so a run that stays in the same wait writes exactly one wait event
+// and then keeps emitting operation events as it polls. An accounting model
+// that closes the wait at the next event therefore closes it at the first poll
+// and charges every hour after that to the execution budget - the original
+// defect, returning after one tick.
+//
+// The earlier unit tests could not see this: they synthesized a fresh
+// run.waiting before each observation, which is a journal production never
+// writes. This one drives the real reconcile loop and lets the runtime write
+// its own journal.
+func TestAWaitSurvivesThePollsTakenDuringIt(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+
+	// Drive until the run parks in an external wait, exactly as it would live.
+	var reason string
+	for pass := 0; pass < 12; pass++ {
+		outcome := fixture.reconcile(runID)
+		reason = outcome.Reason
+		if outcome.Disposition == Waiting && externalWaitReasons[reason] {
+			break
+		}
+		if terminalDisposition(outcome.Disposition) {
+			t.Fatalf("the run finished without ever waiting on anything external: %s/%s", outcome.Disposition, reason)
+		}
+	}
+	if !externalWaitReasons[reason] {
+		t.Skipf("this fixture never reached an external wait (last reason %q); the unit tests cover the accounting", reason)
+	}
+
+	state, err := fixture.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := state.activeElapsed(fixture.clock.Now())
+
+	// Hours pass, the runtime polls, the wait reason does not change - so no
+	// second run.waiting is written. This is the exact shape production emits.
+	waits := countWaitEvents(t, fixture, runID)
+	for tick := 0; tick < 3; tick++ {
+		fixture.clock.advance(4 * time.Hour)
+		fixture.reconcile(runID)
+	}
+	if after := countWaitEvents(t, fixture, runID); after != waits {
+		t.Fatalf("the fixture wrote %d extra run.waiting events, so it is not reproducing the deduplicated journal", after-waits)
+	}
+
+	state, err = fixture.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grew := state.activeElapsed(fixture.clock.Now()) - before
+	if grew > 5*time.Minute {
+		t.Fatalf("twelve hours of waiting spent %s of the execution budget across polling ticks", grew)
+	}
+}
+
+// countWaitEvents is how the test proves it is reproducing the deduplicated
+// journal rather than a convenient one.
+func countWaitEvents(t *testing.T, fixture *phase8Fixture, runID string) int {
+	t.Helper()
+	state, err := fixture.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, event := range state.events {
+		if event.Type == EventRunWaiting {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEveryWaitRoutedFailureIsClassified closes the gap between the two tables.
+// waitReasons names the durable reason each wait-routed failure settles into;
+// every one of them is the run waiting on something OUTSIDE itself - a provider
+// account, a quota, a rate limit, a dependency the operator must provision,
+// disk the operator must free. A reason present in one table and missing from
+// the other silently charges the operator for somebody else's backoff.
+func TestEveryWaitRoutedFailureIsClassified(t *testing.T) {
+	for class, reason := range waitReasons {
+		if !externalWaitReasons[reason] {
+			t.Errorf("failure class %q settles into wait reason %q, which spends the execution budget", class, reason)
+		}
 	}
 }
