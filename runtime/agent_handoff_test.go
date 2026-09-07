@@ -169,7 +169,11 @@ func TestHandoffNeverLowersTheTrustARunWasGovernedUnder(t *testing.T) {
 // the record, so it could never be replayed as new input.
 func TestConsumedFeedbackIsCarriedIntoTheTransition(t *testing.T) {
 	fixture, runID := handoffFixture(t)
-	fixture.deps.Feedback = FeedbackPolicy{PublicationIdentityResolved: true}
+	// The runtime resolves its own publishing account per observation, so the
+	// fake has to have one: without it the guard cannot tell the runtime's
+	// comments from anyone else's and correctly admits nothing.
+	fixture.forge.ViewerActor = GitHubActor{Login: "zenchron-runtime", ID: 99}
+	fixture.deps.Feedback = FeedbackPolicy{}
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 	fixture.forge.Permissions["maintainer"] = PermissionWrite
 	number := fixture.state(runID).projection.PullRequest.Number

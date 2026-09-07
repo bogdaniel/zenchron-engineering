@@ -715,29 +715,18 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 // in place - the gate still refuses everything below the permission threshold,
 // so a failed lookup narrows what the runtime can recognize about itself rather
 // than widening what it admits.
-func (c *composition) feedbackPolicyFor(identity string) runtime.FeedbackPolicy {
-	policy := c.feedback
-	viewer, ok := c.forge.(runtime.ForgeViewer)
-	if !ok {
-		return policy
-	}
-	repo, err := runtime.ParseGitHubRepo(identity)
-	if err != nil {
-		return policy
-	}
-	actor, err := viewer.Viewer(context.Background(), repo)
-	if err != nil || actor.Login == "" {
-		// Fail CLOSED. A failed lookup does not narrow what the runtime
-		// recognizes about itself, it removes the only fact that lets it
-		// recognize itself at all - and its own publisher passes every other
-		// check, so the gate would admit the runtime's own comments. The policy
-		// is returned without a resolved identity, which makes admission report
-		// unavailable rather than run unguarded.
-		return policy
-	}
-	policy.SelfLogins = append(append([]string(nil), policy.SelfLogins...), actor.Login)
-	policy.PublicationIdentityResolved = true
-	return policy
+// feedbackPolicyFor is the operator's DECLARED feedback policy. It deliberately
+// does not resolve the runtime's own publishing account.
+//
+// That identity is resolved by the runtime at observation time instead, against
+// the credential actually in use. Binding it here bound it once, at engine
+// construction, while the credential is re-read from its file on every request:
+// a token rotated while `serve` was alive left the self-loop guard recognizing
+// an account the runtime no longer was, and the account it had become would
+// have its own comments admitted. It also made engine construction perform a
+// live, uncancellable forge request.
+func (c *composition) feedbackPolicyFor(string) runtime.FeedbackPolicy {
+	return c.feedback
 }
 
 // buildEngine is the single-repository entry point: the repository comes from

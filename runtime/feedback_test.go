@@ -200,7 +200,7 @@ func TestFeedbackDeliveryIsBoundedAndOnce(t *testing.T) {
 func feedbackFixture(t *testing.T) (*phase8Fixture, string) {
 	t.Helper()
 	fixture := newPhase8Fixture(t)
-	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}, PublicationIdentityResolved: true}
+	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}}
 	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 	fixture.forge.ViewerActor = GitHubActor{Login: "zenchron-runtime", ID: 99}

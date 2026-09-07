@@ -234,3 +234,116 @@ func (f viewerlessForge) PullRequestComments(ctx context.Context, repo GitHubRep
 func (f viewerlessForge) IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
 	return f.conversation.IssueComments(ctx, repo, number)
 }
+
+// rotatingViewer is a forge whose publishing account changes underneath a live
+// runtime, exactly as rotating the token file does: the credential is re-read
+// per request, so the account the runtime acts as can change without a restart.
+type rotatingViewer struct {
+	*FakeGitHubAdapter
+	actor   func() (GitHubActor, error)
+	viewers int
+}
+
+func (f *rotatingViewer) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
+	f.viewers++
+	return f.actor()
+}
+
+// TestARotatedPublicationCredentialCannotFeedTheRuntimeItsOwnComments is the
+// lifetime law: the publication credential and the identity the self-loop guard
+// refuses must move together.
+//
+// Binding the identity once at construction while the token is re-read per
+// request means a rotation leaves the guard recognizing the account the runtime
+// USED to be. The account it has become is a dedicated, non-bot, write-holding
+// publisher, so it passes every remaining check and its own comments are
+// admitted - recreating the loop.
+func TestARotatedPublicationCredentialCannotFeedTheRuntimeItsOwnComments(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+
+	current := GitHubActor{Login: "zenchron-runtime-a", ID: 111}
+	forge := &rotatingViewer{FakeGitHubAdapter: fixture.forge, actor: func() (GitHubActor, error) { return current, nil }}
+	deps := fixture.deps
+	deps.GitHub = forge
+	deps.Feedback = FeedbackPolicy{MinPermission: PermissionWrite}
+	engine, err := NewEngineeringRuntime(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First observation binds actor A durably.
+	if _, err := engine.ObserveFeedback(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := engine.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound := state.feedbackState().PublicationLogin; bound != "zenchron-runtime-a" {
+		t.Fatalf("the first observation did not bind the publication identity: %q", bound)
+	}
+
+	// The operator rotates the token. No restart: the same engine, the same
+	// cached everything, a different account.
+	current = GitHubActor{Login: "zenchron-runtime-b", ID: 222}
+	observation, err := engine.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Unavailable == "" {
+		t.Fatal("a rotated publication credential was accepted silently; the guard is still bound to the previous account")
+	}
+	for _, phrase := range []string{"zenchron-runtime-b", "zenchron-runtime-a"} {
+		if !strings.Contains(observation.Unavailable, phrase) {
+			t.Fatalf("the refusal does not name both identities: %s", observation.Unavailable)
+		}
+	}
+	if observation.Admitted != 0 {
+		t.Fatalf("%d items were admitted while the publication identity was in doubt", observation.Admitted)
+	}
+}
+
+// TestATransientIdentityFailureRecoversWithoutARestart. Failing closed is only
+// safe if it is temporary: an engine that bound "unresolved" for its lifetime
+// would disable feedback until the operator noticed and restarted.
+func TestATransientIdentityFailureRecoversWithoutARestart(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+
+	failing := true
+	forge := &rotatingViewer{FakeGitHubAdapter: fixture.forge, actor: func() (GitHubActor, error) {
+		if failing {
+			return GitHubActor{}, &GitHubTransientError{Status: 503, Detail: "the forge is briefly unavailable"}
+		}
+		return GitHubActor{Login: "zenchron-runtime", ID: 7}, nil
+	}}
+	deps := fixture.deps
+	deps.GitHub = forge
+	deps.Feedback = FeedbackPolicy{MinPermission: PermissionWrite}
+	engine, err := NewEngineeringRuntime(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observation, err := engine.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Unavailable == "" {
+		t.Fatal("an unresolvable publication identity did not fail closed")
+	}
+
+	// The forge recovers. The SAME engine must pick it up.
+	failing = false
+	recovered, err := engine.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Unavailable != "" {
+		t.Fatalf("feedback stayed disabled after the forge recovered, so it needs a restart: %s", recovered.Unavailable)
+	}
+	if forge.viewers < 2 {
+		t.Fatalf("the identity was resolved %d times; it must be resolved per observation, not bound once", forge.viewers)
+	}
+}

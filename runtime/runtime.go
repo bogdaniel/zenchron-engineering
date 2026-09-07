@@ -88,19 +88,25 @@ const (
 	// an exact invocation. It is a separate event from admission so a crash
 	// between observing a review and acting on it can neither lose it nor
 	// deliver it twice.
-	EventFeedbackConsumed    = "feedback.consumed"
-	EventRunWaiting          = "run.waiting"
-	EventRunCompleted        = "run.completed"
-	EventRunFailed           = "run.failed"
-	EventRunCancelled        = "run.cancelled"
-	EventSourceIntentChanged = "source.intent_changed"
-	EventSourceOptInRemoved  = "source.opt_in_removed"
-	EventSourceOptInRestored = "source.opt_in_restored"
-	EventOperationPlanned    = "operation.planned"
-	EventOperationBefore     = "operation.before"
-	EventOperationAfter      = "operation.after"
-	EventCandidateChanged    = "candidate.changed"
-	EventCandidateCommitted  = "candidate.committed"
+	EventFeedbackConsumed = "feedback.consumed"
+	// EventFeedbackPublicationIdentity binds the account the runtime publishes
+	// as. The self-loop guard refuses feedback authored by that identity, so
+	// the binding has to be durable: a credential rotated while `serve` is
+	// alive would otherwise leave the guard recognizing an account the runtime
+	// no longer is, and admitting its own comments as somebody else's.
+	EventFeedbackPublicationIdentity = "feedback.publication_identity"
+	EventRunWaiting                  = "run.waiting"
+	EventRunCompleted                = "run.completed"
+	EventRunFailed                   = "run.failed"
+	EventRunCancelled                = "run.cancelled"
+	EventSourceIntentChanged         = "source.intent_changed"
+	EventSourceOptInRemoved          = "source.opt_in_removed"
+	EventSourceOptInRestored         = "source.opt_in_restored"
+	EventOperationPlanned            = "operation.planned"
+	EventOperationBefore             = "operation.before"
+	EventOperationAfter              = "operation.after"
+	EventCandidateChanged            = "candidate.changed"
+	EventCandidateCommitted          = "candidate.committed"
 	// EventCandidateCheckpointed is a runtime-owned commit of work an
 	// interrupted producer left behind. It is deliberately NOT
 	// candidate.committed: every reader of that event treats it as an
@@ -129,7 +135,7 @@ const (
 	EventHumanAuthorityRecorded    = "human.authority_recorded"
 )
 
-var eventTypes = map[string]bool{EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
 
 type Ref struct {
 	ID       string `json:"id"`

@@ -48,6 +48,8 @@ var eventPayloads = map[string]payloadValidator{
 	EventRunFailed:    dispositionPayload,
 	EventRunCancelled: dispositionPayload,
 
+	EventFeedbackPublicationIdentity: payloadSchema(FeedbackPublicationIdentityPayload.validate),
+
 	EventOperationPlanned: operationPayload,
 	EventOperationBefore:  operationPayload,
 	EventOperationAfter:   operationPayload,

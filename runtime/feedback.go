@@ -32,6 +32,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -355,6 +356,20 @@ type FeedbackConsumedPayload struct {
 	Attempt     int    `json:"attempt"`
 }
 
+// FeedbackPublicationIdentityPayload is the account the runtime publishes as,
+// recorded the first time it is observed for a run.
+type FeedbackPublicationIdentityPayload struct {
+	Login string `json:"login"`
+	ID    int64  `json:"id,omitempty"`
+}
+
+func (p FeedbackPublicationIdentityPayload) validate() error {
+	if strings.TrimSpace(p.Login) == "" {
+		return errors.New("a publication identity record needs the login it binds")
+	}
+	return nil
+}
+
 // maxFeedbackKeysPerEvent bounds one consumption record. A single invocation is
 // given a bounded number of items - see maxDeliveredFeedbackItems - so this
 // ceiling is never reached in practice; it exists so the canonical payload
@@ -378,6 +393,9 @@ type FeedbackState struct {
 	Admitted []FeedbackObservedPayload
 	// Consumed is the set of keys already delivered to a worker.
 	Consumed map[string]bool
+	// PublicationLogin is the account this run has recorded the runtime as
+	// publishing under. Empty means no binding has been made yet.
+	PublicationLogin string
 }
 
 // Pending is the admitted, applicable, not-yet-delivered items in stable order.
@@ -426,6 +444,11 @@ func (s *runState) feedbackState() FeedbackState {
 			var payload FeedbackObservedPayload
 			if json.Unmarshal(event.Payload, &payload) == nil && payload.Key != "" {
 				state.Admitted = append(state.Admitted, payload)
+			}
+		case EventFeedbackPublicationIdentity:
+			var payload FeedbackPublicationIdentityPayload
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.Login != "" {
+				state.PublicationLogin = payload.Login
 			}
 		case EventFeedbackConsumed:
 			var payload FeedbackConsumedPayload

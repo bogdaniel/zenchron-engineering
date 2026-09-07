@@ -96,11 +96,25 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		observation.Unavailable = "the configured forge adapter cannot resolve actor permissions, so no feedback can pass the admission gate"
 		return observation, nil
 	}
-	// Without a proven publication identity the runtime cannot tell its own
-	// comments from anyone else's, and its publisher normally holds enough
-	// permission to be admitted. Report that rather than admitting anything.
-	if !r.deps.Feedback.identified() {
-		observation.Unavailable = "the runtime's own publication identity could not be resolved, so feedback admission is unavailable until it can be"
+	// The publication identity is resolved HERE, against the credential in use
+	// right now, rather than bound once when the engine was built.
+	//
+	// The credential is re-read from its file on every request, so a token
+	// rotated while `serve` is alive changes who the runtime publishes as. An
+	// identity captured at construction would keep the self-loop guard
+	// recognizing the account the runtime USED to be, and the account it has
+	// become - a dedicated, non-bot, write-holding publisher - would then pass
+	// every check and have its own comments admitted. The credential and the
+	// identity bound to it have to move together.
+	//
+	// Resolving per observation also means a lookup that failed at startup is
+	// retried on the next tick instead of disabling feedback until restart.
+	policy, unavailable, err := r.publicationIdentity(ctx, state)
+	if err != nil {
+		return FeedbackObservation{}, err
+	}
+	if unavailable != "" {
+		observation.Unavailable = unavailable
 		return observation, nil
 	}
 	items, err := r.collectFeedback(ctx, state)
@@ -123,7 +137,6 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 	// Permission is resolved once per DISTINCT actor, and only for actors that
 	// could still be admitted. An item already refused on identity - the
 	// runtime's own comment, an unallowlisted bot - never costs a forge call.
-	policy := r.deps.Feedback
 	resolved := map[string]GitHubPermission{}
 	// unresolvable separates "the forge could not answer" from "this actor is
 	// not permitted". Both fail closed for THIS poll, but only the second is a
@@ -444,4 +457,48 @@ func feedbackFindings(items []FeedbackContext) []Finding {
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Signature < findings[j].Signature })
 	return findings
+}
+
+// publicationIdentity resolves the account the runtime publishes as NOW and
+// reconciles it with the account this run has bound.
+//
+//	same          -> admission proceeds against that identity
+//	unresolvable  -> fail closed, retried on the next observation
+//	changed       -> fail closed, and say so; a rotated credential is an
+//	                 operator event, not something to silently re-bind, because
+//	                 the runtime's earlier comments were authored by the old
+//	                 identity and would become admissible the moment it moved
+func (r *EngineeringRuntime) publicationIdentity(ctx context.Context, state *runState) (FeedbackPolicy, string, error) {
+	policy := r.deps.Feedback
+	viewer, ok := r.deps.GitHub.(ForgeViewer)
+	if !ok {
+		return policy, "the configured forge adapter cannot name the account it publishes as, so the runtime cannot recognize its own comments", nil
+	}
+	repo, err := parseGitHubRepo(state.run.Repository)
+	if err != nil {
+		return policy, "", err
+	}
+	actor, err := viewer.Viewer(ctx, repo)
+	if err != nil || strings.TrimSpace(actor.Login) == "" {
+		return policy, "the runtime's own publication identity could not be resolved, so feedback admission is unavailable until it can be", nil
+	}
+	bound := state.feedbackState().PublicationLogin
+	switch {
+	case bound == "":
+		// First observation for this run: bind, durably, so a later rotation is
+		// a detectable change rather than an invisible one.
+		if err := r.append(state, EventFeedbackPublicationIdentity, "", FeedbackPublicationIdentityPayload{
+			Login: actor.Login, ID: actor.ID,
+		}, nil); err != nil {
+			return policy, "", err
+		}
+	case !strings.EqualFold(bound, actor.Login):
+		return policy, fmt.Sprintf(
+			"the runtime now publishes as %q but this run is bound to %q; feedback admission is refused until an operator reconciles the publication "+
+				"credential, because comments this run already published under the previous identity would otherwise be admitted as somebody else's",
+			actor.Login, bound), nil
+	}
+	policy.SelfLogins = append(append([]string(nil), policy.SelfLogins...), actor.Login)
+	policy.PublicationIdentityResolved = true
+	return policy, "", nil
 }
