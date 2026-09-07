@@ -889,3 +889,40 @@ func TestControlRequestIsBoundedWhileReading(t *testing.T) {
 		t.Fatalf("an oversized control request was not refused: %#v", response)
 	}
 }
+
+// TestClosingTheEndpointWhileServingIsSafe is the regression for a nil
+// dereference CI caught and a local run did not: Close cleared the listener
+// field while Serve was between two Accept calls, which is the shape of every
+// shutdown - Serve runs for the supervisor's whole life and Close is what ends
+// it. Repeating the cycle is what makes the timing window reachable.
+func TestClosingTheEndpointWhileServingIsSafe(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		stateDir := controlStateDir(t)
+		listener, err := ListenControl(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		served := make(chan error, 1)
+		go func() {
+			served <- listener.Serve(func(ControlRequest) ControlResponse {
+				return ControlResponse{OK: true}
+			})
+		}()
+		// Close concurrently with Accept, and twice: Close is idempotent.
+		if err := listener.Close(); err != nil {
+			t.Fatalf("closing a serving endpoint failed: %v", err)
+		}
+		if err := listener.Close(); err != nil {
+			t.Fatalf("a repeated close failed: %v", err)
+		}
+		select {
+		case err := <-served:
+			// A closed listener is a shutdown, not a fault.
+			if err != nil {
+				t.Fatalf("Serve reported a closed listener as an error: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Serve did not return after the endpoint was closed")
+		}
+	}
+}

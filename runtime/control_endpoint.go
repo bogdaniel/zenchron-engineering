@@ -38,6 +38,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -118,6 +119,12 @@ type ControlResponse struct {
 type ControlListener struct {
 	path     string
 	listener net.Listener
+	// closed makes Close idempotent WITHOUT clearing the listener. Clearing it
+	// was a nil dereference waiting for a shutdown to land between two Accept
+	// calls, which is every shutdown: Serve runs on its own goroutine for the
+	// supervisor's whole life and Close is what ends it. The listener field is
+	// therefore written once, at construction, and only ever read afterwards.
+	closed sync.Once
 }
 
 // ListenControl opens the endpoint, refusing every unsafe state rather than
@@ -198,14 +205,18 @@ func (l *ControlListener) Path() string {
 	return l.path
 }
 
-// Close stops listening and removes the endpoint file.
+// Close stops listening and removes the endpoint file. It is idempotent and
+// safe to call while Serve is running: closing the listener is what makes
+// Accept return, which is how Serve learns to stop.
 func (l *ControlListener) Close() error {
 	if l == nil || l.listener == nil {
 		return nil
 	}
-	err := l.listener.Close()
-	_ = os.Remove(l.path)
-	l.listener = nil
+	var err error
+	l.closed.Do(func() {
+		err = l.listener.Close()
+		_ = os.Remove(l.path)
+	})
 	return err
 }
 
