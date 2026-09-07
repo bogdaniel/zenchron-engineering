@@ -908,7 +908,16 @@ func TestClosingTheEndpointWhileServingIsSafe(t *testing.T) {
 				return ControlResponse{OK: true}
 			})
 		}()
-		// Close concurrently with Accept, and twice: Close is idempotent.
+		// One request is answered FIRST, so Serve has completed an Accept and
+		// is blocked in the next one. That is the window the nil dereference
+		// lived in; closing while the very first Accept is still blocked
+		// exercises a different and easier path.
+		response, err := SendControl(stateDir, ControlRequest{Command: ControlPing})
+		if err != nil || !response.OK {
+			t.Fatalf("the endpoint did not answer before the shutdown: %v %#v", err, response)
+		}
+		// Close concurrently with the second Accept, and twice: Close is
+		// idempotent.
 		if err := listener.Close(); err != nil {
 			t.Fatalf("closing a serving endpoint failed: %v", err)
 		}
@@ -923,6 +932,21 @@ func TestClosingTheEndpointWhileServingIsSafe(t *testing.T) {
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatal("Serve did not return after the endpoint was closed")
+		}
+
+		// The DETERMINISTIC half, and the one that actually reproduces the
+		// defect. The race above depends on Close landing inside a window a
+		// few instructions wide, which is why CI hit it and a local run did
+		// not - and why it cannot be relied on as a regression.
+		//
+		// The invariant underneath it does not need a race: Serve reads the
+		// listener field on every iteration, so Close must not mutate it.
+		// Calling Serve after Close reads exactly that field, and a Close that
+		// cleared it panics here every time.
+		if err := listener.Serve(func(ControlRequest) ControlResponse {
+			return ControlResponse{OK: true}
+		}); err != nil {
+			t.Fatalf("serving a closed endpoint reported a fault rather than a shutdown: %v", err)
 		}
 	}
 }
