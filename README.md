@@ -236,7 +236,10 @@ doctor` answers each capability question independently: PASS states what was
 proven, and a check that cannot be answered is WARN or FAIL, never a silent
 PASS. It makes no provider inference call and no forge write, resolves
 credentials without placing one in the report, and neither repairs nor holds
-what it measures. `autonomy gc` reclaims only heavyweight local material that
+what it measures. Because it repairs nothing, `docs/troubleshooting.md`
+carries the operator command behind each remedy - including provisioning the
+dependency cache, which verification cannot do for itself because assurance
+runs with no network by contract. `autonomy gc` reclaims only heavyweight local material that
 a canonical row already explains by reference; a non-terminal run's material,
 a leased run's material, anything inside the retention window, the runtime
 database and its canonical rows, and anything whose ownership cannot be
@@ -249,6 +252,7 @@ AGENTS.md                    Persistent instructions for coding agents
 docs/vision.md               Product thesis and boundaries
 docs/principles.md           Frozen architectural principles
 docs/architecture.md         System architecture
+docs/troubleshooting.md      Operator remedies for failing doctor checks
 docs/adr/                    Architecture decisions
 docs/spec/v0.1.md            Initial domain specification
 docs/spec/runtime-v0.1.md    Local runtime specification
