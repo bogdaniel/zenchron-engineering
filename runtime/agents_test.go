@@ -795,3 +795,48 @@ func TestARevokedSignInWaitsForTheOperatorInsteadOfKillingTheRun(t *testing.T) {
 		t.Fatalf("a quota refusal classified as %q", got)
 	}
 }
+
+// TestTheIsolationExemptionNeedsTwoAgreeingFacts guards the narrowest part of
+// the trust-mode gate, by driving the real construction path.
+//
+// Skipping RequireProtectedIsolation for an operator_trusted agent is correct -
+// that classification IS the answer the check asks for. Skipping it on the
+// strength of one string field is not: a trust mode is a value somebody can
+// set, while a KIND is checked by the registry against the adapter catalogue
+// and cannot be moved between trust modes by configuration.
+//
+// So an agent claiming operator_trusted while naming a brokered kind must still
+// prove its boundary. An earlier version of this test asserted the predicate on
+// its own and passed with the gate reverted, which is no test at all; it now
+// calls NewEngineeringRuntime so the gate itself is what moves.
+func TestTheIsolationExemptionNeedsTwoAgreeingFacts(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	// A provider that proves nothing, which is what every native CLI is.
+	unproven := CLIAgentProvider{Agent: ResolvedAgent{ID: "worker", Kind: AgentKindCodexCLI}}
+
+	build := func(agent ResolvedAgent) error {
+		deps := fixture.deps
+		deps.Provider, deps.Agent = unproven, agent
+		_, err := NewEngineeringRuntime(deps)
+		return err
+	}
+
+	for name, agent := range map[string]ResolvedAgent{
+		"brokered kind claiming operator_trusted": {ID: "x", Kind: AgentKindOpenAIResponses, TrustMode: TrustOperatorTrusted},
+		"unknown kind claiming operator_trusted":  {ID: "x", Kind: "invented_kind", TrustMode: TrustOperatorTrusted},
+		"native kind without the trust mode":      {ID: "x", Kind: AgentKindCodexCLI},
+		"nothing stated at all":                   {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := build(agent); err == nil {
+				t.Fatalf("%q built a runtime over a provider that proves no isolation", name)
+			}
+		})
+	}
+
+	// The one combination that IS exempt, so this cannot pass by refusing
+	// everything - which would mean no agent could ever run at all.
+	if err := build(ResolvedAgent{ID: "x", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}); err != nil {
+		t.Fatalf("a real operator-trusted native CLI was refused, so the product cannot run: %v", err)
+	}
+}

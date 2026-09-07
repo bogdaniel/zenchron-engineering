@@ -336,7 +336,13 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	// and naming it. Checking it here refused every native CLI at construction
 	// and made the whole operator_trusted path unreachable: the classification
 	// existed, was documented, was tested against fakes, and could not run.
-	if d.Agent.TrustMode != TrustOperatorTrusted {
+	// The exemption requires TWO agreeing facts, not one string. A trust mode
+	// alone is a field somebody could set; a kind whose mandated trust mode is
+	// operator_trusted is checked by the registry against the adapter
+	// catalogue, and configuration cannot move a kind between trust modes. An
+	// agent claiming operator_trusted while naming a brokered kind therefore
+	// still has to prove its boundary.
+	if !(d.Agent.NativeCLI() && d.Agent.TrustMode == TrustOperatorTrusted) {
 		if err := RequireProtectedIsolation(d.Provider); err != nil {
 			return nil, &DependencyError{Detail: err.Error()}
 		}
