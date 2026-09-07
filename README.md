@@ -236,7 +236,9 @@ doctor` answers each capability question independently: PASS states what was
 proven, and a check that cannot be answered is WARN or FAIL, never a silent
 PASS. It makes no provider inference call and no forge write, resolves
 credentials without placing one in the report, and neither repairs nor holds
-what it measures. `autonomy gc` reclaims only heavyweight local material that
+what it measures. A resolved credential is one that exists, never a session
+proven to still work; `docs/agents.md` states what readiness does and does not
+prove, and where a run goes when the difference shows up. `autonomy gc` reclaims only heavyweight local material that
 a canonical row already explains by reference; a non-terminal run's material,
 a leased run's material, anything inside the retention window, the runtime
 database and its canonical rows, and anything whose ownership cannot be
@@ -247,6 +249,7 @@ proven are never eligible.
 ```text
 AGENTS.md                    Persistent instructions for coding agents
 docs/vision.md               Product thesis and boundaries
+docs/agents.md               What agent readiness proves, and what it does not
 docs/principles.md           Frozen architectural principles
 docs/architecture.md         System architecture
 docs/adr/                    Architecture decisions
