@@ -323,8 +323,23 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		return nil, &DependencyError{Detail: "engineering policy: " + err.Error()}
 	}
 	// Fail closed on isolation before anything can reach the provider.
-	if err := RequireProtectedIsolation(d.Provider); err != nil {
-		return nil, &DependencyError{Detail: err.Error()}
+	//
+	// The check is conditional on the agent's TRUST MODE, and fails closed on
+	// anything that is not explicitly operator_trusted - an unset mode, a
+	// legacy dependency set, a hand-built one. A `protected` agent must prove
+	// its boundary before it may execute anything.
+	//
+	// An `operator_trusted` agent is exempt because that classification IS the
+	// answer this check would otherwise be asking for. It states that host read
+	// confinement is unproven, deliberately and permanently, and that the
+	// operator authorized this tool anyway by installing it, authenticating it
+	// and naming it. Checking it here refused every native CLI at construction
+	// and made the whole operator_trusted path unreachable: the classification
+	// existed, was documented, was tested against fakes, and could not run.
+	if d.Agent.TrustMode != TrustOperatorTrusted {
+		if err := RequireProtectedIsolation(d.Provider); err != nil {
+			return nil, &DependencyError{Detail: err.Error()}
+		}
 	}
 	repo, err := parseGitHubRepo(d.Repository.Identity)
 	if err != nil {

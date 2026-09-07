@@ -527,7 +527,10 @@ func TestNoConfigurationGrantsCandidateGitHubCredentials(t *testing.T) {
 	provider := NativeCodexProvider{CodexHome: t.TempDir()}
 	for _, entry := range provider.env() {
 		name, value, _ := strings.Cut(entry, "=")
-		if name != "PATH" && name != "HOME" && name != "CODEX_HOME" {
+		// USER is on the allowlist so a CLI whose credential lives in the OS
+		// keychain knows whose keychain to ask. It is an account name, not a
+		// secret, and the credential assertion below still holds.
+		if name != "PATH" && name != "HOME" && name != "USER" && name != "CODEX_HOME" {
 			t.Fatalf("provider environment carries %q, which is not on the allowlist", name)
 		}
 		if strings.Contains(value, "leaked-secret-value") {

@@ -75,6 +75,15 @@ var codexSpec = cliAgentSpec{
 	Signals: []diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"you've hit your usage limit", FailureProviderQuota},
+		// A revoked or expired sign-in is an account PREREQUISITE the operator
+		// restores with `codex login`, not a defect in the work. Left
+		// unrecognized it classified as a terminal invocation failure, so a run
+		// died on a condition that a login would have fixed - and the operator
+		// had to read a provider transcript to discover that. Observed live:
+		// "Your access token could not be refreshed because your refresh token
+		// was revoked. Please log out and sign in again."
+		{"refresh token was revoked", FailureProviderAccountUnavailable},
+		{"please log out and sign in again", FailureProviderAccountUnavailable},
 	},
 	Args: func(i cliInvocation) []string {
 		sandbox := "workspace-write"

@@ -319,6 +319,20 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 		return env
 	}
 	env = append(env, "HOME="+home)
+	// USER is forwarded because a CLI that keeps its credential in the OS
+	// keychain needs to know which account's keychain to ask for. Claude Code
+	// on macOS reports "Not logged in · Please run /login" without it, from a
+	// fully authenticated installation - the agent is then permanently unable
+	// to do any work, and the diagnostic points the operator at a login they
+	// have already performed.
+	//
+	// It is an account NAME, not a credential: the process already runs as that
+	// account, and nothing about the publication boundary changes - no token,
+	// no socket and no key becomes reachable because the worker can spell its
+	// own username.
+	if user := strings.TrimSpace(os.Getenv("USER")); user != "" {
+		env = append(env, "USER="+user)
+	}
 	// The provider's own state variable is set only when the operator pinned a
 	// home. An agent using the operator's real home is invoked exactly as that
 	// operator would invoke it, which is what "use the already-authenticated

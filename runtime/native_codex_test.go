@@ -141,9 +141,11 @@ func TestNativeCodexReceivesNoAmbientHostEnvironment(t *testing.T) {
 			t.Fatalf("ambient host environment reached the provider: %q in %s", forbidden, text)
 		}
 	}
-	// The allowlist is constructed from scratch, so it stays small.
+	// The allowlist is constructed from scratch, so it stays small: PATH, HOME,
+	// USER and the provider's pinned home variable. Counting is deliberate -
+	// it is what makes a fifth member somebody has to justify.
 	for _, call := range fake.calls {
-		if len(call.env) > 3 {
+		if len(call.env) > 4 {
 			t.Fatalf("environment is not an explicit allowlist: %#v", call.env)
 		}
 	}

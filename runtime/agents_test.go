@@ -482,7 +482,12 @@ func TestNativeAgentEnvironmentIsAnAllowlistWithoutBillingOverrides(t *testing.T
 			for _, call := range fake.calls {
 				for _, entry := range call.env {
 					name, value, _ := strings.Cut(entry, "=")
-					if name != "PATH" && name != "HOME" {
+					// PATH so tools resolve, HOME so the CLI finds its own
+					// state, USER so a CLI whose credential lives in the OS
+					// keychain knows whose keychain to ask. All three are
+					// non-secret; the list is closed and every addition to it
+					// has to argue for itself here.
+					if name != "PATH" && name != "HOME" && name != "USER" {
 						t.Fatalf("environment is not an allowlist: %q reached %s", name, kind)
 					}
 					if strings.Contains(value, "leaked-value-9c3") {
@@ -733,5 +738,60 @@ func TestNoAdapterInfersAuthenticationFromAStateDirectory(t *testing.T) {
 				t.Errorf("%s treats %q as authentication evidence; a settings file is configuration", kind, path)
 			}
 		}
+	}
+}
+
+// TestTheWorkerIsToldWhichAccountsKeychainToAsk pins the one non-obvious member
+// of the environment allowlist.
+//
+// A CLI that keeps its credential in the operating system's keychain needs to
+// know which account's keychain to open. Claude Code on macOS answers "Not
+// logged in · Please run /login" without USER, from an installation that is
+// fully authenticated - so the agent can never do any work, and the diagnostic
+// sends the operator to perform a login they have already performed.
+//
+// This was found by running the agent for real, not by a test: every
+// deterministic test invokes a fake executor that has no keychain to fail
+// against. That is why it is pinned here now.
+func TestTheWorkerIsToldWhichAccountsKeychainToAsk(t *testing.T) {
+	t.Setenv("USER", "operator-9c3")
+	for _, kind := range []string{AgentKindCodexCLI, AgentKindClaudeCode, AgentKindGeminiCLI, AgentKindQwenCLI} {
+		provider, request, fake := agentFixture(t, kind)
+		if _, err := provider.Execute(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.calls) == 0 {
+			t.Fatalf("%s was never invoked, so this proves nothing", kind)
+		}
+		for _, call := range fake.calls {
+			if !containsString(call.env, "USER=operator-9c3") {
+				t.Fatalf("%s was invoked without USER, so a keychain-backed credential could not be found: %v", kind, call.env)
+			}
+		}
+	}
+}
+
+// TestARevokedSignInWaitsForTheOperatorInsteadOfKillingTheRun is a
+// classification found by running the real CLI: a revoked Codex sign-in was
+// reported as a terminal invocation failure, so the run died on a condition
+// `codex login` would have fixed, and the operator had to read a provider
+// transcript to find that out.
+//
+// An account prerequisite is recoverable and belongs in the same class as a
+// quota refusal: the run waits, the operator restores the account, the run
+// resumes on the same candidate.
+func TestARevokedSignInWaitsForTheOperatorInsteadOfKillingTheRun(t *testing.T) {
+	for _, diagnostic := range []string{
+		"ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+		"Failed to refresh token: Your access token could not be refreshed because your REFRESH TOKEN WAS REVOKED.",
+	} {
+		if got := classifyAgentFailure(codexSpec, nil, []byte(diagnostic)); got != FailureProviderAccountUnavailable {
+			t.Fatalf("a revoked sign-in classified as %q, want %q: %s", got, FailureProviderAccountUnavailable, diagnostic)
+		}
+	}
+	// A quota refusal stays a quota refusal: the two are different operator
+	// actions - wait for the window, versus sign in again.
+	if got := classifyAgentFailure(codexSpec, nil, []byte("You've hit your usage limit.")); got != FailureProviderQuota {
+		t.Fatalf("a quota refusal classified as %q", got)
 	}
 }
