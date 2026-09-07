@@ -206,6 +206,24 @@ Automatic issue discovery is one optional intake policy under the supervisor. It
 is active only when an operator enrolled repositories for it, and new
 configuration enrols none. The startup banner states which mode is in effect.
 
+Under `serve` it is intake and **nothing else**. Discovery observes consent,
+creates or adopts the durable run, and records withdrawal and credential waits —
+then stops. The supervisor drives it, like every other run.
+
+```text
+standalone `autonomy watch`        under `serve`
+
+discover -> claim -> DRIVE         discover -> claim
+                                                 |
+nothing else is running, so             the supervisor drives it
+the controller is also the driver       with everything else
+```
+
+Collapsing those would give one process two independently capacity-bounded
+advancement paths over the same runs: a freshly claimed run reconciled once by
+discovery and again by the supervisor enumerating non-terminal runs, in a single
+tick, with the operator's ceiling enforced twice over rather than once.
+
 ## Related documents
 
 - [`product-architecture.md`](product-architecture.md) — where the supervisor sits

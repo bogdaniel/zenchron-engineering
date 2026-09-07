@@ -188,12 +188,19 @@ var geminiSpec = cliAgentSpec{
 //
 // The prompt is positional. Qwen's array-valued flags greedily absorb a
 // following positional, so nothing array-valued is ever placed before it.
+//
+// Only the credential file is auth evidence. A settings file or the state
+// directory prove that Qwen has been CONFIGURED, which is not the same fact and
+// would be reported under the same name - the exact overclaim the other three
+// adapters had removed. Where no credential artifact exists the auth mode stays
+// unknown, because an honest gap is worth more than a confident guess about
+// somebody's session.
 var qwenSpec = cliAgentSpec{
 	Probes: []cliHelpProbe{
 		{Args: []string{"--help"}, Required: []string{"--approval-mode", "--model", "--safe-mode"}},
 	},
 	VersionArgs:                     []string{"--version"},
-	AuthStatePaths:                  []string{".qwen/oauth_creds.json", ".qwen/settings.json", ".qwen"},
+	AuthStatePaths:                  []string{".qwen/oauth_creds.json"},
 	HomeEnv:                         "QWEN_HOME",
 	Permission:                      cliPermissionModes{Safe: "auto-edit", Bypass: "yolo"},
 	SuppressesWorkspaceInstructions: true,

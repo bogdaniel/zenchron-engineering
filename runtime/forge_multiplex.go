@@ -178,6 +178,22 @@ func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, m
 	if current, ok := m.inflight[key]; ok && current == pending {
 		delete(m.inflight, key)
 	}
+	// A transient refusal that carries retry timing becomes shared backoff. The
+	// forge's own instruction is honoured once for the whole repository instead
+	// of being rediscovered by every run.
+	//
+	// This is recorded BEFORE the epoch check, and deliberately. Cacheability
+	// and backoff are facts about different things: an answer describes
+	// repository state, which a write can move past, while "stop asking until
+	// this instant" describes the forge itself, which no write of ours changes.
+	// Discarding the instruction because a sibling wrote something in the
+	// meantime would send every other run straight back into the same limit.
+	var transient *GitHubTransientError
+	if errors.As(err, &transient) {
+		if until := retryInstant(now, transient.RateLimit); until.After(now) {
+			m.backoff[repo.String()] = forgeBackoff{until: until, err: err}
+		}
+	}
 	// An answer from a superseded epoch is returned to THIS caller - it is the
 	// answer its own request produced - and is not cached, because the state it
 	// describes is the state a write has already moved past.
@@ -185,15 +201,6 @@ func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, m
 		return typedForgeAnswer[T](key, value, err)
 	}
 	m.answers[key] = forgeAnswer{value: value, err: err, at: now}
-	// A transient refusal that carries retry timing becomes shared backoff. The
-	// forge's own instruction is honoured once for the whole repository instead
-	// of being rediscovered by every run.
-	var transient *GitHubTransientError
-	if errors.As(err, &transient) {
-		if until := retryInstant(now, transient.RateLimit); until.After(now) {
-			m.backoff[repo.String()] = forgeBackoff{until: until, err: err}
-		}
-	}
 	return value, err
 }
 

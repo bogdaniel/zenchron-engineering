@@ -207,14 +207,19 @@ func supervisorRegistry(t *testing.T) AgentRegistry {
 
 // supervisorFixture builds a supervisor over the phase 8 fixture's store,
 // driving the same repository-bound engine an operator command would.
-func supervisorFixture(t *testing.T, fixture *phase8Fixture, ceiling int) *Supervisor {
+func supervisorFixture(t *testing.T, fixture *phase8Fixture, ceiling int, discovery ...*WatchController) *Supervisor {
 	t.Helper()
 	repo, err := ParseGitHubRepo("acme/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var intake *WatchController
+	if len(discovery) == 1 {
+		intake = discovery[0]
+	}
 	supervisor, err := NewSupervisor(SupervisorDependencies{
-		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Discovery: intake,
+		Store:     fixture.store, Clock: fixture.clock, Owner: "owner-1",
 		Liveness:          OwnerLivenessFunc(func(string) bool { return false }),
 		Repositories:      []GitHubRepo{repo},
 		MaxConcurrentRuns: ceiling,
@@ -1154,5 +1159,124 @@ func TestCancellationEventIdCarriesNoOperatorText(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no cancellation was journalled: %v", journalTypes(events))
+	}
+}
+
+// TestDiscoveryUnderASupervisorIsIntakeAndNeverADriver is the product law that
+// `serve` owns scheduling.
+//
+// Automatic discovery is one optional INTAKE policy. Standalone `autonomy
+// watch` also drives, because nothing else is running - but under a supervisor
+// a discovery controller that drove would give one process two independently
+// capacity-bounded advancement paths over the same durable runs. A single
+// supervisor tick would hand a freshly claimed run to Reconcile once through
+// discovery and again through the supervisor's own enumeration of non-terminal
+// runs, which is the operator ceiling being enforced twice over rather than
+// once.
+func TestDiscoveryUnderASupervisorIsIntakeAndNeverADriver(t *testing.T) {
+	fixture := newWatchFixture(t)
+	optIn(fixture.forge, phase8Issue, fixture.clock.Now())
+
+	intake, err := NewWatchController(WatchDependencies{
+		Store:    fixture.store,
+		Clock:    fixture.clock,
+		Owner:    fixture.deps.Owner,
+		Liveness: OwnerLivenessFunc(func(string) bool { return true }),
+		GitHub:   fixture.forge,
+		Settings: WatchSettings{
+			Repositories: []GitHubRepo{repoA}, Label: DefaultWatchLabel,
+			PollInterval: watchPollInterval, MaxConcurrentRuns: 1,
+		},
+		Runtime: func(GitHubRepo) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+		// What `serve` supplies.
+		IntakeOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := supervisorFixture(t, fixture, 1, intake).Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Discovery == nil || len(report.Discovery.Repositories) != 1 {
+		t.Fatalf("discovery did not report its repository: %#v", report.Discovery)
+	}
+	discovered := report.Discovery.Repositories[0]
+
+	// Intake still happened. Without this the test would pass on a controller
+	// that did nothing at all, which is not the property being defended.
+	if discovered.Discovered == 0 {
+		t.Fatal("discovery claimed nothing, so this tick proves nothing about who drives")
+	}
+	runID := runIDFor(t, fixture.runtime, phase8Issue)
+	if _, ok := storedRun(t, fixture, runID); !ok {
+		t.Fatal("discovery did not create the durable run it is responsible for creating")
+	}
+
+	// ...and it drove nothing.
+	if len(discovered.Driven) != 0 {
+		t.Fatalf("discovery drove runs under a supervisor: %v", discovered.Driven)
+	}
+	// The supervisor did, exactly once.
+	if len(report.Driven) != 1 || report.Driven[0].RunID != runID {
+		t.Fatalf("the supervisor did not drive exactly the run discovery claimed: %#v", report.Driven)
+	}
+}
+
+// TestASupersededRateLimitStillTeachesTheRepositoryToWait separates two facts
+// the multiplexer had been treating as one.
+//
+// An ANSWER describes repository state, so an invalidating write can move past
+// it and it must not be cached. A rate-limit instruction describes the FORGE,
+// and nothing this process writes changes when the forge is willing to be asked
+// again. Discarding the instruction because a sibling happened to write in the
+// meantime sends every other run in the repository straight back into the same
+// limit - the shared backoff exists precisely so the limit is discovered once.
+func TestASupersededRateLimitStillTeachesTheRepositoryToWait(t *testing.T) {
+	inner := newBlockingForge()
+	refusal := &GitHubTransientError{
+		Status: 429, Detail: "rate limited",
+		RateLimit: RateLimitObservation{RetryAfter: time.Minute},
+	}
+	inner.Fail = func(call GitHubCall) error {
+		// Only the slow READ is refused. The write has to succeed, because the
+		// write is what supersedes the read's epoch.
+		if call.Method == "PullRequest" {
+			return refusal
+		}
+		return nil
+	}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Nanosecond // defeat coalescing, so only backoff can stop a call
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	refused := make(chan error, 1)
+	go func() {
+		_, err := forge.PullRequest(context.Background(), repo, 1)
+		refused <- err
+	}()
+	inner.waitForCall(t)
+
+	// A write lands while the rate-limited read is still in flight, so the read
+	// completes into an epoch that is no longer current.
+	if _, err := forge.CreatePullRequest(context.Background(), repo, GitHubPullRequestCreate{
+		HeadRef: "zenchron/x", BaseRef: "main", Title: "t", Body: mustPublication(t, "body"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(inner.release)
+	if err := <-refused; err == nil {
+		t.Fatal("the fixture never produced a rate-limit refusal, so this test proves nothing")
+	}
+
+	// A sibling run now asks a DIFFERENT question about the same repository. It
+	// must be refused from the shared backoff without reaching the forge.
+	before := len(inner.Calls)
+	if _, err := forge.Checks(context.Background(), repo, "head"); err == nil {
+		t.Fatal("a sibling was allowed to ask a repository the forge had just rate-limited")
+	}
+	if len(inner.Calls) != before {
+		t.Fatalf("a superseded rate limit taught nobody: %d new calls reached the forge", len(inner.Calls)-before)
 	}
 }

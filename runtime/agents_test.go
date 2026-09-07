@@ -669,3 +669,69 @@ func TestBypassRunClaimsNoSandboxProof(t *testing.T) {
 		t.Fatal("a bypass run was admitted for protected execution")
 	}
 }
+
+// TestConfiguredIsNotAuthenticated is the second half of the auth-truth law.
+//
+// The first half stops an unobserved state being reported as a subscription.
+// This half stops a DIFFERENT fact being reported under the same name: a
+// settings file and a state directory prove the operator has configured the
+// CLI, which says nothing about whether a session behind it can execute work.
+// Reporting that as `local_cli_session` is the overclaim, and it is the one
+// that survives longest, because a configured machine is exactly where nobody
+// looks for it.
+func TestConfiguredIsNotAuthenticated(t *testing.T) {
+	provider, request, _ := agentFixture(t, AgentKindQwenCLI)
+	state := filepath.Join(provider.OperatorHome, ".qwen")
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Everything a configured-but-signed-out installation leaves behind.
+	if err := os.WriteFile(filepath.Join(state, "settings.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Invocation.AuthMode != AuthModeUnknown || result.Invocation.AuthModeSource != AuthSourceUnobserved {
+		t.Fatalf("configuration state was reported as an authenticated session: %#v", result.Invocation)
+	}
+
+	// The credential itself is the only thing that changes the answer.
+	if err := os.WriteFile(filepath.Join(state, "oauth_creds.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authenticated.Invocation.AuthMode != AuthModeLocalCLISession {
+		t.Fatalf("a real credential was not recognized: %#v", authenticated.Invocation)
+	}
+}
+
+// TestNoAdapterInfersAuthenticationFromAStateDirectory generalizes the finding
+// above to every adapter, present and future. The defect it prevents is not
+// "Qwen listed a directory" - it is that the next adapter will be written by
+// copying one of these specs, and a bare directory in the copied list looks
+// exactly like a credential file to whoever is reading quickly.
+func TestNoAdapterInfersAuthenticationFromAStateDirectory(t *testing.T) {
+	for kind, spec := range map[string]cliAgentSpec{
+		AgentKindCodexCLI:   codexSpec,
+		AgentKindClaudeCode: claudeSpec,
+		AgentKindGeminiCLI:  geminiSpec,
+		AgentKindQwenCLI:    qwenSpec,
+	} {
+		for _, path := range spec.AuthStatePaths {
+			base := filepath.Base(path)
+			// A credential artifact is a named file. A directory, or a
+			// settings/config file, is evidence of configuration.
+			if !strings.Contains(base, ".") || strings.HasSuffix(path, "/") {
+				t.Errorf("%s treats %q as authentication evidence; it proves configuration, not a session", kind, path)
+			}
+			if strings.Contains(base, "settings") || strings.Contains(base, "config") {
+				t.Errorf("%s treats %q as authentication evidence; a settings file is configuration", kind, path)
+			}
+		}
+	}
+}

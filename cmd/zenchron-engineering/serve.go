@@ -156,7 +156,11 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 	// the runtime exists. It is active only when an operator enrolled
 	// repositories for it; new configuration enrols none.
 	if len(settings.Repositories) > 0 {
-		discovery, err = c.watchController(settings)
+		// INTAKE ONLY. The supervisor below drives every non-terminal run; a
+		// discovery controller that also drove would reconcile the runs it just
+		// claimed and the supervisor would reconcile them again in the same
+		// tick.
+		discovery, err = c.watchController(settings, true)
 		if err != nil {
 			return nil, err
 		}

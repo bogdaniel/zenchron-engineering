@@ -1038,7 +1038,7 @@ func autonomyWatch(parent context.Context, flags autonomyFlags, overrides autono
 	}
 	controller := overrides.Watch
 	if controller == nil {
-		real, err := built.watchController(settings)
+		real, err := built.watchController(settings, false)
 		if err != nil {
 			return runtime.ExitInvalid, err
 		}
@@ -1104,14 +1104,19 @@ func (c *composition) watchSettings() (runtime.WatchSettings, error) {
 // factory. Watch never builds a provider or a credential of its own: every
 // engine it drives comes out of the same composition, so a watched repository
 // is governed by exactly the configuration this invocation validated.
-func (c *composition) watchController(settings runtime.WatchSettings) (*runtime.WatchController, error) {
+// watchController builds the discovery controller. intakeOnly separates its two
+// callers: standalone `autonomy watch` is the only thing running and therefore
+// both discovers and drives, while under `serve` the supervisor owns driving
+// and discovery contributes intake alone.
+func (c *composition) watchController(settings runtime.WatchSettings, intakeOnly bool) (*runtime.WatchController, error) {
 	return runtime.NewWatchController(runtime.WatchDependencies{
-		Store:    c.store,
-		Clock:    runtime.RealClock{},
-		Owner:    c.owner,
-		Liveness: runtime.NewLockOwnerLiveness(c.config.StateDir),
-		GitHub:   c.forge,
-		Settings: settings,
+		Store:      c.store,
+		Clock:      runtime.RealClock{},
+		Owner:      c.owner,
+		Liveness:   runtime.NewLockOwnerLiveness(c.config.StateDir),
+		GitHub:     c.forge,
+		Settings:   settings,
+		IntakeOnly: intakeOnly,
 		Runtime: func(repo runtime.GitHubRepo) (*runtime.EngineeringRuntime, error) {
 			return c.engine(runtime.RepositoryTarget{
 				Identity:      repo.String(),

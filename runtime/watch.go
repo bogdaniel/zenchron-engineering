@@ -63,6 +63,20 @@ type WatchDependencies struct {
 	// Runtime builds the Phase 8 engine for one repository. The CLI supplies
 	// this so watch never constructs providers/credentials itself.
 	Runtime func(repo GitHubRepo) (*EngineeringRuntime, error)
+	// IntakeOnly makes this controller DISCOVER and CLAIM without driving.
+	//
+	// Standalone `autonomy watch` is both the intake policy and the driver,
+	// because nothing else is running. Under `serve` the supervisor owns
+	// scheduling, and a controller that also drove would give one process two
+	// independently capacity-bounded advancement paths over the same runs: a
+	// run could be handed to Reconcile twice in a single supervisor tick, once
+	// by discovery and again by the supervisor enumerating non-terminal runs.
+	//
+	// Discovery under a supervisor is therefore intake and nothing else. What
+	// it still does is the whole of claiming - observing consent, creating or
+	// adopting the durable run, recording withdrawal and auth waits - which is
+	// exactly the seam #63 says automatic discovery is allowed to be.
+	IntakeOnly bool
 }
 
 // WatchController performs one deterministic scheduling cycle per Tick. It
@@ -388,7 +402,10 @@ func (w *WatchController) claim(ctx context.Context, engine *EngineeringRuntime,
 // same tick. Nothing here holds capacity merely because a durable run exists,
 // so with the M0 ceiling of one a later run is delayed, never starved.
 func (w *WatchController) drive(ctx context.Context, engine *EngineeringRuntime, report *RepositoryWatchReport, runIDs []string, capacity bool) {
-	if !capacity {
+	// The single funnel every claimed run passes through on its way to the
+	// reconciler, which is why the intake-only decision is taken here rather
+	// than at each call site: one guard cannot be forgotten by a fourth one.
+	if w.deps.IntakeOnly || !capacity {
 		return
 	}
 	for _, runID := range runIDs {

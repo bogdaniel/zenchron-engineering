@@ -137,6 +137,13 @@ is an observation with stated provenance, and `unknown` is a legitimate and
 common answer. It is never inferred to be `subscription` merely because Zenchron
 supplied no key.
 
+The same restraint applies to what counts as evidence. Only a provider's
+credential artifact reports `local_cli_session`. A settings file, or the CLI's
+state directory, proves the tool has been **configured** — a different fact,
+which would be misleading under the same name, and misleading on exactly the
+machines where nobody would think to check. Where an installed CLI exposes no
+trustworthy credential artifact, the answer stays `unknown`.
+
 ## Readiness
 
 ```bash
