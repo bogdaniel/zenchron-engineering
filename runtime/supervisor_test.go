@@ -951,18 +951,21 @@ func TestClosingTheEndpointWhileServingIsSafe(t *testing.T) {
 	}
 }
 
-// TestAPreWriteReadIsNeitherJoinedNorCached is the staleness rule coalescing
-// nearly reintroduced. A read that began BEFORE a write must not be handed to a
-// caller that arrives after it, and must not be stored into the cache the write
-// just cleared - which is exactly what invalidation exists to prevent.
-func TestAPreWriteReadIsNeitherJoinedNorCached(t *testing.T) {
+// TestAPreWriteAnswerIsNotCached is one half of the invalidation rule. A read
+// that began before a write completes after it, holding state the write already
+// moved past; that answer belongs to its own caller and must not become shared
+// state.
+//
+// It deliberately has ONE job. An earlier version also exercised joining, and
+// the two readers then raced to populate the cache - so whichever finished last
+// decided the assertion, and the test passed with the guard removed.
+func TestAPreWriteAnswerIsNotCached(t *testing.T) {
 	inner := newBlockingForge()
 	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "before", State: GitHubOpen}
 	forge := NewMultiplexedForge(inner, newSteppingClock())
 	forge.Window = time.Hour
 	repo := GitHubRepo{Owner: "acme", Name: "repo"}
 
-	// A read starts and blocks inside the forge.
 	first := make(chan GitHubPullRequest, 1)
 	go func() {
 		pr, _ := forge.PullRequest(context.Background(), repo, 1)
@@ -976,19 +979,67 @@ func TestAPreWriteReadIsNeitherJoinedNorCached(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The forge now reports the post-write state.
 	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "after", State: GitHubOpen}
 	close(inner.release)
-	<-first
 
-	// A reader arriving now must see the CURRENT state, not the answer the
-	// pre-write request produced.
+	// The pre-write read really did observe pre-write state; without that this
+	// test would be asserting nothing.
+	if stale := <-first; stale.HeadSHA != "before" {
+		t.Fatalf("the fixture never produced a pre-write answer: head %q", stale.HeadSHA)
+	}
+	// A reader arriving now must see the CURRENT state. With the pre-write
+	// answer cached it would see the state the write already moved past.
 	pr, err := forge.PullRequest(context.Background(), repo, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pr.HeadSHA != "after" {
-		t.Fatalf("a pre-write answer survived the invalidation: head %q", pr.HeadSHA)
+		t.Fatalf("a pre-write answer was cached across the invalidation: head %q", pr.HeadSHA)
+	}
+}
+
+// TestAPreWriteRequestIsNotJoined is the other half. A reader arriving while a
+// pre-write read is STILL in flight must start its own request rather than
+// waiting on one whose answer the write has already invalidated.
+//
+// The ordering is the assertion: the joiner has to arrive before anything is
+// released. Releasing first retires the in-flight entry and leaves nothing to
+// join, which is how an earlier version of this test proved nothing.
+func TestAPreWriteRequestIsNotJoined(t *testing.T) {
+	inner := newBlockingForge()
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "before", State: GitHubOpen}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	first := make(chan GitHubPullRequest, 1)
+	go func() {
+		pr, _ := forge.PullRequest(context.Background(), repo, 1)
+		first <- pr
+	}()
+	inner.waitForCall(t)
+
+	if _, err := forge.CreatePullRequest(context.Background(), repo, GitHubPullRequestCreate{
+		HeadRef: "zenchron/x", BaseRef: "main", Title: "t", Body: mustPublication(t, "body"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "after", State: GitHubOpen}
+
+	joiner := make(chan GitHubPullRequest, 1)
+	go func() {
+		pr, _ := forge.PullRequest(context.Background(), repo, 1)
+		joiner <- pr
+	}()
+	// Let the joiner reach the multiplexer while the first read is still held.
+	time.Sleep(50 * time.Millisecond)
+	close(inner.release)
+
+	if stale := <-first; stale.HeadSHA != "before" {
+		t.Fatalf("the fixture never produced a pre-write answer: head %q", stale.HeadSHA)
+	}
+	if joined := <-joiner; joined.HeadSHA != "after" {
+		t.Fatalf("a reader joined a request that began before the write: head %q", joined.HeadSHA)
 	}
 }
 
@@ -1054,7 +1105,13 @@ func (f *blockingForge) waitForCall(t *testing.T) {
 }
 
 func (f *blockingForge) PullRequest(ctx context.Context, repo GitHubRepo, number int) (GitHubPullRequest, error) {
+	// The state is observed FIRST and the response is slow afterwards, which
+	// is what a pre-write read actually is. Blocking before observing would
+	// make the "slow" read return post-write state, so no stale answer would
+	// exist and a test built on it would prove nothing - which is exactly what
+	// the first version of this fake did.
+	pr, err := f.FakeGitHubAdapter.PullRequest(ctx, repo, number)
 	f.once.Do(func() { close(f.called) })
 	<-f.release
-	return f.FakeGitHubAdapter.PullRequest(ctx, repo, number)
+	return pr, err
 }

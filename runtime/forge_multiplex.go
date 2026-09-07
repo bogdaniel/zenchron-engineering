@@ -236,10 +236,17 @@ func (m *MultiplexedForge) invalidate() {
 	defer m.mu.Unlock()
 	m.answers = map[string]forgeAnswer{}
 	// Reads still in flight belong to the old generation: they may already
-	// hold pre-write state. Advancing the epoch stops a later caller joining
-	// one and stops its owner caching the result.
+	// hold pre-write state. Advancing the epoch is what stops a later caller
+	// joining one and stops its owner caching the result.
+	//
+	// The in-flight map is deliberately NOT cleared as well. It would be a
+	// second mechanism for the same invariant, and the redundant one is
+	// untestable: with both in place, removing either changes no observable
+	// behaviour, so neither can be shown to do anything. The epoch is kept
+	// because it states the rule directly - a call from a superseded
+	// generation is not joined and not cached - and because clearing the map
+	// would also strand the waiters of a call still in progress.
 	m.epoch++
-	m.inflight = map[string]*forgeCall{}
 }
 
 func forgeKey(repo GitHubRepo, parts ...string) string {
