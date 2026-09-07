@@ -161,9 +161,14 @@ host READ confinement UNPROVEN            eligible for protected-required work
 `operator_trusted` is a truthful classification, not a degraded `protected`. It
 says: this is approximately the trust you already extend by running `codex`
 yourself, plus the runtime's guarantees about credentials, permission mode and
-provenance, minus any claim about what the process can read. A policy that
-requires protected execution is not satisfied by it, and never will be by
-renaming it.
+provenance, minus any claim about what the process can read. It will never
+become `protected` by renaming it.
+
+The isolation gate is applied per trust mode and fails closed: anything not
+explicitly `operator_trusted` must prove the boundary first. What does not exist
+yet is a policy vocabulary for "this work requires protected execution", so
+matching work to a trust mode is the operator's decision rather than a rule the
+runtime enforces.
 
 Neither trust mode is authority. An `operator_trusted` agent may write the
 change and cannot accept it; a `protected` one cannot either.

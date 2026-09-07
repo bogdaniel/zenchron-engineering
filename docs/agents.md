@@ -104,9 +104,18 @@ provenance.
 
 **Not proven.** Filesystem *read* confinement. A CLI running as you can read
 what you can read, whatever mode bounds its writes. That residual risk is what
-this trust mode names; it is never relabelled as proven, and an
-`operator_trusted` agent is refused for any work whose policy requires protected
-execution.
+this trust mode names, and it is never relabelled as proven.
+
+What that refusal is, precisely, in this milestone: a `protected` agent must
+prove its boundary before it may execute anything, an `operator_trusted` one
+states that it cannot and is used anyway on the operator's authority, and a run
+created under `protected` is never continued by an `operator_trusted` worker.
+
+What it is **not** yet: policy cannot say "this work requires protected
+execution". There is no such rule vocabulary, so nothing matches work to a trust
+mode — choosing an `operator_trusted` worker is the operator's decision, made by
+which agents they configure and which one they name. See the known limitations
+in [`../ROADMAP.md`](../ROADMAP.md).
 
 This is approximately the trust you already extend by running `codex` or
 `claude` yourself, plus the runtime's guarantees, minus any claim about reads.

@@ -208,6 +208,15 @@ things a reviewer or operator should know before relying on them.
   their upgrade path.
 - **Feedback delivery is bounded** to the most recent applicable items per
   invocation, newest first.
+- **Policy cannot require protected execution.** The isolation gate is applied
+  per agent trust mode and fails closed on anything not explicitly
+  `operator_trusted`, and a `protected` run is never continued by an
+  operator-trusted worker - but there is no rule vocabulary for "this work
+  requires protected execution", so nothing matches work to a trust mode. Until
+  #63 this was masked: the gate was unconditional, which refused every native
+  CLI at construction and made the operator-trusted path unreachable, so the
+  guarantee held only because nothing could run. The upgrade is a policy effect
+  naming a required execution trust, evaluated where permissions already are.
 
 ## Measuring it
 

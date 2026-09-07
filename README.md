@@ -72,9 +72,11 @@ cannot silently turn a subscription session into metered API billing. Zenchron
 requires no OpenAI credential for normal local development.
 
 **It tells the truth about what it can prove.** A CLI running under your account
-can read what you can read. That is what `operator_trusted` names, it is never
-relabelled as proven isolation, and work whose policy requires protected
-execution is refused to it.
+can read what you can read. That is what `operator_trusted` names, and it is
+never relabelled as proven isolation. A `protected` agent must prove its
+boundary before it executes anything, and a run created under `protected` is
+never continued by an operator-trusted worker. Policy cannot yet say "this work
+requires protected execution" - see the known limitations in `ROADMAP.md`.
 
 ## Documentation
 
