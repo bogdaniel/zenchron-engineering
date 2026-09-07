@@ -56,8 +56,13 @@ Agents may reason and execute. Agents do not self-authorize material outcomes.
 - Do not introduce YAML as an equal canonical representation.
 - Provider-specific behavior must remain behind adapters.
 - The authorization kernel must not depend on Claude, Codex, or any single model vendor.
-- Sentinel Shield is the preferred native assurance integration, not an unavoidable platform dependency.
-- Zenchron Foundry is the preferred native trusted-environment/provenance integration, not an unavoidable platform dependency.
+- `zenchron-engineering`, `sentinel-shield` and `zenchron-foundry` are SEPARATE
+  products. This repository must be complete and useful without either sibling.
+  No milestone here depends on one, neither is a privileged or native
+  implementation inside it, and branded origin never grants stronger trust or
+  authority. Any external product integrates later through the same generic
+  ExecutionProvider, AssuranceProvider, evidence-producer and
+  environment/provenance interfaces every other implementation uses.
 
 ## Architectural constraints
 
@@ -135,9 +140,12 @@ multi-agent engineering execution runtime: `serve`, named execution agents,
 concurrent runs, the GitHub feedback loop, and an operator control room. This is
 the milestone the code in this repository now implements.
 
-**M2 (#64), not implemented.** The Engineering Planner: roles, capabilities,
-`EngineeringPlan`, decomposition and dynamic agent selection. Do not build any
-of it while working on something else. See `ROADMAP.md`.
+**M2 and beyond, not implemented.** #64 is the Engineering Planner - roles,
+capabilities, `EngineeringPlan`, decomposition and dynamic agent selection - and
+#67 is Repository Intelligence beside it. #65 is the accepted roadmap tracker
+and carries the full graph through M7; `ROADMAP.md` is its in-repository form.
+Do not build any of that while working on something else, and treat later
+milestones as hypotheses to be reviewed against evidence rather than a queue.
 
 Still true, and still the reason the kernel came first: do not build a broad
 autonomous engineering platform. Breadth is earned one governed capability at a

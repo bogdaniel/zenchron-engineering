@@ -66,7 +66,7 @@ var codexSpec = cliAgentSpec{
 		{Args: []string{"--help"}, Required: []string{"--ask-for-approval"}},
 	},
 	VersionArgs:                     []string{"--version"},
-	AuthStatePaths:                  []string{".codex/auth.json", ".codex/config.toml", "auth.json"},
+	AuthStatePaths:                  []string{".codex/auth.json", "auth.json"},
 	HomeEnv:                         "CODEX_HOME",
 	Permission:                      cliPermissionModes{Safe: "approval=never,sandbox=workspace-write", Bypass: "sandbox=danger-full-access"},
 	Sandbox:                         "workspace-write",
@@ -116,7 +116,7 @@ var claudeSpec = cliAgentSpec{
 		{Args: []string{"--help"}, Required: []string{"--print", "--permission-mode", "--model", "--safe-mode"}},
 	},
 	VersionArgs:                     []string{"--version"},
-	AuthStatePaths:                  []string{".claude/.credentials.json", ".claude.json", ".claude/settings.json"},
+	AuthStatePaths:                  []string{".claude/.credentials.json"},
 	HomeEnv:                         "CLAUDE_CONFIG_DIR",
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
@@ -152,10 +152,10 @@ var claudeSpec = cliAgentSpec{
 // this adapter cannot prove the file was never read, so it does not claim to.
 var geminiSpec = cliAgentSpec{
 	Probes: []cliHelpProbe{
-		{Args: []string{"--help"}, Required: []string{"--prompt", "--approval-mode", "--model"}},
+		{Args: []string{"--help"}, Required: []string{"--prompt", "--approval-mode", "--model", "--extensions"}},
 	},
 	VersionArgs:    []string{"--version"},
-	AuthStatePaths: []string{".gemini/oauth_creds.json", ".gemini/settings.json"},
+	AuthStatePaths: []string{".gemini/oauth_creds.json"},
 	Permission:     cliPermissionModes{Safe: "auto_edit", Bypass: "yolo"},
 	Signals: []diagnosticSignal{
 		{"resource_exhausted", FailureProviderQuota},

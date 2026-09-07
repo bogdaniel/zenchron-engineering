@@ -6,7 +6,10 @@ package runtime
 // boundary, so what it refuses matters more than what it accepts.
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -770,5 +773,119 @@ func TestEveryActiveRunGetsATurnUnderACeiling(t *testing.T) {
 	// Three ticks at a ceiling of one must have reached three distinct runs.
 	if len(driven) != len(runIDs) {
 		t.Fatalf("only %d of %d active runs were ever driven: %#v", len(driven), len(runIDs), driven)
+	}
+}
+
+// TestSupervisorSurvivesAnUnreadableTick is the isolation rule applied to the
+// tick itself. A supervisor that exited because one enumeration failed would
+// take every healthy run down with it, which is the same failure the per-run
+// isolation already forbids.
+func TestSupervisorSurvivesAnUnreadableTick(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	supervisor := supervisorFixture(t, fixture, 2)
+	// Close the store underneath it: the next enumeration cannot succeed.
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("one unreadable enumeration ended the supervisor: %v", err)
+	}
+	if report.Error == "" {
+		t.Fatal("the failure was swallowed instead of reported")
+	}
+}
+
+// TestFeedbackFailureIsReportedRatherThanLookingLikeSilence keeps two very
+// different states apart: a pull request nobody commented on, and a forge that
+// has stopped answering. They produced identical output before, so an operator
+// waiting for their review to reach a worker could not tell which they were in.
+func TestFeedbackFailureIsReportedRatherThanLookingLikeSilence(t *testing.T) {
+	fixture, runID := feedbackFixture(t)
+	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	fixture.forge.Fail = func(call GitHubCall) error {
+		if call.Method == "PullRequestComments" || call.Method == "Reviews" {
+			return &GitHubTransientError{Status: 503, Detail: "unavailable"}
+		}
+		return nil
+	}
+	supervisor := supervisorFixture(t, fixture, 2)
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, driven := range report.Driven {
+		if driven.RunID == runID && driven.FeedbackError != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a broken feedback path was indistinguishable from no feedback: %#v", report.Driven)
+	}
+}
+
+// TestSupervisorNeedsAUsableAgentRegistry fails at construction rather than on
+// the first piece of work, so an operator learns it from `serve` refusing to
+// start instead of from a run that mysteriously never moves.
+func TestSupervisorNeedsAUsableAgentRegistry(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	_, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Repositories: []GitHubRepo{{Owner: "acme", Name: "repo"}},
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) {
+			return fixture.runtime, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("a supervisor was constructed with no usable agent registry")
+	}
+	if !strings.Contains(err.Error(), "agent registry") {
+		t.Fatalf("the refusal does not name the missing registry: %v", err)
+	}
+}
+
+// TestControlRequestIsBoundedWhileReading proves the ceiling is enforced by the
+// reader. A local process sending a very long line with no newline must not be
+// able to make the supervisor allocate it in full and only then be refused.
+func TestControlRequestIsBoundedWhileReading(t *testing.T) {
+	stateDir := controlStateDir(t)
+	listener, err := ListenControl(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		_ = listener.Serve(func(ControlRequest) ControlResponse {
+			return ControlResponse{OK: true}
+		})
+	}()
+
+	connection, err := net.DialTimeout("unix", listener.Path(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	// Over the ceiling, and deliberately never newline-terminated. The overage
+	// is kept modest so the write still fits the socket buffer: the server
+	// stops reading as soon as the bound is passed, and a much larger payload
+	// would fail the WRITE on a broken pipe before the refusal could be read -
+	// correct behaviour, but it would test the socket rather than the bound.
+	oversized := append([]byte(`{"command":"ping","reason":"`), bytes.Repeat([]byte("A"), maxControlRequestBytes+1024)...)
+	if _, err := connection.Write(oversized); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bufio.NewReader(connection).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("the endpoint did not answer an oversized request: %v", err)
+	}
+	var response ControlResponse
+	if err := json.Unmarshal(reply, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || !strings.Contains(response.Error, "size bound") {
+		t.Fatalf("an oversized control request was not refused: %#v", response)
 	}
 }

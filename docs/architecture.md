@@ -171,11 +171,16 @@ knows any of them. See [`agents.md`](agents.md).
 
 ### AssuranceProvider
 
-Tests, CI, static analyzers, Sentinel Shield, enterprise systems, and human review can produce or verify evidence. Sentinel Shield is the preferred Zenchron-native implementation, not a mandatory dependency.
+Tests, CI, static analyzers, enterprise systems and human review can produce or
+verify evidence. There is no privileged implementation: an assurance provider
+earns trust by the isolation and evidence properties it proves, never by which
+product ships it.
 
 ### ExecutionEnvironmentProvider
 
-Local worktrees, Docker, CI runners, customer infrastructure, and Zenchron Foundry can provide execution environments. Foundry is the preferred native provenance-aware implementation.
+Local worktrees, Docker, CI runners and customer infrastructure can provide
+execution environments, through one generic capability interface. As above, no
+implementation is privileged by origin.
 
 ## Early implementation rule
 

@@ -126,10 +126,17 @@ type cliAgentSpec struct {
 	Probes []cliHelpProbe
 	// VersionArgs prints the CLI's own version. It is a local, free call.
 	VersionArgs []string
-	// AuthStatePaths are files or directories, relative to Home, whose
-	// EXISTENCE is evidence that the CLI holds its own authentication state.
+	// AuthStatePaths are CREDENTIAL or SESSION files, relative to Home, whose
+	// existence is evidence that the CLI holds its own authentication state.
 	// Their contents are never read: the observation is "this CLI is logged
 	// in", not "here is the session".
+	//
+	// Settings and configuration files are deliberately NOT listed. A
+	// `settings.json` proves the tool has been run, not that anyone is
+	// authenticated, and treating one as proof would report
+	// local_cli_session for a CLI nobody has logged into. Where a provider
+	// keeps its credential outside the filesystem - the platform keychain,
+	// for instance - the honest answer stays AuthModeUnknown.
 	AuthStatePaths []string
 	// HomeEnv is the environment variable, if any, that points the CLI at a
 	// non-default state directory. It is set only when the operator pinned a

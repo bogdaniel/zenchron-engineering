@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -233,13 +234,19 @@ func (l *ControlListener) Serve(handle func(ControlRequest) ControlResponse) err
 func answerControlConnection(connection net.Conn, handle func(ControlRequest) ControlResponse) {
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
-	reader := bufio.NewReaderSize(connection, maxControlRequestBytes)
+	// The ceiling is enforced by the READER, not checked afterwards.
+	// bufio.ReadBytes grows its own buffer past the size hint, so a local
+	// process sending a line with no newline could make the supervisor allocate
+	// without bound and be refused only once it already had. One byte of
+	// headroom distinguishes "exactly at the bound" from "over it".
+	bounded := io.LimitReader(connection, maxControlRequestBytes+1)
+	reader := bufio.NewReaderSize(bounded, maxControlRequestBytes)
 	line, err := reader.ReadBytes('\n')
-	if err != nil && len(line) == 0 {
-		return
-	}
 	if len(line) > maxControlRequestBytes {
 		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
+		return
+	}
+	if err != nil && len(line) == 0 {
 		return
 	}
 	var request ControlRequest

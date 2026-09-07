@@ -94,6 +94,16 @@ execution is refused to it.
 | [`docs/principles.md`](docs/principles.md) | architectural principles P1-P12 |
 | [`docs/construction-principles.md`](docs/construction-principles.md) | how the code implementing them is built |
 
+## Product separation
+
+`zenchron-engineering`, `sentinel-shield` and `zenchron-foundry` are separate
+products. This one is complete and useful without either: nothing here depends
+on a sibling, neither is a privileged or native implementation inside it, and a
+branded origin never earns stronger trust or authority than any other adapter.
+External products integrate through the same generic interfaces every
+implementation uses — `ExecutionProvider`, `AssuranceProvider`, evidence
+producers, and environment/provenance capabilities.
+
 ## Thesis
 
 Zenchron Engineering is **not** a generic multi-agent orchestrator. Coding agents
@@ -123,8 +133,8 @@ built. See [`ROADMAP.md`](ROADMAP.md).
 - Canonical machine-readable representation: **JSON**
 - Contract/schema format: **JSON Schema**
 - Agent providers: replaceable adapters. Codex CLI, Claude Code, Gemini CLI and an agentic Qwen CLI run as operator-trusted local workers; the brokered OpenAI Responses provider remains the protected one
-- Assurance providers: pluggable; Sentinel Shield is the Zenchron-native high-fidelity integration
-- Execution environments: pluggable; Zenchron Foundry is the native provenance-oriented integration
+- Assurance providers: pluggable behind a generic interface, with no privileged implementation
+- Execution environments: pluggable behind a generic interface, with no privileged implementation
 
 YAML is not a canonical representation. It may be supported later only as an optional authoring format that normalizes to JSON.
 

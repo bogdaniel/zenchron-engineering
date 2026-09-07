@@ -357,17 +357,21 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		if flags.NewGeneration {
 			mode = runtime.NewGeneration
 		}
+		// A supervisor that owns this state directory owns the INTAKE too, so
+		// it is asked BEFORE anything durable is created.
+		//
+		// Creating the run first and handing it over afterwards looked
+		// equivalent and was not: a draining supervisor refuses new work, and
+		// a run created behind that refusal would sit in the store with
+		// nothing driving it - an operator would have been told their work
+		// started when it had not. Ownership boundaries are only boundaries if
+		// they are consulted before the side effect.
+		if built != nil && runtime.SupervisorRunning(built.config.StateDir) {
+			return submitToSupervisor(built, flags, issue, stdout)
+		}
 		outcome, err := engine.StartIssueRun(ctx, issue, mode)
 		if err != nil {
 			return exitFor(err, runtime.ExitFailed), err
-		}
-		// A supervisor that owns this state directory owns the work too. The
-		// operator's terminal is not the thing that has to stay alive for the
-		// run to make progress - that is the whole point of `serve` - so the
-		// run is left to it rather than driven here as well.
-		if built != nil && runtime.SupervisorRunning(built.config.StateDir) {
-			fmt.Fprintf(stdout, "submitted to the running supervisor; follow it with `autonomy status --text` or `autonomy logs %s --follow`\n", outcome.RunID)
-			return runtime.ExitWaiting, nil
 		}
 		if outcome.Adopted {
 			fmt.Fprintf(stdout, "adopted existing generation %s (this controller created it)\n", outcome.RunID)
@@ -393,6 +397,42 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		}
 		return runtime.ExitCompleted, nil
 	}
+}
+
+// submitToSupervisor hands one issue to the process that owns the state
+// directory. The supervisor decides: it refuses while draining, refuses an
+// agent the operator did not configure, refuses a repository it does not
+// govern, and creates the run through an engine bound to the requested agent.
+//
+// Nothing durable is created here first, so a refusal leaves no orphaned run.
+func submitToSupervisor(built *composition, flags autonomyFlags, issue int, stdout io.Writer) (int, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	target, err := repositoryTarget(cwd, flags.Repo)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	delegated, code, err := delegate(built.config.StateDir, runtime.ControlRequest{
+		Command:       runtime.ControlSubmit,
+		Repository:    target.Identity,
+		Issue:         issue,
+		Agent:         flags.Agent,
+		NewGeneration: flags.NewGeneration,
+	}, stdout)
+	if !delegated {
+		// The supervisor stopped between the probe and the request. Say so
+		// rather than silently driving the work here: which process owns a run
+		// is not something to decide by a race.
+		return runtime.ExitInvalid, fmt.Errorf(
+			"the supervisor on %s stopped while this request was being sent; run the command again", built.config.StateDir)
+	}
+	if err != nil {
+		return code, err
+	}
+	fmt.Fprintln(stdout, "submitted to the running supervisor; follow it with `autonomy status --text` or `autonomy logs RUN --follow`")
+	return runtime.ExitWaiting, nil
 }
 
 // requireRun probes the run identity against the same durable store every

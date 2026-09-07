@@ -88,6 +88,11 @@ type SupervisorReport struct {
 	Active   int `json:"active"`
 	// NextEligibleAt is when the supervisor intends to look again.
 	NextEligibleAt time.Time `json:"next_eligible_at"`
+	// Error is a tick that could not enumerate work. It is REPORTED rather
+	// than returned, because a supervisor that exited on one unreadable read
+	// would take every healthy run down with it - the same isolation rule that
+	// already applies to a single failing run, applied to the tick itself.
+	Error string `json:"error,omitempty"`
 }
 
 // RunOutcome pairs a run with what driving it settled on, plus the error if
@@ -101,6 +106,16 @@ type RunOutcome struct {
 	Agent   string      `json:"agent,omitempty"`
 	Repo    string      `json:"repository,omitempty"`
 	State   Disposition `json:"disposition,omitempty"`
+	// FeedbackError is why this run's feedback could not be observed, when it
+	// could not be. It is reported separately from Error because the run itself
+	// is fine: driving continues, and what is lost is only the chance to notice
+	// a new review this tick.
+	//
+	// It exists because silence was ambiguous. A forge that has stopped
+	// answering and a pull request nobody has commented on produced exactly the
+	// same output, so an operator waiting for their review to reach a worker
+	// had no way to tell "nothing was said" from "nothing could be heard".
+	FeedbackError string `json:"feedback_error,omitempty"`
 }
 
 // Supervisor owns the persistent runtime for one state directory.
@@ -139,6 +154,13 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	}
 	if len(d.Repositories) == 0 {
 		return nil, &DependencyError{Detail: "a supervisor governs a stated set of repositories, and none was given"}
+	}
+	// A registry that resolves no default cannot drive anything: every run is
+	// bound to an agent, and a legacy run resolves the default. Failing here
+	// rather than on the first piece of work means an operator learns it from
+	// `serve` refusing to start, not from a run that mysteriously never moves.
+	if _, err := d.Agents.Agent(""); err != nil {
+		return nil, &DependencyError{Detail: "a supervisor needs a usable agent registry: " + err.Error()}
 	}
 	if d.Clock == nil {
 		d.Clock = RealClock{}
@@ -278,7 +300,8 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 	}
 	runs, err := s.deps.Store.Runs()
 	if err != nil {
-		return report, err
+		report.Error = boundedDetail(err.Error())
+		return report, nil
 	}
 	active := make([]EngineeringRun, 0, len(runs))
 	for _, run := range runs {
@@ -365,7 +388,10 @@ func (s *Supervisor) driveOne(ctx context.Context, run EngineeringRun) (RunOutco
 		return result, nil
 	}
 	var observed *FeedbackObservation
-	if observation, err := engine.ObserveFeedback(ctx, run.ID); err == nil {
+	observation, feedbackErr := engine.ObserveFeedback(ctx, run.ID)
+	if feedbackErr != nil {
+		result.FeedbackError = boundedDetail(feedbackErr.Error())
+	} else {
 		observed = &observation
 	}
 	outcome, err := engine.Reconcile(ctx, run.ID)

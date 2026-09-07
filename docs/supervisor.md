@@ -164,6 +164,16 @@ and not merely across goroutines. A repository may tighten it and can never
 raise it; where both `supervisor.max_concurrent_runs` and the older
 `watch.max_concurrent_runs` are stated, the stricter value wins.
 
+What the ceiling bounds is **whole-run reconciliation**, not specifically the
+expensive part of it. A run being reconciled holds a slot whether it is invoking
+a coding agent or performing a cheap forge observation, so the bound is coarser
+than "N concurrent provider invocations". In practice a tick's cost is dominated
+by execution and assurance, and the rotation above means a slot is never held
+across ticks. If a deployment ever needs the finer bound - N expensive
+operations rather than N runs - that is a per-operation-kind concurrency class
+in the scheduler, and it is deliberately not built on speculation about which
+kinds would need one.
+
 ## Shared observation
 
 Several runs in one repository ask the forge the same questions. Left alone that

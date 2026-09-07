@@ -77,8 +77,12 @@ A later organization-level product spanning repositories, policies, providers, b
 
 ## Native Zenchron ecosystem
 
-- **Sentinel Shield**: preferred high-fidelity evidence and assurance backend.
-- **Zenchron Foundry**: preferred trusted execution/material/provenance backend.
+- **Sentinel Shield** and **Zenchron Foundry** are SEPARATE PRODUCTS, not
+  backends of this one. Zenchron Engineering is complete and useful without
+  either; neither is privileged inside it; and either may integrate later
+  through the same generic assurance, evidence and environment/provenance
+  interfaces available to any other implementation. Branded origin grants no
+  additional trust or authority.
 
 Both should integrate through contracts so the platform can interoperate with existing enterprise systems.
 
