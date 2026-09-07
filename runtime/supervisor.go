@@ -77,6 +77,11 @@ type SupervisorReport struct {
 	Driven []RunOutcome `json:"driven,omitempty"`
 	// Observed is the feedback polls performed, one per active published run.
 	Observed []FeedbackObservation `json:"observed,omitempty"`
+	// DiscoveryError is why automatic intake could not run this tick, when it
+	// could not. It is separate from Error because the supervisor is still
+	// healthy: every run it already owns is driven as usual and only new intake
+	// is lost, which is a different thing for an operator to act on.
+	DiscoveryError string `json:"discovery_error,omitempty"`
 	// Discovery is the optional intake report, present only when automatic
 	// discovery is configured.
 	Discovery *TickReport `json:"discovery,omitempty"`
@@ -138,7 +143,7 @@ type Supervisor struct {
 	// engines caches one repository-bound engine per repository. Building one
 	// opens nothing and contacts nothing, but caching keeps a tick from
 	// rebuilding the same value for every run.
-	engines map[string]*EngineeringRuntime
+	engines map[string]*engineSlot
 }
 
 // NewSupervisor validates the dependency set.
@@ -172,7 +177,7 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// supervisor can never drive more runs at once than the operator
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
-	return &Supervisor{deps: d, engines: map[string]*EngineeringRuntime{}}, nil
+	return &Supervisor{deps: d, engines: map[string]*engineSlot{}}, nil
 }
 
 // engine returns the engine for one repository worked by one agent, refusing a
@@ -182,29 +187,65 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 // legacy meaning of a run created before the agent registry existed: it was
 // worked by whichever single provider the configuration named at the time, and
 // the default is the closest honest successor to that.
+// engineSlot is one cache entry. Its once is what makes a cache MISS
+// single-flight without holding the cache lock across the build.
+type engineSlot struct {
+	once   sync.Once
+	engine *EngineeringRuntime
+	err    error
+}
+
 func (s *Supervisor) engine(identity, agentID string) (*EngineeringRuntime, error) {
 	agent, err := s.deps.Agents.Agent(agentID)
 	if err != nil {
 		return nil, err
 	}
+	governed, ok := s.governedRepository(identity)
+	if !ok {
+		return nil, fmt.Errorf("repository %q is not governed by this supervisor; enrolment is operator configuration, not a request", identity)
+	}
 	key := identity + "|" + agent.ID
+
+	// The cache lock is held only to find or reserve the slot. Building the
+	// engine happens OUTSIDE it, because the factory is not the cheap
+	// constructor this cache once assumed: under `serve` it resolves the
+	// publication identity, which is a live forge request. Holding the mutex
+	// across that call serialized every run goroutine in a tick and every
+	// operator submission behind one slow GitHub response.
 	s.enginesMu.Lock()
-	defer s.enginesMu.Unlock()
-	if engine, ok := s.engines[key]; ok {
-		return engine, nil
+	slot, cached := s.engines[key]
+	if !cached {
+		slot = &engineSlot{}
+		s.engines[key] = slot
 	}
+	s.enginesMu.Unlock()
+
+	// One build per key even when several goroutines miss at once; the others
+	// wait for that build rather than starting their own.
+	slot.once.Do(func() { slot.engine, slot.err = s.deps.Runtime(governed, agent) })
+	if slot.err != nil {
+		// A failed build is not cached forever: a forge that was unreachable
+		// for one tick must not make this pairing permanently unusable.
+		s.enginesMu.Lock()
+		if s.engines[key] == slot {
+			delete(s.engines, key)
+		}
+		s.enginesMu.Unlock()
+		return nil, slot.err
+	}
+	return slot.engine, nil
+}
+
+// governedRepository resolves an identity to an ENROLLED repository. Enrolment
+// is operator configuration, so this answers from the configured set and never
+// from the request.
+func (s *Supervisor) governedRepository(identity string) (GitHubRepo, bool) {
 	for _, repo := range s.deps.Repositories {
-		if !strings.EqualFold(repo.String(), identity) {
-			continue
+		if strings.EqualFold(repo.String(), identity) {
+			return repo, true
 		}
-		engine, err := s.deps.Runtime(repo, agent)
-		if err != nil {
-			return nil, err
-		}
-		s.engines[key] = engine
-		return engine, nil
 	}
-	return nil, fmt.Errorf("repository %q is not governed by this supervisor; enrolment is operator configuration, not a request", identity)
+	return GitHubRepo{}, false
 }
 
 // Submit is the explicit operator intake path: one issue, one agent, one
@@ -294,7 +335,15 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 	}
 	if s.deps.Discovery != nil && !report.Draining {
 		discovery, err := s.deps.Discovery.Tick(ctx)
-		if err == nil {
+		if err != nil {
+			// Silence is ambiguous. A misconfigured label or a permanently
+			// failing poll used to be invisible forever - the operator saw a
+			// supervisor discovering nothing and could not tell that from a
+			// repository with nothing to discover. Reported separately from
+			// report.Error because the supervisor itself is fine: the runs it
+			// already owns keep being driven, and what is lost is intake.
+			report.DiscoveryError = boundedDetail(err.Error())
+		} else {
 			report.Discovery = &discovery
 		}
 	}

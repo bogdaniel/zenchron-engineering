@@ -1603,3 +1603,151 @@ func waitForJoin(t *testing.T, forge *MultiplexedForge) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TestBuildingAnEngineDoesNotHoldTheCacheLock. Under `serve` the runtime factory
+// resolves the publication identity, which is a live forge request. Holding the
+// engine-cache mutex across it serialized every run goroutine in a tick and
+// every operator submission behind one slow GitHub response — and with
+// context.Background() inside that call, an unresponsive forge was not
+// cancellable during shutdown either.
+//
+// The property is that a SLOW build for one pairing does not stop a different
+// pairing from being served.
+func TestBuildingAnEngineDoesNotHoldTheCacheLock(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t)
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	building := make(chan struct{}, 1)
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Liveness:     OwnerLivenessFunc(func(string) bool { return false }),
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 2,
+		PollInterval: time.Minute, Agents: registry,
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			if agent.ID == "codex" { // the slow one, standing in for a hung forge
+				building <- struct{}{}
+				<-release
+			}
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slow := make(chan error, 1)
+	go func() { _, err := supervisor.engine("acme/repo", "codex"); slow <- err }()
+	select {
+	case <-building:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the slow build never started")
+	}
+
+	// A different pairing must be servable while that build is still in flight.
+	done := make(chan error, 1)
+	go func() { _, err := supervisor.engine("acme/repo", "claude"); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the second pairing failed to build: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("a second pairing was blocked behind an in-flight build, so the cache lock is still held across it")
+	}
+	close(release)
+	if err := <-slow; err != nil {
+		t.Fatalf("the slow build failed: %v", err)
+	}
+}
+
+// TestAFailedEngineBuildIsNotCachedForever. A forge that was unreachable for one
+// tick must not make a repository-and-agent pairing permanently unusable.
+func TestAFailedEngineBuildIsNotCachedForever(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t)
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail := true
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Liveness:     OwnerLivenessFunc(func(string) bool { return false }),
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 1,
+		PollInterval: time.Minute, Agents: registry,
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			if fail {
+				return nil, errors.New("the forge was unreachable")
+			}
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.engine("acme/repo", "codex"); err == nil {
+		t.Fatal("a failing build reported success")
+	}
+	fail = false
+	if _, err := supervisor.engine("acme/repo", "codex"); err != nil {
+		t.Fatalf("the pairing stayed broken after the forge recovered: %v", err)
+	}
+}
+
+// TestConcurrentSupervisorStartsElectOneWinner closes the reclaim race. Two
+// processes starting at once could both dial a stale socket, both find nobody
+// listening, and the second unlink the socket the first had just bound - so two
+// supervisors ran, competing for one store, which is the outcome the endpoint
+// exists to prevent.
+func TestConcurrentSupervisorStartsElectOneWinner(t *testing.T) {
+	dir := controlStateDir(t)
+	// A stale socket from a crashed supervisor: present, but nobody listening.
+	stale, err := net.Listen("unix", ControlSocketPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 8
+	var wg sync.WaitGroup
+	listeners := make([]*ControlListener, racers)
+	errs := make([]error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			listeners[i], errs[i] = ListenControl(dir)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i := range listeners {
+		if errs[i] == nil {
+			winners++
+			t.Cleanup(func() { _ = listeners[i].Close() })
+			continue
+		}
+		if !errors.Is(errs[i], ErrSupervisorAlreadyRunning) {
+			t.Fatalf("a loser failed for the wrong reason: %v", errs[i])
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d supervisors bound the control endpoint at once, want exactly 1", winners)
+	}
+}

@@ -148,6 +148,15 @@ func ListenControl(stateDir string) (*ControlListener, error) {
 	if err := assertOwnerOnlyDir(stateDir); err != nil {
 		return nil, &ControlEndpointError{Path: path, Detail: err.Error()}
 	}
+	// Held across reclaim AND bind. Without it two supervisors starting at once
+	// can both dial a stale socket, both find nobody listening, and the second
+	// unlink the socket the first just bound - leaving two supervisors driving
+	// one store.
+	release, err := acquireControlStartLock(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := reclaimStaleControlSocket(path); err != nil {
 		return nil, err
 	}

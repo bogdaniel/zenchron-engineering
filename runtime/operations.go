@@ -566,14 +566,29 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// duplicate it rather than preserve it. The items remain visible in the
 	// journal as admitted-and-consumed, which is what a later transition
 	// carries forward.
-	if len(feedback) > 0 {
+	if len(pending) > 0 {
+		delivered := make(map[string]bool, len(feedback))
 		keys := make([]string, 0, len(feedback))
 		for _, item := range feedback {
 			keys = append(keys, item.Key)
+			delivered[item.Key] = true
 		}
-		events = append(events, journalEntry{Type: EventFeedbackConsumed, Payload: FeedbackConsumedPayload{
-			Keys: keys, AgentID: r.deps.Agent.ID, OperationID: operation.ID, Attempt: operation.Attempt,
-		}})
+		// Every admitted item that was due is accounted for, not only the ones
+		// whose text still existed. An item whose artifact had been reclaimed
+		// was previously left out of the record entirely, so it stayed pending
+		// forever and every later attempt re-derived a binding for it.
+		var unavailable []string
+		for _, item := range pending {
+			if !delivered[item.Key] {
+				unavailable = append(unavailable, item.Key)
+			}
+		}
+		if len(keys) > 0 || len(unavailable) > 0 {
+			events = append(events, journalEntry{Type: EventFeedbackConsumed, Payload: FeedbackConsumedPayload{
+				Keys: keys, Unavailable: unavailable,
+				AgentID: r.deps.Agent.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+			}})
+		}
 	}
 	produced := effect{result: executionRecord{mutationResult: record, PriorContext: result.PriorContext}, state: Succeeded, events: events}
 	if execErr != nil || result.Failure != nil {

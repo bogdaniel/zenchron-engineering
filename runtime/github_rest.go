@@ -307,45 +307,64 @@ func (a GitHubRESTAdapter) IssueComments(ctx context.Context, repo GitHubRepo, n
 	return a.issueComments(ctx, repo, number)
 }
 
+// maxConversationPages bounds the conversation walk, exactly as
+// maxDiscoveryPages bounds discovery. Reaching it is an error rather than a
+// silent truncation.
+const maxConversationPages = 50
+
 func (a GitHubRESTAdapter) issueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("issue or pull request number must be positive")
 	}
-	var wire []struct {
-		ID        int64    `json:"id"`
-		User      *ghActor `json:"user"`
-		Body      string   `json:"body"`
-		CreatedAt string   `json:"created_at"`
-		UpdatedAt string   `json:"updated_at"`
-	}
-	query := url.Values{"per_page": {"100"}}
-	// Read through doRaw rather than call() for the same reason as above: the
-	// budget headers are what separate a throttled read from a rejected
-	// credential, and only the first belongs in shared backoff.
-	status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet,
-		repoPath(repo)+"/issues/"+strconv.Itoa(number)+"/comments", query, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	rate, reported := observeRateLimit(header, status)
-	if err := classifyGitHubStatus(status, rate, reported, "conversation comments"); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		return nil, &GitHubAPIError{Status: status, Detail: "unreadable conversation comment response"}
-	}
-	comments := make([]GitHubComment, 0, len(wire))
-	for _, c := range wire {
-		comment := GitHubComment{ID: c.ID, Author: c.User.normalize(), Body: UntrustedText(c.Body)}
-		if at, ok := parseTime(c.CreatedAt); ok {
-			comment.CreatedAt = at
+	// GitHub returns conversation comments OLDEST FIRST, so a single page holds
+	// the oldest hundred and the newest are on the last page. Reading one page
+	// therefore hid exactly the comments this feature exists to observe: on a
+	// busy thread the operator's latest review was never returned, never
+	// admitted, and never reached a worker - with no error, because a full first
+	// page is indistinguishable from a complete answer without following Link.
+	comments := []GitHubComment{}
+	for page := 1; page <= maxConversationPages; page++ {
+		var wire []struct {
+			ID        int64    `json:"id"`
+			User      *ghActor `json:"user"`
+			Body      string   `json:"body"`
+			CreatedAt string   `json:"created_at"`
+			UpdatedAt string   `json:"updated_at"`
 		}
-		if at, ok := parseTime(c.UpdatedAt); ok {
-			comment.UpdatedAt = at
+		query := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		// Read through doRaw rather than call() for the same reason as above:
+		// the budget headers are what separate a throttled read from a rejected
+		// credential, and only the first belongs in shared backoff.
+		status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet,
+			repoPath(repo)+"/issues/"+strconv.Itoa(number)+"/comments", query, nil, nil)
+		if err != nil {
+			return nil, err
 		}
-		comments = append(comments, comment)
+		rate, reported := observeRateLimit(header, status)
+		if err := classifyGitHubStatus(status, rate, reported, "conversation comments"); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			return nil, &GitHubAPIError{Status: status, Detail: "unreadable conversation comment response"}
+		}
+		for _, c := range wire {
+			comment := GitHubComment{ID: c.ID, Author: c.User.normalize(), Body: UntrustedText(c.Body)}
+			if at, ok := parseTime(c.CreatedAt); ok {
+				comment.CreatedAt = at
+			}
+			if at, ok := parseTime(c.UpdatedAt); ok {
+				comment.UpdatedAt = at
+			}
+			comments = append(comments, comment)
+		}
+		if !hasNextPage(header.Get("Link")) {
+			return comments, nil
+		}
 	}
-	return comments, nil
+	return nil, &GitHubAPIError{
+		Status: http.StatusOK,
+		Detail: fmt.Sprintf("conversation %d in %s exceeded %d pages; refusing to report a truncated set", number, repo, maxConversationPages),
+	}
 }
 
 type ghIssue struct {

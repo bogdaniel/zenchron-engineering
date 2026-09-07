@@ -30,3 +30,7 @@ func assertOwnerOnlyDir(string) error { return errControlEndpointUnsupported }
 func AssertControlEndpointSecure(path string) error {
 	return &ControlEndpointError{Path: path, Detail: errControlEndpointUnsupported.Error()}
 }
+
+// acquireControlStartLock is unreachable here: this platform refuses the
+// endpoint before startup serialization could matter.
+func acquireControlStartLock(string) (func(), error) { return func() {}, ErrControlEndpointUnsupported }

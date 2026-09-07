@@ -8,6 +8,8 @@ package runtime
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"syscall"
 )
 
 // ControlEndpointMechanism names what the endpoint actually is, for doctor and
@@ -49,4 +51,33 @@ func AssertControlEndpointSecure(path string) error {
 		return &ControlEndpointError{Path: path, Detail: fmt.Sprintf("is mode %#o and is reachable by other users; anything that can reach it can start coding agents under this account", perm)}
 	}
 	return nil
+}
+
+// acquireControlStartLock serializes endpoint STARTUP across processes.
+//
+// Reclaiming a stale socket is dial-then-unlink, and between those two steps
+// another supervisor can bind the path: A dials (nobody home), A binds, B dials
+// (B's dial raced ahead and also found nobody home), B unlinks the socket A just
+// bound, B binds a fresh inode - and two supervisors run, both driving the same
+// store, which is exactly what the endpoint exists to prevent.
+//
+// The lock is an flock on a file beside the socket, held from before the dial
+// until after the bind. flock is released by the kernel when the process exits,
+// so a crash cannot leave a lock nobody can clear - which is the property an
+// O_EXCL lock file would not have.
+func acquireControlStartLock(stateDir string) (release func(), err error) {
+	path := filepath.Join(stateDir, "serve.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("the control start lock cannot be opened: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		// Another supervisor holds it, which means one is starting or running.
+		return nil, ErrSupervisorAlreadyRunning
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }

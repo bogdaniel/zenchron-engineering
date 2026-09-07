@@ -336,6 +336,19 @@ type FeedbackObservedPayload struct {
 // a human's review.
 type FeedbackConsumedPayload struct {
 	Keys []string `json:"keys"`
+	// Unavailable names admitted items whose local text could no longer be
+	// read when the worker was invoked - reclaimed artifacts, most often.
+	//
+	// They are recorded because the alternative is a set that never drains:
+	// consumption used to name only the items that loaded, so an item whose
+	// artifact was gone stayed pending forever, was never delivered, and made
+	// every later attempt re-derive a binding for it. It is a SEPARATE field
+	// because "we showed this to the worker" and "this is gone" are different
+	// facts, and the delivery record must not claim the second was the first.
+	//
+	// omitempty: an event written before this field existed, and the ordinary
+	// case where nothing was lost, both canonicalize exactly as before.
+	Unavailable []string `json:"unavailable,omitempty"`
 	// AgentID and Attempt name the exact invocation that received them.
 	AgentID     string `json:"agent_id,omitempty"`
 	OperationID string `json:"operation_id"`
@@ -418,6 +431,12 @@ func (s *runState) feedbackState() FeedbackState {
 			var payload FeedbackConsumedPayload
 			if json.Unmarshal(event.Payload, &payload) == nil {
 				for _, key := range payload.Keys {
+					state.Consumed[key] = true
+				}
+				// An item whose artifact is gone is finished with, whether or
+				// not it was ever delivered. Leaving it pending would re-derive
+				// a binding for it on every subsequent attempt, forever.
+				for _, key := range payload.Unavailable {
 					state.Consumed[key] = true
 				}
 			}

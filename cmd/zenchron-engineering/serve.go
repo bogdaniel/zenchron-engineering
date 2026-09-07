@@ -123,8 +123,47 @@ func discoveryDescription(built *composition) string {
 // repositories when the operator configured any, otherwise the one this
 // invocation targets. Enrolment stays operator configuration - a control
 // request selects among these and can never introduce one.
+// batchTarget picks the one repository a batch submission is for. With a single
+// governed repository it is that one; with several, the operator must say which,
+// because guessing spends their subscription on the wrong project.
+func batchTarget(repositories []runtime.GitHubRepo, stated string) (string, error) {
+	if stated = strings.TrimSpace(stated); stated != "" {
+		wanted, err := runtime.ParseGitHubRepo(stated)
+		if err != nil {
+			return "", err
+		}
+		for _, repo := range repositories {
+			if strings.EqualFold(repo.String(), wanted.String()) {
+				return repo.String(), nil
+			}
+		}
+		return "", fmt.Errorf("repository %q is not governed by this supervisor; enrolled: %s", wanted, repositoryList(repositories))
+	}
+	if len(repositories) == 1 {
+		return repositories[0].String(), nil
+	}
+	return "", fmt.Errorf(
+		"several repositories are governed (%s), so a batch submission must name one with --repo rather than being sent to whichever is first",
+		repositoryList(repositories))
+}
+
+func repositoryList(repositories []runtime.GitHubRepo) string {
+	names := make([]string, 0, len(repositories))
+	for _, repo := range repositories {
+		names = append(names, repo.String())
+	}
+	return strings.Join(names, ", ")
+}
+
 func (c *composition) governedRepositories(flags autonomyFlags) ([]runtime.GitHubRepo, error) {
-	if settings, err := c.config.WatchSettings(); err == nil && len(settings.Repositories) > 0 {
+	// A watch configuration that cannot be read is an operator problem, not a
+	// reason to quietly fall through to the working directory and govern
+	// something else than the configuration says.
+	settings, err := c.config.WatchSettings()
+	if err != nil {
+		return nil, err
+	}
+	if len(settings.Repositories) > 0 {
 		return settings.Repositories, nil
 	}
 	cwd, err := os.Getwd()
@@ -590,7 +629,15 @@ func autonomyRunIssues(ctx context.Context, flags autonomyFlags, overrides auton
 			"starting several issues at once needs a supervisor to own them; run `zenchron-engineering serve` in another terminal, "+
 				"or start them one at a time with `autonomy run issue N --agent X`. State directory: %s", stateDir)
 	}
-	repository := repositories[0].String()
+	// The batch path resolves its target the same way the single-issue path
+	// does. Taking repositories[0] sent every issue to whichever repository
+	// happened to be enrolled first, silently ignoring --repo: `run issues 5 7
+	// --repo owner/name` submitted to somebody else's repository and said
+	// nothing. An ambiguous target is refused rather than guessed.
+	repository, err := batchTarget(repositories, flags.Repo)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
 	failures := 0
 	for _, issue := range issues {
 		request := runtime.ControlRequest{
