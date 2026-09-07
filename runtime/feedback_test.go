@@ -426,8 +426,19 @@ func TestAdmittedTextCannotCloseItsOwnFrame(t *testing.T) {
 	if terminators != 1 {
 		t.Fatalf("the body forged %d extra frame boundaries:\n%s", terminators-1, block)
 	}
-	if !strings.Contains(block, "UNTRUSTED-FEEDBACK-ESCAPED") {
+	if !strings.Contains(block, neutralizedFrameMarker) {
 		t.Fatalf("the smuggled marker was not neutralized:\n%s", block)
+	}
+	// The replacement carries no substring of the marker. A token that merely
+	// fails to terminate the frame can still shape how a language model reads
+	// the surrounding text, and the reader of this block is a model.
+	if strings.Contains(neutralizedFrameMarker, feedbackFrameMarker) {
+		t.Fatalf("the neutralized form still embeds the marker: %q", neutralizedFrameMarker)
+	}
+	// Exactly the two the runtime wrote survive: the opening header and the
+	// closing terminator. The body contributes none.
+	if got := strings.Count(block, feedbackFrameMarker); got != 3 {
+		t.Fatalf("the body contributed %d marker occurrences beyond the runtime's own:\n%s", got-3, block)
 	}
 	// The escape is visible rather than silent: the reader can see the body
 	// contained the marker.

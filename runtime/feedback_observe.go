@@ -378,12 +378,22 @@ func feedbackBlock(items []FeedbackContext) string {
 	return out.String()
 }
 
+// neutralizedFrameMarker is what an occurrence of the marker inside a body
+// becomes. It deliberately contains NO substring of the marker itself.
+//
+// An earlier form was the marker plus a suffix, which prevented exact-line
+// terminator forgery but still handed the downstream model the token it was
+// being protected from - and the reader of a prompt is a language model, not a
+// parser, so a token that merely fails to terminate the frame can still shape
+// how the surrounding text is read. Breaking it completely costs nothing.
+const neutralizedFrameMarker = "[frame marker removed by runtime]"
+
 // neutralizeFrameMarker removes a body's ability to close its own frame. The
 // replacement is visible rather than silent, so a reader of the transcript can
 // see that the text contained the marker instead of wondering why it reads
 // oddly.
 func neutralizeFrameMarker(text string) string {
-	return strings.ReplaceAll(text, feedbackFrameMarker, "UNTRUSTED-FEEDBACK-ESCAPED")
+	return strings.ReplaceAll(text, feedbackFrameMarker, neutralizedFrameMarker)
 }
 
 // feedbackFindings turns admitted items into the typed findings a remediation

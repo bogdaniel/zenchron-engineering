@@ -38,6 +38,37 @@ four causes it is.
 | --- | --- | --- |
 | `executable <name> was not found on PATH` | the CLI is not installed, or not on the `PATH` this process inherited | install it, or pin `agents.<id>.command` to an absolute path |
 | `the installed <name> does not advertise the sandbox, permission and working-directory capabilities this runtime requires, so it is refused rather than run with weaker constraints` | the installed version renamed or dropped a flag the runtime depends on | upgrade or downgrade the CLI. The runtime will not fall back to a weaker invocation: an unconstrained coding agent whose provenance describes it as constrained is the failure `operator_trusted` exists to prevent |
+
+### Sweep the flag vocabulary when you upgrade a CLI
+
+**This is the failure mode most likely to look like something else.** A provider
+flag that has been renamed upstream does not produce an error at the moment it
+changes — it produces an agent that is permanently `not ready`, with a message
+about capabilities rather than about the flag that moved. The adapter is right
+to refuse (running in whatever mode the CLI defaults to is the one outcome
+`operator_trusted` cannot absorb), but the cause is upstream and the symptom
+points at your installation.
+
+So treat it as an acceptance step, not only a debugging step. After upgrading
+any coding CLI, and before relying on a worker for real work:
+
+```bash
+zenchron-engineering autonomy agents --text     # every agent still `ready`?
+codex exec --help | grep -E -- '--sandbox|--ignore-user-config|--cd'
+claude --help    | grep -E -- '--print|--permission-mode|--model|--safe-mode'
+gemini --help    | grep -E -- '--prompt|--approval-mode|--model|--extensions'
+qwen --help      | grep -E -- '--approval-mode|--model|--safe-mode'
+```
+
+Every flag the runtime passes is also a flag it probes for, so `agents --text`
+alone will catch a rename. The greps are there for when it does: they tell you
+which flag moved, which is what an upstream issue or a version pin needs.
+
+The same discipline applies in reverse. If a provider adds a flag this runtime
+should be passing — a stronger sandbox mode, a new instruction-isolation switch
+— that is an adapter change in `runtime/agent_specs.go` plus its probe entry,
+not a configuration change. Both halves move together on purpose: the probe is
+what makes a wrong or outdated flag fail closed.
 | `agent <id> home <path> is not an existing directory` | `agents.<id>.home` points nowhere, or the operator has no home directory | create it, or remove `home` to use the operator's own |
 | `the configured provider credential is readable by other users; run chmod 600 on it` | a brokered agent's `credential_path` is group- or world-readable | `chmod 600` it |
 

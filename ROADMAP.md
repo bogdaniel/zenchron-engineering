@@ -174,6 +174,41 @@ learned a provider's name.
   decision; a system that made it silently would be spending their subscriptions
   on its own opinion.
 
+## Known limitations of #63
+
+Stated here rather than left to be rediscovered, and each with the upgrade that
+would close it. None is load-bearing for the milestone's acceptance; all are
+things a reviewer or operator should know before relying on them.
+
+- **Provider handoff is refusal-only.** The typed record carries everything a
+  successor would need; performing the transition does not.
+- **No provider-native session identifier is persisted.** Continuity comes from
+  the candidate, the contract, the admitted feedback and the journal, so the
+  "session metadata does not migrate" law holds trivially rather than through
+  machinery.
+- **The concurrency ceiling bounds whole-run reconciliation**, not specifically
+  expensive execution operations. A run holds a slot whether it is invoking a
+  coding agent or making a cheap forge read. The upgrade is a
+  per-operation-kind concurrency class in the scheduler; see
+  [`docs/supervisor.md`](docs/supervisor.md).
+- **Provider flag vocabulary must be verified against the operator's INSTALLED
+  CLIs**, never against documentation alone. An upstream rename does not
+  announce itself: it turns a working agent into a permanently unavailable one,
+  described in terms of capabilities rather than of the flag that moved. That
+  makes it a live-acceptance step, not only a debugging step; see
+  [`docs/troubleshooting.md`](docs/troubleshooting.md).
+- **Gemini exposes no flag suppressing workspace instruction files**, so its
+  provenance records `workspace_instructions_suppressed: false` rather than
+  claiming parity with the other three adapters.
+- **Structured provider output is not parsed.** Four providers would mean four
+  schemas and four parsers; the invocation provenance already answers what this
+  milestone asks for.
+- **The state-storage ceiling uses a fixed per-run reservation** and a full
+  directory walk per allocation, both marked `ponytail:` in the source with
+  their upgrade path.
+- **Feedback delivery is bounded** to the most recent applicable items per
+  invocation, newest first.
+
 ## Measuring it
 
 The point of the milestone is leverage, not adapter count. #66 rebases the

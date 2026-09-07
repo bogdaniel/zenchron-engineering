@@ -139,6 +139,11 @@ rather than run in a weaker mode, because an unconstrained coding agent whose
 provenance describes it as constrained is the one failure `operator_trusted`
 cannot tolerate.
 
+Re-run this after upgrading any coding CLI. An upstream flag rename does not
+announce itself: it turns a working agent into a permanently `not ready` one,
+described in terms of capabilities rather than of the flag that moved. See
+[troubleshooting.md](troubleshooting.md).
+
 ## The first run
 
 From inside a clone of the repository you want changed, with an open issue:
