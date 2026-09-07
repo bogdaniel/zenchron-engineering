@@ -157,6 +157,10 @@ type runState struct {
 	sources           []sourceRecord
 	source            *sourceRecord
 	controllerChanged bool
+	// External-wait accounting, folded from the journal once; see externalWait.
+	waitExcluded  time.Duration
+	waitOpenSince time.Time
+	waitComputed  bool
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -360,6 +364,33 @@ var externalWaitReasons = map[string]bool{
 // counted; only the idle gap between ticks is excluded.
 func (s *runState) activeElapsed(now time.Time) time.Duration {
 	elapsed := now.Sub(s.run.CreatedAt)
+	excluded, openWait := s.externalWait()
+	// An external wait that is still open runs to now, which is the only part
+	// of the answer that depends on the clock - and therefore the only part
+	// that cannot be computed once.
+	if !openWait.IsZero() {
+		if delta := now.Sub(openWait); delta > 0 {
+			excluded += delta
+		}
+	}
+	if excluded > elapsed {
+		return 0
+	}
+	return elapsed - excluded
+}
+
+// externalWait folds the journal once: the total of the CLOSED external-wait
+// intervals, and the start of an open one if the run is in a wait now.
+//
+// It is memoized because the events of a loaded runState never change, while
+// conditions() is called several times per reconcile pass and a long-lived run
+// accumulates thousands of events. Walking the whole journal on each call would
+// make the cost of asking "how long has this been working" grow with how long it
+// has been alive.
+func (s *runState) externalWait() (time.Duration, time.Time) {
+	if s.waitComputed {
+		return s.waitExcluded, s.waitOpenSince
+	}
 	var excluded time.Duration
 	var waitingSince time.Time
 	for _, event := range s.events {
@@ -376,16 +407,8 @@ func (s *runState) activeElapsed(now time.Time) time.Duration {
 			waitingSince = time.Time{}
 		}
 	}
-	// Still waiting: the open interval runs to now.
-	if !waitingSince.IsZero() {
-		if delta := now.Sub(waitingSince); delta > 0 {
-			excluded += delta
-		}
-	}
-	if excluded > elapsed {
-		return 0
-	}
-	return elapsed - excluded
+	s.waitExcluded, s.waitOpenSince, s.waitComputed = excluded, waitingSince, true
+	return excluded, waitingSince
 }
 
 // pinnedBase is the base revision the run was compiled and cloned against. It
