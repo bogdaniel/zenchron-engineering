@@ -64,6 +64,8 @@ type MultiplexedForge struct {
 	// after it, hand its pre-write answer to the joiner, and then store that
 	// answer back into the cache the write had just cleared.
 	epoch uint64
+	// joins counts callers that joined an in-flight request; see joinCount.
+	joins uint64
 	// calls counts underlying calls per method, which is what makes "runs
 	// share one poll" a testable property rather than a claim.
 	calls map[string]int
@@ -103,6 +105,14 @@ func NewMultiplexedForge(inner GitHubAdapter, clock Clock) *MultiplexedForge {
 }
 
 // Calls reports how many underlying calls each method actually made.
+// joinCount is how many callers have adopted an in-flight request. It exists
+// for tests that must establish that ordering before releasing anything.
+func (m *MultiplexedForge) joinCount() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.joins
+}
+
 func (m *MultiplexedForge) Calls() map[string]int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -126,8 +136,21 @@ func (m *MultiplexedForge) window() time.Duration {
 // The generic parameter keeps the cached value typed: a cached
 // GitHubCheckObservation can never be handed back as a GitHubReviewObservation,
 // which a map[string]any without it would make a runtime question.
+// callerLocalError reports whether an error describes the CALLER rather than
+// the repository. A cancellation or a deadline belongs to whoever made the
+// request; it is never another run's answer, whether it would have been reached
+// through the cache or by joining an in-flight call.
+func callerLocalError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, method, key string, call func() (T, error)) (T, error) {
 	var zero T
+	// joined counts how many times this caller has adopted somebody else's
+	// in-flight request. It bounds the retry below to one, so a repository
+	// whose owner keeps being cancelled cannot turn a read into a spin.
+	joined := 0
+retry:
 	now := m.Clock.Now()
 
 	m.mu.Lock()
@@ -150,12 +173,26 @@ func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, m
 	// the invalidation was for.
 	epoch := m.epoch
 	if pending, ok := m.inflight[key]; ok && pending.epoch == epoch {
+		// Counted while the lock is still held, so a test can wait for a joiner
+		// to have ACTUALLY joined rather than sleeping and hoping. Ordering
+		// assertions that rest on a sleep pass when the scheduler is kind and
+		// stop testing anything when it is not.
+		m.joins++
 		m.mu.Unlock()
 		// Waiting is cancellable. A joiner blocked on somebody else's slow
 		// request would otherwise hold up its own caller - and, through it, a
 		// whole supervisor tick - long after its context was done.
 		select {
 		case <-pending.done:
+			// The owner's own cancellation is not this caller's answer. A
+			// sibling that merely arrived while a since-stopped run held the
+			// request would otherwise be told its live question was cancelled -
+			// the same caller-scoped leak the cache refuses, reached by the
+			// other path. Fall through and become an owner instead, once.
+			if joined == 0 && callerLocalError(pending.err) && ctx.Err() == nil {
+				joined++
+				goto retry
+			}
 			return typedForgeAnswer[T](key, pending.value, pending.err)
 		case <-ctx.Done():
 			return zero, ctx.Err()
@@ -209,7 +246,7 @@ func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, m
 	//
 	// Other errors ARE cached. A 404 or a 403 describes the repository, which is
 	// exactly the kind of observation the siblings should be spared repeating.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if callerLocalError(err) {
 		return value, err
 	}
 	m.answers[key] = forgeAnswer{value: value, err: err, at: now}

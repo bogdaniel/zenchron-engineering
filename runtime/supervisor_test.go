@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -1378,5 +1379,227 @@ func TestARepositoryErrorIsStillSharedOnce(t *testing.T) {
 	}
 	if len(inner.Calls) != before {
 		t.Fatalf("a repository refusal was rediscovered rather than shared: %d new calls", len(inner.Calls)-before)
+	}
+}
+
+// operationFingerprints is the durable side-effect ledger a restart must not
+// duplicate. Operation identity is what makes an already-satisfied step
+// idempotent, so counting each id's terminal state is how "the second
+// supervisor redid something" becomes visible rather than inferred.
+func operationFingerprints(t *testing.T, fixture *phase8Fixture) map[string]string {
+	t.Helper()
+	operations, err := fixture.store.AllOperations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprints := map[string]string{}
+	for _, op := range operations {
+		fingerprints[op.ID] = fmt.Sprintf("%s|%s|attempt=%d", op.Kind, op.State, op.Attempt)
+	}
+	return fingerprints
+}
+
+// agentBoundSupervisor builds a supervisor whose runtime carries the resolved
+// agent, so a submission produces a run with a journalled agent binding rather
+// than the fixture's unbound legacy run.
+func agentBoundSupervisor(t *testing.T, fixture *phase8Fixture, ceiling int) *Supervisor {
+	t.Helper()
+	registry := supervisorRegistry(t)
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Liveness:     OwnerLivenessFunc(func(string) bool { return false }),
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: ceiling,
+		PollInterval: time.Minute, Agents: registry,
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return supervisor
+}
+
+// TestASupervisorRestartResumesWorkWithoutDuplicatingIt is the normative
+// `serve` restart requirement: a restart reconstructs and resumes eligible
+// durable work without creating duplicate logical runs or repeating side
+// effects.
+//
+// The architecture makes this plausible - the supervisor owns no durable queue
+// of its own and re-enumerates non-terminal runs from the store every tick - but
+// plausible is not proved, and "recovery is replay" is exactly the kind of claim
+// that stays true right up until something starts being remembered in memory.
+// This pins it as behaviour instead of as a design intention.
+func TestASupervisorRestartResumesWorkWithoutDuplicatingIt(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	issue := phase8Issue + 21
+	fixture.forge.Issues[issue] = GitHubIssue{
+		Number: issue, URL: "https://github.com/acme/repo/issues/21",
+		Title: "restart", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+	}
+	submitted, err := agentBoundSupervisor(t, fixture, 1).Submit(context.Background(), ControlRequest{
+		Repository: "acme/repo", Issue: issue, Agent: "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := submitted.RunID
+
+	// The journalled binding is the authority. Reading it here also stops the
+	// comparison below from being satisfied by two empty strings, which is what
+	// it silently was when this test was first written against an unbound run.
+	boundAgent := fixture.state(runID).recordedAgent().AgentID
+	if boundAgent == "" {
+		t.Fatal("the run carries no agent binding, so the restart comparison would prove nothing")
+	}
+
+	// Supervisor A advances the run to whatever durable boundary it reaches.
+	first, err := agentBoundSupervisor(t, fixture, 1).Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Driven) != 1 || first.Driven[0].RunID != runID {
+		t.Fatalf("the first supervisor did not drive the run: %#v", first.Driven)
+	}
+	before, err := fixture.store.Runs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeOps := operationFingerprints(t, fixture)
+	if len(beforeOps) == 0 {
+		t.Fatal("the first supervisor performed no durable operation, so there is no side effect to duplicate")
+	}
+	run, ok := storedRun(t, fixture, runID)
+	if !ok {
+		t.Fatal("the run was not durable after the first supervisor drove it")
+	}
+	if terminalDisposition(run.Disposition) {
+		t.Fatalf("the run finished in one tick, so a restart would have nothing to resume: %s", run.Disposition)
+	}
+
+	// Supervisor A is gone. Nothing is cancelled and nothing is handed over:
+	// B is constructed from the same durable store, exactly as a restarted
+	// process would be, and is told nothing about what A had been doing.
+	second, err := agentBoundSupervisor(t, fixture, 1).Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The same logical run resumes.
+	if len(second.Driven) != 1 || second.Driven[0].RunID != runID {
+		t.Fatalf("the restarted supervisor did not resume the same run: %#v", second.Driven)
+	}
+	after, err := fixture.store.Runs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("the restart created a duplicate logical run: %d runs before, %d after", len(before), len(after))
+	}
+	resumed, ok := storedRun(t, fixture, runID)
+	if !ok {
+		t.Fatal("the run disappeared across the restart")
+	}
+	// The binding survives the process, not merely the tick. A restart that
+	// re-derived the agent from today's default would silently move a run to a
+	// different worker, which is the failure this is really guarding.
+	if resumedAgent := fixture.state(runID).recordedAgent().AgentID; resumedAgent != boundAgent {
+		t.Fatalf("the agent binding changed across the restart: %q then %q", boundAgent, resumedAgent)
+	}
+	if resumed.Base.Revision != run.Base.Revision {
+		t.Fatalf("the base moved across the restart: %q then %q", run.Base.Revision, resumed.Base.Revision)
+	}
+
+	// No already-succeeded step was performed again. A restart is allowed to
+	// ADD operations - that is what resuming means - but an operation that had
+	// already SUCCEEDED must not be reopened or retried.
+	afterOps := operationFingerprints(t, fixture)
+	for id, fingerprint := range beforeOps {
+		now, ok := afterOps[id]
+		if !ok {
+			t.Fatalf("operation %s vanished across the restart", id)
+		}
+		if strings.Contains(fingerprint, string(Succeeded)) && now != fingerprint {
+			t.Fatalf("a succeeded operation was redone across the restart: %s was %q, now %q", id, fingerprint, now)
+		}
+	}
+}
+
+// TestAJoinerDoesNotAdoptTheOwnersCancellation closes the other half of the
+// caller-scoped leak. Refusing to CACHE an owner's cancellation is not enough
+// while a sibling that merely arrived during the same request still receives it
+// directly: same leak, other path.
+//
+// The sibling here is live throughout. Only the run that happened to own the
+// in-flight request is stopped, which is exactly the shape of `stop RUN` while
+// other runs in the repository are mid-tick.
+func TestAJoinerDoesNotAdoptTheOwnersCancellation(t *testing.T) {
+	inner := newBlockingForge()
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "head", State: GitHubOpen}
+	stoppedRun := true
+	inner.Fail = func(GitHubCall) error {
+		// The owner's request fails the way a cancelled caller's does; the
+		// sibling's own request must still be answered.
+		if stoppedRun {
+			stoppedRun = false
+			return context.Canceled
+		}
+		return nil
+	}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	owner := make(chan error, 1)
+	go func() {
+		_, err := forge.PullRequest(context.Background(), repo, 1)
+		owner <- err
+	}()
+	inner.waitForCall(t)
+
+	// The sibling joins while the owner's request is still in flight. Its own
+	// context is live and stays live.
+	joiner := make(chan GitHubPullRequest, 1)
+	joinerErr := make(chan error, 1)
+	go func() {
+		pr, err := forge.PullRequest(context.Background(), repo, 1)
+		joiner <- pr
+		joinerErr <- err
+	}()
+	// The joiner has to have JOINED before the owner's request completes.
+	// Releasing first would retire the entry, leave nothing to join, and
+	// exercise the cold path while looking like it tested the join path.
+	waitForJoin(t, forge)
+	close(inner.release)
+
+	if err := <-owner; err == nil {
+		t.Fatal("the fixture never cancelled the owner, so this test proves nothing")
+	}
+	if err := <-joinerErr; err != nil {
+		t.Fatalf("a live sibling adopted the stopped run's cancellation: %v", err)
+	}
+	if pr := <-joiner; pr.HeadSHA != "head" {
+		t.Fatalf("the sibling did not get a real answer: head %q", pr.HeadSHA)
+	}
+}
+
+// waitForJoin blocks until a caller has adopted an in-flight request. It polls
+// a counter rather than sleeping a guessed interval: a joiner that never joins
+// makes this time out and fail, where a sleep would let the test proceed down
+// the cold path and pass without testing anything.
+func waitForJoin(t *testing.T, forge *MultiplexedForge) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for forge.joinCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no caller ever joined the in-flight request")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

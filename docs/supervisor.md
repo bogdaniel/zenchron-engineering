@@ -187,6 +187,25 @@ they changed, and a rate-limit refusal becomes shared backoff for the whole
 repository. It is a decorator: no new persistence, no message bus, no second
 normalization of anything.
 
+What is shared is decided by **whom a fact describes**, not by whether it is an
+error:
+
+```text
+describes the REPOSITORY          describes the FORGE        describes the CALLER
+an answer, a 404, a 403           "retry after N seconds"     cancelled, deadline
+
+cached for the window             becomes shared backoff      never shared
+invalidated by our writes         survives our writes         never cached,
+                                                              never adopted by a
+                                                              joiner
+```
+
+The last column is the one that took three passes to get right. A run being
+stopped must not answer its siblings' live questions with its own cancellation —
+neither through the cache, nor by a sibling that happened to join its in-flight
+request. A joiner that receives a caller-scoped error while its own context is
+still live issues its own request instead, once.
+
 ## Restart
 
 Recovery is replay. The supervisor holds nothing durable of its own: on start it
@@ -195,6 +214,13 @@ thing it does on every tick. A restart therefore resumes eligible work without
 creating duplicate logical runs, because run identity is derived from the
 repository, the issue and the configuration digest rather than from anything the
 supervisor remembers.
+
+That is a claim a design can stop honouring the moment something starts being
+kept in memory, so it is pinned as behaviour rather than left as intent: a
+regression drives a run with one supervisor, constructs a second over the same
+store with no handover, and requires the same run to resume with its agent
+binding and base intact, no duplicate logical run, and no already-succeeded
+operation performed again.
 
 ## Discovery
 

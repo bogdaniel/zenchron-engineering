@@ -145,6 +145,47 @@ provider-handoff record in [`agents.md`](agents.md).
 *Serves P1 and P11: an unbuilt abstraction cannot freeze a decomposition, and
 cannot quietly acquire governance meaning.*
 
+## A fix carries a regression that can fail
+
+A defect fix leaves behind a test that **demonstrably fails when the defect is
+restored**. Not a test written alongside the fix, and not a passing suite —
+restore the old code, run the test, watch it fail, put the fix back.
+
+The reason is the one #29 already applies to assurance: verification that cannot
+fail is not verification. A test written from the same understanding that
+produced the fix tends to encode that understanding rather than the behaviour,
+and it passes for reasons the author never checks.
+
+This is not hypothetical discipline. Applying it across one remediation branch
+found two regressions that passed with their own defect restored — one asserting
+an ordering the fixture never actually produced, one whose fake blocked before
+reading state so the "stale" answer it claimed to catch never existed. Both
+looked rigorous. Neither tested anything.
+
+```text
+write the fix
+restore the defect          <- the step that is usually skipped
+run the test, see it FAIL   <- the evidence
+put the fix back, see it pass
+```
+
+Two failure modes to watch for specifically:
+
+- **Vacuous assertions.** Comparing two values that are both empty, or both
+  defaults. Assert the precondition is real before asserting the property.
+- **`time.Sleep` standing in for ordering.** A sleep is a claim about the
+  scheduler. It passes when the machine is unloaded and silently stops
+  exercising the intended interleaving when it is not — a false green, which is
+  the harder kind to notice. Signal the state you are waiting for, and make the
+  wait time out with a message naming what never happened.
+
+Where a regression genuinely cannot be made to fail — a pure deletion, a
+boundary enforced by review rather than by code — state the exception and the
+alternative evidence explicitly rather than leaving the gap implied.
+
+*Serves P11: a test that cannot fail is a claim, and claims are what evidence is
+supposed to replace.*
+
 ## Review checklist
 
 Review of a substantive change explicitly answers:
@@ -157,3 +198,4 @@ Review of a substantive change explicitly answers:
 - Could composition replace branching or copying?
 - Does any code exist only for a hypothetical future requirement?
 - Is any security or policy invariant now stated in two places?
+- For a defect fix: was the regression shown to fail with the defect restored?
