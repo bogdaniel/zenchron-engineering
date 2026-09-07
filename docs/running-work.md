@@ -186,14 +186,22 @@ the current candidate. A cancelled run is not resumed either — explicit operat
 intent is not withdrawn by asking again.
 
 `refresh` is the only thing that re-reads changed source intent, and it is
-deliberately not a flag on `resume`. It records operator refresh intent as a
-cancellation whose reason is `operator_source_refresh`, which stales that run's
-contract, evidence and authority together, then starts the next generation for
-the same issue and reconciles it. The old journal is preserved exactly. Because
-the boundary is a generation, the previous candidate branch and any pull request
+deliberately not a flag on `resume`. It draws a GENERATION BOUNDARY: the current
+generation is settled through the same cancellation path `stop` uses, under the
+distinct reason `operator_source_refresh`, which stales that run's contract,
+evidence and authority together; the next generation for the same issue is then
+started and reconciled. The old journal is preserved exactly, and because the
+boundary is a generation, the previous candidate branch and any pull request
 opened from it are abandoned.
 
-`stop` is the only thing that cancels a run. It is durable, idempotent, and
+Two things are worth separating there, because the words overlap. Both `stop`
+and `refresh` settle a generation as `cancelled` — that is the DISPOSITION, and
+`autonomy status` reports it identically for either. What differs is the recorded
+REASON and what happens next: `stop` is an operator withdrawing the work and
+starts nothing, while `refresh` is an operator replacing the subject and starts
+the successor generation in the same command.
+
+`stop` is the only thing that cancels a run WITHOUT replacing it. It is durable, idempotent, and
 journalled with the reason `operator_stop`; a second stop appends nothing.
 Killing the process, closing the terminal, or shutting down a supervisor cancels
 nothing.

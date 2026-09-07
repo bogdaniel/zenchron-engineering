@@ -181,7 +181,17 @@ type FeedbackDecision struct {
 	// superseded commit is retained as history and is not delivered.
 	HeadRevision string `json:"head_revision,omitempty"`
 	Applicable   bool   `json:"applicable"`
-	CreatedAt    string `json:"created_at,omitempty"`
+	// Commit is the exact commit the ITEM is bound to, and is empty for an item
+	// that describes the work rather than a diff.
+	//
+	// Delivery re-checks applicability against this, not against HeadRevision.
+	// Expiring by the head an item was judged at would silently discard two
+	// real cases: a maintainer's issue comment admitted at head A and not yet
+	// delivered when the candidate moves to head B, and the remainder of a
+	// batch larger than the per-invocation bound, whose own delivery advances
+	// the head past the items it left behind.
+	Commit    string `json:"commit,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // Admission reasons. They are a closed vocabulary so an operator reading a
@@ -213,7 +223,7 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 		decision := FeedbackDecision{
 			Key: item.Key(), Class: item.Class,
 			Actor: item.Actor.Login, ActorID: item.Actor.ID,
-			HeadRevision: head,
+			HeadRevision: head, Commit: item.Commit,
 		}
 		if !item.CreatedAt.IsZero() {
 			decision.CreatedAt = item.CreatedAt.UTC().Format(time.RFC3339)
@@ -323,11 +333,15 @@ func (s FeedbackState) Pending(head string) []FeedbackObservedPayload {
 		if !decision.Admitted || s.Consumed[decision.Key] {
 			continue
 		}
-		// Applicability is re-checked against the CURRENT head rather than
-		// trusted from the recording. A run that moved on between observing a
-		// review and delivering it must not hand the worker feedback about a
-		// commit that no longer exists.
-		if decision.HeadRevision != "" && head != "" && decision.HeadRevision != head {
+		// Applicability is re-checked against the CURRENT head, by the SAME
+		// rule the admission gate used: an item bound to an exact commit
+		// applies only to that commit, and an item that describes the work
+		// rather than a diff applies to whatever head is current.
+		//
+		// Using the head the item was judged at instead would expire every
+		// conversation and issue comment the moment the candidate moved, which
+		// is precisely when a worker most needs to have been told.
+		if !feedbackApplies(FeedbackItem{Commit: decision.Commit}, head) {
 			continue
 		}
 		pending = append(pending, decision)

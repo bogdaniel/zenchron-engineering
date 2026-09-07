@@ -235,14 +235,21 @@ func (a GitHubRESTAdapter) RepositoryPermission(ctx context.Context, repo GitHub
 	if err := safeLogin(login); err != nil {
 		return PermissionUnresolved, err
 	}
-	status, body, err := a.do(ctx, repo, http.MethodGet, repoPath(repo)+"/collaborators/"+url.PathEscape(login)+"/permission", nil, nil)
+	status, header, body, err := a.doRaw(ctx, repo, http.MethodGet,
+		repoPath(repo)+"/collaborators/"+url.PathEscape(login)+"/permission", nil, nil, nil)
 	if err != nil {
 		return PermissionUnresolved, err
 	}
 	if status == http.StatusNotFound {
 		return PermissionNone, nil
 	}
-	if err := classifyGitHubStatus(status, RateLimitObservation{}, false, "repository permission"); err != nil {
+	// The budget headers are read, because a 403 is GitHub's rate-limit refusal
+	// as well as its permission refusal. Discarding them would classify a
+	// throttled lookup as a credential fault, which never reaches the shared
+	// per-repository backoff and would have every run rediscovering the limit
+	// separately.
+	rate, reported := observeRateLimit(header, status)
+	if err := classifyGitHubStatus(status, rate, reported, "repository permission"); err != nil {
 		return PermissionUnresolved, err
 	}
 	var payload struct {
@@ -312,8 +319,20 @@ func (a GitHubRESTAdapter) issueComments(ctx context.Context, repo GitHubRepo, n
 		UpdatedAt string   `json:"updated_at"`
 	}
 	query := url.Values{"per_page": {"100"}}
-	if err := a.call(ctx, repo, http.MethodGet, repoPath(repo)+"/issues/"+strconv.Itoa(number)+"/comments", query, nil, &wire); err != nil {
+	// Read through doRaw rather than call() for the same reason as above: the
+	// budget headers are what separate a throttled read from a rejected
+	// credential, and only the first belongs in shared backoff.
+	status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet,
+		repoPath(repo)+"/issues/"+strconv.Itoa(number)+"/comments", query, nil, nil)
+	if err != nil {
 		return nil, err
+	}
+	rate, reported := observeRateLimit(header, status)
+	if err := classifyGitHubStatus(status, rate, reported, "conversation comments"); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, &GitHubAPIError{Status: status, Detail: "unreadable conversation comment response"}
 	}
 	comments := make([]GitHubComment, 0, len(wire))
 	for _, c := range wire {

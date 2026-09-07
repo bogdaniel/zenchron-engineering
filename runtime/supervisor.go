@@ -111,6 +111,10 @@ type Supervisor struct {
 	// it, so a slow run never blocks an operator command.
 	mu       sync.Mutex
 	draining bool
+	// cursor is the rotation offset into the active-run list. It exists so a
+	// ceiling smaller than the active set is a rate limit rather than a fixed
+	// prefix; see rotate.
+	cursor int
 	// enginesMu guards the engine cache, which several run goroutines reach
 	// concurrently inside one tick. It is separate from mu on purpose: the
 	// lifecycle flags are read by operator commands, and a slow engine
@@ -289,11 +293,20 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 		// not started does not begin.
 		return report, nil
 	}
-	// Oldest first, so a long-queued run is not starved by newer submissions.
+	// Oldest first, then ROTATED between ticks.
+	//
+	// A run is non-terminal for its whole lifetime, not only while it is inside
+	// Reconcile, so age order alone is not a queue - it is a fixed prefix. With
+	// a ceiling of one and one long-lived active run, that run would be the
+	// only one ever driven and every later submission would wait for it to
+	// finish. The multi-task workflow this supervisor exists for would have
+	// been one task at a time wearing a fleet view.
+	//
+	// Rotating the starting offset each tick gives every active run a turn
+	// while still bounding how many are driven at once. Ordering stays
+	// deterministic within a tick; only the entry point moves.
 	sort.SliceStable(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
-	if len(active) > s.deps.MaxConcurrentRuns {
-		active = active[:s.deps.MaxConcurrentRuns]
-	}
+	active = s.rotate(active)
 
 	var mu sync.Mutex
 	var wait sync.WaitGroup
@@ -314,6 +327,27 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 	sort.SliceStable(report.Driven, func(i, j int) bool { return report.Driven[i].RunID < report.Driven[j].RunID })
 	sort.SliceStable(report.Observed, func(i, j int) bool { return report.Observed[i].RunID < report.Observed[j].RunID })
 	return report, nil
+}
+
+// rotate selects at most MaxConcurrentRuns runs, starting from a cursor that
+// advances every tick. It is the whole fairness mechanism: no priority, no
+// weighting, no starvation.
+func (s *Supervisor) rotate(active []EngineeringRun) []EngineeringRun {
+	if len(active) <= s.deps.MaxConcurrentRuns {
+		return active
+	}
+	s.mu.Lock()
+	start := s.cursor % len(active)
+	// The cursor advances by the number actually driven, so the next tick
+	// begins where this one stopped rather than overlapping it.
+	s.cursor = (start + s.deps.MaxConcurrentRuns) % len(active)
+	s.mu.Unlock()
+
+	selected := make([]EngineeringRun, 0, s.deps.MaxConcurrentRuns)
+	for i := 0; i < s.deps.MaxConcurrentRuns; i++ {
+		selected = append(selected, active[(start+i)%len(active)])
+	}
+	return selected
 }
 
 // driveOne observes feedback for one run and then reconciles it. The order

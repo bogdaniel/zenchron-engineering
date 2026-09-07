@@ -713,3 +713,62 @@ func TestSupervisorAcceptsASubmissionForAnyConfiguredAgent(t *testing.T) {
 		t.Fatal("a submission introduced an unconfigured agent")
 	}
 }
+
+// TestEveryActiveRunGetsATurnUnderACeiling is the fairness rule. A run is
+// non-terminal for its whole lifetime, not only while it is inside Reconcile,
+// so selecting a fixed age-ordered prefix would make a ceiling of one mean "the
+// oldest run, forever" - and every later submission would wait for it to
+// finish. The multi-task workflow would have been one task at a time wearing a
+// fleet view.
+func TestEveryActiveRunGetsATurnUnderACeiling(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t)
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Three durable active runs, one at a time.
+	var runIDs []string
+	for i := 0; i < 3; i++ {
+		issue := phase8Issue + 20 + i
+		fixture.forge.Issues[issue] = GitHubIssue{
+			Number: issue, URL: "https://github.com/acme/repo/issues/3",
+			Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+		}
+		outcome, err := fixture.runtime.StartIssueRun(context.Background(), issue, AdoptCompatibleGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runIDs = append(runIDs, outcome.RunID)
+	}
+
+	var mu sync.Mutex
+	driven := map[string]int{}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 1,
+		PollInterval: time.Minute, Agents: registry,
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) {
+			return fixture.runtime, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tick := 0; tick < 3; tick++ {
+		report, err := supervisor.Tick(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Driven) != 1 {
+			t.Fatalf("tick %d drove %d runs, want the ceiling of one", tick, len(report.Driven))
+		}
+		mu.Lock()
+		driven[report.Driven[0].RunID]++
+		mu.Unlock()
+	}
+	// Three ticks at a ceiling of one must have reached three distinct runs.
+	if len(driven) != len(runIDs) {
+		t.Fatalf("only %d of %d active runs were ever driven: %#v", len(driven), len(runIDs), driven)
+	}
+}

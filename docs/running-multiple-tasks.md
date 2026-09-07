@@ -128,12 +128,20 @@ The default concurrency is 1. An operator who wants parallel work must raise it:
 ```
 
 `supervisor.*` and `watch.*` are combined by taking the STRICTER value — fewer
-runs, longer interval — so stating one can never loosen the other, and a
-repository that tightens the watch bound still tightens the effective one. A
-repository may lower the ceiling in `.zenchron.json` and may not raise it.
+runs, longer interval — so stating one can never loosen the other.
 
-Each tick drives the active runs oldest first, capped at the ceiling, so a
-long-queued run is not starved by newer submissions. The scheduler enforces the
+`supervisor.*` is **operator-only**: the in-repo allowlist refuses it before
+decoding. A repository that wants a lower ceiling for itself writes
+`watch.max_concurrent_runs` in `.zenchron.json`, which it may only lower and
+never raise — and because the effective bound is the stricter of the two, that
+tightening still holds.
+
+Each tick drives the active runs oldest first and caps the number driven at the
+ceiling, ROTATING the starting point between ticks. The rotation is the part
+that matters: a run stays non-terminal for its whole lifetime, not only while it
+is being reconciled, so a fixed prefix would make a ceiling of one mean "the
+oldest run, forever" and every later submission would wait for it to finish. The
+ceiling is a rate limit, not a queue position. The scheduler enforces the
 same ceiling durably; the supervisor bound exists so the process does not start
 work it cannot lease. A per-run failure is REPORTED inside the tick report and
 never propagated: one run whose forge call failed, whose provider is unavailable

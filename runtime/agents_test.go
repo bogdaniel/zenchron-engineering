@@ -639,3 +639,33 @@ func TestNativeAgentIsNeverProtectedEligible(t *testing.T) {
 		}
 	}
 }
+
+// TestBypassRunClaimsNoSandboxProof is the honesty rule for the one invocation
+// that has no sandbox: an authorized bypass selects the provider's unsafe mode,
+// so neither write confinement nor network denial is enforced and neither may
+// be reported as proven. Reading the spec constant alone would have described a
+// fully unsandboxed worker as bounded - to the operator, in doctor, using the
+// same words a constrained run gets.
+func TestBypassRunClaimsNoSandboxProof(t *testing.T) {
+	constrained, _, _ := agentFixture(t, AgentKindCodexCLI)
+	bounded := constrained.Isolation()
+	if bounded.FilesystemWrite != IsolationProven || bounded.NetworkDenied != IsolationProven {
+		t.Fatalf("a constrained codex run lost its real sandbox claim: %#v", bounded)
+	}
+
+	bypassing := constrained
+	bypassing.Agent.AllowPermissionBypass = true
+	bypassing.PermissionBypass = true
+	unbounded := bypassing.Isolation()
+	if unbounded.FilesystemWrite == IsolationProven || unbounded.NetworkDenied == IsolationProven {
+		t.Fatalf("a bypass run claimed sandbox proof it does not have: %#v", unbounded)
+	}
+	if !strings.Contains(unbounded.Rationale, "permission bypass") {
+		t.Fatalf("the rationale does not say why nothing is claimed: %q", unbounded.Rationale)
+	}
+	// Read confinement was never proven either way, so protected admission is
+	// refused in both cases. The defect was the false claim, not admission.
+	if err := RequireProtectedIsolation(bypassing); err == nil {
+		t.Fatal("a bypass run was admitted for protected execution")
+	}
+}

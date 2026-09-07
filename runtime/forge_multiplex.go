@@ -49,9 +49,23 @@ type MultiplexedForge struct {
 	// at: a rate limit is about the credential's budget against that
 	// repository, not about the run that happened to hit it.
 	backoff map[string]forgeBackoff
+	// inflight is the request currently in progress for a key, if any. It is
+	// what makes coalescing true on a COLD cache: without it, several runs
+	// starting together all miss, all call the forge, and the shared
+	// observation only ever shares an answer that some earlier tick happened to
+	// warm - which is exactly the moment sharing matters least.
+	inflight map[string]*forgeCall
 	// calls counts underlying calls per method, which is what makes "runs
 	// share one poll" a testable property rather than a claim.
 	calls map[string]int
+}
+
+// forgeCall is one in-progress read. Waiters block on done and then read the
+// same answer the caller that made the request stored.
+type forgeCall struct {
+	done  chan struct{}
+	value any
+	err   error
 }
 
 type forgeAnswer struct {
@@ -72,7 +86,8 @@ func NewMultiplexedForge(inner GitHubAdapter, clock Clock) *MultiplexedForge {
 	}
 	return &MultiplexedForge{
 		Inner: inner, Clock: clock, Window: DefaultForgeWindow,
-		answers: map[string]forgeAnswer{}, backoff: map[string]forgeBackoff{}, calls: map[string]int{},
+		answers: map[string]forgeAnswer{}, backoff: map[string]forgeBackoff{},
+		inflight: map[string]*forgeCall{}, calls: map[string]int{},
 	}
 }
 
@@ -116,17 +131,16 @@ func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, ca
 	}
 	if answer, ok := m.answers[key]; ok && now.Sub(answer.at) < m.window() {
 		m.mu.Unlock()
-		if answer.err != nil {
-			return zero, answer.err
-		}
-		typed, ok := answer.value.(T)
-		if ok {
-			return typed, nil
-		}
-		// A key collision across types would be a defect in this file, not a
-		// condition of the run, so it is surfaced rather than silently re-read.
-		return zero, fmt.Errorf("multiplexed forge answer for %q is not a %T", key, zero)
+		return typedForgeAnswer[T](key, answer.value, answer.err)
 	}
+	// A request already in flight for this key is JOINED rather than repeated.
+	if pending, ok := m.inflight[key]; ok {
+		m.mu.Unlock()
+		<-pending.done
+		return typedForgeAnswer[T](key, pending.value, pending.err)
+	}
+	pending := &forgeCall{done: make(chan struct{})}
+	m.inflight[key] = pending
 	m.calls[method]++
 	m.mu.Unlock()
 
@@ -134,6 +148,9 @@ func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, ca
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	pending.value, pending.err = value, err
+	close(pending.done)
+	delete(m.inflight, key)
 	m.answers[key] = forgeAnswer{value: value, err: err, at: now}
 	// A transient refusal that carries retry timing becomes shared backoff. The
 	// forge's own instruction is honoured once for the whole repository instead
@@ -145,6 +162,21 @@ func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, ca
 		}
 	}
 	return value, err
+}
+
+// typedForgeAnswer returns a shared answer as the caller's type. A key
+// collision across types would be a defect in this file, not a condition of the
+// run, so it is surfaced rather than silently re-read.
+func typedForgeAnswer[T any](key string, value any, err error) (T, error) {
+	var zero T
+	if err != nil {
+		return zero, err
+	}
+	typed, ok := value.(T)
+	if !ok {
+		return zero, fmt.Errorf("multiplexed forge answer for %q is not a %T", key, zero)
+	}
+	return typed, nil
 }
 
 // retryInstant is when the forge said to come back, bounded so a malformed or
@@ -301,8 +333,13 @@ func (m *MultiplexedForge) Viewer(ctx context.Context, repo GitHubRepo) (GitHubA
 // decide truthfully whether to advertise the capability at all, rather than
 // wrapping and then failing every lookup.
 func (m *MultiplexedForge) SupportsFeedbackAdmission() bool {
+	// BOTH capabilities are required. An adapter that can resolve a permission
+	// but cannot read a comment thread would advertise admission and then fail
+	// every conversation read at run time, which reports a broken run where the
+	// truth is a configuration that simply cannot carry feedback.
 	_, permissions := m.Inner.(ForgeActorPermissions)
-	return permissions
+	_, conversation := m.Inner.(ForgeConversation)
+	return permissions && conversation
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

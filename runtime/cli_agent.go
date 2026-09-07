@@ -266,12 +266,22 @@ func (p CLIAgentProvider) Isolation() ProviderIsolation {
 		Rationale: "operator_trusted: " + p.Agent.Kind + " runs under the local operator account. Zenchron injects no publication credential, " +
 			"but it cannot confine what that account may read, so host read isolation is unproven and this adapter is ineligible for protected execution",
 	}
-	if spec.Sandbox != "" {
-		// A provider-native workspace sandbox bounds WRITES and, where the
-		// provider states it, tool network access. It still says nothing about
-		// reads, so only the properties the mode actually covers move.
+	// A provider-native workspace sandbox bounds WRITES and, where the provider
+	// states it, tool network access. It still says nothing about reads, so
+	// only the properties the mode actually covers move.
+	//
+	// An authorized BYPASS selects the provider's unsafe mode instead: the
+	// workspace sandbox is not applied and tool network access is not denied,
+	// so neither property is claimed. Reading the spec constant alone would
+	// have described a fully unsandboxed worker as write-bounded and
+	// network-denied - a false proven claim, which is the one thing this
+	// adapter's honesty rests on not doing.
+	if spec.Sandbox != "" && !p.PermissionBypass {
 		isolation.FilesystemWrite = IsolationProven
 		isolation.NetworkDenied = IsolationProven
+	}
+	if p.PermissionBypass {
+		isolation.Rationale += ". This invocation requested the provider's permission bypass, so no workspace sandbox is selected and neither write confinement nor network denial is claimed"
 	}
 	return isolation
 }

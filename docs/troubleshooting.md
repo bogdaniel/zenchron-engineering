@@ -288,7 +288,11 @@ live generation was created by a different controller build or configuration.
 Restore that configuration, or use `--new-generation`.
 
 **`run ... was cancelled (operator_stop); explicit operator intent is not
-withdrawn by asking again`.** Start new work with `autonomy run issue N`.
+withdrawn by asking again`.** A run id is deterministic from the repository, the
+issue and the configuration digest, so `autonomy run issue N` addresses the same
+cancelled run rather than creating a fresh one. Start new work with `autonomy
+run issue N --new-generation`, which leaves the cancelled generation and its
+journal untouched.
 
 **`run ... is waiting on opt_in_removed`.** The opt-in label was removed from the
 source issue, which withdraws consent to work on it. Restore the label; the run

@@ -550,9 +550,63 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 			_, err := r.RequestAgentHandoff(runID, r.deps.Agent.ID, "adoption of a live generation by a different agent")
 			return StartOutcome{}, err
 		}
+		// The row and the journal are written by separate transactions, so a
+		// process that stopped between claiming the run and journalling its
+		// binding leaves a row naming an agent that replay cannot see. Repair
+		// it here, from the row that already exists, rather than letting the
+		// run read back as a legacy one - which any agent would then adopt,
+		// turning a crash into a silent provider change.
+		if err := r.repairAgentBinding(runID, existing); err != nil {
+			return StartOutcome{}, err
+		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// repairAgentBinding restores a journalled agent assignment for a run whose row
+// records one. It is idempotent and does nothing in the ordinary case.
+//
+// It exists because the claim and the genesis events cannot share a
+// transaction: the journal's foreign key requires the run row to exist first.
+// That leaves exactly one window - claimed, not yet assigned - and this closes
+// it on the next pass rather than leaving the row and the journal disagreeing
+// about which worker owns the run.
+func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun) error {
+	// Only THIS runtime's own agent can be reconstructed: the row records an
+	// id, and the kind and trust mode that complete the record live in the
+	// registry, not on the row. A runtime driving a different agent - or none -
+	// leaves the repair to one that can make it truthfully rather than
+	// inventing provenance from a name.
+	if run.AgentID == "" || run.AgentID != r.deps.Agent.ID {
+		return nil
+	}
+	events, err := r.deps.Store.Events(runID)
+	if err != nil {
+		return err
+	}
+	state := &runState{run: run, events: events}
+	if state.recordedAgent().AgentID != "" {
+		return nil
+	}
+	payload, err := marshalPayloadJSON(AgentAssignedPayload{
+		AgentID:      run.AgentID,
+		ProviderKind: r.deps.Agent.Kind,
+		TrustMode:    r.deps.Agent.TrustMode,
+		Model:        r.deps.Agent.Model,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = r.deps.Store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion,
+		ID:            runID + "-agent-assigned",
+		RunID:         runID,
+		Type:          EventRunAgentAssigned,
+		OccurredAt:    r.deps.Clock.Now(),
+		Payload:       payload,
+	})
+	return err
 }
 
 func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {

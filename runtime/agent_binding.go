@@ -353,11 +353,15 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 	}
 	if _, err := store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
-		ID:            fmt.Sprintf("%s-%s-%d", runID, reason, now.UnixNano()),
-		RunID:         runID,
-		Type:          EventRunCancelled,
-		OccurredAt:    now,
-		Payload:       payload,
+		// The operator's stated reason belongs in the PAYLOAD, where it is
+		// bounded, and not in the durable identity. `stop-all --reason <text>`
+		// and the control endpoint both carry arbitrary operator text, and an
+		// event id is a primary key that is read back forever.
+		ID:         fmt.Sprintf("%s-cancelled-%d", runID, now.UnixNano()),
+		RunID:      runID,
+		Type:       EventRunCancelled,
+		OccurredAt: now,
+		Payload:    payload,
 	}); err != nil {
 		return Outcome{}, err
 	}

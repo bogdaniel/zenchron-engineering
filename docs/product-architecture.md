@@ -54,8 +54,10 @@ The two are not alternatives. Every path below ends at the same kernel.
 Three things about this diagram are load-bearing.
 
 **The agents are at the bottom, not the middle.** They author changes. Every
-arrow after the candidate workspace is runtime-owned, and none of it is
-influenced by what a provider said about its own work.
+arrow from the candidate workspace THROUGH publication is runtime-owned, and
+none of it is influenced by what a provider said about its own work. Review and
+merge are the arrows after that, and both remain external: a human reads the
+pull request in GitHub and a human merges it.
 
 **There is one store and one scheduler.** The supervisor is an owner, not a
 second runtime. Adding `serve` added ownership, concurrency, a shared
