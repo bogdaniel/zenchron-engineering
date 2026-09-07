@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func publicationTokenFile(t *testing.T, contents string, mode os.FileMode) string {
@@ -345,5 +346,60 @@ func TestATransientIdentityFailureRecoversWithoutARestart(t *testing.T) {
 	}
 	if forge.viewers < 2 {
 		t.Fatalf("the identity was resolved %d times; it must be resolved per observation, not bound once", forge.viewers)
+	}
+}
+
+// TestTheCredentialIdentityIsNeverServedFromCache goes through the PRODUCTION
+// MultiplexedForge, because that is where the staleness lived.
+//
+// Every other read the multiplexer coalesces answers a question about the
+// repository, and answering it once per window is the whole point. Viewer
+// answers a question about the CREDENTIAL, which is re-read per request and can
+// change between two calls a cache would collapse into one. A stale answer means
+// the self-loop guard compares against an account the runtime no longer is:
+// rotate the token, publish as the new account, and a sibling run observing
+// inside the window resolves the OLD identity, does not recognize the comment as
+// its own, and admits it.
+func TestTheCredentialIdentityIsNeverServedFromCache(t *testing.T) {
+	inner := &rotatingViewer{FakeGitHubAdapter: NewFakeGitHubAdapter()}
+	current := GitHubActor{Login: "zenchron-runtime-a", ID: 111}
+	inner.actor = func() (GitHubActor, error) { return current, nil }
+
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour // a window long enough that a cache would certainly hide the rotation
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	first, err := forge.Viewer(context.Background(), repo)
+	if err != nil || first.Login != "zenchron-runtime-a" {
+		t.Fatalf("first resolution = %+v %v", first, err)
+	}
+
+	// The token rotates. No write happens in between, because the dangerous
+	// sequence does not require one to have completed.
+	current = GitHubActor{Login: "zenchron-runtime-b", ID: 222}
+
+	second, err := forge.Viewer(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Login != "zenchron-runtime-b" {
+		t.Fatalf("a rotated credential still resolved as %q from the shared cache; the guard would compare against an account the runtime is no longer using", second.Login)
+	}
+	if inner.viewers != 2 {
+		t.Fatalf("the inner adapter was asked %d times; the identity must not be coalesced", inner.viewers)
+	}
+
+	// Repository state IS still shared - this fix must not have turned the
+	// multiplexer into a pass-through.
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "head", State: GitHubOpen}
+	if _, err := forge.PullRequest(context.Background(), repo, 1); err != nil {
+		t.Fatal(err)
+	}
+	before := len(inner.Calls)
+	if _, err := forge.PullRequest(context.Background(), repo, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(inner.Calls) != before {
+		t.Fatalf("repository reads stopped being shared: %d new calls", len(inner.Calls)-before)
 	}
 }

@@ -419,14 +419,32 @@ func (m *MultiplexedForge) IssueComments(ctx context.Context, repo GitHubRepo, n
 	})
 }
 
+// Viewer is deliberately NOT coalesced or cached.
+//
+// Every other read here answers a question about the REPOSITORY, which is why
+// answering it once for a window and fanning it out is safe. This one answers a
+// question about the CREDENTIAL - who does this token act as - and the
+// credential is re-read from its file on every request, so it can change between
+// two calls a cache would collapse into one.
+//
+// The self-loop guard refuses feedback authored by this identity. A stale answer
+// therefore means the runtime is comparing against an account it no longer is:
+// rotate the token, publish a comment as the new account, and a sibling run
+// observing inside the window resolves the OLD identity, fails to recognize the
+// comment as its own, and admits it. The window is small; the consequence is the
+// loop this branch exists to prevent, so the extra request is the right trade.
+//
+// The call is still counted, so shared-observation reporting stays truthful
+// about what was asked.
 func (m *MultiplexedForge) Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error) {
 	inner, ok := m.Inner.(ForgeViewer)
 	if !ok {
 		return GitHubActor{}, fmt.Errorf("the configured forge adapter cannot name its own identity")
 	}
-	return observe(ctx, m, repo, "Viewer", forgeKey(repo, "viewer"), func() (GitHubActor, error) {
-		return inner.Viewer(ctx, repo)
-	})
+	m.mu.Lock()
+	m.calls["Viewer"]++
+	m.mu.Unlock()
+	return inner.Viewer(ctx, repo)
 }
 
 // SupportsFeedbackAdmission reports whether the wrapped adapter can answer the
