@@ -1115,3 +1115,44 @@ func (f *blockingForge) PullRequest(ctx context.Context, repo GitHubRepo, number
 	<-f.release
 	return pr, err
 }
+
+// TestCancellationEventIdCarriesNoOperatorText is the one fix on this branch
+// that had no regression at all, which I would rather close than leave noted.
+//
+// An event id is a primary key read back forever, and `stop-all --reason
+// <text>` and the control endpoint both carry arbitrary operator text. The
+// reason belongs in the payload, where the schema bounds it.
+func TestCancellationEventIdCarriesNoOperatorText(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+
+	// A reason with a newline, a path separator and enough length to be a
+	// problem if it ever reached an identity.
+	reason := "operator/stop\nwith text " + strings.Repeat("x", 300)
+	scheduler := Scheduler{Store: fixture.store, Clock: fixture.clock, Owner: "owner-1"}
+	if _, err := CancelRun(fixture.store, scheduler, fixture.clock.Now(), runID, reason); err != nil {
+		t.Fatal(err)
+	}
+	events, err := fixture.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, event := range events {
+		if event.Type != EventRunCancelled {
+			continue
+		}
+		found = true
+		if strings.Contains(event.ID, "xxx") || strings.Contains(event.ID, "\n") || strings.Contains(event.ID, "/") {
+			t.Fatalf("operator text reached the durable event id: %q", event.ID)
+		}
+		// The reason is still recorded - it is simply recorded where a bound
+		// applies to it.
+		if !strings.Contains(string(event.Payload), "operator/stop") {
+			t.Fatalf("the operator's stated reason was lost from the payload: %s", event.Payload)
+		}
+	}
+	if !found {
+		t.Fatalf("no cancellation was journalled: %v", journalTypes(events))
+	}
+}
