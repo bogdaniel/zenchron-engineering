@@ -1082,7 +1082,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 	}
 	in.GitHubCredentialMode = config.GitHub.CredentialMode
 	in.DiscoveryLabel = config.Watch.Label
-	in.Credentials = githubCredentials(config.GitHub.CredentialMode)
+	in.Credentials = githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
 	if in.Provider == nil {
 		if registry, err := config.AgentRegistry(); err == nil {
 			if agent, err := registry.Agent(""); err == nil {

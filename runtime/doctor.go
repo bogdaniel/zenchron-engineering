@@ -586,14 +586,21 @@ func doctorProviderIsolation(in DoctorInput) DoctorCheck {
 	// protected one. Reporting it as a failure would tell an operator running
 	// their own authenticated Codex or Claude Code CLI that their setup is
 	// broken, when what is actually true is that this worker's host read
-	// confinement is unproven and it is therefore ineligible for protected
-	// work. That distinction is the whole point of having two trust modes, and
-	// doctor states it rather than collapsing it into red.
+	// confinement is unproven. That distinction is the whole point of having
+	// two trust modes, and doctor states it rather than collapsing it into red.
+	//
+	// It states only what is ENFORCED. This text used to end "ineligible for
+	// work whose policy requires protected execution", which reads as a rule
+	// the runtime applies; there is no policy vocabulary for requiring
+	// protected execution, so nothing matches work to a trust mode. e09b170
+	// removed the same claim from the durable documentation and this is the
+	// last copy of it. See the known limitations in ROADMAP.md.
 	if agent, ok := defaultAgentStatus(in); ok && agent.TrustMode == TrustOperatorTrusted {
 		return pass(doctorGroupProvider, id, fmt.Sprintf(
 			"the default agent %q runs as %s: Zenchron injects no publication credential and selects the provider's least-privilege automation mode, "+
-				"but a CLI running under your account can read what your account can read, so host read confinement is UNPROVEN and this agent is "+
-				"ineligible for work whose policy requires protected execution", agent.ID, TrustOperatorTrusted))
+				"but a CLI running under your account can read what your account can read, so host read confinement is UNPROVEN. A protected agent must "+
+				"prove that boundary before it executes anything, and a run created under protected is never continued by an operator_trusted worker; "+
+				"choosing this worker is your decision, because policy cannot yet require protected execution", agent.ID, TrustOperatorTrusted))
 	}
 	if err := RequireProtectedIsolation(in.Provider); err != nil {
 		return fail(doctorGroupProvider, id, err.Error())
@@ -855,7 +862,42 @@ const doctorGroupGitHub = "github"
 func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 	credential := doctorGitHubCredential(in)
 	identity, rate := doctorGitHubRead(ctx, in, credential)
-	return []DoctorCheck{credential, identity, rate}
+	return []DoctorCheck{credential, doctorPublicationIdentity(in), identity, rate}
+}
+
+// doctorPublicationIdentity answers whether the operator can give their own
+// workers feedback.
+//
+// The runtime refuses feedback it authored itself, by identity, so it cannot
+// talk itself into a loop. When it publishes with the operator's own `gh`
+// credential, the runtime IS the operator as far as GitHub is concerned, and
+// that guard refuses the operator's reviews along with its own. Everything
+// behaves exactly as designed and the central #63 workflow - review the pull
+// request, the right worker continues - silently cannot happen.
+//
+// It was silent until a live run hit it: the runtime observed the review, bound
+// it to the exact head, and recorded "authored by this runtime, so admitting it
+// would let the system feed itself" about a human being. This states it up
+// front, before an operator spends a subscription discovering it.
+//
+// It is a WARN rather than a FAIL because runs still execute, publish and
+// verify; what is unavailable is the remediation loop. The fix is a separate
+// publication identity, not a weaker guard.
+func doctorPublicationIdentity(in DoctorInput) DoctorCheck {
+	const id = "github.publication_identity"
+	switch in.GitHubCredentialMode {
+	case GitHubCredentialNone:
+		return warn(doctorGroupGitHub, id, "github.credential_mode is \"none\", so the runtime publishes nothing and no publication identity exists")
+	case GitHubCredentialToken:
+		return pass(doctorGroupGitHub, id,
+			"the runtime publishes with its own operator-provisioned token, so it is a DIFFERENT GitHub actor from you. Your reviews and comments are "+
+				"admissible feedback, and the runtime's own are still refused by identity")
+	}
+	return warn(doctorGroupGitHub, id,
+		"the runtime publishes with your own `gh` credential, so it acts as YOU on GitHub. Feedback authored by the publishing identity is refused so the "+
+			"system cannot feed itself - which means your own reviews and comments will not reach a worker, and the review loop is unavailable. Give the "+
+			"runtime an identity of its own with github.credential_mode \"token\" and github.token_path (a GitHub App installation token or a dedicated "+
+			"runtime account); nothing here weakens the self-loop guard")
 }
 
 // doctorGitHubCredential reports the typed github_auth_required outcome rather

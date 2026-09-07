@@ -599,7 +599,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations"),
 	}
 
-	credentials := githubCredentials(config.GitHub.CredentialMode)
+	credentials := githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
 	forge := overrides.GitHub
 	if forge == nil {
 		forge = runtime.GitHubRESTAdapter{
@@ -795,9 +795,14 @@ func operatorHome() string {
 	return os.Getenv("HOME")
 }
 
-func githubCredentials(mode string) runtime.CredentialProvider {
-	if mode == runtime.GitHubCredentialCLI {
+func githubCredentials(mode string, tokenPath string) runtime.CredentialProvider {
+	switch mode {
+	case runtime.GitHubCredentialCLI:
 		return runtime.GitHubCLICredential{}
+	case runtime.GitHubCredentialToken:
+		// A publication identity of the runtime's own, so the operator stays a
+		// distinct actor whose review is admissible feedback.
+		return runtime.GitHubTokenFileCredential{Path: tokenPath}
 	}
 	// Nil is the documented "github_auth_required" state, not anonymous access.
 	return nil

@@ -150,6 +150,35 @@ there is nothing to instruct, and the command says so rather than succeeding
 silently. `stop-all` is operator authority over runs and does not depend on a
 supervisor existing.
 
+## Budgets: work, and waiting
+
+```text
+wall_limit_seconds          bounds the time the SYSTEM is working
+                            pauses while the run waits on a person, an account,
+                            a quota, or a provisioning step
+
+lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
+                            optional, absent by default
+```
+
+These answer different questions and were the same number until a live run
+showed what that costs: a pull request reached its goal in eight minutes, waited
+for review, and was killed at thirty with `run_wall_budget_exhausted`. Any pull
+request not reviewed inside the execution budget died, so the review loop could
+not survive human-paced review at any budget that also bounded runaway work.
+
+Active time is derived from the journal, not from a stopwatch. An external wait
+runs from the `run.waiting` event that declared it until the next event that is
+not that wait, so a restart re-derives the same number from the same rows.
+Observation performed while waiting - re-reading the pull request, re-reading
+the issue - is real work and is counted; only the idle gap between ticks is
+excluded.
+
+The set of waits that pause the clock is **closed and fail-closed**: a reason
+nobody has classified spends the budget. A new wait pauses the clock only when
+somebody decides it should, which is the safe direction for a bound whose whole
+job is to end things.
+
 ## Concurrency
 
 The ceiling is operator authority:

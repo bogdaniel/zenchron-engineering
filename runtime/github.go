@@ -510,6 +510,53 @@ func (GitHubCLICredential) Credential(identity RemoteIdentity) (string, string, 
 	return gitHubCredentialUser, secret, nil
 }
 
+// GitHubTokenFileCredential resolves the PUBLICATION credential from a file the
+// operator provisioned - a GitHub App installation token or a dedicated runtime
+// account's token.
+//
+// It exists so the runtime can act as SOMEBODY ELSE. With the `gh` credential
+// the runtime authenticates as the operator, so a comment it publishes and a
+// review the operator writes are the same GitHub actor; the self-loop guard
+// then refuses the operator's own review, and the #63 workflow - review the
+// pull request, the right worker continues - cannot run on a single-account
+// installation. Separating the identity fixes that without weakening the guard:
+// admission stays decided by who wrote something, which is what makes it robust
+// against what the something says.
+//
+// The boundary is the same one GitHubCLICredential documents, with one addition:
+// the file must be owner-only, because a token another local account can read is
+// a publication identity that account also has.
+type GitHubTokenFileCredential struct{ Path string }
+
+func (c GitHubTokenFileCredential) Credential(identity RemoteIdentity) (string, string, error) {
+	if identity.URL == "" || identity.Transport() != "https" {
+		return "", "", &GitHubAuthError{Detail: "credential is only issued to the governed https remote"}
+	}
+	if strings.TrimSpace(c.Path) == "" {
+		return "", "", &GitHubAuthError{Detail: "no publication token path is configured"}
+	}
+	info, err := os.Stat(c.Path)
+	switch {
+	case err != nil:
+		return "", "", &GitHubAuthError{Detail: "the publication token file cannot be inspected"}
+	case !info.Mode().IsRegular():
+		return "", "", &GitHubAuthError{Detail: "the publication token path is not a regular file"}
+	case info.Mode().Perm()&0o077 != 0:
+		return "", "", &GitHubAuthError{Detail: "the publication token file is readable by other users; run chmod 600 on it"}
+	}
+	raw, err := os.ReadFile(c.Path)
+	if err != nil {
+		// The read error is not quoted: it can contain the path and, on some
+		// systems, content fragments.
+		return "", "", &GitHubAuthError{Detail: "the publication token file cannot be read"}
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", "", &GitHubAuthError{Detail: "the publication token file is empty"}
+	}
+	return gitHubCredentialUser, secret, nil
+}
+
 // ghBinary mirrors gitBinary(): resolve from the runtime's constant search path
 // rather than the host PATH, so the program that runs is chosen by the runtime.
 func ghBinary() (string, error) {

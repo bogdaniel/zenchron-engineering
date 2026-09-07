@@ -194,6 +194,9 @@ default `zenchron:auto`.
 | `storage.max_state_bytes` | Ceiling on the state directory, checked before a candidate clone is allocated so a full disk is a typed wait rather than a half-written workspace. | 0, meaning unbounded |
 | `feedback.min_permission` | The repository permission an actor must currently hold before their review or comment may reach a worker. See [github-feedback.md](github-feedback.md). | `write` |
 | `feedback.allowed_bots` | Automation logins explicitly admitted, in GitHub's own login spelling. | none |
+| `github.credential_mode` | `github-cli` uses your own `gh` login; `token` gives the runtime a publication identity of its own so your reviews are admissible feedback; `none` refuses forge writes. | `github-cli` |
+| `github.token_path` | Absolute path to an owner-only file holding the publication token, required by and only used with `credential_mode: "token"`. | none |
+| `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity per repository; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
 | `operator.id` | The identity a run is recorded as having been authorized by. It is provenance, not authentication: nothing here is signed and no challenge was issued. | the local account name |

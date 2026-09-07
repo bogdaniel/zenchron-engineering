@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -312,6 +313,81 @@ func (s *runState) epoch() int64 {
 
 func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epoch(), 10) }
 
+// externalWaitReasons is the CLOSED set of waits that are somebody else's turn.
+//
+// An execution wall budget bounds the work this system does. It must not be
+// spent waiting for a human to read a pull request, for an operator to sign a
+// provider back in, or for a rate limit to lift: none of that is the runtime
+// working, and a budget that burns through it forces an operator to size their
+// engineering budget around how fast people answer email. A run that reached
+// its goal and sat overnight awaiting review used to die of
+// run_wall_budget_exhausted, which made the #63 review loop unusable at any
+// budget that still bounded runaway work.
+//
+// The set is closed and fail-closed: a reason that is not listed here SPENDS
+// the budget. A new wait pauses the clock only when somebody decides it should,
+// which is the safe direction for a bound whose whole job is to end things.
+var externalWaitReasons = map[string]bool{
+	// Waiting for a person: review, merge authority, a policy decision only an
+	// operator can make.
+	"goal_state_reached":            true,
+	"awaiting_authority":            true,
+	"authority_blocked":             true,
+	"authority_unknown":             true,
+	"requested_privilege_expansion": true,
+	// Waiting for the operator's own accounts and tools.
+	"execution_provider_account_unavailable": true,
+	"execution_provider_quota":               true,
+	"assurance_dependency_unavailable":       true,
+	WatchWaitingGitHubAuth:                   true,
+	// Waiting for a human decision about the source or the pull request.
+	WatchWaitingOptInRemoved:       true,
+	"source_intent_changed":        true,
+	"source_closed":                true,
+	"pull_request_closed_unmerged": true,
+	"candidate_external_changed":   true,
+}
+
+// activeElapsed is the time this run has been the SYSTEM'S turn, derived from
+// the durable journal rather than from a stopwatch: every interval it excludes
+// is bounded by two recorded events, so a restart, a crash, or a second
+// supervisor reaches the same number from the same rows. An in-memory timer
+// would reset on restart and quietly hand a run a fresh budget.
+//
+// An external wait runs from the run.waiting event that declared it until the
+// next event that is not that same wait. Observation the runtime performs while
+// waiting - polling the pull request, re-reading the issue - is real work and is
+// counted; only the idle gap between ticks is excluded.
+func (s *runState) activeElapsed(now time.Time) time.Duration {
+	elapsed := now.Sub(s.run.CreatedAt)
+	var excluded time.Duration
+	var waitingSince time.Time
+	for _, event := range s.events {
+		if event.Type == EventRunWaiting && externalWaitReasons[payloadReason(event.Payload)] {
+			if waitingSince.IsZero() {
+				waitingSince = event.OccurredAt
+			}
+			continue
+		}
+		if !waitingSince.IsZero() {
+			if delta := event.OccurredAt.Sub(waitingSince); delta > 0 {
+				excluded += delta
+			}
+			waitingSince = time.Time{}
+		}
+	}
+	// Still waiting: the open interval runs to now.
+	if !waitingSince.IsZero() {
+		if delta := now.Sub(waitingSince); delta > 0 {
+			excluded += delta
+		}
+	}
+	if excluded > elapsed {
+		return 0
+	}
+	return elapsed - excluded
+}
+
 // pinnedBase is the base revision the run was compiled and cloned against. It
 // is the FIRST observation's base: later base movement is handled by
 // base.integrate and reassessment, never by silently recompiling the contract
@@ -505,8 +581,16 @@ func (s *runState) conditions() (Disposition, string) {
 		return Cancelled, s.snapshot.Reason
 	}
 	now := s.rt.deps.Clock.Now()
-	if limit := s.rt.deps.Budgets.WallLimit; limit > 0 && now.Sub(s.run.CreatedAt) > limit {
+	// The execution budget bounds ACTIVE work; see activeElapsed. A separate,
+	// optional lifecycle deadline is what bounds total calendar time, for an
+	// operator who genuinely wants a run to stop existing after a while. They
+	// are different questions and overloading one to answer both is what made a
+	// pull request awaiting review look like a runaway run.
+	if limit := s.rt.deps.Budgets.WallLimit; limit > 0 && s.activeElapsed(now) > limit {
 		return Failed, "run_wall_budget_exhausted"
+	}
+	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
+		return Failed, "run_lifecycle_deadline_exhausted"
 	}
 	if s.controllerChanged {
 		return Waiting, "controller_changed"

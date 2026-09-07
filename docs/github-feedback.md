@@ -135,6 +135,47 @@ identities it cannot discover — a coding-agent service account, a second bot y
 publish under. Nothing here inspects a message body, because a body is written
 by whoever is talking.
 
+### Give the runtime an identity of its own
+
+That guard has a consequence worth stating before you meet it:
+
+```text
+credential_mode "github-cli"          credential_mode "token"
+
+runtime publishes as YOU              runtime publishes as ITSELF
+        |                                     |
+your review is authored by the        your review is a different actor
+publishing identity                           |
+        |                                     v
+refused as self-authored              admitted as feedback
+        |
+the review loop cannot run
+```
+
+With `github-cli` the runtime authenticates as you, so GitHub cannot tell your
+review apart from a comment the runtime wrote — and neither can the guard. Your
+own reviews are refused as self-authored, and the workflow this milestone exists
+for cannot happen. It was found by a live run: the runtime observed a real
+review, bound it to the exact head, and recorded *"authored by this runtime, so
+admitting it would let the system feed itself"* about a person.
+
+The answer is a separate identity, not an exception for your login:
+
+```json
+{"github": {"credential_mode": "token", "token_path": "/Users/you/.zenchron/publication.token"}}
+```
+
+A GitHub App installation token or a dedicated runtime account. The file must be
+owner-only — a token another local account can read is a publication identity
+that account also has. `autonomy doctor` reports `github.publication_identity`:
+PASS when the runtime is a distinct actor, WARN naming exactly what you lose
+when it is not.
+
+Admitting your own login as an exception would be the other fix, and it is the
+wrong one. Admission is decided by identity precisely so it does not depend on
+what a message says; an exception for "the account that also publishes" is an
+exception for whatever else that account does.
+
 ## Delivered once, bound to one invocation
 
 Admission and consumption are separate durable facts, so a restart, a retry or a

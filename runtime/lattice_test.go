@@ -103,8 +103,16 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"provider.credential_path",
 		"provider.endpoint",
 		"github.credential_mode",
+		// A PATH to a publication token, never a secret, and operator-owned:
+		// the in-repo layer names no credential member, so a repository cannot
+		// point the runtime at a different identity to publish as.
+		"github.token_path",
 		"github.endpoint",
 		"budgets.wall_limit_seconds",
+		// A total-elapsed bound, separate from the execution budget. Operator
+		// authority: a repository may tighten budgets it is allowed to name,
+		// and this is not one of them.
+		"budgets.lifecycle_deadline_seconds",
 		"budgets.max_execution_attempts",
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",

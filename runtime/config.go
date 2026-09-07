@@ -56,8 +56,12 @@ const (
 // GitHub credential modes. "none" is an explicit refusal to authorize forge
 // writes, not an anonymous fallback.
 const (
-	GitHubCredentialCLI  = "github-cli"
-	GitHubCredentialNone = "none"
+	GitHubCredentialCLI = "github-cli"
+	// GitHubCredentialToken authenticates with an operator-provisioned token
+	// file, which is how the runtime is given a publication identity of its own
+	// rather than borrowing the operator's.
+	GitHubCredentialToken = "token"
+	GitHubCredentialNone  = "none"
 )
 
 // Watch enrolment. Watch observes ONLY repositories an operator listed in the
@@ -114,7 +118,27 @@ type ProviderConfig struct {
 // never a secret.
 type GitHubConfig struct {
 	CredentialMode string `json:"credential_mode"`
-	Endpoint       string `json:"endpoint,omitempty"`
+	// TokenPath is the file holding the PUBLICATION credential when
+	// credential_mode is "token". It names a path, never a secret, and the file
+	// must be owner-only.
+	//
+	// It exists so the runtime can publish under an identity that is NOT the
+	// operator's own GitHub account. With `github-cli` the runtime authenticates
+	// as the operator, so its own comments and the operator's reviews are the
+	// same actor - and the self-loop guard, which refuses anything the runtime
+	// authored, then refuses the operator's review too. The result is that the
+	// #63 review loop cannot run on a single-account installation: the operator
+	// reviews the pull request and the worker never hears it.
+	//
+	// The answer is a separate identity, not a weaker guard. A GitHub App
+	// installation token or a dedicated runtime account keeps admission decided
+	// by identity - which is what makes it robust against text - while leaving
+	// the human a distinct actor whose feedback is admissible.
+	//
+	// omitempty, so a configuration that does not use it canonicalizes exactly
+	// as it did before this member existed.
+	TokenPath string `json:"token_path,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty"`
 }
 
 // SupervisorConfig is the persistent supervisor's own bounds.
@@ -197,8 +221,17 @@ func (c OperatorConfig) FeedbackPolicy() (FeedbackPolicy, error) {
 
 // BudgetConfig is the operator ceiling for one run.
 type BudgetConfig struct {
-	WallLimitSeconds     int `json:"wall_limit_seconds"`
-	MaxExecutionAttempts int `json:"max_execution_attempts"`
+	WallLimitSeconds int `json:"wall_limit_seconds"`
+	// LifecycleDeadlineSeconds bounds TOTAL elapsed time for a run, including
+	// waits on people and provider accounts. It is optional and absent by
+	// default: wall_limit_seconds bounds the work, and a run waiting for a
+	// human review should not be killed for the human's latency. Set this only
+	// when a run genuinely must stop existing after a fixed period.
+	//
+	// omitempty keeps a configuration that does not state it canonicalizing
+	// exactly as it did before this member existed.
+	LifecycleDeadlineSeconds int `json:"lifecycle_deadline_seconds,omitempty"`
+	MaxExecutionAttempts     int `json:"max_execution_attempts"`
 	// MaxExecutionContinuations bounds how many DISTINCT continuation
 	// execution bindings one run may start. It is a different resource from
 	// MaxExecutionAttempts, which bounds retries of ONE binding, and the two
@@ -382,6 +415,7 @@ type Config struct {
 func (c Config) RunBudgets() RunBudgets {
 	return RunBudgets{
 		WallLimit:                 time.Duration(c.Budgets.WallLimitSeconds) * time.Second,
+		LifecycleDeadline:         time.Duration(c.Budgets.LifecycleDeadlineSeconds) * time.Second,
 		MaxExecutionAttempts:      c.Budgets.MaxExecutionAttempts,
 		MaxExecutionContinuations: c.Budgets.continuations(),
 		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
@@ -744,8 +778,20 @@ func (c OperatorConfig) validate(path string) error {
 			return refuse("default_agent requires an agents registry")
 		}
 	}
-	if c.GitHub.CredentialMode != GitHubCredentialCLI && c.GitHub.CredentialMode != GitHubCredentialNone {
-		return refuse(fmt.Sprintf("github.credential_mode must be %q or %q", GitHubCredentialCLI, GitHubCredentialNone))
+	switch c.GitHub.CredentialMode {
+	case GitHubCredentialCLI, GitHubCredentialNone:
+		if strings.TrimSpace(c.GitHub.TokenPath) != "" {
+			return refuse(fmt.Sprintf("github.token_path is only used with credential_mode %q", GitHubCredentialToken))
+		}
+	case GitHubCredentialToken:
+		if strings.TrimSpace(c.GitHub.TokenPath) == "" {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.token_path", GitHubCredentialToken))
+		}
+		if !filepath.IsAbs(c.GitHub.TokenPath) {
+			return refuse("github.token_path must be an absolute path")
+		}
+	default:
+		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialNone))
 	}
 	for _, bound := range []struct {
 		name  string
@@ -768,6 +814,22 @@ func (c OperatorConfig) validate(path string) error {
 	// an outage. Absent resolves to the M1 default in BudgetConfig.resolved.
 	if stated := c.Budgets.MaxExecutionContinuations; stated != nil && *stated < 1 {
 		return refuse("budgets.max_execution_continuations must be at least 1")
+	}
+	// lifecycle_deadline_seconds is OPTIONAL, so 0 means absent rather than a
+	// malformed bound - unlike its neighbours above, where an explicit 0 is a
+	// stated ceiling of nothing. A negative value is still a mistake.
+	//
+	// A deadline below the wall limit is refused rather than silently making
+	// the execution budget unreachable: an operator who writes that has said
+	// two things that cannot both be honoured, and guessing which they meant is
+	// how a run dies for a reason its configuration does not explain.
+	if c.Budgets.LifecycleDeadlineSeconds < 0 {
+		return refuse("budgets.lifecycle_deadline_seconds must not be negative")
+	}
+	if d := c.Budgets.LifecycleDeadlineSeconds; d > 0 && d < c.Budgets.WallLimitSeconds {
+		return refuse(fmt.Sprintf(
+			"budgets.lifecycle_deadline_seconds (%d) is below budgets.wall_limit_seconds (%d): the total deadline would end every run before its execution budget could be spent",
+			d, c.Budgets.WallLimitSeconds))
 	}
 	if c.GC.RetentionHours < 0 {
 		return refuse("gc.retention_hours must not be negative")

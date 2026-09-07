@@ -137,7 +137,16 @@ type ConfigDigest struct {
 // the attempt ceilings bound each bounded operation kind independently, so a
 // failing verifier cannot consume the execution provider's budget.
 type RunBudgets struct {
-	WallLimit            time.Duration `json:"wall_limit"`
+	WallLimit time.Duration `json:"wall_limit"`
+	// LifecycleDeadline bounds TOTAL elapsed calendar time, including every
+	// external wait. It is a different question from WallLimit, which bounds
+	// the time the system is working, and it is optional: absent means a run
+	// waiting on a person waits as long as the person takes.
+	//
+	// omitempty, because it must not appear in the canonical document of any
+	// run created before it existed - run identity is derived from that
+	// document, and an added zero would re-identify every historical run.
+	LifecycleDeadline    time.Duration `json:"lifecycle_deadline,omitempty"`
 	MaxExecutionAttempts int           `json:"max_execution_attempts"`
 	// MaxExecutionContinuations bounds DISTINCT continuation execution
 	// bindings for one run. MaxExecutionAttempts bounds retries of ONE

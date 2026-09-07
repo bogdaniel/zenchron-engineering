@@ -208,6 +208,21 @@ things a reviewer or operator should know before relying on them.
   their upgrade path.
 - **Feedback delivery is bounded** to the most recent applicable items per
   invocation, newest first.
+- **The review loop needs a publication identity of its own.** Feedback is
+  admitted by WHO wrote it, which is what makes admission robust against what it
+  says. With `github.credential_mode: "github-cli"` the runtime publishes as the
+  operator, so the guard that refuses runtime-authored feedback refuses the
+  operator's reviews too and the loop cannot run. `credential_mode: "token"`
+  gives the runtime its own identity - a GitHub App installation token or a
+  dedicated account - and `autonomy doctor` names the collision when it exists.
+  The guard itself is unchanged: an operator's own login is never admitted as an
+  exception.
+- **Gemini CLI and Qwen CLI are not live-qualified.** Neither is installed on
+  the acceptance host, so their adapters are covered by deterministic tests and
+  their flag grammar is taken from upstream documentation rather than verified
+  against a binary. The probe is fail-closed, so a wrong flag makes the agent
+  unavailable rather than mis-invoked - a mitigation, not a substitute. #63 does
+  not wait on them; they are qualified when there is an intent to use them.
 - **Policy cannot require protected execution.** The isolation gate is applied
   per agent trust mode and fails closed on anything not explicitly
   `operator_trusted`, and a `protected` run is never continued by an

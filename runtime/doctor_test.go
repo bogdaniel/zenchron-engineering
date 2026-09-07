@@ -253,7 +253,14 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			Pages:     1,
 			RateLimit: RateLimitObservation{Remaining: 4931, ResetAt: time.Unix(1800000000, 0).UTC()},
 		}},
-		GitHubCredentialMode: GitHubCredentialCLI,
+		// A healthy environment gives the runtime a PUBLICATION IDENTITY of its
+		// own. With the operator's own `gh` credential the runtime publishes as
+		// them, and the guard that refuses runtime-authored feedback then
+		// refuses their reviews too - so the review loop is unavailable and
+		// doctor says so. That is a warning about a real limitation, not a
+		// fixture detail to paper over, which is why the healthy fixture is the
+		// configuration that does not have it.
+		GitHubCredentialMode: GitHubCredentialToken,
 		OperatorConfigPath:   f.configPath,
 		RepositoryRoot:       f.repoRoot,
 		ProjectModel:         model,
@@ -350,7 +357,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
 		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache", "assurance.semantic",
 		"assurance.dependency_preparation",
-		"github.credential", "github.identity", "github.rate_limit",
+		"github.credential", "github.publication_identity", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",
