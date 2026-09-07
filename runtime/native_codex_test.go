@@ -141,12 +141,27 @@ func TestNativeCodexReceivesNoAmbientHostEnvironment(t *testing.T) {
 			t.Fatalf("ambient host environment reached the provider: %q in %s", forbidden, text)
 		}
 	}
-	// The allowlist is constructed from scratch, so it stays small: PATH, HOME,
-	// USER and the provider's pinned home variable. Counting is deliberate -
-	// it is what makes a fifth member somebody has to justify.
+	// The allowlist is constructed from scratch, so it is asserted by NAME and
+	// by pinned value rather than by size. Counting only proves the environment
+	// is small: four variables that are not these four would satisfy it, so a
+	// member swapped for another would pass a length check unnoticed. That is
+	// how a test stops being able to fail for the reason it exists.
+	want := map[string]bool{"PATH": true, "HOME": true, "USER": true, "CODEX_HOME": true}
 	for _, call := range fake.calls {
-		if len(call.env) > 4 {
-			t.Fatalf("environment is not an explicit allowlist: %#v", call.env)
+		seen := map[string]bool{}
+		for _, entry := range call.env {
+			name, value, _ := strings.Cut(entry, "=")
+			if !want[name] {
+				t.Fatalf("environment is not an explicit allowlist: %q reached the provider: %#v", name, call.env)
+			}
+			if seen[name] {
+				t.Fatalf("environment states %q twice: %#v", name, call.env)
+			}
+			seen[name] = true
+			// HOME and CODEX_HOME are the PINNED home, not the operator's.
+			if (name == "HOME" || name == "CODEX_HOME") && value != provider.CodexHome {
+				t.Fatalf("%s is %q, want the pinned codex home %q", name, value, provider.CodexHome)
+			}
 		}
 	}
 }
