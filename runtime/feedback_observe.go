@@ -183,6 +183,12 @@ func findFeedbackItem(items []FeedbackItem, key string) (FeedbackItem, bool) {
 // and inline review comments come from the head-bound observation the runtime
 // already makes; conversation comments come from the optional conversation
 // capability, whose absence simply yields fewer items rather than an error.
+//
+// The pull request's thread and the source issue's thread are read through the
+// same forge endpoint, because a pull request IS an issue there. They cannot
+// collide: GitHub numbers issues and pull requests from ONE sequence, so a
+// run's source issue and its pull request never share a number, and the same
+// comment can therefore never arrive twice under two classes.
 func (r *EngineeringRuntime) collectFeedback(ctx context.Context, state *runState) ([]FeedbackItem, error) {
 	var items []FeedbackItem
 	conversation, hasConversation := r.deps.GitHub.(ForgeConversation)

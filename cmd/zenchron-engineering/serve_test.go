@@ -312,3 +312,62 @@ func TestAgentSetRefusesAndSaysWhatToDoInstead(t *testing.T) {
 		t.Fatal("an agent change was accepted with no stated reason")
 	}
 }
+
+// TestSelectingACLIAgentNeverBuildsTheAPIAdapter is the no-silent-fallback law
+// at the composition root, which is the one place a provider is chosen.
+//
+// "Zenchron supervised my Claude Code run" must not be able to mean "Zenchron
+// billed my Anthropic API account". The environment allowlist is the runtime
+// half of that guarantee; this is the wiring half: selecting a CLI agent
+// constructs the CLI adapter and never the brokered API one, whatever else is
+// configured.
+func TestSelectingACLIAgentNeverBuildsTheAPIAdapter(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git",
+		agentsConfig(map[string]any{
+			"codex":  map[string]any{"kind": "codex_cli", "trust_mode": "operator_trusted"},
+			"claude": map[string]any{"kind": "claude_code", "trust_mode": "operator_trusted"},
+			"openai": map[string]any{
+				"kind": "openai_responses", "trust_mode": "protected",
+				"model": "gpt-5", "credential_path": filepath.Join(t.TempDir(), "key"),
+			},
+		}, "codex"))
+	t.Chdir(dir)
+
+	config, err := runtime.LoadConfig(configPath, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := config.AgentRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := runtime.ArtifactStore{Root: filepath.Join(config.StateDir, "artifacts")}
+	for _, agentID := range []string{"codex", "claude"} {
+		agent, err := registry.Agent(agentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider := executionProvider(config, agent, artifacts, runtime.DockerSandbox{}, false)
+		cli, ok := provider.(runtime.CLIAgentProvider)
+		if !ok {
+			t.Fatalf("agent %q built %T instead of the native CLI adapter", agentID, provider)
+		}
+		if cli.Agent.ID != agentID || cli.Agent.TrustMode != runtime.TrustOperatorTrusted {
+			t.Fatalf("agent %q built an adapter for %#v", agentID, cli.Agent)
+		}
+		// A native CLI is handed no Zenchron credential at all, because it
+		// authenticates itself.
+		if cli.Agent.CredentialPath != "" {
+			t.Fatalf("agent %q was given a Zenchron-held credential: %q", agentID, cli.Agent.CredentialPath)
+		}
+	}
+	// The protected agent still builds the brokered adapter, so this is a
+	// selection rule rather than the CLI path swallowing everything.
+	protected, err := registry.Agent("openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := executionProvider(config, protected, artifacts, runtime.DockerSandbox{}, false).(runtime.CLIAgentProvider); ok {
+		t.Fatal("the protected agent built a native CLI adapter")
+	}
+}
