@@ -55,6 +55,15 @@ type MultiplexedForge struct {
 	// observation only ever shares an answer that some earlier tick happened to
 	// warm - which is exactly the moment sharing matters least.
 	inflight map[string]*forgeCall
+	// epoch increments on every invalidation. An in-flight read carries the
+	// epoch it started in, and a read that started BEFORE a write is neither
+	// joined nor cached afterwards.
+	//
+	// Without it, coalescing reintroduced the staleness invalidation exists to
+	// prevent: a read that began before a publication could still be waited on
+	// after it, hand its pre-write answer to the joiner, and then store that
+	// answer back into the cache the write had just cleared.
+	epoch uint64
 	// calls counts underlying calls per method, which is what makes "runs
 	// share one poll" a testable property rather than a claim.
 	calls map[string]int
@@ -66,6 +75,8 @@ type forgeCall struct {
 	done  chan struct{}
 	value any
 	err   error
+	// epoch is the invalidation generation this call belongs to.
+	epoch uint64
 }
 
 type forgeAnswer struct {
@@ -115,7 +126,7 @@ func (m *MultiplexedForge) window() time.Duration {
 // The generic parameter keeps the cached value typed: a cached
 // GitHubCheckObservation can never be handed back as a GitHubReviewObservation,
 // which a map[string]any without it would make a runtime question.
-func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, call func() (T, error)) (T, error) {
+func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, method, key string, call func() (T, error)) (T, error) {
 	var zero T
 	now := m.Clock.Now()
 
@@ -133,13 +144,24 @@ func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, ca
 		m.mu.Unlock()
 		return typedForgeAnswer[T](key, answer.value, answer.err)
 	}
-	// A request already in flight for this key is JOINED rather than repeated.
-	if pending, ok := m.inflight[key]; ok {
+	// A request already in flight for this key is JOINED rather than repeated -
+	// but only when it belongs to the CURRENT epoch. One that started before an
+	// invalidation would answer with pre-write state, which is precisely what
+	// the invalidation was for.
+	epoch := m.epoch
+	if pending, ok := m.inflight[key]; ok && pending.epoch == epoch {
 		m.mu.Unlock()
-		<-pending.done
-		return typedForgeAnswer[T](key, pending.value, pending.err)
+		// Waiting is cancellable. A joiner blocked on somebody else's slow
+		// request would otherwise hold up its own caller - and, through it, a
+		// whole supervisor tick - long after its context was done.
+		select {
+		case <-pending.done:
+			return typedForgeAnswer[T](key, pending.value, pending.err)
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
 	}
-	pending := &forgeCall{done: make(chan struct{})}
+	pending := &forgeCall{done: make(chan struct{}), epoch: epoch}
 	m.inflight[key] = pending
 	m.calls[method]++
 	m.mu.Unlock()
@@ -150,7 +172,18 @@ func observe[T any](m *MultiplexedForge, repo GitHubRepo, method, key string, ca
 	defer m.mu.Unlock()
 	pending.value, pending.err = value, err
 	close(pending.done)
-	delete(m.inflight, key)
+	// Only remove the entry if it is still ours: an invalidation may have
+	// replaced it, and deleting somebody else's in-flight call would strand
+	// its joiners.
+	if current, ok := m.inflight[key]; ok && current == pending {
+		delete(m.inflight, key)
+	}
+	// An answer from a superseded epoch is returned to THIS caller - it is the
+	// answer its own request produced - and is not cached, because the state it
+	// describes is the state a write has already moved past.
+	if m.epoch != epoch {
+		return typedForgeAnswer[T](key, value, err)
+	}
 	m.answers[key] = forgeAnswer{value: value, err: err, at: now}
 	// A transient refusal that carries retry timing becomes shared backoff. The
 	// forge's own instruction is honoured once for the whole repository instead
@@ -202,6 +235,11 @@ func (m *MultiplexedForge) invalidate() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.answers = map[string]forgeAnswer{}
+	// Reads still in flight belong to the old generation: they may already
+	// hold pre-write state. Advancing the epoch stops a later caller joining
+	// one and stops its owner caching the result.
+	m.epoch++
+	m.inflight = map[string]*forgeCall{}
 }
 
 func forgeKey(repo GitHubRepo, parts ...string) string {
@@ -219,43 +257,43 @@ func forgeKey(repo GitHubRepo, parts ...string) string {
 var _ GitHubAdapter = (*MultiplexedForge)(nil)
 
 func (m *MultiplexedForge) Issue(ctx context.Context, repo GitHubRepo, number int) (GitHubIssue, error) {
-	return observe(m, repo, "Issue", forgeKey(repo, "issue", itoa(number)), func() (GitHubIssue, error) {
+	return observe(ctx, m, repo, "Issue", forgeKey(repo, "issue", itoa(number)), func() (GitHubIssue, error) {
 		return m.Inner.Issue(ctx, repo, number)
 	})
 }
 
 func (m *MultiplexedForge) DiscoverIssues(ctx context.Context, query DiscoveryQuery) (DiscoveryResult, error) {
-	return observe(m, query.Repo, "DiscoverIssues", forgeKey(query.Repo, "discover", query.Label, query.ETag), func() (DiscoveryResult, error) {
+	return observe(ctx, m, query.Repo, "DiscoverIssues", forgeKey(query.Repo, "discover", query.Label, query.ETag), func() (DiscoveryResult, error) {
 		return m.Inner.DiscoverIssues(ctx, query)
 	})
 }
 
 func (m *MultiplexedForge) FindPullRequests(ctx context.Context, repo GitHubRepo, headRef, baseRef string) ([]GitHubPullRequest, error) {
-	return observe(m, repo, "FindPullRequests", forgeKey(repo, "find", headRef, baseRef), func() ([]GitHubPullRequest, error) {
+	return observe(ctx, m, repo, "FindPullRequests", forgeKey(repo, "find", headRef, baseRef), func() ([]GitHubPullRequest, error) {
 		return m.Inner.FindPullRequests(ctx, repo, headRef, baseRef)
 	})
 }
 
 func (m *MultiplexedForge) PullRequest(ctx context.Context, repo GitHubRepo, number int) (GitHubPullRequest, error) {
-	return observe(m, repo, "PullRequest", forgeKey(repo, "pr", itoa(number)), func() (GitHubPullRequest, error) {
+	return observe(ctx, m, repo, "PullRequest", forgeKey(repo, "pr", itoa(number)), func() (GitHubPullRequest, error) {
 		return m.Inner.PullRequest(ctx, repo, number)
 	})
 }
 
 func (m *MultiplexedForge) Checks(ctx context.Context, repo GitHubRepo, headSHA string) (GitHubCheckObservation, error) {
-	return observe(m, repo, "Checks", forgeKey(repo, "checks", headSHA), func() (GitHubCheckObservation, error) {
+	return observe(ctx, m, repo, "Checks", forgeKey(repo, "checks", headSHA), func() (GitHubCheckObservation, error) {
 		return m.Inner.Checks(ctx, repo, headSHA)
 	})
 }
 
 func (m *MultiplexedForge) Reviews(ctx context.Context, repo GitHubRepo, number int, headSHA string) (GitHubReviewObservation, error) {
-	return observe(m, repo, "Reviews", forgeKey(repo, "reviews", itoa(number), headSHA), func() (GitHubReviewObservation, error) {
+	return observe(ctx, m, repo, "Reviews", forgeKey(repo, "reviews", itoa(number), headSHA), func() (GitHubReviewObservation, error) {
 		return m.Inner.Reviews(ctx, repo, number, headSHA)
 	})
 }
 
 func (m *MultiplexedForge) RefSHA(ctx context.Context, repo GitHubRepo, ref string) (RefObservation, error) {
-	return observe(m, repo, "RefSHA", forgeKey(repo, "ref", ref), func() (RefObservation, error) {
+	return observe(ctx, m, repo, "RefSHA", forgeKey(repo, "ref", ref), func() (RefObservation, error) {
 		return m.Inner.RefSHA(ctx, repo, ref)
 	})
 }
@@ -293,7 +331,7 @@ func (m *MultiplexedForge) RepositoryPermission(ctx context.Context, repo GitHub
 	if !ok {
 		return PermissionUnresolved, fmt.Errorf("the configured forge adapter cannot resolve actor permissions")
 	}
-	return observe(m, repo, "RepositoryPermission", forgeKey(repo, "permission", login), func() (GitHubPermission, error) {
+	return observe(ctx, m, repo, "RepositoryPermission", forgeKey(repo, "permission", login), func() (GitHubPermission, error) {
 		return inner.RepositoryPermission(ctx, repo, login)
 	})
 }
@@ -303,7 +341,7 @@ func (m *MultiplexedForge) PullRequestComments(ctx context.Context, repo GitHubR
 	if !ok {
 		return nil, fmt.Errorf("the configured forge adapter cannot read conversation comments")
 	}
-	return observe(m, repo, "PullRequestComments", forgeKey(repo, "pr-comments", itoa(number)), func() ([]GitHubComment, error) {
+	return observe(ctx, m, repo, "PullRequestComments", forgeKey(repo, "pr-comments", itoa(number)), func() ([]GitHubComment, error) {
 		return inner.PullRequestComments(ctx, repo, number)
 	})
 }
@@ -313,7 +351,7 @@ func (m *MultiplexedForge) IssueComments(ctx context.Context, repo GitHubRepo, n
 	if !ok {
 		return nil, fmt.Errorf("the configured forge adapter cannot read conversation comments")
 	}
-	return observe(m, repo, "IssueComments", forgeKey(repo, "issue-comments", itoa(number)), func() ([]GitHubComment, error) {
+	return observe(ctx, m, repo, "IssueComments", forgeKey(repo, "issue-comments", itoa(number)), func() ([]GitHubComment, error) {
 		return inner.IssueComments(ctx, repo, number)
 	})
 }
@@ -323,7 +361,7 @@ func (m *MultiplexedForge) Viewer(ctx context.Context, repo GitHubRepo) (GitHubA
 	if !ok {
 		return GitHubActor{}, fmt.Errorf("the configured forge adapter cannot name its own identity")
 	}
-	return observe(m, repo, "Viewer", forgeKey(repo, "viewer"), func() (GitHubActor, error) {
+	return observe(ctx, m, repo, "Viewer", forgeKey(repo, "viewer"), func() (GitHubActor, error) {
 		return inner.Viewer(ctx, repo)
 	})
 }

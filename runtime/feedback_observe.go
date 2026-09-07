@@ -13,6 +13,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -139,8 +140,17 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		}
 		permission, err := permissions.RepositoryPermission(ctx, r.repo, item.Actor.Login)
 		if err != nil {
-			unresolvable[login] = true
-			continue
+			// Only a TRANSIENT failure is deferred. Deferring everything was
+			// an over-correction: a rejected credential is not a lookup that
+			// might succeed next time, so treating a 401 as "try again later"
+			// made the runtime retry a permanently broken credential on every
+			// tick while reporting nothing at all - the same invisible-failure
+			// shape FeedbackError exists to end.
+			if transientForgeFailure(err) {
+				unresolvable[login] = true
+				continue
+			}
+			return FeedbackObservation{}, err
 		}
 		resolved[login] = permission
 	}
@@ -187,6 +197,23 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 // whether the adapter underneath it actually answers permission lookups.
 type feedbackAdmissionCapable interface {
 	SupportsFeedbackAdmission() bool
+}
+
+// transientForgeFailure reports whether a forge failure is one that a later
+// poll could plausibly get a different answer to.
+//
+// It is a stated allowlist rather than "anything that is not an auth error":
+// an unrecognized failure is treated as PERMANENT and surfaced, so a fault this
+// runtime has not seen before becomes visible instead of becoming a silent
+// retry loop.
+func transientForgeFailure(err error) bool {
+	var transient *GitHubTransientError
+	if errors.As(err, &transient) {
+		return true
+	}
+	// A cancelled or timed-out poll says nothing about the actor, and the next
+	// tick asks again.
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func findFeedbackItem(items []FeedbackItem, key string) (FeedbackItem, bool) {

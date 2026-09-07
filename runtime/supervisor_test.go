@@ -926,3 +926,111 @@ func TestClosingTheEndpointWhileServingIsSafe(t *testing.T) {
 		}
 	}
 }
+
+// TestAPreWriteReadIsNeitherJoinedNorCached is the staleness rule coalescing
+// nearly reintroduced. A read that began BEFORE a write must not be handed to a
+// caller that arrives after it, and must not be stored into the cache the write
+// just cleared - which is exactly what invalidation exists to prevent.
+func TestAPreWriteReadIsNeitherJoinedNorCached(t *testing.T) {
+	inner := newBlockingForge()
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "before", State: GitHubOpen}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	// A read starts and blocks inside the forge.
+	first := make(chan GitHubPullRequest, 1)
+	go func() {
+		pr, _ := forge.PullRequest(context.Background(), repo, 1)
+		first <- pr
+	}()
+	inner.waitForCall(t)
+
+	// A write lands while that read is still in flight.
+	if _, err := forge.CreatePullRequest(context.Background(), repo, GitHubPullRequestCreate{
+		HeadRef: "zenchron/x", BaseRef: "main", Title: "t", Body: mustPublication(t, "body"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The forge now reports the post-write state.
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "after", State: GitHubOpen}
+	close(inner.release)
+	<-first
+
+	// A reader arriving now must see the CURRENT state, not the answer the
+	// pre-write request produced.
+	pr, err := forge.PullRequest(context.Background(), repo, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.HeadSHA != "after" {
+		t.Fatalf("a pre-write answer survived the invalidation: head %q", pr.HeadSHA)
+	}
+}
+
+// TestJoiningASharedRequestHonoursCancellation keeps one slow forge call from
+// holding up an unrelated caller - and, through it, a whole supervisor tick -
+// after that caller's context is done.
+func TestJoiningASharedRequestHonoursCancellation(t *testing.T) {
+	inner := newBlockingForge()
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "head", State: GitHubOpen}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	owner := make(chan struct{})
+	go func() {
+		defer close(owner)
+		_, _ = forge.PullRequest(context.Background(), repo, 1)
+	}()
+	inner.waitForCall(t)
+
+	// A second caller joins the in-flight request, then gives up.
+	ctx, cancel := context.WithCancel(context.Background())
+	joined := make(chan error, 1)
+	go func() { _, err := forge.PullRequest(ctx, repo, 1); joined <- err }()
+	cancel()
+
+	select {
+	case err := <-joined:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("a cancelled joiner returned %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a cancelled joiner stayed blocked on somebody else's request")
+	}
+	close(inner.release)
+	<-owner
+}
+
+// blockingForge holds one read open until released, which is the only way to
+// observe what happens to callers that arrive while a request is in flight.
+type blockingForge struct {
+	*FakeGitHubAdapter
+	release chan struct{}
+	called  chan struct{}
+	once    sync.Once
+}
+
+func newBlockingForge() *blockingForge {
+	return &blockingForge{
+		FakeGitHubAdapter: NewFakeGitHubAdapter(),
+		release:           make(chan struct{}),
+		called:            make(chan struct{}),
+	}
+}
+
+func (f *blockingForge) waitForCall(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.called:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the forge was never called")
+	}
+}
+
+func (f *blockingForge) PullRequest(ctx context.Context, repo GitHubRepo, number int) (GitHubPullRequest, error) {
+	f.once.Do(func() { close(f.called) })
+	<-f.release
+	return f.FakeGitHubAdapter.PullRequest(ctx, repo, number)
+}

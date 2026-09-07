@@ -521,3 +521,64 @@ func TestATransientPermissionLookupIsNotADurableRefusal(t *testing.T) {
 		t.Fatalf("the review was lost across a transient failure: %#v", recovered)
 	}
 }
+
+// TestAPermanentPermissionFailureIsReportedNotDeferred is the other half of the
+// transient rule, and the over-correction it guards against.
+//
+// Deferring EVERY lookup failure kept a rejected credential invisible: the
+// runtime retried it on every tick, journalled nothing, and reported nothing,
+// so an operator whose token had expired saw exactly what they would have seen
+// if nobody had commented. A transient failure is retried; a permanent one is
+// surfaced.
+func TestAPermanentPermissionFailureIsReportedNotDeferred(t *testing.T) {
+	for name, tc := range map[string]struct {
+		failure  error
+		deferred bool
+	}{
+		"transient 503 is retried later": {
+			failure: &GitHubTransientError{Status: 503, Detail: "unavailable"}, deferred: true,
+		},
+		"rate limit is retried later": {
+			failure: &GitHubTransientError{Status: 429, Detail: "rate limited"}, deferred: true,
+		},
+		"rejected credential is surfaced": {
+			failure: &GitHubAuthError{Detail: "github rejected the credential with status 401"},
+		},
+		"api fault is surfaced": {
+			failure: &GitHubAPIError{Status: 500, Detail: "boom"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture, runID := feedbackFixture(t)
+			number := fixture.state(runID).projection.PullRequest.Number
+			fixture.forge.ConversationComments[number] = []GitHubComment{{
+				ID: 1301, Author: GitHubActor{Login: "maintainer", ID: 7},
+				Body: UntrustedText("please rename the helper"), CreatedAt: fixture.clock.Now(),
+			}}
+			fixture.forge.Fail = func(call GitHubCall) error {
+				if call.Method == "RepositoryPermission" {
+					return tc.failure
+				}
+				return nil
+			}
+			observation, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+			if tc.deferred {
+				if err != nil {
+					t.Fatalf("a transient failure was surfaced as a fault: %v", err)
+				}
+				if observation.Deferred != 1 {
+					t.Fatalf("a transient failure was not deferred: %#v", observation)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a permanent failure was hidden as a deferral: %#v", observation)
+			}
+			// And nothing durable was written about the item either way: a
+			// failure to ask is never a judgement about the actor.
+			if countType(fixture.state(runID).events, EventFeedbackObserved) != 0 {
+				t.Fatal("a failed lookup was journalled as a decision")
+			}
+		})
+	}
+}

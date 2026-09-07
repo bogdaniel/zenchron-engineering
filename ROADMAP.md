@@ -215,4 +215,4 @@ The point of the milestone is leverage, not adapter count. #66 rebases the
 benchmark on the actual `serve` product and measures whether #63 reaches the
 >=2x hypothesis on ordinary work without worsening defects, rework or authority
 safety. Higher-order leverage through role planning and decomposition belongs to
-#64 and is measured there.
+issue #64, where it is measured.
