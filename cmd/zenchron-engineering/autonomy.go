@@ -413,7 +413,29 @@ func requireRun(built *composition, runID string) (runtime.EngineeringRun, error
 	return run, nil
 }
 
+// observeFeedback polls GitHub for reviewer feedback before driving a run.
+//
+// Polling belongs to whoever owns the clock, which is normally the supervisor.
+// An operator driving a run in their own terminal owns it instead, and without
+// this that run would never see a review comment at all - the feedback loop
+// would exist only for supervised work. The capability is optional so an
+// injected test runtime does not have to implement it.
+//
+// A failed poll is not a failure of the run: feedback is an input the run can
+// proceed without, and refusing to reconcile because GitHub was briefly
+// unreachable would turn an observation into an outage.
+func observeFeedback(ctx context.Context, engine engineeringRuntime, runID string) {
+	observer, ok := engine.(interface {
+		ObserveFeedback(context.Context, string) (runtime.FeedbackObservation, error)
+	})
+	if !ok {
+		return
+	}
+	_, _ = observer.ObserveFeedback(ctx, runID)
+}
+
 func reconcile(ctx context.Context, engine engineeringRuntime, runID string, stdout io.Writer) (int, error) {
+	observeFeedback(ctx, engine, runID)
 	outcome, err := engine.Reconcile(ctx, runID)
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -462,7 +484,14 @@ type composition struct {
 	agent    runtime.ResolvedAgent
 	feedback runtime.FeedbackPolicy
 	storage  runtime.StateStorage
-	release  func()
+	// sandbox and permissionBypass are kept so an engine can be built for an
+	// agent other than the one this invocation resolved. providerInjected
+	// marks the test seam: an injected provider is used for every agent,
+	// because a test that supplied one meant it.
+	sandbox          runtime.DockerSandbox
+	permissionBypass bool
+	providerInjected bool
+	release          func()
 }
 
 // newComposition is the wiring. Every failure here is a configuration or usage
@@ -557,7 +586,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	}
 	// NewEngineeringRuntime fails closed on provider isolation, so there is no
 	// second check here.
-	provider := overrides.Provider
+	provider, providerInjected := overrides.Provider, overrides.Provider != nil
 	if provider == nil {
 		provider = executionProvider(config, agent, artifacts, sandbox, flags.PermissionBypass)
 	}
@@ -578,6 +607,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
 		agents: registry, agent: agent, feedback: feedback,
+		sandbox: sandbox, permissionBypass: flags.PermissionBypass, providerInjected: providerInjected,
 		storage: runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
 		release: release,
 	}, nil
@@ -586,14 +616,31 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 // engine binds the shared composition to one repository. It opens nothing and
 // contacts nothing, so building one per enrolled repository is cheap.
 func (c *composition) engine(target runtime.RepositoryTarget) (*runtime.EngineeringRuntime, error) {
+	return c.engineFor(target, c.agent)
+}
+
+// engineFor binds the shared composition to one repository worked by ONE agent.
+//
+// The agent is a parameter because a supervisor is not single-agent: it drives
+// each run with the worker that run is bound to, so the provider adapter has to
+// be built per pairing rather than once for whichever agent this process was
+// started with.
+func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
 	remote, err := runtime.GovernedRemote(target.Remote)
 	if err != nil {
 		return nil, err
 	}
 	feedback := c.feedbackPolicyFor(target.Identity)
+	// An injected provider is a test seam and stays authoritative. Otherwise
+	// the adapter is built for THIS agent, which is what makes one supervisor
+	// able to run codex and claude side by side.
+	provider := c.provider
+	if !c.providerInjected {
+		provider = executionProvider(c.config, agent, c.artifacts, c.sandbox, c.permissionBypass)
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
-		Agent:             c.agent,
+		Agent:             agent,
 		Agents:            c.agents,
 		Feedback:          feedback,
 		Storage:           c.storage,
@@ -601,7 +648,7 @@ func (c *composition) engine(target runtime.RepositoryTarget) (*runtime.Engineer
 		Owner:             c.owner,
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
 		GitHub:            c.forge,
-		Provider:          c.provider,
+		Provider:          provider,
 		Assurance:         c.assurance,
 		SemanticAssurance: c.semantic,
 		Artifacts:         c.artifacts,
@@ -724,18 +771,53 @@ func githubCredentials(mode string) runtime.CredentialProvider {
 // identities despite the shared account - which is why this file says M0
 // independence and never says vendor independence.
 func semanticAssuranceProvider(config runtime.Config, artifacts runtime.ArtifactStore) runtime.AssuranceProvider {
-	if config.Provider.Kind != runtime.ProviderOpenAI || strings.TrimSpace(config.Provider.CredentialPath) == "" {
+	// The producer is available exactly when the operator configured a
+	// brokered agent with a credential - whether they wrote it as the pre-#63
+	// `provider` block or as an entry in the agent registry. Reading only the
+	// old spelling would have made migrating to `agents` silently remove the
+	// semantic acceptance producer, so a contract requiring it would start
+	// being refused for a reason the operator never chose.
+	//
+	// It does NOT have to be the agent doing the work, and usually should not
+	// be: the same trusted controller credential serves both, no second
+	// mandatory secret is invented, and the two keep distinct producer
+	// identities despite the shared account. That is M0 independence, and this
+	// file has never claimed it is vendor independence.
+	agent, ok := brokeredAgent(config)
+	if !ok {
 		return nil
 	}
 	return runtime.OpenAISemanticVerifier{
 		ArtifactStore: artifacts,
-		Model:         config.Provider.Model,
-		AuthMode:      config.Provider.AuthMode,
-		APIKeyFile:    config.Provider.CredentialPath,
-		Endpoint:      config.Provider.Endpoint,
+		Model:         agent.Model,
+		AuthMode:      agent.DeclaredAuthMode,
+		APIKeyFile:    agent.CredentialPath,
+		Endpoint:      agent.Endpoint,
 		HTTP:          &http.Client{Timeout: 5 * time.Minute},
 		Timeout:       5 * time.Minute,
 	}
+}
+
+// brokeredAgent is the configured protected provider, if there is one. The
+// default agent wins when it is brokered; otherwise the first brokered agent in
+// deterministic order is used, so the answer does not depend on map iteration.
+func brokeredAgent(config runtime.Config) (runtime.ResolvedAgent, bool) {
+	registry, err := config.AgentRegistry()
+	if err != nil {
+		return runtime.ResolvedAgent{}, false
+	}
+	usable := func(agent runtime.ResolvedAgent) bool {
+		return agent.Kind == runtime.AgentKindOpenAIResponses && strings.TrimSpace(agent.CredentialPath) != ""
+	}
+	if agent, err := registry.Agent(""); err == nil && usable(agent) {
+		return agent, true
+	}
+	for _, agent := range registry.All() {
+		if usable(agent) {
+			return agent, true
+		}
+	}
+	return runtime.ResolvedAgent{}, false
 }
 
 // executionProvider builds the adapter for ONE resolved agent. It is the

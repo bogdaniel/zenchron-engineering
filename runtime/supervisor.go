@@ -39,11 +39,18 @@ type SupervisorDependencies struct {
 	Clock    Clock
 	Owner    string
 	Liveness OwnerLiveness
-	// Runtime builds the engine for one repository. It is a factory rather than
-	// a value because a supervisor governs several repositories and each needs
-	// its own repository-bound engine over the SAME store, provider and
-	// credentials.
-	Runtime func(GitHubRepo) (*EngineeringRuntime, error)
+	// Runtime builds the engine for one repository worked by one agent.
+	//
+	// It takes BOTH because a supervisor is not single-agent. The whole point
+	// of the milestone is that #123 can be worked by codex while #124 is worked
+	// by claude, under one process; an engine bound to a single agent would
+	// have driven every run with whichever worker the supervisor happened to be
+	// started with, silently overriding each run's own durable binding.
+	//
+	// It is a factory rather than a value because a supervisor governs several
+	// repositories and several agents, and each pairing needs its own engine
+	// over the SAME store and credentials.
+	Runtime func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error)
 	// Repositories is the set the supervisor may govern. A submission naming
 	// anything else is refused: enrolment is operator authority, and a local
 	// control request must not be able to introduce a repository.
@@ -142,23 +149,33 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	return &Supervisor{deps: d, engines: map[string]*EngineeringRuntime{}}, nil
 }
 
-// engine returns the repository-bound engine, refusing a repository this
-// supervisor was not constructed to govern.
-func (s *Supervisor) engine(identity string) (*EngineeringRuntime, error) {
+// engine returns the engine for one repository worked by one agent, refusing a
+// repository this supervisor was not constructed to govern.
+//
+// An EMPTY agent id resolves the operator's default. That is the documented
+// legacy meaning of a run created before the agent registry existed: it was
+// worked by whichever single provider the configuration named at the time, and
+// the default is the closest honest successor to that.
+func (s *Supervisor) engine(identity, agentID string) (*EngineeringRuntime, error) {
+	agent, err := s.deps.Agents.Agent(agentID)
+	if err != nil {
+		return nil, err
+	}
+	key := identity + "|" + agent.ID
 	s.enginesMu.Lock()
 	defer s.enginesMu.Unlock()
-	if engine, ok := s.engines[identity]; ok {
+	if engine, ok := s.engines[key]; ok {
 		return engine, nil
 	}
 	for _, repo := range s.deps.Repositories {
 		if !strings.EqualFold(repo.String(), identity) {
 			continue
 		}
-		engine, err := s.deps.Runtime(repo)
+		engine, err := s.deps.Runtime(repo, agent)
 		if err != nil {
 			return nil, err
 		}
-		s.engines[repo.String()] = engine
+		s.engines[key] = engine
 		return engine, nil
 	}
 	return nil, fmt.Errorf("repository %q is not governed by this supervisor; enrolment is operator configuration, not a request", identity)
@@ -177,21 +194,13 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	if request.Issue <= 0 {
 		return StartOutcome{}, fmt.Errorf("issue number must be positive, got %d", request.Issue)
 	}
-	engine, err := s.engine(request.Repository)
+	// The agent is resolved against the OPERATOR's registry, and the run is
+	// created through an engine bound to THAT agent. A control request selects
+	// among agents the operator configured; it can never introduce an
+	// executable, a trust mode or a credential.
+	engine, err := s.engine(request.Repository, request.Agent)
 	if err != nil {
 		return StartOutcome{}, err
-	}
-	// The agent is resolved against the OPERATOR's registry. A control request
-	// selects among agents the operator configured; it can never introduce an
-	// executable, a trust mode or a credential.
-	if request.Agent != "" {
-		agent, err := s.deps.Agents.Agent(request.Agent)
-		if err != nil {
-			return StartOutcome{}, err
-		}
-		if engine.deps.Agent.ID != agent.ID {
-			return StartOutcome{}, fmt.Errorf("this supervisor drives agent %q; submit to a supervisor configured for %q, or start that run explicitly", engine.deps.Agent.ID, agent.ID)
-		}
 	}
 	mode := AdoptCompatibleGeneration
 	if request.NewGeneration {
@@ -313,7 +322,10 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 // up by the next one without any second scheduling concept.
 func (s *Supervisor) driveOne(ctx context.Context, run EngineeringRun) (RunOutcome, *FeedbackObservation) {
 	result := RunOutcome{RunID: run.ID, Repo: run.Repository, Agent: run.AgentID, State: run.Disposition}
-	engine, err := s.engine(run.Repository)
+	// The run's OWN durable agent binding decides which worker continues it.
+	// Driving it with the supervisor's own agent would be a silent provider
+	// handoff on every tick - the exact thing the binding exists to prevent.
+	engine, err := s.engine(run.Repository, run.AgentID)
 	if err != nil {
 		result.Error = boundedDetail(err.Error())
 		return result, nil

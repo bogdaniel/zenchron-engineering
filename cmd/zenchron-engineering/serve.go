@@ -87,7 +87,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  state directory   %s\n", built.config.StateDir)
 	fmt.Fprintf(stdout, "  control endpoint  %s\n", listener.Path())
 	fmt.Fprintf(stdout, "  mechanism         %s\n", runtime.ControlEndpointMechanism)
-	fmt.Fprintf(stdout, "  agent             %s (%s, %s)\n", built.agent.ID, built.agent.Kind, built.agent.TrustMode)
+	fmt.Fprintf(stdout, "  agents            %s (default %s)\n", strings.Join(built.agents.IDs(), ", "), built.agents.Default())
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
 
@@ -171,12 +171,12 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 		PollInterval:      settings.PollInterval,
 		Discovery:         discovery,
 		Agents:            c.agents,
-		Runtime: func(repo runtime.GitHubRepo) (*runtime.EngineeringRuntime, error) {
-			return c.engine(runtime.RepositoryTarget{
+		Runtime: func(repo runtime.GitHubRepo, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
+			return c.engineFor(runtime.RepositoryTarget{
 				Identity:      repo.String(),
 				Remote:        repo.CloneURL(),
 				DefaultBranch: watchedDefaultBranch,
-			})
+			}, agent)
 		},
 	})
 }

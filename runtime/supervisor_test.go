@@ -185,6 +185,23 @@ func TestControlClientRefusesAWidenedEndpoint(t *testing.T) {
 // Supervisor
 // ---------------------------------------------------------------------------
 
+// supervisorRegistry is the operator registry a supervisor resolves run
+// bindings against.
+func supervisorRegistry(t *testing.T) AgentRegistry {
+	t.Helper()
+	registry, err := OperatorConfig{
+		Agents: map[string]AgentConfig{
+			"codex":  {Kind: AgentKindCodexCLI, TrustMode: string(TrustOperatorTrusted)},
+			"claude": {Kind: AgentKindClaudeCode, TrustMode: string(TrustOperatorTrusted)},
+		},
+		DefaultAgent: "codex",
+	}.AgentRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
 // supervisorFixture builds a supervisor over the phase 8 fixture's store,
 // driving the same repository-bound engine an operator command would.
 func supervisorFixture(t *testing.T, fixture *phase8Fixture, ceiling int) *Supervisor {
@@ -199,7 +216,8 @@ func supervisorFixture(t *testing.T, fixture *phase8Fixture, ceiling int) *Super
 		Repositories:      []GitHubRepo{repo},
 		MaxConcurrentRuns: ceiling,
 		PollInterval:      time.Minute,
-		Runtime:           func(GitHubRepo) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+		Agents:            supervisorRegistry(t),
+		Runtime:           func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return fixture.runtime, nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +354,8 @@ func TestSupervisorReportsAFailingRunWithoutStoppingItsSiblings(t *testing.T) {
 		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
 		Repositories:      []GitHubRepo{{Owner: "acme", Name: "repo"}},
 		MaxConcurrentRuns: 2, PollInterval: time.Minute,
-		Runtime: func(repo GitHubRepo) (*EngineeringRuntime, error) {
+		Agents: supervisorRegistry(t),
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) {
 			return fixture.runtime, nil
 		},
 	})
@@ -569,5 +588,128 @@ func TestConcurrentDrivingOfOneRunIsSerializedByTheScheduler(t *testing.T) {
 	state := fixture.state(runID)
 	if _, err := Reduce(state.run, state.events); err != nil {
 		t.Fatalf("concurrent driving corrupted the journal: %v", err)
+	}
+}
+
+// TestOneSupervisorDrivesEachRunWithItsOwnAgent is the milestone's headline
+// scenario, and it is the one a single-agent supervisor would quietly break:
+// two issues, two different workers, one process. Driving both with whichever
+// agent the supervisor was started with would be a silent provider handoff on
+// every tick - the exact thing a run's durable agent binding exists to prevent.
+func TestOneSupervisorDrivesEachRunWithItsOwnAgent(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t)
+
+	// Each run is created by an engine bound to its own agent, which is what
+	// `run issue N --agent X` does.
+	started := map[string]string{}
+	for agentID, issue := range map[string]int{"codex": phase8Issue, "claude": phase8Issue + 3} {
+		agent, err := registry.Agent(agentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.forge.Issues[issue] = GitHubIssue{
+			Number: issue, URL: "https://github.com/acme/repo/issues/1",
+			Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+		}
+		deps := fixture.deps
+		deps.Agent, deps.Agents = agent, registry
+		engine := fixture.newRuntime(deps)
+		outcome, err := engine.StartIssueRun(context.Background(), issue, AdoptCompatibleGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		started[outcome.RunID] = agentID
+	}
+	if len(started) != 2 {
+		t.Fatalf("two issues produced %d runs", len(started))
+	}
+
+	// The supervisor asks the factory for an engine per pairing. What it asks
+	// for is the assertion: each run must be offered to the agent it is bound
+	// to, and to no other.
+	var mu sync.Mutex
+	requested := map[string]string{}
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Liveness:          OwnerLivenessFunc(func(string) bool { return false }),
+		Repositories:      []GitHubRepo{repo},
+		MaxConcurrentRuns: 2, PollInterval: time.Minute, Agents: registry,
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			mu.Lock()
+			requested[agent.ID] = agent.Kind
+			mu.Unlock()
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requested["codex"] != AgentKindCodexCLI || requested["claude"] != AgentKindClaudeCode {
+		t.Fatalf("the supervisor did not drive each run with its own agent: %#v", requested)
+	}
+
+	// And each run's binding is unchanged: being driven is not a handoff.
+	for runID, agentID := range started {
+		if recorded := fixture.state(runID).recordedAgent().AgentID; recorded != agentID {
+			t.Fatalf("run %s was bound to %q and is now %q", runID, agentID, recorded)
+		}
+	}
+}
+
+// TestSupervisorAcceptsASubmissionForAnyConfiguredAgent is the intake half of
+// the same law: an operator submits per-issue agents to ONE supervisor.
+func TestSupervisorAcceptsASubmissionForAnyConfiguredAgent(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t)
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 2,
+		PollInterval: time.Minute, Agents: registry,
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for agentID, issue := range map[string]int{"codex": phase8Issue + 11, "claude": phase8Issue + 12} {
+		fixture.forge.Issues[issue] = GitHubIssue{
+			Number: issue, URL: "https://github.com/acme/repo/issues/2",
+			Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+		}
+		outcome, err := supervisor.Submit(context.Background(), ControlRequest{
+			Repository: "acme/repo", Issue: issue, Agent: agentID,
+		})
+		if err != nil {
+			t.Fatalf("submitting issue %d to agent %q was refused: %v", issue, agentID, err)
+		}
+		if recorded := fixture.state(outcome.RunID).recordedAgent().AgentID; recorded != agentID {
+			t.Fatalf("issue %d was bound to %q, want %q", issue, recorded, agentID)
+		}
+	}
+	// An agent the operator did not configure is still refused: a control
+	// request selects among configured workers and never introduces one.
+	if _, err := supervisor.Submit(context.Background(), ControlRequest{
+		Repository: "acme/repo", Issue: phase8Issue + 13, Agent: "gemini",
+	}); err == nil {
+		t.Fatal("a submission introduced an unconfigured agent")
 	}
 }
