@@ -7,13 +7,22 @@ This file is the persistent engineering handoff for Codex, Claude Code, Cursor, 
 Before making architectural or implementation changes, read:
 
 1. `README.md`
-2. `docs/vision.md`
-3. `docs/principles.md`
-4. `docs/architecture.md`
-5. all accepted ADRs under `docs/adr/`
-6. `docs/spec/v0.1.md`
+2. `ROADMAP.md` — where the project is, and what the current milestone is a prerequisite for
+3. `docs/product-architecture.md` — the system an operator actually runs
+4. `docs/vision.md`
+5. `docs/principles.md` and `docs/construction-principles.md`
+6. `docs/architecture.md`
+7. all accepted ADRs under `docs/adr/`
+8. `docs/spec/v0.1.md`
 
 Committed repository documents are the project source of truth. Chat history is not.
+
+Read `ROADMAP.md` before concluding what this product is. The Authorization
+Kernel is the core, and a governed single-task runtime is not the finished
+category: the current milestone (#63) builds the persistent multi-agent
+execution runtime, and the Engineering Planner above it (#64) is a separate,
+later layer. Do not implement #64's roles, plans or decomposition while working
+on anything else.
 
 ## Project identity
 
@@ -73,6 +82,36 @@ Prefer:
 - contract reassessment when observed scope materially differs from predicted scope;
 - boring infrastructure until the engineering semantics are proven.
 
+## Current product surface
+
+The operator-facing system is documented, not inferred:
+
+- `docs/supervisor.md` — `serve`, the persistent supervisor, and its
+  local control endpoint
+- `docs/agents.md` — named execution agents, trust modes, provenance and the
+  provider-handoff refusal
+- `docs/getting-started.md`, `docs/running-work.md`,
+  `docs/running-multiple-tasks.md`, `docs/github-feedback.md`,
+  `docs/configuration.md`, `docs/troubleshooting.md`
+
+Three distinctions in that surface are frequently collapsed by a reader in a
+hurry, and collapsing any of them is a defect:
+
+- **agent id != provider kind != trust mode.** They are three separate facts.
+- **execution trust != acceptance authority.** An `operator_trusted` worker may
+  author a change and may never accept it.
+- **execution agent != engineering role.** Agents are workers an operator
+  installed; roles belong to the future planner in #64.
+
+## Design principles for implementation
+
+`docs/construction-principles.md` is binding, not advisory: DRY for knowledge
+rather than for text, Go-adapted SOLID, composition over inheritance, and YAGNI.
+A change can be functionally green and still fail review for materially
+violating them. Provider-specific knowledge belongs in adapters and their specs;
+adding a provider must not require semantic changes in kernel or domain
+packages.
+
 ## Working style
 
 For non-trivial changes:
@@ -86,11 +125,27 @@ For non-trivial changes:
 7. prefer small, reviewable commits;
 8. report assumptions, unresolved uncertainty, and evidence produced.
 
-## Initial milestone
+## Milestones
 
-Do not build a broad autonomous engineering platform yet.
+**M0-M1, complete.** Prove the authorization kernel using representative
+scenarios (below), and build the durable single-task local runtime above it.
 
-The first milestone is to prove the authorization kernel using representative scenarios:
+**M1-R (#63), the current surface.** Make that runtime a persistent, usable,
+multi-agent engineering execution runtime: `serve`, named execution agents,
+concurrent runs, the GitHub feedback loop, and an operator control room. This is
+the milestone the code in this repository now implements.
+
+**M2 (#64), not implemented.** The Engineering Planner: roles, capabilities,
+`EngineeringPlan`, decomposition and dynamic agent selection. Do not build any
+of it while working on something else. See `ROADMAP.md`.
+
+Still true, and still the reason the kernel came first: do not build a broad
+autonomous engineering platform. Breadth is earned one governed capability at a
+time, and every capability added since M0 has had to keep the kernel's
+invariants intact.
+
+The kernel scenarios that first milestone proved, retained here because they
+remain the acceptance shape for governance work:
 
 - trivial change;
 - normal behavioral change;

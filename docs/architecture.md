@@ -1,5 +1,15 @@
 # Architecture
 
+This document is the **Authorization Kernel**: how engineering facts become
+obligations, evidence and an action-scoped authority decision. It is the durable
+core and it is deliberately unaware of which coding agent produced a change.
+
+For the system an operator actually runs — the persistent supervisor, the named
+execution agents, concurrent runs and the GitHub feedback loop that sit *above*
+this kernel — see [`product-architecture.md`](product-architecture.md). For where
+the project is going, see [`../ROADMAP.md`](../ROADMAP.md). Neither replaces this
+document: every path in them ends at the kernel described here.
+
 ## System boundary
 
 Zenchron Engineering OS is organized around an Engineering Authorization Kernel. Agent orchestration is an execution concern beneath that kernel.
@@ -154,6 +164,10 @@ Initial decision states should distinguish at least:
 ### AgentProvider
 
 Codex, Claude, Gemini, local agents, and future systems belong behind provider adapters.
+
+Implemented as a named agent registry: a stable agent id, a provider kind and an
+explicit trust mode are three separate facts, and no package in this kernel
+knows any of them. See [`agents.md`](agents.md).
 
 ### AssuranceProvider
 

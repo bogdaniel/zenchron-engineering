@@ -1,10 +1,104 @@
 # Zenchron Engineering OS
 
-Policy-governed autonomous software engineering infrastructure that turns engineering intent into bounded work, verified evidence, and authorized software changes.
+A local engineering control plane that coordinates the AI coding agents you have
+already installed — Codex CLI, Claude Code, Gemini CLI, an agentic Qwen CLI —
+across several project tasks at once, using GitHub issues as context and pull
+requests as the review surface, while keeping verification, provenance, policy
+and authority in the runtime rather than in the agent.
+
+The core rule has not changed: **agents may reason and execute, but they may not
+self-authorize material outcomes.**
+
+## The operator workflow
+
+```bash
+# 1. Build it.
+go build -o bin/zenchron-engineering ./cmd/zenchron-engineering
+
+# 2. See which workers you can actually give work to. This spends nothing.
+zenchron-engineering autonomy agents --text
+
+# 3. Start the persistent runtime. It owns the work from here.
+zenchron-engineering serve
+
+# 4. In another terminal: give it several tickets, one agent each.
+zenchron-engineering autonomy run issue 123 --agent codex
+zenchron-engineering autonomy run issue 124 --agent claude
+
+# 5. Watch all of it from one place.
+zenchron-engineering autonomy status --text
+zenchron-engineering autonomy logs RUN --follow
+
+# 6. Review the pull requests in GitHub, and leave comments there.
+#    Admitted feedback reaches the right worker; you copy nothing.
+
+# 7. Merge when satisfied. That decision stays yours.
+```
+
+Start at [`docs/getting-started.md`](docs/getting-started.md).
+
+```text
+    you                          zenchron-engineering serve                GitHub
+     |                                      |                                |
+     |-- run issue 123 --agent codex ------>|                                |
+     |-- run issue 124 --agent claude ----->|                                |
+     |                                      |-- clone, invoke agent          |
+     |                                      |   commit, reassess, assure     |
+     |                                      |   authorize, push, open PR --->|
+     |<-- status / logs --------------------|                                |
+     |                                                                       |
+     |-- review comment ---------------------------------------------------->|
+     |                                      |<-- admitted feedback ----------|
+     |                                      |-- worker corrects, PR updates ->|
+     |-- merge ------------------------------------------------------------->|
+```
+
+## What it does for you, and what it refuses to do for you
+
+**It removes the message bus.** You do not paste a prompt into a coding CLI,
+paste its output back, copy failing test output somewhere else, create the
+commit, push the branch, or shuttle review comments into a terminal. The runtime
+owns all of that.
+
+**It does not remove you from the decision.** Merge is external. No
+configuration in this repository authorizes the runtime to adopt its own
+candidate, and a coding agent's own report is never the evidence that accepts
+its own change.
+
+**It uses the subscriptions you already have.** Selecting `claude` runs the
+Claude Code CLI you authenticated, not an Anthropic API adapter substituted for
+it. The child environment is built from scratch, so an API key in your shell
+cannot silently turn a subscription session into metered API billing. Zenchron
+requires no OpenAI credential for normal local development.
+
+**It tells the truth about what it can prove.** A CLI running under your account
+can read what you can read. That is what `operator_trusted` names, it is never
+relabelled as proven isolation, and work whose policy requires protected
+execution is refused to it.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [`docs/getting-started.md`](docs/getting-started.md) | install, configure, first run |
+| [`docs/running-work.md`](docs/running-work.md) | one issue end to end |
+| [`docs/running-multiple-tasks.md`](docs/running-multiple-tasks.md) | several at once, and what happens when one merges first |
+| [`docs/github-feedback.md`](docs/github-feedback.md) | the review loop, and who is allowed to direct a worker |
+| [`docs/agents.md`](docs/agents.md) | the workers, trust modes, provenance |
+| [`docs/supervisor.md`](docs/supervisor.md) | `serve`, its control endpoint, drain/shutdown/stop-all |
+| [`docs/configuration.md`](docs/configuration.md) | every configuration member and which layer owns it |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | symptom, cause, fix |
+| [`ROADMAP.md`](ROADMAP.md) | where this sits, and what comes next |
+| [`docs/product-architecture.md`](docs/product-architecture.md) | the running system |
+| [`docs/architecture.md`](docs/architecture.md) | the Authorization Kernel |
+| [`docs/principles.md`](docs/principles.md) | architectural principles P1-P12 |
+| [`docs/construction-principles.md`](docs/construction-principles.md) | how the code implementing them is built |
 
 ## Thesis
 
-Zenchron Engineering is **not** a generic multi-agent orchestrator. Coding agents are replaceable execution providers. The durable system governs engineering change:
+Zenchron Engineering is **not** a generic multi-agent orchestrator. Coding agents
+are replaceable execution providers. The durable system governs engineering
+change:
 
 ```text
 engineering intent
@@ -16,18 +110,19 @@ engineering intent
   -> authority decision
 ```
 
-The core rule is simple: **agents may reason and execute, but they may not self-authorize material outcomes.**
-
 ## Status
 
-This repository is in architecture/bootstrap stage. The first objective is to specify and validate the Engineering Authorization Kernel before building a broad orchestration or control-plane product.
+The Authorization Kernel and the local Engineering Runtime are implemented. The
+current milestone makes that runtime a persistent, multi-agent, operator-usable
+control plane; the Engineering Planner above it is a later layer and is not
+built. See [`ROADMAP.md`](ROADMAP.md).
 
 ## Technology decisions
 
 - Core implementation language: **Go**
 - Canonical machine-readable representation: **JSON**
 - Contract/schema format: **JSON Schema**
-- Agent providers: replaceable adapters; initial targets are Codex and Claude
+- Agent providers: replaceable adapters. Codex CLI, Claude Code, Gemini CLI and an agentic Qwen CLI run as operator-trusted local workers; the brokered OpenAI Responses provider remains the protected one
 - Assurance providers: pluggable; Sentinel Shield is the Zenchron-native high-fidelity integration
 - Execution environments: pluggable; Zenchron Foundry is the native provenance-oriented integration
 
@@ -242,35 +337,107 @@ a leased run's material, anything inside the retention window, the runtime
 database and its canonical rows, and anything whose ownership cannot be
 proven are never eligible.
 
+`zenchron-engineering serve` is the persistent supervisor. It owns the
+scheduler, drives every active run, observes each repository once on behalf of
+all of them, and answers an operator while the work continues. Its control
+endpoint is an operator-authority boundary rather than a convenience socket:
+anything able to submit an accepted request to it can start operator-trusted
+coding agents under the local account, so it is a Unix-domain socket inside the
+owner-only state directory, owner-only itself, checked before creation and
+re-checked by every client, with no TCP listener and no stored credential beside
+it. Drain, shutdown and stop-all are three different operations, and only the
+last one cancels runs.
+
+`autonomy agents` reports each configured worker: found, capabilities
+advertised, version, and the authentication state actually observed. It spends
+nothing, and an unobserved authentication mode is reported as `unknown` rather
+than inferred to be a subscription. Readiness requires the installed CLI to
+advertise the exact flags the runtime passes, so a CLI that renamed one is
+reported unavailable instead of being run in whatever mode it defaults to.
+
+`autonomy status` with no run named is the all-runs view; naming a run keeps the
+detailed single-run projection unchanged. `autonomy logs RUN` shows the
+sanitized provider transcripts with attempt boundaries and the agent that
+produced each, so an operator never has to locate an artifact path. The raw
+transcripts beside them stay local-only forensic material and are never
+rendered.
+
+GitHub review feedback reaches the worker through one admission gate. Reviews,
+inline comments, pull-request conversation and post-creation issue comments are
+all admitted on the ACTOR's current repository permission — defaulting to
+collaborator-equivalent write — and never on what the comment says. The
+runtime's own comments are refused by identity, automation accounts are refused
+unless allowlisted, an unresolvable actor is never admitted, and an admitted
+item is delivered exactly once, bound to the invocation that received it, framed
+as untrusted data. A review of a superseded commit stays history, and a frozen
+generation never wakes up because someone commented on its old pull request.
+
+Changing a live run's execution agent is a governed transition that this
+milestone always refuses, recording a complete typed transition record —
+candidate, both agents, both trust modes, reason, contract, cumulative budgets
+with unknown dimensions left unknown, consumed feedback — and pointing at a new
+generation instead. Budgets never reset across it, and a run created under
+protected execution is never continued by an operator-trusted worker.
+
 ## Repository map
 
 ```text
-AGENTS.md                    Persistent instructions for coding agents
-docs/vision.md               Product thesis and boundaries
-docs/principles.md           Frozen architectural principles
-docs/architecture.md         System architecture
-docs/adr/                    Architecture decisions
-docs/spec/v0.1.md            Initial domain specification
-docs/spec/runtime-v0.1.md    Local runtime specification
-schemas/                     Canonical JSON Schemas and Go validation tests
-domain/                      Go v0.1 representations and canonical JSON codecs
-reassessment/                Observed-scope validation and contract reassessment
-runtime/                     Local runtime, adapters, scheduler, and state
-fixtures/v0.1/               Positive and targeted invalid schema fixtures
-cmd/zenchron-engineering/    CLI entry point
+AGENTS.md                       Persistent instructions for coding agents
+ROADMAP.md                      Where the project is and what comes next
+docs/getting-started.md         Install, configure, first run
+docs/running-work.md            One issue end to end
+docs/running-multiple-tasks.md  Several at once, and base drift between them
+docs/github-feedback.md         The review loop and its admission gate
+docs/agents.md                  Execution agents, trust modes, provenance
+docs/supervisor.md              serve, its control endpoint and lifecycle
+docs/configuration.md           Every configuration member and its layer
+docs/troubleshooting.md         Symptom, cause, fix
+docs/product-architecture.md    The running system
+docs/vision.md                  Product thesis and boundaries
+docs/principles.md              Frozen architectural principles P1-P12
+docs/construction-principles.md How the implementing code is built
+docs/architecture.md            Authorization Kernel architecture
+docs/adr/                       Architecture decisions
+docs/spec/v0.1.md               Initial domain specification
+docs/spec/runtime-v0.1.md       Local runtime specification
+schemas/                        Canonical JSON Schemas and Go validation tests
+domain/                         Go v0.1 representations and canonical JSON codecs
+reassessment/                   Observed-scope validation and contract reassessment
+runtime/                        Local runtime, adapters, supervisor, scheduler, state
+fixtures/v0.1/                  Positive and targeted invalid schema fixtures
+cmd/zenchron-engineering/       CLI entry point and composition root
 ```
 
-## Non-goals for the first milestone
+## Non-goals
 
 Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC.
 
-The first milestone must prove that the same facts + policies can produce appropriately different engineering obligations and authority decisions across low-, medium-, and high-impact work.
+Nor, at this milestone: an AI agent router, a raw-LLM coding harness, a hosted
+control plane, remote worker federation, autonomous merge, or the engineering
+roles and planning layer that [`ROADMAP.md`](ROADMAP.md) assigns to the next one.
+
+The kernel milestone had to prove that the same facts and policies produce
+appropriately different obligations and authority decisions across low-, medium-
+and high-impact work. That property still governs everything added since.
 
 ## Development
 
 ```bash
 go test ./...
 go run ./cmd/zenchron-engineering version
+
+# The persistent runtime and the operator surfaces over it.
+go run ./cmd/zenchron-engineering serve
+go run ./cmd/zenchron-engineering autonomy agents --text
+go run ./cmd/zenchron-engineering autonomy run issue 123 --agent codex
+go run ./cmd/zenchron-engineering autonomy run issues 123 124 --assign 123=codex --assign 124=claude
+go run ./cmd/zenchron-engineering autonomy status --text
+go run ./cmd/zenchron-engineering autonomy logs <run> --follow
+go run ./cmd/zenchron-engineering autonomy agent set <run> --agent claude --reason "..."
+go run ./cmd/zenchron-engineering autonomy drain
+go run ./cmd/zenchron-engineering autonomy shutdown
+go run ./cmd/zenchron-engineering autonomy stop-all --reason "end of day"
+
 go run ./cmd/zenchron-engineering selfhost issue 4
 go run ./cmd/zenchron-engineering selfhost issue 4 --model gpt-5.6-terra --fallback-model gpt-5.6-luna
 go run ./cmd/zenchron-engineering selfhost resume issue 4
