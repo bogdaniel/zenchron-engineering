@@ -1036,8 +1036,12 @@ func TestAPreWriteRequestIsNotJoined(t *testing.T) {
 		pr, _ := forge.PullRequest(context.Background(), repo, 1)
 		joiner <- pr
 	}()
-	// Let the joiner reach the multiplexer while the first read is still held.
-	time.Sleep(50 * time.Millisecond)
+	// The joiner must have reached the forge with its OWN request before
+	// anything is released. Sleeping here would let a slow joiner arrive after
+	// the first request had already retired, where there is nothing left to
+	// join and the join decision is never exercised - the test would pass
+	// without testing anything.
+	inner.waitForSecondCall(t)
 	close(inner.release)
 
 	if stale := <-first; stale.HeadSHA != "before" {
@@ -1089,7 +1093,15 @@ type blockingForge struct {
 	*FakeGitHubAdapter
 	release chan struct{}
 	called  chan struct{}
-	once    sync.Once
+	// second closes when a SECOND request reaches the forge. A test that needs
+	// a joiner to have made its own request cannot prove that by sleeping: on a
+	// loaded machine the joiner may still be on its way, the first request
+	// retires, and the joiner then reads current state through a path that
+	// never exercised the join decision at all. That is a false green rather
+	// than a false red, which is the harder kind to notice.
+	second chan struct{}
+	mu     sync.Mutex
+	calls  int
 }
 
 func newBlockingForge() *blockingForge {
@@ -1097,6 +1109,7 @@ func newBlockingForge() *blockingForge {
 		FakeGitHubAdapter: NewFakeGitHubAdapter(),
 		release:           make(chan struct{}),
 		called:            make(chan struct{}),
+		second:            make(chan struct{}),
 	}
 }
 
@@ -1109,6 +1122,18 @@ func (f *blockingForge) waitForCall(t *testing.T) {
 	}
 }
 
+// waitForSecondCall blocks until a second request has reached the forge. A
+// reader that JOINED an in-flight request never issues one, so this timing out
+// is itself the failure the caller is looking for.
+func (f *blockingForge) waitForSecondCall(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.second:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no second request ever reached the forge: the reader joined the in-flight one instead of starting its own")
+	}
+}
+
 func (f *blockingForge) PullRequest(ctx context.Context, repo GitHubRepo, number int) (GitHubPullRequest, error) {
 	// The state is observed FIRST and the response is slow afterwards, which
 	// is what a pre-write read actually is. Blocking before observing would
@@ -1116,7 +1141,16 @@ func (f *blockingForge) PullRequest(ctx context.Context, repo GitHubRepo, number
 	// exist and a test built on it would prove nothing - which is exactly what
 	// the first version of this fake did.
 	pr, err := f.FakeGitHubAdapter.PullRequest(ctx, repo, number)
-	f.once.Do(func() { close(f.called) })
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	f.mu.Unlock()
+	switch n {
+	case 1:
+		close(f.called)
+	case 2:
+		close(f.second)
+	}
 	<-f.release
 	return pr, err
 }
@@ -1278,5 +1312,71 @@ func TestASupersededRateLimitStillTeachesTheRepositoryToWait(t *testing.T) {
 	}
 	if len(inner.Calls) != before {
 		t.Fatalf("a superseded rate limit taught nobody: %d new calls reached the forge", len(inner.Calls)-before)
+	}
+}
+
+// TestOneRunsCancellationIsNotSharedWithItsSiblings separates a third pair of
+// facts the multiplexer had been treating as one.
+//
+// Errors are worth sharing when they describe the repository: a 404 or a 403 is
+// the same answer for every run, and re-asking would only spend rate limit to
+// be told the same thing. A caller's own cancellation or deadline describes the
+// CALLER. Caching it would mean stopping one run answers its siblings' live
+// questions with that run's cancellation until the window expires - `stop RUN`
+// silently degrading every other run in the same repository, which is the exact
+// opposite of what sharing an observation stream is for.
+func TestOneRunsCancellationIsNotSharedWithItsSiblings(t *testing.T) {
+	inner := NewFakeGitHubAdapter()
+	inner.PullRequests[1] = GitHubPullRequest{Number: 1, HeadSHA: "head", State: GitHubOpen}
+	cancelled := true
+	inner.Fail = func(GitHubCall) error {
+		if cancelled {
+			cancelled = false
+			return context.Canceled
+		}
+		return nil
+	}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour // the whole point is that the answer would persist
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := forge.PullRequest(stopped, repo, 1); err == nil {
+		t.Fatal("the fixture never produced a cancellation, so this test proves nothing")
+	}
+
+	// A sibling with a live context asks the same question.
+	pr, err := forge.PullRequest(context.Background(), repo, 1)
+	if err != nil {
+		t.Fatalf("a sibling inherited another run's cancellation: %v", err)
+	}
+	if pr.HeadSHA != "head" {
+		t.Fatalf("the sibling did not get a real answer: head %q", pr.HeadSHA)
+	}
+}
+
+// TestARepositoryErrorIsStillSharedOnce is the other side of that line. The fix
+// above must not turn into "never cache errors": a refusal that describes the
+// repository is exactly what the siblings should be spared from rediscovering,
+// and re-asking would spend rate limit to be told the same thing N times.
+func TestARepositoryErrorIsStillSharedOnce(t *testing.T) {
+	inner := NewFakeGitHubAdapter()
+	inner.Fail = func(GitHubCall) error {
+		return &GitHubAPIError{Status: 404, Detail: "not found"}
+	}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Hour
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	if _, err := forge.PullRequest(context.Background(), repo, 1); err == nil {
+		t.Fatal("the refusal was not surfaced")
+	}
+	before := len(inner.Calls)
+	if _, err := forge.PullRequest(context.Background(), repo, 1); err == nil {
+		t.Fatal("the shared refusal was not surfaced to the sibling")
+	}
+	if len(inner.Calls) != before {
+		t.Fatalf("a repository refusal was rediscovered rather than shared: %d new calls", len(inner.Calls)-before)
 	}
 }

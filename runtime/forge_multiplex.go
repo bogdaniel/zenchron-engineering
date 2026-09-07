@@ -200,6 +200,18 @@ func observe[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, m
 	if m.epoch != epoch {
 		return typedForgeAnswer[T](key, value, err)
 	}
+	// A caller's OWN cancellation or deadline is a fact about that caller, not
+	// about the repository, so it is returned and never shared. Caching it would
+	// let one stopped run answer its siblings' live questions with a
+	// cancellation for the rest of the window - a run being stopped would
+	// degrade every other run in the same repository, which is the opposite of
+	// what sharing an observation stream is for.
+	//
+	// Other errors ARE cached. A 404 or a 403 describes the repository, which is
+	// exactly the kind of observation the siblings should be spared repeating.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return value, err
+	}
 	m.answers[key] = forgeAnswer{value: value, err: err, at: now}
 	return value, err
 }
