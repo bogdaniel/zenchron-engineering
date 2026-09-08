@@ -100,6 +100,7 @@ func planStageViews(plan domain.EngineeringPlan) []stageView {
 		views = append(views, stageView{
 			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn,
 			RequiredClaims: stage.RequiredClaims, Action: stage.Action, Independence: stage.Independence,
+			SubstitutesRole:      stage.SubstitutesRole,
 			RequiresCapabilities: stage.RequiresCapabilities, Profile: stage.Profile,
 			TrustRequirement: stage.TrustRequirement,
 		})
@@ -117,6 +118,20 @@ func unmetObligations(plan domain.EngineeringPlan, requirements domain.PlanRequi
 	for _, requirement := range requirements.Roles {
 		stage, found := roleStage(plan, requirement.Role)
 		if !found {
+			// A human decision gate may stand in for the role where POLICY
+			// permitted that substitution - and only there. It is the same
+			// obligation answered by a person instead of a worker, which is
+			// exactly what the permission says may happen.
+			if substituted, ok := humanSubstitute(plan, requirement.Role); ok {
+				if requirement.Independence == nil || !requirement.Independence.HumanSubstitutionPermitted {
+					reasons = append(reasons, fmt.Sprintf(
+						"stage %q substitutes a person for role %q and policy did not permit that substitution", substituted.ID, requirement.Role))
+				} else if len(substituted.RequiredClaims) == 0 {
+					reasons = append(reasons, fmt.Sprintf(
+						"stage %q substitutes a person for role %q and states nothing for them to answer", substituted.ID, requirement.Role))
+				}
+				continue
+			}
 			reasons = append(reasons, fmt.Sprintf("policy requires role %q and no stage fulfils it (%s)", requirement.Role, requirement.Statement))
 			continue
 		}
@@ -165,6 +180,17 @@ func unmetObligations(plan domain.EngineeringPlan, requirements domain.PlanRequi
 		}
 	}
 	return reasons
+}
+
+// humanSubstitute is the human decision gate standing in for one role, if the
+// plan states one.
+func humanSubstitute(plan domain.EngineeringPlan, role domain.EngineeringRole) (domain.PlanStage, bool) {
+	for _, stage := range plan.Stages {
+		if stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role {
+			return stage, true
+		}
+	}
+	return domain.PlanStage{}, false
 }
 
 func roleStage(plan domain.EngineeringPlan, role domain.EngineeringRole) (domain.PlanStage, bool) {
@@ -266,6 +292,26 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 	for _, stage := range plan.Stages {
 		before, found := previousStage(previous, stage.ID)
 		if !found {
+			continue
+		}
+		// A stage that CHANGED KIND from a worker stage to a human decision
+		// gate is the policy-permitted human substitution: no eligible
+		// independent worker existed, policy said a person may answer instead,
+		// and an operator decided to. It legitimately drops the worker
+		// requirements, because a gate has no worker.
+		//
+		// It is permitted only where the previous stage carried that
+		// permission. Without this the same shape would be the easiest way to
+		// escape an independence obligation: turn the reviewer into a gate and
+		// the requirement disappears with it.
+		if before.Kind == domain.StageAgent && stage.Kind == domain.StageHumanDecisionGate {
+			if before.Independence == nil || !before.Independence.HumanSubstitutionPermitted {
+				reasons = append(reasons, fmt.Sprintf(
+					"stage %q becomes a human decision gate and its previous form did not carry a policy-permitted human substitution: an independence obligation cannot be escaped by changing what the stage is", stage.ID))
+			}
+			if len(stage.RequiredClaims) == 0 {
+				reasons = append(reasons, fmt.Sprintf("stage %q becomes a human decision gate stating nothing for a person to answer", stage.ID))
+			}
 			continue
 		}
 		if trustStrength(stage.TrustRequirement) < trustStrength(before.TrustRequirement) {

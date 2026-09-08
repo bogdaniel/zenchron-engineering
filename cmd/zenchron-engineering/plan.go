@@ -17,15 +17,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
 const planUsage = "usage: zenchron-engineering autonomy plan {issue <number> [--template <id>] [--agent <id>] [--deterministic]|" +
-	"show <plan>|approve <plan> [--note <text>]|reject <plan> [--note <text>]|revise <plan> [--template <id>] [--deterministic]|" +
+	"show <plan>|approve <plan> [--note <text>]|reject <plan> [--note <text>]|" +
+	"revise <plan> [--template <id>] [--deterministic] [--substitute-human <stage>]|" +
 	"status <plan>|list} [--text] [--repo owner/name] [--config <path>]"
 
 // autonomyPlan dispatches the plan verbs.
@@ -71,6 +74,9 @@ func autonomyPlan(ctx context.Context, args []string, overrides autonomyOverride
 	case "approve", "reject":
 		return planDecide(flags, overrides, planID, verb, stdout)
 	case "revise":
+		if flags.SubstituteHuman != "" {
+			return planSubstituteHuman(ctx, flags, overrides, planID, stdout)
+		}
 		return planRevise(ctx, flags, overrides, planID, stdout)
 	default:
 		return runtime.ExitInvalid, errors.New(planUsage)
@@ -260,6 +266,77 @@ func planRevise(ctx context.Context, flags autonomyFlags, overrides autonomyOver
 		flags.Repo = repository
 	}
 	return planPropose(ctx, flags, overrides, issue, planID, stdout)
+}
+
+// planSubstituteHuman proposes a revision in which one blocked agent stage
+// becomes a human decision gate.
+//
+// It is the operator ACTING on an independence shortage that policy permits a
+// person to fill. It applies nothing: the substitution produces a proposed
+// revision that goes through the same validation and the same approval as any
+// other, because replacing a worker with a person changes what the plan is.
+func planSubstituteHuman(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (int, error) {
+	composed, err := buildPlanComposition(flags, overrides)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer composed.release()
+
+	view, err := composed.service.View(planID)
+	if err != nil {
+		return exitFor(err, exitRunNotFound), err
+	}
+	contract, found, err := composed.built.store.PlanContract(planID, view.Plan.Revision)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	if !found {
+		return runtime.ExitFailed, fmt.Errorf("plan %s revision %d has no stored contract, so the claims a person would answer are unknown", planID, view.Plan.Revision)
+	}
+	// The claims the person answers are the contract's own INDEPENDENT claims:
+	// the ones policy already said an independent producer must supply. A
+	// substitution changes who answers them, never what they are.
+	claims := independentClaims(contract)
+	if len(claims) == 0 {
+		return runtime.ExitInvalid, fmt.Errorf(
+			"the work contract defines no claim requiring an independent producer, so there is nothing for a human decision gate to answer")
+	}
+	stages, err := planning.SubstituteHumanReview(view.Plan, flags.SubstituteHuman, claims)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	repository, issue, _, err := composed.built.store.PlanSource(planID)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	_ = repository
+	plan, err := composed.service.Propose(ctx, runtime.ProposeInput{
+		PlanID: planID, Objective: view.Plan.Objective, Subject: view.Plan.Subject,
+		Contract: contract, Reasoned: stages, Issue: issue,
+		Origin: "operator_edit",
+	})
+	if err != nil {
+		return exitFor(err, runtime.ExitFailed), err
+	}
+	revised, err := composed.service.View(plan.ID)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	return planOutput(flags, revised, stdout, "proposed")
+}
+
+// independentClaims are the contract's claims that require a producer
+// independent of the change producer - which is exactly what a human
+// substitution is being asked to supply.
+func independentClaims(contract domain.EngineeringWorkContract) []string {
+	var claims []string
+	for id, claim := range contract.RequiredClaims {
+		if claim.IndependentFromChangeProducer {
+			claims = append(claims, id)
+		}
+	}
+	sort.Strings(claims)
+	return claims
 }
 
 // planShow is the approval view: the exact revision, its state, the assignments

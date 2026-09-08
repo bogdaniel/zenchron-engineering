@@ -301,3 +301,136 @@ func TestAnEscalatingProfileIsIneligibleWithItsReason(t *testing.T) {
 		t.Fatalf("an escalating profile was not recorded as ineligible with its reason: %#v", explanations)
 	}
 }
+
+// The operator's answer to an independence shortage policy permits a person to
+// fill. It converts the blocked stage into a human decision gate - which creates
+// no run - and it refuses everywhere policy did not permit the substitution.
+func TestHumanSubstitutionIsAvailableOnlyWherePolicyPermitsIt(t *testing.T) {
+	plan := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	stage, found := stageForRole(plan, domain.RoleSecurityReviewer)
+	if !found {
+		t.Fatal("the fixture plan has no security reviewer stage")
+	}
+
+	// Policy did not permit it here: the substitution is refused, with the
+	// reason that the permission is not the operator's to grant.
+	_, err := planning.SubstituteHumanReview(plan, stage.ID, []string{"claim-security-review"})
+	if err == nil || !strings.Contains(err.Error(), "nothing else may grant it") {
+		t.Fatalf("a substitution policy did not permit was accepted: %v", err)
+	}
+
+	// With the permission, the stage becomes a human decision gate that
+	// references the claims a person answers, keeps the dependencies, and
+	// carries no worker requirement at all.
+	permitted := plan
+	permitted.Stages = append([]domain.PlanStage{}, plan.Stages...)
+	for i, existing := range permitted.Stages {
+		if existing.ID != stage.ID {
+			continue
+		}
+		independence := *existing.Independence
+		independence.HumanSubstitutionPermitted = true
+		permitted.Stages[i].Independence = &independence
+	}
+	stages, err := planning.SubstituteHumanReview(permitted, stage.ID, []string{"claim-security-review"})
+	if err != nil {
+		t.Fatalf("a policy-permitted substitution was refused: %v", err)
+	}
+	var substituted domain.PlanStage
+	for _, candidate := range stages {
+		if candidate.ID == stage.ID {
+			substituted = candidate
+		}
+	}
+	if substituted.Kind != domain.StageHumanDecisionGate {
+		t.Fatalf("the substituted stage is a %s", substituted.Kind)
+	}
+	if substituted.Role != "" || substituted.Profile != "" || len(substituted.RequiresCapabilities) > 0 {
+		t.Fatalf("the human decision gate kept worker requirements: %#v", substituted)
+	}
+	if !containsString(substituted.RequiredClaims, "claim-security-review") {
+		t.Fatalf("the gate does not state what the person answers: %#v", substituted.RequiredClaims)
+	}
+	if len(substituted.DependsOn) != len(stage.DependsOn) {
+		t.Fatalf("the substitution changed the graph: %#v vs %#v", substituted.DependsOn, stage.DependsOn)
+	}
+}
+
+// The substitution is checked where it lands: at the revision boundary, and
+// against the policy obligation it claims to answer. Turning an
+// independence-carrying stage into a gate is the easiest way to escape the
+// obligation, so a gate stands in for a role only when it SAYS it does and only
+// where policy permitted a person to answer.
+func TestARevisionCannotEscapeIndependenceByBecomingAGate(t *testing.T) {
+	previous := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	stage, _ := stageForRole(previous, domain.RoleSecurityReviewer)
+
+	// The policy fixture's own permission, which is what decides.
+	permittedContract := contractFor(t, "security-sensitive.engineering-fact.json")
+	permitRequirement := func(permit bool) domain.EngineeringWorkContract {
+		contract := permittedContract
+		requirements := *contract.PlanRequirements
+		roles := append([]domain.RoleRequirement{}, requirements.Roles...)
+		for i := range roles {
+			if roles[i].Independence == nil {
+				continue
+			}
+			independence := *roles[i].Independence
+			independence.HumanSubstitutionPermitted = permit
+			roles[i].Independence = &independence
+		}
+		requirements.Roles = roles
+		contract.PlanRequirements = &requirements
+		return contract
+	}
+
+	revise := func(marked, permitted bool) error {
+		source := previous
+		source.Stages = append([]domain.PlanStage{}, previous.Stages...)
+		for i, existing := range source.Stages {
+			if existing.ID != stage.ID || existing.Independence == nil {
+				continue
+			}
+			independence := *existing.Independence
+			independence.HumanSubstitutionPermitted = permitted
+			source.Stages[i].Independence = &independence
+		}
+		stages := make([]domain.PlanStage, 0, len(source.Stages))
+		for _, existing := range source.Stages {
+			if existing.ID != stage.ID {
+				stages = append(stages, existing)
+				continue
+			}
+			gate := domain.PlanStage{
+				ID: existing.ID, Kind: domain.StageHumanDecisionGate,
+				DependsOn: existing.DependsOn, RequiredClaims: []string{"claim-security-review"},
+			}
+			if marked {
+				gate.SubstitutesRole = existing.Role
+			}
+			stages = append(stages, gate)
+		}
+		next := source
+		next.Revision = source.Revision + 1
+		revision := source.Revision
+		next.Provenance.PreviousRevision = &revision
+		next.Stages = stages
+		return planning.Validate(next, planning.ValidationInput{
+			Contract: permitRequirement(permitted), Envelope: operatorEnvelope(), Previous: &source,
+		})
+	}
+
+	// Unmarked: the role obligation is simply unfulfilled. A gate that does not
+	// say what it stands in for stands in for nothing.
+	if err := revise(false, true); err == nil || !strings.Contains(err.Error(), `requires role "security_reviewer"`) {
+		t.Fatalf("an unmarked gate silently fulfilled a role obligation: %v", err)
+	}
+	// Marked, but policy did not permit a person to answer.
+	if err := revise(true, false); err == nil || !strings.Contains(err.Error(), "cannot be escaped by changing what the stage is") {
+		t.Fatalf("an unpermitted substitution passed revision validation: %v", err)
+	}
+	// Marked and permitted: the same obligation, answered by a person.
+	if err := revise(true, true); err != nil {
+		t.Fatalf("a policy-permitted substitution was refused at the revision boundary: %v", err)
+	}
+}

@@ -19,9 +19,11 @@ import (
 // stageView is the part of a stage the graph laws care about. It deliberately
 // carries no budget, objective or rationale: those are not graph properties.
 type stageView struct {
-	ID                   string
-	Kind                 domain.StageKind
-	Role                 domain.EngineeringRole
+	ID   string
+	Kind domain.StageKind
+	Role domain.EngineeringRole
+	// SubstitutesRole is the role a human decision gate stands in for.
+	SubstitutesRole      domain.EngineeringRole
 	DependsOn            []string
 	RequiredClaims       []string
 	Action               *domain.Action
@@ -88,6 +90,14 @@ func validateStage(stage stageView, byID map[string]stageView) error {
 		}
 		if stage.Kind == domain.StageHumanDecisionGate && len(stage.RequiredClaims) == 0 && stage.Action == nil {
 			return fmt.Errorf("stage %q is a human decision gate with neither a required claim nor a protected action: nothing states what a person is deciding", stage.ID)
+		}
+		if stage.SubstitutesRole != "" {
+			if stage.Kind != domain.StageHumanDecisionGate {
+				return fmt.Errorf("stage %q is a %s claiming to substitute for role %q: only a human decision gate stands in for a worker", stage.ID, stage.Kind, stage.SubstitutesRole)
+			}
+			if !domain.KnownRole(stage.SubstitutesRole) {
+				return fmt.Errorf("stage %q substitutes for role %q, which is not in the role catalogue", stage.ID, stage.SubstitutesRole)
+			}
 		}
 	default:
 		return fmt.Errorf("stage %q has kind %q; the kinds are %s", stage.ID, stage.Kind, stageKindList())

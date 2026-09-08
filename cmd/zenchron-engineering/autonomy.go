@@ -192,6 +192,12 @@ type autonomyFlags struct {
 	// Template names the operator's reusable EngineeringPlanTemplate for a plan
 	// proposal. Empty means the planner compiles from policy and intent alone.
 	Template string
+	// SubstituteHuman names the blocked agent stage an operator is replacing
+	// with an independent human review. It is only ever accepted where POLICY
+	// permitted that substitution; the permission comes from the obligation
+	// that required the independence, and neither an operator nor a plan may
+	// grant it.
+	SubstituteHuman string
 	// Deterministic compiles a plan with NO model invocation. It is the honest
 	// alternative to reasoning rather than a fallback from it: the same
 	// obligations, the same validation, and a plan that says a model was not
@@ -1027,6 +1033,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Reason = args[1]
 		case "--template":
 			flags.Template = args[1]
+		case "--substitute-human":
+			flags.SubstituteHuman = args[1]
 		case "--assign":
 			issue, agent, ok := strings.Cut(args[1], "=")
 			number, err := strconv.Atoi(strings.TrimSpace(issue))

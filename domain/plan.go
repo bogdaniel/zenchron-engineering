@@ -583,8 +583,16 @@ type PlanStage struct {
 	// evidence bundles already use; the plan defines no second evidence model.
 	RequiredClaims []string `json:"required_claims,omitempty"`
 	// Action is the protected action a human decision gate decides.
-	Action *Action     `json:"action,omitempty"`
-	Budget StageBudget `json:"budget,omitzero"`
+	Action *Action `json:"action,omitempty"`
+	// SubstitutesRole names the role a human decision gate stands in for.
+	//
+	// It exists because a substitution has to remain CHECKABLE: policy required
+	// a role, an independence obligation could not be met by any eligible
+	// worker, and policy explicitly permitted a person to answer instead.
+	// Without this the gate would just be a gate, and the role obligation would
+	// read as unfulfilled - or worse, as quietly dropped.
+	SubstitutesRole EngineeringRole `json:"substitutes_role,omitempty"`
+	Budget          StageBudget     `json:"budget,omitzero"`
 	// Rationale is the planner's operator-readable reason for this stage. It is
 	// explanation, never authority.
 	Rationale string `json:"rationale,omitempty"`

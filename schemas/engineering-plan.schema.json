@@ -168,6 +168,19 @@
         },
         "rationale": {
           "$ref": "#/$defs/non_empty_string"
+        },
+        "substitutes_role": {
+          "enum": [
+            "product_architect",
+            "system_architect",
+            "planner",
+            "implementer",
+            "tester",
+            "security_reviewer",
+            "reviewer",
+            "integrator",
+            "release_reviewer"
+          ]
         }
       }
     },
