@@ -712,3 +712,143 @@ func TestServeReconcilesAPlanAndDrivesItsRunsInOneTick(t *testing.T) {
 		t.Fatalf("the plan changed the operator's concurrency ceiling to %d", report.Capacity)
 	}
 }
+
+// A stage is done when its WORK is done. A run that produced its candidate,
+// passed assurance and is waiting for a person in the forge has produced the
+// output the next stage reviews; treating that as unfinished would mean a plan
+// whose review stage never starts.
+func TestAStageCompletesWhenItsRunReachesItsGoalState(t *testing.T) {
+	cases := []struct {
+		name    string
+		run     EngineeringRun
+		outcome string
+		done    bool
+	}{
+		{name: "completed", run: EngineeringRun{Disposition: Completed}, outcome: "completed", done: true},
+		{
+			name:    "published and waiting for a person",
+			run:     EngineeringRun{Disposition: Waiting, Reason: ReasonGoalStateReached},
+			outcome: "completed", done: true,
+		},
+		{
+			// Every other wait is still in progress: the work has not been done
+			// yet, and a plan that read "waiting" as "finished" would review a
+			// change nobody had produced.
+			name: "waiting on a provider account",
+			run:  EngineeringRun{Disposition: Waiting, Reason: "execution_provider_quota"},
+			done: false,
+		},
+		{name: "failed", run: EngineeringRun{Disposition: Failed}, outcome: "failed", done: true},
+		{name: "cancelled", run: EngineeringRun{Disposition: Cancelled}, outcome: "failed", done: true},
+		{name: "active", run: EngineeringRun{Disposition: Active}, done: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, done := stageOutcome(tc.run)
+			if done != tc.done || (done && outcome != tc.outcome) {
+				t.Fatalf("stageOutcome = %q/%v, want %q/%v", outcome, done, tc.outcome, tc.done)
+			}
+		})
+	}
+}
+
+// A gate is proved by the runs that PRODUCED something. A reviewing stage
+// creates no candidate and has no assurance verdict of its own, so requiring one
+// from every upstream run would make an assurance gate after a review
+// permanently unsatisfiable - and treating a run with nothing to judge as proof
+// would make the gate vacuous.
+func TestAnAssuranceGateIsProvedByTheRunsThatProducedSomething(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "assurance", Kind: domain.StageAssuranceGate, DependsOn: []string{"implementation"},
+			RequiredClaims: []string{"verification"}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the implementation stage created no run")
+	}
+	plan, _, err := fixture.store.PlanRevision(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, _ := plan.Stage("assurance")
+
+	// With no verdict anywhere upstream, the gate waits rather than passing on
+	// an absence.
+	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot); err != nil || satisfied {
+		t.Fatalf("a gate with no upstream verdict reported satisfied=%v err=%v", satisfied, err)
+	}
+}
+
+// A stage that continues published upstream work is BASED on that work. A
+// reviewer or integrator whose workspace is the trusted base has nothing to
+// review or integrate - which is what the first live dogfood review reported,
+// as a blocking finding about its own workspace.
+func TestADownstreamStageIsBasedOnPublishedUpstreamWork(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	assignment := domain.AgentAssignment{
+		Context: domain.ContextPack{UpstreamOutputs: []domain.UpstreamOutput{
+			{StageID: "implementation", RunID: "run-upstream", Candidate: "c0ffee"},
+		}},
+	}
+
+	// An UNPUBLISHED upstream candidate is not a base: it exists only in
+	// another run's workspace, and a candidate is cloned from the governed
+	// remote.
+	if base := fixture.reconciler.upstreamBase(assignment); base != "" {
+		t.Fatalf("an unpublished upstream candidate was used as a base: %q", base)
+	}
+
+	// Publish it, and it becomes the base.
+	if err := fixture.store.PutRun(EngineeringRun{
+		SchemaVersion: SchemaVersion, ID: "run-upstream", Repository: "acme/repo",
+		Goal: "github-issue:acme/repo#41", Disposition: Waiting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []EngineeringEvent{
+		{SchemaVersion: SchemaVersion, ID: "up-1", RunID: "run-upstream", Type: EventRunCreated},
+		{SchemaVersion: SchemaVersion, ID: "up-2", RunID: "run-upstream", Type: EventGitHubPRObserved,
+			Payload: mustPayload(t, GitHubPRObservedPayload{
+				Number: 7, HeadRevision: "c0ffee", BaseRevision: "base", State: "open",
+			})},
+	} {
+		if _, err := fixture.store.AppendEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if base := fixture.reconciler.upstreamBase(assignment); base != "c0ffee" {
+		t.Fatalf("a published upstream candidate produced base %q", base)
+	}
+
+	// And the run created for such a stage pins that base rather than the
+	// branch the plan started from.
+	run := EngineeringRun{Plan: &RunPlanBinding{BaseRevision: "c0ffee"}}
+	state := &runState{run: run, sources: []sourceRecord{{BaseRevision: "trusted-base"}}}
+	if got := state.pinnedBase(); got != "c0ffee" {
+		t.Fatalf("the stage run pinned %q, want the upstream candidate", got)
+	}
+	// A stage with no upstream base is unchanged: the trusted base, as before.
+	ordinary := &runState{run: EngineeringRun{}, sources: []sourceRecord{{BaseRevision: "trusted-base"}}}
+	if got := ordinary.pinnedBase(); got != "trusted-base" {
+		t.Fatalf("an ordinary run pinned %q", got)
+	}
+}
+
+func mustPayload(t *testing.T, payload any) []byte {
+	t.Helper()
+	encoded, err := marshalPayloadJSON(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}

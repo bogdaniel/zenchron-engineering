@@ -278,6 +278,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	binding := RunPlanBinding{
 		PlanID: plan.ID, Revision: plan.Revision, PlanDigest: plan.Digest,
 		StageID: stage.ID, AssignmentID: assignment.ID,
+		BaseRevision: r.upstreamBase(assignment),
 	}
 	outcome, err := engine.StartPlanStageRun(ctx, r.Issue, binding)
 	if err != nil {
@@ -308,6 +309,37 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	return &PlanStageRun{StageID: stage.ID, RunID: outcome.RunID, AgentID: assignment.Agent.ID}, nil, nil
 }
 
+// upstreamBase is the published upstream candidate this stage should build on.
+//
+// It is deliberately narrow. Only a PUBLISHED candidate qualifies: the run's
+// workspace is cloned from the governed remote, so a commit that exists only in
+// another run's local workspace cannot be its base. Where several upstream
+// stages published, the last one in the assignment's own order wins - a plan
+// with two independent producers feeding one stage is an integration the
+// reconciler cannot invent, and one of them being the base is the honest
+// approximation until an integration stage materializes both.
+func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) string {
+	base := ""
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		if upstream.RunID == "" || upstream.Candidate == "" {
+			continue
+		}
+		events, err := r.Store.Events(upstream.RunID)
+		if err != nil {
+			continue
+		}
+		projection, err := Project(events)
+		if err != nil || projection.PullRequest == nil {
+			// Not published. Its commit is not on the remote, so it cannot be
+			// cloned; the stage stays based on the trusted base and receives
+			// the diff as context.
+			continue
+		}
+		base = upstream.Candidate
+	}
+	return base
+}
+
 // settleFinishedStages records how each running stage's child run ended, and
 // what it spent.
 func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapshot PlanSnapshot) ([]string, error) {
@@ -321,12 +353,17 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		if err != nil {
 			return settled, err
 		}
-		if !found || !terminalDisposition(run.Disposition) {
+		if !found {
 			continue
 		}
-		outcome := "completed"
-		if run.Disposition != Completed {
-			outcome = "failed"
+		// A stage is done when its WORK is done, which is not the same as its
+		// run being terminal. A published run waits for a person in the forge
+		// and stays non-terminal for as long as that takes; a plan that treated
+		// that as "not finished" would never start the review of the change
+		// that run just produced.
+		outcome, done := stageOutcome(run)
+		if !done {
+			continue
 		}
 		// What the run actually spent, read from ITS journal rather than
 		// assumed: provider invocations are attempts of execution operations,
@@ -350,6 +387,26 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		settled = append(settled, stage.ID)
 	}
 	return settled, nil
+}
+
+// stageOutcome maps a child run's state onto what it means for the plan stage.
+//
+// Completed and goal-state-reached are both COMPLETE: the first is a run that
+// finished, the second is a run that produced its candidate, passed assurance
+// and is waiting for a person - which is exactly the point at which the next
+// stage has something to work with. Every other non-terminal state is still in
+// progress, and cancellation or failure is a failed stage.
+func stageOutcome(run EngineeringRun) (string, bool) {
+	switch {
+	case run.Disposition == Completed:
+		return "completed", true
+	case run.Disposition == Waiting && run.Reason == ReasonGoalStateReached:
+		return "completed", true
+	case terminalDisposition(run.Disposition):
+		return "failed", true
+	default:
+		return "", false
+	}
 }
 
 // providerInvocations counts the execution attempts one run actually made.
@@ -381,6 +438,13 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 		// because nothing happened is the fake evidence #64 refuses.
 		return payload, false, nil
 	}
+	// PROVING runs are the ones that produced something to judge. A reviewing
+	// stage produces no candidate and therefore has no assurance observation of
+	// its own; requiring one of every upstream run would make a gate after a
+	// review permanently unsatisfiable, and treating a run with nothing to judge
+	// as proof would make the gate vacuous. So: every upstream run that HAS a
+	// verdict must pass, and at least one must exist.
+	proving := 0
 	for _, runID := range runs {
 		projected, err := r.runProjection(runID)
 		if err != nil {
@@ -388,7 +452,11 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 		}
 		switch stage.Kind {
 		case domain.StageAssuranceGate:
-			if projected.Assurance == nil || projected.Assurance.Stale || !projected.Assurance.Passed {
+			if projected.Assurance == nil {
+				continue
+			}
+			proving++
+			if projected.Assurance.Stale || !projected.Assurance.Passed {
 				return payload, false, nil
 			}
 			// The independent semantic verdict, where one exists, has to agree.
@@ -401,11 +469,17 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 		case domain.StageHumanDecisionGate:
 			decision, satisfied := humanDecision(projected, stage.Action)
 			if !satisfied {
-				return payload, false, nil
+				continue
 			}
+			proving++
 			payload.Decision = decision.decision
 			payload.HumanEvidenceID = decision.humanEvidenceID
 		}
+	}
+	if proving == 0 {
+		// Nothing upstream has been judged yet. A gate satisfied by an absence
+		// would be the fake evidence #64 refuses.
+		return payload, false, nil
 	}
 	return payload, true, nil
 }

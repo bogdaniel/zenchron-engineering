@@ -273,6 +273,16 @@ type RunPlanBinding struct {
 	PlanDigest   string `json:"plan_digest"`
 	StageID      string `json:"stage_id"`
 	AssignmentID string `json:"assignment_id"`
+	// BaseRevision is the UPSTREAM candidate this stage builds on, when its
+	// dependencies produced and published one. A reviewing or integrating stage
+	// based on the trusted branch would have nothing to review or integrate;
+	// this is what makes its workspace contain the work.
+	//
+	// It is only ever set to a published commit, because the governed remote is
+	// the only thing a candidate is cloned from. Where the upstream work is not
+	// published, the field is empty and the stage is based on the trusted base
+	// with the upstream diff supplied as context instead.
+	BaseRevision string `json:"base_revision,omitempty"`
 }
 
 type RunOperation struct {

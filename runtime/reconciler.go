@@ -332,10 +332,17 @@ func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epo
 // The set is closed and fail-closed: a reason that is not listed here SPENDS
 // the budget. A new wait pauses the clock only when somebody decides it should,
 // which is the safe direction for a bound whose whole job is to end things.
+// ReasonGoalStateReached is the wait a run settles into when it has done
+// everything it can: the candidate is produced, assurance has judged it, and
+// what remains is a person in the forge. It is named because a PLAN reads it -
+// a stage whose run reached its goal state has produced its output, and the
+// stages that depend on it can proceed while the run itself waits for review.
+const ReasonGoalStateReached = "goal_state_reached"
+
 var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
-	"goal_state_reached":            true,
+	ReasonGoalStateReached:          true,
 	"awaiting_authority":            true,
 	"authority_blocked":             true,
 	"authority_unknown":             true,
@@ -470,6 +477,20 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 // base.integrate and reassessment, never by silently recompiling the contract
 // against a base the candidate was never built on.
 func (s *runState) pinnedBase() string {
+	// A PLAN STAGE that continues upstream work is based on that work, not on
+	// the branch the plan started from. Without this a reviewer or an
+	// integrator gets a workspace at the trusted base and has nothing to review
+	// or integrate - which is exactly what the first live dogfood review
+	// reported as a blocking finding about its own workspace.
+	//
+	// The override is the upstream candidate commit the plan reconciler
+	// recorded when it created this run, and it is only ever recorded for an
+	// upstream candidate that was PUBLISHED: a commit that exists only in
+	// another run's local workspace is not something the governed remote can
+	// clone.
+	if s.run.Plan != nil && s.run.Plan.BaseRevision != "" {
+		return s.run.Plan.BaseRevision
+	}
 	if len(s.sources) == 0 {
 		return ""
 	}
@@ -1287,7 +1308,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			}
 		}
 		if !wanted {
-			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, "goal_state_reached"))
+			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, ReasonGoalStateReached))
 		}
 		if err := state.validate(desired, live); err != nil {
 			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, "operation_refused"))
