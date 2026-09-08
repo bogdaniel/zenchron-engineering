@@ -252,3 +252,29 @@ func TestEveryEngineCarriesTheCustomizationRegistry(t *testing.T) {
 		}
 	}
 }
+
+// An operator's decision is about the revision they were ASKED about. A
+// decomposition proposal is stored as a new unapproved revision while the
+// approved one keeps executing, so a decision that targeted the governing
+// revision would answer a question nobody asked.
+func TestApprovalTargetsTheRevisionAwaitingADecision(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+
+	// Approve revision 1, then propose revision 2 by re-planning.
+	if _, err := autonomy([]string{"plan", "approve", planID, "--config", configPath},
+		planOverrides(t, 41), &bytes.Buffer{}); err != nil {
+		t.Fatalf("approve r1: %v", err)
+	}
+	proposePlan(t, configPath, 41)
+
+	var out bytes.Buffer
+	if _, err := autonomy([]string{"plan", "approve", planID, "--text", "--config", configPath},
+		planOverrides(t, 41), &out); err != nil {
+		t.Fatalf("approve r2: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "revision 2 approved") {
+		t.Fatalf("the decision did not target the revision awaiting one: %q", out.String())
+	}
+}

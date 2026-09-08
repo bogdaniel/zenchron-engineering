@@ -368,9 +368,16 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	view, err := composed.service.View(planID)
+	// The decision is about the revision AWAITING one, which is not always the
+	// revision currently governing: a decomposition proposal is stored as a new
+	// unapproved revision while the approved one keeps executing, and an
+	// operator answering "approve" means the thing they were asked about.
+	pending, found, err := composed.built.store.Plan(planID)
 	if err != nil {
-		return exitFor(err, exitRunNotFound), err
+		return runtime.ExitFailed, err
+	}
+	if !found {
+		return exitRunNotFound, fmt.Errorf("no such plan %q", planID)
 	}
 	decide := composed.service.Approve
 	if verb == "reject" {
@@ -379,12 +386,12 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	// The DIGEST of the revision that was read is what the decision names, so
 	// approving a revision whose content changed between reading and deciding
 	// is refused rather than recorded.
-	snapshot, err := decide(planID, view.Plan.Revision, view.Plan.Digest, operator.ID, flags.Note)
+	snapshot, err := decide(planID, pending.Revision, pending.Digest, operator.ID, flags.Note)
 	if err != nil {
 		return exitFor(err, runtime.ExitFailed), err
 	}
 	if flags.Text {
-		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, view.Plan.Revision, snapshot.Approval.Status, operator.ID)
+		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, pending.Revision, snapshot.Approval.Status, operator.ID)
 		return runtime.ExitCompleted, nil
 	}
 	if err := writeJSON(stdout, snapshot); err != nil {
