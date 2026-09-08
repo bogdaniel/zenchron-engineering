@@ -159,6 +159,19 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 			return report, err
 		}
 	}
+	// A gate proved against work that has since MOVED is re-opened before
+	// anything reads it. A goal-state run is not finished: reviewer feedback
+	// re-activates it and it can produce a different candidate, and a verdict
+	// about the old one is not a verdict about the new one.
+	reopened, err := r.reopenStaleGates(plan, snapshot)
+	if err != nil {
+		return report, err
+	}
+	if reopened {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
+			return report, err
+		}
+	}
 	// What every child run has spent SINCE it was last attributed, settled or
 	// not. A settled stage's run is not finished with the plan's budget: a
 	// goal-state run stays live, admitted feedback re-activates it, and the
@@ -306,6 +319,58 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 		return snapshot, err
 	}
 	return r.Store.ReplayPlan(planID)
+}
+
+// reopenStaleGates un-satisfies any gate whose proof no longer describes the
+// work. It re-opens rather than re-deciding: the next pass evaluates the gate
+// against what exists now, through exactly the same check that satisfied it.
+func (r PlanReconciler) reopenStaleGates(plan domain.EngineeringPlan, snapshot PlanSnapshot) (bool, error) {
+	reopened := false
+	for _, stage := range plan.Stages {
+		projection, ok := snapshot.Stages[stage.ID]
+		if !ok || projection.State != PlanStageSatisfied || projection.Gate == nil {
+			continue
+		}
+		moved, err := r.provenHeadsMoved(projection.Gate.ProvenHeads)
+		if err != nil {
+			return reopened, err
+		}
+		if !moved {
+			continue
+		}
+		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+			StageID: stage.ID, Outcome: planStageInvalidated,
+			Reason: "the work this gate was proved against has changed",
+		}); err != nil {
+			return reopened, err
+		}
+		reopened = true
+	}
+	return reopened, nil
+}
+
+// provenHeadsMoved reports whether any run named in a gate's proof now carries
+// a different head. A gate recorded before heads were captured has none, and is
+// left alone: it is a gate about work that predates the question.
+func (r PlanReconciler) provenHeadsMoved(proven []string) (bool, error) {
+	for _, entry := range proven {
+		runID, head, ok := strings.Cut(entry, "@")
+		if !ok || runID == "" {
+			continue
+		}
+		events, err := r.Store.Events(runID)
+		if err != nil {
+			return false, err
+		}
+		projected, err := Project(events)
+		if err != nil {
+			return false, err
+		}
+		if projected.Head() != head {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // startAgentStage creates or associates the ordinary EngineeringRun for one
@@ -597,6 +662,7 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			}
 			payload.Evidence = projected.Assurance.Bundle
 			payload.ProvingRuns = append(payload.ProvingRuns, runID)
+			payload.ProvenHeads = append(payload.ProvenHeads, runID+"@"+projected.Head())
 		case domain.StageHumanDecisionGate:
 			decision, satisfied := humanDecision(events, stage.Action)
 			if !satisfied {
@@ -614,6 +680,7 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			payload.Decision = decision.decision
 			payload.HumanEvidenceID = decision.humanEvidenceID
 			payload.ProvingRuns = append(payload.ProvingRuns, runID)
+			payload.ProvenHeads = append(payload.ProvenHeads, runID+"@"+projected.Head())
 		}
 	}
 	if proving == 0 {

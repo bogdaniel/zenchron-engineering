@@ -58,6 +58,8 @@ type PlanGateSatisfaction struct {
 	Evidence        Ref              `json:"evidence,omitzero"`
 	Decision        Ref              `json:"decision,omitzero"`
 	HumanEvidenceID string           `json:"human_evidence_id,omitempty"`
+	// ProvenHeads is what each proving run carried when it proved this gate.
+	ProvenHeads []string `json:"proven_heads,omitempty"`
 }
 
 // PlanStageProjection is one stage's replayed state, including the exact
@@ -394,6 +396,7 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		stage.Gate = &PlanGateSatisfaction{
 			Kind: domain.StageKind(payload.Kind), Claims: payload.Claims,
 			Evidence: payload.Evidence, Decision: payload.Decision, HumanEvidenceID: payload.HumanEvidenceID,
+			ProvenHeads: payload.ProvenHeads,
 		}
 		s.Stages[payload.StageID] = stage
 	case EventPlanBudgetConsumed:

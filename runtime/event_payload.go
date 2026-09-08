@@ -790,6 +790,12 @@ type PlanGateSatisfiedPayload struct {
 	// is proved by both - recording only the last one left the record thinner
 	// than the check that produced it.
 	ProvingRuns []string `json:"proving_runs,omitempty"`
+	// ProvenHeads is the exact candidate each proving run carried when it
+	// proved this gate, as "<run>@<head>". A gate is a statement about a
+	// CHANGE, and a goal-state run is not finished: it can be re-activated by
+	// reviewer feedback and produce a different candidate. Without the head,
+	// the gate's verdict silently transfers to work nobody judged.
+	ProvenHeads []string `json:"proven_heads,omitempty"`
 }
 
 // PlanBudgetConsumedPayload is a DELTA, never a total. Totals are projected by
@@ -931,7 +937,8 @@ var planPayloads = map[string]payloadValidator{
 			optionalRef("evidence", p.Evidence),
 			optionalRef("decision", p.Decision),
 			bounded("human_evidence_id", p.HumanEvidenceID),
-			boundedList("proving_runs", p.ProvingRuns))
+			boundedList("proving_runs", p.ProvingRuns),
+			boundedList("proven_heads", p.ProvenHeads))
 	}),
 	EventPlanBudgetConsumed: payloadSchema(func(p PlanBudgetConsumedPayload) error {
 		if p.ChildRuns == 0 && p.ProviderInvocations == 0 && p.WallSeconds == 0 && p.CostMicros == nil {

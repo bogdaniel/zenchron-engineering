@@ -1651,3 +1651,97 @@ func TestTheSupersessionTopUpUsesTheGoverningPredecessor(t *testing.T) {
 		t.Fatalf("the backend stage, whose live work revision 3 changed, was not invalidated: %q", invalidated)
 	}
 }
+
+// A gate is a statement about a CHANGE, and it stops being true when the change
+// moves.
+//
+// A goal-state run is not finished: reviewer feedback re-activates it and it
+// can produce a different candidate. The gate's verdict used to transfer
+// silently to work nobody had judged.
+func TestAGateIsReopenedWhenTheWorkItProvedMoves(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "assurance", Kind: domain.StageAssuranceGate, DependsOn: []string{"implementation"},
+			RequiredClaims: []string{"verification"}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the stage created no run")
+	}
+
+	// The run reaches goal state with a passing verdict on candidate A.
+	recordCandidateAndAssurance(t, fixture, runID, "aaaaaaaaaaaa")
+	run, _, err := fixture.store.Run(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Disposition = Waiting
+	run.Reason = "goal_state_reached"
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	satisfied, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if satisfied.Stages["assurance"].State != PlanStageSatisfied {
+		t.Fatalf("the gate was not satisfied against candidate A: %#v", satisfied.Stages["assurance"])
+	}
+
+	// Feedback re-activates the run, which produces candidate B - not yet
+	// verified. The gate's verdict was about A.
+	recordCandidate(t, fixture, runID, "bbbbbbbbbbbb")
+	fixture.reconcile(t)
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Stages["assurance"].State == PlanStageSatisfied {
+		t.Fatal("the gate stayed satisfied after the work it proved was replaced")
+	}
+}
+
+// recordCandidateAndAssurance moves a run to a candidate and records a passing
+// assurance observation for it, which is what a gate reads.
+func recordCandidateAndAssurance(t *testing.T, fixture *planRunFixture, runID, head string) {
+	t.Helper()
+	recordCandidate(t, fixture, runID, head)
+	appendRunEventFor(t, fixture, runID, head, EventAssuranceObserved, AssuranceObservedPayload{
+		ProviderID: "go", VerifierDefinition: strings.Repeat("d", 64), Passed: true,
+		Commit: head, Tree: head, Bundle: Ref{ID: "evidence-" + head, Revision: head},
+	})
+}
+
+// recordCandidate moves a run to a new candidate WITHOUT a verdict about it.
+func recordCandidate(t *testing.T, fixture *planRunFixture, runID, head string) {
+	t.Helper()
+	appendRunEventFor(t, fixture, runID, head, EventCandidateCommitted, CandidateCommittedPayload{
+		Commit: head, Tree: head, PathCount: 1, PathsDigest: strings.Repeat("c", 64),
+	})
+}
+
+func appendRunEventFor(t *testing.T, fixture *planRunFixture, runID, head, kind string, payload any) {
+	t.Helper()
+	events, err := fixture.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: fmt.Sprintf("%s-%s-%d", kind, head, len(events)),
+		RunID: runID, Type: kind, OccurredAt: fixture.clock.Now(),
+		Payload: mustPayload(t, payload),
+	}); err != nil {
+		t.Fatalf("append %s: %v", kind, err)
+	}
+}
