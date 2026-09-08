@@ -173,6 +173,15 @@ paid call is never made to prove a worker exists, and `ready` therefore means
 "can be invoked", not "has budget" — account state is only observable by making
 a paid request.
 
+A present credential artifact proves a credential **exists**, not that the
+session behind it is still valid. A revoked or expired sign-in still prints
+`ready yes` with an `auth_mode` such as `local_cli_session`; the failure only
+surfaces at the first real invocation. The resulting provider-account wait,
+`execution_provider_account_unavailable`, leaves the run waiting for the
+operator to repair the account and `resume`, rather than terminating it. See
+[running-work.md](running-work.md) and
+[running-multiple-tasks.md](running-multiple-tasks.md#provider-capacity-is-shared).
+
 Readiness requires the installed CLI to **advertise** the exact flags the
 runtime passes. Each adapter states the flags it depends on twice: once as a
 capability the CLI must advertise, once as an argument that is passed. A CLI
