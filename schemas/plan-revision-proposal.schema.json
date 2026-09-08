@@ -45,39 +45,8 @@
       }
     },
     "proposed_revision": {
-      "type": "object",
-      "additionalProperties": true,
-      "required": [
-        "schema_version",
-        "id",
-        "revision",
-        "digest",
-        "objective",
-        "stages"
-      ],
-      "properties": {
-        "schema_version": {
-          "const": "0.1"
-        },
-        "id": {
-          "$ref": "#/$defs/non_empty_string"
-        },
-        "revision": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "digest": {
-          "$ref": "#/$defs/digest"
-        },
-        "objective": {
-          "$ref": "#/$defs/non_empty_string"
-        },
-        "stages": {
-          "type": "array",
-          "minItems": 1
-        }
-      },
-      "description": "The plan this proposal asks for. It is constrained structurally here rather than by reference, because these schemas are self-contained and resolve no external $ref offline; the runtime validates it in full against engineering-plan.schema.json before it can be stored or approved."
+      "$ref": "engineering-plan.schema.json",
+      "description": "The plan this proposal asks for, validated as a plan. The compiler registers every schema in this directory as a resource named after its file, so this reference resolves offline with no network and no second definition of what a plan is - the earlier structural restatement here accepted plan bodies the plan schema refuses."
     },
     "reason": {
       "$ref": "#/$defs/non_empty_string"

@@ -272,8 +272,14 @@ var qwenSpec = cliAgentSpec{
 	// probe is what stands between an upstream difference and a planning
 	// invocation that could write.
 	ReadOnly: &cliReadOnlyMode{
-		Probe: cliHelpProbe{Args: []string{"--help"}, Required: []string{"plan"}},
-		Mode:  "plan",
+		// The flag must be there AND `plan` must appear as a choice rather than
+		// as a word in a sentence. A bare substring match on "plan" is
+		// satisfied by "planned" or "explanation", which would let this adapter
+		// believe in a mode the installed binary does not have.
+		Probe: cliHelpProbe{
+			Args: []string{"--help"}, Required: []string{"--approval-mode"}, RequiredTokens: []string{"plan"},
+		},
+		Mode: "plan",
 		Args: func(i cliInvocation) []string {
 			args := []string{"--approval-mode", "plan", "--safe-mode"}
 			if i.Model() != "" {

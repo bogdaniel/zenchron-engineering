@@ -721,3 +721,40 @@ func appendPlanBudget(t *testing.T, store *SQLiteOperationStore, planID string, 
 	})
 	return err
 }
+
+// A durable event's origin is held to the catalogue, not merely to being
+// non-empty: `Propose` copies a caller-provided origin straight into the
+// journal, and a value nothing defines describes a provenance no reader can
+// interpret.
+func TestAProposalOriginMustBeInTheCatalogue(t *testing.T) {
+	_, store := openPlanStore(t)
+	plan := planFixture(t, "plan-origin", 1)
+	if _, err := store.ClaimPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := Digest(plan.Objective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendOrigin := func(origin string) error {
+		body, err := marshalPayloadJSON(PlanProposedPayload{
+			Revision: 1, Digest: plan.Digest, ObjectiveDigest: digest,
+			StageCount: len(plan.Stages), AgentStageCount: 2,
+			Budget: budgetPayload(plan.BudgetEnvelope), Origin: origin,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = store.AppendPlanEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion, ID: "proposed-" + origin, PlanID: plan.ID,
+			Type: EventPlanProposed, OccurredAt: time.Unix(10, 0).UTC(), Payload: body,
+		})
+		return err
+	}
+	if err := appendOrigin("mystery_origin"); err == nil {
+		t.Fatal("a proposal origin outside the catalogue was journalled")
+	}
+	if err := appendOrigin(domain.ProposalOriginInitial); err != nil {
+		t.Fatalf("the catalogue's own origin was refused: %v", err)
+	}
+}

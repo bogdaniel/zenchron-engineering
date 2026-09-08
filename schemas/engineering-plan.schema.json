@@ -147,17 +147,7 @@
           ]
         },
         "role": {
-          "enum": [
-            "product_architect",
-            "system_architect",
-            "planner",
-            "implementer",
-            "tester",
-            "security_reviewer",
-            "reviewer",
-            "integrator",
-            "release_reviewer"
-          ]
+          "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
         },
         "objective": {
           "$ref": "#/$defs/non_empty_string"
@@ -173,14 +163,7 @@
         "requires_capabilities": {
           "type": "array",
           "items": {
-            "enum": [
-              "requirements_analysis",
-              "architecture_reasoning",
-              "repository_analysis",
-              "code_change",
-              "verification",
-              "security_review"
-            ]
+            "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
           },
           "uniqueItems": true,
           "minItems": 1
@@ -224,17 +207,7 @@
           "$ref": "#/$defs/non_empty_string"
         },
         "substitutes_role": {
-          "enum": [
-            "product_architect",
-            "system_architect",
-            "planner",
-            "implementer",
-            "tester",
-            "security_reviewer",
-            "reviewer",
-            "integrator",
-            "release_reviewer"
-          ]
+          "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
         }
       }
     },

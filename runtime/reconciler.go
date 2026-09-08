@@ -381,19 +381,11 @@ var externalWaitReasons = map[string]bool{
 // waiting - polling the pull request, re-reading the issue - is real work and is
 // counted; only the idle gap between ticks is excluded.
 func (s *runState) activeElapsed(now time.Time) time.Duration {
-	elapsed := now.Sub(s.run.CreatedAt)
-	// The memoized fold, plus the one part of the answer that depends on the
-	// clock: an open wait runs to now, less the work already performed in it.
+	// The MEMOIZED fold - a loaded run state's events never change and
+	// conditions() asks several times per pass - through the same arithmetic
+	// the plan's ceiling uses.
 	excluded, openSince, openWork := s.externalWait()
-	if !openSince.IsZero() {
-		if idle := now.Sub(openSince) - openWork; idle > 0 {
-			excluded += idle
-		}
-	}
-	if excluded > elapsed {
-		return 0
-	}
-	return elapsed - excluded
+	return activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)
 }
 
 // externalWait folds the journal once: the total of the CLOSED external-wait
@@ -489,8 +481,19 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 // The plan's aggregate wall ceiling is attributed with this, so "active time"
 // means exactly what it means for a run's own wall budget.
 func ActiveElapsed(run EngineeringRun, events []EngineeringEvent, now time.Time) time.Duration {
-	elapsed := now.Sub(run.CreatedAt)
 	excluded, openSince, openWork := foldExternalWait(events)
+	return activeFrom(run.CreatedAt, excluded, openSince, openWork, now)
+}
+
+// activeFrom is the arithmetic itself, over a fold either caller supplies. It
+// is one function because the run's wall budget and the plan's wall ceiling
+// must mean the same thing by construction: two copies of this could drift, and
+// two ceilings that disagree about what "active" means would be two budgets
+// wearing one name.
+func activeFrom(createdAt time.Time, excluded time.Duration, openSince time.Time, openWork time.Duration, now time.Time) time.Duration {
+	elapsed := now.Sub(createdAt)
+	// An open wait runs to now, less the work already performed inside it. This
+	// is the only part of the answer that depends on the clock.
 	if !openSince.IsZero() {
 		if idle := now.Sub(openSince) - openWork; idle > 0 {
 			excluded += idle

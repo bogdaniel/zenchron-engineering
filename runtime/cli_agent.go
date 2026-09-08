@@ -79,6 +79,12 @@ func (e *UnsupportedAgentKindError) Error() string {
 type cliHelpProbe struct {
 	Args     []string
 	Required []string
+	// RequiredTokens must appear as WHOLE WORDS, delimited by anything that is
+	// not a letter, a digit or a hyphen. A substring is the wrong test for a
+	// short choice value: requiring "plan" in `--help` output is satisfied by
+	// "planned", "explanation" or a sentence about planning, which is no
+	// evidence at all that the mode this adapter is about to rely on exists.
+	RequiredTokens []string
 }
 
 // cliPermissionModes names the least-privilege automation mode this runtime
@@ -448,7 +454,38 @@ func (p CLIAgentProvider) probeCapability(ctx context.Context, capability cliHel
 			return ErrSandboxUnavailable
 		}
 	}
+	for _, token := range capability.RequiredTokens {
+		if !advertisesToken(advertised, token) {
+			return ErrSandboxUnavailable
+		}
+	}
 	return nil
+}
+
+// advertisesToken reports whether help output contains a token as a whole word.
+// It deliberately does not assume quoting: a CLI may print its choices quoted,
+// bracketed, comma-separated or bare, and all of those are word boundaries.
+func advertisesToken(advertised, token string) bool {
+	for offset := 0; ; {
+		index := strings.Index(advertised[offset:], token)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(token)
+		if !wordCharacter(advertised, start-1) && !wordCharacter(advertised, end) {
+			return true
+		}
+		offset = start + 1
+	}
+}
+
+func wordCharacter(text string, at int) bool {
+	if at < 0 || at >= len(text) {
+		return false
+	}
+	c := text[at]
+	return c == '-' || c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // version reads the CLI's own version. It is best effort: a CLI that does not

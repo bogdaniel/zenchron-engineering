@@ -179,3 +179,29 @@ func TestPlanningEnvelopeTellsTheWorkerItMayChangeNothing(t *testing.T) {
 		t.Fatalf("planning prompt still tells the worker what it may modify: %s", prompt)
 	}
 }
+
+// A short choice token must be advertised as a WORD, not as a substring.
+//
+// The qwen read-only probe required "plan" anywhere in `--help`, which
+// "planned", "explanation" or a sentence about planning all satisfy - so the
+// adapter could believe in a non-mutating mode the installed binary does not
+// have, which is the one belief this whole boundary rests on.
+func TestAReadOnlyProbeRequiresTheChoiceAsAWord(t *testing.T) {
+	cases := []struct {
+		name       string
+		help       string
+		advertises bool
+	}{
+		{name: "quoted choice", help: `--approval-mode  choices: "default", "plan", "yolo"`, advertises: true},
+		{name: "bare choice", help: "--approval-mode {default,plan,yolo}", advertises: true},
+		{name: "prose only", help: "--approval-mode  how changes are planned and approved", advertises: false},
+		{name: "longer word", help: "--approval-mode  see the explanation in the manual", advertises: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := advertisesToken(tc.help, "plan"); got != tc.advertises {
+				t.Fatalf("advertisesToken(%q) = %v, want %v", tc.help, got, tc.advertises)
+			}
+		})
+	}
+}

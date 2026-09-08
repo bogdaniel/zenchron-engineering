@@ -141,8 +141,13 @@ func CreatePlanningWorkspace(stateDir, planID, source, commit, tree string) (*Pl
 	return &PlanningWorkspace{Dir: dir, Commit: commit, Tree: strings.TrimSpace(derived)}, nil
 }
 
+// planningWorkspaceDir is derived, and the plan id is ENCODED into one path
+// component before it is joined. The normal path produces a constrained id, but
+// this directory is handed to os.RemoveAll, and a component that could contain
+// a separator or `..` is a component that could name a directory somewhere else
+// entirely. Encoding costs nothing and removes the question.
 func planningWorkspaceDir(stateDir, planID string) string {
-	return filepath.Join(stateDir, "plans", planID, "planning-workspace")
+	return filepath.Join(stateDir, "plans", encodePathComponent(planID), "planning-workspace")
 }
 
 // Remove deletes the workspace. It is called after the invocation because the

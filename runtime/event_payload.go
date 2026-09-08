@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -840,7 +841,7 @@ var planPayloads = map[string]payloadValidator{
 		if err := errors.Join(
 			required("digest", p.Digest),
 			required("objective_digest", p.ObjectiveDigest),
-			required("origin", p.Origin),
+			knownOrigin(p.Origin),
 			bounded("proposal_id", p.ProposalID),
 			validatePlanBudget(p.Budget),
 		); err != nil {
@@ -959,6 +960,19 @@ var planPayloads = map[string]payloadValidator{
 // planStageInvalidated is the third stage outcome: not completed, not failed,
 // but no longer valid because an upstream change invalidated its assumptions.
 const planStageInvalidated = "invalidated"
+
+// knownOrigin holds a proposal's origin to the catalogue rather than merely to
+// non-emptiness: the origin is copied from the caller into a durable event, and
+// a value nothing defines describes a provenance no reader can interpret.
+func knownOrigin(origin string) error {
+	if err := required("origin", origin); err != nil {
+		return err
+	}
+	if !domain.KnownProposalOrigin(origin) {
+		return fmt.Errorf("proposal origin %q is not one of %s", origin, strings.Join(domain.ProposalOrigins(), ", "))
+	}
+	return nil
+}
 
 var planDecisionPayload = payloadSchema(func(p PlanDecisionPayload) error {
 	if p.Revision < 1 {

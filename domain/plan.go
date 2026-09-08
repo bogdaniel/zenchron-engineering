@@ -833,6 +833,23 @@ const (
 	ProposalOriginRemediation   = "remediation"
 )
 
+// ProposalOrigins is the closed catalogue of where a proposal came from.
+func ProposalOrigins() []string {
+	return []string{ProposalOriginInitial, ProposalOriginDecomposition, ProposalOriginOperatorEdit, ProposalOriginRemediation}
+}
+
+// KnownProposalOrigin reports whether an origin is in the catalogue. A durable
+// event naming an origin nothing defines describes a provenance no reader can
+// interpret, which is worse than no origin at all.
+func KnownProposalOrigin(origin string) bool {
+	for _, known := range ProposalOrigins() {
+		if known == origin {
+			return true
+		}
+	}
+	return false
+}
+
 // ProposalProvenance identifies who produced a proposal.
 type ProposalProvenance struct {
 	Origin string `json:"origin"`

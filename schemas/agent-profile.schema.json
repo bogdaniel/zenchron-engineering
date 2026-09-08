@@ -37,14 +37,7 @@
     "capabilities": {
       "type": "array",
       "items": {
-        "enum": [
-          "requirements_analysis",
-          "architecture_reasoning",
-          "repository_analysis",
-          "code_change",
-          "verification",
-          "security_review"
-        ]
+        "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
       },
       "uniqueItems": true,
       "minItems": 1

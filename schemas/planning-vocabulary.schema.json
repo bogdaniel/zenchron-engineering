@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json",
+  "title": "Planning vocabulary v0.1",
+  "description": "The closed role and capability catalogues, defined ONCE. They were restated in six places, so adding a role meant six coordinated edits and one missed edit silently accepted a value in some artifact types and refused it in others. The Go catalogues in domain/plan.go remain authoritative; schemas.TestTheSchemaVocabularyMatchesTheDomainCatalogue holds the two together.",
+  "$defs": {
+    "role": {
+      "enum": [
+        "product_architect",
+        "system_architect",
+        "planner",
+        "implementer",
+        "tester",
+        "security_reviewer",
+        "reviewer",
+        "integrator",
+        "release_reviewer"
+      ]
+    },
+    "capability": {
+      "enum": [
+        "requirements_analysis",
+        "architecture_reasoning",
+        "repository_analysis",
+        "code_change",
+        "verification",
+        "security_review"
+      ]
+    }
+  }
+}
