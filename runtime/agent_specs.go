@@ -173,7 +173,14 @@ var claudeSpec = cliAgentSpec{
 	// prints it, so a renamed or removed mode makes the agent ineligible for
 	// planning rather than quietly running it in an editing mode.
 	ReadOnly: &cliReadOnlyMode{
-		Probe: cliHelpProbe{Args: []string{"--help"}, Required: []string{`"plan"`}},
+		// Bound to the FLAG that carries it, like the codex and qwen probes.
+		// Requiring the quoted token alone was tighter than a bare substring
+		// and still not an association: help text that quotes "plan" for any
+		// other reason satisfied it.
+		Probe: cliHelpProbe{
+			Args: []string{"--help"}, Required: []string{"--permission-mode"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--permission-mode", Value: "plan"}},
+		},
 		Mode:  "plan",
 		Args: func(i cliInvocation) []string {
 			args := []string{"--print", "--permission-mode", "plan", "--safe-mode"}

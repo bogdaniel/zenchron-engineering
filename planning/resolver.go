@@ -115,7 +115,10 @@ type ResolveInput struct {
 func Resolve(input ResolveInput) (Resolution, error) {
 	resolution := Resolution{}
 	assigned := map[string]domain.AgentAssignment{}
-	profiles := input.candidateProfiles()
+	profiles, err := input.candidateProfiles()
+	if err != nil {
+		return Resolution{}, err
+	}
 	// EVERY frozen assignment is known before the first stage resolves, not as
 	// its own stage comes round. A plan compiled before the compiler added the
 	// dependency edge can still list a reviewer ahead of its producer, and
@@ -175,7 +178,7 @@ func Resolve(input ResolveInput) (Resolution, error) {
 // quietly bypass the instructions and context policy the operator wrote - which
 // is the whole reason they wrote a profile - and would do it invisibly, because
 // both candidates name the same agent.
-func (input ResolveInput) candidateProfiles() []domain.AgentProfile {
+func (input ResolveInput) candidateProfiles() ([]domain.AgentProfile, error) {
 	profiles := append([]domain.AgentProfile{}, input.Registry.Profiles()...)
 	specialized := map[string]bool{}
 	for _, profile := range profiles {
@@ -185,15 +188,19 @@ func (input ResolveInput) candidateProfiles() []domain.AgentProfile {
 		if specialized[agent.ID] {
 			continue
 		}
-		profiles = append(profiles, DirectProfile(agent))
+		direct, err := DirectProfile(agent)
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, direct)
 	}
 	sort.SliceStable(profiles, func(i, j int) bool { return profiles[i].ID < profiles[j].ID })
-	return profiles
+	return profiles, nil
 }
 
 // DirectProfile is the implicit profile for one registered agent: the worker
 // used as itself.
-func DirectProfile(agent domain.ExecutionAgentDescriptor) domain.AgentProfile {
+func DirectProfile(agent domain.ExecutionAgentDescriptor) (domain.AgentProfile, error) {
 	profile := domain.AgentProfile{
 		SchemaVersion:    domain.SchemaVersion,
 		ID:               agent.ID,
@@ -207,10 +214,16 @@ func DirectProfile(agent domain.ExecutionAgentDescriptor) domain.AgentProfile {
 	// The digest is computed from the same content rule every other artifact
 	// uses, so an assignment against a direct profile freezes an identity that
 	// changes when the agent's configuration changes.
-	if digest, err := profile.ContentDigest(); err == nil {
-		profile.Digest = digest
+	//
+	// A digest that cannot be computed is not "no digest": it is an unknown
+	// identity, and an assignment freezing an unknown identity freezes nothing.
+	// The error is returned rather than skipped.
+	digest, err := profile.ContentDigest()
+	if err != nil {
+		return domain.AgentProfile{}, err
 	}
-	return profile
+	profile.Digest = digest
+	return profile, nil
 }
 
 func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain.AgentProfile, assigned map[string]domain.AgentAssignment) (domain.AgentAssignment, *Blocked, error) {

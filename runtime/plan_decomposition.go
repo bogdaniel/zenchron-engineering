@@ -174,7 +174,11 @@ func (r PlanReconciler) recordProposal(plan domain.EngineeringPlan, stage domain
 		Approval:   domain.ProposalApproval{Status: domain.ApprovalPending},
 	}
 	if compileErr != nil {
-		proposal.Proposed = refusedRevisionPlaceholder(plan, next, proposalID)
+		placeholder, err := refusedRevisionPlaceholder(plan, next, proposalID)
+		if err != nil {
+			return domain.PlanRevisionProposal{}, err
+		}
+		proposal.Proposed = placeholder
 		proposal.Validation = domain.ProposalValidation{
 			Status: domain.ProposalRefused, Errors: refusalReasons(compileErr),
 		}
@@ -230,16 +234,22 @@ func (r PlanReconciler) recordProposal(plan domain.EngineeringPlan, stage domain
 // refusedRevisionPlaceholder is the minimum schema-valid document a refused
 // proposal carries. A refusal still has to say what plan and revision it was
 // about; it must not pretend to carry a plan that never compiled.
-func refusedRevisionPlaceholder(plan domain.EngineeringPlan, revision int, proposalID string) domain.EngineeringPlan {
+func refusedRevisionPlaceholder(plan domain.EngineeringPlan, revision int, proposalID string) (domain.EngineeringPlan, error) {
 	placeholder := plan
 	placeholder.Revision = revision
 	previous := plan.Revision
 	placeholder.Provenance.PreviousRevision = &previous
 	placeholder.Provenance.ProposalID = proposalID
-	if digest, err := placeholder.ContentDigest(); err == nil {
-		placeholder.Digest = digest
+	// A digest that cannot be computed is an unknown identity, not an absent
+	// one. This placeholder is what an operator READS when a proposal was
+	// refused, and a document whose digest is unknown is a document nobody can
+	// check they are looking at the same thing.
+	digest, err := placeholder.ContentDigest()
+	if err != nil {
+		return domain.EngineeringPlan{}, err
 	}
-	return placeholder
+	placeholder.Digest = digest
+	return placeholder, nil
 }
 
 func proposalReason(notes string) string {
