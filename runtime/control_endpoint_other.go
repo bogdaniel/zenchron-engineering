@@ -33,4 +33,4 @@ func AssertControlEndpointSecure(path string) error {
 
 // acquireControlStartLock is unreachable here: this platform refuses the
 // endpoint before startup serialization could matter.
-func acquireControlStartLock(string) (func(), error) { return func() {}, ErrControlEndpointUnsupported }
+func acquireControlStartLock(string) (func(), error) { return func() {}, errControlEndpointUnsupported }

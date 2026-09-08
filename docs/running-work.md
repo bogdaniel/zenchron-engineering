@@ -73,7 +73,7 @@ controller created it)`, then drives the run until it settles.
   execution.invoke  ->  candidate.commit
         |  ^                  |
         |  |                  v
-        |  +--- remediation.gofmt / execution.remediation
+        |  +--- remediation.gofmt / execution.invoke(remediation)
         |                     |
         v                     v
   assurance.go          assurance.semantic        (offline, exact tree, in the pinned image)
@@ -93,7 +93,7 @@ controller created it)`, then drives the run until it settles.
 ```
 
 `phase` in `status` is the operator projection of that path — `contract`,
-`execute`, `observe`, `assure`, `authorize`, `remediate`, `publish` — and
+`execute`, `observe`, `assure`, `authorize`, `publish` — and
 `disposition` is independently `active`, `waiting`, `completed`, `failed` or
 `cancelled`. A waiting run may still perform the two observation-only
 operations, `source.observe` and `github.observe`, so a run that is waiting can

@@ -479,8 +479,22 @@ func (r *EngineeringRuntime) publicationIdentity(ctx context.Context, state *run
 		return policy, "", err
 	}
 	actor, err := viewer.Viewer(ctx, repo)
-	if err != nil || strings.TrimSpace(actor.Login) == "" {
+	switch {
+	case err != nil && transientForgeFailure(err):
+		// A forge that was briefly unreachable is retried on the next
+		// observation; nothing is bound and nothing is admitted meanwhile.
 		return policy, "the runtime's own publication identity could not be resolved, so feedback admission is unavailable until it can be", nil
+	case err != nil:
+		// A rejected or expired publication credential is NOT a temporary
+		// outage, and reporting it as one gave it the same shape: the runtime
+		// retried every tick and the operator saw nothing, because a
+		// successful ObserveFeedback with Unavailable set never reaches
+		// RunOutcome.FeedbackError. This is the same distinction the
+		// permission lookup below already draws, applied to the identity that
+		// gates the whole gate.
+		return policy, "", err
+	case strings.TrimSpace(actor.Login) == "":
+		return policy, "the forge answered without naming an account, so the runtime cannot tell its own comments from anyone else's", nil
 	}
 	bound := state.feedbackState().PublicationLogin
 	switch {

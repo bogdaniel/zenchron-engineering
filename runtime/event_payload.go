@@ -198,8 +198,17 @@ var eventPayloads = map[string]payloadValidator{
 			bounded("actor", p.Actor))
 	}),
 	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
-		if len(p.Keys) == 0 {
-			return fmt.Errorf("a consumption record with no keys delivers nothing")
+		// A record may carry ONLY unavailable keys: when every pending item's
+		// text artifact has been reclaimed, nothing was delivered and the
+		// record exists to drain the pending set. Requiring Keys made that
+		// case unwritable - AppendEvent failed after the provider had already
+		// been invoked, and every later pass re-derived the same set, re-ran
+		// the provider, and died at the same append.
+		if len(p.Keys) == 0 && len(p.Unavailable) == 0 {
+			return fmt.Errorf("a consumption record with no keys accounts for nothing")
+		}
+		if len(p.Unavailable) > maxFeedbackKeysPerEvent {
+			return fmt.Errorf("a consumption record carries %d unavailable keys, more than the bound of %d", len(p.Unavailable), maxFeedbackKeysPerEvent)
 		}
 		if len(p.Keys) > maxFeedbackKeysPerEvent {
 			return fmt.Errorf("a consumption record carries %d keys, more than the bound of %d", len(p.Keys), maxFeedbackKeysPerEvent)
@@ -207,7 +216,8 @@ var eventPayloads = map[string]payloadValidator{
 		if p.Attempt < 1 {
 			return fmt.Errorf("feedback delivery must name the attempt that received it, got %d", p.Attempt)
 		}
-		return errors.Join(required("operation_id", p.OperationID), boundedList("keys", p.Keys))
+		return errors.Join(required("operation_id", p.OperationID),
+			boundedList("keys", p.Keys), boundedList("unavailable", p.Unavailable))
 	}),
 }
 

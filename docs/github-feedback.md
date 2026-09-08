@@ -129,11 +129,20 @@ still be admitted, so an item already refused on identity costs no forge call.
 ## Self-loops
 
 The runtime refuses its own comments by IDENTITY, never by matching text. It
-recognizes itself two ways: the account its credential acts as, resolved per
-repository at startup, and any login you listed in `feedback.self_logins` for
-identities it cannot discover — a coding-agent service account, a second bot you
-publish under. Nothing here inspects a message body, because a body is written
-by whoever is talking.
+recognizes itself two ways: the account its credential acts as, resolved **on
+every observation** and bound durably to the run, and any login you listed in
+`feedback.self_logins` for identities it cannot discover — a coding-agent
+service account, a second bot you publish under. Nothing here inspects a message
+body, because a body is written by whoever is talking.
+
+Resolving per observation rather than once at startup is deliberate: the
+credential is re-read from its file on every request, so a token rotated while
+`serve` is running changes who the runtime publishes as. An identity captured at
+startup would leave this guard recognizing the account the runtime used to be,
+and the account it had become — a dedicated, write-holding, non-bot publisher —
+would pass every remaining check. A changed identity fails closed rather than
+re-binding silently, because comments the run already published under the
+previous identity would otherwise become admissible the moment it moved.
 
 ### Admission fails closed without a known publication identity
 

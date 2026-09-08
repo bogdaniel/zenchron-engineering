@@ -221,7 +221,12 @@ func (s *runState) recordedAgent() AgentIdentity {
 // a subscription CLI and inventing a number would be worse than saying so.
 func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets {
 	budgets := r.deps.Budgets.defaults()
-	elapsed := r.deps.Clock.Now().Sub(state.run.CreatedAt)
+	// ACTIVE time, by the same rule conditions() enforces the budget with.
+	// Raw elapsed contradicted it: a run that sat overnight awaiting review
+	// would record wall_seconds: 0 in a durable handoff record while the
+	// runtime would still grant it nearly its whole budget - provenance
+	// disagreeing with the semantics it exists to carry forward.
+	elapsed := state.activeElapsed(r.deps.Clock.Now())
 	wall := int64((budgets.WallLimit - elapsed) / time.Second)
 	if wall < 0 {
 		wall = 0

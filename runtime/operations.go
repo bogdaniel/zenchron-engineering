@@ -566,7 +566,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// duplicate it rather than preserve it. The items remain visible in the
 	// journal as admitted-and-consumed, which is what a later transition
 	// carries forward.
-	if len(pending) > 0 {
+	// Delivery is recorded only when a worker actually RAN. CLIAgentProvider
+	// refuses before starting a process on a failed capability probe, a missing
+	// home or a missing executable, and those refusals used to mark the
+	// feedback consumed anyway: the agent CLI absent for one tick meant a
+	// reviewer's comment was recorded as delivered, its binding disappeared,
+	// and the review reached nobody, ever.
+	//
+	// An invocation that ran and then failed still counts, which is the case
+	// the comment above defends: re-delivering a human's review because the
+	// work failed afterwards would duplicate it. Invocation provenance is
+	// written only after the process returns, so it is the honest signal for
+	// "this attempt reached a worker".
+	invoked := execErr == nil || result.Invocation != nil
+	if len(pending) > 0 && invoked {
 		delivered := make(map[string]bool, len(feedback))
 		keys := make([]string, 0, len(feedback))
 		for _, item := range feedback {

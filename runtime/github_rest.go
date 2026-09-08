@@ -270,9 +270,26 @@ func (a GitHubRESTAdapter) RepositoryPermission(ctx context.Context, repo GitHub
 // Viewer names the identity this adapter's credential acts as. It is how the
 // runtime recognizes its own comments without matching on their text.
 func (a GitHubRESTAdapter) Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error) {
-	var actor ghActor
-	if err := a.call(ctx, repo, http.MethodGet, "/user", nil, nil, &actor); err != nil {
+	// Read through doRaw with typed status classification, not call().
+	//
+	// call() maps every 401 and 403 to GitHubAuthError and flattens 429 and 5xx
+	// into generic errors, discarding the budget headers. That was tolerable
+	// while this was an incidental lookup; it is now the observation that gates
+	// feedback admission, so a throttled /user has to be classified as a
+	// throttle - shared backoff and a later retry - rather than as a rejected
+	// credential, and a genuinely rejected credential has to stay
+	// distinguishable from both.
+	status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet, "/user", nil, nil, nil)
+	if err != nil {
 		return GitHubActor{}, err
+	}
+	rate, reported := observeRateLimit(header, status)
+	if err := classifyGitHubStatus(status, rate, reported, "publication identity"); err != nil {
+		return GitHubActor{}, err
+	}
+	var actor ghActor
+	if err := json.Unmarshal(raw, &actor); err != nil {
+		return GitHubActor{}, &GitHubAPIError{Status: status, Detail: "unreadable publication identity response"}
 	}
 	return actor.normalize(), nil
 }

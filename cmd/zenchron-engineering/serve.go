@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
@@ -78,9 +79,18 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	// The endpoint answers on its own goroutine so an operator command is not
 	// queued behind a run that is mid-reconcile.
 	go func() {
-		_ = listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
+		// A failed Accept kills the control endpoint while the supervisor keeps
+		// running. The socket file still exists, so SupervisorRunning keeps
+		// answering true and every delegated command hangs to its deadline
+		// instead of learning the endpoint is dead. An unreachable endpoint
+		// also defeats `stop` and `stop-all`, so this stops the supervisor
+		// rather than leaving it un-commandable.
+		if err := listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
 			return built.handleControl(ctx, supervisor, stopSignals, request)
-		})
+		}); err != nil && !errors.Is(err, net.ErrClosed) {
+			fmt.Fprintf(stdout, "the control endpoint stopped accepting connections: %v\n", err)
+			stopSignals()
+		}
 	}()
 
 	fmt.Fprintf(stdout, "zenchron-engineering serve\n")
@@ -647,10 +657,18 @@ func autonomyRunIssues(ctx context.Context, flags autonomyFlags, overrides auton
 		if request.Agent == "" {
 			request.Agent = flags.Agent
 		}
-		if _, code, err := delegate(stateDir, request, stdout); err != nil {
+		delegated, _, err := delegate(stateDir, request, stdout)
+		switch {
+		case err != nil:
 			fmt.Fprintf(stdout, "issue %d was not submitted: %v\n", issue, err)
 			failures++
-			_ = code
+		case !delegated:
+			// The supervisor was probed once before the loop. If it exited
+			// mid-batch every remaining delegate returns "not delegated" with
+			// no error, and counting those as submitted made the command exit
+			// 0 with the work never created.
+			fmt.Fprintf(stdout, "issue %d was not submitted: the supervisor stopped accepting work mid-batch\n", issue)
+			failures++
 		}
 	}
 	if failures > 0 {

@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -401,5 +402,109 @@ func TestTheCredentialIdentityIsNeverServedFromCache(t *testing.T) {
 	}
 	if len(inner.Calls) != before {
 		t.Fatalf("repository reads stopped being shared: %d new calls", len(inner.Calls)-before)
+	}
+}
+
+// TestARateLimitedIdentityLookupIsSharedAcrossRuns. Refusing to cache the
+// credential identity must not also discard the repository's shared rate-limit
+// law: with N active runs each observing feedback, all N would otherwise
+// rediscover the same limit and keep asking.
+//
+// The answer is never shared; the forge's instruction to stop asking is.
+func TestARateLimitedIdentityLookupIsSharedAcrossRuns(t *testing.T) {
+	inner := &rotatingViewer{FakeGitHubAdapter: NewFakeGitHubAdapter()}
+	inner.actor = func() (GitHubActor, error) {
+		return GitHubActor{}, &GitHubTransientError{
+			Status: 429, Detail: "rate limited",
+			RateLimit: RateLimitObservation{RetryAfter: time.Minute},
+		}
+	}
+	forge := NewMultiplexedForge(inner, newSteppingClock())
+	forge.Window = time.Nanosecond // defeat coalescing, so only backoff can stop a call
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	if _, err := forge.Viewer(context.Background(), repo); err == nil {
+		t.Fatal("the rate limit was not surfaced")
+	}
+	asked := inner.viewers
+
+	// A sibling run observing feedback must be refused from the shared backoff
+	// without reaching the forge.
+	if _, err := forge.Viewer(context.Background(), repo); err == nil {
+		t.Fatal("a sibling was allowed to ask again during the shared backoff")
+	}
+	if inner.viewers != asked {
+		t.Fatalf("the identity lookup ignored shared backoff: %d extra calls reached the forge", inner.viewers-asked)
+	}
+
+	// A DIFFERENT question about the same repository is refused too: the
+	// backoff belongs to the repository, not to this one read.
+	if _, err := forge.Checks(context.Background(), repo, "head"); err == nil {
+		t.Fatal("the identity lookup did not record repository-wide backoff")
+	}
+}
+
+// TestAPermanentIdentityFailureIsReportedNotRetriedForever. A rejected or
+// expired publication credential is not a temporary outage, and reporting it as
+// one gave it the same shape: a successful ObserveFeedback with Unavailable set
+// never reaches RunOutcome.FeedbackError, so the runtime retried every tick and
+// the operator saw nothing to act on.
+func TestAPermanentIdentityFailureIsReportedNotRetriedForever(t *testing.T) {
+	for name, failure := range map[string]error{
+		"rejected credential": &GitHubAuthError{Detail: "credential rejected"},
+		"permanent api error": &GitHubAPIError{Status: 500, Detail: "server error"},
+		"unrecognized":        errors.New("something nobody classified"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newPhase8Fixture(t)
+			runID := fixture.start()
+			forge := &rotatingViewer{FakeGitHubAdapter: fixture.forge}
+			forge.actor = func() (GitHubActor, error) { return GitHubActor{}, failure }
+			deps := fixture.deps
+			deps.GitHub = forge
+			deps.Feedback = FeedbackPolicy{MinPermission: PermissionWrite}
+			engine, err := NewEngineeringRuntime(deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := engine.ObserveFeedback(context.Background(), runID)
+			if err == nil {
+				t.Fatalf("a permanent identity failure was reported as temporary unavailability: %q", observation.Unavailable)
+			}
+			// Nothing may be bound on a failure path: a run must not record an
+			// identity it never actually resolved.
+			state, loadErr := engine.load(runID)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if bound := state.feedbackState().PublicationLogin; bound != "" {
+				t.Fatalf("a failed resolution bound the identity %q", bound)
+			}
+		})
+	}
+}
+
+// TestATransientIdentityFailureStaysUnavailableRatherThanFailingTheRun keeps the
+// other half honest: a brief forge outage must not be reported as a run problem.
+func TestATransientIdentityFailureStaysUnavailableRatherThanFailingTheRun(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	forge := &rotatingViewer{FakeGitHubAdapter: fixture.forge}
+	forge.actor = func() (GitHubActor, error) {
+		return GitHubActor{}, &GitHubTransientError{Status: 503, Detail: "briefly unavailable"}
+	}
+	deps := fixture.deps
+	deps.GitHub = forge
+	deps.Feedback = FeedbackPolicy{MinPermission: PermissionWrite}
+	engine, err := NewEngineeringRuntime(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := engine.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("a transient forge outage was reported as a run failure: %v", err)
+	}
+	if observation.Unavailable == "" {
+		t.Fatal("a transient identity failure did not fail closed")
 	}
 }

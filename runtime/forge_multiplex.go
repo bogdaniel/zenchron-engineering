@@ -441,10 +441,49 @@ func (m *MultiplexedForge) Viewer(ctx context.Context, repo GitHubRepo) (GitHubA
 	if !ok {
 		return GitHubActor{}, fmt.Errorf("the configured forge adapter cannot name its own identity")
 	}
+	return observeUncached(ctx, m, repo, "Viewer", func() (GitHubActor, error) {
+		return inner.Viewer(ctx, repo)
+	})
+}
+
+// observeUncached performs a read that must be FRESH but must still obey the
+// repository's shared rate-limit law.
+//
+// observe() does two separable things: it caches and coalesces answers, and it
+// honours and records the forge's own backoff. Only the first is unsafe for a
+// credential identity. Skipping both - which is what bypassing observe entirely
+// did - meant N active runs could each rediscover the same rate limit and keep
+// asking, which is precisely the behaviour the shared observation stream exists
+// to prevent.
+func observeUncached[T any](ctx context.Context, m *MultiplexedForge, repo GitHubRepo, method string, call func() (T, error)) (T, error) {
+	var zero T
+	now := m.Clock.Now()
+
 	m.mu.Lock()
-	m.calls["Viewer"]++
+	if wait, ok := m.backoff[repo.String()]; ok {
+		if now.Before(wait.until) {
+			m.mu.Unlock()
+			return zero, wait.err
+		}
+		delete(m.backoff, repo.String())
+	}
+	m.calls[method]++
 	m.mu.Unlock()
-	return inner.Viewer(ctx, repo)
+
+	value, err := call()
+
+	// A transient refusal that carries retry timing becomes shared backoff, the
+	// same as any other read. The ANSWER is never stored: that is the whole
+	// difference between this and observe().
+	var transient *GitHubTransientError
+	if errors.As(err, &transient) {
+		if until := retryInstant(now, transient.RateLimit); until.After(now) {
+			m.mu.Lock()
+			m.backoff[repo.String()] = forgeBackoff{until: until, err: err}
+			m.mu.Unlock()
+		}
+	}
+	return value, err
 }
 
 // SupportsFeedbackAdmission reports whether the wrapped adapter can answer the
