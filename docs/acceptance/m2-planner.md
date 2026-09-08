@@ -269,12 +269,19 @@ runtime verifies it unchanged; a provider that cannot prove the mode is refused.
 ## 24. Aggregate plan budget
 
 Approval shows the envelope and known/unknown cost truthfully; execution
-enforces it; consumption cannot reset.
+enforces the dimensions it can attribute - child runs, concurrency and provider
+invocations, each checked before a stage starts or a planner is invoked -
+and consumption cannot reset. `max_wall_seconds` is validated against the
+operator ceiling at approval and is NOT enforced during execution: nothing yet
+attributes elapsed provider time to a plan, so consumed wall seconds read 0.
 
 - `domain/plan.go` — `PlanBudgetEnvelope`; `runtime/plan_reconciler.go`.
 - **Proved:** `runtime.TestTheAggregateEnvelopeBoundsChildRuns`,
   `planning.TestTemplateMayTightenTheEnvelopeAndNeverWidenIt`,
   `runtime.TestUnknownCostStaysUnknownAndKnownCostAccumulates`.
+- **Also proved:** `runtime.TestAFailedPlanningInvocationIsCountedAndTheCeilingStopsIt`
+  for the invocation ceiling, and `runtime.TestConsumptionCountsOneFactOnce` for
+  the crash window that let one consumption be counted twice.
 - **Live:** a live proposal was refused for needing five child runs against an
   operator ceiling of three, and the approval view reports cost as unknown
   rather than zero.

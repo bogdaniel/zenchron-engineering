@@ -252,13 +252,14 @@ would close it.
 - **ContextPack v0 consumes ProjectModel v1 as it is.** It grows no
   repository-analysis or dependency graph of its own; #67 enriches the model and
   #64 consumes richer facts when they exist.
-- **A downstream stage runs in its own workspace at the trusted base.** It is
-  given the upstream stage's exact commit and tree and the diff that stage
-  produced, delimited as untrusted data, rather than a workspace materialized
-  from the upstream candidate. That is enough for a review and not enough for an
-  integration stage that must build on the change; materializing an upstream
-  candidate as a downstream base is the upgrade, and it needs the governed-remote
-  boundary to gain a local-source case.
+- **A downstream stage can only build on PUBLISHED upstream work.** Where its
+  dependencies published a candidate, the stage's workspace is cloned at that
+  exact commit and it builds on the change. Where they did not - the work exists
+  only in another run's local workspace - the stage runs at the trusted base and
+  is given the upstream commit, tree and diff as untrusted data instead. That is
+  enough for a review and not enough for an integration stage that must build on
+  unpublished work; the upgrade needs the governed-remote boundary to gain a
+  local-source case.
 - **A failed stage is terminal for its plan.** The plan reconciler does not
   retry a stage whose run failed: retries inside a run belong to the existing
   scheduler, and re-running a stage is a new revision through the ordinary

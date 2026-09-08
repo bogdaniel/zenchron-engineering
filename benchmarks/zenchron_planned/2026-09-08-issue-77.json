@@ -36,9 +36,34 @@
       "workspace_unchanged": true
     },
     "stages": [
-      {"id": "implementation", "kind": "agent", "role": "implementer", "agent_id": "codex", "vendor_family": "openai", "outcome": "completed"},
-      {"id": "review", "kind": "agent", "role": "reviewer", "agent_id": "claude", "vendor_family": "anthropic", "independent_of": ["implementation"], "independence_dimension": "vendor_family", "outcome": "completed"},
-      {"id": "assurance", "kind": "assurance_gate", "claims": ["claim-validation"], "outcome": "satisfied"}
+      {
+        "id": "implementation",
+        "kind": "agent",
+        "role": "implementer",
+        "agent_id": "codex",
+        "vendor_family": "openai",
+        "outcome": "completed"
+      },
+      {
+        "id": "review",
+        "kind": "agent",
+        "role": "reviewer",
+        "agent_id": "claude",
+        "vendor_family": "anthropic",
+        "independent_of": [
+          "implementation"
+        ],
+        "independence_dimension": "vendor_family",
+        "outcome": "completed"
+      },
+      {
+        "id": "assurance",
+        "kind": "assurance_gate",
+        "claims": [
+          "claim-validation"
+        ],
+        "outcome": "satisfied"
+      }
     ]
   },
   "measured": {
@@ -56,7 +81,8 @@
       "currency": null,
       "amount": null,
       "reason": "both providers are subscription CLIs and reported no cost; unknown is not zero"
-    }
+    },
+    "provider_invocations_note": "Attributed to the plan by the reconciler: the two stage runs. The PLANNING invocation that produced the plan is a third real provider call and is not in this number - it happens before the plan exists to attribute it to. Read the total as 3 when comparing against a mode that includes its own planning."
   },
   "unmeasured": [
     "planning_invocation_wall_seconds - the planner invocation is not separately instrumented; the plan's first journal event is the proposal",

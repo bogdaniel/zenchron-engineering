@@ -60,7 +60,8 @@ The resolver's own record of why the review went to Claude and not to Codex:
  "selected":"zenchron-reviewer"}
 ```
 
-Nothing executed until `autonomy plan approve`.
+Nothing executed until `autonomy plan approve`, which names the exact revision
+and digest the operator read.
 
 ## What the deterministic layer refused, live
 
@@ -143,10 +144,10 @@ verification, at revision `7aed24f9f809d98f9743ad1314b6149685769f40`.
 The review is the part worth reading. The independent reviewer - a different
 vendor, working from the PUBLISHED candidate rather than the base - checked each
 acceptance criterion against the code the documentation describes, raised four
-findings (an incompletely stated containment rule that `doctor` does not catch, a
-bind mount the prose does not admit is writable, a diagnostic string presented as
-a gate, and two hardening flags the rest of the system sets), and then wrote
-this:
+findings - an incompletely stated containment rule that `doctor` does not catch,
+a bind mount the prose does not admit is writable, a diagnostic string presented
+as a gate, and a provisioning container missing two hardening flags the rest of
+the system sets - and then wrote this:
 
 > I could not execute `gofmt -l .`, `go vet ./...`, or `go test ./...` - the
 > sandbox refused each of those commands, including with the sandbox override, so

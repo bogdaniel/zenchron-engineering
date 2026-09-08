@@ -639,3 +639,36 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 		t.Fatalf("the refusal does not name what happened: %v", err)
 	}
 }
+
+// An artifact the plan NAMES and nobody installed is refused with the
+// artifact's own name. A pinned profile that was never installed used to be
+// reported as "no eligible profile" - true, and useless - and a missing
+// context policy surfaced later as a hard error from the middle of resolution.
+func TestAMissingOperatorArtifactIsNamed(t *testing.T) {
+	plan := compilePlan(t, planInput(t, "trivial.engineering-fact.json", nil))
+	pinned := plan
+	pinned.Stages = append([]domain.PlanStage(nil), plan.Stages...)
+	pinned.Stages[0].Profile = "never-installed"
+
+	resolution, err := planning.Resolve(resolveInput(t, pinned, codexAgent()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolution.Blocked) != 1 || resolution.Blocked[0].Kind != planning.BlockMissingArtifact {
+		t.Fatalf("blocked = %#v, want one %q block", resolution.Blocked, planning.BlockMissingArtifact)
+	}
+	if !strings.Contains(resolution.Blocked[0].Reason, "never-installed") {
+		t.Fatalf("the block does not name the artifact: %q", resolution.Blocked[0].Reason)
+	}
+
+	policy := plan
+	policy.Stages = append([]domain.PlanStage(nil), plan.Stages...)
+	policy.Stages[0].ContextPolicy = "absent-policy"
+	blocked, err := planning.Resolve(resolveInput(t, policy, codexAgent()))
+	if err != nil {
+		t.Fatalf("a missing context policy failed resolution outright rather than blocking the stage: %v", err)
+	}
+	if len(blocked.Blocked) != 1 || !strings.Contains(blocked.Blocked[0].Reason, "absent-policy") {
+		t.Fatalf("blocked = %#v, want the missing context policy named", blocked.Blocked)
+	}
+}

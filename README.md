@@ -30,7 +30,7 @@ zenchron-engineering autonomy run issue 124 --agent claude
 #     what. It proposes; nothing runs until you approve.
 zenchron-engineering autonomy plan issue 125 --template zenchron-feature
 zenchron-engineering autonomy plan show PLAN --text
-zenchron-engineering autonomy plan approve PLAN
+zenchron-engineering autonomy plan approve PLAN --revision N --digest SHA256
 
 # 5. Watch all of it from one place.
 zenchron-engineering autonomy status --text
@@ -50,7 +50,7 @@ Start at [`docs/getting-started.md`](docs/getting-started.md), and read
      |                                      |                                |
      |-- plan issue 125 -------------------->|  compile roles, capabilities,  |
      |<-- proposed plan + assignments -------|  independence, gates, budget   |
-     |-- plan approve PLAN ----------------->|  nothing ran before this       |
+     |-- plan approve PLAN --revision --digest >| nothing ran before this       |
      |                                      |                                |
      |-- run issue 123 --agent codex ------>|                                |
      |-- run issue 124 --agent claude ----->|                                |

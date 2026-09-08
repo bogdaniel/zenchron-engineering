@@ -39,6 +39,12 @@ const (
 	// BlockUnavailable means the eligible workers are not currently usable -
 	// unauthenticated, not installed, out of quota.
 	BlockUnavailable BlockKind = "agent_unavailable"
+	// BlockMissingArtifact means the plan names an operator artifact that is
+	// not installed: a pinned profile, or a context policy. It is its own kind
+	// because the answer is different - install it, or edit the plan - and
+	// reporting it as "nothing can perform this role" sent an operator looking
+	// for a worker that was never the problem.
+	BlockMissingArtifact BlockKind = "artifact_not_installed"
 )
 
 // Blocked is a typed, explainable refusal to assign one stage.
@@ -120,6 +126,17 @@ func Resolve(input ResolveInput) (Resolution, error) {
 		if frozen, ok := input.Frozen[stage.ID]; ok {
 			assigned[stage.ID] = frozen
 			resolution.Assignments = append(resolution.Assignments, frozen)
+			continue
+		}
+		// An artifact the plan NAMES and the operator has not installed is a
+		// deterministic refusal with the artifact's own name in it. Without
+		// this, a pinned profile that was never installed was reported as "no
+		// eligible profile" - true, and useless - and a missing context policy
+		// surfaced much later as a hard error from the middle of resolution.
+		if missing := input.missingArtifact(stage); missing != "" {
+			resolution.Blocked = append(resolution.Blocked, Blocked{
+				StageID: stage.ID, Role: stage.Role, Kind: BlockMissingArtifact, Reason: missing,
+			})
 			continue
 		}
 		assignment, blocked, err := input.resolveStage(stage, profiles, assigned)
@@ -535,6 +552,22 @@ func selectionReason(stage domain.PlanStage, profile domain.AgentProfile, agent 
 	default:
 		return "the first eligible profile in deterministic order"
 	}
+}
+
+// missingArtifact names an operator artifact this stage requires and the
+// registry does not have. Empty means everything it names is installed.
+func (input ResolveInput) missingArtifact(stage domain.PlanStage) string {
+	if stage.Profile != "" {
+		if _, err := input.Registry.Profile(stage.Profile); err != nil {
+			return fmt.Sprintf("the stage pins agent profile %q and it is not installed", stage.Profile)
+		}
+	}
+	if stage.ContextPolicy != "" {
+		if _, err := input.Registry.ContextPolicy(stage.ContextPolicy); err != nil {
+			return fmt.Sprintf("the stage names context policy %q and it is not installed", stage.ContextPolicy)
+		}
+	}
+	return ""
 }
 
 func (input ResolveInput) contextPolicyFor(stage domain.PlanStage, profile domain.AgentProfile) (*domain.ContextPolicy, error) {

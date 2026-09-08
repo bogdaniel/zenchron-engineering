@@ -184,12 +184,14 @@ func TestRegistryRefusals(t *testing.T) {
 		},
 		{
 			// A gate creates no EngineeringRun. A gate with a role is a fake
-			// worker run wearing a gate's name.
+			// worker run wearing a gate's name - refused by the SCHEMA, which
+			// is why the detail names the document rather than the graph law
+			// that says the same thing one layer further in.
 			name: "gate names a role",
 			files: map[string]string{
 				"templates/fake-worker.json": `{"stages": [{"id": "g", "kind": "assurance_gate", "role": "reviewer", "required_claims": ["claim-x"]}]}`,
 			},
-			detail: "a gate is not performed by a worker",
+			detail: "validate encoded engineering-plan-template",
 		},
 		{
 			name: "assurance gate proves nothing",

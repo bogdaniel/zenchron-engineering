@@ -24,7 +24,7 @@ an issue, or a stated objective
    plan show PLAN           read it
         |
         v
-   plan approve PLAN        the boundary: nothing ran before this
+   plan approve PLAN --revision N --digest SHA   the boundary: nothing ran before this
         |
         v
    serve executes           ordinary EngineeringRuns, one per agent stage
@@ -173,10 +173,14 @@ reasoning, because that is what makes the review independent.
 What a downstream stage DOES receive is the upstream change itself. A stage that
 depends on completed producer stages is given their exact commit and tree and
 the diff they produced, delimited as untrusted data and framed by the
-runtime-owned instructions like every other piece of candidate-derived text. It
-runs in its own workspace at the trusted base, so without that a reviewer would
-be reviewing nothing; with it, the review is about the change and still carries
-none of the producer's reasoning. A diff too large for the runtime's bound is
+runtime-owned instructions like every other piece of candidate-derived text.
+
+Where those producers PUBLISHED a candidate, the stage's own workspace is cloned
+at that exact commit, so a reviewer opens the tree that contains the change.
+Where they did not - the work exists only in another run's local workspace,
+which the governed remote cannot serve - the stage runs at the trusted base and
+the diff is what carries the change to it. Either way the review is about the
+change and carries none of the producer's reasoning. A diff too large for the runtime's bound is
 truncated and says so, and a diff the runtime could not read says that rather
 than appearing as an empty change.
 
@@ -388,8 +392,8 @@ planner, profile or template statement.
 zenchron-engineering autonomy plan issue 123 [--template zenchron-feature]
                                              [--agent claude] [--deterministic]
 zenchron-engineering autonomy plan show PLAN [--text]
-zenchron-engineering autonomy plan approve PLAN [--note "..."]
-zenchron-engineering autonomy plan reject PLAN [--note "..."]
+zenchron-engineering autonomy plan approve PLAN --revision N --digest SHA256 [--note "..."]
+zenchron-engineering autonomy plan reject  PLAN --revision N --digest SHA256 [--note "..."]
 zenchron-engineering autonomy plan revise PLAN [--template ...] [--deterministic]
                                                [--substitute-human <stage>]
 zenchron-engineering autonomy plan status PLAN [--text]
@@ -411,7 +415,11 @@ candidates that were considered and why they were rejected, any blockers, and th
 budget envelope with known and unknown fields distinguished.
 
 `plan approve` records the operator's decision and produces the approved
-immutable revision. `plan reject` records the refusal. `plan revise` produces a
+immutable revision. It NAMES the revision and digest being decided, and
+`plan show` prints the exact command: a plan can gain a new unapproved revision
+between reading it and deciding - `serve` stores a decomposition proposal as
+one, on its own - and a decision that just took "whatever is newest" would
+approve something nobody read. `plan reject` records the refusal. `plan revise` produces a
 new proposal rather than editing an approved plan in place, because an approved
 revision is immutable and the work bound to it stays bound to what was approved.
 
