@@ -50,6 +50,20 @@ const ControlSocketName = "serve.sock"
 // leaves room for the file name.
 const maxControlSocketPath = 100
 
+// BoundedNote is one operator annotation, truncated to the bound a durable
+// payload field holds. It is the same bound the local path applies, so a note
+// reaches the journal identically whichever process records it.
+func BoundedNote(note string) string {
+	if len(note) > maxNoteBytes {
+		return note[:maxNoteBytes]
+	}
+	return note
+}
+
+// maxNoteBytes matches the payload field bound the journal enforces, so the
+// truncation here and the truncation there cut at the same place.
+const maxNoteBytes = maxPayloadFieldBytes
+
 // ControlDeadline is how long one control command may take, on BOTH sides of
 // the socket. It is per-command because the commands are not alike: a status
 // read answers immediately, while a plan revision clones a repository and
@@ -333,6 +347,13 @@ func writeControlResponse(connection net.Conn, response ControlResponse) {
 // client half, used by ordinary operator commands so they can delegate to a
 // running supervisor instead of driving the work in their own terminal.
 func SendControl(stateDir string, request ControlRequest) (ControlResponse, error) {
+	// The operator's note is TRUNCATED to what a payload field holds, exactly
+	// as the local path truncates it before journalling. Sending it whole and
+	// letting the request bound refuse the connection made a long note behave
+	// differently depending on which process applied the decision, which is the
+	// one thing the delegated path is supposed to make invisible.
+	request.Note = BoundedNote(request.Note)
+	request.Reason = BoundedNote(request.Reason)
 	path := ControlSocketPath(stateDir)
 	if err := AssertControlEndpointSecure(path); err != nil {
 		return ControlResponse{}, err

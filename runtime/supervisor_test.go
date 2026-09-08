@@ -1770,3 +1770,34 @@ func TestAControlDeadlineCoversTheWorkTheCommandAsksFor(t *testing.T) {
 		t.Fatalf("an unrecognized command is allowed %s, want the ordinary deadline", unknown)
 	}
 }
+
+// An operator's note reaches the journal the same way whichever process
+// records the decision.
+//
+// The local path truncates a note to the payload field bound before
+// journalling; the delegated path sent it whole and let the request size bound
+// refuse the connection, so a long note failed the command in one terminal and
+// was accepted in the other.
+func TestALongNoteIsTruncatedRatherThanRefused(t *testing.T) {
+	long := strings.Repeat("z", 32<<10)
+	bounded := BoundedNote(long)
+	if len(bounded) != maxPayloadFieldBytes {
+		t.Fatalf("a note of %d bytes bounded to %d, want the payload field bound %d", len(long), len(bounded), maxPayloadFieldBytes)
+	}
+	if short := BoundedNote("read it"); short != "read it" {
+		t.Fatalf("a short note was altered: %q", short)
+	}
+
+	// And the bounded request fits the socket's own request bound with room to
+	// spare, so the command is never refused for its note.
+	encoded, err := json.Marshal(ControlRequest{
+		Command: ControlPlanApprove, PlanID: "plan-x", Revision: 1,
+		Digest: strings.Repeat("a", 64), Note: bounded,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= maxControlRequestBytes {
+		t.Fatalf("a bounded request is %d bytes, at or above the %d-byte request bound", len(encoded), maxControlRequestBytes)
+	}
+}
