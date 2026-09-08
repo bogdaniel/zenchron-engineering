@@ -426,6 +426,24 @@ func (b RunBudgets) defaults() RunBudgets {
 	return b
 }
 
+// tightenedBy narrows these budgets by a plan stage's own. It only ever
+// narrows: a stage budget larger than the operator's configured bound is not
+// authority to exceed it, and a stage that states none keeps the configured
+// bound exactly.
+//
+// The runtime reads a run's persisted budgets through the run state, so this is
+// what makes an AgentProfile's `max_wall_seconds` and `max_execution_attempts`
+// bind the work rather than merely be recorded in the assignment.
+func (b RunBudgets) tightenedBy(stage domain.StageBudget) RunBudgets {
+	if wall := time.Duration(stage.MaxWallSeconds) * time.Second; wall > 0 && (b.WallLimit <= 0 || wall < b.WallLimit) {
+		b.WallLimit = wall
+	}
+	if attempts := stage.MaxExecutionAttempts; attempts > 0 && (b.MaxExecutionAttempts <= 0 || attempts < b.MaxExecutionAttempts) {
+		b.MaxExecutionAttempts = attempts
+	}
+	return b
+}
+
 // ParseGitHubRepo is the exported form for composition roots that hold an
 // owner/name identity and need the typed repository.
 func ParseGitHubRepo(identity string) (GitHubRepo, error) { return parseGitHubRepo(identity) }
@@ -565,7 +583,7 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal, nil)
+			created, err := r.createRun(ctx, runID, goal, nil, domain.StageBudget{})
 			return StartOutcome{RunID: created}, err
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
@@ -666,9 +684,9 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding) (string, error) {
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, stageBudget domain.StageBudget) (string, error) {
 	now := r.deps.Clock.Now()
-	budgets := r.deps.Budgets.defaults()
+	budgets := r.deps.Budgets.defaults().tightenedBy(stageBudget)
 	run := EngineeringRun{
 		SchemaVersion:    SchemaVersion,
 		ID:               runID,
@@ -1055,6 +1073,6 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
-	created, err := r.createRun(ctx, runID, goal, &binding)
+	created, err := r.createRun(ctx, runID, goal, &binding, binding.StageBudget)
 	return StartOutcome{RunID: created}, err
 }

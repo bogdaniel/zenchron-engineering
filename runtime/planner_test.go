@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -345,5 +346,35 @@ func TestPlanningWorkspaceIsTheExactTrustedSnapshot(t *testing.T) {
 	}
 	if first != second {
 		t.Fatal("measuring an unchanged workspace twice produced two digests")
+	}
+}
+
+// The answer is located in a single pass. The earlier scanner restarted at
+// every unclosed brace, which is quadratic in exactly the input a coding CLI
+// produces - echoed source code - so an ordinary transcript could stall
+// planning for minutes before anything was parsed.
+func TestThePlannerAnswerIsLocatedInOnePass(t *testing.T) {
+	answer := `{"stages": [{"id": "implementation", "kind": "agent", "role": "implementer", "objective": "do it"}]}`
+	// Half a megabyte of unclosed braces, as a CLI echoing code produces.
+	noise := strings.Repeat("if x { log(\"a\n", 40000)
+
+	started := time.Now()
+	found, err := extractJSONObject(noise + "\n" + answer)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("the answer was not found after %d bytes of noise: %v", len(noise), err)
+	}
+	if found != answer {
+		t.Fatalf("located %q, want the answer itself", found)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("locating the answer took %s: the scan is not linear", elapsed)
+	}
+
+	// A candidate closed inside an unbalanced outer region still counts: the
+	// surrounding noise is the CLI's, not the model's.
+	inner := `{"stages": []}`
+	if found, err := extractJSONObject(`{ source ` + inner); err != nil || found != inner {
+		t.Fatalf("an answer inside an unclosed region was missed: %q %v", found, err)
 	}
 }

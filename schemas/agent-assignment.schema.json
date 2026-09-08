@@ -109,6 +109,24 @@
             "operator_trusted",
             "protected"
           ]
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The profile's narrowing, frozen with it. Every member NARROWS: there is deliberately no member that raises a ceiling or permits a bypass.",
+          "properties": {
+            "max_wall_seconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_execution_attempts": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "deny_permission_bypass": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -186,6 +204,7 @@
           },
           "different_from": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "$ref": "#/$defs/non_empty_string"
             },

@@ -220,7 +220,7 @@ func (s *runState) recordedAgent() AgentIdentity {
 // dimensions stay unknown, because no configured worker in #63 reports them for
 // a subscription CLI and inventing a number would be worse than saying so.
 func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets {
-	budgets := r.deps.Budgets.defaults()
+	budgets := state.budgets()
 	// ACTIVE time, by the same rule conditions() enforces the budget with.
 	// Raw elapsed contradicted it: a run that sat overnight awaiting review
 	// would record wall_seconds: 0 in a durable handoff record while the

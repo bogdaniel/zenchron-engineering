@@ -684,7 +684,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
-	if limit := s.rt.deps.Budgets.WallLimit; limit > 0 && s.activeElapsed(now) > limit {
+	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
 		return Failed, "run_wall_budget_exhausted"
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
@@ -785,9 +785,35 @@ func (s *runState) plan() (desiredOperation, bool) {
 		if s.satisfied(spec.kind, key) {
 			continue
 		}
-		return desiredOperation{kind: spec.kind, key: key, maxAttempts: s.rt.attemptsFor(spec.kind)}, true
+		return desiredOperation{kind: spec.kind, key: key, maxAttempts: s.attemptsFor(spec.kind)}, true
 	}
 	return desiredOperation{}, false
+}
+
+// budgets is the bound THIS run is judged by: the operator's configuration,
+// narrowed by whatever the run persisted at creation. A plan stage run persists
+// its stage budget - already narrowed by the assigned profile's constraints -
+// so a profile that tightens wall time or attempts tightens the actual work
+// rather than only the document describing it.
+func (s *runState) budgets() RunBudgets {
+	budgets := s.rt.deps.Budgets.defaults()
+	if s.run.Budgets == nil {
+		return budgets
+	}
+	if wall := s.run.Budgets.WallLimit; wall > 0 && wall < budgets.WallLimit {
+		budgets.WallLimit = wall
+	}
+	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
+		budgets.MaxExecutionAttempts = attempts
+	}
+	return budgets
+}
+
+func (s *runState) attemptsFor(kind string) int {
+	if kind == OpExecutionInvoke {
+		return s.budgets().MaxExecutionAttempts
+	}
+	return s.rt.attemptsFor(kind)
 }
 
 func (r *EngineeringRuntime) attemptsFor(kind string) int {

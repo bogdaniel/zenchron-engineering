@@ -545,3 +545,60 @@ func TestAnIndependenceObligationIsNeverProvenVacuously(t *testing.T) {
 		t.Fatalf("a single-vendor plan resolved an independence obligation: %#v", single.Assignments)
 	}
 }
+
+// A profile's constraints are frozen INTO the assignment, narrowed only.
+// They used to be accepted, digested, schema-validated and then ignored
+// everywhere - a silent weakening of "narrow, never escalate".
+func TestAProfilesConstraintsAreFrozenIntoTheAssignment(t *testing.T) {
+	dir := t.TempDir()
+	writeArtifact(t, dir, "profiles/narrow.json", `{
+	  "execution_agent": "codex", "capabilities": ["repository_analysis", "code_change", "verification"],
+	  "constraints": {"max_wall_seconds": 300, "max_execution_attempts": 1, "deny_permission_bypass": true}
+	}`)
+	registry, err := planning.LoadRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := compilePlan(t, planInput(t, "trivial.engineering-fact.json", nil))
+	stage := plan.Stages[0]
+	input := resolveInput(t, plan, codexAgent())
+	input.Registry = registry
+	resolution, err := planning.Resolve(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, ok := resolution.Assignment(stage.ID)
+	if !ok {
+		t.Fatalf("the stage did not resolve: %#v", resolution.Blocked)
+	}
+	if assignment.Profile.Constraints == nil || !assignment.Profile.Constraints.DenyPermissionBypass {
+		t.Fatalf("the assignment does not carry the profile's refusal of the bypass: %#v", assignment.Profile.Constraints)
+	}
+	if assignment.Budget.MaxWallSeconds != 300 || assignment.Budget.MaxExecutionAttempts != 1 {
+		t.Fatalf("the assignment budget is %#v, want it narrowed to the profile's 300 seconds and 1 attempt", assignment.Budget)
+	}
+
+	// A profile stating a LARGER bound than the stage narrows nothing.
+	wider := t.TempDir()
+	writeArtifact(t, wider, "profiles/wide.json", `{
+	  "execution_agent": "codex", "capabilities": ["repository_analysis", "code_change", "verification"],
+	  "constraints": {"max_wall_seconds": 1048576, "max_execution_attempts": 99}
+	}`)
+	wideRegistry, err := planning.LoadRegistry(wider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Registry = wideRegistry
+	widened, err := planning.Resolve(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaxed, ok := widened.Assignment(stage.ID)
+	if !ok {
+		t.Fatalf("the stage did not resolve: %#v", widened.Blocked)
+	}
+	if relaxed.Budget != stage.Budget {
+		t.Fatalf("a profile widened the stage budget to %#v from %#v", relaxed.Budget, stage.Budget)
+	}
+}

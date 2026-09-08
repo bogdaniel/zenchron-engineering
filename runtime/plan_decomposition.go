@@ -269,8 +269,29 @@ func changeSummary(current, proposed domain.EngineeringPlan, snapshot PlanSnapsh
 	}
 	summary.InvalidatedStages = InvalidatedStages(current, proposed, snapshot)
 	summary.Material = len(summary.AddedStages) > 0 || len(summary.RemovedStages) > 0 ||
-		len(summary.ChangedStages) > 0 || current.BudgetEnvelope != proposed.BudgetEnvelope
+		len(summary.ChangedStages) > 0 || !sameEnvelope(current.BudgetEnvelope, proposed.BudgetEnvelope)
 	return summary
+}
+
+// sameEnvelope compares envelopes by VALUE. A struct comparison looks right
+// and is not: PlanBudgetEnvelope carries MaxCostMicros as a pointer, so two
+// envelopes holding the same ceiling would report a budget change that never
+// happened - pausing the plan for an operator decision about nothing - and two
+// aliased pointers holding different ceilings would report no change at all.
+// Which one you got depended on whether the documents had been round-tripped.
+func sameEnvelope(left, right domain.PlanBudgetEnvelope) bool {
+	if left.MaxChildRuns != right.MaxChildRuns || left.MaxConcurrency != right.MaxConcurrency ||
+		left.MaxProviderInvocations != right.MaxProviderInvocations || left.MaxWallSeconds != right.MaxWallSeconds {
+		return false
+	}
+	switch {
+	case left.MaxCostMicros == nil && right.MaxCostMicros == nil:
+		return true
+	case left.MaxCostMicros == nil || right.MaxCostMicros == nil:
+		return false
+	default:
+		return *left.MaxCostMicros == *right.MaxCostMicros
+	}
 }
 
 // ---------------------------------------------------------------------------

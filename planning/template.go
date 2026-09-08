@@ -84,6 +84,24 @@ func TemplateStagesFor(template domain.EngineeringPlanTemplate, facts []domain.E
 		} else {
 			stage.DependsOn = kept
 		}
+		// An independence peer the condition excluded is dropped for the same
+		// reason, and it is not the same list: leaving the reference behind
+		// made the whole plan refuse to compile ("requires independence from X,
+		// which is not a stage in this plan") for exactly the fact sets that
+		// excluded the peer. An obligation left with no peers is re-bound to
+		// the remaining material producers by the compiler, and a stage with no
+		// producer left to differ from is refused there rather than here.
+		if stage.Independence != nil {
+			peers := make([]string, 0, len(stage.Independence.DifferentFrom))
+			for _, peer := range stage.Independence.DifferentFrom {
+				if included[peer] {
+					peers = append(peers, peer)
+				}
+			}
+			independence := *stage.Independence
+			independence.DifferentFrom = peers
+			stage.Independence = &independence
+		}
 		result = append(result, stage)
 	}
 	return result

@@ -282,6 +282,9 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		PlanID: plan.ID, Revision: plan.Revision, PlanDigest: plan.Digest,
 		StageID: stage.ID, AssignmentID: assignment.ID,
 		BaseRevision: r.upstreamBase(assignment),
+		// The assignment's budget is the stage's, already narrowed by the
+		// assigned profile's constraints. The run is created bounded by it.
+		StageBudget: assignment.Budget,
 	}
 	outcome, err := engine.StartPlanStageRun(ctx, r.Issue, binding)
 	if err != nil {
@@ -693,8 +696,13 @@ func (s *SQLiteOperationStore) PlanAssignment(planID string, revision int, stage
 		}
 		return domain.AgentAssignment{}, false, err
 	}
-	var assignment domain.AgentAssignment
-	if err := json.Unmarshal([]byte(document), &assignment); err != nil {
+	// Decoded through the SCHEMA, like every other durable artifact this
+	// package reads back. A frozen assignment drives the agent binding, the
+	// instruction packs and the upstream context, so a row that no longer
+	// satisfies its own schema - corruption, or a schema tightened after it was
+	// written - is refused rather than used.
+	assignment, err := domain.Decode[domain.AgentAssignment]([]byte(document))
+	if err != nil {
 		return domain.AgentAssignment{}, false, fmt.Errorf("decode durable assignment: %w", err)
 	}
 	return assignment, true, nil

@@ -705,6 +705,12 @@ type ProfileBinding struct {
 	ContextPolicy    *PackRef                `json:"context_policy,omitempty"`
 	Capabilities     []EngineeringCapability `json:"capabilities"`
 	TrustRequirement TrustRequirement        `json:"trust_requirement"`
+	// Constraints is the profile's narrowing, frozen with the rest of it. It is
+	// carried here because the constraints have to be ENFORCED where the work
+	// runs, and the assignment is what the runtime reads there. A profile whose
+	// narrowing lived only in the operator's file would be a statement nothing
+	// applied.
+	Constraints *ProfileConstraints `json:"constraints,omitempty"`
 }
 
 // AgentBinding is the frozen identity of the underlying worker.

@@ -540,7 +540,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Purpose:               purpose,
 		Findings:              findings,
 		Feedback:              feedback,
-		Budgets:               ProviderBudget{WallLimit: r.deps.Budgets.WallLimit},
+		Budgets:               ProviderBudget{WallLimit: state.budgets().WallLimit},
 	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
@@ -2003,6 +2003,9 @@ func (p planStageContext) apply(request ExecutionRequest) ExecutionRequest {
 	request.Instructions = p.instructions
 	request.ModelPreference = p.assignment.Agent.Model
 	request.Upstream = p.upstream
+	if constraints := p.assignment.Profile.Constraints; constraints != nil {
+		request.DenyPermissionBypass = constraints.DenyPermissionBypass
+	}
 	return request
 }
 

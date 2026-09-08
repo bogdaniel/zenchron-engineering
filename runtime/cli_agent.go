@@ -54,11 +54,14 @@ import (
 // inherited flag and no provider suggestion can reach it. A refusal is a
 // configuration fault, not a run condition: it is raised before the process
 // starts, so nothing is executed under a mode that was not authorized.
-type PermissionBypassRefusedError struct{ AgentID, Mode string }
+type PermissionBypassRefusedError struct{ AgentID, Mode, Detail string }
 
 func (e *PermissionBypassRefusedError) Error() string {
-	return "refused permission bypass " + e.Mode + " for agent " + e.AgentID +
-		": the operator configuration does not set allow_permission_bypass for this agent"
+	detail := e.Detail
+	if detail == "" {
+		detail = "the operator configuration does not set allow_permission_bypass for this agent"
+	}
+	return "refused permission bypass " + e.Mode + " for agent " + e.AgentID + ": " + detail
 }
 
 // UnsupportedAgentKindError names a kind no CLI spec implements.
@@ -644,6 +647,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// unauthorized one executes nothing at all.
 	if p.PermissionBypass && !p.Agent.AllowPermissionBypass {
 		return ExecutionResult{}, &PermissionBypassRefusedError{AgentID: p.Agent.ID, Mode: spec.Permission.Bypass}
+	}
+	// A PROFILE may refuse the bypass for its own stages even where the agent
+	// has standing operator permission. Narrowing is the whole of what a
+	// profile may do, and a narrowing nothing applies is a statement, not a
+	// constraint.
+	if p.PermissionBypass && request.DenyPermissionBypass {
+		return ExecutionResult{}, &PermissionBypassRefusedError{
+			AgentID: p.Agent.ID, Mode: spec.Permission.Bypass,
+			Detail: "the agent profile this stage was assigned under denies the bypass",
+		}
 	}
 	if err := os.MkdirAll(p.ArtifactStore.Root, 0700); err != nil {
 		return ExecutionResult{}, err

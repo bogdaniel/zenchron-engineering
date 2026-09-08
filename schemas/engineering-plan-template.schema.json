@@ -172,6 +172,7 @@
         },
         "different_from": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "$ref": "#/$defs/non_empty_string"
           },

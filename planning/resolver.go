@@ -238,6 +238,7 @@ func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain
 		binding = domain.ProfileBinding{
 			ID: selected.ID, Version: selected.Version, Digest: selected.Digest,
 			Capabilities: selected.Capabilities, TrustRequirement: selected.TrustRequirement,
+			Constraints: profileConstraints(selected.Constraints),
 		}
 	}
 	contextPolicy, err := input.contextPolicyFor(stage, *selected)
@@ -273,7 +274,7 @@ func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain
 		TrustRequirement: effectiveTrust(stage, *selected),
 		Contract:         domain.ObjectRevision{ID: input.Contract.ID, Revision: input.Contract.Revision},
 		Context:          pack,
-		Budget:           stage.Budget,
+		Budget:           tightenedByProfile(stage.Budget, selected.Constraints),
 		Independence:     independenceBindings(stage, assigned, selectedAgent, *selected),
 		Selection:        explanation,
 	}
@@ -368,6 +369,30 @@ func independenceViolation(stage domain.PlanStage, profile domain.AgentProfile, 
 		}
 	}
 	return "", false
+}
+
+// profileConstraints carries a profile's narrowing into the frozen assignment,
+// and only when it states one: an empty object in every assignment document
+// would be noise in a content-addressed artifact.
+func profileConstraints(constraints domain.ProfileConstraints) *domain.ProfileConstraints {
+	if constraints == (domain.ProfileConstraints{}) {
+		return nil
+	}
+	return &constraints
+}
+
+// tightenedByProfile narrows a stage budget by the profile's constraints. It
+// only ever narrows: a profile that stated a HIGHER ceiling than the stage
+// would be escalating, and the smaller of the two is what an assignment
+// carries.
+func tightenedByProfile(budget domain.StageBudget, constraints domain.ProfileConstraints) domain.StageBudget {
+	if wall := constraints.MaxWallSeconds; wall != nil && *wall > 0 && (budget.MaxWallSeconds <= 0 || *wall < budget.MaxWallSeconds) {
+		budget.MaxWallSeconds = *wall
+	}
+	if attempts := constraints.MaxExecutionAttempts; attempts != nil && *attempts > 0 && (budget.MaxExecutionAttempts <= 0 || *attempts < budget.MaxExecutionAttempts) {
+		budget.MaxExecutionAttempts = *attempts
+	}
+	return budget
 }
 
 func independenceClass(dimension domain.IndependenceDimension, profile domain.AgentProfile, agent domain.ExecutionAgentDescriptor) string {

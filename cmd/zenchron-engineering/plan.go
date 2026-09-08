@@ -306,11 +306,18 @@ func planSubstituteHuman(ctx context.Context, flags autonomyFlags, overrides aut
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	repository, issue, _, err := composed.built.store.PlanSource(planID)
+	// The substitution produces a REVISION of this plan, and a revision answers
+	// the same source the plan does. `plan revise` refuses a plan with no
+	// recorded source; this path dropped the answer and proposed anyway,
+	// producing an approvable revision of a plan the supervisor will never
+	// drive.
+	_, issue, found, err := composed.built.store.PlanSource(planID)
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	_ = repository
+	if !found || issue <= 0 {
+		return runtime.ExitInvalid, fmt.Errorf("plan %s records no source issue, so it cannot be revised", planID)
+	}
 	plan, err := composed.service.Propose(ctx, runtime.ProposeInput{
 		PlanID: planID, Objective: view.Plan.Objective, Subject: view.Plan.Subject,
 		Contract: contract, Reasoned: stages, Issue: issue,
@@ -553,10 +560,13 @@ func planExit(view runtime.PlanView) int {
 	}
 }
 
+// singleLinePlan is one line of an objective, truncated by RUNES. The objective
+// carries issue text, so cutting bytes can split a multi-byte character and
+// print a broken rune into the operator's terminal.
 func singleLinePlan(text string) string {
 	line := strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " ")
-	if len(line) > 120 {
-		return line[:117] + "..."
+	if runes := []rune(line); len(runes) > 120 {
+		return string(runes[:117]) + "..."
 	}
 	return line
 }

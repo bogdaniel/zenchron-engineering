@@ -283,6 +283,15 @@ type RunPlanBinding struct {
 	// published, the field is empty and the stage is based on the trusted base
 	// with the upstream diff supplied as context instead.
 	BaseRevision string `json:"base_revision,omitempty"`
+	// StageBudget is the plan stage's own bound, already narrowed by the
+	// assigned profile's constraints. The run persists its budgets narrowed by
+	// this, which is what makes a profile's `max_wall_seconds` and
+	// `max_execution_attempts` bind the work instead of being recorded and
+	// ignored.
+	//
+	// omitempty, because a run created before it existed must canonicalize
+	// exactly as it did: the genesis event is hashed against the run document.
+	StageBudget domain.StageBudget `json:"stage_budget,omitzero"`
 }
 
 type RunOperation struct {

@@ -468,6 +468,10 @@ func (r Registry) Binding(profile domain.AgentProfile) (domain.ProfileBinding, e
 	binding := domain.ProfileBinding{
 		ID: profile.ID, Version: profile.Version, Digest: profile.Digest,
 		Capabilities: profile.Capabilities, TrustRequirement: profile.TrustRequirement,
+		// The constraints travel with the binding, because they are enforced
+		// where the work runs and the assignment is what the runtime reads
+		// there.
+		Constraints: profileConstraints(profile.Constraints),
 	}
 	for _, id := range profile.Instructions {
 		pack, err := r.Pack(id)

@@ -72,7 +72,13 @@ type ExecutionRequest struct {
 	// ModelPreference is the AgentProfile's model preference for this
 	// invocation. Empty means the agent's own configured default.
 	ModelPreference string
-	Findings        []Finding
+	// DenyPermissionBypass is an AgentProfile's refusal of the provider's
+	// unsafe permission mode for this stage, even where the agent has standing
+	// operator permission for it. It is a NARROWING and there is no member
+	// beside it that permits one: a profile can refuse the bypass and can never
+	// grant it.
+	DenyPermissionBypass bool
+	Findings             []Finding
 	// Feedback is the admitted, applicable, undelivered reviewer feedback this
 	// invocation is being given. It is UNTRUSTED DATA: it reaches the worker
 	// inside explicit delimiters, framed by the runtime-owned trusted

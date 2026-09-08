@@ -496,6 +496,11 @@ func stageIDs(plan domain.EngineeringPlan) []string {
 // reader of a provider transcript sees, credential values are already replaced
 // in it, and parsing the raw copy would make the planner the one component that
 // reads unredacted provider output.
+// maxPlannerAnswerBytes bounds how much of a planning transcript is scanned for
+// the answer. It is generous - a plan document is kilobytes - and exists so an
+// enormous transcript cannot turn parsing into the expensive step.
+const maxPlannerAnswerBytes = 4 << 20
+
 func readPlannerAnswer(artifacts []Artifact) (string, error) {
 	for _, item := range artifacts {
 		if !item.Sanitized {
@@ -504,6 +509,15 @@ func readPlannerAnswer(artifacts []Artifact) (string, error) {
 		body, err := os.ReadFile(item.Path)
 		if err != nil {
 			return "", err
+		}
+		// The answer is read from a BOUNDED tail of the transcript. A provider's
+		// output is not size-limited anywhere on this path, and everything else
+		// that reads provider output in this runtime is capped; the answer ends
+		// the output - the last balanced object wins - so the tail is where it
+		// is, and an unbounded read was the one place a transcript's size
+		// reached the parser.
+		if len(body) > maxPlannerAnswerBytes {
+			body = body[len(body)-maxPlannerAnswerBytes:]
 		}
 		return string(body), nil
 	}
@@ -617,35 +631,39 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 // located rather than assumed to be the whole output: the LAST balanced JSON
 // object containing a "stages" member wins, because a model that restates its
 // answer ends with the one it means.
+// It is a SINGLE pass over the transcript, keeping the position of every open
+// brace on a stack. The earlier form restarted the scan at each unclosed brace,
+// which is quadratic in the number of unclosed braces - and a coding CLI that
+// echoes source code produces plenty of those, so an ordinary transcript could
+// stall planning for minutes before the answer was even parsed.
 func extractJSONObject(answer string) (string, error) {
 	best := ""
-	for start := 0; start < len(answer); start++ {
-		if answer[start] != '{' {
-			continue
-		}
-		depth, inString, escaped := 0, false, false
-		for end := start; end < len(answer); end++ {
-			character := answer[end]
-			switch {
-			case escaped:
-				escaped = false
-			case character == '\\' && inString:
-				escaped = true
-			case character == '"':
-				inString = !inString
-			case inString:
-			case character == '{':
-				depth++
-			case character == '}':
-				depth--
-				if depth == 0 {
-					candidate := answer[start : end+1]
-					if strings.Contains(candidate, `"stages"`) && json.Valid([]byte(candidate)) {
-						best = candidate
-					}
-					start = end
-					end = len(answer)
-				}
+	var opens []int
+	inString, escaped := false, false
+	for i := 0; i < len(answer); i++ {
+		character := answer[i]
+		switch {
+		case escaped:
+			escaped = false
+		case character == '\\' && inString:
+			escaped = true
+		case character == '"':
+			inString = !inString
+		case inString:
+		case character == '{':
+			opens = append(opens, i)
+		case character == '}':
+			if len(opens) == 0 {
+				continue
+			}
+			start := opens[len(opens)-1]
+			opens = opens[:len(opens)-1]
+			// A candidate closed inside an unbalanced outer region still counts:
+			// `{ source {"stages":[]}` contains a perfectly good answer, and
+			// the surrounding noise is the CLI's, not the model's.
+			candidate := answer[start : i+1]
+			if strings.Contains(candidate, `"stages"`) && json.Valid([]byte(candidate)) {
+				best = candidate
 			}
 		}
 	}
