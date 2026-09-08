@@ -311,8 +311,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		}
 		return controlOK(view)
 	case runtime.ControlPlanRevise:
-		var view runtime.PlanView
-		if err := supervisor.WithPlanLock(func() (err error) { view, err = c.revisePlan(ctx, request); return err }); err != nil {
+		// NOT wrapped in the plan lock: revising runs a planning invocation,
+		// and the lock is taken inside, around the durable write alone. A lock
+		// held across a provider call stalls every run in the fleet.
+		view, err := c.revisePlan(ctx, supervisor, request)
+		if err != nil {
 			return controlError(err)
 		}
 		return controlOK(view)
@@ -355,7 +358,7 @@ func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanVi
 // composition: the engine it already built, the store it already owns, and -
 // where the operator did not ask for the deterministic compilation - the same
 // verified non-mutating planning invocation.
-func (c *composition) revisePlan(ctx context.Context, request runtime.ControlRequest) (runtime.PlanView, error) {
+func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Supervisor, request runtime.ControlRequest) (runtime.PlanView, error) {
 	plans, err := c.planService()
 	if err != nil {
 		return runtime.PlanView{}, err
@@ -371,16 +374,18 @@ func (c *composition) revisePlan(ctx context.Context, request runtime.ControlReq
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
-	// The repository's OWN default branch, resolved the same way the local
-	// command resolves it. Assuming one made a delegated revision compile
-	// against a branch the repository may not have, which is a difference an
-	// operator would experience as "it works in one terminal and not the
-	// other".
-	target, err := runtime.ResolveRepository(c.config.StateDir, repo.String())
-	if err != nil {
-		target = runtime.RepositoryTarget{
-			Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: watchedDefaultBranch,
-		}
+	// Derived from the plan's own repository IDENTITY, exactly as the local
+	// command derives it when a repository is named explicitly.
+	//
+	// An earlier attempt at this ran `git remote get-url origin` in the STATE
+	// DIRECTORY, which is not a checkout of anything: usually it errors and the
+	// fallback silently assumed a default branch, and where the state directory
+	// happens to sit inside some unrelated git repository it succeeded and bound
+	// a governed-remote system to that repository's origin. A supervisor governs
+	// several repositories; the plan says which one, and nothing about the
+	// process's own working directory does.
+	target := runtime.RepositoryTarget{
+		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: watchedDefaultBranch,
 	}
 	engine, err := c.engine(target)
 	if err != nil {
@@ -393,13 +398,19 @@ func (c *composition) revisePlan(ctx context.Context, request runtime.ControlReq
 		Template: request.Template, Deterministic: request.Deterministic,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
 	}
+	serialize := supervisor.WithPlanLock
 	if flags.SubstituteHuman != "" {
-		if _, err := substituteHumanWithComposition(ctx, composed, flags, request.PlanID, io.Discard); err != nil {
+		// The substitution compiles deterministically - no provider call - so
+		// the whole of it is short enough to serialize.
+		if err := serialize(func() error {
+			_, err := substituteHumanWithComposition(ctx, composed, flags, request.PlanID, io.Discard)
+			return err
+		}); err != nil {
 			return runtime.PlanView{}, err
 		}
 		return plans.View(request.PlanID)
 	}
-	if _, err := proposeWithComposition(ctx, composed, flags, issue, request.PlanID, io.Discard); err != nil {
+	if _, err := proposeSerialized(ctx, composed, flags, issue, request.PlanID, io.Discard, serialize); err != nil {
 		return runtime.PlanView{}, err
 	}
 	return plans.View(request.PlanID)

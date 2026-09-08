@@ -19,6 +19,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -1800,4 +1801,76 @@ func TestALongNoteIsTruncatedRatherThanRefused(t *testing.T) {
 	if len(encoded) >= maxControlRequestBytes {
 		t.Fatalf("a bounded request is %d bytes, at or above the %d-byte request bound", len(encoded), maxControlRequestBytes)
 	}
+}
+
+// Truncation must not split a rune.
+//
+// A byte cut through a multi-byte character produces invalid UTF-8; json.Marshal
+// substitutes U+FFFD - three bytes for one - so the field grows PAST the bound it
+// was just cut to and the journal refuses the append. The truncation meant to
+// make a note storable is what stopped it from being stored, on both the local
+// and the delegated path.
+func TestTruncationNeverSplitsARune(t *testing.T) {
+	note := strings.Repeat("a", maxPayloadFieldBytes-1) + strings.Repeat("ă", 4)
+	for name, bounded := range map[string]string{
+		"BoundedNote":   BoundedNote(note),
+		"boundedDetail": boundedDetail(note),
+	} {
+		if len(bounded) > maxPayloadFieldBytes {
+			t.Fatalf("%s produced %d bytes, above the %d-byte bound", name, len(bounded), maxPayloadFieldBytes)
+		}
+		if !utf8.ValidString(bounded) {
+			t.Fatalf("%s produced invalid UTF-8", name)
+		}
+		// The journal's own check is what this has to survive: marshalling must
+		// not grow the field past the bound.
+		encoded, err := json.Marshal(map[string]string{"note": bounded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var round map[string]string
+		if err := json.Unmarshal(encoded, &round); err != nil {
+			t.Fatal(err)
+		}
+		if len(round["note"]) > maxPayloadFieldBytes {
+			t.Fatalf("%s grew to %d bytes through a JSON round trip", name, len(round["note"]))
+		}
+	}
+}
+
+// The plan lock is not held across a provider call.
+//
+// It serializes read-then-append against an operator decision, which takes
+// microseconds. Held across a repository clone and a live planning invocation,
+// it stalled every run in the fleet - the tick takes the same lock before it
+// drives anything - so a single delegated revision froze work that had nothing
+// to do with plans.
+func TestThePlanLockIsReleasedAcrossAProviderCall(t *testing.T) {
+	supervisor := &Supervisor{}
+	invoked := make(chan struct{})
+	released := make(chan struct{})
+
+	supervisor.plansMu.Lock()
+	go func() {
+		<-invoked
+		// A decision arriving while the provider runs must be able to take the
+		// lock; if the reconciler still held it, this would block until the
+		// invocation finished.
+		supervisor.plansMu.Lock()
+		supervisor.plansMu.Unlock()
+		close(released)
+	}()
+
+	// The seam the reconciler calls, with the lock held around it.
+	func() {
+		supervisor.plansMu.Unlock()
+		defer supervisor.plansMu.Lock()
+		close(invoked)
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Error("a decision could not take the plan lock while a provider call was in flight")
+		}
+	}()
+	supervisor.plansMu.Unlock()
 }

@@ -109,6 +109,31 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 	return true, code, err
 }
 
+// reportDelegatedDecision answers "did my decision happen" from the durable
+// record when the supervisor's reply did not arrive.
+func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, planID, verb string, revision int, digest string, cause error, stdout io.Writer) (int, error) {
+	reader, err := openPlanReader(flags, overrides)
+	if err != nil {
+		return runtime.ExitFailed, cause
+	}
+	defer reader.release()
+	snapshot, err := reader.store.ReplayPlan(planID)
+	if err != nil {
+		return runtime.ExitFailed, cause
+	}
+	decided := snapshot.Approval
+	applied := decided.Revision == revision && decided.Digest == digest &&
+		((verb == "approve" && decided.Status == domain.ApprovalApproved) ||
+			(verb == "reject" && decided.Status == domain.ApprovalRejected))
+	if !applied {
+		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: revision %d is %s)",
+			cause, decided.Revision, decided.Status)
+	}
+	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, decided.Revision, decided.Status, decided.Operator)
+	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%v); the durable record above is what happened\n", cause)
+	return runtime.ExitCompleted, nil
+}
+
 // renderDelegatedPlan prints a supervisor's answer exactly as a locally applied
 // decision prints: an operator should not be able to tell which process did it.
 func renderDelegatedPlan(flags autonomyFlags, payload []byte, decided bool, stdout io.Writer) (int, error) {
@@ -247,6 +272,18 @@ func planPropose(ctx context.Context, flags autonomyFlags, overrides autonomyOve
 // revision requested while `serve` is running is applied by the process that
 // owns the work rather than by a second one racing it.
 func proposeWithComposition(ctx context.Context, composed *planComposition, flags autonomyFlags, issue int, planID string, stdout io.Writer) (int, error) {
+	return proposeSerialized(ctx, composed, flags, issue, planID, stdout, nil)
+}
+
+// proposeSerialized is the propose with an optional CRITICAL SECTION around the
+// durable write alone.
+//
+// The supervisor passes one so an operator's decision cannot interleave with
+// the write; it deliberately does not cover the planning invocation, which
+// clones a repository and calls a provider. Holding a lock across that stalled
+// every run in the fleet - the reconciler takes the same lock before it drives
+// anything - so the long part runs unlocked and only the append is serialized.
+func proposeSerialized(ctx context.Context, composed *planComposition, flags autonomyFlags, issue int, planID string, stdout io.Writer, under func(func() error) error) (int, error) {
 	intent, err := composed.engine.CompilePlanIntent(ctx, issue)
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -272,7 +309,13 @@ func proposeWithComposition(ctx context.Context, composed *planComposition, flag
 		}
 		input.Reasoned, input.Reasoning = stages, reasoning
 	}
-	plan, err := composed.service.Propose(ctx, input)
+	var plan domain.EngineeringPlan
+	write := func() (err error) { plan, err = composed.service.Propose(ctx, input); return err }
+	if under != nil {
+		err = under(write)
+	} else {
+		err = write()
+	}
 	if err != nil {
 		return exitFor(err, runtime.ExitFailed), err
 	}
@@ -548,7 +591,12 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	})
 	if delegated {
 		if err != nil {
-			return exitFor(err, runtime.ExitFailed), err
+			// The supervisor may have applied the decision and lost the reply -
+			// a connection deadline, a restart. Reporting a bare failure for a
+			// decision that WAS applied is the "effect without the answer" this
+			// endpoint exists to avoid, so the durable record is consulted
+			// before an operator is told it failed.
+			return reportDelegatedDecision(flags, overrides, planID, verb, revision, digest, err, stdout)
 		}
 		return renderDelegatedPlan(flags, payload, true, stdout)
 	}

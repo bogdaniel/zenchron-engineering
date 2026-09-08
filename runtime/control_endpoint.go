@@ -53,16 +53,7 @@ const maxControlSocketPath = 100
 // BoundedNote is one operator annotation, truncated to the bound a durable
 // payload field holds. It is the same bound the local path applies, so a note
 // reaches the journal identically whichever process records it.
-func BoundedNote(note string) string {
-	if len(note) > maxNoteBytes {
-		return note[:maxNoteBytes]
-	}
-	return note
-}
-
-// maxNoteBytes matches the payload field bound the journal enforces, so the
-// truncation here and the truncation there cut at the same place.
-const maxNoteBytes = maxPayloadFieldBytes
+func BoundedNote(note string) string { return boundedField(note) }
 
 // ControlDeadline is how long one control command may take, on BOTH sides of
 // the socket. It is per-command because the commands are not alike: a status

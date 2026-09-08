@@ -499,6 +499,12 @@ func flagDescription(text string) string {
 	}
 	cut("\n  -")
 	cut("\n-")
+	// clap indents long-only flags by six spaces. Without this the "possible
+	// values" exception below can carry a description across the NEXT flag, and
+	// the choice check then accepts a value that belongs to a different flag -
+	// the exact association this function exists to require.
+	cut("\n      --")
+	cut("\n    --")
 	// A blank line ends the description UNLESS the next block is this flag's
 	// own value list. clap prints "Possible values:" as an indented block after
 	// a blank line, so cutting at the blank line put the choices outside the
@@ -790,6 +796,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
 		Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
 		PromptSHA256:                    promptDigest(invocation.Prompt),
+	}
+	// The invocation's WALL BOUND is applied here, where the process actually
+	// runs. It was carried all the way into the request and read by nobody on
+	// this path, so a planner stage narrowed to five minutes could run until
+	// the process exited on its own - and the CLI adapters are exactly the ones
+	// given read-only planning modes, so it was the primary planner path that
+	// was unbounded.
+	if limit := request.Budgets.WallLimit; limit > 0 {
+		bounded, cancel := context.WithTimeout(ctx, limit)
+		defer cancel()
+		ctx = bounded
 	}
 	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, p.env(spec, home), p.grace())
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(p.Agent.ID, request.AttemptRef(), output.Stdout, output.Stderr)

@@ -817,7 +817,11 @@ func humanDecision(events []EngineeringEvent, action *domain.Action, head string
 		}
 		var payload HumanAuthorityRecordedPayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			continue
+			// An unreadable decision is not an absent one. Walking past it
+			// reaches an OLDER approval of the same head and satisfies the
+			// gate - an error answering the question "did a person approve
+			// this", which is the class this file swept elsewhere.
+			return humanDecisionReference{}, false
 		}
 		if action != nil && payload.Action != *action {
 			continue

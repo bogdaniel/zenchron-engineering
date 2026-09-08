@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"time"
 )
 
 func planningRequest(request ExecutionRequest) ExecutionRequest {
@@ -228,5 +229,27 @@ func TestAReadOnlyProbeRequiresTheChoiceOfTheFlagItPasses(t *testing.T) {
 				t.Fatalf("advertisesChoice(%q) = %v, want %v", tc.help, got, tc.advertises)
 			}
 		})
+	}
+}
+
+// A stated wall bound bounds the process, on the path that actually plans.
+//
+// The bound travelled from the stage budget into the request and was read by
+// nobody in the CLI adapters - which are exactly the adapters given read-only
+// planning modes, so the primary planner path was unbounded while the plan
+// reported a ceiling.
+func TestACLIInvocationIsBoundedByItsStatedWallLimit(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.block = true
+	request.Budgets = ProviderBudget{WallLimit: 50 * time.Millisecond}
+
+	started := time.Now()
+	_, err := provider.Execute(context.Background(), request)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("an invocation past its wall bound returned success")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the invocation ran %s against a 50ms bound", elapsed)
 	}
 }

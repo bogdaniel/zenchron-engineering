@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -56,11 +57,27 @@ func failed(err error) effect {
 	}{boundedDetail(err.Error())}}
 }
 
-func boundedDetail(detail string) string {
-	if len(detail) > maxPayloadFieldBytes {
-		return detail[:maxPayloadFieldBytes]
+func boundedDetail(detail string) string { return boundedField(detail) }
+
+// boundedField truncates to the payload field bound WITHOUT splitting a rune.
+//
+// A byte slice through a multi-byte character produces invalid UTF-8, and
+// json.Marshal then substitutes U+FFFD - three bytes for one - so the field
+// grows past the bound it was just cut to and the journal refuses the append.
+// The truncation that was supposed to make a note storable is what stops it
+// from being stored.
+//
+// This is the second time a byte-offset cut has been wrong in this package;
+// there is one implementation now, and both callers use it.
+func boundedField(text string) string {
+	if len(text) <= maxPayloadFieldBytes {
+		return text
 	}
-	return detail
+	cut := maxPayloadFieldBytes
+	for cut > 0 && !utf8.ValidString(text[:cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 // handle dispatches on the operation kind. This is a dispatch table for

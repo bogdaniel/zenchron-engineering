@@ -618,6 +618,19 @@ func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
 			// the initial planner uses. The supervisor supplies the seam and
 			// learns nothing about providers.
 			Planner: func(ctx context.Context, request PlanDecompositionRequest) (PlannerOutput, error) {
+				// The provider call happens with the plan lock RELEASED. The
+				// lock serializes read-then-append against an operator
+				// decision, which takes microseconds; holding it across a
+				// repository clone and a live planning invocation stalled
+				// every run in the fleet for minutes, because this tick takes
+				// the same lock before it drives anything.
+				//
+				// Releasing here is safe because the caller re-reads plan state
+				// after the invocation: the proposal is compiled and recorded
+				// against a snapshot taken afterwards, so a decision that lands
+				// in the window is seen rather than overwritten.
+				s.plansMu.Unlock()
+				defer s.plansMu.Lock()
 				return s.decomposeWithAgent(ctx, repository, request)
 			},
 		}
