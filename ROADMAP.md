@@ -194,7 +194,10 @@ and a kernel that has never learned a provider's name.
   them; nothing executes until the operator approves a revision.
 - **Typed independence.** Profile, execution agent, provider kind, vendor family
   and human legs are distinct equivalence classes, ordered so a stronger
-  requirement is never silently degraded.
+  requirement is never silently degraded. Where only one vendor is eligible and
+  policy required vendor independence, the stage blocks explicitly and offers the
+  human substitution policy permitted - as an operator decision that produces a
+  revision, never as something the resolver applies.
 - **A plan reconciler inside `serve`.** It marks gates satisfied from existing
   evidence, authority and human-decision state, identifies dependency-ready
   `agent` stages, and creates ordinary `EngineeringRun`s for them. The existing

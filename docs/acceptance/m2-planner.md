@@ -126,9 +126,14 @@ With one eligible vendor and a vendor-family obligation, the plan surfaces an
 explicit block. A human substitution is offered only where policy permits it.
 
 - `planning/resolver.go` — `independenceViolation`, `blocked`.
-- **Proved:** `planning.TestSingleVendorIndependenceShortageBlocksExplicitly`.
-- **Limitation:** performing the substitution is an operator decision through
-  `plan revise`; the resolver surfaces the permission and does not apply it.
+- **Proved:** `planning.TestSingleVendorIndependenceShortageBlocksExplicitly`,
+  `planning.TestHumanSubstitutionIsAvailableOnlyWherePolicyPermitsIt`,
+  `planning.TestARevisionCannotEscapeIndependenceByBecomingAGate`.
+- The substitution is an operator DECISION - `plan revise --substitute-human
+  STAGE` - and it produces a revision that goes through the ordinary approval
+  boundary. The resulting gate records the role it stands in for, so the
+  obligation stays checkable; a gate that names no role fulfils none, which is
+  what stops "turn the reviewer into a gate" from being an escape.
 
 ## 12. Role-specific context
 

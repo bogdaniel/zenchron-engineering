@@ -384,6 +384,7 @@ zenchron-engineering autonomy plan show PLAN [--text]
 zenchron-engineering autonomy plan approve PLAN [--note "..."]
 zenchron-engineering autonomy plan reject PLAN [--note "..."]
 zenchron-engineering autonomy plan revise PLAN [--template ...] [--deterministic]
+                                               [--substitute-human <stage>]
 zenchron-engineering autonomy plan status PLAN [--text]
 zenchron-engineering autonomy plan list [--text]
 ```
@@ -406,6 +407,14 @@ budget envelope with known and unknown fields distinguished.
 immutable revision. `plan reject` records the refusal. `plan revise` produces a
 new proposal rather than editing an approved plan in place, because an approved
 revision is immutable and the work bound to it stays bound to what was approved.
+
+`plan revise --substitute-human STAGE` is the operator acting on an independence
+shortage that policy permits a person to fill: the blocked worker stage becomes a
+human decision gate answering the contract's own independent claims. It applies
+nothing — it proposes a revision, which needs the same approval as any other, and
+it is refused where policy did not permit the substitution. The gate records the
+role it stands in for, so the obligation stays checkable rather than quietly
+disappearing with the stage.
 
 `plan status` reports stage and gate state for one plan, `plan list` lists every
 plan, and global `autonomy status` shows plan state — awaiting_approval,
