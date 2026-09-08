@@ -190,6 +190,14 @@ Consumption is a projection of the durable journal, never a stored counter:
 child_runs  provider_invocations  wall_seconds  cost_micros (+ cost_known)
 ```
 
+`child_runs` and `provider_invocations` are attributed by the reconciler and
+ENFORCED against the envelope before a stage starts. `wall_seconds` is carried
+and validated against the operator ceiling at approval, but nothing yet
+attributes elapsed provider time to a plan, so consumed `wall_seconds` reads 0
+and that ceiling is not enforced during execution. It reads 0 rather than
+pretending: an unenforced ceiling that looked enforced would be worse than one
+that reads as unattributed.
+
 > **A plan revision, reassignment, restart or decomposition step may not reset
 > already-consumed plan or run budget.**
 
