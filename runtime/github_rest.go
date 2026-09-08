@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -322,6 +323,44 @@ func (a GitHubRESTAdapter) PullRequestComments(ctx context.Context, repo GitHubR
 
 func (a GitHubRESTAdapter) IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
 	return a.issueComments(ctx, repo, number)
+}
+
+// pagedJSON walks every page of a list endpoint into out, which must be a
+// pointer to a slice. It exists so review metadata, inline review comments and
+// conversation comments obey ONE pagination law rather than three: each of them
+// feeds admission, and a silently truncated page is feedback that never reaches
+// a worker.
+//
+// It reads through doRaw with typed status classification, so a throttled page
+// is a throttle rather than a rejected credential, and it REFUSES at the bound
+// instead of returning a short answer.
+func (a GitHubRESTAdapter) pagedJSON(ctx context.Context, repo GitHubRepo, path, what string, out any) error {
+	value := reflect.ValueOf(out).Elem()
+	all := reflect.MakeSlice(value.Type(), 0, 0)
+	for page := 1; page <= maxConversationPages; page++ {
+		query := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet, path, query, nil, nil)
+		if err != nil {
+			return err
+		}
+		rate, reported := observeRateLimit(header, status)
+		if err := classifyGitHubStatus(status, rate, reported, what); err != nil {
+			return err
+		}
+		batch := reflect.New(value.Type())
+		if err := json.Unmarshal(raw, batch.Interface()); err != nil {
+			return &GitHubAPIError{Status: status, Detail: "unreadable " + what + " response"}
+		}
+		all = reflect.AppendSlice(all, batch.Elem())
+		if !hasNextPage(header.Get("Link")) {
+			value.Set(all)
+			return nil
+		}
+	}
+	return &GitHubAPIError{
+		Status: http.StatusOK,
+		Detail: fmt.Sprintf("%s in %s exceeded %d pages; refusing to report a truncated set", what, repo, maxConversationPages),
+	}
 }
 
 // maxConversationPages bounds the conversation walk, exactly as
@@ -665,7 +704,6 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 		return GitHubReviewObservation{}, err
 	}
 	base := repoPath(repo) + "/pulls/" + strconv.Itoa(number)
-	query := url.Values{"per_page": {"100"}}
 	var reviews []struct {
 		ID          int64    `json:"id"`
 		User        *ghActor `json:"user"`
@@ -674,7 +712,12 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 		CommitID    string   `json:"commit_id"`
 		SubmittedAt string   `json:"submitted_at"`
 	}
-	if err := a.call(ctx, repo, http.MethodGet, base+"/reviews", query, nil, &reviews); err != nil {
+	// Reviews and inline comments paginate exactly like conversation comments,
+	// and for the same reason: retrieval happens BEFORE admission, so a
+	// maintainer's review pushed onto page 2 by a hundred earlier records is
+	// not merely slow to notice - it is permanently invisible, and anyone able
+	// to comment can push it there.
+	if err := a.pagedJSON(ctx, repo, base+"/reviews", "pull request reviews", &reviews); err != nil {
 		return GitHubReviewObservation{}, err
 	}
 	var comments []struct {
@@ -685,7 +728,7 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 		CommitID  string   `json:"commit_id"`
 		CreatedAt string   `json:"created_at"`
 	}
-	if err := a.call(ctx, repo, http.MethodGet, base+"/comments", query, nil, &comments); err != nil {
+	if err := a.pagedJSON(ctx, repo, base+"/comments", "pull request review comments", &comments); err != nil {
 		return GitHubReviewObservation{}, err
 	}
 	observation := GitHubReviewObservation{HeadSHA: headSHA}

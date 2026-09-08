@@ -338,9 +338,14 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 	// nowhere else: this is the one place the runtime allocates a workspace,
 	// and a bound checked anywhere earlier would be checking a number that
 	// could have changed by the time it mattered.
-	if err := r.deps.Storage.Admit(); err != nil {
+	// The admission is HELD across the clone. Checking and then allocating let
+	// two concurrent runs both find room for one more candidate and both take
+	// it.
+	release, err := r.deps.Storage.Reserve()
+	if err != nil {
 		return effect{state: OperationFailed, result: mutationResult{FailureClass: FailureStateStorageExhausted}}
 	}
+	defer release()
 	workspace, err := CreateCandidateClone(r.deps.StateDir, state.run.ID, r.deps.Remote.URL, state.pinnedBase(), r.deps.Credentials)
 	if err != nil {
 		return failed(err)

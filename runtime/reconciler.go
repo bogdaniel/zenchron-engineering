@@ -351,7 +351,10 @@ var externalWaitReasons = map[string]bool{
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
-	WatchWaitingGitHubAuth:    true,
+	// The controller stopped. The run is not working, and it is waiting for a
+	// supervisor to exist again rather than for anything it can do itself.
+	"controller_shutdown":  true,
+	WatchWaitingGitHubAuth: true,
 	// Waiting for a human decision about the source or the pull request.
 	WatchWaitingOptInRemoved:       true,
 	"source_intent_changed":        true,
@@ -1545,6 +1548,7 @@ var waitReasons = map[FailureClass]string{
 	FailureProviderQuota:         "execution_provider_quota",
 	FailureProviderRateLimited:   "execution_provider_rate_limited",
 	FailureStateStorageExhausted: "state_storage_exhausted",
+	FailureControllerShutdown:    "controller_shutdown",
 }
 
 func waitReason(class FailureClass) string {

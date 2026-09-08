@@ -34,3 +34,8 @@ func AssertControlEndpointSecure(path string) error {
 // acquireControlStartLock is unreachable here: this platform refuses the
 // endpoint before startup serialization could matter.
 func acquireControlStartLock(string) (func(), error) { return func() {}, errControlEndpointUnsupported }
+
+// acquireStateAllocationLock cannot serialize allocation on a platform whose
+// ownership modes this runtime does not verify; the caller treats an
+// unavailable lock as "do not enforce the ceiling" rather than as a refusal.
+func acquireStateAllocationLock(string) (func(), error) { return nil, errControlEndpointUnsupported }

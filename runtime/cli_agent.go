@@ -594,8 +594,15 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		if ctx.Err() != nil {
+			// The CONTROLLER stopped, not the work. Recording this as
+			// FailureUnknown routed it to RouteStop and terminalized a run that
+			// a shutdown is supposed to leave resumable.
+			//
+			// This does not weaken `stop RUN`: operator cancellation is a
+			// separate durable act that journals run.cancelled, and the
+			// Cancelled disposition takes precedence over every wait.
 			result.Outcome = OperationCancelled
-			result.Failure.Classification = FailureUnknown
+			result.Failure.Classification = FailureControllerShutdown
 		}
 	}
 	return result, runErr

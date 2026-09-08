@@ -81,3 +81,24 @@ func acquireControlStartLock(stateDir string) (release func(), err error) {
 		_ = file.Close()
 	}, nil
 }
+
+// acquireStateAllocationLock serializes candidate-workspace allocation across
+// processes sharing one state directory. Same mechanism as the control-endpoint
+// start lock, different file: two supervisors, or a supervisor and an
+// `autonomy run` command, must not both pass a storage ceiling check and then
+// both allocate.
+func acquireStateAllocationLock(dir string) (func(), error) {
+	path := filepath.Join(dir, "storage.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
+}

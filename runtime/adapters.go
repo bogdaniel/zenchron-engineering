@@ -394,6 +394,20 @@ const (
 	// from burning a run's remediation budget on an allowance that will simply
 	// come back.
 	FailureProviderQuota FailureClass = "provider_quota"
+	// FailureControllerShutdown is the CONTROLLER stopping, observed from
+	// inside an invocation as a cancelled context.
+	//
+	// It is not the work failing and it is not the operator cancelling the run.
+	// Those are different acts with different records: `stop RUN` journals
+	// run.cancelled and the Cancelled disposition takes precedence over
+	// everything below it, while a shutdown is supposed to leave every run
+	// exactly as resumable as its journal says.
+	//
+	// Classifying it as FailureUnknown routed it to RouteStop, so a supervisor
+	// shutting down terminalized whatever was mid-flight - the controller
+	// lifecycle failure shape #57 documents, and the exact opposite of what
+	// docs/supervisor.md promises about shutdown.
+	FailureControllerShutdown FailureClass = "controller_shutdown"
 	// FailureProviderRateLimited is the same shape at a shorter timescale: the
 	// provider asked to be called less often. It is kept separate from quota
 	// because the operator action differs - one waits, the other means the
@@ -502,7 +516,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
-		FailureProviderQuota, FailureProviderRateLimited, FailureStateStorageExhausted:
+		FailureProviderQuota, FailureProviderRateLimited, FailureStateStorageExhausted,
+		FailureControllerShutdown:
 		return RouteWait
 	default:
 		return RouteStop

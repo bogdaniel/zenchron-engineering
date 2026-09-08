@@ -57,8 +57,45 @@ type StateStorage struct {
 // clone once per repository and reusing that figure is the upgrade.
 const estimatedCandidateBytes = 512 << 20
 
+// Reserve admits ONE candidate workspace and holds the admission until the
+// workspace exists.
+//
+// Admit alone was a check with no reservation, and the supervisor deliberately
+// drives runs concurrently: two runs could measure the same `used`, both find
+// room for one more candidate, and both then clone - overshooting the ceiling
+// and hitting ENOSPC mid-work, which is the exact failure the bound exists to
+// prevent.
+//
+// The lock is an flock on a file in the state directory, so it serializes
+// across PROCESSES as well as goroutines: two supervisors, or a supervisor and
+// an `autonomy run` command, share one state directory and one ceiling. It is
+// released by the kernel if a process dies holding it.
+//
+// The returned release must be called once the workspace is created or the
+// attempt is abandoned.
+func (s StateStorage) Reserve() (release func(), err error) {
+	if s.CeilingBytes <= 0 || s.Dir == "" {
+		return func() {}, nil
+	}
+	unlock, err := lockStateAllocation(s.Dir)
+	if err != nil {
+		// A directory that cannot be locked is not a reason to refuse work, for
+		// the same reason an unmeasurable one is not: the bound is a resource
+		// courtesy, not a security boundary.
+		return func() {}, nil
+	}
+	if err := s.Admit(); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
+}
+
 // Admit reports whether another candidate workspace may be allocated. An
 // unconfigured ceiling admits everything, which is exactly what it means.
+//
+// It measures and does not reserve; callers that are about to allocate use
+// Reserve, which holds the admission across the allocation.
 func (s StateStorage) Admit() error {
 	if s.CeilingBytes <= 0 || s.Dir == "" {
 		return nil
@@ -112,4 +149,11 @@ func (s StateStorage) Usage() (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// lockStateAllocation serializes candidate allocation for one state directory.
+// It is a separate file from the control-endpoint start lock: they guard
+// different things and holding one must never imply the other.
+func lockStateAllocation(dir string) (func(), error) {
+	return acquireStateAllocationLock(dir)
 }

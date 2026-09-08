@@ -495,8 +495,11 @@ func TestGitHubRESTAdapterShapesItsRequests(t *testing.T) {
 		{"PATCH", "https://api.github.com/repos/zenchron/fixture/pulls/5"},
 		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5"},
 		{"GET", "https://api.github.com/repos/zenchron/fixture/commits/" + testHeadSHA + "/check-runs?per_page=100"},
-		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/reviews?per_page=100"},
-		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/comments?per_page=100"},
+		// page=1 is explicit: reviews and inline comments are walked page by
+		// page like conversation comments, because retrieval happens before
+		// admission and a truncated first page is feedback that never arrives.
+		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/reviews?page=1&per_page=100"},
+		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/comments?page=1&per_page=100"},
 		{"POST", "https://api.github.com/repos/zenchron/fixture/issues/5/comments"},
 		{"GET", "https://api.github.com/repos/zenchron/fixture/git/ref/heads/issue-7"},
 	}
