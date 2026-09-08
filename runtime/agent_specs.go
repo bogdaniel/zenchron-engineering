@@ -181,7 +181,7 @@ var claudeSpec = cliAgentSpec{
 			Args: []string{"--help"}, Required: []string{"--permission-mode"},
 			RequiredChoices: []cliFlagChoice{{Flag: "--permission-mode", Value: "plan"}},
 		},
-		Mode:  "plan",
+		Mode: "plan",
 		Args: func(i cliInvocation) []string {
 			args := []string{"--print", "--permission-mode", "plan", "--safe-mode"}
 			if i.Model() != "" {
