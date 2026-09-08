@@ -252,10 +252,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 // decides, and a stale answer would block a plan on an agent that has since
 // become available.
 func (c *composition) planService() (runtime.PlanService, error) {
-	registry, err := c.planningRegistry()
-	if err != nil {
-		return runtime.PlanService{}, err
-	}
+	registry := c.planning
 	agents := runtime.DescribeExecutionAgents(context.Background(), c.agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
 		return runtime.AgentProberFor(agent, c.artifacts, c.config.StateDir)
 	})

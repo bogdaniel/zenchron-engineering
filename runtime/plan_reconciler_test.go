@@ -8,8 +8,11 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/planning"
@@ -589,5 +592,123 @@ func TestAnUnreadableUpstreamDiffIsStatedRatherThanOmitted(t *testing.T) {
 	})
 	if !strings.Contains(prompt, "could not read this stage's diff") {
 		t.Fatalf("an unreadable diff was silently omitted:\n%s", prompt)
+	}
+}
+
+// Editing a profile after approval does not rewrite work already approved. The
+// assignment froze the instruction pack by digest, and a pack whose content has
+// moved since no longer matches it - so the run refuses rather than silently
+// executing text nobody approved.
+func TestAnEditedInstructionPackRefusesRatherThanRewritingApprovedWork(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistryFile(t, dir, "instructions/review.json", `{"instructions": ["Review the diff; do not implement."]}`)
+	writeRegistryFile(t, dir, "profiles/zenchron-reviewer.json", `{
+	  "execution_agent": "claude", "capabilities": ["repository_analysis", "security_review"],
+	  "instructions": ["review"]
+	}`)
+	registry, err := planning.LoadRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := registry.Profile("zenchron-reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.Binding(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := domain.AgentAssignment{ID: "assignment-1", Profile: binding}
+
+	// As approved: the digests agree and the instruction text is delivered.
+	fixture := newPhase8Fixture(t)
+	fixture.deps.Planning = registry
+	engine := fixture.newRuntime(fixture.deps)
+	instructions, err := engine.frozenInstructions(assignment)
+	if err != nil {
+		t.Fatalf("an unedited pack was refused: %v", err)
+	}
+	if len(instructions) != 1 {
+		t.Fatalf("instructions = %#v", instructions)
+	}
+
+	// The operator edits the pack. The plan was approved against the old one.
+	writeRegistryFile(t, dir, "instructions/review.json", `{"instructions": ["Rewrite the whole module."]}`)
+	edited, err := planning.LoadRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.deps.Planning = edited
+	editedEngine := fixture.newRuntime(fixture.deps)
+	if _, err := editedEngine.frozenInstructions(assignment); err == nil ||
+		!strings.Contains(err.Error(), "approved against") {
+		t.Fatalf("an edited pack was delivered to work approved against the old one: %v", err)
+	}
+}
+
+func writeRegistryFile(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The plan reconciler runs INSIDE serve, and the runs it creates are driven by
+// the existing supervisor in the same tick: two dependency-ready stages become
+// two runs that are then driven concurrently under the operator's own ceiling.
+// Nothing here is a second scheduler.
+func TestServeReconcilesAPlanAndDrivesItsRunsInOneTick(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	fixture.approve(t)
+
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Liveness:          OwnerLivenessFunc(func(string) bool { return false }),
+		Repositories:      []GitHubRepo{repo},
+		MaxConcurrentRuns: 2,
+		PollInterval:      time.Minute,
+		Agents:            supervisorRegistry(t),
+		Plans:             fixture.service,
+		Runtime:           func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Plans) != 1 {
+		t.Fatalf("the tick reconciled %d plans", len(report.Plans))
+	}
+	if len(report.Plans[0].Started) != 2 {
+		t.Fatalf("the plan started %#v", report.Plans[0].Started)
+	}
+	// The SAME tick drove both runs the plan created, through the existing
+	// scheduler and the operator's ceiling - not through anything the plan
+	// reconciler owns.
+	if len(report.Driven) != 2 {
+		t.Fatalf("the supervisor drove %d of the plan's runs in the tick that created them: %#v", len(report.Driven), report.Driven)
+	}
+	driven := map[string]bool{}
+	for _, outcome := range report.Driven {
+		driven[outcome.RunID] = true
+	}
+	for _, started := range report.Plans[0].Started {
+		if !driven[started.RunID] {
+			t.Fatalf("run %s was created by the plan and not driven: %#v", started.RunID, report.Driven)
+		}
+	}
+	if report.Capacity != 2 {
+		t.Fatalf("the plan changed the operator's concurrency ceiling to %d", report.Capacity)
 	}
 }

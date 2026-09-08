@@ -170,6 +170,16 @@ a named class precisely so it can be refused. A policy that asks for it is
 rejected: an independent reviewer never inherits the producer's hidden
 reasoning, because that is what makes the review independent.
 
+What a downstream stage DOES receive is the upstream change itself. A stage that
+depends on completed producer stages is given their exact commit and tree and
+the diff they produced, delimited as untrusted data and framed by the
+runtime-owned instructions like every other piece of candidate-derived text. It
+runs in its own workspace at the trusted base, so without that a reviewer would
+be reviewing nothing; with it, the review is about the change and still carries
+none of the producer's reasoning. A diff too large for the runtime's bound is
+truncated and says so, and a diff the runtime could not read says that rather
+than appearing as an empty change.
+
 ## AgentProfile
 
 A reusable custom agent, built over a worker the operator already registered in
@@ -369,14 +379,23 @@ planner, profile or template statement.
 
 ```text
 zenchron-engineering autonomy plan issue 123 [--template zenchron-feature]
+                                             [--agent claude] [--deterministic]
 zenchron-engineering autonomy plan show PLAN [--text]
 zenchron-engineering autonomy plan approve PLAN [--note "..."]
 zenchron-engineering autonomy plan reject PLAN [--note "..."]
-zenchron-engineering autonomy plan revise PLAN
+zenchron-engineering autonomy plan revise PLAN [--template ...] [--deterministic]
 zenchron-engineering autonomy plan status PLAN [--text]
+zenchron-engineering autonomy plan list [--text]
 ```
 
 `plan issue` compiles a proposal and stores it. It does not execute it.
+
+By default the decomposition is REASONED by a registered execution agent in its
+own non-mutating mode: `--agent` selects which one, and an agent whose adapter
+cannot prove such a mode is refused with that reason rather than run
+permissively. `--deterministic` compiles the same obligations with no model
+invocation at all, and the approval view says which of the two produced the
+plan.
 
 `plan show` is the approval view: the decomposition and its rationale, the
 resolved assignments with the profile and worker each stage would use, the
@@ -388,9 +407,11 @@ immutable revision. `plan reject` records the refusal. `plan revise` produces a
 new proposal rather than editing an approved plan in place, because an approved
 revision is immutable and the work bound to it stays bound to what was approved.
 
-`plan status` reports stage and gate state for one plan, and global `autonomy
-status` shows plan state — proposed, awaiting approval, executing, blocked,
-completed — alongside the child runs.
+`plan status` reports stage and gate state for one plan, `plan list` lists every
+plan, and global `autonomy status` shows plan state — awaiting_approval,
+executing, blocked, completed, rejected — alongside the child runs. Where a
+newer revision is proposed while an older one is executing, the fleet view shows
+both, as `2<3`: revision 2 governs, revision 3 is waiting for you.
 
 The shared flags are the ones every `autonomy` command takes: `--repo`,
 `--config`, `--text`, and `--agent` where an agent is being selected.

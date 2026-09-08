@@ -357,6 +357,19 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 			report.Discovery = &discovery
 		}
 	}
+	// PLANS are reconciled BEFORE the run list is read, so a stage that became
+	// dependency-ready since the last tick gets its run created and then driven
+	// in the SAME pass rather than waiting a whole poll interval. Reading the
+	// runs first would enumerate the fleet as it was before the plan added to
+	// it.
+	//
+	// This is dependency gating, not scheduling: it creates or associates
+	// ordinary EngineeringRuns and stops. Everything below - the ceiling, the
+	// rotation, the leases - is unchanged and remains the only thing that
+	// decides when a run executes.
+	if !report.Draining {
+		report.Plans = s.reconcilePlans(ctx)
+	}
 	runs, err := s.deps.Store.Runs()
 	if err != nil {
 		report.Error = boundedDetail(err.Error())
@@ -369,17 +382,6 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 		}
 	}
 	report.Active = len(active)
-	// PLANS are reconciled before runs are driven, so a stage that became
-	// dependency-ready since the last tick gets its run created and then driven
-	// in the SAME pass rather than waiting a whole interval.
-	//
-	// This is dependency gating, not scheduling: it creates or associates
-	// ordinary EngineeringRuns and stops. Everything below - the ceiling, the
-	// rotation, the leases - is unchanged and remains the only thing that
-	// decides when a run executes.
-	if !report.Draining {
-		report.Plans = s.reconcilePlans(ctx)
-	}
 	if report.Draining {
 		// A draining supervisor starts nothing. Work already inside a Reconcile
 		// call finishes because this function waits for it below; work that has

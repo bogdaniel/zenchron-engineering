@@ -30,6 +30,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
@@ -538,6 +539,12 @@ type composition struct {
 	agents   runtime.AgentRegistry
 	agent    runtime.ResolvedAgent
 	feedback runtime.FeedbackPolicy
+	// planning is the operator's customization registry. It is loaded ONCE
+	// here and handed to every engine, because a run executing a plan stage
+	// resolves its frozen instruction packs through it: an engine built
+	// without it would refuse work the operator approved, on the grounds that
+	// a pack it was never given is "no longer installed".
+	planning planning.Registry
 	storage  runtime.StateStorage
 	// sandbox and permissionBypass are kept so an engine can be built for an
 	// agent other than the one this invocation resolved. providerInjected
@@ -639,6 +646,11 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		release()
 		return nil, err
 	}
+	customization, err := planning.LoadRegistry(config.PlanningDir)
+	if err != nil {
+		release()
+		return nil, err
+	}
 	// NewEngineeringRuntime fails closed on provider isolation, so there is no
 	// second check here.
 	provider, providerInjected := overrides.Provider, overrides.Provider != nil
@@ -661,7 +673,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		config: config, store: store, owner: owner, model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
-		agents: registry, agent: agent, feedback: feedback,
+		agents: registry, agent: agent, feedback: feedback, planning: customization,
 		sandbox: sandbox, permissionBypass: flags.PermissionBypass, providerInjected: providerInjected,
 		storage: runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
 		release: release,
@@ -697,6 +709,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Store:             c.store,
 		Agent:             agent,
 		Agents:            c.agents,
+		Planning:          c.planning,
 		Feedback:          feedback,
 		Storage:           c.storage,
 		Clock:             runtime.RealClock{},

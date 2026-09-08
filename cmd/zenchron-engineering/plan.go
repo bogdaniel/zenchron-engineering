@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
-	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
@@ -101,11 +100,7 @@ func buildPlanComposition(flags autonomyFlags, overrides autonomyOverrides) (*pl
 	if err != nil {
 		return nil, err
 	}
-	registry, err := built.planningRegistry()
-	if err != nil {
-		built.release()
-		return nil, err
-	}
+	registry := built.planning
 	// The workforce as the planner sees it. Readiness is PROBED here because a
 	// plan an operator is about to approve should say which workers can
 	// actually take it - and probing costs nothing: an executable, a version
@@ -466,9 +461,4 @@ func singleLinePlan(text string) string {
 		return line[:117] + "..."
 	}
 	return line
-}
-
-// planningRegistryFromConfig loads the operator's customization directory.
-func (c *composition) planningRegistry() (planning.Registry, error) {
-	return planning.LoadRegistry(c.config.PlanningDir)
 }
