@@ -159,6 +159,26 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 			return report, err
 		}
 	}
+	// What every child run has spent SINCE it was last attributed, settled or
+	// not. A settled stage's run is not finished with the plan's budget: a
+	// goal-state run stays live, admitted feedback re-activates it, and the
+	// invocations it spends then are the plan's too.
+	attributed := false
+	for stageID, projection := range snapshot.Stages {
+		if projection.RunID == "" {
+			continue
+		}
+		recorded, err := r.attributeRunSpend(plan, snapshot, stageID, projection.RunID)
+		if err != nil {
+			return report, err
+		}
+		attributed = attributed || recorded
+	}
+	if attributed {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
+			return report, err
+		}
+	}
 
 	for _, stage := range plan.Stages {
 		projection := snapshot.Stages[stage.ID]
@@ -337,8 +357,12 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		StageID: stage.ID, AssignmentID: assignment.ID,
 		BaseRevision: r.upstreamBase(assignment),
 		// The assignment's budget is the stage's, already narrowed by the
-		// assigned profile's constraints. The run is created bounded by it.
-		StageBudget: assignment.Budget,
+		// assigned profile's constraints, and narrowed AGAIN by what the plan
+		// has left. A ceiling that only refuses the NEXT stage after an
+		// overspend is a report, not a ceiling: the run has to be bounded by
+		// the remainder when it starts, because one run makes several execution
+		// bindings and can outspend the remainder before anything settles.
+		StageBudget: remainingHeadroom(plan, snapshot).tighten(assignment.Budget),
 	}
 	outcome, err := engine.StartPlanStageRun(ctx, r.Issue, binding)
 	if err != nil {
@@ -401,6 +425,53 @@ func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) string {
 	return base
 }
 
+// attributeRunSpend records what one child run has spent SO FAR, as the delta
+// since the last time this plan attributed it.
+//
+// It is called every tick, not only at settlement. A stage settles when its
+// work reaches goal state, and a goal-state run is not terminal: admitted
+// reviewer feedback re-activates it and it spends more invocations and more
+// active time. Attributing once, at settlement, made every one of those later
+// invocations invisible to the plan's ceilings.
+//
+// The key carries the running TOTAL, so each increment is its own fact and the
+// count-once fold still refuses a replayed one.
+func (r PlanReconciler) attributeRunSpend(plan domain.EngineeringPlan, snapshot PlanSnapshot, stageID, runID string) (bool, error) {
+	invocations, err := r.providerInvocations(runID)
+	if err != nil {
+		return false, err
+	}
+	active, err := r.activeSeconds(runID)
+	if err != nil {
+		return false, err
+	}
+	recorded := false
+	attributed := snapshot.RunConsumed[runID]
+	if delta := invocations - attributed.ProviderInvocations; delta > 0 {
+		if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
+			Key: fmt.Sprintf("invocations:%s:%d", runID, invocations), StageID: stageID, RunID: runID,
+			ProviderInvocations: delta,
+		}); err != nil {
+			return false, err
+		}
+		recorded = true
+	}
+	// ACTIVE wall time, by the same definition the run's own wall budget uses:
+	// elapsed less what the run spent waiting on something external. A plan
+	// whose stages wait days for a reviewer has not spent days of execution,
+	// and a ceiling that counted them would stop work nobody was doing.
+	if delta := active - attributed.WallSeconds; delta > 0 {
+		if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
+			Key: fmt.Sprintf("wall:%s:%d", runID, active), StageID: stageID, RunID: runID,
+			WallSeconds: delta,
+		}); err != nil {
+			return false, err
+		}
+		recorded = true
+	}
+	return recorded, nil
+}
+
 // settleFinishedStages records how each running stage's child run ended, and
 // what it spent.
 func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapshot PlanSnapshot) ([]string, error) {
@@ -426,40 +497,8 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		if !done {
 			continue
 		}
-		// What the run actually spent, read from ITS journal rather than
-		// assumed: provider invocations are attempts of execution operations,
-		// which is a fact the durable operations already carry.
-		invocations, err := r.providerInvocations(projection.RunID)
-		if err != nil {
+		if _, err := r.attributeRunSpend(plan, snapshot, stage.ID, projection.RunID); err != nil {
 			return settled, err
-		}
-		if invocations > 0 {
-			// Keyed by the run: settling is retried after a crash between this
-			// append and the settled event, and the invocations of one run are
-			// one fact however many times that retry happens.
-			if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
-				Key: "invocations:" + projection.RunID, StageID: stage.ID, RunID: projection.RunID,
-				ProviderInvocations: invocations,
-			}); err != nil {
-				return settled, err
-			}
-		}
-		// ACTIVE wall time, by the same definition the run's own wall budget
-		// uses: elapsed less what the run spent waiting on something external.
-		// A plan whose stages wait days for a reviewer has not spent days of
-		// execution, and a ceiling that counted them would stop work nobody
-		// was doing.
-		active, err := r.activeSeconds(projection.RunID)
-		if err != nil {
-			return settled, err
-		}
-		if active > 0 {
-			if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
-				Key: "wall:" + projection.RunID, StageID: stage.ID, RunID: projection.RunID,
-				WallSeconds: active,
-			}); err != nil {
-				return settled, err
-			}
 		}
 		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
 			StageID: stage.ID, Outcome: outcome, Reason: boundedDetail(run.Reason),
@@ -695,6 +734,38 @@ func terminalStageState(state PlanStageState) bool {
 	default:
 		return false
 	}
+}
+
+// headroom is what the plan has LEFT of each attributable dimension. A zero
+// value means the envelope states no ceiling in that dimension, which is not
+// the same as no headroom.
+type headroom struct{ invocations, wallSeconds int }
+
+func remainingHeadroom(plan domain.EngineeringPlan, snapshot PlanSnapshot) headroom {
+	left := headroom{}
+	if ceiling := plan.BudgetEnvelope.MaxProviderInvocations; ceiling > 0 {
+		if left.invocations = ceiling - snapshot.Consumed.ProviderInvocations; left.invocations < 0 {
+			left.invocations = 0
+		}
+	}
+	if ceiling := plan.BudgetEnvelope.MaxWallSeconds; ceiling > 0 {
+		if left.wallSeconds = ceiling - snapshot.Consumed.WallSeconds; left.wallSeconds < 0 {
+			left.wallSeconds = 0
+		}
+	}
+	return left
+}
+
+// tighten narrows a stage budget to the remainder. It only ever narrows: a
+// remainder larger than the stage's own bound changes nothing.
+func (h headroom) tighten(budget domain.StageBudget) domain.StageBudget {
+	if h.invocations > 0 && (budget.MaxExecutionAttempts <= 0 || h.invocations < budget.MaxExecutionAttempts) {
+		budget.MaxExecutionAttempts = h.invocations
+	}
+	if h.wallSeconds > 0 && (budget.MaxWallSeconds <= 0 || h.wallSeconds < budget.MaxWallSeconds) {
+		budget.MaxWallSeconds = h.wallSeconds
+	}
+	return budget
 }
 
 // invocationCeilingReached is the aggregate provider-invocation gate, applied

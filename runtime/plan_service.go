@@ -488,7 +488,7 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 		if projection.AssignmentID == "" {
 			continue
 		}
-		assignment, found, err := s.Store.PlanAssignment(plan.ID, plan.Revision, stageID)
+		assignment, found, err := s.frozenAssignment(plan, projection, stageID)
 		if err != nil {
 			return planning.Resolution{}, err
 		}
@@ -500,6 +500,37 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 		Plan: plan, Registry: s.Registry, Agents: s.Agents,
 		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent, Frozen: frozen,
 	})
+}
+
+// frozenAssignment is the assignment a stage ACTUALLY executed under, which is
+// not always stored under the revision governing now.
+//
+// Assignment rows are written under the revision that governed when the stage
+// started, and a later revision that did not invalidate that stage leaves its
+// completed work in place - so after an ordinary approve, revise, approve the
+// row lives under the older revision. Looking only under the current one made
+// the stage vanish from the frozen set, and a downstream independence
+// obligation was then judged against a fresh re-resolution: whichever worker
+// would be picked today rather than the one that produced the change.
+//
+// The stage's own RUN carries the revision it was created under, so that is
+// what the search follows.
+func (s PlanService) frozenAssignment(plan domain.EngineeringPlan, projection PlanStageProjection, stageID string) (domain.AgentAssignment, bool, error) {
+	assignment, found, err := s.Store.PlanAssignment(plan.ID, plan.Revision, stageID)
+	if err != nil || found {
+		return assignment, found, err
+	}
+	if projection.RunID == "" {
+		return domain.AgentAssignment{}, false, nil
+	}
+	run, runFound, err := s.Store.Run(projection.RunID)
+	if err != nil {
+		return domain.AgentAssignment{}, false, err
+	}
+	if !runFound || run.Plan == nil || run.Plan.Revision == plan.Revision {
+		return domain.AgentAssignment{}, false, nil
+	}
+	return s.Store.PlanAssignment(plan.ID, run.Plan.Revision, stageID)
 }
 
 // ---------------------------------------------------------------------------

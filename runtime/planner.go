@@ -544,6 +544,12 @@ const maxPlannerAnswerBytes = 4 << 20
 // bound rather than in the nesting.
 const maxPlannerCandidateBytes = 16 << 20
 
+// maxPlannerCandidates bounds how many balanced spans are remembered while
+// scanning. A transcript of nothing but braces would otherwise grow the slice
+// with the input; the answer ends the output, so the newest spans are the ones
+// that can be it.
+const maxPlannerCandidates = 1 << 16
+
 func readPlannerAnswer(artifacts []Artifact) (string, error) {
 	for _, item := range artifacts {
 		if !item.Sanitized {
@@ -673,11 +679,13 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 // echoes source code produces plenty of those, so an ordinary transcript could
 // stall planning for minutes before the answer was even parsed.
 func extractJSONObject(answer string) (string, error) {
-	best := ""
+	// ONE pass records where each balanced span begins and ends. Nothing is
+	// parsed here: recording a span costs the two indices, whatever the span
+	// contains.
+	type span struct{ start, end int }
+	var spans []span
 	var opens []int
-	budget := maxPlannerCandidateBytes
 	inString, escaped := false, false
-scan:
 	for i := 0; i < len(answer); i++ {
 		character := answer[i]
 		switch {
@@ -696,40 +704,40 @@ scan:
 			}
 			start := opens[len(opens)-1]
 			opens = opens[:len(opens)-1]
-			// A candidate closed inside an unbalanced outer region still counts:
-			// `{ source {"stages":[]}` contains a perfectly good answer, and
-			// the surrounding noise is the CLI's, not the model's.
-			candidate := answer[start : i+1]
-			// EVERY per-candidate byte scan is charged, not only the JSON
-			// validation: searching a candidate for "stages" costs its length
-			// too, and nested candidates grow, so leaving that scan unbilled
-			// left the quadratic behaviour the budget exists to stop.
-			if len(candidate) > budget {
-				// The budget is spent. Stopping here is what keeps pathological
-				// provider output from turning parsing into a local denial of
-				// service; whatever was already located still stands, and if
-				// nothing was, the refusal below says so.
-				//
-				// The label is load-bearing: an unlabelled break inside this
-				// switch would leave the switch, not the loop, and the scan
-				// would run on with a budget it had already spent.
-				break scan
-			}
-			budget -= len(candidate)
-			if !strings.Contains(candidate, `"stages"`) {
-				continue
-			}
-			if len(candidate) > budget {
-				break scan
-			}
-			budget -= len(candidate)
-			if json.Valid([]byte(candidate)) {
-				best = candidate
+			spans = append(spans, span{start: start, end: i + 1})
+			// A bound on how many spans are REMEMBERED, so a transcript of
+			// nothing but braces cannot grow this slice without limit. The
+			// answer ends the output, so the newest spans are the ones that
+			// matter and the oldest are dropped.
+			if len(spans) > maxPlannerCandidates {
+				spans = spans[len(spans)-maxPlannerCandidates:]
 			}
 		}
 	}
-	if best == "" {
-		return "", fmt.Errorf("no JSON object with a stages member was found in the answer")
+
+	// The LAST balanced object containing "stages" is the answer - a model that
+	// restates its answer ends with the one it means - so the search runs
+	// BACKWARDS and stops at the first candidate that parses. Validating
+	// forwards charged the whole nested prefix of a noisy transcript before
+	// reaching the answer, and could exhaust its own budget before it got
+	// there: a stale earlier restatement then became the proposal, which is the
+	// worst outcome available.
+	budget := maxPlannerCandidateBytes
+	for i := len(spans) - 1; i >= 0; i-- {
+		candidate := answer[spans[i].start:spans[i].end]
+		if len(candidate) > budget {
+			// The budget bounds the work spent LOOKING. Reaching it means the
+			// answer was not found in a bounded search rather than that one was
+			// found: a refusal, never a stale substitute.
+			break
+		}
+		budget -= len(candidate)
+		if !strings.Contains(candidate, `"stages"`) {
+			continue
+		}
+		if json.Valid([]byte(candidate)) {
+			return candidate, nil
+		}
 	}
-	return best, nil
+	return "", fmt.Errorf("no JSON object with a stages member was found in the answer")
 }

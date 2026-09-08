@@ -301,6 +301,18 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
+		view, err := c.decidePlan(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
+	case runtime.ControlPlanRevise:
+		view, err := c.revisePlan(ctx, request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlStopAll:
 		outcomes, err := supervisor.StopAll(request.Reason)
 		if err != nil {
@@ -310,6 +322,76 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	default:
 		return controlError(fmt.Errorf("unknown control command %q", request.Command))
 	}
+}
+
+// decidePlan applies an operator's approval or rejection inside the supervisor
+// that owns the work. The digest requirement lives in PlanService, so a request
+// naming a revision without its content is refused there rather than here.
+func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanView, error) {
+	plans, err := c.planService()
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	operator, err := c.config.ResolveOperator()
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	decide := plans.Approve
+	if request.Command == runtime.ControlPlanReject {
+		decide = plans.Reject
+	}
+	if _, err := decide(request.PlanID, request.Revision, request.Digest, operator.ID, request.Note); err != nil {
+		return runtime.PlanView{}, err
+	}
+	return plans.View(request.PlanID)
+}
+
+// revisePlan proposes a new revision of a plan this supervisor is executing.
+//
+// It runs the same propose the command would, through this supervisor's own
+// composition: the engine it already built, the store it already owns, and -
+// where the operator did not ask for the deterministic compilation - the same
+// verified non-mutating planning invocation.
+func (c *composition) revisePlan(ctx context.Context, request runtime.ControlRequest) (runtime.PlanView, error) {
+	plans, err := c.planService()
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	repository, issue, found, err := c.store.PlanSource(request.PlanID)
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	if !found || issue <= 0 {
+		return runtime.PlanView{}, fmt.Errorf("plan %s records no source issue, so it cannot be revised", request.PlanID)
+	}
+	repo, err := runtime.ParseGitHubRepo(repository)
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	target := runtime.RepositoryTarget{
+		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: watchedDefaultBranch,
+	}
+	engine, err := c.engine(target)
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	composed := &planComposition{
+		built: c, engine: engine, service: plans, target: target, release: func() {},
+	}
+	flags := autonomyFlags{
+		Template: request.Template, Deterministic: request.Deterministic,
+		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
+	}
+	if flags.SubstituteHuman != "" {
+		if _, err := substituteHumanWithComposition(ctx, composed, flags, request.PlanID, io.Discard); err != nil {
+			return runtime.PlanView{}, err
+		}
+		return plans.View(request.PlanID)
+	}
+	if _, err := proposeWithComposition(ctx, composed, flags, issue, request.PlanID, io.Discard); err != nil {
+		return runtime.PlanView{}, err
+	}
+	return plans.View(request.PlanID)
 }
 
 func controlOK(payload any) runtime.ControlResponse {
@@ -563,22 +645,34 @@ func autonomyLogs(ctx context.Context, flags autonomyFlags, overrides autonomyOv
 // false when no supervisor owns this state directory, which is the signal to
 // drive the work in this terminal exactly as before `serve` existed.
 func delegate(stateDir string, request runtime.ControlRequest, stdout io.Writer) (bool, int, error) {
-	if !runtime.SupervisorRunning(stateDir) {
-		return false, 0, nil
+	delegated, payload, err := delegatePayload(stateDir, request)
+	if !delegated || err != nil {
+		return delegated, runtime.ExitFailed, err
 	}
-	response, err := runtime.SendControl(stateDir, request)
-	if err != nil {
-		return true, runtime.ExitFailed, err
-	}
-	if !response.OK {
-		return true, runtime.ExitFailed, errors.New(response.Error)
-	}
-	if len(response.Payload) > 0 {
-		if _, err := fmt.Fprintln(stdout, string(response.Payload)); err != nil {
+	if len(payload) > 0 {
+		if _, err := fmt.Fprintln(stdout, string(payload)); err != nil {
 			return true, runtime.ExitFailed, err
 		}
 	}
 	return true, runtime.ExitCompleted, nil
+}
+
+// delegatePayload is the same submission with the answer RETURNED rather than
+// printed, for a command that renders its own view. It exists so a delegated
+// command and a locally executed one produce the same output: an operator
+// should not be able to tell which process applied their decision.
+func delegatePayload(stateDir string, request runtime.ControlRequest) (bool, json.RawMessage, error) {
+	if !runtime.SupervisorRunning(stateDir) {
+		return false, nil, nil
+	}
+	response, err := runtime.SendControl(stateDir, request)
+	if err != nil {
+		return true, nil, err
+	}
+	if !response.OK {
+		return true, nil, errors.New(response.Error)
+	}
+	return true, response.Payload, nil
 }
 
 // requireSupervisor is for the lifecycle verbs that have no meaning without a

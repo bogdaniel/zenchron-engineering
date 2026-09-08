@@ -116,6 +116,15 @@ func Resolve(input ResolveInput) (Resolution, error) {
 	resolution := Resolution{}
 	assigned := map[string]domain.AgentAssignment{}
 	profiles := input.candidateProfiles()
+	// EVERY frozen assignment is known before the first stage resolves, not as
+	// its own stage comes round. A plan compiled before the compiler added the
+	// dependency edge can still list a reviewer ahead of its producer, and
+	// evaluating that reviewer against an empty map would block it forever on
+	// "no resolved worker" while the producer's assignment sat in this very
+	// input.
+	for id, frozen := range input.Frozen {
+		assigned[id] = frozen
+	}
 
 	for _, stage := range input.Plan.Stages {
 		if stage.Kind != domain.StageAgent {

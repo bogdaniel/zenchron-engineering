@@ -60,8 +60,24 @@ func (r PlanReconciler) decomposeStage(ctx context.Context, plan domain.Engineer
 	if block := invocationCeilingReached(plan, snapshot, stage.ID); block != nil {
 		return block, nil
 	}
+	// The FROZEN assignment bounds this invocation too. An ordinary stage run
+	// carries the assignment's budget - already narrowed by the assigned
+	// profile's constraints - through its run binding; this path invoked the
+	// planner without consulting it at all, so a profile that narrows a planner
+	// stage to one attempt was bounded only by the aggregate ceiling. Narrowing
+	// that nothing applies is a statement, not a constraint.
+	spent := snapshot.StageConsumed[stage.ID].ProviderInvocations
+	if attempts := assignment.Budget.MaxExecutionAttempts; attempts > 0 && spent >= attempts {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "budget",
+			Reason: fmt.Sprintf("the stage allows %d planning attempts and %d have been spent", attempts, spent),
+		}, nil
+	}
 	output, plannerErr := r.Planner(ctx, PlanDecompositionRequest{
 		Plan: plan, Stage: stage, Assignment: assignment, Contract: contract,
+		// The wall bound the stage - and therefore the profile - states, or the
+		// plan's remaining wall headroom, whichever is smaller.
+		WallSeconds: remainingHeadroom(plan, snapshot).tighten(assignment.Budget).MaxWallSeconds,
 	})
 	// One provider invocation was spent whether or not the proposal is
 	// accepted, AND whether or not the invocation failed - the provider ran.
@@ -100,6 +116,10 @@ type PlanDecompositionRequest struct {
 	Stage      domain.PlanStage
 	Assignment domain.AgentAssignment
 	Contract   domain.EngineeringWorkContract
+	// WallSeconds bounds this invocation: the stage's own wall budget - which
+	// the assigned profile may have narrowed - or the plan's remaining wall
+	// headroom, whichever is smaller. Zero means neither states one.
+	WallSeconds int
 }
 
 // recordProposal compiles, validates and stores the proposed revision.

@@ -13,10 +13,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,6 +86,51 @@ func autonomyPlan(ctx context.Context, args []string, overrides autonomyOverride
 	}
 }
 
+// delegatePlanRevision sends a revision request to a running supervisor, for
+// the same reason a decision goes there: it owns the work being revised.
+func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (bool, int, error) {
+	reader, err := openPlanReader(flags, overrides)
+	if err != nil {
+		return false, 0, nil
+	}
+	stateDir := reader.config.StateDir
+	reader.release()
+	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
+		Command: runtime.ControlPlanRevise, PlanID: planID, Template: flags.Template,
+		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman, Note: flags.Note,
+	})
+	if !delegated {
+		return false, 0, nil
+	}
+	if err != nil {
+		return true, exitFor(err, runtime.ExitFailed), err
+	}
+	code, err := renderDelegatedPlan(flags, payload, false, stdout)
+	return true, code, err
+}
+
+// renderDelegatedPlan prints a supervisor's answer exactly as a locally applied
+// decision prints: an operator should not be able to tell which process did it.
+func renderDelegatedPlan(flags autonomyFlags, payload []byte, decided bool, stdout io.Writer) (int, error) {
+	var view runtime.PlanView
+	if err := json.Unmarshal(payload, &view); err != nil {
+		return runtime.ExitFailed, err
+	}
+	if decided && flags.Text {
+		decision := view.Snapshot.Approval
+		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n",
+			view.Plan.ID, decision.Revision, decision.Status, decision.Operator)
+		return runtime.ExitCompleted, nil
+	}
+	if decided {
+		if err := writeJSON(stdout, view.Snapshot); err != nil {
+			return runtime.ExitFailed, err
+		}
+		return runtime.ExitCompleted, nil
+	}
+	return planOutput(flags, view, stdout, "proposed")
+}
+
 // planComposition is the wiring one plan command needs: the shared composition,
 // an engine bound to the repository, and the plan service over the same store.
 type planComposition struct {
@@ -92,6 +139,60 @@ type planComposition struct {
 	service runtime.PlanService
 	target  runtime.RepositoryTarget
 	release func()
+}
+
+// planReader is the READ-ONLY view of a plan: the durable store and the
+// operator's own artifacts, and no runtime ownership at all.
+//
+// A reader that took ownership could not run while a supervisor owned the state
+// directory in the same process, and - more to the point - reading a plan is
+// not an act that owns anything. The store is WAL with a busy timeout, so a
+// reader and a running supervisor are the designed case.
+type planReader struct {
+	config  runtime.Config
+	store   *runtime.SQLiteOperationStore
+	service runtime.PlanService
+	release func()
+}
+
+func openPlanReader(flags autonomyFlags, overrides autonomyOverrides) (*planReader, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	config, err := runtime.LoadConfig(flags.Config, cwd)
+	if err != nil {
+		return nil, err
+	}
+	store, err := runtime.OpenSQLiteOperationStore(config.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := planning.LoadRegistry(config.PlanningDir)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	agents, err := config.AgentRegistry()
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	described := runtime.DescribeExecutionAgents(context.Background(), agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
+		return runtime.AgentProberFor(agent, runtime.ArtifactStore{Root: filepath.Join(config.StateDir, "artifacts")}, config.StateDir)
+	})
+	if err := registry.Bind(described); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return &planReader{
+		config: config, store: store,
+		service: runtime.PlanService{
+			Store: store, Clock: runtime.RealClock{}, Registry: registry,
+			Agents: described, DefaultAgent: agents.Default(), Envelope: config.PlanEnvelope(),
+		},
+		release: func() { _ = store.Close() },
+	}, nil
 }
 
 func buildPlanComposition(flags autonomyFlags, overrides autonomyOverrides) (*planComposition, error) {
@@ -138,7 +239,14 @@ func planPropose(ctx context.Context, flags autonomyFlags, overrides autonomyOve
 		return runtime.ExitInvalid, err
 	}
 	defer composed.release()
+	return proposeWithComposition(ctx, composed, flags, issue, planID, stdout)
+}
 
+// proposeWithComposition is the propose itself, over an already-built
+// composition. The supervisor uses it too, through its OWN composition, so a
+// revision requested while `serve` is running is applied by the process that
+// owns the work rather than by a second one racing it.
+func proposeWithComposition(ctx context.Context, composed *planComposition, flags autonomyFlags, issue int, planID string, stdout io.Writer) (int, error) {
 	intent, err := composed.engine.CompilePlanIntent(ctx, issue)
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -248,6 +356,9 @@ func requirePlanningMode(composed *planComposition, agent runtime.ResolvedAgent)
 // in-place change: it goes through the same validation and the same approval as
 // any other revision.
 func planRevise(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (int, error) {
+	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, stdout); delegated {
+		return code, err
+	}
 	composed, err := buildPlanComposition(flags, overrides)
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -277,12 +388,20 @@ func planRevise(ctx context.Context, flags autonomyFlags, overrides autonomyOver
 // revision that goes through the same validation and the same approval as any
 // other, because replacing a worker with a person changes what the plan is.
 func planSubstituteHuman(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (int, error) {
+	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, stdout); delegated {
+		return code, err
+	}
 	composed, err := buildPlanComposition(flags, overrides)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
 	defer composed.release()
+	return substituteHumanWithComposition(ctx, composed, flags, planID, stdout)
+}
 
+// substituteHumanWithComposition is the substitution itself, over an
+// already-built composition, so the supervisor can perform it through its own.
+func substituteHumanWithComposition(ctx context.Context, composed *planComposition, flags autonomyFlags, planID string, stdout io.Writer) (int, error) {
 	view, err := composed.service.View(planID)
 	if err != nil {
 		return exitFor(err, exitRunNotFound), err
@@ -351,12 +470,12 @@ func independentClaims(contract domain.EngineeringWorkContract) []string {
 // resolution would produce, every blocked stage with its reason, and the
 // budget - known and unknown alike.
 func planShow(flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (int, error) {
-	composed, err := buildPlanComposition(flags, overrides)
+	reader, err := openPlanReader(flags, overrides)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	defer composed.release()
-	view, err := composed.service.View(planID)
+	defer reader.release()
+	view, err := reader.service.View(planID)
 	if err != nil {
 		return exitFor(err, exitRunNotFound), err
 	}
@@ -366,17 +485,13 @@ func planShow(flags autonomyFlags, overrides autonomyOverrides, planID string, s
 // planDecide records the operator's approval or rejection of the exact revision
 // they were shown.
 func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb string, stdout io.Writer) (int, error) {
-	composed, err := buildPlanComposition(flags, overrides)
+	reader, err := openPlanReader(flags, overrides)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	defer composed.release()
-
-	operator, err := composed.built.config.ResolveOperator()
-	if err != nil {
-		return runtime.ExitInvalid, err
-	}
-	pending, found, err := composed.built.store.Plan(planID)
+	pending, found, err := reader.store.Plan(planID)
+	stateDir := reader.config.StateDir
+	reader.release()
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -393,6 +508,34 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 		return runtime.ExitInvalid, fmt.Errorf(
 			"%s names the exact revision it decides: run `autonomy plan show %s` and use the command it prints (currently `autonomy plan %s %s --revision %d --digest %s`)",
 			verb, planID, verb, planID, pending.Revision, pending.Digest)
+	}
+	// A DECISION about work a supervisor is executing goes to that supervisor.
+	// It is the process that owns the work, so it applies the decision against
+	// the state it is reconciling, in the order decisions arrive, rather than a
+	// second process writing beside it. With no supervisor running, this
+	// terminal is the owner and decides directly.
+	command := runtime.ControlPlanApprove
+	if verb == "reject" {
+		command = runtime.ControlPlanReject
+	}
+	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
+		Command: command, PlanID: planID, Revision: revision, Digest: digest, Note: flags.Note,
+	})
+	if delegated {
+		if err != nil {
+			return exitFor(err, runtime.ExitFailed), err
+		}
+		return renderDelegatedPlan(flags, payload, true, stdout)
+	}
+
+	composed, err := buildPlanComposition(flags, overrides)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer composed.release()
+	operator, err := composed.built.config.ResolveOperator()
+	if err != nil {
+		return runtime.ExitInvalid, err
 	}
 	decide := composed.service.Approve
 	if verb == "reject" {
@@ -414,12 +557,12 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 
 // planList is the fleet view for plans.
 func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer) (int, error) {
-	composed, err := buildPlanComposition(flags, overrides)
+	reader, err := openPlanReader(flags, overrides)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	defer composed.release()
-	plans, err := composed.built.store.Plans()
+	defer reader.release()
+	plans, err := reader.store.Plans()
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -433,7 +576,7 @@ func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer
 	}
 	summaries := make([]summary, 0, len(plans))
 	for _, plan := range plans {
-		snapshot, err := composed.built.store.ReplayPlan(plan.ID)
+		snapshot, err := reader.store.ReplayPlan(plan.ID)
 		if err != nil {
 			return runtime.ExitFailed, err
 		}

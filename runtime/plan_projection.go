@@ -153,7 +153,16 @@ type PlanSnapshot struct {
 	// immutable records, so nothing - not a revision, not a restart, not a
 	// reassignment - can lower it.
 	Consumed domain.PlanConsumption `json:"consumed"`
-	Cursor   Cursor                 `json:"journal_cursor"`
+	// StageConsumed is the same sum PER STAGE. A stage's own budget - the one a
+	// profile narrows - is a fact about that stage, so enforcing it needs the
+	// stage's share rather than the plan's total.
+	StageConsumed map[string]domain.PlanConsumption `json:"stage_consumed,omitempty"`
+	// RunConsumed is what has already been attributed FOR EACH RUN, so the next
+	// attribution is a delta rather than a repeat. A run keeps spending after
+	// the stage settles - feedback re-activates it - and this is how that later
+	// spend reaches the plan without counting the earlier spend twice.
+	RunConsumed map[string]domain.PlanConsumption `json:"run_consumed,omitempty"`
+	Cursor      Cursor                            `json:"journal_cursor"`
 	// consumedKeys is the set of consumption keys already counted. It is not
 	// exported and not part of the state digest: it is how the fold stays
 	// idempotent, not a fact about the plan.
@@ -374,6 +383,26 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 				return nil
 			}
 			s.consumedKeys[payload.Key] = true
+		}
+		if payload.StageID != "" {
+			if s.StageConsumed == nil {
+				s.StageConsumed = map[string]domain.PlanConsumption{}
+			}
+			stage := s.StageConsumed[payload.StageID]
+			stage.ChildRuns += payload.ChildRuns
+			stage.ProviderInvocations += payload.ProviderInvocations
+			stage.WallSeconds += payload.WallSeconds
+			s.StageConsumed[payload.StageID] = stage
+		}
+		if payload.RunID != "" {
+			if s.RunConsumed == nil {
+				s.RunConsumed = map[string]domain.PlanConsumption{}
+			}
+			run := s.RunConsumed[payload.RunID]
+			run.ChildRuns += payload.ChildRuns
+			run.ProviderInvocations += payload.ProviderInvocations
+			run.WallSeconds += payload.WallSeconds
+			s.RunConsumed[payload.RunID] = run
 		}
 		s.Consumed.ChildRuns += payload.ChildRuns
 		s.Consumed.ProviderInvocations += payload.ProviderInvocations

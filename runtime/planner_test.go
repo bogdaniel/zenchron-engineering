@@ -354,18 +354,18 @@ func TestPlanningWorkspaceIsTheExactTrustedSnapshot(t *testing.T) {
 // produces - echoed source code - so an ordinary transcript could stall
 // planning for minutes before anything was parsed.
 func TestThePlannerAnswerIsLocatedInOnePass(t *testing.T) {
-	answer := `{"stages": [{"id": "implementation", "kind": "agent", "role": "implementer", "objective": "do it"}]}`
+	firstAnswer := `{"stages": [{"id": "implementation", "kind": "agent", "role": "implementer", "objective": "do it"}]}`
 	// Half a megabyte of unclosed braces, as a CLI echoing code produces.
 	noise := strings.Repeat("if x { log(\"a\n", 40000)
 
 	started := time.Now()
-	found, err := extractJSONObject(noise + "\n" + answer)
+	located, err := extractJSONObject(noise + "\n" + firstAnswer)
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("the answer was not found after %d bytes of noise: %v", len(noise), err)
 	}
-	if found != answer {
-		t.Fatalf("located %q, want the answer itself", found)
+	if located != firstAnswer {
+		t.Fatalf("located %q, want the answer itself", located)
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("locating the answer took %s: the scan is not linear", elapsed)
@@ -403,10 +403,34 @@ func TestNestedCandidatesCannotMakeLocatingTheAnswerQuadratic(t *testing.T) {
 	// is that a real answer AFTER the pathological region is still found.
 	_ = err
 
+	// AT BUDGET SCALE. The search runs backwards from the end, so a nested
+	// region large enough to exhaust a forward budget cannot starve the answer
+	// out - and, worse, cannot leave an earlier stale restatement standing as
+	// the proposal.
 	answer := `{"stages": [{"id": "implementation", "kind": "agent", "role": "implementer", "objective": "do it"}]}`
-	found, err := extractJSONObject(`{"stages": {"stages": {"stages": []}}}` + "\n" + answer)
-	if err != nil || found != answer {
-		t.Fatalf("the real answer after nested candidates was missed: %q %v", found, err)
+	stale := `{"stages": [{"id": "stale", "kind": "agent", "role": "implementer", "objective": "an earlier draft"}]}`
+	noisy := stale + "\n" + strings.Repeat(`{"stages": {"stages": {"stages": {"stages": [1]}}}}`+"\n", 60000) + answer
+	// The nested region is larger than the transcript tail the runtime reads,
+	// so it is as large as this step can ever face - and its nested spans
+	// charge several times their own bytes to a forward search.
+	if len(noisy) < maxPlannerAnswerBytes/2 {
+		t.Fatalf("the noisy region is %d bytes, too small to test the bound", len(noisy))
+	}
+	started = time.Now()
+	found, err := extractJSONObject(noisy)
+	if err != nil {
+		t.Fatalf("the answer after %d bytes of nested candidates was not found: %v", len(noisy), err)
+	}
+	if found != answer {
+		t.Fatalf("located %q, want the trailing answer rather than an earlier draft", found)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("locating the trailing answer took %s", elapsed)
+	}
+
+	inner, err := extractJSONObject(`{"stages": {"stages": {"stages": []}}}` + "\n" + answer)
+	if err != nil || inner != answer {
+		t.Fatalf("the real answer after nested candidates was missed: %q %v", inner, err)
 	}
 }
 

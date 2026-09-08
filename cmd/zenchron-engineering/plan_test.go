@@ -63,6 +63,13 @@ func (p *refusingPlanner) Isolation() runtime.ProviderIsolation {
 
 func planWorkspace(t *testing.T) (dir, configPath string) {
 	t.Helper()
+	return planWorkspaceIn(t, "")
+}
+
+// planWorkspaceIn is the same workspace with an operator-chosen state
+// directory, for the tests that need one short enough for a socket address.
+func planWorkspaceIn(t *testing.T, stateDir string) (dir, configPath string) {
+	t.Helper()
 	// An operator-owned customization directory, so the composition under test
 	// is the one an operator who defined a profile actually has.
 	planningDir := t.TempDir()
@@ -75,6 +82,9 @@ func planWorkspace(t *testing.T) (dir, configPath string) {
 		config["operator"] = map[string]any{"id": "operator-1"}
 		config["plan"] = map[string]any{"max_child_runs": 4, "max_concurrency": 2, "max_provider_invocations": 8}
 		config["planning_dir"] = planningDir
+		if stateDir != "" {
+			config["state_dir"] = stateDir
+		}
 	})
 	return dir, configPath
 }
@@ -353,20 +363,41 @@ func TestADecisionMustNameTheRevisionTheOperatorRead(t *testing.T) {
 // test holds one as a live supervisor would and drives the real CLI entry
 // points against the same state directory.
 func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T) {
-	dir, configPath := planWorkspace(t)
-	t.Chdir(dir)
-	planID := proposePlan(t, configPath, 41)
-
-	config, err := runtime.LoadConfig(configPath, dir)
+	// A SHORT state directory, because the control endpoint is a Unix socket
+	// and its address is bounded by the operating system. `serve` refuses a
+	// state_dir that would exceed it, with that message; a test that used the
+	// default temporary path would be testing that refusal instead.
+	stateDir, err := os.MkdirTemp("", "zc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A supervisor's ownership, held for the rest of the test.
-	supervisor, err := runtime.AcquireOwnershipLock(config.StateDir, "supervisor-host/424242/live")
-	if err != nil {
-		t.Fatalf("could not simulate a running supervisor: %v", err)
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = supervisor.Release() })
+	dir, configPath := planWorkspaceIn(t, stateDir)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+	// A REAL supervisor: the same composition `serve` builds - same
+	// newComposition, same store, same ownership lock - AND the same
+	// owner-only control endpoint it listens on. Both halves matter: the
+	// ownership is what a plan command used to collide with, and the endpoint
+	// is where a decision about work this process owns now goes.
+	supervisor, err := newComposition(autonomyFlags{Config: configPath}, planOverrides(t, 41))
+	if err != nil {
+		t.Fatalf("a supervisor composition could not be built: %v", err)
+	}
+	t.Cleanup(supervisor.release)
+	listener, err := runtime.ListenControl(supervisor.config.StateDir)
+	if err != nil {
+		t.Fatalf("the supervisor could not listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		_ = listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
+			return supervisor.handleControl(context.Background(), nil, func() {}, request)
+		})
+	}()
 
 	var shown bytes.Buffer
 	if code, err := autonomy([]string{"plan", "show", planID, "--text", "--config", configPath},

@@ -1364,3 +1364,180 @@ func TestActiveTimeStopsAtTheTerminalEvent(t *testing.T) {
 		t.Fatalf("attributed %d seconds, want the run's own ten minutes rather than the two hours since it ended", seconds)
 	}
 }
+
+// A frozen assignment survives the revision boundary.
+//
+// Assignment rows are written under the revision governing when the stage
+// started. After an ordinary approve → revise → approve, a completed stage the
+// new revision did not invalidate keeps its work - and its row stays under the
+// older revision. Looking only under the current revision made the stage vanish
+// from the frozen set, so a downstream independence obligation was judged
+// against a fresh re-resolution: whichever worker would be chosen today rather
+// than the one that produced the change.
+func TestAFrozenAssignmentSurvivesARevision(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis},
+			Independence: &domain.IndependenceRequirement{
+				Dimension: domain.IndependenceVendorFamily, DifferentFrom: []string{"implementation"}}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := snapshot.Stages["implementation"]
+	if first.AssignmentID == "" {
+		t.Fatalf("the producer did not start: %#v", snapshot.Stages)
+	}
+	producer := first.AgentID
+
+	// Revision 2 changes only the REVIEW stage, so the producer's completed
+	// work stands and its assignment row stays under revision 1.
+	second := fixture.plan
+	second.Revision = 2
+	previous := fixture.plan.Revision
+	second.Provenance.PreviousRevision = &previous
+	second.Stages = append([]domain.PlanStage(nil), fixture.plan.Stages...)
+	second.Stages[1].Objective = "Review it carefully."
+	digest, err := second.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "operator", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := fixture.store.ReplayPlan(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := fixture.service.Resolve(second, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, ok := resolution.Assignment("implementation")
+	if !ok {
+		t.Fatal("the producer dropped out of the resolution after a revision it was not part of")
+	}
+	if frozen.Agent.ID != producer {
+		t.Fatalf("the producer resolved to %q after the revision, want the worker that did the work (%q)", frozen.Agent.ID, producer)
+	}
+}
+
+// A settled stage's run is not finished with the plan's budget.
+//
+// A goal-state run stays live: admitted reviewer feedback re-activates it and
+// it spends more invocations and more active time. Attributing once, at
+// settlement, made every one of those later invocations invisible to the
+// ceilings - and the count-once keys would have deduped a naive top-up, since
+// they named the run rather than the fact.
+func TestSpendAfterSettlementStillReachesThePlan(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the stage created no run")
+	}
+
+	// It reaches goal state having spent one invocation, and settles.
+	recordExecutionAttempts(t, fixture, runID, 1)
+	run, _, err := fixture.store.Run(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Disposition = Waiting
+	run.Reason = "goal_state_reached"
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	fixture.reconcile(t)
+	settled, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Stages["implementation"].State != PlanStageCompleted {
+		t.Fatalf("the stage did not settle: %#v", settled.Stages["implementation"])
+	}
+	first := settled.Consumed.ProviderInvocations
+
+	// Reviewer feedback re-activates the run, which spends two more.
+	recordExecutionAttempts(t, fixture, runID, 3)
+	fixture.reconcile(t)
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Consumed.ProviderInvocations <= first {
+		t.Fatalf("consumption stayed at %d after the settled run spent more (now %d attempts)", after.Consumed.ProviderInvocations, 3)
+	}
+	if after.Consumed.ProviderInvocations != 3 {
+		t.Fatalf("consumed %d invocations, want the run's 3", after.Consumed.ProviderInvocations)
+	}
+
+	// And attributing again records nothing: each total is one fact.
+	fixture.reconcile(t)
+	again, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Consumed.ProviderInvocations != 3 {
+		t.Fatalf("re-attribution counted the same spend twice: %d", again.Consumed.ProviderInvocations)
+	}
+}
+
+// recordExecutionAttempts sets the run's execution operation to a given attempt
+// count, which is what the plan reads provider invocations from.
+func recordExecutionAttempts(t *testing.T, fixture *planRunFixture, runID string, attempt int) {
+	t.Helper()
+	operations, err := fixture.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range operations {
+		if operation.Kind != OpExecutionInvoke {
+			continue
+		}
+		stored, revision, found, err := fixture.store.Operation(operation.ID)
+		if err != nil || !found {
+			t.Fatalf("read the execution operation: found=%v err=%v", found, err)
+		}
+		operation = stored
+		operation.Attempt = attempt
+		if _, written, err := fixture.store.PutOperation(operation, revision); err != nil || !written {
+			t.Fatalf("update the execution operation: written=%v err=%v", written, err)
+		}
+		return
+	}
+	if _, written, err := fixture.store.PutOperation(RunOperation{
+		SchemaVersion: SchemaVersion, ID: runID + ":execution.invoke", RunID: runID,
+		Kind: OpExecutionInvoke, IdempotencyKey: "initial|1|base", State: Succeeded,
+		Attempt: attempt, MaxAttempts: 8, InputStateSHA256: strings.Repeat("0", 64),
+		CreatedAt: fixture.clock.Now(),
+	}, 0); err != nil || !written {
+		t.Fatalf("record an execution operation: written=%v err=%v", written, err)
+	}
+}

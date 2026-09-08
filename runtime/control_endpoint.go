@@ -94,6 +94,23 @@ type ControlRequest struct {
 	NewGeneration bool `json:"new_generation,omitempty"`
 	// Reason is the operator's stated cause for a cancellation.
 	Reason string `json:"reason,omitempty"`
+	// PlanID, Revision, Digest and Note are one plan decision. They exist here
+	// because a plan decision is an OPERATOR act against work a supervisor is
+	// executing, and the supervisor is the process that owns that work: routing
+	// the decision to it means one writer applies it, in the order it arrived,
+	// against the state the supervisor is reconciling.
+	//
+	// The digest is not optional in the service that receives this, so a
+	// request naming a revision without its content decides nothing.
+	PlanID   string `json:"plan_id,omitempty"`
+	Revision int    `json:"revision,omitempty"`
+	Digest   string `json:"digest,omitempty"`
+	Note     string `json:"note,omitempty"`
+	// Template, Deterministic and SubstituteHuman are a plan REVISION request,
+	// mirroring the flags of the command that would otherwise drive it here.
+	Template        string `json:"template,omitempty"`
+	Deterministic   bool   `json:"deterministic,omitempty"`
+	SubstituteHuman string `json:"substitute_human,omitempty"`
 }
 
 // Control commands. Each maps to one supervisor action.
@@ -106,6 +123,13 @@ const (
 	ControlStop     = "stop"
 	ControlStopAll  = "stop-all"
 	ControlPing     = "ping"
+	// The plan lifecycle verbs. Each is an operator decision that already
+	// exists as a command; the endpoint exists so the decision reaches the
+	// supervisor that owns the work rather than racing it from a second
+	// process.
+	ControlPlanApprove = "plan-approve"
+	ControlPlanReject  = "plan-reject"
+	ControlPlanRevise  = "plan-revise"
 )
 
 // ControlResponse is the answer. Payload is the command's own JSON result.
