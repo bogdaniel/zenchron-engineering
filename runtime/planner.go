@@ -672,6 +672,7 @@ func extractJSONObject(answer string) (string, error) {
 	var opens []int
 	budget := maxPlannerCandidateBytes
 	inString, escaped := false, false
+scan:
 	for i := 0; i < len(answer); i++ {
 		character := answer[i]
 		switch {
@@ -694,15 +695,27 @@ func extractJSONObject(answer string) (string, error) {
 			// `{ source {"stages":[]}` contains a perfectly good answer, and
 			// the surrounding noise is the CLI's, not the model's.
 			candidate := answer[start : i+1]
-			if !strings.Contains(candidate, `"stages"`) {
-				continue
-			}
+			// EVERY per-candidate byte scan is charged, not only the JSON
+			// validation: searching a candidate for "stages" costs its length
+			// too, and nested candidates grow, so leaving that scan unbilled
+			// left the quadratic behaviour the budget exists to stop.
 			if len(candidate) > budget {
 				// The budget is spent. Stopping here is what keeps pathological
 				// provider output from turning parsing into a local denial of
 				// service; whatever was already located still stands, and if
 				// nothing was, the refusal below says so.
-				break
+				//
+				// The label is load-bearing: an unlabelled break inside this
+				// switch would leave the switch, not the loop, and the scan
+				// would run on with a budget it had already spent.
+				break scan
+			}
+			budget -= len(candidate)
+			if !strings.Contains(candidate, `"stages"`) {
+				continue
+			}
+			if len(candidate) > budget {
+				break scan
 			}
 			budget -= len(candidate)
 			if json.Valid([]byte(candidate)) {

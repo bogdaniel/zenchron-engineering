@@ -1313,3 +1313,54 @@ func TestThePlanWallCeilingIsAttributedAndEnforced(t *testing.T) {
 		t.Fatalf("the wall ceiling did not block the stage: %#v", report.Blocked)
 	}
 }
+
+// A run that has ENDED is measured to its terminal event, never to now.
+//
+// Measuring a finished run against the current clock charges the plan for every
+// hour between the run ending and the tick that settled it - after a restart,
+// the whole downtime - and would spend a plan's wall ceiling on time nothing
+// was running.
+func TestActiveTimeStopsAtTheTerminalEvent(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the stage created no run")
+	}
+	now := fixture.clock.Now()
+	run, _, err := fixture.store.Run(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// It ran for ten minutes, two hours ago, and the process was down since.
+	run.Disposition = Completed
+	run.CreatedAt = now.Add(-2 * time.Hour)
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "terminal-1", RunID: runID,
+		Type: EventRunCompleted, OccurredAt: now.Add(-110 * time.Minute),
+		Payload: mustPayload(t, map[string]string{"reason": "goal_state_reached"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	seconds, err := fixture.reconciler.activeSeconds(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seconds < 590 || seconds > 610 {
+		t.Fatalf("attributed %d seconds, want the run's own ten minutes rather than the two hours since it ended", seconds)
+	}
+}

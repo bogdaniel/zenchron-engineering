@@ -653,11 +653,17 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 		}
 		gated.Stages = append(gated.Stages, stage)
 	}
-	if err := planning.Validate(gated, planning.ValidationInput{
+	err = planning.Validate(gated, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
 		Previous: &previous,
-	}); err == nil {
+	})
+	if err == nil {
 		t.Fatal("an obligation was answered by a human gate policy never permitted")
+	}
+	// The reason matters: passing on some unrelated validation error would
+	// leave the rule under test unexercised.
+	if !strings.Contains(err.Error(), "policy did not permit that substitution") {
+		t.Fatalf("the refusal is not the substitution rule: %v", err)
 	}
 }
 

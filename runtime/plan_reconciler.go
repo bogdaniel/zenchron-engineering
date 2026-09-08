@@ -725,6 +725,12 @@ func invocationCeilingReached(plan domain.EngineeringPlan, snapshot PlanSnapshot
 }
 
 // activeSeconds is one child run's active execution time, in whole seconds.
+//
+// A run that has ENDED is measured to its terminal event, never to now.
+// Measuring a finished run against the current clock charges the plan for every
+// hour between the run ending and the tick that settled it - which after a
+// restart is the whole downtime, and would spend a plan's wall ceiling on time
+// nothing was running.
 func (r PlanReconciler) activeSeconds(runID string) (int, error) {
 	run, found, err := r.Store.Run(runID)
 	if err != nil || !found {
@@ -734,11 +740,22 @@ func (r PlanReconciler) activeSeconds(runID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	active := ActiveElapsed(run, events, r.now())
+	active := ActiveElapsed(run, events, terminalOrNow(events, r.now()))
 	if active <= 0 {
 		return 0, nil
 	}
 	return int(active / time.Second), nil
+}
+
+// terminalOrNow is when the run stopped, or now if it has not.
+func terminalOrNow(events []EngineeringEvent, now time.Time) time.Time {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case EventRunCompleted, EventRunFailed, EventRunCancelled:
+			return events[i].OccurredAt
+		}
+	}
+	return now
 }
 
 func activeStages(snapshot PlanSnapshot) int {

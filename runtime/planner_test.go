@@ -386,14 +386,18 @@ func TestThePlannerAnswerIsLocatedInOnePass(t *testing.T) {
 // every one re-reads overlapping, growing slices. One budget across all
 // validations bounds the whole step.
 func TestNestedCandidatesCannotMakeLocatingTheAnswerQuadratic(t *testing.T) {
-	depth := 20000
+	// The nested region approaches the transcript bound itself: a 4 MiB tail
+	// holds roughly this many nested candidates, and the per-candidate byte
+	// scans - not only the JSON validation - have to be charged for the bound
+	// to mean anything at that depth.
+	depth := 200000
 	nested := strings.Repeat(`{"stages":`, depth) + "[]" + strings.Repeat("}", depth)
 
 	started := time.Now()
 	_, err := extractJSONObject(nested)
 	elapsed := time.Since(started)
 	if elapsed > 5*time.Second {
-		t.Fatalf("locating the answer in %d nested candidates took %s", depth, elapsed)
+		t.Fatalf("locating the answer in %d nested candidates (%d bytes) took %s", depth, len(nested), elapsed)
 	}
 	// Whether it finds one is not the point - not stalling is. What must hold
 	// is that a real answer AFTER the pathological region is still found.
