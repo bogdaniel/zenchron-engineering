@@ -343,23 +343,28 @@ func independenceViolation(stage domain.PlanStage, profile domain.AgentProfile, 
 	for _, other := range stage.Independence.DifferentFrom {
 		assignment, ok := assigned[other]
 		if !ok {
-			// The stage it must differ from has no assignment yet, so there is
-			// nothing to compare. It cannot be declared independent either: the
-			// obligation is re-evaluated when that stage resolves, and the
-			// reconciler refuses to start a stage whose independence is
-			// unproven.
-			continue
+			// The stage it must differ from has no assignment, so the
+			// obligation cannot be PROVEN - and unproven is not satisfied.
+			// Skipping here passed vacuously and stamped the result as
+			// independently satisfied, which is the one outcome an independence
+			// obligation exists to prevent. The plan graph makes every peer a
+			// dependency, so reaching this means the producer could not be
+			// resolved at all.
+			return fmt.Sprintf("independence in dimension %q cannot be proven: stage %q has no resolved worker",
+				stage.Independence.Dimension, other), true
 		}
 		theirs := assignedIndependenceClass(stage.Independence.Dimension, assignment)
+		// An UNKNOWN or ABSENT class proves nothing. This is checked before the
+		// comparison because two unknowns are equal and would otherwise be
+		// reported as "not independent" rather than as unprovable - and, worse,
+		// an empty class on one side alone would compare unequal and pass.
+		if mine == "" || theirs == "" || mine == "unknown" || theirs == "unknown" {
+			return fmt.Sprintf("independence in dimension %q cannot be proven against stage %q: one side's class is unknown",
+				stage.Independence.Dimension, other), true
+		}
 		if mine == theirs {
 			return fmt.Sprintf("%s %q is not independent of stage %q in dimension %q",
 				dimensionNoun(stage.Independence.Dimension), mine, other, stage.Independence.Dimension), true
-		}
-		// An UNKNOWN class proves nothing. Two unknown vendor families are not
-		// evidence of independence, so they are refused rather than accepted.
-		if mine == "unknown" || theirs == "unknown" {
-			return fmt.Sprintf("independence in dimension %q cannot be proven against stage %q: one side's class is unknown",
-				stage.Independence.Dimension, other), true
 		}
 	}
 	return "", false

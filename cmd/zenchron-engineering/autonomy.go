@@ -192,6 +192,12 @@ type autonomyFlags struct {
 	// Template names the operator's reusable EngineeringPlanTemplate for a plan
 	// proposal. Empty means the planner compiles from policy and intent alone.
 	Template string
+	// Revision and Digest name the EXACT plan revision a decision is about.
+	// They are what an operator read: without them the CLI would decide
+	// whatever the highest revision happened to be at decide time, which can
+	// be a proposal that landed after the operator looked.
+	Revision int
+	Digest   string
 	// SubstituteHuman names the blocked agent stage an operator is replacing
 	// with an independent human review. It is only ever accepted where POLICY
 	// permitted that substitution; the permission comes from the obligation
@@ -1035,6 +1041,14 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Template = args[1]
 		case "--substitute-human":
 			flags.SubstituteHuman = args[1]
+		case "--digest":
+			flags.Digest = args[1]
+		case "--revision":
+			revision, err := strconv.Atoi(args[1])
+			if err != nil || revision < 1 {
+				return autonomyFlags{}, fmt.Errorf("--revision must be a positive integer, got %q", args[1])
+			}
+			flags.Revision = revision
 		case "--assign":
 			issue, agent, ok := strings.Cut(args[1], "=")
 			number, err := strconv.Atoi(strings.TrimSpace(issue))

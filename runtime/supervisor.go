@@ -529,8 +529,12 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	}
 	defer workspace.Remove()
 
+	// The ATTEMPT is deliberately not stated here. InvokePlanner derives it
+	// from the durable transcript evidence, and hardcoding 1 made every retry
+	// collide with the first attempt's create-once transcript: the provider ran
+	// again - a real invocation, every tick - and then died storing its answer.
 	return InvokePlanner(ctx, PlannerInput{
-		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Attempt: 1,
+		PlanID: request.Plan.ID, Revision: request.Plan.Revision,
 		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),
 		ProfileID: request.Assignment.Profile.ID, Model: request.Assignment.Agent.Model,
 		Workspace: workspace, Contract: request.Contract,

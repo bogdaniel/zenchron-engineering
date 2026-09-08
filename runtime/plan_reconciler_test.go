@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -851,4 +852,196 @@ func mustPayload(t *testing.T, payload any) []byte {
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+// A human decision gate is satisfied by A PERSON, or not at all.
+//
+// The gate that stands in for a blocked independence obligation compiles with
+// no action, and an authorized #7 decision needs no human when the action's
+// policy requires none - so accepting one let the producing run's own
+// auto-authorized publication discharge the "an independent person reviewed
+// this" gate. Only recorded human authority evidence proves it.
+func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "human", Kind: domain.StageHumanDecisionGate, DependsOn: []string{"implementation"},
+			SubstitutesRole: domain.RoleReviewer, RequiredClaims: []string{"human-approval"}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the implementation stage created no run")
+	}
+	plan, _, err := fixture.store.PlanRevision(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, _ := plan.Stage("human")
+
+	// An AUTHORIZED machine decision on the producing run proves nothing about
+	// a person.
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "authority-1", RunID: runID,
+		Type: EventAuthorityEvaluated, OccurredAt: time.Unix(20, 0).UTC(),
+		Payload: mustPayload(t, AuthorityEvaluatedPayload{
+			Decision: Ref{ID: "decision-1", Revision: "1"},
+			Action:   domain.Action{Type: "publish", Target: "owner/name"}, Status: domain.AuthorityAuthorized,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot); err != nil || satisfied {
+		t.Fatalf("an auto-authorized machine decision satisfied a human gate: satisfied=%v err=%v", satisfied, err)
+	}
+
+	// Recorded HUMAN authority does prove it, and the satisfaction names the
+	// person's evidence.
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "human-1", RunID: runID,
+		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(21, 0).UTC(),
+		Payload: mustPayload(t, humanAuthorityFixture(nil)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot)
+	if err != nil || !satisfied {
+		t.Fatalf("recorded human authority did not satisfy the gate: satisfied=%v err=%v", satisfied, err)
+	}
+	if payload.HumanEvidenceID == "" {
+		t.Fatal("the satisfaction records no human evidence, so nothing names the person who decided")
+	}
+}
+
+// The aggregate provider-invocation ceiling is enforced BEFORE the provider
+// runs, and a failed planning invocation counts.
+//
+// A planner whose answer never parses is re-entered every tick. Recording the
+// invocation only on success made those failures invisible to the aggregate,
+// and nothing compared the aggregate to the ceiling at all - so the plan spent
+// real provider invocations forever against a limit that was only ever
+// displayed.
+func TestAFailedPlanningInvocationIsCountedAndTheCeilingStopsIt(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "decomposition", Kind: domain.StageAgent, Role: domain.RolePlanner,
+			Objective:      "Decide how this change is decomposed.",
+			InvocationMode: domain.InvocationModeNonMutatingPlanning},
+	})
+	// Two invocations is the whole budget.
+	tightened := fixture.plan
+	tightened.BudgetEnvelope.MaxProviderInvocations = 2
+	tightened.Revision = 2
+	digest, err := tightened.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tightened.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(tightened); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "operator", ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.plan = tightened
+
+	calls := 0
+	fixture.reconciler.Planner = func(context.Context, PlanDecompositionRequest) (PlannerOutput, error) {
+		calls++
+		return PlannerOutput{}, fmt.Errorf("the provider's answer could not be decoded")
+	}
+
+	for tick := 0; tick < 5; tick++ {
+		fixture.reconcile(t)
+	}
+	if calls != 2 {
+		t.Fatalf("the planner ran %d times against a ceiling of 2 invocations", calls)
+	}
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Consumed.ProviderInvocations != 2 {
+		t.Fatalf("consumed %d provider invocations, want 2: a failed invocation still ran", snapshot.Consumed.ProviderInvocations)
+	}
+	report := fixture.reconcile(t)
+	budgetBlock := false
+	for _, block := range report.Blocked {
+		if block.Kind == "budget" {
+			budgetBlock = true
+		}
+	}
+	if !budgetBlock {
+		t.Fatalf("the ceiling did not block the stage: %#v", report.Blocked)
+	}
+}
+
+// "Reject - keep the current plan" is the ordinary answer to a decomposition
+// proposal, and it used to wedge the plan permanently: the proposal stayed
+// pending, and a pending material proposal pauses every new stage.
+func TestRejectingAProposalReleasesTheApprovedPlan(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "decomposition", Kind: domain.StageAgent, Role: domain.RolePlanner,
+			Objective:      "Decide how this change is decomposed.",
+			InvocationMode: domain.InvocationModeNonMutatingPlanning},
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			DependsOn: []string{"decomposition"}, Objective: "Do the work.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+	fixture.reconciler.Planner = func(context.Context, PlanDecompositionRequest) (PlannerOutput, error) {
+		return PlannerOutput{
+			Stages: []domain.PlanStage{
+				{ID: "decomposition", Kind: domain.StageAgent, Role: domain.RolePlanner,
+					InvocationMode: domain.InvocationModeNonMutatingPlanning},
+				{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+					DependsOn: []string{"decomposition"}},
+				{ID: "extra", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+					DependsOn: []string{"decomposition"}},
+			},
+			Notes: "It needs a second half.",
+			Reasoning: domain.PlanReasoningProvenance{
+				AgentID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
+				TrustMode:      domain.TrustRequirementOperatorTrusted,
+				InvocationMode: domain.InvocationModeNonMutatingPlanning, ProviderMode: "plan",
+				WorkspaceDigestBefore: strings.Repeat("a", 64), WorkspaceDigestAfter: strings.Repeat("a", 64),
+				WorkspaceUnchanged: true,
+			},
+		}, nil
+	}
+	fixture.reconcile(t)
+
+	proposals, err := fixture.store.PlanProposals(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 1 || !proposals[0].Changes.Material {
+		t.Fatalf("expected one material proposal, got %#v", proposals)
+	}
+	paused := fixture.reconcile(t)
+	if !strings.Contains(paused.Waiting, "awaiting operator approval of revision") {
+		t.Fatalf("a material proposal did not pause the plan: %q", paused.Waiting)
+	}
+
+	// The operator says no. The plan keeps executing the revision it approved.
+	if _, err := fixture.service.Reject(fixture.plan.ID, proposals[0].Proposed.Revision, proposals[0].Proposed.Digest, "operator", "keep the current plan"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	released := fixture.reconcile(t)
+	if strings.Contains(released.Waiting, "awaiting operator approval") {
+		t.Fatalf("a rejected proposal still pauses the plan: %q", released.Waiting)
+	}
+	if len(released.Started) != 1 || released.Started[0].StageID != "implementation" {
+		t.Fatalf("the approved plan did not resume after the rejection: %#v (blocked %#v)", released.Started, released.Blocked)
+	}
 }

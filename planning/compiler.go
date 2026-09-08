@@ -483,6 +483,17 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.P
 			independence.DifferentFrom = producersExcept(stages, stage.ID)
 			stage.Independence = &independence
 		}
+		// An independence obligation is only checkable if the producer it
+		// names is already resolved when this stage resolves, and the only
+		// thing that orders two stages is a dependency. A peer that is not
+		// already a dependency becomes one: a reviewer that must differ from
+		// the worker that produced the change reviews AFTER it anyway, so the
+		// edge states what the obligation already meant. It is a completion in
+		// one direction - an edge is added, never removed - and an edge that
+		// would close a loop is refused by the cycle law rather than accepted.
+		if stage.Independence != nil {
+			stage.DependsOn = withIndependencePeers(stage.DependsOn, stage.Independence.DifferentFrom)
+		}
 		if stage.InvocationMode == "" {
 			stage.InvocationMode = RequiredInvocationMode(stage.Role)
 		}
@@ -492,6 +503,24 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.P
 		stages[i] = stage
 	}
 	return stages
+}
+
+// withIndependencePeers adds every independence peer that is not already a
+// dependency, preserving the stated order and adding the rest in the order the
+// obligation names them.
+func withIndependencePeers(dependencies, peers []string) []string {
+	present := make(map[string]bool, len(dependencies))
+	for _, dependency := range dependencies {
+		present[dependency] = true
+	}
+	for _, peer := range peers {
+		if present[peer] {
+			continue
+		}
+		present[peer] = true
+		dependencies = append(dependencies, peer)
+	}
+	return dependencies
 }
 
 // canonicalOrder sorts stages into dependency order, breaking ties by id.

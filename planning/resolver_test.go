@@ -478,3 +478,70 @@ func TestAFrozenAssignmentIsUsedRatherThanRecomputed(t *testing.T) {
 		t.Fatalf("the review resolved onto the frozen producer's vendor family %q", review.Agent.VendorFamily)
 	}
 }
+
+// An independence obligation is only PROVEN if the stage it names is already
+// resolved when this stage resolves, and nothing but a dependency orders two
+// stages. A review with no dependency on the producer used to resolve first,
+// find nothing to compare, and be stamped as independently satisfied on the
+// very same vendor.
+func TestAnIndependenceObligationIsNeverProvenVacuously(t *testing.T) {
+	// Alphabetically first, so a tie-break on id would resolve it before the
+	// producer it must differ from.
+	stages := []domain.PlanStage{
+		{ID: "a-review", Kind: domain.StageAgent, Role: domain.RoleSecurityReviewer,
+			Objective:            "Review the change independently.",
+			RequiresCapabilities: planning.RoleCapabilities(domain.RoleSecurityReviewer),
+			InvocationMode:       domain.InvocationModeMutating,
+			Independence:         &domain.IndependenceRequirement{Dimension: domain.IndependenceVendorFamily, DifferentFrom: []string{"z-impl"}}},
+		{ID: "z-impl", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective:            "Make the change.",
+			RequiresCapabilities: planning.RoleCapabilities(domain.RoleImplementer),
+			InvocationMode:       domain.InvocationModeMutating},
+	}
+
+	// The compiler states the ordering the obligation already meant.
+	input := planInput(t, "security-sensitive.engineering-fact.json", nil)
+	input.Proposed = stages
+	plan, err := planning.Compile(input)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	review, ok := plan.Stage("a-review")
+	if !ok {
+		t.Fatal("the review stage did not survive compilation")
+	}
+	depends := false
+	for _, dependency := range review.DependsOn {
+		if dependency == "z-impl" {
+			depends = true
+		}
+	}
+	if !depends {
+		t.Fatalf("the review does not depend on the stage it must differ from: %#v", review.DependsOn)
+	}
+
+	// And a plan that states the obligation WITHOUT the ordering is refused
+	// rather than resolved vacuously.
+	unordered := plan
+	unordered.Stages = append([]domain.PlanStage(nil), plan.Stages...)
+	for i, stage := range unordered.Stages {
+		if stage.ID == "a-review" {
+			stage.DependsOn = nil
+			unordered.Stages[i] = stage
+		}
+	}
+	if err := planning.Validate(unordered, planning.ValidationInput{
+		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
+	}); err == nil {
+		t.Fatal("a plan whose reviewer could resolve before the work it judges was accepted")
+	}
+
+	// One vendor cannot satisfy it, and the block says so rather than passing.
+	single, err := planning.Resolve(resolveInput(t, plan, claudeAgent()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(single.Blocked) == 0 {
+		t.Fatalf("a single-vendor plan resolved an independence obligation: %#v", single.Assignments)
+	}
+}

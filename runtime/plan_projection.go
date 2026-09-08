@@ -135,7 +135,12 @@ type PlanSnapshot struct {
 	// executing: the approved revision keeps governing until an operator
 	// approves the replacement, which is what lets unaffected stages continue
 	// while a proposal waits.
-	Approved   PlanApproval                   `json:"approved,omitzero"`
+	Approved PlanApproval `json:"approved,omitzero"`
+	// Rejected is every revision an operator turned down. It is a set rather
+	// than a latest-decision field because rejecting a proposal is the ordinary
+	// answer "keep the current plan", and without a durable record of it the
+	// proposal stayed pending forever and paused every new stage of the plan.
+	Rejected   map[int]bool                   `json:"rejected,omitempty"`
 	Validation PlanValidation                 `json:"validation,omitzero"`
 	Stages     map[string]PlanStageProjection `json:"stages"`
 	Superseded []PlanSupersession             `json:"superseded,omitempty"`
@@ -268,6 +273,12 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		// not a withdrawal of the approval the plan is already executing under.
 		if status == domain.ApprovalApproved && payload.Revision >= s.Approved.Revision {
 			s.Approved = decision
+		}
+		if status == domain.ApprovalRejected {
+			if s.Rejected == nil {
+				s.Rejected = map[int]bool{}
+			}
+			s.Rejected[payload.Revision] = true
 		}
 	case EventPlanStageAssigned:
 		var payload PlanStageAssignedPayload

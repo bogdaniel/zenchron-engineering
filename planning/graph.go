@@ -144,8 +144,38 @@ func validateStage(stage stageView, byID map[string]stageView) error {
 		if peer.Kind != domain.StageAgent {
 			return fmt.Errorf("stage %q requires independence from %q, which is a %s and produces nothing to be independent of", stage.ID, other, peer.Kind)
 		}
+		// The obligation is only checkable if the peer is ALREADY assigned when
+		// this stage resolves, and nothing but a dependency orders two stages.
+		// Without the edge, two stages with no dependency between them resolve
+		// in whichever order the canonical form happens to produce, and a
+		// reviewer resolved first would be compared against nothing - passing
+		// vacuously and being stamped as independently satisfied.
+		if !dependsOnTransitively(stage.ID, other, byID) {
+			return fmt.Errorf("stage %q requires independence from %q but does not depend on it: an obligation that could be resolved before the work it judges proves nothing", stage.ID, other)
+		}
 	}
 	return nil
+}
+
+// dependsOnTransitively reports whether one stage is reachable from another
+// through the dependency edges. It is a plain depth-first walk; the graph is
+// small and a cycle is refused separately, so a visited set is enough.
+func dependsOnTransitively(from, to string, byID map[string]stageView) bool {
+	visited := map[string]bool{from: true}
+	frontier := append([]string(nil), byID[from].DependsOn...)
+	for len(frontier) > 0 {
+		next := frontier[0]
+		frontier = frontier[1:]
+		if next == to {
+			return true
+		}
+		if visited[next] {
+			continue
+		}
+		visited[next] = true
+		frontier = append(frontier, byID[next].DependsOn...)
+	}
+	return false
 }
 
 // refuseCycles is a deterministic topological walk. A cycle is refused with the

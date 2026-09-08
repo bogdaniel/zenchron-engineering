@@ -141,11 +141,13 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		return domain.EngineeringPlan{}, compileErr
 	}
 
+	claimedNow := false
 	if !found {
 		claimed, err := s.Store.ClaimPlan(plan)
 		if err != nil {
 			return domain.EngineeringPlan{}, err
 		}
+		claimedNow = claimed
 		// The claim is a conditional insert, so `false` means another proposer
 		// created this plan between the read above and here. Continuing would
 		// append a second proposed event for a revision that already exists -
@@ -158,10 +160,14 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 			}
 		}
 	}
+	// ClaimPlan writes the first revision with the plan row, in one
+	// transaction, so a first proposal's PutPlanRevision is a no-op by
+	// construction: the claim IS the creation.
 	created, err := s.Store.PutPlanRevision(plan)
 	if err != nil {
 		return domain.EngineeringPlan{}, err
 	}
+	created = created || claimedNow
 	objectiveDigest, err := Digest(plan.Objective)
 	if err != nil {
 		return domain.EngineeringPlan{}, err

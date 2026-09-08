@@ -259,6 +259,9 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 			Reason: fmt.Sprintf("the plan's aggregate envelope allows %d child runs and %d have been created", plan.BudgetEnvelope.MaxChildRuns, snapshot.Consumed.ChildRuns),
 		}, nil
 	}
+	if block := invocationCeilingReached(plan, snapshot, stage.ID); block != nil {
+		return nil, block, nil
+	}
 	if active := activeStages(snapshot); active >= plan.BudgetEnvelope.MaxConcurrency {
 		return nil, &PlanStageBlock{
 			StageID: stage.ID, Kind: "concurrency",
@@ -446,7 +449,11 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 	// verdict must pass, and at least one must exist.
 	proving := 0
 	for _, runID := range runs {
-		projected, err := r.runProjection(runID)
+		events, err := r.Store.Events(runID)
+		if err != nil {
+			return payload, false, err
+		}
+		projected, err := Project(events)
 		if err != nil {
 			return payload, false, err
 		}
@@ -467,7 +474,7 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			}
 			payload.Evidence = projected.Assurance.Bundle
 		case domain.StageHumanDecisionGate:
-			decision, satisfied := humanDecision(projected, stage.Action)
+			decision, satisfied := humanDecision(events, stage.Action)
 			if !satisfied {
 				continue
 			}
@@ -489,20 +496,38 @@ type humanDecisionReference struct {
 	humanEvidenceID string
 }
 
-// humanDecision reports whether a person decided the gate's action for this run.
+// humanDecision reports whether A PERSON decided this gate for this run.
 //
-// It accepts either an authorized #7 decision for the exact action - which
-// already required the human evidence a policy asked for - or a recorded human
-// authority answer of "approve" for it. Both are existing durable records; the
-// plan invents no second approval system.
-func humanDecision(projected RunProjection, action *domain.Action) (humanDecisionReference, bool) {
-	for _, evaluation := range projected.AuthorityDecisions {
-		if action != nil && evaluation.Action != *action {
+// It reads the run's recorded human authority evidence and nothing else. An
+// authorized #7 decision is NOT accepted in its place: authority is authorized
+// whenever nothing is missing, which ordinary machine evidence can reach on its
+// own, so a producing run's auto-authorized publication could discharge the
+// very gate that stood in for a blocked independence obligation. A gate that
+// says a person decided has to be able to name the person's evidence.
+//
+// The evidence is the kernel's existing HumanAuthorityRecorded record - pinned
+// to a request, a candidate, a contract and a state digest - so the plan
+// invents no second approval system.
+func humanDecision(events []EngineeringEvent, action *domain.Action) (humanDecisionReference, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Type != EventHumanAuthorityRecorded {
 			continue
 		}
-		if evaluation.Status == domain.AuthorityAuthorized {
-			return humanDecisionReference{decision: evaluation.Decision}, true
+		var payload HumanAuthorityRecordedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
 		}
+		if payload.Decision != "approve" {
+			continue
+		}
+		if action != nil && payload.Action != *action {
+			continue
+		}
+		return humanDecisionReference{
+			decision:        Ref{ID: payload.Request.ID, Revision: payload.Request.Revision},
+			humanEvidenceID: payload.EvidenceID,
+		}, true
 	}
 	return humanDecisionReference{}, false
 }
@@ -570,12 +595,36 @@ func planDependenciesSatisfied(stage domain.PlanStage, snapshot PlanSnapshot) (b
 	return true, ""
 }
 
+// terminalStageState is a stage this plan will not touch again.
+//
+// INVALIDATED is deliberately not one of them. A stage whose assumptions an
+// approved revision invalidated has to be done again under that revision - its
+// run identity carries the revision, so redoing it is a new run rather than a
+// continuation - and treating it as terminal wedged the plan: the stage never
+// re-ran and everything downstream blocked forever on a dependency that could
+// not progress.
 func terminalStageState(state PlanStageState) bool {
 	switch state {
-	case PlanStageCompleted, PlanStageFailed, PlanStageInvalidated, PlanStageSatisfied:
+	case PlanStageCompleted, PlanStageFailed, PlanStageSatisfied:
 		return true
 	default:
 		return false
+	}
+}
+
+// invocationCeilingReached is the aggregate provider-invocation gate, applied
+// before anything that will spend one. The envelope states a total, and a
+// ceiling that is only compared after the spending has happened is not a
+// ceiling - it is a report.
+func invocationCeilingReached(plan domain.EngineeringPlan, snapshot PlanSnapshot, stageID string) *PlanStageBlock {
+	ceiling := plan.BudgetEnvelope.MaxProviderInvocations
+	if ceiling <= 0 || snapshot.Consumed.ProviderInvocations < ceiling {
+		return nil
+	}
+	return &PlanStageBlock{
+		StageID: stageID, Kind: "budget",
+		Reason: fmt.Sprintf("the plan allows %d provider invocations and %d have been spent",
+			ceiling, snapshot.Consumed.ProviderInvocations),
 	}
 }
 

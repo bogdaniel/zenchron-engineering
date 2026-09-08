@@ -50,21 +50,33 @@ func (r PlanReconciler) decomposeStage(ctx context.Context, plan domain.Engineer
 	if !found {
 		return nil, &PlanRefusedError{PlanID: plan.ID, Detail: "no contract is stored for the approved revision"}
 	}
-	output, err := r.Planner(ctx, PlanDecompositionRequest{
+	// The ceiling is checked BEFORE the provider runs. A planner whose answer
+	// never parses is re-entered on every tick, and without this the plan spent
+	// a real invocation each time against a ceiling nothing consulted.
+	snapshot, err := r.Store.ReplayPlan(plan.ID)
+	if err != nil {
+		return nil, err
+	}
+	if block := invocationCeilingReached(plan, snapshot, stage.ID); block != nil {
+		return block, nil
+	}
+	output, plannerErr := r.Planner(ctx, PlanDecompositionRequest{
 		Plan: plan, Stage: stage, Assignment: assignment, Contract: contract,
 	})
-	if err != nil {
-		// A refused planning invocation is a BLOCK on that stage, not a failed
-		// plan: the reason is typed, the operator can act on it, and the
-		// approved revision keeps executing whatever it can.
-		return &PlanStageBlock{StageID: stage.ID, Kind: "planner", Reason: boundedDetail(err.Error())}, nil
-	}
 	// One provider invocation was spent whether or not the proposal is
-	// accepted. Recording it here is what keeps the aggregate honest.
+	// accepted, AND whether or not the invocation failed - the provider ran.
+	// Recording it only on success made every failure invisible to the
+	// aggregate.
 	if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
 		StageID: stage.ID, ProviderInvocations: 1,
 	}); err != nil {
 		return nil, err
+	}
+	if plannerErr != nil {
+		// A refused planning invocation is a BLOCK on that stage, not a failed
+		// plan: the reason is typed, the operator can act on it, and the
+		// approved revision keeps executing whatever it can.
+		return &PlanStageBlock{StageID: stage.ID, Kind: "planner", Reason: boundedDetail(plannerErr.Error())}, nil
 	}
 	proposal, err := r.recordProposal(plan, stage, contract, output)
 	if err != nil {
@@ -354,6 +366,13 @@ func (s *SQLiteOperationStore) PendingMaterialProposal(planID string, approvedRe
 			return domain.PlanRevisionProposal{}, false, err
 		}
 		if approved, ok := snapshot.ApprovedRevision(); ok && approved >= proposal.Proposed.Revision {
+			continue
+		}
+		// And a proposal an operator REJECTED is answered too. "Keep the
+		// current plan" is the ordinary answer to a decomposition, and reading
+		// only approvals left the plan paused on a question that had been
+		// decided - blocking every new stage forever.
+		if snapshot.Rejected[proposal.Proposed.Revision] {
 			continue
 		}
 		return proposal, true, nil

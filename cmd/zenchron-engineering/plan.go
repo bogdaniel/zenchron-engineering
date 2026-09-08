@@ -27,7 +27,8 @@ import (
 )
 
 const planUsage = "usage: zenchron-engineering autonomy plan {issue <number> [--template <id>] [--agent <id>] [--deterministic]|" +
-	"show <plan>|approve <plan> [--note <text>]|reject <plan> [--note <text>]|" +
+	"show <plan>|approve <plan> --revision <n> --digest <sha256> [--note <text>]|" +
+	"reject <plan> --revision <n> --digest <sha256> [--note <text>]|" +
 	"revise <plan> [--template <id>] [--deterministic] [--substitute-human <stage>]|" +
 	"status <plan>|list} [--text] [--repo owner/name] [--config <path>]"
 
@@ -368,10 +369,6 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	// The decision is about the revision AWAITING one, which is not always the
-	// revision currently governing: a decomposition proposal is stored as a new
-	// unapproved revision while the approved one keeps executing, and an
-	// operator answering "approve" means the thing they were asked about.
 	pending, found, err := composed.built.store.Plan(planID)
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -379,19 +376,27 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if !found {
 		return exitRunNotFound, fmt.Errorf("no such plan %q", planID)
 	}
+	// The decision names the revision the OPERATOR READ, not whatever is
+	// highest when the command runs. Reading the plan here and deciding on
+	// that same read compared a digest to itself: a decomposition proposal
+	// stored between reading and deciding - which `serve` does on its own -
+	// would be approved sight unseen. `plan show` prints the exact command.
+	revision, digest := flags.Revision, strings.TrimSpace(flags.Digest)
+	if revision < 1 || digest == "" {
+		return runtime.ExitInvalid, fmt.Errorf(
+			"%s names the exact revision it decides: run `autonomy plan show %s` and use the command it prints (currently `autonomy plan %s %s --revision %d --digest %s`)",
+			verb, planID, verb, planID, pending.Revision, pending.Digest)
+	}
 	decide := composed.service.Approve
 	if verb == "reject" {
 		decide = composed.service.Reject
 	}
-	// The DIGEST of the revision that was read is what the decision names, so
-	// approving a revision whose content changed between reading and deciding
-	// is refused rather than recorded.
-	snapshot, err := decide(planID, pending.Revision, pending.Digest, operator.ID, flags.Note)
+	snapshot, err := decide(planID, revision, digest, operator.ID, flags.Note)
 	if err != nil {
 		return exitFor(err, runtime.ExitFailed), err
 	}
 	if flags.Text {
-		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, pending.Revision, snapshot.Approval.Status, operator.ID)
+		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, revision, snapshot.Approval.Status, operator.ID)
 		return runtime.ExitCompleted, nil
 	}
 	if err := writeJSON(stdout, snapshot); err != nil {
@@ -504,8 +509,17 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		}
 	}
 	writePlanBudget(stdout, view)
-	if view.Snapshot.Approval.Status != domain.ApprovalApproved {
-		fmt.Fprintf(stdout, "nothing executes until this revision is approved: `autonomy plan approve %s`\n", view.Plan.ID)
+	// The decision command names the EXACT revision awaiting one, with its
+	// digest. The revision rendered above is the one that GOVERNS, which is not
+	// always the one being asked about: a decomposition proposal is stored as a
+	// new unapproved revision while the approved one keeps executing. Printing
+	// the command with both is what lets an operator approve what they read.
+	if awaiting := view.Snapshot.Approval; awaiting.Status == domain.ApprovalPending && awaiting.Revision > 0 {
+		if awaiting.Revision != view.Plan.Revision {
+			fmt.Fprintf(stdout, "awaiting a decision: revision %d (digest %s)\n", awaiting.Revision, awaiting.Digest)
+		}
+		fmt.Fprintf(stdout, "nothing executes until it is approved: `autonomy plan approve %s --revision %d --digest %s`\n",
+			view.Plan.ID, awaiting.Revision, awaiting.Digest)
 	}
 	return planExit(view), nil
 }

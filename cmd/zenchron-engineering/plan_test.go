@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,7 +109,8 @@ func TestPlanProposalAwaitsApproval(t *testing.T) {
 	for _, want := range []string{
 		"proposed plan",
 		"planned by: the deterministic compiler; no model was invoked",
-		"nothing executes until this revision is approved",
+		"nothing executes until it is approved: `autonomy plan approve",
+		"--revision 1 --digest ",
 		"cost: unknown",
 	} {
 		if !strings.Contains(printed, want) {
@@ -124,8 +126,10 @@ func TestPlanApprovalIsRecordedAgainstTheExactRevision(t *testing.T) {
 
 	planID := proposePlan(t, configPath, 41)
 
+	revision, digest := pendingDecision(t, configPath, planID, 41)
 	var approved bytes.Buffer
-	code, err := autonomy([]string{"plan", "approve", planID, "--note", "read it", "--text", "--config", configPath},
+	code, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision), "--digest", digest,
+		"--note", "read it", "--text", "--config", configPath},
 		planOverrides(t, 41), &approved)
 	if err != nil || code != runtime.ExitCompleted {
 		t.Fatalf("approve: code=%d err=%v\n%s", code, err, approved.String())
@@ -200,6 +204,32 @@ func TestPlanListShowsProposedPlans(t *testing.T) {
 }
 
 // proposePlan runs a deterministic proposal and returns the plan id.
+// pendingDecision is the revision an operator is being asked about, with its
+// digest - what `plan show` prints and what a decision has to name.
+func pendingDecision(t *testing.T, configPath, planID string, issue int) (int, string) {
+	t.Helper()
+	var out bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", planID, "--config", configPath},
+		planOverrides(t, issue), &out); err != nil {
+		t.Fatalf("show: %v\n%s", err, out.String())
+	}
+	var view struct {
+		Snapshot struct {
+			Approval struct {
+				Revision int    `json:"revision"`
+				Digest   string `json:"digest"`
+			} `json:"approval"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+		t.Fatalf("decode plan view: %v\n%s", err, out.String())
+	}
+	if view.Snapshot.Approval.Revision == 0 {
+		t.Fatalf("plan show reports no revision awaiting a decision:\n%s", out.String())
+	}
+	return view.Snapshot.Approval.Revision, view.Snapshot.Approval.Digest
+}
+
 func proposePlan(t *testing.T, configPath string, issue int) string {
 	t.Helper()
 	var out bytes.Buffer
@@ -263,18 +293,52 @@ func TestApprovalTargetsTheRevisionAwaitingADecision(t *testing.T) {
 	planID := proposePlan(t, configPath, 41)
 
 	// Approve revision 1, then propose revision 2 by re-planning.
-	if _, err := autonomy([]string{"plan", "approve", planID, "--config", configPath},
+	first, firstDigest := pendingDecision(t, configPath, planID, 41)
+	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(first), "--digest", firstDigest, "--config", configPath},
 		planOverrides(t, 41), &bytes.Buffer{}); err != nil {
 		t.Fatalf("approve r1: %v", err)
 	}
 	proposePlan(t, configPath, 41)
 
+	second, secondDigest := pendingDecision(t, configPath, planID, 41)
+	if second != 2 {
+		t.Fatalf("the plan is awaiting a decision on revision %d, want 2", second)
+	}
 	var out bytes.Buffer
-	if _, err := autonomy([]string{"plan", "approve", planID, "--text", "--config", configPath},
-		planOverrides(t, 41), &out); err != nil {
+	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(second), "--digest", secondDigest,
+		"--text", "--config", configPath}, planOverrides(t, 41), &out); err != nil {
 		t.Fatalf("approve r2: %v\n%s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "revision 2 approved") {
 		t.Fatalf("the decision did not target the revision awaiting one: %q", out.String())
+	}
+}
+
+// A decision names what the operator READ. Deciding without naming it, or
+// naming a revision that has since been replaced, is refused rather than
+// silently redirected onto whatever is newest - `serve` stores decomposition
+// proposals as new unapproved revisions on its own, so the window is real.
+func TestADecisionMustNameTheRevisionTheOperatorRead(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+	revision, digest := pendingDecision(t, configPath, planID, 41)
+
+	var bare bytes.Buffer
+	code, err := autonomy([]string{"plan", "approve", planID, "--config", configPath}, planOverrides(t, 41), &bare)
+	if err == nil || code != runtime.ExitInvalid {
+		t.Fatalf("an approval that named no revision was accepted: code=%d err=%v", code, err)
+	}
+	if !strings.Contains(err.Error(), "--revision") || !strings.Contains(err.Error(), "--digest") {
+		t.Fatalf("the refusal does not say what to run: %v", err)
+	}
+
+	// A digest from a revision that is no longer the one awaiting a decision is
+	// refused by the service, not quietly applied to the newer one.
+	proposePlan(t, configPath, 41)
+	var stale bytes.Buffer
+	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision + 1), "--digest", digest,
+		"--config", configPath}, planOverrides(t, 41), &stale); err == nil {
+		t.Fatal("an approval carrying a digest from another revision was recorded")
 	}
 }
