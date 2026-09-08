@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // RunSummary is one run as an operator sees it in a list. Every field answers a
@@ -82,12 +84,114 @@ type Fleet struct {
 	Capacity int          `json:"capacity"`
 	Active   int          `json:"active"`
 	Runs     []RunSummary `json:"runs"`
+	// Plans is the plan-level view beside the runs. An operator with a plan
+	// awaiting their approval is being waited ON, and that has to be visible in
+	// the same place they look to see whether anything is happening.
+	Plans []PlanSummary `json:"plans,omitempty"`
 	// SupervisorRunning reports whether a persistent supervisor currently owns
 	// the control endpoint for this state directory.
 	SupervisorRunning bool `json:"supervisor_running"`
 	// ControlEndpoint is the mechanism and path, so an operator can see the
 	// authority boundary they are relying on.
 	ControlEndpoint string `json:"control_endpoint,omitempty"`
+}
+
+// PlanSummary is one plan as the control room shows it: what it is, which
+// revision governs, whether it is waiting on a person, and what it has spent.
+type PlanSummary struct {
+	PlanID   string `json:"plan_id"`
+	Revision int    `json:"revision"`
+	// ApprovedRevision is the revision actually executing, which is not always
+	// the newest one: a proposed revision waits for approval while the approved
+	// one keeps governing.
+	ApprovedRevision int `json:"approved_revision,omitempty"`
+	// State is the plan-level answer: proposed, awaiting_approval, executing,
+	// blocked, completed or rejected.
+	State string `json:"state"`
+	// Stages counts stage states, so "2 running, 1 satisfied, 1 pending" is
+	// visible without opening the plan.
+	Stages map[string]int `json:"stages,omitempty"`
+	// Runs are the child EngineeringRuns this plan created, which are the same
+	// runs listed above.
+	Runs     []string               `json:"runs,omitempty"`
+	Consumed domain.PlanConsumption `json:"consumed"`
+	Error    string                 `json:"error,omitempty"`
+}
+
+// Plan lifecycle states as the control room names them.
+const (
+	PlanStateAwaitingApproval = "awaiting_approval"
+	PlanStateRejected         = "rejected"
+	PlanStateExecuting        = "executing"
+	PlanStateCompleted        = "completed"
+	PlanStateBlocked          = "blocked"
+)
+
+// summarizePlans projects every plan in the store, one entry each.
+func summarizePlans(store *SQLiteOperationStore) []PlanSummary {
+	plans, err := store.Plans()
+	if err != nil {
+		return []PlanSummary{{Error: boundedDetail(err.Error())}}
+	}
+	summaries := make([]PlanSummary, 0, len(plans))
+	for _, plan := range plans {
+		summary := PlanSummary{PlanID: plan.ID, Revision: plan.Revision}
+		snapshot, err := store.ReplayPlan(plan.ID)
+		if err != nil {
+			summary.Error = boundedDetail(err.Error())
+			summaries = append(summaries, summary)
+			continue
+		}
+		summary.Consumed = snapshot.Consumed
+		summary.Runs = snapshot.ChildRuns()
+		summary.Stages = map[string]int{}
+		for _, projection := range snapshot.Stages {
+			summary.Stages[string(projection.State)]++
+		}
+		summary.State = planState(snapshot)
+		if approved, ok := snapshot.ApprovedRevision(); ok {
+			summary.ApprovedRevision = approved
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+// planState is the plan-level answer, derived from the same replayed state
+// everything else reads.
+func planState(snapshot PlanSnapshot) string {
+	approved, ok := snapshot.ApprovedRevision()
+	switch {
+	case !ok && snapshot.Approval.Status == domain.ApprovalRejected:
+		return PlanStateRejected
+	case !ok:
+		return PlanStateAwaitingApproval
+	case approved < snapshot.Approval.Revision && snapshot.Approval.Status == domain.ApprovalPending:
+		// A newer revision is proposed and unapproved: the plan is executing
+		// what was approved AND waiting on a person for what was proposed.
+		return PlanStateAwaitingApproval
+	}
+	running, pending, failed := 0, 0, 0
+	for _, projection := range snapshot.Stages {
+		switch projection.State {
+		case PlanStageRunning:
+			running++
+		case PlanStagePending:
+			pending++
+		case PlanStageFailed:
+			failed++
+		}
+	}
+	switch {
+	case running > 0:
+		return PlanStateExecuting
+	case failed > 0 && pending == 0:
+		return PlanStateBlocked
+	case pending > 0:
+		return PlanStateExecuting
+	default:
+		return PlanStateCompleted
+	}
 }
 
 // FleetStatus projects every run in the store. It never fails because one run
@@ -104,6 +208,7 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		SupervisorRunning: SupervisorRunning(stateDir),
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
+	fleet.Plans = summarizePlans(store)
 	for _, run := range runs {
 		summary := summarizeRun(store, stateDir, run, now)
 		if !terminalDisposition(run.Disposition) {

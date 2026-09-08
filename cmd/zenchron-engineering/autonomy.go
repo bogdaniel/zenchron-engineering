@@ -34,6 +34,7 @@ import (
 )
 
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
+	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
@@ -187,6 +188,14 @@ type autonomyFlags struct {
 	PermissionBypass bool
 	// Reason is the operator's stated cause for a governed transition.
 	Reason string
+	// Template names the operator's reusable EngineeringPlanTemplate for a plan
+	// proposal. Empty means the planner compiles from policy and intent alone.
+	Template string
+	// Deterministic compiles a plan with NO model invocation. It is the honest
+	// alternative to reasoning rather than a fallback from it: the same
+	// obligations, the same validation, and a plan that says a model was not
+	// consulted.
+	Deterministic bool
 	// Detached submits work to a running supervisor instead of driving it in
 	// this terminal. It is implied when a supervisor owns the state directory.
 	Detached bool
@@ -229,6 +238,12 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		return autonomyWatch(context.Background(), flags, overrides, stdout)
 	case "gc":
 		return autonomyGC(rest, overrides, stdout)
+	case "plan":
+		// The plan lifecycle. It is under `autonomy` beside `run` because it is
+		// the same operator asking for the same work at a different altitude:
+		// `run issue N` starts one governed run, `plan issue N` proposes the
+		// decomposition that several of them would execute.
+		return autonomyPlan(context.Background(), rest, overrides, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
@@ -966,6 +981,13 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
 			continue
+		case "--deterministic":
+			// Compile the plan with NO model invocation. It is the honest
+			// alternative to reasoning, not a fallback from it: a provider that
+			// cannot plan is refused with its reason rather than quietly
+			// producing a deterministic plan the operator did not ask for.
+			flags.Deterministic, args = true, args[1:]
+			continue
 		case "--approve", "--reject":
 			// The two decisions are mutually exclusive flags rather than one
 			// --decision value, so a typo is a usage error instead of an
@@ -990,6 +1012,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Agent = args[1]
 		case "--reason":
 			flags.Reason = args[1]
+		case "--template":
+			flags.Template = args[1]
 		case "--assign":
 			issue, agent, ok := strings.Cut(args[1], "=")
 			number, err := strconv.Atoi(strings.TrimSpace(issue))

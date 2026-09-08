@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // SupervisorDependencies is the complete input. Like the runtime's own
@@ -68,6 +70,10 @@ type SupervisorDependencies struct {
 	Discovery *WatchController
 	// Agents is the registry a control request resolves an agent id against.
 	Agents AgentRegistry
+	// Plans is the plan lifecycle service, or the zero value when no plan has
+	// ever been proposed. It is what the plan reconciler resolves assignments
+	// through, and it contacts nothing.
+	Plans PlanService
 }
 
 // SupervisorReport is one tick's account of what the supervisor did.
@@ -93,6 +99,10 @@ type SupervisorReport struct {
 	Active   int `json:"active"`
 	// NextEligibleAt is when the supervisor intends to look again.
 	NextEligibleAt time.Time `json:"next_eligible_at"`
+	// Plans is what the plan reconciler did this tick, one entry per plan it
+	// looked at. A plan awaiting approval appears here saying so, which is how
+	// an operator sees that the runtime is waiting on THEM rather than on work.
+	Plans []PlanTickReport `json:"plans,omitempty"`
 	// Error is a tick that could not enumerate work. It is REPORTED rather
 	// than returned, because a supervisor that exited on one unreadable read
 	// would take every healthy run down with it - the same isolation rule that
@@ -359,6 +369,17 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 		}
 	}
 	report.Active = len(active)
+	// PLANS are reconciled before runs are driven, so a stage that became
+	// dependency-ready since the last tick gets its run created and then driven
+	// in the SAME pass rather than waiting a whole interval.
+	//
+	// This is dependency gating, not scheduling: it creates or associates
+	// ordinary EngineeringRuns and stops. Everything below - the ceiling, the
+	// rotation, the leases - is unchanged and remains the only thing that
+	// decides when a run executes.
+	if !report.Draining {
+		report.Plans = s.reconcilePlans(ctx)
+	}
 	if report.Draining {
 		// A draining supervisor starts nothing. Work already inside a Reconcile
 		// call finishes because this function waits for it below; work that has
@@ -487,4 +508,93 @@ func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) err
 		}
 	}
 	return nil
+}
+
+// decomposeWithAgent performs one decomposition invocation through the agent
+// the stage's assignment resolved to.
+//
+// The workspace is materialized from the plan's exact subject revision and
+// removed afterwards: it is derived state, and the snapshot it held is recorded
+// in the resulting proposal's provenance.
+func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, request PlanDecompositionRequest) (PlannerOutput, error) {
+	engine, err := s.engine(repository, request.Assignment.Agent.ID)
+	if err != nil {
+		return PlannerOutput{}, err
+	}
+	workspace, err := CreatePlanningWorkspace(engine.StateDirectory(), request.Plan.ID,
+		engine.PlanningSource(), request.Plan.Subject.Revision, "")
+	if err != nil {
+		return PlannerOutput{}, err
+	}
+	defer workspace.Remove()
+
+	return InvokePlanner(ctx, PlannerInput{
+		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Attempt: 1,
+		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),
+		ProfileID: request.Assignment.Profile.ID, Model: request.Assignment.Agent.Model,
+		Workspace: workspace, Contract: request.Contract,
+		Objective:      request.Stage.Objective,
+		Base:           Ref{Revision: request.Plan.Subject.Revision},
+		SourceSnapshot: Ref{ID: request.Plan.ID, Revision: request.Plan.Digest},
+		ControllerID:   engine.ControllerIdentityID(),
+		Current:        &request.Plan,
+		AvailableRoles: domain.EngineeringRoles(), AvailableCapabilities: domain.EngineeringCapabilities(),
+		Artifacts: engine.PlanningArtifacts(),
+	})
+}
+
+// reconcilePlans advances every plan the supervisor governs.
+//
+// A per-plan failure is REPORTED, never returned, for exactly the reason a
+// per-run failure is: one plan whose agent is unavailable must not stop the
+// runtime, and a plan that cannot resolve a stage is a state an operator acts
+// on rather than an outage.
+func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
+	if s.deps.Plans.Store == nil {
+		return nil
+	}
+	plans, err := s.deps.Store.Plans()
+	if err != nil {
+		return []PlanTickReport{{Waiting: boundedDetail(err.Error())}}
+	}
+	reports := make([]PlanTickReport, 0, len(plans))
+	for _, plan := range plans {
+		repository, issue, found, err := s.deps.Store.PlanSource(plan.ID)
+		if err != nil {
+			reports = append(reports, PlanTickReport{PlanID: plan.ID, Waiting: boundedDetail(err.Error())})
+			continue
+		}
+		if !found || issue <= 0 {
+			// A plan with no recorded source cannot create a run: every stage
+			// run answers the source the plan was proposed for. Saying so is
+			// more useful than silently skipping it.
+			reports = append(reports, PlanTickReport{PlanID: plan.ID, Waiting: "no source issue is recorded for this plan"})
+			continue
+		}
+		if _, governed := s.governedRepository(repository); !governed {
+			reports = append(reports, PlanTickReport{PlanID: plan.ID, Waiting: "repository " + repository + " is not governed by this supervisor"})
+			continue
+		}
+		reconciler := PlanReconciler{
+			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.deps.Plans,
+			Repository: repository, Issue: issue,
+			Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
+				return s.engine(repository, agentID)
+			},
+			// A decomposition stage runs through the engine bound to the agent
+			// its assignment resolved to, in the same verified non-mutating mode
+			// the initial planner uses. The supervisor supplies the seam and
+			// learns nothing about providers.
+			Planner: func(ctx context.Context, request PlanDecompositionRequest) (PlannerOutput, error) {
+				return s.decomposeWithAgent(ctx, repository, request)
+			},
+		}
+		report, err := reconciler.Reconcile(ctx, plan.ID)
+		if err != nil {
+			report.PlanID = plan.ID
+			report.Waiting = boundedDetail(err.Error())
+		}
+		reports = append(reports, report)
+	}
+	return reports
 }

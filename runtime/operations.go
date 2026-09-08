@@ -501,7 +501,18 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
 	priorFailure, _ := state.lastFailure(operation.ID)
-	result, execErr := r.deps.Provider.Execute(ctx, ExecutionRequest{
+	// A PLAN STAGE run executes under its frozen assignment: the stage
+	// objective the operator approved, the context that stage's role receives,
+	// and the instruction packs its profile named - by digest. An ordinary run
+	// is unchanged and takes the contract's own objective.
+	stage, err := r.planStage(state)
+	if err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
+	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -530,7 +541,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Findings:              findings,
 		Feedback:              feedback,
 		Budgets:               ProviderBudget{WallLimit: r.deps.Budgets.WallLimit},
-	})
+	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
 	}
@@ -1953,4 +1964,91 @@ func decodeJSON(raw []byte, target any) error {
 		return fmt.Errorf("empty operation result")
 	}
 	return json.Unmarshal(raw, target)
+}
+
+// ---------------------------------------------------------------------------
+// Plan stage execution
+// ---------------------------------------------------------------------------
+
+// planStageContext is what a plan stage adds to an ordinary invocation. The
+// zero value adds nothing, which is exactly what an ordinary run needs.
+type planStageContext struct {
+	assignment   *domain.AgentAssignment
+	instructions []string
+}
+
+// apply narrows the request to the stage the operator approved.
+//
+// Everything it replaces is a STATEMENT OF WHAT THIS STAGE IS FOR: its
+// objective, the acceptance it is judged against, the obligations it carries
+// and the context its role receives. It never widens anything: permissions and
+// prohibitions still come from the compiled contract, and the trusted
+// instruction text is still the runtime's own with the operator's packs beside
+// it.
+func (p planStageContext) apply(request ExecutionRequest) ExecutionRequest {
+	if p.assignment == nil {
+		return request
+	}
+	context := p.assignment.Context
+	if strings.TrimSpace(context.Objective) != "" {
+		request.Objective = context.Objective
+	}
+	if len(context.AcceptanceCriteria) > 0 {
+		request.AcceptanceObligations = context.AcceptanceCriteria
+	}
+	if len(context.Obligations) > 0 {
+		request.Constraints = context.Obligations
+	}
+	request.Instructions = p.instructions
+	request.ModelPreference = p.assignment.Agent.Model
+	return request
+}
+
+// planStage loads the frozen assignment for a plan stage run and resolves the
+// instruction text it names.
+//
+// The digest check is the point. An assignment names instruction packs by
+// content digest; if the operator has edited one since the plan was approved,
+// the text no longer matches what was approved and this REFUSES rather than
+// delivering the new text to work already in flight.
+func (r *EngineeringRuntime) planStage(state *runState) (planStageContext, error) {
+	binding := state.run.Plan
+	if binding == nil {
+		return planStageContext{}, nil
+	}
+	assignment, found, err := r.deps.Store.PlanAssignment(binding.PlanID, binding.Revision, binding.StageID)
+	if err != nil {
+		return planStageContext{}, err
+	}
+	if !found {
+		return planStageContext{}, fmt.Errorf("run %s is bound to plan %s stage %s and no approved assignment is stored for it",
+			state.run.ID, binding.PlanID, binding.StageID)
+	}
+	if assignment.ID != binding.AssignmentID {
+		return planStageContext{}, fmt.Errorf("run %s was created under assignment %s and the stored assignment is %s",
+			state.run.ID, binding.AssignmentID, assignment.ID)
+	}
+	instructions, err := r.frozenInstructions(assignment)
+	if err != nil {
+		return planStageContext{}, err
+	}
+	return planStageContext{assignment: &assignment, instructions: instructions}, nil
+}
+
+// frozenInstructions resolves the instruction text an assignment froze by
+// digest, refusing anything that has changed underneath it.
+func (r *EngineeringRuntime) frozenInstructions(assignment domain.AgentAssignment) ([]string, error) {
+	var instructions []string
+	for _, reference := range assignment.Profile.Instructions {
+		pack, err := r.deps.Planning.Pack(reference.ID)
+		if err != nil {
+			return nil, fmt.Errorf("assignment %s names instruction pack %q, which is no longer installed: %w", assignment.ID, reference.ID, err)
+		}
+		if pack.Digest != reference.Digest {
+			return nil, fmt.Errorf("instruction pack %q now digests to %s and assignment %s was approved against %s: an approved plan executes under the configuration it was approved with",
+				reference.ID, short12(pack.Digest), assignment.ID, short12(reference.Digest))
+		}
+		instructions = append(instructions, pack.Instructions...)
+	}
+	return instructions, nil
 }

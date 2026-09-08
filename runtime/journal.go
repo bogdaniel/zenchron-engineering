@@ -11,8 +11,29 @@ import (
 // same PRAGMA user_version migration list. There is one runtime database, one
 // migration mechanism, and one reducer.
 const (
-	sqliteRunColumns   = `id, repository, base_id, base_revision, contract_id, contract_revision, candidate_branch, candidate_revision, candidate_tree, controller_sha256, created_unix_nano, document`
+	sqliteRunColumns = `id, repository, base_id, base_revision, contract_id, contract_revision, candidate_branch, candidate_revision, candidate_tree, controller_sha256, created_unix_nano, document`
+	// sqliteEventColumns is the RUN event insert. The stream columns are
+	// deliberately absent: they default to the run stream, so this column list
+	// - and every caller of it - keeps meaning exactly what it meant before
+	// plan events existed.
 	sqliteEventColumns = `id, run_id, sequence, type, operation_id, previous_event_id, previous_event_hash, state_before, state_after, event_hash, document`
+	// sqlitePlanEventColumns is the PLAN event insert. A plan event states its
+	// stream explicitly because nothing about it can be defaulted: it has no
+	// run, and reading it back as one would put a plan's history inside a run's
+	// hash chain.
+	sqlitePlanEventColumns = `id, run_id, sequence, type, operation_id, previous_event_id, previous_event_hash, state_before, state_after, event_hash, document, stream_kind, plan_id`
+	// sqliteEventReadColumns is what every read selects. It carries the stream
+	// columns so a row's stream can be checked against its document rather than
+	// assumed from the query that found it.
+	sqliteEventReadColumns = sqlitePlanEventColumns
+)
+
+// Journal stream kinds. A stream is one hash-chained sequence of events about
+// one subject; runs and plans are two kinds of subject in ONE journal, not two
+// journals.
+const (
+	streamRun  = "run"
+	streamPlan = "plan"
 )
 
 // PutRun persists run identity together with its exact subject and contract
@@ -103,6 +124,63 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 	if e.ID == "" || e.RunID == "" {
 		return EngineeringEvent{}, fmt.Errorf("event id and run id are required")
 	}
+	if e.PlanID != "" {
+		return EngineeringEvent{}, fmt.Errorf("event %q names both a run and a plan: an event belongs to exactly one stream", e.ID)
+	}
+	if planEventTypes[e.Type] {
+		return EngineeringEvent{}, fmt.Errorf("event type %q belongs to the plan stream and cannot be appended to a run", e.Type)
+	}
+	var run EngineeringRun
+	return s.appendToStream(e, journalStream{
+		kind: streamRun, id: e.RunID,
+		// The run row is read INSIDE the transaction. That read is what the
+		// dropped foreign key used to guarantee: an event may not be journalled
+		// against a run that does not exist.
+		bind: func(tx *sql.Tx) error {
+			var document string
+			switch err := tx.QueryRow(`SELECT document FROM runs WHERE id = ?`, e.RunID).Scan(&document); err {
+			case nil:
+			case sql.ErrNoRows:
+				return fmt.Errorf("unknown run %q", e.RunID)
+			default:
+				return err
+			}
+			var err error
+			run, err = decodeRun(document)
+			return err
+		},
+		events: func(tx *sql.Tx) ([]EngineeringEvent, error) { return queryEvents(tx, e.RunID) },
+		digest: func(events []EngineeringEvent) (string, error) {
+			snapshot, err := Reduce(run, events)
+			return snapshot.StateSHA256, err
+		},
+		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string) error {
+			_, err := tx.Exec(`INSERT INTO events (`+sqliteEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				event.ID, event.RunID, event.Sequence, event.Type, event.OperationID, event.PreviousEventID,
+				event.PreviousEventHash, event.StateBefore, event.StateAfter, event.EventHash, canonical)
+			return err
+		},
+	})
+}
+
+// journalStream is one hash-chained subject. Runs and plans differ in where
+// their subject lives and in which reducer computes their state digest; they do
+// NOT differ in how a sequence is allocated, how the chain is linked, or how a
+// row is written, so those are stated once below.
+type journalStream struct {
+	kind, id string
+	bind     func(*sql.Tx) error
+	events   func(*sql.Tx) ([]EngineeringEvent, error)
+	digest   func([]EngineeringEvent) (string, error)
+	insert   func(*sql.Tx, EngineeringEvent, string) error
+}
+
+// appendToStream is the ONE append implementation. Allocating a sequence,
+// linking the hash chain, recording the state-before/state-after digests and
+// inserting the row happen in one transaction, whichever stream the event
+// belongs to - so a plan's history is as tamper-evident as a run's, by being
+// the same mechanism rather than a similar one.
+func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journalStream) (EngineeringEvent, error) {
 	if e.Sequence != 0 || e.PreviousEventID != "" || e.PreviousEventHash != "" || e.StateBefore != "" || e.StateAfter != "" || e.EventHash != "" {
 		return EngineeringEvent{}, fmt.Errorf("sequence, chain, and state hashes are allocated by the journal, not the caller")
 	}
@@ -117,23 +195,14 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 		return EngineeringEvent{}, err
 	}
 	defer tx.Rollback()
-	var document string
-	switch err := tx.QueryRow(`SELECT document FROM runs WHERE id = ?`, e.RunID).Scan(&document); err {
-	case nil:
-	case sql.ErrNoRows:
-		return EngineeringEvent{}, fmt.Errorf("unknown run %q", e.RunID)
-	default:
+	if err := stream.bind(tx); err != nil {
 		return EngineeringEvent{}, err
 	}
-	run, err := decodeRun(document)
+	existing, err := stream.events(tx)
 	if err != nil {
 		return EngineeringEvent{}, err
 	}
-	existing, err := queryEvents(tx, e.RunID)
-	if err != nil {
-		return EngineeringEvent{}, err
-	}
-	before, err := Reduce(run, existing)
+	before, err := stream.digest(existing)
 	if err != nil {
 		return EngineeringEvent{}, err
 	}
@@ -142,15 +211,15 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 		e.PreviousEventID = existing[n-1].ID
 		e.PreviousEventHash = existing[n-1].EventHash
 	}
-	e.StateBefore = before.StateSHA256
+	e.StateBefore = before
 	// StateDigest excludes the journal cursor and state_sha256, so an event's
 	// state_after never feeds back into the digest it records: the last event's
 	// state_after equals the replayed snapshot's state_sha256.
-	after, err := Reduce(run, append(existing, e))
+	after, err := stream.digest(append(existing, e))
 	if err != nil {
 		return EngineeringEvent{}, err
 	}
-	e.StateAfter = after.StateSHA256
+	e.StateAfter = after
 	if e.EventHash, err = EventDigest(e); err != nil {
 		return EngineeringEvent{}, err
 	}
@@ -158,9 +227,7 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 	if err != nil {
 		return EngineeringEvent{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO events (`+sqliteEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.RunID, e.Sequence, e.Type, e.OperationID, e.PreviousEventID, e.PreviousEventHash,
-		e.StateBefore, e.StateAfter, e.EventHash, string(canonical)); err != nil {
+	if err := stream.insert(tx, e, string(canonical)); err != nil {
 		return EngineeringEvent{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -194,10 +261,24 @@ func (s *SQLiteOperationStore) Replay(runID string) (RunSnapshot, error) {
 	return Reduce(run, events)
 }
 
-func queryEvents(q interface {
+type eventQuerier interface {
 	Query(string, ...any) (*sql.Rows, error)
-}, runID string) ([]EngineeringEvent, error) {
-	rows, err := q.Query(`SELECT `+sqliteEventColumns+` FROM events WHERE run_id = ? ORDER BY sequence ASC`, runID)
+}
+
+func queryEvents(q eventQuerier, runID string) ([]EngineeringEvent, error) {
+	return queryStreamEvents(q, `stream_kind = ? AND run_id = ?`, streamRun, runID)
+}
+
+func queryPlanEvents(q eventQuerier, planID string) ([]EngineeringEvent, error) {
+	return queryStreamEvents(q, `stream_kind = ? AND plan_id = ?`, streamPlan, planID)
+}
+
+// queryStreamEvents reads one stream in sequence order. Every indexed column
+// must still agree with its canonical document - including the STREAM columns,
+// so a row moved between streams by direct database access is refused rather
+// than replayed into the wrong history.
+func queryStreamEvents(q eventQuerier, where string, kind, id string) ([]EngineeringEvent, error) {
+	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`, kind, id)
 	if err != nil {
 		return nil, err
 	}
@@ -205,17 +286,18 @@ func queryEvents(q interface {
 	out := []EngineeringEvent{}
 	for rows.Next() {
 		var row EngineeringEvent
-		var document string
+		var document, streamKind string
 		if err := rows.Scan(&row.ID, &row.RunID, &row.Sequence, &row.Type, &row.OperationID,
 			&row.PreviousEventID, &row.PreviousEventHash, &row.StateBefore, &row.StateAfter,
-			&row.EventHash, &document); err != nil {
+			&row.EventHash, &document, &streamKind, &row.PlanID); err != nil {
 			return nil, err
 		}
 		var e EngineeringEvent
 		if err := json.Unmarshal([]byte(document), &e); err != nil {
 			return nil, fmt.Errorf("decode durable event: %w", err)
 		}
-		if e.ID != row.ID || e.RunID != row.RunID || e.Sequence != row.Sequence || e.Type != row.Type ||
+		if e.ID != row.ID || e.RunID != row.RunID || e.PlanID != row.PlanID ||
+			e.Sequence != row.Sequence || e.Type != row.Type ||
 			e.OperationID != row.OperationID || e.PreviousEventID != row.PreviousEventID ||
 			e.PreviousEventHash != row.PreviousEventHash || e.StateBefore != row.StateBefore ||
 			e.StateAfter != row.StateAfter || e.EventHash != row.EventHash {

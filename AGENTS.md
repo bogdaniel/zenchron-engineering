@@ -19,10 +19,11 @@ Committed repository documents are the project source of truth. Chat history is 
 
 Read `ROADMAP.md` before concluding what this product is. The Authorization
 Kernel is the core, and a governed single-task runtime is not the finished
-category: the current milestone (#63) builds the persistent multi-agent
-execution runtime, and the Engineering Planner above it (#64) is a separate,
-later layer. Do not implement #64's roles, plans or decomposition while working
-on anything else.
+category: #63 built the persistent multi-agent execution runtime, and #64 builds
+the Engineering Planner above it. Both are implemented here. Repository
+Intelligence (#67), the external adapter protocol (#103) and everything after
+them are separate, later layers; do not implement any of them while working on
+something else.
 
 ## Project identity
 
@@ -95,18 +96,39 @@ The operator-facing system is documented, not inferred:
   local control endpoint
 - `docs/agents.md` — named execution agents, trust modes, provenance and the
   provider-handoff refusal
+- `docs/planning.md` — operator-defined agent profiles, instruction packs,
+  context policies, plan templates, and the plan approval boundary
+- `docs/spec/planning-v0.1.md` — the normative M2 planning artifacts
 - `docs/getting-started.md`, `docs/running-work.md`,
   `docs/running-multiple-tasks.md`, `docs/github-feedback.md`,
   `docs/configuration.md`, `docs/troubleshooting.md`
 
-Three distinctions in that surface are frequently collapsed by a reader in a
+Seven distinctions in that surface are frequently collapsed by a reader in a
 hurry, and collapsing any of them is a defect:
 
 - **agent id != provider kind != trust mode.** They are three separate facts.
 - **execution trust != acceptance authority.** An `operator_trusted` worker may
   author a change and may never accept it.
-- **execution agent != engineering role.** Agents are workers an operator
-  installed; roles belong to the future planner in #64.
+- **EngineeringRole != AgentProfile != ExecutionAgent.** A role is a
+  responsibility a plan requires; a profile is an operator-defined
+  specialization of a worker; an execution agent is the installed worker. One
+  agent backs several profiles, and one role resolves to whichever profile is
+  eligible.
+- **EngineeringPlanTemplate != EngineeringPlan.** A template is reusable
+  planning input with no governance or execution authority. A plan is a
+  validated, approved, immutable revision.
+- **EngineeringPolicy != ContextPolicy.** `EngineeringPolicy` is the only
+  obligation system in this product. A `ContextPolicy` selects which context
+  classes an assignment receives; it grants no authority and can never remove
+  context the work contract requires.
+- **only `agent` stages become EngineeringRuns.** `assurance_gate` and
+  `human_decision_gate` reference existing evidence, authority and
+  human-decision state. A gate that created a worker run would be a fake run
+  asserting evidence nothing produced.
+- **customization may specialize or narrow; it may not escalate.** A profile,
+  instruction pack, context policy or template cannot raise trust, widen
+  access, raise a ceiling, grant publication or acceptance authority, suppress
+  a policy obligation, or reset consumed budget.
 
 ## Design principles for implementation
 
@@ -135,17 +157,32 @@ For non-trivial changes:
 **M0-M1, complete.** Prove the authorization kernel using representative
 scenarios (below), and build the durable single-task local runtime above it.
 
-**M1-R (#63), the current surface.** Make that runtime a persistent, usable,
-multi-agent engineering execution runtime: `serve`, named execution agents,
-concurrent runs, the GitHub feedback loop, and an operator control room. This is
-the milestone the code in this repository now implements.
+**M1-R (#63), adopted.** Make that runtime a persistent, usable, multi-agent
+engineering execution runtime: `serve`, named execution agents, concurrent runs,
+the GitHub feedback loop, and an operator control room.
 
-**M2 and beyond, not implemented.** #64 is the Engineering Planner - roles,
-capabilities, `EngineeringPlan`, decomposition and dynamic agent selection - and
-#67 is Repository Intelligence beside it. #65 is the accepted roadmap tracker
-and carries the full graph through M7; `ROADMAP.md` is its in-repository form.
-Do not build any of that while working on something else, and treat later
-milestones as hypotheses to be reviewed against evidence rather than a queue.
+**M2 (#64), the current surface.** The Engineering Planner above that runtime:
+engineering roles and capabilities, operator-defined `AgentProfile`s built from
+`InstructionPack`s and `ContextPolicy`s, reusable `EngineeringPlanTemplate`s, a
+proposed `EngineeringPlan` that an operator approves before anything executes,
+typed assurance and human-decision gates, an aggregate plan budget envelope, and
+a plan reconciler inside `serve` that turns dependency-ready `agent` stages into
+ordinary #63 `EngineeringRun`s. Read `docs/spec/planning-v0.1.md` for the
+normative artifacts and `docs/planning.md` for the operator surface.
+
+What #64 is careful NOT to be is a second runtime. It adds no scheduler, no task
+database, no event journal, no policy system and no authority system: role,
+capability, independence and gate obligations compile through the existing
+`EngineeringPolicy` compiler, plans persist in the existing SQLite store and
+journal, and the existing scheduler and leases remain the only thing that
+decides when a run executes.
+
+**M3 and beyond, not implemented.** #67 is Repository Intelligence beside this
+layer, and #103 owns the external execution-agent adapter protocol that #64
+deliberately split out. #65 is the accepted roadmap tracker and carries the full
+graph through M7; `ROADMAP.md` is its in-repository form. Do not build any of
+that while working on something else, and treat later milestones as hypotheses
+to be reviewed against evidence rather than a queue.
 
 Still true, and still the reason the kernel came first: do not build a broad
 autonomous engineering platform. Breadth is earned one governed capability at a

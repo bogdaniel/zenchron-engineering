@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -214,8 +215,18 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 			return nil, err
 		}
 	}
+	// The plan lifecycle service the supervisor's plan reconciler resolves
+	// through. It is built from the SAME store, the same customization
+	// registry and the same workforce every plan command uses, so `serve`
+	// cannot resolve a stage differently from what an operator was shown when
+	// they approved it.
+	plans, err := c.planService()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store:             c.store,
+		Plans:             plans,
 		Clock:             runtime.RealClock{},
 		Owner:             c.owner,
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
@@ -232,6 +243,29 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 			}, agent)
 		},
 	})
+}
+
+// planService builds the plan lifecycle service for this composition.
+//
+// Readiness is probed here for the same reason it is probed for a plan
+// command: which workers can take a stage is part of what the reconciler
+// decides, and a stale answer would block a plan on an agent that has since
+// become available.
+func (c *composition) planService() (runtime.PlanService, error) {
+	registry, err := c.planningRegistry()
+	if err != nil {
+		return runtime.PlanService{}, err
+	}
+	agents := runtime.DescribeExecutionAgents(context.Background(), c.agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
+		return runtime.AgentProberFor(agent, c.artifacts, c.config.StateDir)
+	})
+	if err := registry.Bind(agents); err != nil {
+		return runtime.PlanService{}, err
+	}
+	return runtime.PlanService{
+		Store: c.store, Clock: runtime.RealClock{}, Registry: registry,
+		Agents: agents, DefaultAgent: c.agents.Default(), Envelope: c.config.PlanEnvelope(),
+	}, nil
 }
 
 // handleControl answers one operator request. Every verb here already exists as
@@ -401,8 +435,40 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 			issueLabel(run), orDash(run.Agent), stateLabel(run), locationLabel(run),
 			elapsedLabel(run.Elapsed), run.Reason)
 	}
+	// PLANS, beside the runs. A plan awaiting approval is the runtime waiting on
+	// a PERSON, and that has to be visible where an operator looks to see
+	// whether anything is happening at all.
+	if len(fleet.Plans) > 0 {
+		fmt.Fprintf(stdout, "\n%-38s %-6s %-18s %-22s %s\n", "PLAN", "REV", "STATE", "STAGES", "CHILD RUNS")
+		for _, plan := range fleet.Plans {
+			fmt.Fprintf(stdout, "%-38s %-6s %-18s %-22s %d\n",
+				plan.PlanID, revisionLabel(plan), plan.State, stageLabel(plan), len(plan.Runs))
+		}
+		fmt.Fprintln(stdout, "\n`autonomy plan show PLAN --text` explains one plan; a plan awaiting approval executes nothing until `autonomy plan approve PLAN`.")
+	}
 	fmt.Fprintln(stdout, "\n`autonomy status RUN --text` explains one run; `autonomy logs RUN` shows what its worker is saying.")
 	return runtime.ExitCompleted, nil
+}
+
+// revisionLabel shows the governing revision beside the latest one when they
+// differ, because "executing r2 while r3 waits for you" is the whole state.
+func revisionLabel(plan runtime.PlanSummary) string {
+	if plan.ApprovedRevision != 0 && plan.ApprovedRevision != plan.Revision {
+		return fmt.Sprintf("%d<%d", plan.ApprovedRevision, plan.Revision)
+	}
+	return strconv.Itoa(plan.Revision)
+}
+
+func stageLabel(plan runtime.PlanSummary) string {
+	states := make([]string, 0, len(plan.Stages))
+	for state, count := range plan.Stages {
+		states = append(states, fmt.Sprintf("%d %s", count, state))
+	}
+	sort.Strings(states)
+	if len(states) == 0 {
+		return "-"
+	}
+	return strings.Join(states, ", ")
 }
 
 func issueLabel(run runtime.RunSummary) string {

@@ -625,3 +625,365 @@ func optionalRef(name string, ref Ref) error {
 	}
 	return requiredRef(name, ref)
 }
+
+// ---------------------------------------------------------------------------
+// Plan lifecycle payloads
+// ---------------------------------------------------------------------------
+
+// The plan payloads are identities, counts, digests and short enum-ish status
+// strings, exactly like the run payloads above. An objective is the one piece
+// of human-authored text among them, and it is bounded like every other field:
+// a plan's full content lives in the immutable plan_revisions row, which the
+// digest here references, so the journal never becomes a second copy of it.
+
+// PlanProposedPayload records a plan revision offered for approval.
+type PlanProposedPayload struct {
+	Revision int    `json:"revision"`
+	Digest   string `json:"digest"`
+	// ObjectiveDigest is the SHA-256 of the plan's objective, not the objective
+	// itself. The objective is derived from an issue title and body, which are
+	// UNTRUSTED third-party text: the journal carries no such text anywhere, so
+	// it carries an identity here and the readable objective lives in the plan
+	// revision document the operator reads.
+	ObjectiveDigest string `json:"objective_digest"`
+	// StageCount and AgentStageCount are what an approval view needs before it
+	// loads the revision document, and they are also the two numbers that make
+	// "gates create no runs" checkable from the journal alone.
+	StageCount      int `json:"stage_count"`
+	AgentStageCount int `json:"agent_stage_count"`
+	// Template is the exact template revision this plan was compiled from, or
+	// absent when the operator supplied none. A later template edit cannot
+	// change what this says.
+	Template *PlanTemplateRef `json:"template,omitempty"`
+	// Budget is the aggregate envelope the revision proposes.
+	Budget PlanBudgetPayload `json:"budget"`
+	// Reasoning is present when a registered execution agent contributed
+	// semantic reasoning, and carries the runtime's OWN verification that the
+	// planning workspace did not change.
+	Reasoning *PlanReasoningPayload `json:"reasoning,omitempty"`
+	// ProposalID is the PlanRevisionProposal this revision came from, absent
+	// for an initial plan.
+	ProposalID string `json:"proposal_id,omitempty"`
+	Origin     string `json:"origin"`
+}
+
+// PlanTemplateRef pins a template revision by digest.
+type PlanTemplateRef struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
+	Digest  string `json:"digest"`
+}
+
+// PlanBudgetPayload is the aggregate envelope. MaxCostMicros is a POINTER
+// because most configurations cannot report cost at all: absent means unknown,
+// and unknown is never rendered as zero.
+type PlanBudgetPayload struct {
+	MaxChildRuns           int    `json:"max_child_runs"`
+	MaxConcurrency         int    `json:"max_concurrency"`
+	MaxProviderInvocations int    `json:"max_provider_invocations"`
+	MaxWallSeconds         int    `json:"max_wall_seconds,omitempty"`
+	MaxCostMicros          *int64 `json:"max_cost_micros,omitempty"`
+}
+
+// PlanReasoningPayload is the planner invocation's provenance, including the
+// proof that it could not write. The two workspace digests are the runtime's
+// own measurement, taken before and after the invocation; WorkspaceUnchanged is
+// the conclusion, recorded so a reader never has to compare two hashes to learn
+// the answer.
+type PlanReasoningPayload struct {
+	AgentID               string `json:"agent_id"`
+	ProviderKind          string `json:"provider_kind"`
+	VendorFamily          string `json:"vendor_family,omitempty"`
+	TrustMode             string `json:"trust_mode"`
+	Model                 string `json:"model,omitempty"`
+	ProfileID             string `json:"profile_id,omitempty"`
+	InvocationMode        string `json:"invocation_mode"`
+	ProviderMode          string `json:"provider_mode,omitempty"`
+	WorkspaceDigestBefore string `json:"workspace_digest_before"`
+	WorkspaceDigestAfter  string `json:"workspace_digest_after"`
+	WorkspaceUnchanged    bool   `json:"workspace_unchanged"`
+}
+
+// PlanValidatedPayload records the deterministic validator's verdict. Errors
+// are bounded runtime-authored statements, never provider text.
+type PlanValidatedPayload struct {
+	Revision int      `json:"revision"`
+	Digest   string   `json:"digest"`
+	Status   string   `json:"status"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
+// PlanDecisionPayload is the operator's approval or rejection of one exact
+// revision. Both the revision number and its digest are required: approving a
+// revision number whose content could since have changed would be approving
+// something nobody looked at.
+type PlanDecisionPayload struct {
+	Revision int    `json:"revision"`
+	Digest   string `json:"digest"`
+	Operator string `json:"operator"`
+	Note     string `json:"note,omitempty"`
+}
+
+// PlanStageAssignedPayload freezes which configuration performed a stage. The
+// profile digest is what makes a later profile edit unable to rewrite work
+// already assigned.
+type PlanStageAssignedPayload struct {
+	StageID        string `json:"stage_id"`
+	AssignmentID   string `json:"assignment_id"`
+	Role           string `json:"role"`
+	ProfileID      string `json:"profile_id"`
+	ProfileVersion int    `json:"profile_version"`
+	ProfileDigest  string `json:"profile_digest"`
+	AgentID        string `json:"agent_id"`
+	ProviderKind   string `json:"provider_kind"`
+	VendorFamily   string `json:"vendor_family"`
+	TrustMode      string `json:"trust_mode"`
+	InvocationMode string `json:"invocation_mode"`
+	RunID          string `json:"run_id,omitempty"`
+}
+
+// PlanRunStartedPayload associates one agent stage with one ordinary
+// EngineeringRun. It is the ONLY link between the two streams, and it exists
+// only for agent stages: a gate that produced one of these would be a fake
+// worker run.
+type PlanRunStartedPayload struct {
+	StageID string `json:"stage_id"`
+	RunID   string `json:"run_id"`
+}
+
+// PlanStageSettledPayload records how a stage ended.
+type PlanStageSettledPayload struct {
+	StageID string `json:"stage_id"`
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// PlanGateSatisfiedPayload records that a typed gate's EXISTING durable
+// references now prove it. The references are the evidence, authority and human
+// decision records the kernel already owns; the plan stores no second copy of
+// any of them, which is what keeps a gate from becoming a parallel evidence
+// model.
+type PlanGateSatisfiedPayload struct {
+	StageID string   `json:"stage_id"`
+	Kind    string   `json:"kind"`
+	Claims  []string `json:"claims,omitempty"`
+	// Evidence, Decision and HumanEvidenceID are references. At least one is
+	// required: a gate satisfied by nothing is a gate that proved nothing.
+	Evidence        Ref    `json:"evidence,omitzero"`
+	Decision        Ref    `json:"decision,omitzero"`
+	HumanEvidenceID string `json:"human_evidence_id,omitempty"`
+}
+
+// PlanBudgetConsumedPayload is a DELTA, never a total. Totals are projected by
+// summing these, so nothing a revision or a restart does can lower one.
+//
+// CostMicros is a pointer and CostKnown is separate from it because "not
+// reported" and "zero" are opposite facts: a subscription CLI reports no cost,
+// and rendering that as zero would fabricate a currency figure.
+type PlanBudgetConsumedPayload struct {
+	StageID             string `json:"stage_id,omitempty"`
+	RunID               string `json:"run_id,omitempty"`
+	ChildRuns           int    `json:"child_runs,omitempty"`
+	ProviderInvocations int    `json:"provider_invocations,omitempty"`
+	WallSeconds         int    `json:"wall_seconds,omitempty"`
+	CostMicros          *int64 `json:"cost_micros,omitempty"`
+	CostKnown           bool   `json:"cost_known,omitempty"`
+}
+
+// PlanRevisionSupersededPayload records one revision replacing another and
+// exactly which downstream stages that invalidated. Only AFFECTED stages
+// appear: invalidating an unrelated stage to be safe would discard valid work.
+type PlanRevisionSupersededPayload struct {
+	FromRevision      int      `json:"from_revision"`
+	ToRevision        int      `json:"to_revision"`
+	ProposalID        string   `json:"proposal_id"`
+	InvalidatedStages []string `json:"invalidated_stages,omitempty"`
+}
+
+// planPayloads registers the plan schemas. It is a separate map merged into
+// eventPayloads by init so the run catalogue above stays readable; the
+// validation path is unchanged and there is still exactly one registry.
+var planPayloads = map[string]payloadValidator{
+	EventPlanProposed: payloadSchema(func(p PlanProposedPayload) error {
+		if p.Revision < 1 {
+			return fmt.Errorf("plan revision %d must be positive", p.Revision)
+		}
+		if p.StageCount < 1 {
+			return fmt.Errorf("a proposed plan carries %d stages", p.StageCount)
+		}
+		if p.AgentStageCount > p.StageCount {
+			return fmt.Errorf("plan reports %d agent stages of %d stages", p.AgentStageCount, p.StageCount)
+		}
+		if err := errors.Join(
+			required("digest", p.Digest),
+			required("objective_digest", p.ObjectiveDigest),
+			required("origin", p.Origin),
+			bounded("proposal_id", p.ProposalID),
+			validatePlanBudget(p.Budget),
+		); err != nil {
+			return err
+		}
+		if p.Template != nil {
+			if p.Template.Version < 1 {
+				return fmt.Errorf("template version %d must be positive", p.Template.Version)
+			}
+			if err := errors.Join(required("template.id", p.Template.ID), required("template.digest", p.Template.Digest)); err != nil {
+				return err
+			}
+		}
+		return validatePlanReasoning(p.Reasoning)
+	}),
+	EventPlanValidated: payloadSchema(func(p PlanValidatedPayload) error {
+		if p.Status != string(domain.ProposalValid) && p.Status != string(domain.ProposalRefused) {
+			return fmt.Errorf("plan validation status %q must be %q or %q", p.Status, domain.ProposalValid, domain.ProposalRefused)
+		}
+		if p.Status == string(domain.ProposalRefused) && len(p.Errors) == 0 {
+			return errors.New("a refused validation records no reason")
+		}
+		if p.Revision < 1 {
+			return fmt.Errorf("plan revision %d must be positive", p.Revision)
+		}
+		return errors.Join(required("digest", p.Digest), boundedList("errors", p.Errors))
+	}),
+	EventPlanApproved: planDecisionPayload,
+	EventPlanRejected: planDecisionPayload,
+	EventPlanStageAssigned: payloadSchema(func(p PlanStageAssignedPayload) error {
+		if p.ProfileVersion < 1 {
+			return fmt.Errorf("profile version %d must be positive", p.ProfileVersion)
+		}
+		if p.InvocationMode != string(domain.InvocationModeMutating) && p.InvocationMode != string(domain.InvocationModeNonMutatingPlanning) {
+			return fmt.Errorf("invocation mode %q is not a mode", p.InvocationMode)
+		}
+		if !domain.KnownRole(domain.EngineeringRole(p.Role)) {
+			return fmt.Errorf("role %q is not in the role catalogue", p.Role)
+		}
+		return errors.Join(
+			required("stage_id", p.StageID),
+			required("assignment_id", p.AssignmentID),
+			required("profile_id", p.ProfileID),
+			required("profile_digest", p.ProfileDigest),
+			required("agent_id", p.AgentID),
+			required("provider_kind", p.ProviderKind),
+			required("vendor_family", p.VendorFamily),
+			required("trust_mode", p.TrustMode),
+			bounded("run_id", p.RunID))
+	}),
+	EventPlanRunStarted: payloadSchema(func(p PlanRunStartedPayload) error {
+		return errors.Join(required("stage_id", p.StageID), required("run_id", p.RunID))
+	}),
+	EventPlanStageSettled: payloadSchema(func(p PlanStageSettledPayload) error {
+		switch p.Outcome {
+		case string(Completed), string(Failed), planStageInvalidated:
+		default:
+			return fmt.Errorf("stage outcome %q must be %q, %q or %q", p.Outcome, Completed, Failed, planStageInvalidated)
+		}
+		return errors.Join(required("stage_id", p.StageID), bounded("reason", p.Reason))
+	}),
+	EventPlanGateSatisfied: payloadSchema(func(p PlanGateSatisfiedPayload) error {
+		if p.Kind != string(domain.StageAssuranceGate) && p.Kind != string(domain.StageHumanDecisionGate) {
+			return fmt.Errorf("gate kind %q must be %q or %q", p.Kind, domain.StageAssuranceGate, domain.StageHumanDecisionGate)
+		}
+		// A gate is satisfied by an existing durable record, so at least one
+		// reference is required. Without this a gate could be journalled as
+		// satisfied by nothing at all, which is the fabricated-evidence path
+		// the typed gates exist to close.
+		if p.Evidence == (Ref{}) && p.Decision == (Ref{}) && p.HumanEvidenceID == "" {
+			return errors.New("a satisfied gate must reference the evidence, authority decision or human decision that proves it")
+		}
+		return errors.Join(
+			required("stage_id", p.StageID),
+			boundedList("claims", p.Claims),
+			optionalRef("evidence", p.Evidence),
+			optionalRef("decision", p.Decision),
+			bounded("human_evidence_id", p.HumanEvidenceID))
+	}),
+	EventPlanBudgetConsumed: payloadSchema(func(p PlanBudgetConsumedPayload) error {
+		if p.ChildRuns == 0 && p.ProviderInvocations == 0 && p.WallSeconds == 0 && p.CostMicros == nil {
+			return errors.New("a consumption record with no delta accounts for nothing")
+		}
+		if p.CostMicros != nil && !p.CostKnown {
+			return errors.New("a cost figure was recorded without stating that cost is known")
+		}
+		if p.CostKnown && p.CostMicros == nil {
+			return errors.New("cost was stated as known with no figure: unknown and zero are different facts")
+		}
+		if p.CostMicros != nil && *p.CostMicros < 0 {
+			return fmt.Errorf("cost delta %d must not be negative", *p.CostMicros)
+		}
+		return errors.Join(
+			nonNegative("child_runs", p.ChildRuns),
+			nonNegative("provider_invocations", p.ProviderInvocations),
+			nonNegative("wall_seconds", p.WallSeconds),
+			bounded("stage_id", p.StageID),
+			bounded("run_id", p.RunID))
+	}),
+	EventPlanRevisionSuperseded: payloadSchema(func(p PlanRevisionSupersededPayload) error {
+		if p.FromRevision < 1 || p.ToRevision < 1 {
+			return fmt.Errorf("supersession from revision %d to %d must name positive revisions", p.FromRevision, p.ToRevision)
+		}
+		if p.ToRevision <= p.FromRevision {
+			return fmt.Errorf("revision %d cannot supersede %d: a revision replaces an EARLIER one", p.ToRevision, p.FromRevision)
+		}
+		return errors.Join(required("proposal_id", p.ProposalID), boundedList("invalidated_stages", p.InvalidatedStages))
+	}),
+}
+
+// planStageInvalidated is the third stage outcome: not completed, not failed,
+// but no longer valid because an upstream change invalidated its assumptions.
+const planStageInvalidated = "invalidated"
+
+var planDecisionPayload = payloadSchema(func(p PlanDecisionPayload) error {
+	if p.Revision < 1 {
+		return fmt.Errorf("plan revision %d must be positive", p.Revision)
+	}
+	return errors.Join(
+		required("digest", p.Digest),
+		required("operator", p.Operator),
+		bounded("note", p.Note))
+})
+
+func validatePlanBudget(budget PlanBudgetPayload) error {
+	if budget.MaxChildRuns < 1 || budget.MaxConcurrency < 1 || budget.MaxProviderInvocations < 1 {
+		return fmt.Errorf("plan budget envelope must bound child runs, concurrency and provider invocations, got %d/%d/%d",
+			budget.MaxChildRuns, budget.MaxConcurrency, budget.MaxProviderInvocations)
+	}
+	if budget.MaxCostMicros != nil && *budget.MaxCostMicros < 0 {
+		return fmt.Errorf("plan cost ceiling %d must not be negative", *budget.MaxCostMicros)
+	}
+	return nonNegative("max_wall_seconds", budget.MaxWallSeconds)
+}
+
+// validatePlanReasoning refuses a reasoning record that does not carry its own
+// proof. A planner invocation whose workspace was not verified afterwards, or
+// which ran in a mutating mode, is exactly what the non-mutating boundary
+// exists to prevent, so it cannot be recorded as if it had happened safely.
+func validatePlanReasoning(reasoning *PlanReasoningPayload) error {
+	if reasoning == nil {
+		return nil
+	}
+	if reasoning.InvocationMode != string(domain.InvocationModeNonMutatingPlanning) {
+		return fmt.Errorf("planner reasoning ran in mode %q: planning is %q", reasoning.InvocationMode, domain.InvocationModeNonMutatingPlanning)
+	}
+	if !reasoning.WorkspaceUnchanged {
+		return errors.New("planner reasoning recorded a changed planning workspace: a plan may not be built on an invocation that wrote")
+	}
+	if reasoning.WorkspaceDigestBefore != reasoning.WorkspaceDigestAfter {
+		return errors.New("planner reasoning claims an unchanged workspace while its own digests differ")
+	}
+	return errors.Join(
+		required("agent_id", reasoning.AgentID),
+		required("provider_kind", reasoning.ProviderKind),
+		required("trust_mode", reasoning.TrustMode),
+		required("workspace_digest_before", reasoning.WorkspaceDigestBefore),
+		required("workspace_digest_after", reasoning.WorkspaceDigestAfter),
+		bounded("vendor_family", reasoning.VendorFamily),
+		bounded("model", reasoning.Model),
+		bounded("profile_id", reasoning.ProfileID),
+		bounded("provider_mode", reasoning.ProviderMode))
+}
+
+func init() {
+	for eventType, validator := range planPayloads {
+		eventPayloads[eventType] = validator
+	}
+}

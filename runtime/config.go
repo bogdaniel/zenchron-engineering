@@ -160,6 +160,69 @@ type SupervisorConfig struct {
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
 }
 
+// PlanConfig is the operator's aggregate ceiling for one plan.
+//
+// Its zero value is the conservative default below rather than "unbounded":
+// a plan creates runs that spend an operator's subscription, and a ceiling
+// nobody stated should be small enough to notice rather than large enough to
+// surprise.
+type PlanConfig struct {
+	// MaxChildRuns bounds how many EngineeringRuns one plan may create in
+	// total, across every revision.
+	MaxChildRuns int `json:"max_child_runs,omitempty"`
+	// MaxConcurrency bounds how many of them may be active at once. It is
+	// clamped to the operator's global run ceiling, so a plan can never widen
+	// what the supervisor already enforces.
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
+	// MaxProviderInvocations bounds total provider invocations attributable to
+	// one plan.
+	MaxProviderInvocations int `json:"max_provider_invocations,omitempty"`
+	// MaxWallSeconds bounds total active execution wall time across the plan.
+	MaxWallSeconds int `json:"max_wall_seconds,omitempty"`
+	// MaxCostMicros is a monetary ceiling. It is a POINTER because most
+	// configurations cannot report cost at all: absent means unknown, and
+	// unknown is never rendered - or enforced - as zero.
+	MaxCostMicros *int64 `json:"max_cost_micros,omitempty"`
+}
+
+// Default plan bounds. They are deliberately modest: an operator who wants a
+// bigger plan states it, and that statement is the authority the compiler
+// checks a widening against.
+const (
+	DefaultPlanMaxChildRuns           = 6
+	DefaultPlanMaxConcurrency         = 2
+	DefaultPlanMaxProviderInvocations = 18
+)
+
+// PlanEnvelope is the runtime-facing form of the operator ceiling, with the
+// defaults applied and the concurrency clamped to the global run ceiling.
+func (c Config) PlanEnvelope() domain.PlanBudgetEnvelope {
+	envelope := domain.PlanBudgetEnvelope{
+		MaxChildRuns:           c.Plan.MaxChildRuns,
+		MaxConcurrency:         c.Plan.MaxConcurrency,
+		MaxProviderInvocations: c.Plan.MaxProviderInvocations,
+		MaxWallSeconds:         c.Plan.MaxWallSeconds,
+		MaxCostMicros:          c.Plan.MaxCostMicros,
+	}
+	if envelope.MaxChildRuns <= 0 {
+		envelope.MaxChildRuns = DefaultPlanMaxChildRuns
+	}
+	if envelope.MaxProviderInvocations <= 0 {
+		envelope.MaxProviderInvocations = DefaultPlanMaxProviderInvocations
+	}
+	if envelope.MaxConcurrency <= 0 {
+		envelope.MaxConcurrency = DefaultPlanMaxConcurrency
+	}
+	// A plan may never run more work at once than the operator authorized for
+	// the whole runtime. The supervisor enforces that ceiling durably; clamping
+	// here means an operator reading a plan sees the number that will actually
+	// apply.
+	if global := resolveMaxConcurrentRuns(0, c.Supervisor.MaxConcurrentRuns); global > 0 && envelope.MaxConcurrency > global {
+		envelope.MaxConcurrency = global
+	}
+	return envelope
+}
+
 // StorageConfig is the operator's bound on local runtime state. Parallel
 // candidate clones make disk an operator-level resource, and a bound checked
 // before allocation is what turns "the machine filled up mid-clone" into a
@@ -364,8 +427,13 @@ type OperatorConfig struct {
 	Storage StorageConfig `json:"storage,omitzero"`
 	// Supervisor is the persistent runtime's own bounds.
 	Supervisor SupervisorConfig `json:"supervisor,omitzero"`
-	Budgets    BudgetConfig     `json:"budgets"`
-	Watch      WatchConfig      `json:"watch,omitempty"`
+	// Plan is the operator's AGGREGATE ceiling for one EngineeringPlan. It is
+	// the only path by which a plan's envelope can be widened: a template, a
+	// profile, a planner proposal and an operator approval can all tighten it
+	// and none of them can raise it.
+	Plan    PlanConfig   `json:"plan,omitzero"`
+	Budgets BudgetConfig `json:"budgets"`
+	Watch   WatchConfig  `json:"watch,omitempty"`
 	// GC is the operator's reclamation window for `autonomy gc`.
 	GC GCConfig `json:"gc,omitempty"`
 	// Operator names who a run is recorded as having been authorized by. It is

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 )
 
 // ---------------------------------------------------------------------------
@@ -181,6 +182,16 @@ type Dependencies struct {
 	// against. It is optional: a runtime constructed to drive exactly one run
 	// needs only Agent, and only the handoff path consults the registry.
 	Agents AgentRegistry
+	// Planning is the operator's customization registry: instruction packs,
+	// context policies, profiles and templates. It is optional - a runtime
+	// driving ordinary issue runs never consults it - and it is READ-ONLY here.
+	//
+	// A plan stage run uses it to resolve the instruction TEXT its frozen
+	// assignment names by digest, and refuses when the digest no longer
+	// matches. That refusal is the mechanism behind "editing profile v3 into v4
+	// does not rewrite work already approved": the run executes under the
+	// configuration the operator approved, or it does not execute.
+	Planning planning.Registry
 	// Feedback is the operator's admission rule for model-visible GitHub
 	// feedback. Its zero value is the SAFE default - collaborator-equivalent
 	// write permission, no allowlisted automation - so a configuration that
@@ -436,12 +447,28 @@ func parseGitHubRepo(identity string) (GitHubRepo, error) {
 // nothing else. In particular it never binds a filesystem path, so the same
 // logical run is found again from any checkout.
 func issueRunID(repository string, issue int, config ConfigDigest, generation int) (string, error) {
+	return derivedRunID(repository, issue, config, generation, nil)
+}
+
+// planStageIdentity is the part of a run identity that belongs to a plan stage.
+// It is a POINTER member of the digested document and omitempty, so a run that
+// is not a plan stage digests exactly as it did before plans existed - run
+// identities are derived from this document, and an added member would
+// re-identify every historical run.
+type planStageIdentity struct {
+	Plan     string `json:"plan"`
+	Revision int    `json:"revision"`
+	Stage    string `json:"stage"`
+}
+
+func derivedRunID(repository string, issue int, config ConfigDigest, generation int, stage *planStageIdentity) (string, error) {
 	d, err := Digest(struct {
-		Repository string       `json:"repository"`
-		Issue      int          `json:"issue"`
-		Config     ConfigDigest `json:"config"`
-		Generation int          `json:"generation"`
-	}{repository, issue, config, generation})
+		Repository string             `json:"repository"`
+		Issue      int                `json:"issue"`
+		Config     ConfigDigest       `json:"config"`
+		Generation int                `json:"generation"`
+		PlanStage  *planStageIdentity `json:"plan_stage,omitempty"`
+	}{repository, issue, config, generation, stage})
 	if err != nil {
 		return "", err
 	}
@@ -538,7 +565,7 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal)
+			created, err := r.createRun(ctx, runID, goal, nil)
 			return StartOutcome{RunID: created}, err
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
@@ -639,7 +666,7 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding) (string, error) {
 	now := r.deps.Clock.Now()
 	budgets := r.deps.Budgets.defaults()
 	run := EngineeringRun{
@@ -658,8 +685,13 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		// than from whatever is configured afterwards; the wall limit and the
 		// attempt ceilings are still read live. Persisting the whole record
 		// now is what lets the rest follow without another schema change.
-		Budgets:   &budgets,
-		AgentID:   r.deps.Agent.ID,
+		Budgets: &budgets,
+		AgentID: r.deps.Agent.ID,
+		// The plan binding is part of the run AS CREATED, never attached
+		// afterwards: the genesis event is hashed against this row, and a row
+		// that gained its binding later would leave the two disagreeing about
+		// what the run is.
+		Plan:      plan,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -960,4 +992,57 @@ func marshalPayloadJSON(payload any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(raw), nil
+}
+
+// ---------------------------------------------------------------------------
+// Plan stage runs
+// ---------------------------------------------------------------------------
+
+// StartPlanStageRun creates the ordinary EngineeringRun for one dependency-ready
+// agent stage.
+//
+// It is deliberately the same run every other path creates: same identity
+// derivation, same claim, same genesis and agent-binding events, same
+// scheduler, same leases, same candidate lifecycle. What a plan adds is the
+// BINDING - which plan revision, which stage, which assignment - and nothing
+// else. A second kind of run would be a second runtime.
+//
+// The identity includes the plan revision and the stage, so two stages of one
+// plan are two runs and a new revision's stage is a new run rather than a
+// silent continuation of work approved under different terms.
+func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, binding RunPlanBinding) (StartOutcome, error) {
+	if issue <= 0 {
+		return StartOutcome{}, fmt.Errorf("a plan stage run answers a source issue, and none was given")
+	}
+	if binding.PlanID == "" || binding.StageID == "" || binding.AssignmentID == "" || binding.Revision < 1 {
+		return StartOutcome{}, fmt.Errorf("a plan stage run needs the plan, revision, stage and assignment it was created for")
+	}
+	goal := issueGoal(r.deps.Repository.Identity, issue)
+	runID, err := derivedRunID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest, 0, &planStageIdentity{
+		Plan: binding.PlanID, Revision: binding.Revision, Stage: binding.StageID,
+	})
+	if err != nil {
+		return StartOutcome{}, err
+	}
+	existing, found, err := r.deps.Store.Run(runID)
+	if err != nil {
+		return StartOutcome{}, err
+	}
+	if found {
+		// The reconciler is idempotent: it re-derives the same identity every
+		// tick, so finding the run it created before is the ordinary case, not
+		// a conflict. A row describing different work IS a conflict.
+		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
+			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
+		}
+		if existing.Plan == nil || existing.Plan.PlanID != binding.PlanID || existing.Plan.StageID != binding.StageID {
+			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run belongs to a different plan stage"}
+		}
+		if err := r.repairAgentBinding(runID, existing); err != nil {
+			return StartOutcome{}, err
+		}
+		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
+	}
+	created, err := r.createRun(ctx, runID, goal, &binding)
+	return StartOutcome{RunID: created}, err
 }

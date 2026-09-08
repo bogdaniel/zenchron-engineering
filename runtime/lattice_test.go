@@ -137,6 +137,15 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// names no such member, so a repository cannot install an instruction
 		// pack, define a profile, or point this anywhere.
 		"planning_dir",
+		// The AGGREGATE ceiling for one plan. It is operator authority because
+		// it decides how much of the operator's subscription a single approved
+		// plan may spend: a template, a profile, a planner proposal and an
+		// operator approval can each tighten it, and none of them can raise it.
+		"plan.max_child_runs",
+		"plan.max_concurrency",
+		"plan.max_provider_invocations",
+		"plan.max_wall_seconds",
+		"plan.max_cost_micros",
 		// Who may direct a coding agent through GitHub. It is operator
 		// authority because it decides whose text reaches a worker running
 		// under the operator's own account.

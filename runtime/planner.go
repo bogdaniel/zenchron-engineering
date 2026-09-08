@@ -73,10 +73,32 @@ func CreatePlanningWorkspace(stateDir, planID, source, commit, tree string) (*Pl
 	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
 		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
 	}
-	if err := CreateAssuranceCheckout(source, dir, commit, tree); err != nil {
+	// The TREE may be unstated: a forge read gives a commit, and the tree it
+	// names is derived from it rather than supplied alongside it. Deriving it
+	// here keeps the checkout exactly as pinned - the commit is the identity
+	// and the tree is a fact about it - while the stated-tree path stays the
+	// verified one the assurance checkout already provides.
+	if strings.TrimSpace(tree) != "" {
+		if err := CreateAssuranceCheckout(source, dir, commit, tree); err != nil {
+			return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+		}
+		return &PlanningWorkspace{Dir: dir, Commit: commit, Tree: tree}, nil
+	}
+	if _, err := runGit("", "clone", "--no-checkout", source, dir); err != nil {
 		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
 	}
-	return &PlanningWorkspace{Dir: dir, Commit: commit, Tree: tree}, nil
+	if _, err := runGit(dir, "checkout", "--detach", commit); err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	head, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(head) != commit {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: "checkout commit mismatch"}
+	}
+	derived, err := gitOutput(dir, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	return &PlanningWorkspace{Dir: dir, Commit: commit, Tree: strings.TrimSpace(derived)}, nil
 }
 
 func planningWorkspaceDir(stateDir, planID string) string {

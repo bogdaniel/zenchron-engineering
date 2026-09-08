@@ -69,6 +69,133 @@ CREATE TABLE watch_state (
 	revision   INTEGER NOT NULL,
 	document   TEXT NOT NULL
 );
+`, `
+-- EngineeringPlans, in the SAME database as runs, operations and the journal.
+-- #64 forbids a second plan database, and a second one would be a second answer
+-- to "what work exists".
+--
+-- The split between the two tables is the immutability boundary. plans holds
+-- the identity and the highest revision written; plan_revisions holds each
+-- revision's canonical document forever. A revision row is never updated, so a
+-- historical approved plan stays reconstructable byte for byte - which is what
+-- an assignment, an event digest and an operator's approval all point at.
+CREATE TABLE plans (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	current_revision  INTEGER NOT NULL,
+	created_unix_nano INTEGER NOT NULL
+);
+CREATE TABLE plan_revisions (
+	plan_id  TEXT NOT NULL REFERENCES plans(id),
+	revision INTEGER NOT NULL,
+	digest   TEXT NOT NULL,
+	document TEXT NOT NULL,
+	PRIMARY KEY (plan_id, revision)
+);
+`, `
+-- The journal becomes STREAM-scoped so plan lifecycle events live in the same
+-- append-only table, under the same hash chain, as run events. #64 forbids a
+-- second event journal; generalizing this one is the alternative to keeping two.
+--
+-- SQLite cannot alter a table constraint in place, so the supported rebuild is
+-- used: create, copy, drop, rename. Every historical row copies across with its
+-- document and every hash UNCHANGED - run events keep exactly the canonical
+-- document they were hashed over, and stream_kind defaults to 'run' so an
+-- eleven-column insert still lands as a run event.
+--
+-- The foreign key from run_id to runs(id) is not carried over, because a plan
+-- event has no run and NOT NULL DEFAULT '' cannot reference one. What that
+-- constraint enforced is enforced where it always mattered: AppendEvent reads
+-- the run row inside the append transaction and refuses an unknown run.
+ALTER TABLE events RENAME TO events_run_scoped;
+CREATE TABLE events (
+	id                  TEXT PRIMARY KEY,
+	run_id              TEXT NOT NULL,
+	sequence            INTEGER NOT NULL,
+	type                TEXT NOT NULL,
+	operation_id        TEXT NOT NULL,
+	previous_event_id   TEXT NOT NULL,
+	previous_event_hash TEXT NOT NULL,
+	state_before        TEXT NOT NULL,
+	state_after         TEXT NOT NULL,
+	event_hash          TEXT NOT NULL,
+	document            TEXT NOT NULL,
+	stream_kind         TEXT NOT NULL DEFAULT 'run',
+	plan_id             TEXT NOT NULL DEFAULT '',
+	UNIQUE(stream_kind, run_id, plan_id, sequence)
+);
+INSERT INTO events (id, run_id, sequence, type, operation_id, previous_event_id,
+	previous_event_hash, state_before, state_after, event_hash, document, stream_kind, plan_id)
+SELECT id, run_id, sequence, type, operation_id, previous_event_id,
+	previous_event_hash, state_before, state_after, event_hash, document, 'run', ''
+FROM events_run_scoped;
+DROP TABLE events_run_scoped;
+-- The plan stream needs its own ordered index: the UNIQUE index above is
+-- prefixed by run_id, which is empty for every plan event, so it cannot serve
+-- an ordered read keyed on plan_id alone.
+CREATE INDEX events_plan_stream ON events(plan_id, sequence);
+`, `
+-- The frozen AgentAssignment for one stage of one plan revision.
+--
+-- It is a row rather than a field on the run, because it is the artifact an
+-- operator approved the plan against: which profile, which underlying worker,
+-- which instruction packs by digest, which context the stage receives, and why
+-- that worker was eligible. The run row carries the IDENTITIES that point here,
+-- so the two cannot drift.
+--
+-- Immutable per (plan, revision, stage). A resolution that would now choose a
+-- different worker has to be a new revision going through the approval
+-- boundary, never a rewrite of what a live run is executing under.
+CREATE TABLE plan_assignments (
+	plan_id       TEXT NOT NULL REFERENCES plans(id),
+	revision      INTEGER NOT NULL,
+	stage_id      TEXT NOT NULL,
+	assignment_id TEXT NOT NULL,
+	document      TEXT NOT NULL,
+	PRIMARY KEY (plan_id, revision, stage_id)
+);
+`, `
+-- The SOURCE a plan answers.
+--
+-- A plan exists because an operator asked for work on a specific issue, and
+-- every stage run it creates answers that same source with a different stage
+-- objective. Recording it beside the plan is what lets a restarted supervisor
+-- create the next stage's run without reconstructing intent from a plan id.
+--
+-- It is a column with a default rather than a new table: there is exactly one
+-- source per plan, and a table would only create a way for the two to disagree.
+ALTER TABLE plans ADD COLUMN source_issue INTEGER NOT NULL DEFAULT 0;
+`, `
+-- The compiled EngineeringWorkContract one plan revision was planned against.
+--
+-- The plan references it by id and revision, and this is where that reference
+-- resolves. It is stored because resolution needs the OBLIGATIONS: which
+-- acceptance criteria a stage is judged against, which prohibitions it carries,
+-- which claims a gate references. Recompiling it at resolve time would mean a
+-- plan could be resolved against a contract nobody approved it under.
+--
+-- Immutable per (plan, revision), like the revision document itself.
+CREATE TABLE plan_contracts (
+	plan_id  TEXT NOT NULL REFERENCES plans(id),
+	revision INTEGER NOT NULL,
+	document TEXT NOT NULL,
+	PRIMARY KEY (plan_id, revision)
+);
+`, `
+-- PlanRevisionProposals: the durable artifact a decomposition emits.
+--
+-- A planner-role stage proposes a replacement revision; it does not create a
+-- nested plan and it does not apply anything. The proposal is stored so the
+-- deterministic verdict on it, the budget effect it would have and the operator
+-- decision about it all reference the same document.
+CREATE TABLE plan_proposals (
+	id           TEXT PRIMARY KEY,
+	plan_id      TEXT NOT NULL REFERENCES plans(id),
+	from_revision INTEGER NOT NULL,
+	to_revision   INTEGER NOT NULL,
+	document      TEXT NOT NULL
+);
+CREATE INDEX plan_proposals_by_plan ON plan_proposals(plan_id, to_revision);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
