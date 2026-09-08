@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -173,7 +174,12 @@ func loadEach(dir, kind string, load func(path, id string, data []byte) error) e
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(root, name)
-		data, err := os.ReadFile(path)
+		// BOUNDED. These are small operator-authored documents - a profile, a
+		// template, an instruction pack - and every other place this runtime
+		// reads a file it does not control the size of is bounded. An operator
+		// who points planning_dir at something enormous gets a refusal naming
+		// the file rather than a process that stops responding.
+		data, err := readBounded(path, maxPlanningArtifactBytes)
 		if err != nil {
 			return &RegistryError{Path: path, Detail: err.Error()}
 		}
@@ -488,6 +494,28 @@ func (r Registry) Binding(profile domain.AgentProfile) (domain.ProfileBinding, e
 		binding.ContextPolicy = &domain.PackRef{ID: policy.ID, Revision: policy.Revision, Digest: policy.Digest}
 	}
 	return binding, nil
+}
+
+// maxPlanningArtifactBytes bounds one operator artifact. A profile is a few
+// hundred bytes and an instruction pack a few thousand; a megabyte is generous
+// enough that the bound only ever refuses a mistake.
+const maxPlanningArtifactBytes = 1 << 20
+
+// readBounded reads a file and refuses one larger than the bound, by name.
+func readBounded(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("is %d bytes, above the %d-byte bound for an operator artifact", info.Size(), limit)
+	}
+	return io.ReadAll(io.LimitReader(file, limit))
 }
 
 func sortedKeys[T any](m map[string]T) []string {

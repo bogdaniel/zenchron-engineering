@@ -378,3 +378,28 @@ func writeArtifact(t *testing.T, dir, name, body string) {
 		t.Fatal(err)
 	}
 }
+
+// An operator artifact is read within a bound, and an oversized one is refused
+// by name rather than read whole. These are small documents; the bound only
+// ever refuses a mistake, and every other file this runtime reads whose size it
+// does not control is bounded the same way.
+func TestAnOversizedOperatorArtifactIsRefusedByName(t *testing.T) {
+	dir := t.TempDir()
+	writeArtifact(t, dir, "profiles/enormous.json", `{"execution_agent": "codex", "capabilities": ["code_change"]}`)
+	path := filepath.Join(dir, "profiles", "enormous.json")
+	padding := make([]byte, 2<<20)
+	for i := range padding {
+		padding[i] = ' '
+	}
+	if err := os.WriteFile(path, append(padding, []byte(`{"execution_agent": "codex", "capabilities": ["code_change"]}`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := planning.LoadRegistry(dir)
+	if err == nil {
+		t.Fatal("an artifact larger than the bound was read whole")
+	}
+	if !strings.Contains(err.Error(), "enormous.json") || !strings.Contains(err.Error(), "bound") {
+		t.Fatalf("the refusal does not name the file and the bound: %v", err)
+	}
+}

@@ -9,6 +9,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -477,5 +479,29 @@ func TestThePlannerTranscriptIsReadFromABoundedTail(t *testing.T) {
 	whole, err := readTail(small, 4096)
 	if err != nil || whole != answer {
 		t.Fatalf("a small transcript was not read whole: %q %v", whole, err)
+	}
+}
+
+// The workspace digest is the same whether a file is read whole or streamed -
+// the difference is whether verifying a workspace can exhaust the host doing
+// the verifying. A repository can contain a file larger than memory.
+func TestTheWorkspaceDigestStreamsEachFile(t *testing.T) {
+	dir := t.TempDir()
+	large := filepath.Join(dir, "large.bin")
+	body := make([]byte, 8<<20)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+	if err := os.WriteFile(large, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	streamed, err := fileDigest(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := sha256.Sum256(body)
+	if streamed != hex.EncodeToString(whole[:]) {
+		t.Fatalf("the streamed digest %s differs from the whole-file digest %s", streamed, hex.EncodeToString(whole[:]))
 	}
 }

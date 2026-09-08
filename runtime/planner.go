@@ -201,12 +201,16 @@ func (w *PlanningWorkspace) Digest() (string, error) {
 			entries = append(entries, fmt.Sprintf("%s\x00symlink\x00%s", filepath.ToSlash(relative), target))
 			return nil
 		}
-		body, readErr := os.ReadFile(path)
+		// STREAMED, not read whole. This walks a repository checkout, and a
+		// repository can contain a file larger than the machine's memory - the
+		// digest is the same either way, and the difference is whether
+		// verifying a workspace can be made to exhaust the host that is
+		// verifying it.
+		fileSum, readErr := fileDigest(path)
 		if readErr != nil {
 			return readErr
 		}
-		fileSum := sha256.Sum256(body)
-		entries = append(entries, fmt.Sprintf("%s\x00%o\x00%s", filepath.ToSlash(relative), info.Mode().Perm(), hex.EncodeToString(fileSum[:])))
+		entries = append(entries, fmt.Sprintf("%s\x00%o\x00%s", filepath.ToSlash(relative), info.Mode().Perm(), fileSum))
 		return nil
 	})
 	if err != nil {
@@ -503,6 +507,20 @@ func stageIDs(plan domain.EngineeringPlan) []string {
 // reader of a provider transcript sees, credential values are already replaced
 // in it, and parsing the raw copy would make the planner the one component that
 // reads unredacted provider output.
+// fileDigest is one file's content hash, streamed.
+func fileDigest(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
 // readTail reads at most limit bytes from the END of a file, allocating no more
 // than that however large the file is.
 func readTail(path string, limit int64) (string, error) {
