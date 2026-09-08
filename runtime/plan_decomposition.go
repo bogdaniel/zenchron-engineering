@@ -133,7 +133,14 @@ func (r PlanReconciler) recordProposal(plan domain.EngineeringPlan, stage domain
 	if err != nil {
 		return domain.PlanRevisionProposal{}, err
 	}
-	next := plan.Revision + 1
+	// The next FREE revision, not the one after the governing plan. A rejected
+	// proposal is still stored, so `plan.Revision + 1` can name an occupied
+	// slot - and a proposal that cannot be stored turns the stage into one
+	// paid provider invocation per tick, refused at the same place every time.
+	next, err := r.nextFreeRevision(plan)
+	if err != nil {
+		return domain.PlanRevisionProposal{}, err
+	}
 	proposalID := fmt.Sprintf("proposal-%s-r%d", plan.ID, next)
 	reasoning := output.Reasoning
 
@@ -311,6 +318,20 @@ func sameEnvelope(left, right domain.PlanBudgetEnvelope) bool {
 		return false
 	default:
 		return *left.MaxCostMicros == *right.MaxCostMicros
+	}
+}
+
+// nextFreeRevision is the lowest revision number this plan does not already
+// have a stored document for.
+func (r PlanReconciler) nextFreeRevision(plan domain.EngineeringPlan) (int, error) {
+	for revision := plan.Revision + 1; ; revision++ {
+		_, found, err := r.Store.PlanRevision(plan.ID, revision)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			return revision, nil
+		}
 	}
 }
 

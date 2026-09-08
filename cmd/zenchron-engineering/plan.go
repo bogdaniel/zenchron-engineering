@@ -29,7 +29,7 @@ import (
 )
 
 const planUsage = "usage: zenchron-engineering autonomy plan {issue <number> [--template <id>] [--agent <id>] [--deterministic]|" +
-	"show <plan>|approve <plan> --revision <n> --digest <sha256> [--note <text>]|" +
+	"show <plan> [--revision <n>]|approve <plan> --revision <n> --digest <sha256> [--note <text>]|" +
 	"reject <plan> --revision <n> --digest <sha256> [--note <text>]|" +
 	"revise <plan> [--template <id>] [--deterministic] [--substitute-human <stage>]|" +
 	"status <plan>|list} [--text] [--repo owner/name] [--config <path>]"
@@ -475,7 +475,12 @@ func planShow(flags autonomyFlags, overrides autonomyOverrides, planID string, s
 		return runtime.ExitInvalid, err
 	}
 	defer reader.release()
-	view, err := reader.service.View(planID)
+	// `--revision N` shows one exact revision. The default is the governing
+	// one, which is not always the revision an operator is being ASKED about:
+	// a decomposition proposal is stored as a new unapproved revision while the
+	// approved one keeps executing, and reading it is the whole point of being
+	// asked.
+	view, err := reader.service.ViewRevision(planID, flags.Revision)
 	if err != nil {
 		return exitFor(err, exitRunNotFound), err
 	}
@@ -630,7 +635,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 	if action != "" {
 		fmt.Fprintf(stdout, "%s plan %s revision %d\n", action, view.Plan.ID, view.Plan.Revision)
 	}
-	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", view.Plan.ID, view.Plan.Revision, view.Snapshot.Approval.Status)
+	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", view.Plan.ID, view.Plan.Revision, revisionStatus(view))
 	fmt.Fprintf(stdout, "objective: %s\n", singleLinePlan(view.Plan.Objective))
 	if reasoning := view.Plan.Provenance.Reasoning; reasoning != nil {
 		fmt.Fprintf(stdout, "planned by: %s (%s, %s) in %s mode; workspace verified unchanged: %v\n",
@@ -686,6 +691,24 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			view.Plan.ID, awaiting.Revision, awaiting.Digest)
 	}
 	return planExit(view), nil
+}
+
+// revisionStatus is the decision status OF THE RENDERED REVISION, which is not
+// always the plan's latest decision: while a proposal waits, the approved
+// revision is still approved, and printing the proposal's "pending" beside the
+// governing revision's number said the executing plan was unapproved.
+func revisionStatus(view runtime.PlanView) domain.ApprovalStatus {
+	revision := view.Plan.Revision
+	if approved, ok := view.Snapshot.ApprovedRevision(); ok && approved == revision {
+		return domain.ApprovalApproved
+	}
+	if view.Snapshot.Rejected[revision] {
+		return domain.ApprovalRejected
+	}
+	if view.Snapshot.Approval.Revision == revision {
+		return view.Snapshot.Approval.Status
+	}
+	return domain.ApprovalPending
 }
 
 // writePlanBudget prints the envelope beside what has been consumed. Unknown

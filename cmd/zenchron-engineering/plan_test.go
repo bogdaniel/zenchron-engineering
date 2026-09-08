@@ -428,3 +428,43 @@ func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T
 		t.Fatalf("the approval is not visible to a reader:\n%s", status.String())
 	}
 }
+
+// An operator can read the revision they are being ASKED about, not only the
+// one that governs. A decomposition proposal is stored as a new unapproved
+// revision while the approved one keeps executing, and being asked to decide
+// something unreadable is not a decision.
+func TestPlanShowRendersOneExactRevision(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+	first, firstDigest := pendingDecision(t, configPath, planID, 41)
+	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(first),
+		"--digest", firstDigest, "--config", configPath}, planOverrides(t, 41), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	proposePlan(t, configPath, 41)
+
+	var governing bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", planID, "--text", "--config", configPath},
+		planOverrides(t, 41), &governing); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(governing.String(), "revision 1 (approved)") {
+		t.Fatalf("the default view does not show the governing revision:\n%s", governing.String())
+	}
+
+	var pending bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", planID, "--revision", "2", "--text", "--config", configPath},
+		planOverrides(t, 41), &pending); err != nil {
+		t.Fatalf("show --revision 2: %v", err)
+	}
+	if !strings.Contains(pending.String(), "revision 2") {
+		t.Fatalf("--revision 2 did not render revision 2:\n%s", pending.String())
+	}
+
+	var missing bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", planID, "--revision", "9", "--config", configPath},
+		planOverrides(t, 41), &missing); err == nil {
+		t.Fatal("a revision that does not exist was rendered")
+	}
+}

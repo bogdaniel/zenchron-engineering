@@ -375,7 +375,14 @@ child_runs  provider_invocations  wall_seconds  cost_micros (+ cost_known)
 ```
 
 Child runs, provider invocations and wall seconds are all attributed as they
-happen and enforced before a stage starts. A plan that has spent its envelope
+happen - on every pass, not only when a stage settles, because a stage that
+reached its goal state is not finished spending: reviewer feedback re-activates
+its run - and enforced before a stage starts.
+
+One case is knowingly imperfect and stays that way: a crash between a provider
+invocation and the append that records it loses that one count. Recording an
+intent before invoking would trade a lost count for a phantom one, and a
+phantom is worse - it spends an operator's ceiling on work that never ran. A plan that has spent its envelope
 starts nothing further and says which dimension stopped it; a stage already
 running is left alone, because a plan ceiling is not a per-run timeout and the
 run has one of its own.

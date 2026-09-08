@@ -399,7 +399,13 @@ type PlanView struct {
 }
 
 // View is the read behind `plan show` and `plan status`.
-func (s PlanService) View(planID string) (PlanView, error) {
+func (s PlanService) View(planID string) (PlanView, error) { return s.ViewRevision(planID, 0) }
+
+// ViewRevision is the same view of ONE exact revision. Zero means the governing
+// one, which is what `plan show` renders by default; naming a revision is how
+// an operator reads the proposal they are being asked about while a different
+// revision is executing.
+func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error) {
 	plan, found, err := s.Store.Plan(planID)
 	if err != nil {
 		return PlanView{}, err
@@ -410,6 +416,18 @@ func (s PlanService) View(planID string) (PlanView, error) {
 	snapshot, err := s.Store.ReplayPlan(planID)
 	if err != nil {
 		return PlanView{}, err
+	}
+	if revision > 0 {
+		exact, exactFound, err := s.Store.PlanRevision(planID, revision)
+		if err != nil {
+			return PlanView{}, err
+		}
+		if !exactFound {
+			return PlanView{}, &PlanRefusedError{
+				PlanID: planID, Detail: fmt.Sprintf("revision %d does not exist", revision),
+			}
+		}
+		return s.viewOf(exact, snapshot)
 	}
 	// The revision shown is the one that GOVERNS: the approved revision when
 	// there is one, and the latest proposal otherwise. Showing the newest
@@ -423,6 +441,11 @@ func (s PlanService) View(planID string) (PlanView, error) {
 			plan = governing
 		}
 	}
+	return s.viewOf(plan, snapshot)
+}
+
+// viewOf renders one exact plan document beside the plan's replayed state.
+func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
 	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
 	resolution, err := s.Resolve(plan, snapshot)
 	if err != nil {

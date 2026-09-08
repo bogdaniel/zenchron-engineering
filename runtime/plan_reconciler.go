@@ -295,28 +295,44 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 	// Provenance.PreviousRevision names the highest stored revision - including
 	// one that never ran - and invalidations computed against a plan that never
 	// executed are invalidations of the wrong work in both directions.
-	previousRevision, ok := snapshot.PreviousGoverning(plan.Revision)
-	if !ok {
-		return snapshot, nil
+	// EVERY missing link, not only the one into the current revision. Two
+	// approvals with no tick between them leave the middle revision's
+	// invalidations unrecorded, and dependents would then build on work that
+	// revision had already invalidated.
+	recorded := map[int]bool{}
+	for _, supersession := range snapshot.Superseded {
+		recorded[supersession.ToRevision] = true
 	}
-	for _, recorded := range snapshot.Superseded {
-		if recorded.ToRevision == plan.Revision {
-			return snapshot, nil
+	governed := snapshot.GoverningHistory()
+	sort.Ints(governed)
+	appended := false
+	for i := 1; i < len(governed); i++ {
+		from, to := governed[i-1], governed[i]
+		if recorded[to] {
+			continue
 		}
+		previous, found, err := r.Store.PlanRevision(planID, from)
+		if err != nil {
+			return snapshot, err
+		}
+		next, nextFound, err := r.Store.PlanRevision(planID, to)
+		if err != nil {
+			return snapshot, err
+		}
+		if !found || !nextFound {
+			continue
+		}
+		if err := r.appendPlan(planID, EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{
+			FromRevision: from, ToRevision: to,
+			ProposalID:        next.Provenance.ProposalID,
+			InvalidatedStages: InvalidatedStages(previous, next, snapshot),
+		}); err != nil {
+			return snapshot, err
+		}
+		appended = true
 	}
-	previous, found, err := r.Store.PlanRevision(planID, previousRevision)
-	if err != nil {
-		return snapshot, err
-	}
-	if !found {
+	if !appended {
 		return snapshot, nil
-	}
-	if err := r.appendPlan(planID, EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{
-		FromRevision: previousRevision, ToRevision: plan.Revision,
-		ProposalID:        plan.Provenance.ProposalID,
-		InvalidatedStages: InvalidatedStages(previous, plan, snapshot),
-	}); err != nil {
-		return snapshot, err
 	}
 	return r.Store.ReplayPlan(planID)
 }

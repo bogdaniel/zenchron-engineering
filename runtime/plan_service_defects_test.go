@@ -304,3 +304,36 @@ func TestARefusedRevisionStaysRefusedAfterALaterValidation(t *testing.T) {
 		t.Fatalf("the validated revision was refused: %v", err)
 	}
 }
+
+// An operator may change their mind twice. Approve, reject, approve again: the
+// last decision is the one that governs, and the rejection stays in the record
+// as the historical fact it is.
+func TestAnOperatorCanApproveAfterRejecting(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	id, revision, digest := fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest
+
+	if _, err := fixture.service.Approve(id, revision, digest, "operator", "yes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Reject(id, revision, digest, "operator", "on reflection, no"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Approve(id, revision, digest, "operator", "yes after all"); err != nil {
+		t.Fatalf("an operator could not approve after rejecting: %v", err)
+	}
+
+	snapshot, err := fixture.store.ReplayPlan(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Approval.Status != domain.ApprovalApproved || snapshot.Approval.Note != "yes after all" {
+		t.Fatalf("the newest decision is %+v, want the second approval", snapshot.Approval)
+	}
+	governing, ok := snapshot.ApprovedRevision()
+	if !ok || governing != revision {
+		t.Fatalf("governing revision = %d (%v), want %d", governing, ok, revision)
+	}
+	if !snapshot.Rejected[revision] {
+		t.Fatal("the rejection was erased; it is a fact about what happened, not a mode")
+	}
+}
