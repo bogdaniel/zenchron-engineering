@@ -57,8 +57,22 @@ type ExecutionRequest struct {
 	Prohibitions          []string
 	Permissions           []string
 	TrustedInstructions   string
-	Purpose               InvocationPurpose
-	Findings              []Finding
+	// Instructions are the operator-owned InstructionPack lines an AgentProfile
+	// contributes. They are TRUSTED text and reach the worker alongside the
+	// runtime's own instructions, which is exactly why they may come only from
+	// the operator-owned planning directory. Candidate content never arrives
+	// here; it arrives as delimited untrusted data.
+	Instructions []string
+	Purpose      InvocationPurpose
+	// Mode is what this invocation requires of the provider. The zero value is
+	// the ordinary mutating invocation, so every existing caller keeps its
+	// exact behaviour; a planner-role stage sets the non-mutating mode and an
+	// adapter that cannot prove one refuses.
+	Mode domain.InvocationMode
+	// ModelPreference is the AgentProfile's model preference for this
+	// invocation. Empty means the agent's own configured default.
+	ModelPreference string
+	Findings        []Finding
 	// Feedback is the admitted, applicable, undelivered reviewer feedback this
 	// invocation is being given. It is UNTRUSTED DATA: it reaches the worker
 	// inside explicit delimiters, framed by the runtime-owned trusted
@@ -75,6 +89,11 @@ type InvocationPurpose string
 const (
 	InvocationInitial     InvocationPurpose = "initial_implementation"
 	InvocationRemediation InvocationPurpose = "remediation"
+	// InvocationPlanning is REASONING about what work is required. It produces
+	// a structured proposal and changes nothing: it is the only purpose that
+	// runs in a non-mutating provider mode, and the runtime verifies the
+	// workspace afterwards rather than trusting that claim.
+	InvocationPlanning InvocationPurpose = "planning"
 	// InvocationContinuation resumes work a bounded stop interrupted. It is
 	// exact-bound to the runtime-owned checkpoint commit and tree the previous
 	// invocation produced, so the provider sees a clean workspace at a known
@@ -573,4 +592,26 @@ func (b HumanAuthorityBinding) Validate(s RunSnapshot) error {
 		return fmt.Errorf("invalid human decision")
 	}
 	return nil
+}
+
+// InvocationModeUnsupportedError is the typed refusal for an invocation an
+// adapter cannot perform in the mode the work requires.
+//
+// It exists so a planner-role stage whose provider has no provable read-only
+// mode produces an EXPLAINABLE ineligibility - which the resolver turns into
+// another eligible selection or a typed blocked state - rather than a silent
+// downgrade into a mode that may write.
+type InvocationModeUnsupportedError struct {
+	AgentID string
+	Kind    string
+	Mode    domain.InvocationMode
+	Detail  string
+}
+
+func (e *InvocationModeUnsupportedError) Error() string {
+	detail := e.Detail
+	if detail == "" {
+		detail = "this provider exposes no mode whose non-mutating boundary the runtime can prove, so it is ineligible rather than run permissively"
+	}
+	return fmt.Sprintf("agent %q (%s) cannot perform a %q invocation: %s", e.AgentID, e.Kind, e.Mode, detail)
 }

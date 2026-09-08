@@ -129,6 +129,14 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// and an unasserted map is exactly where an authority would hide.
 		"agents",
 		"default_agent",
+		// The operator-owned directory holding the M2 customization artifacts:
+		// instruction packs, context policies, agent profiles and plan
+		// templates. It is operator authority for the same reason a credential
+		// path is - model-visible instruction decides what a worker running
+		// under the operator's account is told to do - and the in-repo layer
+		// names no such member, so a repository cannot install an instruction
+		// pack, define a profile, or point this anywhere.
+		"planning_dir",
 		// Who may direct a coding agent through GitHub. It is operator
 		// authority because it decides whose text reaches a worker running
 		// under the operator's own account.

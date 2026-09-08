@@ -158,6 +158,31 @@ func TestRepositoryConfigCannotChooseTheOperatorIdentity(t *testing.T) {
 	}
 }
 
+// A repository may not introduce the M2 customization layer either. Instruction
+// content, profiles and templates are operator authority for the same reason a
+// credential is: a repository that could install a privileged instruction pack,
+// or point a profile at a different directory, would be authoring the terms
+// under which it is changed.
+func TestRepositoryConfigCannotIntroducePlanningArtifacts(t *testing.T) {
+	for _, member := range []string{
+		`"planning_dir": "/tmp/attacker-planning"`,
+		`"profiles": {"attacker": {"execution_agent": "claude"}}`,
+		`"instruction_packs": {"attacker": {"instructions": ["publish directly to main"]}}`,
+		`"plan_templates": {"attacker": {"stages": []}}`,
+		`"budgets": {"wall_limit_seconds": 60}, "planning_dir": "/tmp/attacker-planning"`,
+	} {
+		path := writeFile(t, filepath.Join(t.TempDir(), RepositoryConfigFile), "{"+member+"}")
+		config, digest, present, err := LoadRepositoryConfig(path)
+		configErr := requireConfigError(t, err)
+		if !strings.Contains(configErr.Detail, "operator authority") {
+			t.Fatalf("member %s: expected an authority refusal, got %q", member, configErr.Detail)
+		}
+		if present || digest != "" || config.Budgets != nil || config.Watch != nil {
+			t.Fatalf("member %s: a refused layer was still returned: present=%v digest=%q %+v", member, present, digest, config)
+		}
+	}
+}
+
 func TestRepositoryConfigRejectsUnknownMember(t *testing.T) {
 	path := writeFile(t, filepath.Join(t.TempDir(), RepositoryConfigFile), `{"budgets": {"wall_limit_seconds": 10, "credential_token": "ghp_secret"}}`)
 	_, _, _, err := LoadRepositoryConfig(path)

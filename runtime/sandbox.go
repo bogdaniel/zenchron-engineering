@@ -895,7 +895,25 @@ func providerPrompt(r ExecutionRequest) string {
 	return providerEnvelope(r) + feedbackBlock(r.Feedback)
 }
 
+// planningEnvelope is the envelope for a NON-MUTATING invocation. It is a
+// separate sentence rather than a flag inside the mutating one because the two
+// say opposite things: the ordinary envelope tells a worker which directory it
+// may change, and this one tells it that it may change nothing at all.
+//
+// The provider mode is what actually enforces this, and the runtime verifies
+// the workspace afterwards. The text exists so the model is not asked to guess
+// what the restriction it is running under means.
+func planningEnvelope(r ExecutionRequest) string {
+	return fmt.Sprintf("Read %s to reason about the work. This invocation is NON-MUTATING: make no edit, no commit and no network request, and produce only the structured answer requested. Run=%s source=%s controller=%s base=%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s.",
+		r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Contract.ID, r.Contract.Revision, r.Purpose,
+		r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "),
+		strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "))
+}
+
 func providerEnvelope(r ExecutionRequest) string {
+	if r.Mode == domain.InvocationModeNonMutatingPlanning {
+		return planningEnvelope(r)
+	}
 	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %v. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), r.Findings)
 }
 

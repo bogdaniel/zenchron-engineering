@@ -100,6 +100,7 @@ const capableHelp = `Options:
       --safe-mode
       --extensions <NAME>
   -m, --model <MODEL>
+      --permission-mode <mode>  (choices: "acceptEdits", "bypassPermissions", "plan")
 `
 
 // agentFixture builds one native CLI agent over a fake executor, with a home

@@ -324,10 +324,23 @@ func (c OperatorConfig) GCRetention() time.Duration {
 
 // OperatorConfig is the authorizing layer.
 type OperatorConfig struct {
-	StateDir         string          `json:"state_dir"`
-	ProjectModelPath string          `json:"project_model_path"`
-	PolicyPath       string          `json:"policy_path"`
-	Assurance        AssuranceConfig `json:"assurance"`
+	StateDir         string `json:"state_dir"`
+	ProjectModelPath string `json:"project_model_path"`
+	PolicyPath       string `json:"policy_path"`
+	// PlanningDir is the operator-owned directory holding the M2 customization
+	// artifacts: InstructionPacks, ContextPolicies, AgentProfiles and
+	// EngineeringPlanTemplates. It is optional - an operator who has defined no
+	// custom agents has a valid configuration - and it is deliberately a
+	// DIRECTORY rather than inline configuration.
+	//
+	// Inline would have been simpler and wrong. A run's identity is derived
+	// from the operator configuration digest, so instruction text inside this
+	// file would re-identify every run in flight whenever an operator edited a
+	// sentence of prose. It is also never a candidate path: instruction content
+	// is operator authority, and nothing here may be authored by the repository
+	// being worked on.
+	PlanningDir string          `json:"planning_dir,omitempty"`
+	Assurance   AssuranceConfig `json:"assurance"`
 	// Provider is the pre-#63 SINGLE execution provider. It remains supported
 	// so an existing operator configuration keeps working unchanged, and it is
 	// migrated into a one-agent registry by AgentRegistry. It is mutually
@@ -750,6 +763,9 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if c.Assurance.DependencyCacheDir != "" && !filepath.IsAbs(c.Assurance.DependencyCacheDir) {
 		return refuse("assurance.dependency_cache_dir must be an absolute path")
+	}
+	if c.PlanningDir != "" && !filepath.IsAbs(c.PlanningDir) {
+		return refuse("planning_dir must be an absolute path to an operator-controlled directory")
 	}
 	// Exactly one statement of which workers exist. An `agents` block is the
 	// #63 registry; its absence is a pre-#63 configuration whose `provider`
