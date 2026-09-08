@@ -1,0 +1,304 @@
+package planning
+
+// Deterministic plan validation.
+//
+// This is the boundary #64 calls "reasoning output is proposal, never
+// authority". Everything that reaches it - a compiled plan, a reasoning agent's
+// proposal, an operator's edit, a decomposition stage's revision - is checked by
+// the SAME rules, so a plan cannot become executable by arriving through a
+// different door.
+//
+// What it refuses is stated rather than emergent:
+//
+//	graph        cycles, dangling dependencies, gates that are worker runs
+//	policy       any compiled obligation the plan would leave unmet
+//	privilege    trust or permission the previous revision did not have
+//	budget       an envelope wider than the operator authorized, or one that
+//	             would reset consumption
+//	identity     a revision that does not follow the one it replaces
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
+)
+
+// ValidationError is the typed refusal. It carries every reason rather than the
+// first, because an operator fixing a plan should see the whole answer.
+type ValidationError struct {
+	PlanID  string
+	Reasons []string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("plan %s is invalid: %s", e.PlanID, strings.Join(e.Reasons, "; "))
+}
+
+// ValidationInput is what a plan is judged against.
+type ValidationInput struct {
+	// Contract is the compiled work contract whose plan_requirements are the
+	// obligations this plan must satisfy.
+	Contract domain.EngineeringWorkContract
+	// Envelope is the OPERATOR ceiling. A plan may be tighter and never wider.
+	Envelope domain.PlanBudgetEnvelope
+	// Previous is the revision being replaced, when there is one.
+	Previous *domain.EngineeringPlan
+	// Consumed is what the plan has already spent. A revision may tighten the
+	// remaining envelope and may never claim back consumption.
+	Consumed domain.PlanConsumption
+}
+
+// Validate refuses every plan that could not be executed as approved.
+func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
+	var reasons []string
+	add := func(format string, args ...any) { reasons = append(reasons, fmt.Sprintf(format, args...)) }
+
+	if plan.ID == "" || plan.Revision < 1 || plan.Objective == "" {
+		add("a plan needs an id, a revision and an objective")
+	}
+	if plan.Subject.Repository == "" || plan.Subject.Revision == "" {
+		add("a plan is bound to an exact repository revision")
+	}
+	if input.Contract.ID != "" {
+		if plan.Provenance.Contract.ID != input.Contract.ID || plan.Provenance.Contract.Revision != input.Contract.Revision {
+			add("plan provenance names contract %s/%s and it is compiled against %s/%s",
+				plan.Provenance.Contract.ID, plan.Provenance.Contract.Revision, input.Contract.ID, input.Contract.Revision)
+		}
+	}
+	if err := validateStageGraph(planStageViews(plan)); err != nil {
+		add("%s", err.Error())
+	}
+	// Only agent stages become EngineeringRuns. Every other rule about gates is
+	// in the graph laws; this is the one about what a gate REFERENCES.
+	for _, stage := range plan.Stages {
+		if stage.Kind == domain.StageAgent {
+			continue
+		}
+		for _, claim := range stage.RequiredClaims {
+			if _, ok := input.Contract.RequiredClaims[claim]; !ok && len(input.Contract.RequiredClaims) > 0 {
+				add("stage %q is a %s referencing claim %q, which the work contract does not define", stage.ID, stage.Kind, claim)
+			}
+		}
+	}
+	if input.Contract.PlanRequirements != nil {
+		reasons = append(reasons, unmetObligations(plan, *input.Contract.PlanRequirements)...)
+	}
+	reasons = append(reasons, envelopeViolations(plan, input)...)
+	if input.Previous != nil {
+		reasons = append(reasons, revisionViolations(plan, *input.Previous)...)
+	}
+	if len(reasons) > 0 {
+		return &ValidationError{PlanID: plan.ID, Reasons: reasons}
+	}
+	return nil
+}
+
+func planStageViews(plan domain.EngineeringPlan) []stageView {
+	views := make([]stageView, 0, len(plan.Stages))
+	for _, stage := range plan.Stages {
+		views = append(views, stageView{
+			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn,
+			RequiredClaims: stage.RequiredClaims, Action: stage.Action, Independence: stage.Independence,
+			RequiresCapabilities: stage.RequiresCapabilities, Profile: stage.Profile,
+			TrustRequirement: stage.TrustRequirement,
+		})
+	}
+	return views
+}
+
+// unmetObligations is the "policy wins" check. A plan that would leave an
+// obligation unmet is refused even when a reasoning agent recommended it and
+// even when an operator would have approved it: the obligation came from
+// governance, and a plan is not the place it gets negotiated.
+func unmetObligations(plan domain.EngineeringPlan, requirements domain.PlanRequirements) []string {
+	var reasons []string
+	producers := materialProducerStages(plan.Stages)
+	for _, requirement := range requirements.Roles {
+		stage, found := roleStage(plan, requirement.Role)
+		if !found {
+			reasons = append(reasons, fmt.Sprintf("policy requires role %q and no stage fulfils it (%s)", requirement.Role, requirement.Statement))
+			continue
+		}
+		for _, capability := range requirement.Capabilities {
+			if !stageRequires(stage, capability) {
+				reasons = append(reasons, fmt.Sprintf("stage %q fulfils role %q without the required capability %q", stage.ID, requirement.Role, capability))
+			}
+		}
+		if trustStrength(requirement.TrustRequirement) > trustStrength(stage.TrustRequirement) {
+			reasons = append(reasons, fmt.Sprintf("stage %q requires %q execution trust and policy requires %q", stage.ID, stage.TrustRequirement, requirement.TrustRequirement))
+		}
+		if requirement.Independence == nil {
+			continue
+		}
+		switch {
+		case stage.Independence == nil:
+			reasons = append(reasons, fmt.Sprintf("policy requires stage %q to be independent in dimension %q and the plan states no independence", stage.ID, requirement.Independence.Dimension))
+		case dimensionStrength(stage.Independence.Dimension) < dimensionStrength(requirement.Independence.Dimension):
+			// Degrading a required independence class is the failure #64 names
+			// explicitly. It is refused rather than reported.
+			reasons = append(reasons, fmt.Sprintf("stage %q states independence %q where policy requires %q", stage.ID, stage.Independence.Dimension, requirement.Independence.Dimension))
+		default:
+			for _, producer := range producers {
+				if producer == stage.ID {
+					continue
+				}
+				if !contains(stage.Independence.DifferentFrom, producer) {
+					reasons = append(reasons, fmt.Sprintf("stage %q must be independent of the material producer %q and does not name it", stage.ID, producer))
+				}
+			}
+			if stage.Independence.HumanSubstitutionPermitted && !requirement.Independence.HumanSubstitutionPermitted {
+				// A plan cannot grant itself the substitution. Only the policy
+				// that stated the obligation can permit it.
+				reasons = append(reasons, fmt.Sprintf("stage %q permits an independent human substitution that policy does not", stage.ID))
+			}
+		}
+	}
+	for _, capability := range requirements.Capabilities {
+		if !capabilityCovered(plan.Stages, capability) {
+			reasons = append(reasons, fmt.Sprintf("policy requires capability %q and no stage requires it", capability))
+		}
+	}
+	for _, gate := range requirements.Gates {
+		if !gateCovered(plan, gate) {
+			reasons = append(reasons, fmt.Sprintf("policy requires a %s gate and the plan has none matching it (%s)", gate.Kind, gate.Statement))
+		}
+	}
+	return reasons
+}
+
+func roleStage(plan domain.EngineeringPlan, role domain.EngineeringRole) (domain.PlanStage, bool) {
+	for _, stage := range plan.Stages {
+		if stage.Kind == domain.StageAgent && stage.Role == role {
+			return stage, true
+		}
+	}
+	return domain.PlanStage{}, false
+}
+
+func stageRequires(stage domain.PlanStage, capability domain.EngineeringCapability) bool {
+	for _, held := range stage.RequiresCapabilities {
+		if held == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func gateCovered(plan domain.EngineeringPlan, gate domain.GateRequirement) bool {
+	for _, stage := range plan.Stages {
+		if stage.Kind != gate.Kind || !sameAction(stage.Action, gate.Action) {
+			continue
+		}
+		for _, claim := range gate.RequiredClaims {
+			if !contains(stage.RequiredClaims, claim) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// envelopeViolations refuses a plan whose aggregate ceiling exceeds what the
+// operator authorized, or whose stage budgets exceed the plan's own ceiling.
+func envelopeViolations(plan domain.EngineeringPlan, input ValidationInput) []string {
+	var reasons []string
+	ceiling := input.Envelope
+	envelope := plan.BudgetEnvelope
+	if ceiling.MaxChildRuns > 0 && envelope.MaxChildRuns > ceiling.MaxChildRuns {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d child runs and the operator ceiling is %d", envelope.MaxChildRuns, ceiling.MaxChildRuns))
+	}
+	if ceiling.MaxConcurrency > 0 && envelope.MaxConcurrency > ceiling.MaxConcurrency {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d concurrent runs and the operator ceiling is %d", envelope.MaxConcurrency, ceiling.MaxConcurrency))
+	}
+	if ceiling.MaxProviderInvocations > 0 && envelope.MaxProviderInvocations > ceiling.MaxProviderInvocations {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d provider invocations and the operator ceiling is %d", envelope.MaxProviderInvocations, ceiling.MaxProviderInvocations))
+	}
+	if ceiling.MaxWallSeconds > 0 && envelope.MaxWallSeconds > ceiling.MaxWallSeconds {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d wall seconds and the operator ceiling is %d", envelope.MaxWallSeconds, ceiling.MaxWallSeconds))
+	}
+	if ceiling.MaxCostMicros != nil && envelope.MaxCostMicros != nil && *envelope.MaxCostMicros > *ceiling.MaxCostMicros {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d cost micros and the operator ceiling is %d", *envelope.MaxCostMicros, *ceiling.MaxCostMicros))
+	}
+	// A plan may never allow LESS than it has already spent: that would be a
+	// ceiling the plan is already past, which reads as a plan that must stop
+	// rather than as a reset - so it is refused at the boundary where an
+	// operator can still fix it.
+	if envelope.MaxChildRuns < input.Consumed.ChildRuns {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d child runs and %d have already been created", envelope.MaxChildRuns, input.Consumed.ChildRuns))
+	}
+	if envelope.MaxProviderInvocations < input.Consumed.ProviderInvocations {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d provider invocations and %d have already been spent", envelope.MaxProviderInvocations, input.Consumed.ProviderInvocations))
+	}
+	agents := 0
+	for _, stage := range plan.Stages {
+		if stage.Kind == domain.StageAgent {
+			agents++
+		}
+	}
+	if agents > envelope.MaxChildRuns {
+		reasons = append(reasons, fmt.Sprintf("the plan has %d agent stages and allows %d child runs", agents, envelope.MaxChildRuns))
+	}
+	return reasons
+}
+
+// revisionViolations enforces the revision laws that are checkable from the two
+// documents alone. Everything else about a revision - which stages are
+// invalidated, what is already consumed - belongs to the reconciler, which can
+// see durable state.
+func revisionViolations(plan, previous domain.EngineeringPlan) []string {
+	var reasons []string
+	if plan.ID != previous.ID {
+		reasons = append(reasons, fmt.Sprintf("revision replaces plan %q with plan %q", previous.ID, plan.ID))
+	}
+	if plan.Revision <= previous.Revision {
+		reasons = append(reasons, fmt.Sprintf("revision %d does not follow revision %d", plan.Revision, previous.Revision))
+	}
+	if plan.Provenance.PreviousRevision == nil || *plan.Provenance.PreviousRevision != previous.Revision {
+		reasons = append(reasons, "a revision records the exact revision it replaces")
+	}
+	if plan.Subject != previous.Subject {
+		reasons = append(reasons, "a revision cannot move the plan onto a different subject")
+	}
+	// PRIVILEGE. A revision may tighten trust and independence; widening either
+	// is new privilege and goes through policy, not through a plan edit.
+	for _, stage := range plan.Stages {
+		before, found := previousStage(previous, stage.ID)
+		if !found {
+			continue
+		}
+		if trustStrength(stage.TrustRequirement) < trustStrength(before.TrustRequirement) {
+			reasons = append(reasons, fmt.Sprintf("stage %q lowers its execution trust from %q to %q across a revision", stage.ID, before.TrustRequirement, stage.TrustRequirement))
+		}
+		if before.Independence != nil {
+			switch {
+			case stage.Independence == nil:
+				reasons = append(reasons, fmt.Sprintf("stage %q drops its independence requirement across a revision", stage.ID))
+			case dimensionStrength(stage.Independence.Dimension) < dimensionStrength(before.Independence.Dimension):
+				reasons = append(reasons, fmt.Sprintf("stage %q weakens independence from %q to %q across a revision", stage.ID, before.Independence.Dimension, stage.Independence.Dimension))
+			case !before.Independence.HumanSubstitutionPermitted && stage.Independence.HumanSubstitutionPermitted:
+				reasons = append(reasons, fmt.Sprintf("stage %q gains a human substitution permission across a revision", stage.ID))
+			}
+		}
+	}
+	return reasons
+}
+
+func previousStage(plan domain.EngineeringPlan, id string) (domain.PlanStage, bool) {
+	for _, stage := range plan.Stages {
+		if stage.ID == id {
+			return stage, true
+		}
+	}
+	return domain.PlanStage{}, false
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
