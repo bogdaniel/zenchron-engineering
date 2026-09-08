@@ -28,9 +28,10 @@ func TestPlanningInvocationUsesTheProvidersOwnReadOnlyMode(t *testing.T) {
 	cases := []struct {
 		kind     string
 		mode     string
+		sandbox  string
 		expected []string
 	}{
-		{kind: AgentKindCodexCLI, mode: "read-only", expected: []string{"--sandbox", "read-only"}},
+		{kind: AgentKindCodexCLI, mode: "read-only", sandbox: "read-only", expected: []string{"--sandbox", "read-only"}},
 		{kind: AgentKindClaudeCode, mode: "plan", expected: []string{"--permission-mode", "plan"}},
 		{kind: AgentKindQwenCLI, mode: "plan", expected: []string{"--approval-mode", "plan"}},
 	}
@@ -55,6 +56,13 @@ func TestPlanningInvocationUsesTheProvidersOwnReadOnlyMode(t *testing.T) {
 			}
 			if result.Invocation == nil || result.Invocation.PermissionMode != tc.mode {
 				t.Fatalf("provenance recorded permission mode %#v, want %q", result.Invocation, tc.mode)
+			}
+			// Provenance records the posture the process RAN under. Codex's
+			// ordinary sandbox is workspace-write, so recording the spec's
+			// sandbox here would durably claim write access this invocation
+			// never had - while the argv beside it said read-only.
+			if result.Invocation.SandboxMode != tc.sandbox {
+				t.Fatalf("provenance recorded sandbox %q, want %q: the planning invocation ran under %q", result.Invocation.SandboxMode, tc.sandbox, strings.Join(tc.expected, " "))
 			}
 		})
 	}

@@ -105,8 +105,9 @@ var codexSpec = cliAgentSpec{
 	// workspace writes is what withholds them here - there is no second
 	// mechanism to get wrong.
 	ReadOnly: &cliReadOnlyMode{
-		Probe: cliHelpProbe{Args: []string{"exec", "--help"}, Required: []string{"read-only"}},
-		Mode:  "read-only",
+		Probe:   cliHelpProbe{Args: []string{"exec", "--help"}, Required: []string{"read-only"}},
+		Mode:    "read-only",
+		Sandbox: "read-only",
 		Args: func(i cliInvocation) []string {
 			args := []string{"--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--ignore-user-config",
 				"-c", "sandbox_workspace_write.network_access=false", "-c", "project_doc_max_bytes=0"}

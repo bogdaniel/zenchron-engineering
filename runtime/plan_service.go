@@ -142,11 +142,24 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	}
 
 	if !found {
-		if _, err := s.Store.ClaimPlan(plan); err != nil {
+		claimed, err := s.Store.ClaimPlan(plan)
+		if err != nil {
 			return domain.EngineeringPlan{}, err
 		}
+		// The claim is a conditional insert, so `false` means another proposer
+		// created this plan between the read above and here. Continuing would
+		// append a second proposed event for a revision that already exists -
+		// and, when the two proposals differ, would write a contract and a
+		// source binding the winner never agreed to. The loser stops.
+		if !claimed {
+			return domain.EngineeringPlan{}, &PlanRefusedError{
+				PlanID: plan.ID,
+				Detail: "the plan was created concurrently by another proposal; read it and propose again from what is now stored",
+			}
+		}
 	}
-	if err := s.Store.PutPlanRevision(plan); err != nil {
+	created, err := s.Store.PutPlanRevision(plan)
+	if err != nil {
 		return domain.EngineeringPlan{}, err
 	}
 	objectiveDigest, err := Digest(plan.Objective)
@@ -167,8 +180,15 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	if plan.Provenance.Reasoning != nil {
 		payload.Reasoning = reasoningPayload(*plan.Provenance.Reasoning)
 	}
-	if err := s.appendPlanEvent(plan.ID, EventPlanProposed, payload); err != nil {
-		return domain.EngineeringPlan{}, err
+	// Only the caller that CREATED the revision announces it. A concurrent
+	// proposer that computed the same next revision from the same stored state
+	// wrote nothing, and announcing it anyway proposed one revision twice. The
+	// writes below are idempotent, so a retry that crashed after storing the
+	// revision still completes them.
+	if created {
+		if err := s.appendPlanEvent(plan.ID, EventPlanProposed, payload); err != nil {
+			return domain.EngineeringPlan{}, err
+		}
 	}
 	if err := s.Store.PutPlanContract(plan.ID, plan.Revision, input.Contract); err != nil {
 		return domain.EngineeringPlan{}, err
@@ -226,6 +246,16 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 	if strings.TrimSpace(operator) == "" {
 		return PlanSnapshot{}, &PlanRefusedError{PlanID: planID, Detail: "an approval records who made it"}
 	}
+	// Approval moves FORWARD. Re-approving a revision older than the one
+	// already governing would leave the durable approval record describing
+	// something other than the work being executed, and the supersession below
+	// would then measure the next revision against the wrong predecessor.
+	if governing, ok := snapshot.ApprovedRevision(); ok && revision < governing {
+		return PlanSnapshot{}, &PlanRefusedError{
+			PlanID: planID,
+			Detail: fmt.Sprintf("revision %d is older than the approved revision %d: a plan is not un-revised by approving what it superseded", revision, governing),
+		}
+	}
 	if err := s.appendPlanEvent(planID, eventType, PlanDecisionPayload{
 		Revision: revision, Digest: plan.Digest, Operator: operator, Note: boundedDetail(note),
 	}); err != nil {
@@ -234,8 +264,13 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 	// An approval of a LATER revision supersedes the one before it, and records
 	// exactly which downstream stages that invalidated. Only affected stages
 	// appear: invalidating unrelated work to be safe would discard valid work.
-	if eventType == EventPlanApproved && snapshot.Approval.Status == domain.ApprovalApproved && snapshot.Approval.Revision < revision {
-		previous, previousFound, err := s.Store.PlanRevision(planID, snapshot.Approval.Revision)
+	//
+	// The predecessor is the APPROVED revision, which is sticky, rather than the
+	// latest decision: proposing a new revision resets the pending decision, so
+	// reading that field here meant the supersession was never recorded at all
+	// in the ordinary propose-approve-propose-approve order.
+	if governing, ok := snapshot.ApprovedRevision(); eventType == EventPlanApproved && ok && governing < revision {
+		previous, previousFound, err := s.Store.PlanRevision(planID, governing)
 		if err != nil {
 			return PlanSnapshot{}, err
 		}
@@ -244,7 +279,7 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 			invalidated = InvalidatedStages(previous, plan, snapshot)
 		}
 		if err := s.appendPlanEvent(planID, EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{
-			FromRevision: snapshot.Approval.Revision, ToRevision: revision,
+			FromRevision: governing, ToRevision: revision,
 			ProposalID: plan.Provenance.ProposalID, InvalidatedStages: invalidated,
 		}); err != nil {
 			return PlanSnapshot{}, err
@@ -348,7 +383,11 @@ func (s PlanService) View(planID string) (PlanView, error) {
 	// there is one, and the latest proposal otherwise. Showing the newest
 	// document while an older one is executing would misdescribe the work.
 	if approved, ok := snapshot.ApprovedRevision(); ok && approved != plan.Revision {
-		if governing, governingFound, err := s.Store.PlanRevision(planID, approved); err == nil && governingFound {
+		governing, governingFound, err := s.Store.PlanRevision(planID, approved)
+		if err != nil {
+			return PlanView{}, err
+		}
+		if governingFound {
 			plan = governing
 		}
 	}
@@ -377,7 +416,16 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 				continue
 			}
 			output := domain.UpstreamOutput{StageID: dependency, RunID: projection.RunID}
-			if run, found, err := s.Store.Run(projection.RunID); err == nil && found {
+			// A read failure is NOT "this stage published nothing". The
+			// assignment resolved here is frozen immutably when the stage
+			// starts, so swallowing the error would permanently base an
+			// independent review on the trusted base and hand it no diff -
+			// the exact defect the first live dogfood review reported.
+			run, runFound, err := s.Store.Run(projection.RunID)
+			if err != nil {
+				return planning.Resolution{}, fmt.Errorf("stage %q depends on run %s and it could not be read: %w", stage.ID, projection.RunID, err)
+			}
+			if runFound {
 				output.Candidate, output.Tree = run.Candidate.Revision, run.Candidate.Tree
 			}
 			outputs = append(outputs, output)
@@ -477,8 +525,32 @@ func (s *SQLiteOperationStore) BindPlanSource(planID string, issue int) error {
 	if issue <= 0 {
 		return fmt.Errorf("a plan answers a source issue, and %d is not one", issue)
 	}
-	_, err := s.db.Exec(`UPDATE plans SET source_issue = ? WHERE id = ? AND source_issue = 0`, issue, planID)
-	return err
+	result, err := s.db.Exec(`UPDATE plans SET source_issue = ? WHERE id = ? AND source_issue = 0`, issue, planID)
+	if err != nil {
+		return err
+	}
+	bound, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if bound == 1 {
+		return nil
+	}
+	// Nothing was updated, which is either the idempotent case - already bound
+	// to this same issue - or a conflict. They are different facts, and
+	// answering both with silence let a caller believe it had redirected a plan
+	// that goes on answering its original issue.
+	_, existing, found, err := s.PlanSource(planID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("plan %s does not exist, so it cannot be bound to issue #%d", planID, issue)
+	}
+	if existing != issue {
+		return fmt.Errorf("plan %s already answers issue #%d and cannot be rebound to #%d: every stage run it creates answers its source", planID, existing, issue)
+	}
+	return nil
 }
 
 // PlanSource is the repository and issue one plan answers.

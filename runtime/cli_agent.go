@@ -219,6 +219,13 @@ type cliReadOnlyMode struct {
 	// Mode is the provider's own name for the mode, recorded in provenance so
 	// a reader can see WHICH restriction was actually applied.
 	Mode string
+	// Sandbox is the sandbox this mode actually selects, which is NOT the
+	// spec's ordinary sandbox: Codex runs `--sandbox read-only` here while its
+	// mutating invocation runs `workspace-write`. Provenance records the mode
+	// the process ran under, so recording the ordinary one would durably claim
+	// a posture the invocation never had. Empty where the provider exposes no
+	// selectable sandbox, exactly as cliAgentSpec.Sandbox is.
+	Sandbox string
 	// Args builds the complete argument vector for a non-mutating invocation.
 	Args func(cliInvocation) []string
 }
@@ -654,7 +661,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// provable read-only mode. There is deliberately no fallback: running a
 	// planner in an editing mode because the restriction was unavailable is the
 	// one outcome the whole planning boundary exists to prevent.
-	buildArgs, permissionMode := spec.Args, invocation.PermissionMode(spec.Permission)
+	buildArgs, permissionMode, sandboxMode := spec.Args, invocation.PermissionMode(spec.Permission), spec.Sandbox
 	if request.Mode == domain.InvocationModeNonMutatingPlanning {
 		if spec.ReadOnly == nil {
 			return ExecutionResult{}, &InvocationModeUnsupportedError{AgentID: p.Agent.ID, Kind: p.Agent.Kind, Mode: request.Mode}
@@ -670,14 +677,14 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		if err := p.probeReadOnly(ctx, spec, home); err != nil {
 			return ExecutionResult{}, err
 		}
-		buildArgs, permissionMode = spec.ReadOnly.Args, spec.ReadOnly.Mode
+		buildArgs, permissionMode, sandboxMode = spec.ReadOnly.Args, spec.ReadOnly.Mode, spec.ReadOnly.Sandbox
 	}
 	args := buildArgs(invocation)
 	authMode, authSource := p.observeAuthMode(spec, home)
 	provenance := InvocationProvenance{
 		AgentID: p.Agent.ID, ProviderKind: p.Agent.Kind, TrustMode: p.Agent.TrustMode,
 		Model: invocation.Model(), Executable: p.command(), Version: p.version(ctx, spec, home),
-		SandboxMode: spec.Sandbox, PermissionMode: permissionMode,
+		SandboxMode: sandboxMode, PermissionMode: permissionMode,
 		PermissionBypass: p.PermissionBypass, AuthMode: authMode, AuthModeSource: authSource,
 		WorkspaceBound:                  spec.WorkingDirectoryFlag,
 		WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,

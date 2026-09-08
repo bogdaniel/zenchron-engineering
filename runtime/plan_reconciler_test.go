@@ -77,7 +77,7 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 	if _, err := base.store.ClaimPlan(plan); err != nil {
 		t.Fatal(err)
 	}
-	if err := base.store.PutPlanRevision(plan); err != nil {
+	if _, err := base.store.PutPlanRevision(plan); err != nil {
 		t.Fatal(err)
 	}
 	if err := base.store.BindPlanSource(plan.ID, base.issue); err != nil {
@@ -297,7 +297,7 @@ func TestTheAggregateEnvelopeBoundsChildRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	tightened.Digest = digest
-	if err := fixture.store.PutPlanRevision(tightened); err != nil {
+	if _, err := fixture.store.PutPlanRevision(tightened); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {

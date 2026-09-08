@@ -132,7 +132,7 @@ func TestPlanRevisionsAreImmutable(t *testing.T) {
 		t.Fatalf("claim: %v claimed=%v", err, claimed)
 	}
 	// The same document again is a no-op, so a retried write is safe.
-	if err := store.PutPlanRevision(plan); err != nil {
+	if _, err := store.PutPlanRevision(plan); err != nil {
 		t.Fatalf("re-storing an identical revision was refused: %v", err)
 	}
 
@@ -143,7 +143,7 @@ func TestPlanRevisionsAreImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	rewritten.Digest = digest
-	err = store.PutPlanRevision(rewritten)
+	_, err = store.PutPlanRevision(rewritten)
 	var conflict *PlanRevisionConflictError
 	if err == nil || !asError(err, &conflict) {
 		t.Fatalf("expected an immutability refusal, got %v", err)
@@ -161,7 +161,7 @@ func TestPlanRevisionsAreImmutable(t *testing.T) {
 	// it can be stored under a name it does not have.
 	lying := planFixture(t, "plan-sso", 2)
 	lying.Digest = strings.Repeat("0", 64)
-	if err := store.PutPlanRevision(lying); err == nil || !strings.Contains(err.Error(), "digests to") {
+	if _, err := store.PutPlanRevision(lying); err == nil || !strings.Contains(err.Error(), "digests to") {
 		t.Fatalf("expected a digest refusal, got %v", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestConsumedBudgetSurvivesRevisionAndRestart(t *testing.T) {
 	}))
 
 	next := planFixture(t, "plan-budget", 2)
-	if err := store.PutPlanRevision(next); err != nil {
+	if _, err := store.PutPlanRevision(next); err != nil {
 		t.Fatal(err)
 	}
 	appendPlan(t, store, planEvent(t, plan.ID, "b-3", EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{

@@ -73,46 +73,53 @@ func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan) (bool, err
 	return true, tx.Commit()
 }
 
-// PutPlanRevision stores one revision of an already-claimed plan.
+// PutPlanRevision stores one revision of an already-claimed plan and reports
+// whether THIS call created it.
 //
 // Re-storing the SAME document is a no-op, so a retried write is safe. Storing
 // a DIFFERENT document under an existing revision is refused: that is not an
 // update, it is a rewrite of history somebody has already approved or been
 // assigned against.
-func (s *SQLiteOperationStore) PutPlanRevision(plan domain.EngineeringPlan) error {
+//
+// The boolean matters because the no-op is indistinguishable from a first
+// write at the caller otherwise, and two proposers computing the same next
+// revision from the same stored state both "succeeded" - and both announced a
+// proposal for one revision. The insert decides, inside this transaction, which
+// one of them actually made it.
+func (s *SQLiteOperationStore) PutPlanRevision(plan domain.EngineeringPlan) (bool, error) {
 	if err := validatePlanIdentity(plan); err != nil {
-		return err
+		return false, err
 	}
 	document, err := CanonicalJSON(plan)
 	if err != nil {
-		return err
+		return false, err
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	var stored string
 	switch err := tx.QueryRow(`SELECT digest FROM plan_revisions WHERE plan_id = ? AND revision = ?`, plan.ID, plan.Revision).Scan(&stored); err {
 	case nil:
 		if stored != plan.Digest {
-			return &PlanRevisionConflictError{PlanID: plan.ID, Revision: plan.Revision, Stored: stored, Offered: plan.Digest}
+			return false, &PlanRevisionConflictError{PlanID: plan.ID, Revision: plan.Revision, Stored: stored, Offered: plan.Digest}
 		}
-		return tx.Commit()
+		return false, tx.Commit()
 	case sql.ErrNoRows:
 	default:
-		return err
+		return false, err
 	}
 	var exists int
 	if err := tx.QueryRow(`SELECT COUNT(1) FROM plans WHERE id = ?`, plan.ID).Scan(&exists); err != nil {
-		return err
+		return false, err
 	}
 	if exists == 0 {
-		return fmt.Errorf("unknown plan %q", plan.ID)
+		return false, fmt.Errorf("unknown plan %q", plan.ID)
 	}
 	if _, err := tx.Exec(`INSERT INTO plan_revisions (plan_id, revision, digest, document) VALUES (?, ?, ?, ?)`,
 		plan.ID, plan.Revision, plan.Digest, string(document)); err != nil {
-		return err
+		return false, err
 	}
 	// current_revision tracks the HIGHEST revision written, which is not the
 	// same question as which revision is approved. Approval lives in the
@@ -121,9 +128,9 @@ func (s *SQLiteOperationStore) PutPlanRevision(plan domain.EngineeringPlan) erro
 	// implying any authority to execute it.
 	if _, err := tx.Exec(`UPDATE plans SET current_revision = ? WHERE id = ? AND current_revision < ?`,
 		plan.Revision, plan.ID, plan.Revision); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	return true, tx.Commit()
 }
 
 // Plan returns the highest stored revision of one plan.

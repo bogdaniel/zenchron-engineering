@@ -707,10 +707,14 @@ type PlanReasoningPayload struct {
 // PlanValidatedPayload records the deterministic validator's verdict. Errors
 // are bounded runtime-authored statements, never provider text.
 type PlanValidatedPayload struct {
-	Revision int      `json:"revision"`
-	Digest   string   `json:"digest"`
-	Status   string   `json:"status"`
-	Errors   []string `json:"errors,omitempty"`
+	Revision int `json:"revision"`
+	// Digest is absent for a REFUSED proposal, because a proposal that failed
+	// to compile produced no document to digest. Requiring it here refused the
+	// refusal record itself, so the one thing this event exists to preserve -
+	// why a proposal was turned down - was replaced by a payload error.
+	Digest string   `json:"digest,omitempty"`
+	Status string   `json:"status"`
+	Errors []string `json:"errors,omitempty"`
 }
 
 // PlanDecisionPayload is the operator's approval or rejection of one exact
@@ -794,9 +798,13 @@ type PlanBudgetConsumedPayload struct {
 // exactly which downstream stages that invalidated. Only AFFECTED stages
 // appear: invalidating an unrelated stage to be safe would discard valid work.
 type PlanRevisionSupersededPayload struct {
-	FromRevision      int      `json:"from_revision"`
-	ToRevision        int      `json:"to_revision"`
-	ProposalID        string   `json:"proposal_id"`
+	FromRevision int `json:"from_revision"`
+	ToRevision   int `json:"to_revision"`
+	// ProposalID is absent for a revision an OPERATOR made directly. Only a
+	// revision that came from a PlanRevisionProposal has one, and requiring it
+	// would refuse to record the supersession of an ordinary operator edit -
+	// losing the fact that one approved revision replaced another.
+	ProposalID        string   `json:"proposal_id,omitempty"`
 	InvalidatedStages []string `json:"invalidated_stages,omitempty"`
 }
 
@@ -843,7 +851,10 @@ var planPayloads = map[string]payloadValidator{
 		if p.Revision < 1 {
 			return fmt.Errorf("plan revision %d must be positive", p.Revision)
 		}
-		return errors.Join(required("digest", p.Digest), boundedList("errors", p.Errors))
+		if p.Status == string(domain.ProposalValid) {
+			return errors.Join(required("digest", p.Digest), boundedList("errors", p.Errors))
+		}
+		return errors.Join(bounded("digest", p.Digest), boundedList("errors", p.Errors))
 	}),
 	EventPlanApproved: planDecisionPayload,
 	EventPlanRejected: planDecisionPayload,
@@ -924,7 +935,7 @@ var planPayloads = map[string]payloadValidator{
 		if p.ToRevision <= p.FromRevision {
 			return fmt.Errorf("revision %d cannot supersede %d: a revision replaces an EARLIER one", p.ToRevision, p.FromRevision)
 		}
-		return errors.Join(required("proposal_id", p.ProposalID), boundedList("invalidated_stages", p.InvalidatedStages))
+		return errors.Join(bounded("proposal_id", p.ProposalID), boundedList("invalidated_stages", p.InvalidatedStages))
 	}),
 }
 

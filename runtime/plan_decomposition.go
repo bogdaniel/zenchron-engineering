@@ -162,7 +162,7 @@ func (r PlanReconciler) recordProposal(plan domain.EngineeringPlan, stage domain
 	// makes it readable, diffable and approvable through exactly the same path
 	// an operator edit takes. Storing it grants nothing: the reconciler
 	// executes the approved revision, and this one is not it.
-	if err := r.Store.PutPlanRevision(proposed); err != nil {
+	if _, err := r.Store.PutPlanRevision(proposed); err != nil {
 		return domain.PlanRevisionProposal{}, err
 	}
 	if err := r.Store.PutPlanContract(plan.ID, proposed.Revision, contract); err != nil {

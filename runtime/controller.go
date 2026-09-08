@@ -1038,6 +1038,18 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		if existing.Plan == nil || existing.Plan.PlanID != binding.PlanID || existing.Plan.StageID != binding.StageID {
 			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run belongs to a different plan stage"}
 		}
+		// The run identity carries the repository, the issue, the configuration
+		// and the plan stage - but NOT the controller. Two controllers that
+		// share a configuration digest and differ in build or identity derive
+		// the same id, so without this check the second one would adopt the
+		// first one's live work. StartIssueRun refuses exactly this, and a plan
+		// stage run is an ordinary run: it is refused here on the same terms.
+		if existing.ControllerSHA256 != r.controller {
+			return StartOutcome{}, &RunAdoptionRefusedError{
+				RunID: runID, Owner: existing.ControllerSHA256,
+				Detail: "adopting it would reconcile another controller's work under this one",
+			}
+		}
 		if err := r.repairAgentBinding(runID, existing); err != nil {
 			return StartOutcome{}, err
 		}
