@@ -342,3 +342,58 @@ func TestADecisionMustNameTheRevisionTheOperatorRead(t *testing.T) {
 		t.Fatal("an approval carrying a digest from another revision was recorded")
 	}
 }
+
+// The operator plan lifecycle works WHILE a supervisor owns the state
+// directory. That is the whole point of the approval boundary: `serve`
+// reconciles the plan, a decomposition proposes a material revision, and a
+// person decides it without stopping the supervisor.
+//
+// The runtime ownership lock is per-OWNER liveness evidence - its path carries
+// the owner identity - so it is not an exclusion lock between processes. This
+// test holds one as a live supervisor would and drives the real CLI entry
+// points against the same state directory.
+func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+
+	config, err := runtime.LoadConfig(configPath, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A supervisor's ownership, held for the rest of the test.
+	supervisor, err := runtime.AcquireOwnershipLock(config.StateDir, "supervisor-host/424242/live")
+	if err != nil {
+		t.Fatalf("could not simulate a running supervisor: %v", err)
+	}
+	t.Cleanup(func() { _ = supervisor.Release() })
+
+	var shown bytes.Buffer
+	if code, err := autonomy([]string{"plan", "show", planID, "--text", "--config", configPath},
+		planOverrides(t, 41), &shown); err != nil {
+		t.Fatalf("plan show while a supervisor owns the state dir: code=%d err=%v", code, err)
+	}
+	if !strings.Contains(shown.String(), "plan "+planID) {
+		t.Fatalf("plan show printed no plan:\n%s", shown.String())
+	}
+
+	revision, digest := pendingDecision(t, configPath, planID, 41)
+	var approved bytes.Buffer
+	if code, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision),
+		"--digest", digest, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
+		t.Fatalf("plan approve while a supervisor owns the state dir: code=%d err=%v\n%s", code, err, approved.String())
+	}
+	if !strings.Contains(approved.String(), "approved by") {
+		t.Fatalf("approval output = %q", approved.String())
+	}
+
+	// And the decision is durable for the supervisor's next tick to read.
+	var status bytes.Buffer
+	if _, err := autonomy([]string{"plan", "status", planID, "--text", "--config", configPath},
+		planOverrides(t, 41), &status); err != nil {
+		t.Fatalf("plan status: %v", err)
+	}
+	if !strings.Contains(status.String(), "(approved)") {
+		t.Fatalf("the approval is not visible to a reader:\n%s", status.String())
+	}
+}

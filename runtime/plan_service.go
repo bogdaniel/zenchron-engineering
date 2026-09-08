@@ -244,7 +244,18 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 	if !found {
 		return PlanSnapshot{}, &PlanRefusedError{PlanID: planID, Detail: fmt.Sprintf("revision %d does not exist", revision)}
 	}
-	if digest != "" && digest != plan.Digest {
+	// A decision NAMES the content it decides. The digest is required here, at
+	// the service boundary, rather than only in the CLI: the invariant belongs
+	// where every caller passes through, and the control endpoint is a second
+	// caller. Deciding by revision number alone is deciding something nobody
+	// has necessarily read.
+	if strings.TrimSpace(digest) == "" {
+		return PlanSnapshot{}, &PlanRefusedError{
+			PlanID: planID,
+			Detail: fmt.Sprintf("a decision on revision %d must name its digest: it is what binds the decision to the content that was read", revision),
+		}
+	}
+	if digest != plan.Digest {
 		return PlanSnapshot{}, &PlanRefusedError{
 			PlanID: planID,
 			Detail: fmt.Sprintf("revision %d now digests to %s and the decision names %s: approve what you read, or read it again", revision, short12(plan.Digest), short12(digest)),

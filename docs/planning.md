@@ -356,9 +356,9 @@ max_child_runs             how many EngineeringRuns this plan may create
 max_concurrency            how many may be active at once, within the
                            operator's global ceiling
 max_provider_invocations   total provider invocations attributable to the plan
-max_wall_seconds           total active execution wall time - validated against
-                           the operator ceiling at approval, but NOT yet enforced
-                           during execution: see the consumption note below
+max_wall_seconds           total ACTIVE execution wall time across the plan:
+                           elapsed less what its runs spent waiting on something
+                           external
 max_cost_micros            optional, and usually absent
 ```
 
@@ -374,10 +374,11 @@ so it survives a restart:
 child_runs  provider_invocations  wall_seconds  cost_micros (+ cost_known)
 ```
 
-Child runs and provider invocations are attributed as they happen and are
-enforced before a stage starts. Consumed `wall_seconds` stays 0: nothing yet
-attributes elapsed provider time to a plan. Read it as unattributed, not as
-"the plan used no time".
+Child runs, provider invocations and wall seconds are all attributed as they
+happen and enforced before a stage starts. A plan that has spent its envelope
+starts nothing further and says which dimension stopped it; a stage already
+running is left alone, because a plan ceiling is not a per-run timeout and the
+run has one of its own.
 
 > A plan revision, reassignment, restart or decomposition step may not reset
 > already-consumed plan or run budget.

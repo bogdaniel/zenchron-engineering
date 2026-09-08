@@ -444,6 +444,23 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 				return settled, err
 			}
 		}
+		// ACTIVE wall time, by the same definition the run's own wall budget
+		// uses: elapsed less what the run spent waiting on something external.
+		// A plan whose stages wait days for a reviewer has not spent days of
+		// execution, and a ceiling that counted them would stop work nobody
+		// was doing.
+		active, err := r.activeSeconds(projection.RunID)
+		if err != nil {
+			return settled, err
+		}
+		if active > 0 {
+			if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
+				Key: "wall:" + projection.RunID, StageID: stage.ID, RunID: projection.RunID,
+				WallSeconds: active,
+			}); err != nil {
+				return settled, err
+			}
+		}
 		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
 			StageID: stage.ID, Outcome: outcome, Reason: boundedDetail(run.Reason),
 		}); err != nil {
@@ -685,15 +702,43 @@ func terminalStageState(state PlanStageState) bool {
 // ceiling that is only compared after the spending has happened is not a
 // ceiling - it is a report.
 func invocationCeilingReached(plan domain.EngineeringPlan, snapshot PlanSnapshot, stageID string) *PlanStageBlock {
-	ceiling := plan.BudgetEnvelope.MaxProviderInvocations
-	if ceiling <= 0 || snapshot.Consumed.ProviderInvocations < ceiling {
-		return nil
+	if ceiling := plan.BudgetEnvelope.MaxProviderInvocations; ceiling > 0 && snapshot.Consumed.ProviderInvocations >= ceiling {
+		return &PlanStageBlock{
+			StageID: stageID, Kind: "budget",
+			Reason: fmt.Sprintf("the plan allows %d provider invocations and %d have been spent",
+				ceiling, snapshot.Consumed.ProviderInvocations),
+		}
 	}
-	return &PlanStageBlock{
-		StageID: stageID, Kind: "budget",
-		Reason: fmt.Sprintf("the plan allows %d provider invocations and %d have been spent",
-			ceiling, snapshot.Consumed.ProviderInvocations),
+	// The aggregate ACTIVE wall ceiling, enforced by the same rule: a plan that
+	// has spent its execution time starts nothing further. It is attributed
+	// when a stage settles, so it bounds the NEXT stage rather than
+	// interrupting one - a plan ceiling is not a per-run timeout, which each
+	// run already has.
+	if ceiling := plan.BudgetEnvelope.MaxWallSeconds; ceiling > 0 && snapshot.Consumed.WallSeconds >= ceiling {
+		return &PlanStageBlock{
+			StageID: stageID, Kind: "budget",
+			Reason: fmt.Sprintf("the plan allows %d active wall seconds and %d have been spent",
+				ceiling, snapshot.Consumed.WallSeconds),
+		}
 	}
+	return nil
+}
+
+// activeSeconds is one child run's active execution time, in whole seconds.
+func (r PlanReconciler) activeSeconds(runID string) (int, error) {
+	run, found, err := r.Store.Run(runID)
+	if err != nil || !found {
+		return 0, err
+	}
+	events, err := r.Store.Events(runID)
+	if err != nil {
+		return 0, err
+	}
+	active := ActiveElapsed(run, events, r.now())
+	if active <= 0 {
+		return 0, nil
+	}
+	return int(active / time.Second), nil
 }
 
 func activeStages(snapshot PlanSnapshot) int {

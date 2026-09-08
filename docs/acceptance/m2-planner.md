@@ -269,19 +269,22 @@ runtime verifies it unchanged; a provider that cannot prove the mode is refused.
 ## 24. Aggregate plan budget
 
 Approval shows the envelope and known/unknown cost truthfully; execution
-enforces the dimensions it can attribute - child runs, concurrency and provider
-invocations, each checked before a stage starts or a planner is invoked -
-and consumption cannot reset. `max_wall_seconds` is validated against the
-operator ceiling at approval and is NOT enforced during execution: nothing yet
-attributes elapsed provider time to a plan, so consumed wall seconds read 0.
+enforces every attributable dimension - child runs, concurrency, provider
+invocations and ACTIVE wall seconds, each checked before a stage starts or a
+planner is invoked - and consumption cannot reset. Cost stays the one dimension
+without a ceiling to enforce, because no configured provider reports it, and
+unknown is not zero.
 
 - `domain/plan.go` — `PlanBudgetEnvelope`; `runtime/plan_reconciler.go`.
 - **Proved:** `runtime.TestTheAggregateEnvelopeBoundsChildRuns`,
   `planning.TestTemplateMayTightenTheEnvelopeAndNeverWidenIt`,
   `runtime.TestUnknownCostStaysUnknownAndKnownCostAccumulates`.
 - **Also proved:** `runtime.TestAFailedPlanningInvocationIsCountedAndTheCeilingStopsIt`
-  for the invocation ceiling, and `runtime.TestConsumptionCountsOneFactOnce` for
-  the crash window that let one consumption be counted twice.
+  for the invocation ceiling, `runtime.TestThePlanWallCeilingIsAttributedAndEnforced`
+  for active wall time, `runtime.TestARevisionCannotClaimACeilingBelowWhatIsSpent`
+  for the non-reset law on the real compile path, and
+  `runtime.TestConsumptionCountsOneFactOnce` for the crash window that let one
+  consumption be counted twice.
 - **Live:** a live proposal was refused for needing five child runs against an
   operator ceiling of three, and the approval view reports cost as unknown
   rather than zero.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -185,5 +186,73 @@ func TestRebindingAPlanToADifferentIssueIsRefused(t *testing.T) {
 	}
 	if err := fixture.store.BindPlanSource("plan-that-does-not-exist", 7); err == nil {
 		t.Fatal("binding a source to a plan that does not exist reported success")
+	}
+}
+
+// A revision cannot claim a ceiling below what the plan has already spent.
+//
+// `Propose` replayed the plan and passed its consumption into the compiler,
+// and the compiler dropped it before validating - so the consumed-budget
+// refusals saw zero on the only path that compiles a real revision, and the
+// non-reset law was unenforced exactly where it applies.
+func TestARevisionCannotClaimACeilingBelowWhatIsSpent(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Consumed.ChildRuns < 2 {
+		t.Fatalf("the fixture spent %d child runs, want at least 2 to test a lower ceiling", snapshot.Consumed.ChildRuns)
+	}
+
+	// One child run is fewer than the two already created.
+	tighter := fixture.service
+	tighter.Envelope = domain.PlanBudgetEnvelope{MaxChildRuns: 1, MaxConcurrency: 1, MaxProviderInvocations: 12}
+	_, err = tighter.Propose(context.Background(), ProposeInput{
+		PlanID: fixture.plan.ID, Objective: fixture.plan.Objective, Subject: fixture.plan.Subject,
+		Contract: planFixtureContract(fixture.phase8Fixture), Issue: fixture.issue,
+		Model: domain.ProjectModel{
+			SchemaVersion: domain.SchemaVersion, ID: "project", Revision: "1",
+			Subject: fixture.plan.Subject,
+		},
+	})
+	if err == nil {
+		t.Fatal("a revision claimed a child-run ceiling below what the plan had already spent")
+	}
+	if !strings.Contains(err.Error(), "already been created") {
+		t.Fatalf("the refusal does not name the consumption: %v", err)
+	}
+}
+
+// A decision NAMES the content it decides. The CLI required the digest; the
+// service did not, so any other caller - the control endpoint among them -
+// could approve a revision by number alone.
+func TestADecisionWithoutADigestIsRefusedAtTheServiceBoundary(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	before, err := fixture.store.PlanEvents(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, digest := range []string{"", "   "} {
+		if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, digest, "operator", ""); err == nil {
+			t.Fatalf("an approval naming digest %q was accepted", digest)
+		}
+		if _, err := fixture.service.Reject(fixture.plan.ID, fixture.plan.Revision, digest, "operator", ""); err == nil {
+			t.Fatalf("a rejection naming digest %q was accepted", digest)
+		}
+	}
+	after, err := fixture.store.PlanEvents(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("a digestless decision appended %d events", len(after)-len(before))
+	}
+	if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest, "operator", ""); err != nil {
+		t.Fatalf("the exact digest was refused: %v", err)
 	}
 }

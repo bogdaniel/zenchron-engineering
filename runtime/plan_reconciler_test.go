@@ -1232,3 +1232,84 @@ func TestALostSupersessionIsReDerivedOnTheNextTick(t *testing.T) {
 		t.Fatalf("the top-up recorded the supersession %d times", len(again.Superseded))
 	}
 }
+
+// The aggregate wall ceiling is attributed and enforced, not merely declared.
+//
+// `max_wall_seconds` used to be validated at approval and then ignored:
+// consumed wall seconds stayed 0 forever, so a field documented as bounding
+// total active execution bounded nothing. Attribution uses the same definition
+// of ACTIVE time the run's own wall budget uses - elapsed less what the run
+// spent waiting on something external.
+func TestThePlanWallCeilingIsAttributedAndEnforced(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "first", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the first half.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "second", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			DependsOn: []string{"first"}, Objective: "Do the second half.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	// Ten seconds of execution is the whole plan budget.
+	bounded := fixture.plan
+	bounded.BudgetEnvelope.MaxWallSeconds = 10
+	bounded.Revision = 2
+	digest, err := bounded.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounded.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(bounded); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.PutPlanContract(bounded.ID, bounded.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.Approve(bounded.ID, bounded.Revision, bounded.Digest, "operator", ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.plan = bounded
+
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(bounded.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["first"].RunID
+	if runID == "" {
+		t.Fatal("the first stage created no run")
+	}
+	// The stage finishes an hour of wall-clock later, all of it active.
+	run, _, err := fixture.store.Run(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Disposition = Completed
+	run.CreatedAt = fixture.clock.Now().Add(-time.Hour)
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.reconcile(t)
+	after, err := fixture.store.ReplayPlan(bounded.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Consumed.WallSeconds < 3000 {
+		t.Fatalf("consumed %d wall seconds, want the stage's active hour attributed", after.Consumed.WallSeconds)
+	}
+	// And the next stage does not start against a spent ceiling.
+	report := fixture.reconcile(t)
+	if len(report.Started) != 0 {
+		t.Fatalf("a stage started after the plan spent its wall ceiling: %#v", report.Started)
+	}
+	spent := false
+	for _, blocked := range report.Blocked {
+		if blocked.Kind == "budget" && strings.Contains(blocked.Reason, "wall seconds") {
+			spent = true
+		}
+	}
+	if !spent {
+		t.Fatalf("the wall ceiling did not block the stage: %#v", report.Blocked)
+	}
+}

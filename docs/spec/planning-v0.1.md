@@ -190,13 +190,16 @@ Consumption is a projection of the durable journal, never a stored counter:
 child_runs  provider_invocations  wall_seconds  cost_micros (+ cost_known)
 ```
 
-`child_runs` and `provider_invocations` are attributed by the reconciler and
-ENFORCED against the envelope before a stage starts. `wall_seconds` is carried
-and validated against the operator ceiling at approval, but nothing yet
-attributes elapsed provider time to a plan, so consumed `wall_seconds` reads 0
-and that ceiling is not enforced during execution. It reads 0 rather than
-pretending: an unenforced ceiling that looked enforced would be worse than one
-that reads as unattributed.
+`child_runs`, `provider_invocations` and `wall_seconds` are attributed by the
+reconciler and ENFORCED against the envelope before a stage starts. Wall time is
+ACTIVE time, by the same definition a run's own wall budget uses: elapsed less
+the intervals the run spent waiting on something external, plus back the work it
+performed inside them. A plan whose stage waited three days for a reviewer has
+not spent three days of execution.
+
+The wall ceiling bounds what the plan STARTS next rather than interrupting a
+running stage: a per-run timeout is the run's own budget and already exists, and
+two mechanisms cancelling one invocation would be two answers to one question.
 
 > **A plan revision, reassignment, restart or decomposition step may not reset
 > already-consumed plan or run budget.**

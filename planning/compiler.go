@@ -125,7 +125,15 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 		previous := input.Previous.Revision
 		plan.Provenance.PreviousRevision = &previous
 	}
-	if err := Validate(plan, ValidationInput{Contract: input.Contract, Envelope: input.Envelope, Previous: input.Previous}); err != nil {
+	if err := Validate(plan, ValidationInput{
+		Contract: input.Contract, Envelope: input.Envelope, Previous: input.Previous,
+		// What the plan has ALREADY spent. Without it the consumed-budget
+		// refusals in envelopeViolations saw zero on the only path that
+		// compiles a real revision, so a revision could claim a ceiling below
+		// what the plan had already spent - the one thing the non-reset law
+		// forbids.
+		Consumed: input.Consumed,
+	}); err != nil {
 		return domain.EngineeringPlan{}, err
 	}
 	digest, err := plan.ContentDigest()

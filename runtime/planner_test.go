@@ -378,3 +378,63 @@ func TestThePlannerAnswerIsLocatedInOnePass(t *testing.T) {
 		t.Fatalf("an answer inside an unclosed region was missed: %q %v", found, err)
 	}
 }
+
+// Nested candidates cannot turn locating the answer into a denial of service.
+//
+// The scan is one pass over braces, but a candidate is validated by READING it,
+// and deeply nested objects nest candidates inside candidates - so validating
+// every one re-reads overlapping, growing slices. One budget across all
+// validations bounds the whole step.
+func TestNestedCandidatesCannotMakeLocatingTheAnswerQuadratic(t *testing.T) {
+	depth := 20000
+	nested := strings.Repeat(`{"stages":`, depth) + "[]" + strings.Repeat("}", depth)
+
+	started := time.Now()
+	_, err := extractJSONObject(nested)
+	elapsed := time.Since(started)
+	if elapsed > 5*time.Second {
+		t.Fatalf("locating the answer in %d nested candidates took %s", depth, elapsed)
+	}
+	// Whether it finds one is not the point - not stalling is. What must hold
+	// is that a real answer AFTER the pathological region is still found.
+	_ = err
+
+	answer := `{"stages": [{"id": "implementation", "kind": "agent", "role": "implementer", "objective": "do it"}]}`
+	found, err := extractJSONObject(`{"stages": {"stages": {"stages": []}}}` + "\n" + answer)
+	if err != nil || found != answer {
+		t.Fatalf("the real answer after nested candidates was missed: %q %v", found, err)
+	}
+}
+
+// The transcript bound is applied by the READ. Reading a huge file and then
+// slicing still allocates whatever the provider wrote, which is the allocation
+// the bound exists to prevent.
+func TestThePlannerTranscriptIsReadFromABoundedTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript.log")
+	answer := `{"stages": [{"id": "implementation", "kind": "agent", "role": "implementer", "objective": "do it"}]}`
+	body := strings.Repeat("noise\n", 200000) + answer
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	tail, err := readTail(path, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail) != 4096 {
+		t.Fatalf("read %d bytes, want the 4096-byte tail", len(tail))
+	}
+	if !strings.HasSuffix(tail, answer) {
+		t.Fatalf("the tail does not end with the answer: %q", tail[len(tail)-80:])
+	}
+	// A file SMALLER than the bound is read whole.
+	small := filepath.Join(dir, "small.log")
+	if err := os.WriteFile(small, []byte(answer), 0600); err != nil {
+		t.Fatal(err)
+	}
+	whole, err := readTail(small, 4096)
+	if err != nil || whole != answer {
+		t.Fatalf("a small transcript was not read whole: %q %v", whole, err)
+	}
+}

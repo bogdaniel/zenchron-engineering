@@ -382,10 +382,9 @@ var externalWaitReasons = map[string]bool{
 // counted; only the idle gap between ticks is excluded.
 func (s *runState) activeElapsed(now time.Time) time.Duration {
 	elapsed := now.Sub(s.run.CreatedAt)
+	// The memoized fold, plus the one part of the answer that depends on the
+	// clock: an open wait runs to now, less the work already performed in it.
 	excluded, openSince, openWork := s.externalWait()
-	// An open wait runs to now, less the work already performed inside it. This
-	// is the only part of the answer that depends on the clock, and therefore
-	// the only part that cannot be computed once.
 	if !openSince.IsZero() {
 		if idle := now.Sub(openSince) - openWork; idle > 0 {
 			excluded += idle
@@ -427,6 +426,18 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 	if s.waitComputed {
 		return s.waitExcluded, s.waitOpenSince, s.waitOpenWork
 	}
+	excluded, waitingSince, work := foldExternalWait(s.events)
+	s.waitExcluded, s.waitOpenSince, s.waitOpenWork, s.waitComputed = excluded, waitingSince, work, true
+	return excluded, waitingSince, work
+}
+
+// foldExternalWait is the fold itself, over events alone.
+//
+// It is a package-level function rather than a method because the PLAN needs
+// the same answer for a stage's child run and must not have a second definition
+// of what counts as active time: a plan wall ceiling judged by different
+// arithmetic from the run wall ceiling would be two budgets wearing one name.
+func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSince time.Time, openWork time.Duration) {
 	var waitingSince time.Time
 	var work time.Duration
 	started := map[string]time.Time{}
@@ -440,7 +451,7 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 		waitingSince, work = time.Time{}, 0
 		started = map[string]time.Time{}
 	}
-	for _, event := range s.events {
+	for _, event := range events {
 		switch event.Type {
 		case EventRunWaiting:
 			if externalWaitReasons[payloadReason(event.Payload)] {
@@ -468,8 +479,27 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 			}
 		}
 	}
-	s.waitExcluded, s.waitOpenSince, s.waitOpenWork, s.waitComputed = excluded, waitingSince, work, true
 	return excluded, waitingSince, work
+}
+
+// ActiveElapsed is how long a run has been WORKING, from its own durable
+// record: total elapsed time less the intervals it spent waiting on something
+// external, plus back the work it performed inside those intervals.
+//
+// The plan's aggregate wall ceiling is attributed with this, so "active time"
+// means exactly what it means for a run's own wall budget.
+func ActiveElapsed(run EngineeringRun, events []EngineeringEvent, now time.Time) time.Duration {
+	elapsed := now.Sub(run.CreatedAt)
+	excluded, openSince, openWork := foldExternalWait(events)
+	if !openSince.IsZero() {
+		if idle := now.Sub(openSince) - openWork; idle > 0 {
+			excluded += idle
+		}
+	}
+	if excluded > elapsed {
+		return 0
+	}
+	return elapsed - excluded
 }
 
 // pinnedBase is the base revision the run was compiled and cloned against. It

@@ -266,6 +266,15 @@ func envelopeViolations(plan domain.EngineeringPlan, input ValidationInput) []st
 	if envelope.MaxProviderInvocations < input.Consumed.ProviderInvocations {
 		reasons = append(reasons, fmt.Sprintf("the plan allows %d provider invocations and %d have already been spent", envelope.MaxProviderInvocations, input.Consumed.ProviderInvocations))
 	}
+	if envelope.MaxWallSeconds > 0 && envelope.MaxWallSeconds < input.Consumed.WallSeconds {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d wall seconds and %d have already been spent", envelope.MaxWallSeconds, input.Consumed.WallSeconds))
+	}
+	// Cost is only comparable where it is KNOWN. An unknown cost is not zero,
+	// so a ceiling is never judged against one.
+	if envelope.MaxCostMicros != nil && input.Consumed.CostKnown && input.Consumed.CostMicros != nil &&
+		*envelope.MaxCostMicros < *input.Consumed.CostMicros {
+		reasons = append(reasons, fmt.Sprintf("the plan allows %d cost micros and %d have already been reported", *envelope.MaxCostMicros, *input.Consumed.CostMicros))
+	}
 	agents := 0
 	for _, stage := range plan.Stages {
 		if stage.Kind == domain.StageAgent {
