@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "id": "plan-nested",
+  "revision": 1,
+  "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "objective": "Nest a plan inside a plan.",
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "budget_envelope": {
+    "max_child_runs": 4,
+    "max_concurrency": 2,
+    "max_provider_invocations": 8
+  },
+  "stages": [
+    {
+      "id": "outer",
+      "kind": "agent",
+      "role": "implementer",
+      "stages": [
+        {
+          "id": "inner",
+          "kind": "agent",
+          "role": "implementer"
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "compiler_version": "plan-compiler-v0.1",
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "contract": { "id": "contract-sso", "revision": "1" }
+  }
+}

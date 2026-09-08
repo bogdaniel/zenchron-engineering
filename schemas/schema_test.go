@@ -19,6 +19,13 @@ var fixtureSchemas = map[string]string{
 	"engineering-work-contract": "engineering-work-contract.schema.json",
 	"evidence-bundle":           "evidence-bundle.schema.json",
 	"project-model":             "project-model.schema.json",
+	"agent-assignment":          "agent-assignment.schema.json",
+	"agent-profile":             "agent-profile.schema.json",
+	"context-policy":            "context-policy.schema.json",
+	"engineering-plan":          "engineering-plan.schema.json",
+	"engineering-plan-template": "engineering-plan-template.schema.json",
+	"instruction-pack":          "instruction-pack.schema.json",
+	"plan-revision-proposal":    "plan-revision-proposal.schema.json",
 }
 
 type invalidExpectation struct {
@@ -42,6 +49,32 @@ var invalidExpectations = map[string]invalidExpectation{
 	"missing-subject-revision.evidence-bundle.json":             {"/subject", "required"},
 	"missing-subject-revision.project-model.json":               {"/subject", "required"},
 	"stale-without-reason.evidence-bundle.json":                 {"/evidence/evidence-auth-tests/lifecycle", "required"},
+	// The M2 planning refusals. Each one is a boundary #64 freezes, expressed
+	// where a malformed document can be refused before anything reads it.
+	//
+	// Instruction content is operator-owned: a repository cannot author it.
+	"candidate-authored.instruction-pack.json": {"/source/type", "enum"},
+	// A ContextPolicy selects from a CLOSED vocabulary; it is not a query
+	// language over whatever a caller can name.
+	"unknown-context-class.context-policy.json": {"/exclude/0", "enum"},
+	// A profile specializes an existing worker. It cannot invent an ability,
+	// which is the shape "customization may not escalate" takes in a schema.
+	"invented-capability.agent-profile.json": {"/capabilities/0", "enum"},
+	// Nested plans are not representable, in a template or in a plan.
+	"nested-plan.engineering-plan-template.json": {"/stages/0/kind", "enum"},
+	"nested-plan.engineering-plan.json":          {"/stages/0", "additionalProperties"},
+	// Roles come from the catalogue; an assignment cannot name a
+	// responsibility nothing can resolve.
+	"unknown-role.agent-assignment.json": {"/role", "enum"},
+	// A proposal without a validation verdict could be approved without ever
+	// having been checked.
+	"missing-validation.plan-revision-proposal.json": {"", "required"},
+	// Policy states obligations, never which worker performs them: naming an
+	// agent in a role obligation is the fixed-agent-workflow refusal again, in
+	// the new vocabulary.
+	"agent-workflow-obligation.engineering-policy.json": {"/rules/RULE-001/effect/engineering_requirements/roles/0", "additionalProperties"},
+	// A gate is not an agent stage. Only `agent` stages become EngineeringRuns.
+	"agent-gate-requirement.engineering-work-contract.json": {"/plan_requirements/gates/0/kind", "enum"},
 }
 
 func TestSchemasCompile(t *testing.T) {

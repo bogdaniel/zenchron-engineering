@@ -121,7 +121,10 @@ func TestCanonicalJSONRejectsNonIJSONInputs(t *testing.T) {
 	cases := []any{
 		map[string]string{"bad": string([]byte{0xff})},
 		map[string]float64{"bad": math.Inf(1)},
-		uint64(maxSafeInteger) + 1,
+		// One past the I-JSON interoperable integer range. The bound itself
+		// lives with the canonicalizer in domain; this states the boundary
+		// value rather than reaching for an unexported constant.
+		uint64(1<<53-1) + 1,
 		json.RawMessage(`{"duplicate":1,"duplicate":2}`),
 		json.RawMessage(`1e400`),
 		json.RawMessage([]byte{'"', 0xff, '"'}),

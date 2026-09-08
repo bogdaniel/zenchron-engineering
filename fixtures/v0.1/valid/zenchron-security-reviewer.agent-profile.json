@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "id": "zenchron-security-reviewer",
+  "version": 3,
+  "digest": "c0a7b8ce791a15bf43a25d8a976840b0f76464354a251a09c9954f367730683b",
+  "execution_agent": "claude",
+  "model": "sonnet",
+  "capabilities": [
+    "repository_analysis",
+    "security_review",
+    "verification"
+  ],
+  "instructions": [
+    "security-review-core"
+  ],
+  "context_policy": "independent-review",
+  "trust_requirement": "operator_trusted",
+  "constraints": {
+    "deny_permission_bypass": true
+  },
+  "source": {
+    "type": "operator_config",
+    "location": "profiles.zenchron-security-reviewer"
+  }
+}

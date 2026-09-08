@@ -17,6 +17,17 @@ const (
 	EngineeringWorkContract = "engineering-work-contract"
 	EvidenceBundle          = "evidence-bundle"
 	ProjectModel            = "project-model"
+	// The M2 planning artifacts. They follow exactly the same discipline as
+	// the kernel contracts above - one schema, valid and invalid fixtures, one
+	// validation path - because a second validation framework beside this one
+	// would be a second definition of what a durable artifact is.
+	AgentAssignment         = "agent-assignment"
+	AgentProfile            = "agent-profile"
+	ContextPolicy           = "context-policy"
+	EngineeringPlan         = "engineering-plan"
+	EngineeringPlanTemplate = "engineering-plan-template"
+	InstructionPack         = "instruction-pack"
+	PlanRevisionProposal    = "plan-revision-proposal"
 )
 
 //go:embed *.schema.json
@@ -41,6 +52,13 @@ func mustCompile() map[string]*jsonschema.Schema {
 		EngineeringWorkContract,
 		EvidenceBundle,
 		ProjectModel,
+		AgentAssignment,
+		AgentProfile,
+		ContextPolicy,
+		EngineeringPlan,
+		EngineeringPlanTemplate,
+		InstructionPack,
+		PlanRevisionProposal,
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()

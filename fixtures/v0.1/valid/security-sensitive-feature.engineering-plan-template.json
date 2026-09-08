@@ -1,0 +1,76 @@
+{
+  "schema_version": "0.1",
+  "id": "security-sensitive-feature",
+  "version": 1,
+  "digest": "13c9b9b122628a11d0f4f321a92b049906d4ea44bac69ad4c16600f8727402cb",
+  "description": "Architecture, implementation, verification, independent security review, assurance and a human release decision.",
+  "stages": [
+    {
+      "id": "architecture",
+      "kind": "agent",
+      "role": "system_architect",
+      "requires_capabilities": [
+        "architecture_reasoning",
+        "repository_analysis"
+      ]
+    },
+    {
+      "id": "implementation",
+      "kind": "agent",
+      "role": "implementer",
+      "depends_on": [
+        "architecture"
+      ],
+      "requires_capabilities": [
+        "code_change",
+        "repository_analysis"
+      ]
+    },
+    {
+      "id": "security-review",
+      "kind": "agent",
+      "role": "security_reviewer",
+      "depends_on": [
+        "implementation"
+      ],
+      "requires_capabilities": [
+        "security_review"
+      ],
+      "independence": {
+        "dimension": "vendor_family",
+        "different_from": [
+          "implementation"
+        ]
+      },
+      "profile": "zenchron-security-reviewer"
+    },
+    {
+      "id": "assurance",
+      "kind": "assurance_gate",
+      "depends_on": [
+        "security-review"
+      ],
+      "required_claims": [
+        "claim-tests"
+      ]
+    },
+    {
+      "id": "release-decision",
+      "kind": "human_decision_gate",
+      "depends_on": [
+        "assurance"
+      ],
+      "required_claims": [
+        "claim-human-approval"
+      ],
+      "action": {
+        "type": "git.pull_request.create",
+        "target": "acme/payments"
+      }
+    }
+  ],
+  "source": {
+    "type": "operator_file",
+    "location": "/home/operator/.config/zenchron/templates/security-sensitive-feature.json"
+  }
+}

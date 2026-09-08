@@ -222,6 +222,20 @@ func roundTripFixture(t *testing.T, name string, data []byte) {
 		roundTrip[domain.EvidenceBundle](t, data)
 	case strings.HasSuffix(name, ".project-model.json"):
 		roundTrip[domain.ProjectModel](t, data)
+	case strings.HasSuffix(name, ".instruction-pack.json"):
+		roundTrip[domain.InstructionPack](t, data)
+	case strings.HasSuffix(name, ".context-policy.json"):
+		roundTrip[domain.ContextPolicy](t, data)
+	case strings.HasSuffix(name, ".agent-profile.json"):
+		roundTrip[domain.AgentProfile](t, data)
+	case strings.HasSuffix(name, ".engineering-plan-template.json"):
+		roundTrip[domain.EngineeringPlanTemplate](t, data)
+	case strings.HasSuffix(name, ".engineering-plan.json"):
+		roundTrip[domain.EngineeringPlan](t, data)
+	case strings.HasSuffix(name, ".agent-assignment.json"):
+		roundTrip[domain.AgentAssignment](t, data)
+	case strings.HasSuffix(name, ".plan-revision-proposal.json"):
+		roundTrip[domain.PlanRevisionProposal](t, data)
 	default:
 		t.Fatalf("fixture %s has no contract suffix", name)
 	}
@@ -272,6 +286,27 @@ func decodeFixture(name string, data []byte) error {
 		return err
 	case strings.HasSuffix(name, ".project-model.json"):
 		_, err := domain.Decode[domain.ProjectModel](data)
+		return err
+	case strings.HasSuffix(name, ".instruction-pack.json"):
+		_, err := domain.Decode[domain.InstructionPack](data)
+		return err
+	case strings.HasSuffix(name, ".context-policy.json"):
+		_, err := domain.Decode[domain.ContextPolicy](data)
+		return err
+	case strings.HasSuffix(name, ".agent-profile.json"):
+		_, err := domain.Decode[domain.AgentProfile](data)
+		return err
+	case strings.HasSuffix(name, ".engineering-plan-template.json"):
+		_, err := domain.Decode[domain.EngineeringPlanTemplate](data)
+		return err
+	case strings.HasSuffix(name, ".engineering-plan.json"):
+		_, err := domain.Decode[domain.EngineeringPlan](data)
+		return err
+	case strings.HasSuffix(name, ".agent-assignment.json"):
+		_, err := domain.Decode[domain.AgentAssignment](data)
+		return err
+	case strings.HasSuffix(name, ".plan-revision-proposal.json"):
+		_, err := domain.Decode[domain.PlanRevisionProposal](data)
 		return err
 	default:
 		return fmt.Errorf("fixture %s has no contract suffix", name)

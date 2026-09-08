@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "id": "nested",
+  "version": 1,
+  "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "stages": [
+    {
+      "id": "sub-plan",
+      "kind": "plan"
+    }
+  ],
+  "source": {
+    "type": "operator_config",
+    "location": "templates.nested"
+  }
+}

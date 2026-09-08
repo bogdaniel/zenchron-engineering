@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/agent-profile.schema.json",
+  "title": "AgentProfile v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "digest",
+    "execution_agent",
+    "capabilities",
+    "trust_requirement",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "execution_agent": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "model": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "requirements_analysis",
+          "architecture_reasoning",
+          "repository_analysis",
+          "code_change",
+          "verification",
+          "security_review"
+        ]
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "instructions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/non_empty_string"
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "context_policy": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "trust_requirement": {
+      "enum": [
+        "operator_trusted",
+        "protected"
+      ]
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_wall_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_execution_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deny_permission_bypass": {
+          "type": "boolean"
+        }
+      }
+    },
+    "source": {
+      "$ref": "#/$defs/artifact_source"
+    }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "location"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "operator_config",
+            "operator_file"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    }
+  }
+}

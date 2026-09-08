@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "id": "assignment-unknown-role",
+  "plan": {
+    "id": "plan-sso-001",
+    "revision": 1,
+    "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "stage_id": "release",
+  "role": "release_manager",
+  "profile": {
+    "id": "zenchron-security-reviewer",
+    "version": 3,
+    "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "capabilities": ["security_review"],
+    "trust_requirement": "operator_trusted"
+  },
+  "agent": {
+    "id": "claude",
+    "provider_kind": "claude_code",
+    "vendor_family": "anthropic",
+    "trust_mode": "operator_trusted"
+  },
+  "invocation_mode": "mutating",
+  "trust_requirement": "operator_trusted",
+  "contract": { "id": "contract-sso", "revision": "1" },
+  "context": {
+    "objective": "Release the change.",
+    "acceptance_criteria": ["It is released"],
+    "included": ["objective"]
+  },
+  "selection": {
+    "considered": [],
+    "reason": "none"
+  }
+}

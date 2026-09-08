@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "security-review-core",
+  "revision": "2",
+  "digest": "20a7fbdb3239eb8ecd262021d721aadacc5a05ac87b8d84f6079b7c5d1bd0e58",
+  "source": {
+    "type": "operator_file",
+    "location": "/home/operator/.config/zenchron/instructions/security-review-core.json"
+  },
+  "instructions": [
+    "Review the candidate diff for authentication, authorization and secret-handling defects.",
+    "State every finding with the exact file and line it applies to.",
+    "Do not modify the candidate: this profile reviews, it does not implement."
+  ]
+}
