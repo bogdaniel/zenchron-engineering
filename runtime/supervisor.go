@@ -521,8 +521,7 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	if err != nil {
 		return PlannerOutput{}, err
 	}
-	workspace, err := CreatePlanningWorkspace(engine.StateDirectory(), request.Plan.ID,
-		engine.PlanningSource(), request.Plan.Subject.Revision, "")
+	workspace, err := engine.MaterializePlanningWorkspace(request.Plan.ID, request.Plan.Subject.Revision)
 	if err != nil {
 		return PlannerOutput{}, err
 	}

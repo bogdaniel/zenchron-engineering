@@ -62,6 +62,44 @@ type PlanningWorkspace struct {
 // It reuses the same verified checkout the assurance verifier uses, so "the
 // planner saw exactly this source" is proven by the same code path that proves
 // "the verifier judged exactly this tree".
+// CreatePlanningWorkspaceFromRemote materializes the planning workspace from the
+// GOVERNED remote, through the same credential-bound Git boundary a candidate
+// clone uses.
+//
+// It exists because the trusted base is on the forge, not on disk: cloning it
+// is a network operation, and every network Git operation in this runtime is
+// bound to a governed remote identity and to the credential the caller was
+// constructed with. Planning is not an exception to that.
+func CreatePlanningWorkspaceFromRemote(stateDir, planID string, remote RemoteIdentity, credentials CredentialProvider, commit string) (*PlanningWorkspace, error) {
+	if strings.TrimSpace(stateDir) == "" || strings.TrimSpace(planID) == "" || strings.TrimSpace(commit) == "" {
+		return nil, &PlanningWorkspaceError{Detail: "a state directory, a plan identity and an exact commit are required"}
+	}
+	dir := planningWorkspaceDir(stateDir, planID)
+	if err := os.RemoveAll(dir); err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	if _, err := remoteGit("", remote, credentials).run("clone", "--no-checkout", remote.URL, dir); err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	// The checkout itself is local: no transport, no credential, and the exact
+	// commit the plan is bound to.
+	if _, err := runGit(dir, "checkout", "--detach", commit); err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	head, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(head) != commit {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: "checkout commit mismatch"}
+	}
+	tree, err := gitOutput(dir, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return nil, &PlanningWorkspaceError{Dir: dir, Detail: err.Error()}
+	}
+	return &PlanningWorkspace{Dir: dir, Commit: commit, Tree: strings.TrimSpace(tree)}, nil
+}
+
 func CreatePlanningWorkspace(stateDir, planID, source, commit, tree string) (*PlanningWorkspace, error) {
 	if strings.TrimSpace(stateDir) == "" || strings.TrimSpace(planID) == "" {
 		return nil, &PlanningWorkspaceError{Detail: "a state directory and a plan identity are required"}
@@ -210,6 +248,11 @@ type PlannerInput struct {
 	// SourceSnapshot identifies the pinned source the objective came from.
 	SourceSnapshot Ref
 	ControllerID   string
+	// Template is the operator's chosen reusable process, when they chose one.
+	// It is PLANNING INPUT and the planner is shown it: an operator who
+	// selected a process expects the plan to follow it, and a planner that
+	// never saw it would silently replace their decision with its own.
+	Template *domain.EngineeringPlanTemplate
 	// Current is the approved plan revision a decomposition reasons against, or
 	// nil for a first plan. It is rebuilt from durable state by the caller;
 	// provider session memory is never the source of truth.
@@ -259,7 +302,17 @@ func InvokePlanner(ctx context.Context, input PlannerInput) (PlannerOutput, erro
 		return PlannerOutput{}, &PlannerRefusedError{AgentID: input.Agent.ID, Detail: "a planning workspace and a registered provider are required"}
 	}
 	if input.Attempt < 1 {
-		input.Attempt = 1
+		// WHICH TRY this is, answered from the durable evidence rather than
+		// assumed. A planning invocation's transcript is create-once attempt
+		// evidence like every other invocation's, so re-planning the same
+		// revision has to be a new attempt - otherwise the second try is
+		// refused for disagreeing with the first, which is the right rule
+		// applied to the wrong question.
+		input.Attempt = input.Artifacts.NextAttempt(input.Agent.ID, ExecutionAttemptRef{
+			RunID:       input.PlanID,
+			OperationID: fmt.Sprintf("plan.reason:%s:r%d", input.PlanID, input.Revision),
+			Attempt:     1,
+		})
 	}
 	before, err := input.Workspace.Digest()
 	if err != nil {
@@ -371,12 +424,38 @@ func plannerOutputContract(input PlannerInput) string {
 	for _, capability := range input.AvailableCapabilities {
 		capabilities = append(capabilities, string(capability))
 	}
+	process := ""
+	if input.Template != nil {
+		lines := make([]string, 0, len(input.Template.Stages))
+		for _, stage := range input.Template.Stages {
+			line := fmt.Sprintf("  %s (%s", stage.ID, stage.Kind)
+			if stage.Role != "" {
+				line += ", role " + string(stage.Role)
+			}
+			if len(stage.DependsOn) > 0 {
+				line += ", after " + strings.Join(stage.DependsOn, " and ")
+			}
+			if stage.Independence != nil {
+				line += fmt.Sprintf(", independent of %s in %s", strings.Join(stage.Independence.DifferentFrom, " and "), stage.Independence.Dimension)
+			}
+			lines = append(lines, line+")")
+		}
+		process = fmt.Sprintf(`
+The operator selected this process for this work, and expects the plan to follow
+it. Keep its stages, roles, dependencies and independence requirements unless
+the objective genuinely cannot be done that way, and say so in "notes" if you
+depart from it. You may add a stage the objective needs; you may not drop a
+stage to make the work smaller.
+
+%s
+`, strings.Join(lines, "\n"))
+	}
 	current := ""
 	if input.Current != nil {
 		current = fmt.Sprintf("\nThe currently approved plan revision is %d with stages: %s. Propose the revision you believe the evidence now supports.\n",
 			input.Current.Revision, strings.Join(stageIDs(*input.Current), ", "))
 	}
-	return fmt.Sprintf(`%s
+	return fmt.Sprintf(`%s%s
 Answer with ONE JSON object, in a fenced json code block, with this shape:
 
 {"stages": [{"id": "kebab-case-id", "kind": "agent|assurance_gate|human_decision_gate",
@@ -387,6 +466,10 @@ Answer with ONE JSON object, in a fenced json code block, with this shape:
   "rationale": "why this stage exists"}],
  "notes": "one short paragraph an operator will read"}
 
+The object must contain EXACTLY the members shown above and no others, at every
+level: an unrecognized member makes the whole answer invalid and it is refused
+rather than partially read. Put anything you want to say in "notes".
+
 Rules for your answer, all of which the runtime enforces afterwards:
 - only "agent" stages are performed by a worker; the two gate kinds reference
   evidence and human decisions that already exist and take no role;
@@ -395,7 +478,7 @@ Rules for your answer, all of which the runtime enforces afterwards:
   a run somebody pays for;
 - you may propose additional verification or review; you may not remove an
   obligation, and anything you leave out that policy requires will be added
-  back.`, current, strings.Join(roles, ", "), strings.Join(capabilities, ", "))
+  back.`, process, current, strings.Join(roles, ", "), strings.Join(capabilities, ", "))
 }
 
 func stageIDs(plan domain.EngineeringPlan) []string {

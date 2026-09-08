@@ -138,10 +138,15 @@ func (r *EngineeringRuntime) PlanID(issue int) (string, error) {
 	return "plan-" + digest[:32], nil
 }
 
-// PlanningSource is the repository the planning workspace is materialized from.
-// It is the governed remote the runtime already clones candidates from, never
-// the controller checkout.
-func (r *EngineeringRuntime) PlanningSource() string { return r.deps.Repository.Remote }
+// MaterializePlanningWorkspace clones the exact trusted commit into a
+// runtime-owned planning workspace, through this runtime's own governed remote
+// and credential.
+//
+// The credential never leaves the runtime: a caller asks for a workspace and
+// receives one, exactly as it does for a candidate.
+func (r *EngineeringRuntime) MaterializePlanningWorkspace(planID, commit string) (*PlanningWorkspace, error) {
+	return CreatePlanningWorkspaceFromRemote(r.deps.StateDir, planID, r.deps.Remote, r.deps.Credentials, commit)
+}
 
 // PlanningAgent is the agent this runtime drives, for a planning invocation.
 func (r *EngineeringRuntime) PlanningAgent() ResolvedAgent { return r.deps.Agent }

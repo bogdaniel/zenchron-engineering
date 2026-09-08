@@ -1975,6 +1975,7 @@ func decodeJSON(raw []byte, target any) error {
 type planStageContext struct {
 	assignment   *domain.AgentAssignment
 	instructions []string
+	upstream     []UpstreamContext
 }
 
 // apply narrows the request to the stage the operator approved.
@@ -2001,6 +2002,7 @@ func (p planStageContext) apply(request ExecutionRequest) ExecutionRequest {
 	}
 	request.Instructions = p.instructions
 	request.ModelPreference = p.assignment.Agent.Model
+	request.Upstream = p.upstream
 	return request
 }
 
@@ -2032,7 +2034,70 @@ func (r *EngineeringRuntime) planStage(state *runState) (planStageContext, error
 	if err != nil {
 		return planStageContext{}, err
 	}
-	return planStageContext{assignment: &assignment, instructions: instructions}, nil
+	upstream, err := r.upstreamOutputs(assignment)
+	if err != nil {
+		return planStageContext{}, err
+	}
+	return planStageContext{assignment: &assignment, instructions: instructions, upstream: upstream}, nil
+}
+
+// maxUpstreamDiffBytes bounds one upstream diff. A reviewer reading a truncated
+// diff is told it is truncated; a prompt that grew without limit would fail the
+// invocation instead.
+//
+// ponytail: a flat byte bound. Per-file selection driven by the stage's own
+// context policy is the upgrade if reviewing large changes becomes routine.
+const maxUpstreamDiffBytes = 96 << 10
+
+// upstreamOutputs reads what the stages this one depends on actually produced.
+//
+// The diff is read from the upstream run's own runtime-owned workspace through
+// the same local Git boundary everything else uses. It is READ ONLY: nothing
+// here touches another run's workspace, and a workspace that has been reclaimed
+// simply yields no diff rather than failing the stage.
+func (r *EngineeringRuntime) upstreamOutputs(assignment domain.AgentAssignment) ([]UpstreamContext, error) {
+	outputs := make([]UpstreamContext, 0, len(assignment.Context.UpstreamOutputs))
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		context := UpstreamContext{
+			StageID: upstream.StageID, RunID: upstream.RunID,
+			Commit: upstream.Candidate, Tree: upstream.Tree,
+		}
+		if upstream.RunID != "" && upstream.Candidate != "" {
+			dir := candidateDir(r.deps.StateDir, upstream.RunID)
+			if dirExists(dir) {
+				run, found, err := r.deps.Store.Run(upstream.RunID)
+				if err != nil {
+					return nil, err
+				}
+				base := ""
+				if found {
+					base = run.Base.Revision
+				}
+				if diff, truncated := readCandidateDiff(dir, base, upstream.Candidate); diff != "" {
+					context.Diff, context.Truncated = diff, truncated
+				}
+			}
+		}
+		outputs = append(outputs, context)
+	}
+	return outputs, nil
+}
+
+// readCandidateDiff reads one upstream run's change. It is best effort by
+// design: a reclaimed workspace is a missing diff, not a failed stage, and the
+// reviewer is told the diff could not be read rather than being handed silence.
+func readCandidateDiff(dir, base, candidate string) (string, bool) {
+	if strings.TrimSpace(base) == "" || strings.TrimSpace(candidate) == "" {
+		return "", false
+	}
+	out, err := gitOutput(dir, "diff", base+".."+candidate)
+	if err != nil {
+		return "", false
+	}
+	if len(out) <= maxUpstreamDiffBytes {
+		return out, false
+	}
+	return out[:maxUpstreamDiffBytes], true
 }
 
 // frozenInstructions resolves the instruction text an assignment froze by

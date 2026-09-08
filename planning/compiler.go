@@ -87,6 +87,7 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 		return domain.EngineeringPlan{}, err
 	}
 	stages = applyPolicyObligations(stages, requirements, input.Contract)
+	stages = ensureAssuranceGate(stages, input.Contract)
 	stages = fillStageDefaults(stages, input)
 	stages = canonicalOrder(stages)
 
@@ -363,6 +364,37 @@ func applyGateObligation(stages []domain.PlanStage, gate domain.GateRequirement,
 	return append(stages, stage)
 }
 
+// ensureAssuranceGate adds the assurance the CONTRACT already requires when a
+// plan has none.
+//
+// It is a completion in one direction: the gate references claims the contract
+// defines, depends on every agent stage, and creates no run. A plan that
+// produced a change and referenced no assurance at all would leave the evidence
+// the contract requires outside the plan an operator approved - which is not a
+// smaller plan, it is a plan that says less than the truth.
+func ensureAssuranceGate(stages []domain.PlanStage, contract domain.EngineeringWorkContract) []domain.PlanStage {
+	claims := contractClaims(contract)
+	if len(claims) == 0 {
+		return stages
+	}
+	for _, stage := range stages {
+		if stage.Kind == domain.StageAssuranceGate {
+			return stages
+		}
+	}
+	producers := agentStages(stages)
+	if len(producers) == 0 {
+		return stages
+	}
+	return append(stages, domain.PlanStage{
+		ID:             uniqueStageID(stages, stageAssurance),
+		Kind:           domain.StageAssuranceGate,
+		DependsOn:      producers,
+		RequiredClaims: claims,
+		Rationale:      "the work contract requires this evidence; the gate references it and creates no run",
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Defaults and canonical form
 // ---------------------------------------------------------------------------
@@ -380,10 +412,32 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.P
 			stage.TrustRequirement = ""
 			stage.InvocationMode = ""
 			stage.Profile = ""
+			// An assurance gate that names no claim is completed from the work
+			// contract's own required claims. It is a safe completion in one
+			// direction only: the gate can gain claims the contract already
+			// requires and can never lose one, so a proposal that simply said
+			// "and then assurance" means the assurance this contract defines
+			// rather than a gate nothing could satisfy. Where the contract
+			// requires nothing, the refusal stands - there would be nothing to
+			// prove.
+			if stage.Kind == domain.StageAssuranceGate && len(stage.RequiredClaims) == 0 {
+				stage.RequiredClaims = contractClaims(input.Contract)
+			}
 			stages[i] = stage
 			continue
 		}
 		stage.RequiresCapabilities = mergeCapabilities(stage.RequiresCapabilities, RoleCapabilities(stage.Role))
+		// An independence requirement that names no stage is BOUND to the
+		// material producers, exactly as a policy obligation is. Policy states a
+		// relationship - "independent of whoever produced the change" - and so
+		// does a proposal that asks for independence without knowing which stage
+		// will produce; binding it is what makes the obligation checkable, and
+		// it can only ever add constraints.
+		if stage.Independence != nil && len(stage.Independence.DifferentFrom) == 0 {
+			independence := *stage.Independence
+			independence.DifferentFrom = producersExcept(stages, stage.ID)
+			stage.Independence = &independence
+		}
 		if stage.InvocationMode == "" {
 			stage.InvocationMode = RequiredInvocationMode(stage.Role)
 		}
@@ -555,6 +609,19 @@ func shareBudget(stages []domain.PlanStage, envelope domain.PlanBudgetEnvelope) 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+// producersExcept is the material producers other than one stage. A reviewer
+// that produced nothing is independent of itself trivially, and naming itself
+// would make the obligation unsatisfiable.
+func producersExcept(stages []domain.PlanStage, self string) []string {
+	var producers []string
+	for _, id := range materialProducerStages(stages) {
+		if id != self {
+			producers = append(producers, id)
+		}
+	}
+	return producers
+}
 
 func materialProducerStages(stages []domain.PlanStage) []string {
 	var producers []string

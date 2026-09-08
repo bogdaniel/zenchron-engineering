@@ -725,6 +725,28 @@ func attemptObservations(transcript []byte) []byte {
 // percent-encoded rather than trusted - an identity is not a path until
 // something makes it one, and "..", a separator or a NUL inside a component
 // must not be able to become one.
+// NextAttempt is the first attempt number for which no transcript exists.
+//
+// It reads the durable evidence rather than a counter, because the evidence is
+// what the create-once transcript rule is about: an attempt whose transcript is
+// already stored happened, and the next invocation is the next attempt. A store
+// it cannot read answers 1, which is the honest default - the write that
+// follows will refuse if that turns out to collide.
+func (s ArtifactStore) NextAttempt(providerID string, attempt ExecutionAttemptRef) int {
+	const maxProbedAttempts = 1024
+	for candidate := 1; candidate <= maxProbedAttempts; candidate++ {
+		attempt.Attempt = candidate
+		prefix, err := attemptTranscriptPrefix(providerID, attempt)
+		if err != nil {
+			return 1
+		}
+		if _, err := os.Stat(filepath.Join(s.Root, prefix+".raw.log")); err != nil {
+			return candidate
+		}
+	}
+	return maxProbedAttempts
+}
+
 func attemptTranscriptPrefix(providerID string, attempt ExecutionAttemptRef) (string, error) {
 	if err := attempt.Validate(); err != nil {
 		return "", err
@@ -892,7 +914,7 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + feedbackBlock(r.Feedback)
+	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback)
 }
 
 // planningEnvelope is the envelope for a NON-MUTATING invocation. It is a

@@ -156,7 +156,7 @@ func planPropose(ctx context.Context, flags autonomyFlags, overrides autonomyOve
 	// for an operator who does not want to spend an invocation: it compiles the
 	// same obligations with no model at all, and says so.
 	if !flags.Deterministic {
-		stages, reasoning, err := reasonAboutPlan(ctx, composed, intent, planID)
+		stages, reasoning, err := reasonAboutPlan(ctx, composed, intent, planID, flags.Template)
 		if err != nil {
 			return runtime.ExitFailed, err
 		}
@@ -179,7 +179,7 @@ func planPropose(ctx context.Context, flags autonomyFlags, overrides autonomyOve
 // runs in the provider's own non-mutating mode, and the runtime verifies the
 // workspace afterwards. A provider that cannot prove the mode is refused here,
 // with the reason, rather than being run permissively.
-func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runtime.PlanIntent, planID string) ([]domain.PlanStage, *domain.PlanReasoningProvenance, error) {
+func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runtime.PlanIntent, planID, templateID string) ([]domain.PlanStage, *domain.PlanReasoningProvenance, error) {
 	// ELIGIBILITY FIRST, before anything is materialized. A provider with no
 	// provable non-mutating mode is ineligible for planning, and discovering
 	// that after cloning a repository would spend an operator's time and disk
@@ -188,15 +188,25 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 	if err := requirePlanningMode(composed, agent); err != nil {
 		return nil, nil, err
 	}
-	workspace, err := runtime.CreatePlanningWorkspace(composed.built.config.StateDir, planID,
-		composed.engine.PlanningSource(), intent.Base.Revision, "")
+	workspace, err := composed.engine.MaterializePlanningWorkspace(planID, intent.Base.Revision)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer workspace.Remove()
 
+	// The operator's chosen process is PLANNING INPUT, so the planner is shown
+	// it. A planner that never saw the template would silently replace the
+	// operator's decision about how this work is done with its own.
+	var template *domain.EngineeringPlanTemplate
+	if templateID != "" {
+		chosen, err := composed.service.Registry.Template(templateID)
+		if err != nil {
+			return nil, nil, err
+		}
+		template = &chosen
+	}
 	output, err := runtime.InvokePlanner(ctx, runtime.PlannerInput{
-		PlanID: planID, Revision: 1, Attempt: 1,
+		PlanID: planID, Revision: 1, Template: template,
 		Agent: composed.engine.PlanningAgent(), Provider: composed.engine.PlanningProvider(),
 		Workspace: workspace, Contract: intent.Contract, Objective: intent.Objective,
 		Base: intent.Base, SourceSnapshot: intent.SourceSnapshot,

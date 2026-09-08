@@ -80,6 +80,16 @@ type ExecutionRequest struct {
 	// expands no permission. Every item in it has already passed the actor
 	// admission gate; nothing that failed that gate is ever placed here.
 	Feedback []FeedbackContext
+	// Upstream is the accepted output of the plan stages this one depends on:
+	// the exact commit and tree, and the DIFF itself.
+	//
+	// The diff is candidate content, so it reaches the worker the way every
+	// other piece of candidate-derived text does - as delimited untrusted data
+	// framed by the runtime-owned instructions - and it is never stored in a
+	// durable payload. It exists because a reviewer that cannot see the change
+	// is not reviewing it: an independent review stage runs in its own
+	// workspace at the trusted base, and this is what makes its work real.
+	Upstream []UpstreamContext
 	Budgets  ProviderBudget
 }
 
@@ -101,6 +111,21 @@ const (
 	// judged the work, it was simply cut off.
 	InvocationContinuation InvocationPurpose = "continuation"
 )
+
+// UpstreamContext is one completed upstream stage's output as a downstream
+// stage sees it.
+type UpstreamContext struct {
+	StageID string
+	RunID   string
+	Commit  string
+	Tree    string
+	// Diff is the change that stage produced, bounded by the runtime. Empty
+	// means the runtime could not read it, which is stated rather than hidden.
+	Diff string
+	// Truncated reports that the diff was cut to the runtime's bound, so a
+	// reviewer knows it is reading part of a change rather than all of it.
+	Truncated bool
+}
 
 type Finding struct {
 	Classification         FailureClass
