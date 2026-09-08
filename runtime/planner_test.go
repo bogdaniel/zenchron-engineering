@@ -450,8 +450,13 @@ func TestThePlannerTranscriptIsReadFromABoundedTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tail) != 4096 {
-		t.Fatalf("read %d bytes, want the 4096-byte tail", len(tail))
+	// At most the bound, and resumed at a line boundary: a cut inside a string
+	// literal would invert the scanner's quote state for the whole tail.
+	if len(tail) > 4096 || len(tail) < 4000 {
+		t.Fatalf("read %d bytes, want a tail just under the 4096-byte bound", len(tail))
+	}
+	if !strings.HasPrefix(tail, "noise\n") {
+		t.Fatalf("the tail resumed mid-line: %q", tail[:20])
 	}
 	if !strings.HasSuffix(tail, answer) {
 		t.Fatalf("the tail does not end with the answer: %q", tail[len(tail)-80:])

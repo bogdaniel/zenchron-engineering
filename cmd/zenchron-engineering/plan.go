@@ -489,14 +489,18 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	pending, found, err := reader.store.Plan(planID)
+	_, found, err := reader.store.Plan(planID)
 	stateDir := reader.config.StateDir
+	awaiting, snapshotErr := reader.store.ReplayPlan(planID)
 	reader.release()
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
 	if !found {
 		return exitRunNotFound, fmt.Errorf("no such plan %q", planID)
+	}
+	if snapshotErr != nil {
+		return runtime.ExitFailed, snapshotErr
 	}
 	// The decision names the revision the OPERATOR READ, not whatever is
 	// highest when the command runs. Reading the plan here and deciding on
@@ -505,9 +509,19 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	// would be approved sight unseen. `plan show` prints the exact command.
 	revision, digest := flags.Revision, strings.TrimSpace(flags.Digest)
 	if revision < 1 || digest == "" {
+		// The hint names the revision AWAITING a decision, which is not always
+		// the highest stored one: a rejected proposal is still stored, and
+		// hinting it would hand the operator a command to approve exactly what
+		// they just turned down. Where nothing awaits a decision, the refusal
+		// says so instead of offering a command.
+		if awaiting.Approval.Status != domain.ApprovalPending || awaiting.Approval.Revision < 1 {
+			return runtime.ExitInvalid, fmt.Errorf(
+				"plan %s has no revision awaiting a decision (revision %d is %s); `autonomy plan show %s` shows its state",
+				planID, awaiting.Approval.Revision, awaiting.Approval.Status, planID)
+		}
 		return runtime.ExitInvalid, fmt.Errorf(
 			"%s names the exact revision it decides: run `autonomy plan show %s` and use the command it prints (currently `autonomy plan %s %s --revision %d --digest %s`)",
-			verb, planID, verb, planID, pending.Revision, pending.Digest)
+			verb, planID, verb, planID, awaiting.Approval.Revision, awaiting.Approval.Digest)
 	}
 	// A DECISION about work a supervisor is executing goes to that supervisor.
 	// It is the process that owns the work, so it applies the decision against

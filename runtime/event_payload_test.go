@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"reflect"
 )
 
 // TestJournalRefusesOversizedCanonicalPayload is the test that proves the size
@@ -561,7 +562,7 @@ func TestHumanAuthorityEvidenceSurvivesReopenByteForByte(t *testing.T) {
 	if events[0].EventHash != stored.EventHash {
 		t.Fatalf("event hash changed across reopen: %q vs %q", stored.EventHash, events[0].EventHash)
 	}
-	if decodeHumanAuthority(t, events[0]) != decodeHumanAuthority(t, stored) {
+	if !reflect.DeepEqual(decodeHumanAuthority(t, events[0]), decodeHumanAuthority(t, stored)) {
 		t.Fatalf("the recorded authority changed across reopen: %+v", decodeHumanAuthority(t, events[0]))
 	}
 	restored, err := reopened.Replay("r")

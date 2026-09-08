@@ -602,6 +602,14 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			if !satisfied {
 				continue
 			}
+			// The gate's CLAIMS have to be what the person answered. A gate
+			// that states claims and accepts any human decision on the run -
+			// including a routine publication authorization - records claims it
+			// never checked, which is a gate that reads as proof of something
+			// nobody was asked.
+			if !answersClaims(decision, stage.RequiredClaims) {
+				continue
+			}
 			proving++
 			payload.Decision = decision.decision
 			payload.HumanEvidenceID = decision.humanEvidenceID
@@ -619,6 +627,29 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 type humanDecisionReference struct {
 	decision        Ref
 	humanEvidenceID string
+	// claims are what the authority request the person answered was ABOUT.
+	claims []string
+}
+
+// answersClaims reports whether a human decision answered the claims the gate
+// states. A gate that names no claims is answered by the decision itself; a
+// gate that names them requires the request to have carried them, because a
+// person authorizing a publication has not thereby answered "was this
+// independently reviewed".
+func answersClaims(decision humanDecisionReference, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	for _, claim := range required {
+		found := false
+		for _, answered := range decision.claims {
+			found = found || answered == claim
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // humanDecision reports whether A PERSON decided this gate for this run.
@@ -656,6 +687,7 @@ func humanDecision(events []EngineeringEvent, action *domain.Action) (humanDecis
 		return humanDecisionReference{
 			decision:        Ref{ID: payload.Request.ID, Revision: payload.Request.Revision},
 			humanEvidenceID: payload.EvidenceID,
+			claims:          payload.Requires,
 		}, true
 	}
 	return humanDecisionReference{}, false

@@ -498,6 +498,13 @@ type HumanAuthorityRecordedPayload struct {
 	// was recorded. It is not the journal's append time, which the event header
 	// records separately.
 	OccurredAt time.Time `json:"occurred_at"`
+	// Requires is what the request the person answered was ABOUT: the exact
+	// outstanding human_approval claim ids. It is recorded because a decision
+	// is evidence of answering a QUESTION, and a plan gate that states claims
+	// has to be able to tell whether those are the claims that were answered -
+	// authorizing a publication is not the same act as attesting that a change
+	// was independently reviewed.
+	Requires []string `json:"requires,omitempty"`
 	// Note is an OPTIONAL, UNTRUSTED operator annotation. It is bounded by the
 	// same field bound as every other string here, and it is an input to
 	// nothing: Binding ignores it, so no permission decision can be made to
@@ -533,6 +540,7 @@ var humanAuthorityPayload = payloadSchema(func(p HumanAuthorityRecordedPayload) 
 		bounded("candidate.branch", p.Candidate.Branch),
 		requiredRef("contract", p.Contract),
 		required("state_sha256", p.StateSHA256),
+		boundedList("requires", p.Requires),
 		bounded("note", p.Note))
 })
 

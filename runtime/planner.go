@@ -516,18 +516,33 @@ func readTail(path string, limit int64) (string, error) {
 		return "", err
 	}
 	size := info.Size()
+	truncated := false
 	if size > limit {
 		if _, err := file.Seek(size-limit, io.SeekStart); err != nil {
 			return "", err
 		}
 		size = limit
+		truncated = true
 	}
 	body := make([]byte, size)
 	read, err := io.ReadFull(file, body)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	return string(body[:read]), nil
+	tail := string(body[:read])
+	if !truncated {
+		return tail, nil
+	}
+	// A cut at an arbitrary byte can land INSIDE a string literal, and the
+	// scanner that follows tracks quotes: starting mid-string inverts its state
+	// for the whole tail and can hide the answer entirely. Resuming at the
+	// first line boundary is not a guarantee about JSON, but it is a guarantee
+	// about the transcript: a provider writes its answer on its own lines, and
+	// a partial first line is exactly the fragment that cannot be part of it.
+	if newline := strings.IndexByte(tail, '\n'); newline >= 0 {
+		return tail[newline+1:], nil
+	}
+	return tail, nil
 }
 
 // maxPlannerAnswerBytes bounds how much of a planning transcript is scanned for

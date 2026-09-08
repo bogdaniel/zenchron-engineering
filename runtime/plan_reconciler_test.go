@@ -932,13 +932,52 @@ func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
 	if _, err := fixture.store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion, ID: "human-1", RunID: runID,
 		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(21, 0).UTC(),
-		Payload: mustPayload(t, humanAuthorityFixture(nil)),
+		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
+			// What the person was actually asked, which is what the gate's
+			// claims are checked against.
+			"requires": []any{"human-approval"},
+		})),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	payload, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot)
 	if err != nil || !satisfied {
 		t.Fatalf("recorded human authority did not satisfy the gate: satisfied=%v err=%v", satisfied, err)
+	}
+
+	// A human decision about something ELSE does not answer this gate: a person
+	// authorizing a publication has not attested that the change was
+	// independently reviewed.
+	elsewhere := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "human", Kind: domain.StageHumanDecisionGate, DependsOn: []string{"implementation"},
+			SubstitutesRole: domain.RoleReviewer, RequiredClaims: []string{"human-approval"}},
+	})
+	elsewhere.approve(t)
+	elsewhere.reconcile(t)
+	otherSnapshot, err := elsewhere.store.ReplayPlan(elsewhere.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRun := otherSnapshot.Stages["implementation"].RunID
+	if _, err := elsewhere.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "human-other", RunID: otherRun,
+		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(23, 0).UTC(),
+		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
+			"evidence_id": "ev-3", "requires": []any{"publication-authorized"},
+		})),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	otherPlan, _, err := elsewhere.store.PlanRevision(elsewhere.plan.ID, elsewhere.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherStage, _ := otherPlan.Stage("human")
+	if _, satisfied, err := elsewhere.reconciler.gateSatisfaction(otherStage, otherPlan, otherSnapshot); err != nil || satisfied {
+		t.Fatalf("a human decision about another claim satisfied the gate: satisfied=%v err=%v", satisfied, err)
 	}
 	if payload.HumanEvidenceID == "" {
 		t.Fatal("the satisfaction records no human evidence, so nothing names the person who decided")
@@ -951,7 +990,7 @@ func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
 		SchemaVersion: SchemaVersion, ID: "human-2", RunID: runID,
 		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(22, 0).UTC(),
 		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
-			"evidence_id": "ev-2", "decision": "reject",
+			"evidence_id": "ev-2", "decision": "reject", "requires": []any{"human-approval"},
 		})),
 	}); err != nil {
 		t.Fatal(err)
