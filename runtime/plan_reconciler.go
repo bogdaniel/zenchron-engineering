@@ -480,10 +480,14 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
 	}
+	upstreamBaseRevision, err := r.upstreamBase(assignment)
+	if err != nil {
+		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "upstream", Reason: boundedDetail(err.Error())}, nil
+	}
 	binding := RunPlanBinding{
 		PlanID: plan.ID, Revision: plan.Revision, PlanDigest: plan.Digest,
 		StageID: stage.ID, AssignmentID: assignment.ID,
-		BaseRevision: r.upstreamBase(assignment),
+		BaseRevision: upstreamBaseRevision,
 		// The assignment's budget is the stage's, already narrowed by the
 		// assigned profile's constraints, and narrowed AGAIN by what the plan
 		// has left. A ceiling that only refuses the NEXT stage after an
@@ -531,7 +535,12 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 // with two independent producers feeding one stage is an integration the
 // reconciler cannot invent, and one of them being the base is the honest
 // approximation until an integration stage materializes both.
-func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) string {
+// A read failure here is NOT "not published". Deciding that from an error
+// bases a reviewing stage on the trusted base and hands it nothing to review -
+// which is the exact blocking finding the first live dogfood review reported
+// about its own workspace, reached through a different door. The error is
+// returned and the stage waits.
+func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) (string, error) {
 	base := ""
 	for _, upstream := range assignment.Context.UpstreamOutputs {
 		if upstream.RunID == "" || upstream.Candidate == "" {
@@ -539,10 +548,13 @@ func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) string {
 		}
 		events, err := r.Store.Events(upstream.RunID)
 		if err != nil {
-			continue
+			return "", fmt.Errorf("upstream stage %q run %s could not be read: %w", upstream.StageID, upstream.RunID, err)
 		}
 		projection, err := Project(events)
-		if err != nil || projection.PullRequest == nil {
+		if err != nil {
+			return "", fmt.Errorf("upstream stage %q run %s could not be projected: %w", upstream.StageID, upstream.RunID, err)
+		}
+		if projection.PullRequest == nil {
 			// Not published. Its commit is not on the remote, so it cannot be
 			// cloned; the stage stays based on the trusted base and receives
 			// the diff as context.
@@ -550,7 +562,7 @@ func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) string {
 		}
 		base = upstream.Candidate
 	}
-	return base
+	return base, nil
 }
 
 // attributeRunSpend records what one child run has spent SO FAR, as the delta

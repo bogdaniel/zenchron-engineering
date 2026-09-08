@@ -830,8 +830,8 @@ func TestADownstreamStageIsBasedOnPublishedUpstreamWork(t *testing.T) {
 	// An UNPUBLISHED upstream candidate is not a base: it exists only in
 	// another run's workspace, and a candidate is cloned from the governed
 	// remote.
-	if base := fixture.reconciler.upstreamBase(assignment); base != "" {
-		t.Fatalf("an unpublished upstream candidate was used as a base: %q", base)
+	if base, err := fixture.reconciler.upstreamBase(assignment); err != nil || base != "" {
+		t.Fatalf("an unpublished upstream candidate was used as a base: %q (err=%v)", base, err)
 	}
 
 	// Publish it, and it becomes the base.
@@ -852,7 +852,7 @@ func TestADownstreamStageIsBasedOnPublishedUpstreamWork(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if base := fixture.reconciler.upstreamBase(assignment); base != "c0ffee" {
+	if base, err := fixture.reconciler.upstreamBase(assignment); err != nil || base != "c0ffee" {
 		t.Fatalf("a published upstream candidate produced base %q", base)
 	}
 
@@ -1874,5 +1874,42 @@ func TestAStaleHumanApprovalIsNotCarriedOntoANewCandidate(t *testing.T) {
 	}
 	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, moved); err != nil || satisfied {
 		t.Fatalf("an approval of candidate A satisfied the gate for candidate B: satisfied=%v err=%v", satisfied, err)
+	}
+}
+
+// A read failure is not an answer about publication.
+//
+// Deciding "not published" from an error bases a reviewing stage on the trusted
+// base and hands it nothing to review - the exact blocking finding the first
+// live dogfood review reported about its own workspace, reached through a
+// different door. The stage waits instead.
+func TestAnUnreadableUpstreamRunBlocksRatherThanRebasing(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	assignment := domain.AgentAssignment{
+		Context: domain.ContextPack{UpstreamOutputs: []domain.UpstreamOutput{
+			{StageID: "implementation", RunID: "run-upstream", Candidate: "c0ffee"},
+		}},
+	}
+	if err := fixture.store.PutRun(EngineeringRun{
+		SchemaVersion: SchemaVersion, ID: "run-upstream", Repository: "acme/repo",
+		Goal: "github-issue:acme/repo#41", Disposition: Waiting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A run whose event document the projection cannot fold.
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "broken-1", RunID: "run-upstream",
+		Type: EventCandidateCommitted, OccurredAt: fixture.clock.Now(),
+		Payload: []byte(`{"commit":"c0ffee","tree":"t","path_count":1,"paths_digest":"` + strings.Repeat("c", 64) + `"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the stored event so Project fails on read.
+	if _, err := fixture.store.db.Exec(
+		`UPDATE events SET document = replace(document, '"payload"', '"payl0ad"') WHERE run_id = ?`, "run-upstream"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.reconciler.upstreamBase(assignment); err == nil {
+		t.Fatal("an unreadable upstream run was treated as unpublished, which bases the stage on the trusted tree")
 	}
 }
