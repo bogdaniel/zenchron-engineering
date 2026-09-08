@@ -27,5 +27,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # A build-tagged file that no CI job compiles rots invisibly:
+      # control_endpoint_other.go referenced an undefined identifier and both
+      # Linux and macOS jobs stayed green, because neither ever selects that
+      # build tag. Compiling for a non-unix target is what makes the refusal
+      # path a checked one.
+      - name: Cross-compile the non-unix build
+        run: GOOS=windows GOARCH=amd64 go build ./...
+
       - name: Test
         run: go test ./...

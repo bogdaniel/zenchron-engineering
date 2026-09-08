@@ -56,6 +56,35 @@ func (s *SQLiteOperationStore) Run(id string) (EngineeringRun, bool, error) {
 	return run, err == nil, err
 }
 
+// Runs returns every persisted run, oldest first. It is the read the all-runs
+// operator view and the supervisor both need: "what work exists" is a question
+// about the durable store, and answering it by walking the state directory
+// would answer a question about the filesystem instead.
+//
+// It returns the run ROWS. The journal remains the authority for everything a
+// row projects; a caller that needs the replayed truth for one run asks for it
+// by id, which is what keeps this a cheap listing rather than a second reducer.
+func (s *SQLiteOperationStore) Runs() ([]EngineeringRun, error) {
+	rows, err := s.db.Query(`SELECT document FROM runs ORDER BY created_unix_nano ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []EngineeringRun
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		run, err := decodeRun(document)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 // AppendEvent allocates the run's next sequence, links the hash chain, records
 // the state-before/state-after digests, and inserts the row in one transaction.
 // The caller never chooses a sequence or a chain link: allocation happens under

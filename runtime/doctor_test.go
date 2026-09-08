@@ -118,6 +118,17 @@ type doctorForge struct {
 	GitHubAdapter
 	result DiscoveryResult
 	err    error
+	// viewer is the account the credential acts as. Doctor reports it rather
+	// than inferring distinctness from the credential mode, so a fixture that
+	// leaves it empty models an environment that cannot answer the question.
+	viewer GitHubActor
+}
+
+func (f doctorForge) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
+	if f.viewer.Login == "" {
+		return GitHubActor{}, &GitHubAuthError{Detail: "no viewer configured"}
+	}
+	return f.viewer, nil
 }
 
 func (f doctorForge) DiscoverIssues(context.Context, DiscoveryQuery) (DiscoveryResult, error) {
@@ -224,23 +235,46 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Credentials:            doctorCredential{secret: doctorSecret},
 		Provider:               doctorProviderFake{isolation: doctorProvenIsolation()},
 		ProviderCredentialPath: f.credential,
-		Codex:                  NativeCodexProvider{Executor: executor},
-		Sandbox:                DockerSandbox{Image: doctorImage, Executor: executor},
-		DependencyCacheDir:     f.cacheDir,
-		SemanticAssurance:      &FakeSemanticAssuranceProvider{},
+		// A healthy #63 environment has at least one named worker that can
+		// actually be invoked. Readiness is supplied rather than probed, for
+		// the same reason the git seams are: the report must not depend on
+		// which coding CLIs the test machine happens to have installed.
+		Agents: []AgentStatus{{
+			ID: "openai", Kind: AgentKindOpenAIResponses, TrustMode: TrustProtected,
+			Endpoint: "brokered API (provider default endpoint)", Default: true,
+			AgentReadiness: AgentReadiness{
+				Available: true, Detail: "the operator credential exists and is owner-only",
+				AuthMode: AuthModeAPIKeyFile, AuthModeSource: AuthSourceConfigured,
+			},
+			Eligible: true, Unattended: true,
+		}},
+		Codex:              NativeCodexProvider{Executor: executor},
+		Sandbox:            DockerSandbox{Image: doctorImage, Executor: executor},
+		DependencyCacheDir: f.cacheDir,
+		SemanticAssurance:  &FakeSemanticAssuranceProvider{},
 		// A healthy environment includes a controller that can say what it is.
 		ControllerBuild: ControllerBuild{
 			Kind: ControllerAdopted, Version: "main-fixture",
 			SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
 			BinarySHA256: strings.Repeat("c", 64),
 		},
-		GitHub: doctorForge{result: DiscoveryResult{
+		// A healthy environment can also say WHO it publishes as: doctor reports
+		// the resolved account rather than inferring distinctness from the
+		// credential mode, so the fixture has to supply one.
+		GitHub: doctorForge{viewer: GitHubActor{Login: "zenchron-runtime", ID: 4242}, result: DiscoveryResult{
 			Repo:      GitHubRepo{Owner: "acme", Name: "widgets"},
 			Label:     DefaultDiscoveryLabel,
 			Pages:     1,
 			RateLimit: RateLimitObservation{Remaining: 4931, ResetAt: time.Unix(1800000000, 0).UTC()},
 		}},
-		GitHubCredentialMode: GitHubCredentialCLI,
+		// A healthy environment gives the runtime a PUBLICATION IDENTITY of its
+		// own. With the operator's own `gh` credential the runtime publishes as
+		// them, and the guard that refuses runtime-authored feedback then
+		// refuses their reviews too - so the review loop is unavailable and
+		// doctor says so. That is a warning about a real limitation, not a
+		// fixture detail to paper over, which is why the healthy fixture is the
+		// configuration that does not have it.
+		GitHubCredentialMode: GitHubCredentialToken,
 		OperatorConfigPath:   f.configPath,
 		RepositoryRoot:       f.repoRoot,
 		ProjectModel:         model,
@@ -337,10 +371,12 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
 		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache", "assurance.semantic",
 		"assurance.dependency_preparation",
-		"github.credential", "github.identity", "github.rate_limit",
+		"github.credential", "github.publication_identity", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",
+		"agent.openai", "agents.usable",
+		"supervisor.endpoint", "state.storage",
 	}
 	if len(report.Checks) != len(want) {
 		t.Fatalf("report has %d checks, want %d", len(report.Checks), len(want))

@@ -27,6 +27,21 @@ Execution agents are replaceable providers beneath this architecture.
 
 The repository will use **Go** for the core implementation and **JSON** as the canonical persisted/interchanged representation. External domain contracts will be described using JSON Schema. YAML is not canonical and may only be added later as an optional authoring format that normalizes to JSON.
 
+## Amendment - product decoupling
+
+This ADR originally named Sentinel Shield and Zenchron Foundry as providers of
+"stronger native integrations". That wording is superseded and the sentence
+below is its corrected form.
+
+`zenchron-engineering`, `sentinel-shield` and `zenchron-foundry` are separate
+products. This one is complete and useful without either; neither is privileged
+inside it; and branded origin never grants stronger trust or authority. An
+assurance provider earns trust from the isolation and evidence properties it
+proves. See `ROADMAP.md` for the separation law and the tracker that states it.
+
+The decision itself is unchanged: the amendment removes a coupling the decision
+never required.
+
 ## Consequences
 
 ### Positive
@@ -36,7 +51,9 @@ The repository will use **Go** for the core implementation and **JSON** as the c
 - engineering semantics remain useful as models improve;
 - assurance and authority become auditable;
 - scope expansion can revise governance without forcing rigid workflows;
-- Sentinel Shield and Zenchron Foundry can provide stronger native integrations without becoming mandatory dependencies.
+- any external assurance or environment product can integrate through the generic
+  capability interfaces without becoming a dependency, and without being
+  privileged by origin.
 
 ### Costs
 

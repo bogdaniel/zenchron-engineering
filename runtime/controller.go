@@ -137,7 +137,16 @@ type ConfigDigest struct {
 // the attempt ceilings bound each bounded operation kind independently, so a
 // failing verifier cannot consume the execution provider's budget.
 type RunBudgets struct {
-	WallLimit            time.Duration `json:"wall_limit"`
+	WallLimit time.Duration `json:"wall_limit"`
+	// LifecycleDeadline bounds TOTAL elapsed calendar time, including every
+	// external wait. It is a different question from WallLimit, which bounds
+	// the time the system is working, and it is optional: absent means a run
+	// waiting on a person waits as long as the person takes.
+	//
+	// omitempty, because it must not appear in the canonical document of any
+	// run created before it existed - run identity is derived from that
+	// document, and an added zero would re-identify every historical run.
+	LifecycleDeadline    time.Duration `json:"lifecycle_deadline,omitempty"`
 	MaxExecutionAttempts int           `json:"max_execution_attempts"`
 	// MaxExecutionContinuations bounds DISTINCT continuation execution
 	// bindings for one run. MaxExecutionAttempts bounds retries of ONE
@@ -154,12 +163,34 @@ type RunBudgets struct {
 // Dependencies is the complete, explicit input to a runtime instance. Every
 // external system is a seam; nothing here is discovered from ambient state.
 type Dependencies struct {
-	Store     *SQLiteOperationStore
-	Clock     Clock
-	Owner     string
-	Liveness  OwnerLiveness
-	GitHub    GitHubAdapter
-	Provider  ExecutionProvider
+	Store    *SQLiteOperationStore
+	Clock    Clock
+	Owner    string
+	Liveness OwnerLiveness
+	GitHub   GitHubAdapter
+	Provider ExecutionProvider
+	// Agent is the named execution agent Provider implements. It is supplied
+	// alongside the provider rather than discovered from it: the composition
+	// root chose both, and a provider that could name itself would be stating
+	// its own trust mode, which is exactly the claim configuration owns.
+	//
+	// The zero value is a runtime driving a pre-#63 single-provider
+	// configuration; nothing is invented for it.
+	Agent ResolvedAgent
+	// Agents is the registry an operator command resolves an agent id
+	// against. It is optional: a runtime constructed to drive exactly one run
+	// needs only Agent, and only the handoff path consults the registry.
+	Agents AgentRegistry
+	// Feedback is the operator's admission rule for model-visible GitHub
+	// feedback. Its zero value is the SAFE default - collaborator-equivalent
+	// write permission, no allowlisted automation - so a configuration that
+	// says nothing about feedback admits only actors who could already push to
+	// the repository.
+	Feedback FeedbackPolicy
+	// Storage is the operator's bound on local runtime state. Its zero value
+	// is unbounded, which is the behaviour every configuration had before the
+	// bound existed.
+	Storage   StateStorage
 	Assurance AssuranceProvider
 	// SemanticAssurance is the INDEPENDENT semantic acceptance producer. It is
 	// optional: without it a contract requiring semantic_acceptance is refused
@@ -247,6 +278,7 @@ type EngineeringRuntime struct {
 	scheduler  Scheduler
 	flow       KernelFlow
 	repo       GitHubRepo
+	agents     AgentRegistry
 	controller string // digest binding controller identity to configuration
 }
 
@@ -300,8 +332,29 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		return nil, &DependencyError{Detail: "engineering policy: " + err.Error()}
 	}
 	// Fail closed on isolation before anything can reach the provider.
-	if err := RequireProtectedIsolation(d.Provider); err != nil {
-		return nil, &DependencyError{Detail: err.Error()}
+	//
+	// The check is conditional on the agent's TRUST MODE, and fails closed on
+	// anything that is not explicitly operator_trusted - an unset mode, a
+	// legacy dependency set, a hand-built one. A `protected` agent must prove
+	// its boundary before it may execute anything.
+	//
+	// An `operator_trusted` agent is exempt because that classification IS the
+	// answer this check would otherwise be asking for. It states that host read
+	// confinement is unproven, deliberately and permanently, and that the
+	// operator authorized this tool anyway by installing it, authenticating it
+	// and naming it. Checking it here refused every native CLI at construction
+	// and made the whole operator_trusted path unreachable: the classification
+	// existed, was documented, was tested against fakes, and could not run.
+	// The exemption requires TWO agreeing facts, not one string. A trust mode
+	// alone is a field somebody could set; a kind whose mandated trust mode is
+	// operator_trusted is checked by the registry against the adapter
+	// catalogue, and configuration cannot move a kind between trust modes. An
+	// agent claiming operator_trusted while naming a brokered kind therefore
+	// still has to prove its boundary.
+	if !(d.Agent.NativeCLI() && d.Agent.TrustMode == TrustOperatorTrusted) {
+		if err := RequireProtectedIsolation(d.Provider); err != nil {
+			return nil, &DependencyError{Detail: err.Error()}
+		}
 	}
 	repo, err := parseGitHubRepo(d.Repository.Identity)
 	if err != nil {
@@ -330,7 +383,8 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		return nil, err
 	}
 	return &EngineeringRuntime{
-		deps: d,
+		deps:   d,
+		agents: d.Agents,
 		scheduler: Scheduler{
 			Store: d.Store, Clock: d.Clock, Owner: d.Owner, Liveness: d.Liveness,
 			LeaseDuration:     time.Minute,
@@ -360,6 +414,10 @@ func (b RunBudgets) defaults() RunBudgets {
 	}
 	return b
 }
+
+// ParseGitHubRepo is the exported form for composition roots that hold an
+// owner/name identity and need the typed repository.
+func ParseGitHubRepo(identity string) (GitHubRepo, error) { return parseGitHubRepo(identity) }
 
 func parseGitHubRepo(identity string) (GitHubRepo, error) {
 	parts := strings.Split(identity, "/")
@@ -507,9 +565,78 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 				Detail: "adopting it would reconcile another controller's work under this one",
 			}
 		}
+		// A live generation keeps the agent it was created with. Adopting it
+		// under a different worker would be a silent provider handoff, which
+		// is the one thing an agent binding exists to prevent - so it goes
+		// through the same typed transition an explicit handoff request
+		// produces, which records the attempt and points at a new generation.
+		//
+		// An EMPTY recorded agent is a run created before the registry
+		// existed. Its documented legacy meaning is "whichever single provider
+		// the operator configuration named at the time", so it is adopted
+		// rather than refused; refusing it would make upgrading strand every
+		// run already in flight.
+		if existing.AgentID != "" && r.deps.Agent.ID != "" && existing.AgentID != r.deps.Agent.ID {
+			_, err := r.RequestAgentHandoff(runID, r.deps.Agent.ID, "adoption of a live generation by a different agent")
+			return StartOutcome{}, err
+		}
+		// The row and the journal are written by separate transactions, so a
+		// process that stopped between claiming the run and journalling its
+		// binding leaves a row naming an agent that replay cannot see. Repair
+		// it here, from the row that already exists, rather than letting the
+		// run read back as a legacy one - which any agent would then adopt,
+		// turning a crash into a silent provider change.
+		if err := r.repairAgentBinding(runID, existing); err != nil {
+			return StartOutcome{}, err
+		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// repairAgentBinding restores a journalled agent assignment for a run whose row
+// records one. It is idempotent and does nothing in the ordinary case.
+//
+// It exists because the claim and the genesis events cannot share a
+// transaction: the journal's foreign key requires the run row to exist first.
+// That leaves exactly one window - claimed, not yet assigned - and this closes
+// it on the next pass rather than leaving the row and the journal disagreeing
+// about which worker owns the run.
+func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun) error {
+	// Only THIS runtime's own agent can be reconstructed: the row records an
+	// id, and the kind and trust mode that complete the record live in the
+	// registry, not on the row. A runtime driving a different agent - or none -
+	// leaves the repair to one that can make it truthfully rather than
+	// inventing provenance from a name.
+	if run.AgentID == "" || run.AgentID != r.deps.Agent.ID {
+		return nil
+	}
+	events, err := r.deps.Store.Events(runID)
+	if err != nil {
+		return err
+	}
+	state := &runState{run: run, events: events}
+	if state.recordedAgent().AgentID != "" {
+		return nil
+	}
+	payload, err := marshalPayloadJSON(AgentAssignedPayload{
+		AgentID:      run.AgentID,
+		ProviderKind: r.deps.Agent.Kind,
+		TrustMode:    r.deps.Agent.TrustMode,
+		Model:        r.deps.Agent.Model,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = r.deps.Store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion,
+		ID:            runID + "-agent-assigned",
+		RunID:         runID,
+		Type:          EventRunAgentAssigned,
+		OccurredAt:    r.deps.Clock.Now(),
+		Payload:       payload,
+	})
+	return err
 }
 
 func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {
@@ -532,6 +659,7 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		// attempt ceilings are still read live. Persisting the whole record
 		// now is what lets the rest follow without another schema change.
 		Budgets:   &budgets,
+		AgentID:   r.deps.Agent.ID,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -569,6 +697,34 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		Payload:       provenance,
 	}); err != nil {
 		return "", err
+	}
+	// The agent binding is journalled immediately after genesis, so a replay
+	// answers "which worker is this run's" from the append-only log rather
+	// than from a mutable row or from whatever the operator's default agent
+	// happens to be today. A runtime driving a pre-#63 single-provider
+	// configuration has no named agent and records none: the absence is the
+	// documented legacy meaning, and inventing an id for it would fabricate
+	// provenance for runs that never had any.
+	if r.deps.Agent.ID != "" {
+		assignment, err := marshalPayloadJSON(AgentAssignedPayload{
+			AgentID:      r.deps.Agent.ID,
+			ProviderKind: r.deps.Agent.Kind,
+			TrustMode:    r.deps.Agent.TrustMode,
+			Model:        r.deps.Agent.Model,
+		})
+		if err != nil {
+			return "", err
+		}
+		if _, err := r.deps.Store.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion,
+			ID:            runID + "-agent-assigned",
+			RunID:         runID,
+			Type:          EventRunAgentAssigned,
+			OccurredAt:    now,
+			Payload:       assignment,
+		}); err != nil {
+			return "", err
+		}
 	}
 	return runID, nil
 }

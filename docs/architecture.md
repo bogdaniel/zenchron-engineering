@@ -1,5 +1,15 @@
 # Architecture
 
+This document is the **Authorization Kernel**: how engineering facts become
+obligations, evidence and an action-scoped authority decision. It is the durable
+core and it is deliberately unaware of which coding agent produced a change.
+
+For the system an operator actually runs — the persistent supervisor, the named
+execution agents, concurrent runs and the GitHub feedback loop that sit *above*
+this kernel — see [`product-architecture.md`](product-architecture.md). For where
+the project is going, see [`../ROADMAP.md`](../ROADMAP.md). Neither replaces this
+document: every path in them ends at the kernel described here.
+
 ## System boundary
 
 Zenchron Engineering OS is organized around an Engineering Authorization Kernel. Agent orchestration is an execution concern beneath that kernel.
@@ -155,13 +165,22 @@ Initial decision states should distinguish at least:
 
 Codex, Claude, Gemini, local agents, and future systems belong behind provider adapters.
 
+Implemented as a named agent registry: a stable agent id, a provider kind and an
+explicit trust mode are three separate facts, and no package in this kernel
+knows any of them. See [`agents.md`](agents.md).
+
 ### AssuranceProvider
 
-Tests, CI, static analyzers, Sentinel Shield, enterprise systems, and human review can produce or verify evidence. Sentinel Shield is the preferred Zenchron-native implementation, not a mandatory dependency.
+Tests, CI, static analyzers, enterprise systems and human review can produce or
+verify evidence. There is no privileged implementation: an assurance provider
+earns trust by the isolation and evidence properties it proves, never by which
+product ships it.
 
 ### ExecutionEnvironmentProvider
 
-Local worktrees, Docker, CI runners, customer infrastructure, and Zenchron Foundry can provide execution environments. Foundry is the preferred native provenance-aware implementation.
+Local worktrees, Docker, CI runners and customer infrastructure can provide
+execution environments, through one generic capability interface. As above, no
+implementation is privileged by origin.
 
 ## Early implementation rule
 

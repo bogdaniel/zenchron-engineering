@@ -56,8 +56,12 @@ const (
 // GitHub credential modes. "none" is an explicit refusal to authorize forge
 // writes, not an anonymous fallback.
 const (
-	GitHubCredentialCLI  = "github-cli"
-	GitHubCredentialNone = "none"
+	GitHubCredentialCLI = "github-cli"
+	// GitHubCredentialToken authenticates with an operator-provisioned token
+	// file, which is how the runtime is given a publication identity of its own
+	// rather than borrowing the operator's.
+	GitHubCredentialToken = "token"
+	GitHubCredentialNone  = "none"
 )
 
 // Watch enrolment. Watch observes ONLY repositories an operator listed in the
@@ -114,13 +118,120 @@ type ProviderConfig struct {
 // never a secret.
 type GitHubConfig struct {
 	CredentialMode string `json:"credential_mode"`
-	Endpoint       string `json:"endpoint,omitempty"`
+	// TokenPath is the file holding the PUBLICATION credential when
+	// credential_mode is "token". It names a path, never a secret, and the file
+	// must be owner-only.
+	//
+	// It exists so the runtime can publish under an identity that is NOT the
+	// operator's own GitHub account. With `github-cli` the runtime authenticates
+	// as the operator, so its own comments and the operator's reviews are the
+	// same actor - and the self-loop guard, which refuses anything the runtime
+	// authored, then refuses the operator's review too. The result is that the
+	// #63 review loop cannot run on a single-account installation: the operator
+	// reviews the pull request and the worker never hears it.
+	//
+	// The answer is a separate identity, not a weaker guard. A GitHub App
+	// installation token or a dedicated runtime account keeps admission decided
+	// by identity - which is what makes it robust against text - while leaving
+	// the human a distinct actor whose feedback is admissible.
+	//
+	// omitempty, so a configuration that does not use it canonicalizes exactly
+	// as it did before this member existed.
+	TokenPath string `json:"token_path,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty"`
+}
+
+// SupervisorConfig is the persistent supervisor's own bounds.
+//
+// They exist as their own members because the concurrency ceiling and the poll
+// interval are properties of the RUNTIME, not of the optional issue-discovery
+// policy they used to live under. `watch` keeps naming them so a configuration
+// written before `serve` existed still works, and when both are stated the
+// STRICTER value wins - fewer concurrent runs, longer interval between polls -
+// so neither member can be used to loosen the other, and a repository that
+// tightens the watch bound still tightens the effective one.
+type SupervisorConfig struct {
+	// MaxConcurrentRuns is the operator-authorized ceiling on runs driven at
+	// once. Zero means "not stated here", which falls back to the watch bound
+	// and then to the M0 default of one.
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// PollIntervalSeconds is how often a quiet supervisor looks again. Zero
+	// means "not stated here".
+	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
+}
+
+// StorageConfig is the operator's bound on local runtime state. Parallel
+// candidate clones make disk an operator-level resource, and a bound checked
+// before allocation is what turns "the machine filled up mid-clone" into a
+// typed wait an operator can act on.
+//
+// It is operator authority and absent from repositoryScope: a repository that
+// could raise it would be choosing how much of the operator's disk its own work
+// may consume.
+type StorageConfig struct {
+	// MaxStateBytes is the ceiling on the state directory. Zero means
+	// UNBOUNDED, which is the behaviour every configuration had before this
+	// member existed; introducing a bound nobody configured would start
+	// refusing work that used to run.
+	MaxStateBytes int64 `json:"max_state_bytes,omitempty"`
+}
+
+// FeedbackConfig is the operator's admission rule for model-visible GitHub
+// feedback. It is operator authority for the same reason a credential is: it
+// decides WHO may direct a coding agent that runs under the operator's own
+// account, and a repository that could widen it would be choosing its own
+// reviewers.
+//
+// Every member is omitempty, so a configuration that says nothing about
+// feedback canonicalizes exactly as it did before this member existed and
+// still gets the safe default: collaborator-equivalent write permission, no
+// allowlisted automation.
+type FeedbackConfig struct {
+	// MinPermission is the repository permission an actor must hold. Empty
+	// means DefaultFeedbackPermission. Setting it to "read" on a public
+	// repository would admit the entire internet, which is why the default is
+	// not that.
+	MinPermission string `json:"min_permission,omitempty"`
+	// AllowedBots are automation logins the operator explicitly admits.
+	AllowedBots []string `json:"allowed_bots,omitempty"`
+	// SelfLogins are identities the operator knows to be this system - the
+	// account the runtime publishes under, and any coding-agent service
+	// account. The runtime also resolves its own credential identity at
+	// startup; this member exists for the identities it cannot discover.
+	SelfLogins []string `json:"self_logins,omitempty"`
+}
+
+// FeedbackPolicy resolves the operator layer into the runtime-facing rule.
+func (c OperatorConfig) FeedbackPolicy() (FeedbackPolicy, error) {
+	policy := FeedbackPolicy{
+		AllowedBots: append([]string(nil), c.Feedback.AllowedBots...),
+		SelfLogins:  append([]string(nil), c.Feedback.SelfLogins...),
+	}
+	stated := strings.ToLower(strings.TrimSpace(c.Feedback.MinPermission))
+	if stated == "" {
+		return policy, nil
+	}
+	permission := GitHubPermission(stated)
+	if _, known := permissionRank[permission]; !known {
+		return FeedbackPolicy{}, &ConfigError{Detail: fmt.Sprintf("feedback.min_permission %q is not a GitHub repository permission", c.Feedback.MinPermission)}
+	}
+	policy.MinPermission = permission
+	return policy, nil
 }
 
 // BudgetConfig is the operator ceiling for one run.
 type BudgetConfig struct {
-	WallLimitSeconds     int `json:"wall_limit_seconds"`
-	MaxExecutionAttempts int `json:"max_execution_attempts"`
+	WallLimitSeconds int `json:"wall_limit_seconds"`
+	// LifecycleDeadlineSeconds bounds TOTAL elapsed time for a run, including
+	// waits on people and provider accounts. It is optional and absent by
+	// default: wall_limit_seconds bounds the work, and a run waiting for a
+	// human review should not be killed for the human's latency. Set this only
+	// when a run genuinely must stop existing after a fixed period.
+	//
+	// omitempty keeps a configuration that does not state it canonicalizing
+	// exactly as it did before this member existed.
+	LifecycleDeadlineSeconds int `json:"lifecycle_deadline_seconds,omitempty"`
+	MaxExecutionAttempts     int `json:"max_execution_attempts"`
 	// MaxExecutionContinuations bounds how many DISTINCT continuation
 	// execution bindings one run may start. It is a different resource from
 	// MaxExecutionAttempts, which bounds retries of ONE binding, and the two
@@ -217,10 +328,31 @@ type OperatorConfig struct {
 	ProjectModelPath string          `json:"project_model_path"`
 	PolicyPath       string          `json:"policy_path"`
 	Assurance        AssuranceConfig `json:"assurance"`
-	Provider         ProviderConfig  `json:"provider"`
-	GitHub           GitHubConfig    `json:"github"`
-	Budgets          BudgetConfig    `json:"budgets"`
-	Watch            WatchConfig     `json:"watch,omitempty"`
+	// Provider is the pre-#63 SINGLE execution provider. It remains supported
+	// so an existing operator configuration keeps working unchanged, and it is
+	// migrated into a one-agent registry by AgentRegistry. It is mutually
+	// exclusive with Agents: two statements of which worker does the work are
+	// two sources of truth, and the runtime refuses rather than picking one.
+	Provider ProviderConfig `json:"provider,omitzero"`
+	// Agents is the named worker registry. Every member is omitempty/omitzero,
+	// so a configuration written before #63 canonicalizes - and therefore
+	// digests, and therefore derives run identities - exactly as it did before
+	// these members existed.
+	Agents map[string]AgentConfig `json:"agents,omitempty"`
+	// DefaultAgent is the agent `autonomy run issue N` uses when the operator
+	// names none. It is required whenever more than one agent is configured:
+	// picking one for the operator would be choosing which worker, and which
+	// account, does their work.
+	DefaultAgent string       `json:"default_agent,omitempty"`
+	GitHub       GitHubConfig `json:"github"`
+	// Feedback is the admission rule for model-visible GitHub feedback.
+	Feedback FeedbackConfig `json:"feedback,omitzero"`
+	// Storage is the bound on local runtime state.
+	Storage StorageConfig `json:"storage,omitzero"`
+	// Supervisor is the persistent runtime's own bounds.
+	Supervisor SupervisorConfig `json:"supervisor,omitzero"`
+	Budgets    BudgetConfig     `json:"budgets"`
+	Watch      WatchConfig      `json:"watch,omitempty"`
 	// GC is the operator's reclamation window for `autonomy gc`.
 	GC GCConfig `json:"gc,omitempty"`
 	// Operator names who a run is recorded as having been authorized by. It is
@@ -283,6 +415,7 @@ type Config struct {
 func (c Config) RunBudgets() RunBudgets {
 	return RunBudgets{
 		WallLimit:                 time.Duration(c.Budgets.WallLimitSeconds) * time.Second,
+		LifecycleDeadline:         time.Duration(c.Budgets.LifecycleDeadlineSeconds) * time.Second,
 		MaxExecutionAttempts:      c.Budgets.MaxExecutionAttempts,
 		MaxExecutionContinuations: c.Budgets.continuations(),
 		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
@@ -540,15 +673,31 @@ func validRepositoryPart(part string) bool {
 }
 
 func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
+	// The supervisor bounds and the watch bounds are combined by taking the
+	// STRICTER of the two, so stating one can never loosen the other and a
+	// repository that tightens the watch bound still tightens the effective
+	// one.
+	ceiling := c.Watch.MaxConcurrentRuns
+	if stated := c.Supervisor.MaxConcurrentRuns; stated > 0 && (ceiling <= 0 || stated < ceiling) {
+		ceiling = stated
+	}
+	interval := time.Duration(c.Watch.PollIntervalSeconds) * time.Second
+	// Only a STATED supervisor interval participates. Treating an unset zero
+	// as a candidate would let the absence of one member erase a malformed
+	// value in the other, and a malformed bound must be refused rather than
+	// replaced by a default.
+	if stated := time.Duration(c.Supervisor.PollIntervalSeconds) * time.Second; stated > 0 && stated > interval {
+		interval = stated
+	}
 	settings := WatchSettings{
 		Label:             strings.TrimSpace(c.Watch.Label),
-		PollInterval:      time.Duration(c.Watch.PollIntervalSeconds) * time.Second,
-		MaxConcurrentRuns: resolveMaxConcurrentRuns(0, c.Watch.MaxConcurrentRuns),
+		PollInterval:      interval,
+		MaxConcurrentRuns: resolveMaxConcurrentRuns(0, ceiling),
 	}
 	if settings.Label == "" {
 		settings.Label = DefaultWatchLabel
 	}
-	if c.Watch.PollIntervalSeconds == 0 {
+	if interval == 0 {
 		settings.PollInterval = DefaultWatchPollSeconds * time.Second
 	}
 	if settings.PollInterval < MinWatchPollSeconds*time.Second {
@@ -602,17 +751,47 @@ func (c OperatorConfig) validate(path string) error {
 	if c.Assurance.DependencyCacheDir != "" && !filepath.IsAbs(c.Assurance.DependencyCacheDir) {
 		return refuse("assurance.dependency_cache_dir must be an absolute path")
 	}
-	if c.Provider.Kind != ProviderOpenAI && c.Provider.Kind != ProviderNativeCodex {
-		return refuse(fmt.Sprintf("provider.kind must be %q or %q", ProviderOpenAI, ProviderNativeCodex))
+	// Exactly one statement of which workers exist. An `agents` block is the
+	// #63 registry; its absence is a pre-#63 configuration whose `provider`
+	// block is migrated into a one-agent registry under that provider's own
+	// historical identity and trust mode. Both together would be two sources
+	// of truth for the same question, so it is refused rather than resolved by
+	// a precedence rule nobody wrote down.
+	if len(c.Agents) > 0 {
+		if c.Provider != (ProviderConfig{}) {
+			return refuse("provider and agents are mutually exclusive: move the provider entry into the agents registry")
+		}
+		if _, err := c.AgentRegistry(); err != nil {
+			return refuse(err.Error())
+		}
+	} else {
+		if c.Provider.Kind != ProviderOpenAI && c.Provider.Kind != ProviderNativeCodex {
+			return refuse(fmt.Sprintf("provider.kind must be %q or %q, or configure an agents registry", ProviderOpenAI, ProviderNativeCodex))
+		}
+		if strings.TrimSpace(c.Provider.Model) == "" {
+			return refuse("provider.model is required")
+		}
+		if !filepath.IsAbs(c.Provider.CredentialPath) {
+			return refuse("provider.credential_path must be an absolute path to an operator-controlled credential")
+		}
+		if strings.TrimSpace(c.DefaultAgent) != "" {
+			return refuse("default_agent requires an agents registry")
+		}
 	}
-	if strings.TrimSpace(c.Provider.Model) == "" {
-		return refuse("provider.model is required")
-	}
-	if !filepath.IsAbs(c.Provider.CredentialPath) {
-		return refuse("provider.credential_path must be an absolute path to an operator-controlled credential")
-	}
-	if c.GitHub.CredentialMode != GitHubCredentialCLI && c.GitHub.CredentialMode != GitHubCredentialNone {
-		return refuse(fmt.Sprintf("github.credential_mode must be %q or %q", GitHubCredentialCLI, GitHubCredentialNone))
+	switch c.GitHub.CredentialMode {
+	case GitHubCredentialCLI, GitHubCredentialNone:
+		if strings.TrimSpace(c.GitHub.TokenPath) != "" {
+			return refuse(fmt.Sprintf("github.token_path is only used with credential_mode %q", GitHubCredentialToken))
+		}
+	case GitHubCredentialToken:
+		if strings.TrimSpace(c.GitHub.TokenPath) == "" {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.token_path", GitHubCredentialToken))
+		}
+		if !filepath.IsAbs(c.GitHub.TokenPath) {
+			return refuse("github.token_path must be an absolute path")
+		}
+	default:
+		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialNone))
 	}
 	for _, bound := range []struct {
 		name  string
@@ -636,11 +815,39 @@ func (c OperatorConfig) validate(path string) error {
 	if stated := c.Budgets.MaxExecutionContinuations; stated != nil && *stated < 1 {
 		return refuse("budgets.max_execution_continuations must be at least 1")
 	}
+	// lifecycle_deadline_seconds is OPTIONAL, so 0 means absent rather than a
+	// malformed bound - unlike its neighbours above, where an explicit 0 is a
+	// stated ceiling of nothing. A negative value is still a mistake.
+	//
+	// A deadline below the wall limit is refused rather than silently making
+	// the execution budget unreachable: an operator who writes that has said
+	// two things that cannot both be honoured, and guessing which they meant is
+	// how a run dies for a reason its configuration does not explain.
+	if c.Budgets.LifecycleDeadlineSeconds < 0 {
+		return refuse("budgets.lifecycle_deadline_seconds must not be negative")
+	}
+	if d := c.Budgets.LifecycleDeadlineSeconds; d > 0 && d < c.Budgets.WallLimitSeconds {
+		return refuse(fmt.Sprintf(
+			"budgets.lifecycle_deadline_seconds (%d) is below budgets.wall_limit_seconds (%d): the total deadline would end every run before its execution budget could be spent",
+			d, c.Budgets.WallLimitSeconds))
+	}
 	if c.GC.RetentionHours < 0 {
 		return refuse("gc.retention_hours must not be negative")
 	}
 	if _, err := c.WatchSettings(); err != nil {
 		return refuse(err.Error())
+	}
+	if _, err := c.FeedbackPolicy(); err != nil {
+		return refuse(err.Error())
+	}
+	if c.Storage.MaxStateBytes < 0 {
+		return refuse("storage.max_state_bytes must not be negative")
+	}
+	if c.Supervisor.MaxConcurrentRuns < 0 {
+		return refuse("supervisor.max_concurrent_runs must not be negative")
+	}
+	if seconds := c.Supervisor.PollIntervalSeconds; seconds != 0 && seconds < MinWatchPollSeconds {
+		return refuse(fmt.Sprintf("supervisor.poll_interval_seconds must be at least %d", MinWatchPollSeconds))
 	}
 	return nil
 }

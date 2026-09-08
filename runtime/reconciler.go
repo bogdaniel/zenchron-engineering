@@ -28,11 +28,14 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -154,6 +157,11 @@ type runState struct {
 	sources           []sourceRecord
 	source            *sourceRecord
 	controllerChanged bool
+	// External-wait accounting, folded from the journal once; see externalWait.
+	waitExcluded  time.Duration
+	waitOpenSince time.Time
+	waitOpenWork  time.Duration
+	waitComputed  bool
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -309,6 +317,153 @@ func (s *runState) epoch() int64 {
 }
 
 func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epoch(), 10) }
+
+// externalWaitReasons is the CLOSED set of waits that are somebody else's turn.
+//
+// An execution wall budget bounds the work this system does. It must not be
+// spent waiting for a human to read a pull request, for an operator to sign a
+// provider back in, or for a rate limit to lift: none of that is the runtime
+// working, and a budget that burns through it forces an operator to size their
+// engineering budget around how fast people answer email. A run that reached
+// its goal and sat overnight awaiting review used to die of
+// run_wall_budget_exhausted, which made the #63 review loop unusable at any
+// budget that still bounded runaway work.
+//
+// The set is closed and fail-closed: a reason that is not listed here SPENDS
+// the budget. A new wait pauses the clock only when somebody decides it should,
+// which is the safe direction for a bound whose whole job is to end things.
+var externalWaitReasons = map[string]bool{
+	// Waiting for a person: review, merge authority, a policy decision only an
+	// operator can make.
+	"goal_state_reached":            true,
+	"awaiting_authority":            true,
+	"authority_blocked":             true,
+	"authority_unknown":             true,
+	"requested_privilege_expansion": true,
+	// Waiting for the operator's own accounts and tools.
+	"execution_provider_account_unavailable": true,
+	"execution_provider_quota":               true,
+	// Rate limiting is the other capacity wait. It is the provider declining to
+	// be asked yet, not the runtime working, and leaving it out charged an
+	// operator for their provider's backoff.
+	"execution_provider_rate_limited":  true,
+	"assurance_dependency_unavailable": true,
+	// The operator has to free disk before anything can proceed; the run is not
+	// working while it waits for them.
+	"state_storage_exhausted": true,
+	// The controller stopped. The run is not working, and it is waiting for a
+	// supervisor to exist again rather than for anything it can do itself.
+	"controller_shutdown":  true,
+	WatchWaitingGitHubAuth: true,
+	// Waiting for a human decision about the source or the pull request.
+	WatchWaitingOptInRemoved:       true,
+	"source_intent_changed":        true,
+	"source_closed":                true,
+	"pull_request_closed_unmerged": true,
+	"candidate_external_changed":   true,
+}
+
+// activeElapsed is the time this run has been the SYSTEM'S turn, derived from
+// the durable journal rather than from a stopwatch: every interval it excludes
+// is bounded by two recorded events, so a restart, a crash, or a second
+// supervisor reaches the same number from the same rows. An in-memory timer
+// would reset on restart and quietly hand a run a fresh budget.
+//
+// An external wait runs from the run.waiting event that declared it until the
+// next event that is not that same wait. Observation the runtime performs while
+// waiting - polling the pull request, re-reading the issue - is real work and is
+// counted; only the idle gap between ticks is excluded.
+func (s *runState) activeElapsed(now time.Time) time.Duration {
+	elapsed := now.Sub(s.run.CreatedAt)
+	excluded, openSince, openWork := s.externalWait()
+	// An open wait runs to now, less the work already performed inside it. This
+	// is the only part of the answer that depends on the clock, and therefore
+	// the only part that cannot be computed once.
+	if !openSince.IsZero() {
+		if idle := now.Sub(openSince) - openWork; idle > 0 {
+			excluded += idle
+		}
+	}
+	if excluded > elapsed {
+		return 0
+	}
+	return elapsed - excluded
+}
+
+// externalWait folds the journal once: the total of the CLOSED external-wait
+// intervals, the start of an open one, and the work performed inside it.
+//
+// An external wait is a STATE, not the gap between two adjacent events. It opens
+// at the run.waiting that declared an external reason and closes only at the
+// next DISPOSITION event - a wait for a different reason, or a terminal event.
+// It deliberately does not close on operation events, because recordDisposition
+// appends run.waiting only when the disposition or reason CHANGES:
+//
+//	t0  run.waiting(goal_state_reached)     <- the human's turn begins
+//	t1  operation.planned/before/after      <- a poll; still goal_state_reached,
+//	                                           so NO second run.waiting is written
+//	t2  hours later, still waiting
+//
+// An earlier version closed the interval at t1 and, finding no new wait event,
+// charged t1..t2 to the execution budget. That reproduced the original defect
+// after the first polling tick, and the unit tests missed it because they
+// synthesized a fresh run.waiting before every observation - a journal
+// production never writes.
+//
+// Work performed WHILE waiting is still work: operation.before/after pairs
+// inside the state are added back, so a poll costs its own duration and no more.
+//
+// Memoized because a loaded runState's events never change, while conditions()
+// is called several times per pass and a long-lived run accumulates thousands of
+// events.
+func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, openWork time.Duration) {
+	if s.waitComputed {
+		return s.waitExcluded, s.waitOpenSince, s.waitOpenWork
+	}
+	var waitingSince time.Time
+	var work time.Duration
+	started := map[string]time.Time{}
+	closeWait := func(at time.Time) {
+		if waitingSince.IsZero() {
+			return
+		}
+		if idle := at.Sub(waitingSince) - work; idle > 0 {
+			excluded += idle
+		}
+		waitingSince, work = time.Time{}, 0
+		started = map[string]time.Time{}
+	}
+	for _, event := range s.events {
+		switch event.Type {
+		case EventRunWaiting:
+			if externalWaitReasons[payloadReason(event.Payload)] {
+				if waitingSince.IsZero() {
+					waitingSince = event.OccurredAt
+				}
+				continue
+			}
+			closeWait(event.OccurredAt)
+		case EventRunCompleted, EventRunFailed, EventRunCancelled:
+			closeWait(event.OccurredAt)
+		case EventOperationBefore:
+			if !waitingSince.IsZero() && event.OperationID != "" {
+				started[event.OperationID] = event.OccurredAt
+			}
+		case EventOperationAfter:
+			if waitingSince.IsZero() || event.OperationID == "" {
+				continue
+			}
+			if at, ok := started[event.OperationID]; ok {
+				if spent := event.OccurredAt.Sub(at); spent > 0 {
+					work += spent
+				}
+				delete(started, event.OperationID)
+			}
+		}
+	}
+	s.waitExcluded, s.waitOpenSince, s.waitOpenWork, s.waitComputed = excluded, waitingSince, work, true
+	return excluded, waitingSince, work
+}
 
 // pinnedBase is the base revision the run was compiled and cloned against. It
 // is the FIRST observation's base: later base movement is handled by
@@ -503,8 +658,16 @@ func (s *runState) conditions() (Disposition, string) {
 		return Cancelled, s.snapshot.Reason
 	}
 	now := s.rt.deps.Clock.Now()
-	if limit := s.rt.deps.Budgets.WallLimit; limit > 0 && now.Sub(s.run.CreatedAt) > limit {
+	// The execution budget bounds ACTIVE work; see activeElapsed. A separate,
+	// optional lifecycle deadline is what bounds total calendar time, for an
+	// operator who genuinely wants a run to stop existing after a while. They
+	// are different questions and overloading one to answer both is what made a
+	// pull request awaiting review look like a runaway run.
+	if limit := s.rt.deps.Budgets.WallLimit; limit > 0 && s.activeElapsed(now) > limit {
 		return Failed, "run_wall_budget_exhausted"
+	}
+	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
+		return Failed, "run_lifecycle_deadline_exhausted"
 	}
 	if s.controllerChanged {
 		return Waiting, "controller_changed"
@@ -664,11 +827,43 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	// Bounded remediation: only a CURRENT-head failure that routes to a
 	// producer. An authority wait never reaches this branch, because
 	// RouteFailure never routes an authority wait to a provider.
-	class, ok := s.currentHeadFailure()
-	if !ok || RouteFailure(class) != RouteProviderRemediation {
-		return "", false
+	if class, ok := s.currentHeadFailure(); ok && RouteFailure(class) == RouteProviderRemediation {
+		return "remediation|" + s.projection.CandidateRevision + "|" + string(class), true
 	}
-	return "remediation|" + s.projection.CandidateRevision + "|" + string(class), true
+	// Admitted, applicable, undelivered reviewer feedback. It is the LAST
+	// producer branch deliberately: a candidate that does not build is fixed
+	// before a reviewer's request is acted on, and the feedback stays pending
+	// rather than being consumed by an invocation that was about something
+	// else.
+	//
+	// The binding is the exact set of items, so delivering them satisfies this
+	// operation forever and a later comment produces a different binding
+	// rather than a retry of this one. That is what makes "the same comment is
+	// never sent to the worker twice" a property of the planner rather than of
+	// a cursor someone has to remember to advance.
+	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
+		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	return "", false
+}
+
+// pendingFeedbackKeys is the admitted, applicable, undelivered feedback for the
+// current head, in stable order.
+func (s *runState) pendingFeedbackKeys() []string {
+	var keys []string
+	for _, decision := range s.feedbackState().Pending(s.projection.Head()) {
+		keys = append(keys, decision.Key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// digestOfKeys is a stable identity for a SET of feedback items. The keys
+// themselves would make an unbounded idempotency key; their digest is fixed
+// width and just as exact.
+func digestOfKeys(keys []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
+	return hex.EncodeToString(sum[:])[:32]
 }
 
 // invocationContinuationPrefix marks an execution binding as continuing
@@ -1346,6 +1541,14 @@ func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
 var waitReasons = map[FailureClass]string{
 	FailureProviderAccountUnavailable: "execution_provider_account_unavailable",
 	FailureAssurancePrerequisite:      "assurance_dependency_unavailable",
+	// The two capacity waits are reported separately because the operator
+	// action differs: a quota comes back on the provider's own schedule, while
+	// repeated rate limiting means the configured concurrency is above what
+	// that account tolerates.
+	FailureProviderQuota:         "execution_provider_quota",
+	FailureProviderRateLimited:   "execution_provider_rate_limited",
+	FailureStateStorageExhausted: "state_storage_exhausted",
+	FailureControllerShutdown:    "controller_shutdown",
 }
 
 func waitReason(class FailureClass) string {

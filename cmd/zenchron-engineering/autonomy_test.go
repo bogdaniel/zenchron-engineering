@@ -250,7 +250,12 @@ func TestUsageAndInvalidInputExitInvalid(t *testing.T) {
 		{"run", "issue"},
 		{"run", "issue", "zero"},
 		{"run", "issue", "0"},
-		{"status"},
+		// NOTE: bare `status` is NOT here. It became VALID in #63 - it is the
+		// fleet view - and this list asserted the opposite for as long as the
+		// machine running it had no operator configuration, because config
+		// resolution failed before usage was ever reached. CI has no
+		// configuration, so CI was green for the wrong reason; the assertion
+		// only broke on a machine with the product actually installed.
 		{"events", "run-1", "--unknown", "x"},
 		{"status", "run-1", "--repo"},
 		{"stop"},
@@ -1845,7 +1850,11 @@ func TestOperatorExitStatusIsTheRealProcessStatus(t *testing.T) {
 		}
 	})
 	t.Run("usage", func(t *testing.T) {
-		if code, out := runCLI(t, dir, "autonomy", "status"); code != runtime.ExitInvalid {
+		// `status --repo` with no value is a usage error whatever the machine's
+		// configuration says. Bare `status` is not: it is the fleet view, and
+		// asserting a refusal for it only held on a machine with no operator
+		// configuration.
+		if code, out := runCLI(t, dir, "autonomy", "status", "--repo"); code != runtime.ExitInvalid {
 			t.Fatalf("process exited %d, want %d\n%s", code, runtime.ExitInvalid, out)
 		}
 	})

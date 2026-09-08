@@ -892,6 +892,10 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
+	return providerEnvelope(r) + feedbackBlock(r.Feedback)
+}
+
+func providerEnvelope(r ExecutionRequest) string {
 	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %v. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), r.Findings)
 }
 

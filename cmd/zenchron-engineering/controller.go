@@ -53,7 +53,7 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 		forge = runtime.GitHubRESTAdapter{
 			HTTP:        &http.Client{Timeout: 30 * time.Second},
 			Endpoint:    config.GitHub.Endpoint,
-			Credentials: githubCredentials(config.GitHub.CredentialMode),
+			Credentials: githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath),
 		}
 	}
 	rulesetReader, ok := forge.(interface {

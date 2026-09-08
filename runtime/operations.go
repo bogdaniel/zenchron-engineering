@@ -334,6 +334,18 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		}
 		return effect{state: Succeeded, result: candidateCreateResult{dir, state.pinnedBase(), adopted}}
 	}
+	// The storage ceiling is checked HERE, immediately before the clone, and
+	// nowhere else: this is the one place the runtime allocates a workspace,
+	// and a bound checked anywhere earlier would be checking a number that
+	// could have changed by the time it mattered.
+	// The admission is HELD across the clone. Checking and then allocating let
+	// two concurrent runs both find room for one more candidate and both take
+	// it.
+	release, err := r.deps.Storage.Reserve()
+	if err != nil {
+		return effect{state: OperationFailed, result: mutationResult{FailureClass: FailureStateStorageExhausted}}
+	}
+	defer release()
 	workspace, err := CreateCandidateClone(r.deps.StateDir, state.run.ID, r.deps.Remote.URL, state.pinnedBase(), r.deps.Credentials)
 	if err != nil {
 		return failed(err)
@@ -471,6 +483,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureCandidateCredentialMaterial, ExecutionResult{}, err),
 		}}
 	}
+	// Admitted, applicable, undelivered reviewer feedback. It is assembled
+	// BEFORE the invocation so the same set that is delivered is the set that
+	// is recorded as consumed afterwards; deriving it twice could deliver one
+	// set and record another.
+	//
+	// Feedback also makes an otherwise-initial invocation a remediation: the
+	// worker is being asked to change something in response to a finding, and
+	// the invocation contract requires a remediation to carry findings.
+	pending := state.feedbackState().Pending(state.projection.Head())
+	feedback := r.feedbackContext(state.run.ID, pending)
+	if len(feedback) > 0 && purpose != InvocationContinuation {
+		purpose = InvocationRemediation
+		findings = append(findings, feedbackFindings(feedback)...)
+	}
 	// The previous attempt of THIS operation, read from durable state. It is
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
@@ -502,6 +528,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		TrustedInstructions:   trustedProviderInstructions,
 		Purpose:               purpose,
 		Findings:              findings,
+		Feedback:              feedback,
 		Budgets:               ProviderBudget{WallLimit: r.deps.Budgets.WallLimit},
 	})
 	if err := workspace.AssertIntegrity(); err != nil {
@@ -536,6 +563,50 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			SubjectCommit: subject.Commit,
 			SubjectTree:   subject.Tree,
 		}})
+	}
+	// The worker has now been shown the feedback, so its delivery is recorded.
+	// Delivery is journalled whether or not the invocation went on to succeed:
+	// what the record means is "these items were given to this attempt", and
+	// re-delivering a human's review because the run failed afterwards would
+	// duplicate it rather than preserve it. The items remain visible in the
+	// journal as admitted-and-consumed, which is what a later transition
+	// carries forward.
+	// Delivery is recorded only when a worker actually RAN. CLIAgentProvider
+	// refuses before starting a process on a failed capability probe, a missing
+	// home or a missing executable, and those refusals used to mark the
+	// feedback consumed anyway: the agent CLI absent for one tick meant a
+	// reviewer's comment was recorded as delivered, its binding disappeared,
+	// and the review reached nobody, ever.
+	//
+	// An invocation that ran and then failed still counts, which is the case
+	// the comment above defends: re-delivering a human's review because the
+	// work failed afterwards would duplicate it. Invocation provenance is
+	// written only after the process returns, so it is the honest signal for
+	// "this attempt reached a worker".
+	invoked := execErr == nil || result.Invocation != nil
+	if len(pending) > 0 && invoked {
+		delivered := make(map[string]bool, len(feedback))
+		keys := make([]string, 0, len(feedback))
+		for _, item := range feedback {
+			keys = append(keys, item.Key)
+			delivered[item.Key] = true
+		}
+		// Every admitted item that was due is accounted for, not only the ones
+		// whose text still existed. An item whose artifact had been reclaimed
+		// was previously left out of the record entirely, so it stayed pending
+		// forever and every later attempt re-derived a binding for it.
+		var unavailable []string
+		for _, item := range pending {
+			if !delivered[item.Key] {
+				unavailable = append(unavailable, item.Key)
+			}
+		}
+		if len(keys) > 0 || len(unavailable) > 0 {
+			events = append(events, journalEntry{Type: EventFeedbackConsumed, Payload: FeedbackConsumedPayload{
+				Keys: keys, Unavailable: unavailable,
+				AgentID: r.deps.Agent.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+			}})
+		}
 	}
 	produced := effect{result: executionRecord{mutationResult: record, PriorContext: result.PriorContext}, state: Succeeded, events: events}
 	if execErr != nil || result.Failure != nil {

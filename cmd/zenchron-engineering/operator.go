@@ -1066,11 +1066,29 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		in.SemanticAssurance = semanticAssuranceProvider(config, artifacts)
 	}
 	in.ProviderCredentialPath = config.Provider.CredentialPath
+	in.ControlEndpoint = runtime.ControlSocketPath(config.StateDir)
+	in.Storage = runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes}
+	// Agent readiness is the SAME answer `autonomy agents` gives, produced by
+	// the same probe. Two independent answers to "is this worker usable" would
+	// eventually disagree, and an operator would have no way to know which one
+	// to believe.
+	if registry, err := config.AgentRegistry(); err == nil {
+		in.Agents = runtime.DescribeAgents(context.Background(), registry, func(agent runtime.ResolvedAgent) runtime.AgentProber {
+			return runtime.AgentProberFor(agent, artifacts, operatorHome())
+		})
+		if agent, err := registry.Agent(""); err == nil {
+			in.ProviderCredentialPath = firstConfigured(agent.CredentialPath, config.Provider.CredentialPath)
+		}
+	}
 	in.GitHubCredentialMode = config.GitHub.CredentialMode
 	in.DiscoveryLabel = config.Watch.Label
-	in.Credentials = githubCredentials(config.GitHub.CredentialMode)
+	in.Credentials = githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
 	if in.Provider == nil {
-		in.Provider = executionProvider(config, artifacts, sandbox)
+		if registry, err := config.AgentRegistry(); err == nil {
+			if agent, err := registry.Agent(""); err == nil {
+				in.Provider = executionProvider(config, agent, artifacts, sandbox, false)
+			}
+		}
 	}
 	if in.GitHub == nil && in.Credentials != nil {
 		in.GitHub = runtime.GitHubRESTAdapter{
@@ -1130,4 +1148,16 @@ func autonomyGC(args []string, overrides autonomyOverrides, stdout io.Writer) (i
 		return runtime.ExitFailed, err
 	}
 	return runtime.ExitCompleted, nil
+}
+
+// firstConfigured returns the first non-empty value. It exists so the doctor's
+// credential check follows the agent registry when one is configured and the
+// pre-#63 provider block when it is not, without a second precedence rule.
+func firstConfigured(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

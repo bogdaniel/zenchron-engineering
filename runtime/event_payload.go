@@ -48,6 +48,8 @@ var eventPayloads = map[string]payloadValidator{
 	EventRunFailed:    dispositionPayload,
 	EventRunCancelled: dispositionPayload,
 
+	EventFeedbackPublicationIdentity: payloadSchema(FeedbackPublicationIdentityPayload.validate),
+
 	EventOperationPlanned: operationPayload,
 	EventOperationBefore:  operationPayload,
 	EventOperationAfter:   operationPayload,
@@ -164,6 +166,59 @@ var eventPayloads = map[string]payloadValidator{
 			nonNegative("finding_count", p.FindingCount))
 	}),
 	EventHumanAuthorityRecorded: humanAuthorityPayload,
+
+	EventRunAgentAssigned: payloadSchema(func(p AgentAssignedPayload) error {
+		if _, known := agentKinds[p.ProviderKind]; !known {
+			return fmt.Errorf("agent provider kind %q is not a configurable kind", p.ProviderKind)
+		}
+		if p.TrustMode != agentKinds[p.ProviderKind] {
+			return fmt.Errorf("agent trust mode %q is not the trust mode of kind %q", p.TrustMode, p.ProviderKind)
+		}
+		return errors.Join(required("agent_id", p.AgentID), bounded("model", p.Model))
+	}),
+	// A handoff record is identity, counts and digests. The schema checks the
+	// members a reader would have to trust: which run, which two agents, and a
+	// stated reason - an unexplained provider transition is the thing this
+	// event exists to make impossible.
+	EventRunAgentHandoffRefused: payloadSchema(func(p AgentHandoffRecord) error {
+		return errors.Join(
+			required("run_id", p.RunID),
+			required("to.agent_id", p.To.AgentID),
+			bounded("reason", p.Reason),
+			required("refusal_code", string(p.RefusalCode)),
+			nonNegative("evidence_bundles", p.EvidenceBundles),
+			nonNegative("feedback_consumed", p.FeedbackConsumed))
+	}),
+	EventFeedbackObserved: payloadSchema(func(p FeedbackObservedPayload) error {
+		return errors.Join(
+			required("key", p.Key),
+			required("class", string(p.Class)),
+			required("reason", p.Reason),
+			required("text_digest", p.TextDigest),
+			bounded("actor", p.Actor))
+	}),
+	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
+		// A record may carry ONLY unavailable keys: when every pending item's
+		// text artifact has been reclaimed, nothing was delivered and the
+		// record exists to drain the pending set. Requiring Keys made that
+		// case unwritable - AppendEvent failed after the provider had already
+		// been invoked, and every later pass re-derived the same set, re-ran
+		// the provider, and died at the same append.
+		if len(p.Keys) == 0 && len(p.Unavailable) == 0 {
+			return fmt.Errorf("a consumption record with no keys accounts for nothing")
+		}
+		if len(p.Unavailable) > maxFeedbackKeysPerEvent {
+			return fmt.Errorf("a consumption record carries %d unavailable keys, more than the bound of %d", len(p.Unavailable), maxFeedbackKeysPerEvent)
+		}
+		if len(p.Keys) > maxFeedbackKeysPerEvent {
+			return fmt.Errorf("a consumption record carries %d keys, more than the bound of %d", len(p.Keys), maxFeedbackKeysPerEvent)
+		}
+		if p.Attempt < 1 {
+			return fmt.Errorf("feedback delivery must name the attempt that received it, got %d", p.Attempt)
+		}
+		return errors.Join(required("operation_id", p.OperationID),
+			boundedList("keys", p.Keys), boundedList("unavailable", p.Unavailable))
+	}),
 }
 
 // validateEventPayload enforces the byte ceiling and the per-type schema. It

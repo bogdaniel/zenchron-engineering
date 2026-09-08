@@ -123,6 +123,18 @@ type DoctorInput struct {
 	ProjectModel domain.ProjectModel
 	Policy       domain.EngineeringPolicy
 
+	// Agents is the operator's configured worker registry, already probed. It
+	// is passed in rather than probed here so the preflight performs the SAME
+	// readiness the `agents` command shows: two answers to "is this worker
+	// usable" would eventually disagree.
+	Agents []AgentStatus
+	// ControlEndpoint is the supervisor's local control path, when one is
+	// configured. It is an operator-authority boundary, so doctor reports what
+	// it is and refuses to call an exposed one healthy.
+	ControlEndpoint string
+	// Storage is the operator's bound on local runtime state.
+	Storage StateStorage
+
 	// ControllerBuild is the provenance of the binary running this preflight.
 	// The zero value is the truthful answer for an unattested build.
 	//
@@ -149,6 +161,9 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
 	checks = append(checks, doctorController(in))
+	checks = append(checks, doctorAgents(in)...)
+	checks = append(checks, doctorControlEndpoint(in))
+	checks = append(checks, doctorStateStorage(in))
 
 	report := DoctorReport{Status: DoctorPass, Checks: checks}
 	for _, check := range checks {
@@ -565,7 +580,27 @@ func doctorProvider(in DoctorInput) []DoctorCheck {
 func doctorProviderIsolation(in DoctorInput) DoctorCheck {
 	const id = "provider.isolation"
 	if in.Provider == nil {
-		return fail(doctorGroupProvider, id, "no execution provider is configured, so no protected-eligible provider exists; set provider.kind in the operator configuration")
+		return fail(doctorGroupProvider, id, "no execution provider is configured, so no protected-eligible provider exists; configure an agents registry or set provider.kind")
+	}
+	// An operator_trusted worker is a TRUTHFUL classification, not a degraded
+	// protected one. Reporting it as a failure would tell an operator running
+	// their own authenticated Codex or Claude Code CLI that their setup is
+	// broken, when what is actually true is that this worker's host read
+	// confinement is unproven. That distinction is the whole point of having
+	// two trust modes, and doctor states it rather than collapsing it into red.
+	//
+	// It states only what is ENFORCED. This text used to end "ineligible for
+	// work whose policy requires protected execution", which reads as a rule
+	// the runtime applies; there is no policy vocabulary for requiring
+	// protected execution, so nothing matches work to a trust mode. e09b170
+	// removed the same claim from the durable documentation and this is the
+	// last copy of it. See the known limitations in ROADMAP.md.
+	if agent, ok := defaultAgentStatus(in); ok && agent.TrustMode == TrustOperatorTrusted {
+		return pass(doctorGroupProvider, id, fmt.Sprintf(
+			"the default agent %q runs as %s: Zenchron injects no publication credential and selects the provider's least-privilege automation mode, "+
+				"but a CLI running under your account can read what your account can read, so host read confinement is UNPROVEN. A protected agent must "+
+				"prove that boundary before it executes anything, and a run created under protected is never continued by an operator_trusted worker; "+
+				"choosing this worker is your decision, because policy cannot yet require protected execution", agent.ID, TrustOperatorTrusted))
 	}
 	if err := RequireProtectedIsolation(in.Provider); err != nil {
 		return fail(doctorGroupProvider, id, err.Error())
@@ -579,9 +614,18 @@ func doctorProviderIsolation(in DoctorInput) DoctorCheck {
 // is not a usable secret, which is exactly why configuration names one.
 func doctorProviderCredential(in DoctorInput) DoctorCheck {
 	const id = "provider.credential"
+	// A native CLI authenticates ITSELF. Zenchron holds no credential for it,
+	// deliberately, and demanding one would be asking an operator to copy a
+	// token into configuration for a tool they have already logged into - which
+	// is exactly what this milestone exists to stop requiring.
+	if agent, ok := defaultAgentStatus(in); ok && nativeCLIKind(agent.Kind) {
+		return pass(doctorGroupProvider, id, fmt.Sprintf(
+			"the default agent %q is a local CLI that authenticates itself; Zenchron holds no credential for it and injects none. "+
+				"Its observed authentication state is %q (%s)", agent.ID, agent.AuthMode, agent.AuthModeSource))
+	}
 	path := strings.TrimSpace(in.ProviderCredentialPath)
 	if path == "" {
-		return fail(doctorGroupProvider, id, "no provider credential path is configured; set provider.credential_path to an operator-controlled file")
+		return fail(doctorGroupProvider, id, "no provider credential path is configured; set the brokered agent's credential_path to an operator-controlled file")
 	}
 	if !filepath.IsAbs(path) {
 		return fail(doctorGroupProvider, id, "provider credential path "+path+" is not absolute; provider.credential_path must be an absolute path")
@@ -818,7 +862,71 @@ const doctorGroupGitHub = "github"
 func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 	credential := doctorGitHubCredential(in)
 	identity, rate := doctorGitHubRead(ctx, in, credential)
-	return []DoctorCheck{credential, identity, rate}
+	return []DoctorCheck{credential, doctorPublicationIdentity(in), identity, rate}
+}
+
+// doctorPublicationIdentity answers whether the operator can give their own
+// workers feedback.
+//
+// The runtime refuses feedback it authored itself, by identity, so it cannot
+// talk itself into a loop. When it publishes with the operator's own `gh`
+// credential, the runtime IS the operator as far as GitHub is concerned, and
+// that guard refuses the operator's reviews along with its own. Everything
+// behaves exactly as designed and the central #63 workflow - review the pull
+// request, the right worker continues - silently cannot happen.
+//
+// It was silent until a live run hit it: the runtime observed the review, bound
+// it to the exact head, and recorded "authored by this runtime, so admitting it
+// would let the system feed itself" about a human being. This states it up
+// front, before an operator spends a subscription discovering it.
+//
+// It is a WARN rather than a FAIL because runs still execute, publish and
+// verify; what is unavailable is the remediation loop. The fix is a separate
+// publication identity, not a weaker guard.
+// doctorViewer resolves the account the runtime publishes as, when the adapter
+// can answer. It is a read; doctor makes no write.
+func doctorViewer(in DoctorInput) (GitHubActor, bool) {
+	viewer, ok := in.GitHub.(ForgeViewer)
+	if !ok || strings.TrimSpace(in.Repository.Identity) == "" {
+		return GitHubActor{}, false
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return GitHubActor{}, false
+	}
+	actor, err := viewer.Viewer(context.Background(), repo)
+	if err != nil || strings.TrimSpace(actor.Login) == "" {
+		return GitHubActor{}, false
+	}
+	return actor, true
+}
+
+func doctorPublicationIdentity(in DoctorInput) DoctorCheck {
+	const id = "github.publication_identity"
+	switch in.GitHubCredentialMode {
+	case GitHubCredentialNone:
+		return warn(doctorGroupGitHub, id, "github.credential_mode is \"none\", so the runtime publishes nothing and no publication identity exists")
+	case GitHubCredentialToken:
+		// The mode proves a SEPARATE CREDENTIAL, not a separate account: a
+		// personal access token for the operator's own login sits in that file
+		// just as happily as a dedicated runtime account's. Claiming
+		// distinctness from the mode alone would be the same kind of untrue
+		// statement this check exists to make.
+		if actor, ok := doctorViewer(in); ok {
+			return pass(doctorGroupGitHub, id, fmt.Sprintf(
+				"the runtime publishes as %q from its own operator-provisioned token. Compare that with your own GitHub login: where they differ, your "+
+					"reviews are admissible feedback and the runtime's own are refused by identity; where they are the SAME account, the runtime is still "+
+					"acting as you and your reviews will not reach a worker", actor.Login))
+		}
+		return warn(doctorGroupGitHub, id,
+			"the runtime is configured with its own publication token, but the account it authenticates as could not be resolved, so this check cannot "+
+				"say whether it is a different actor from you - and feedback admission fails closed until that identity resolves")
+	}
+	return warn(doctorGroupGitHub, id,
+		"the runtime publishes with your own `gh` credential, so it acts as YOU on GitHub. Feedback authored by the publishing identity is refused so the "+
+			"system cannot feed itself - which means your own reviews and comments will not reach a worker, and the review loop is unavailable. Give the "+
+			"runtime an identity of its own with github.credential_mode \"token\" and github.token_path (a GitHub App installation token or a dedicated "+
+			"runtime account); nothing here weakens the self-loop guard")
 }
 
 // doctorGitHubCredential reports the typed github_auth_required outcome rather
@@ -1003,4 +1111,137 @@ func doctorGovernance(in DoctorInput) DoctorCheck {
 		}
 	}
 	return warn(doctorGroupGovernance, id, "policy does not grant "+PublicationActionType+":"+branch+" from predicted scope. The runtime cannot predict which files an issue will touch, so predicted scope is honestly `unknown`; a policy that only grants publication once the paths are known makes that grant a privilege EXPANSION at reassessment, which is correctly refused, and the run would wait on requested_privilege_expansion forever. Add a rule granting this permission for the `unknown` value of the boundary facts it matches on. Nothing was granted by this diagnosis.")
+}
+
+// ---------------------------------------------------------------------------
+// Agents, control endpoint and state storage
+// ---------------------------------------------------------------------------
+
+// defaultAgentStatus is the worker a run would use when the operator names
+// none. Several checks answer differently for a self-authenticating local CLI
+// than for a brokered provider, and this is the one place that distinction is
+// resolved.
+func defaultAgentStatus(in DoctorInput) (AgentStatus, bool) {
+	for _, agent := range in.Agents {
+		if agent.Default {
+			return agent, true
+		}
+	}
+	return AgentStatus{}, false
+}
+
+const (
+	doctorGroupAgents     = "agents"
+	doctorGroupSupervisor = "supervisor"
+)
+
+// doctorAgents reports each configured worker INDEPENDENTLY. One unusable agent
+// is not a broken system: an operator with Codex installed and Gemini not is in
+// a perfectly ordinary state, and a report that collapsed that into one verdict
+// would tell them nothing about which work they can actually start.
+//
+// An unavailable agent is therefore WARN, not FAIL. The one FAIL is having no
+// usable worker at all, because that is the state in which no work can begin.
+func doctorAgents(in DoctorInput) []DoctorCheck {
+	if len(in.Agents) == 0 {
+		// A pre-#63 single-provider configuration has no named agents, and it
+		// is a legal configuration whose provider is diagnosed by the provider
+		// checks above. Saying so is a WARN rather than a FAIL: nothing is
+		// broken, and per-agent readiness simply has nothing to report.
+		return []DoctorCheck{warn(doctorGroupAgents, "agents.configured",
+			"no named execution agents were resolved, so per-agent readiness was not evaluated. "+
+				"A configuration written before the agent registry existed is diagnosed by the provider checks instead; "+
+				"add an `agents` registry to name the coding CLIs you have installed")}
+	}
+	checks := make([]DoctorCheck, 0, len(in.Agents)+1)
+	usable := 0
+	for _, agent := range in.Agents {
+		id := "agent." + agent.ID
+		detail := fmt.Sprintf("%s (%s, %s): %s", agent.ID, agent.Kind, agent.TrustMode, agent.Detail)
+		if agent.Version != "" {
+			detail += " [version " + agent.Version + "]"
+		}
+		// Standing permission for a provider's unsafe mode is surfaced even
+		// when unused: it is a posture, and an operator should not have to read
+		// a configuration file to discover it.
+		if agent.PermissionBypassAllowed {
+			detail += "; this agent is configured to ALLOW its provider's permission bypass when an invocation explicitly requests it"
+		}
+		if agent.Available {
+			usable++
+			checks = append(checks, pass(doctorGroupAgents, id, detail))
+			continue
+		}
+		checks = append(checks, warn(doctorGroupAgents, id, detail))
+	}
+	if usable == 0 {
+		checks = append(checks, fail(doctorGroupAgents, "agents.usable",
+			"no configured agent is usable, so no work can be started; install or authenticate one of the configured coding CLIs"))
+	} else {
+		checks = append(checks, pass(doctorGroupAgents, "agents.usable",
+			fmt.Sprintf("%d of %d configured agents can be invoked", usable, len(in.Agents))))
+	}
+	return checks
+}
+
+// doctorControlEndpoint reports the supervisor's authority boundary.
+//
+// It is a FAIL rather than a warning when the endpoint exists and is reachable
+// by other users, because anything that can reach it can start operator_trusted
+// coding agents under this account. An ABSENT endpoint is not a fault at all:
+// no supervisor is running, which is an ordinary state.
+func doctorControlEndpoint(in DoctorInput) DoctorCheck {
+	const id = "supervisor.endpoint"
+	path := strings.TrimSpace(in.ControlEndpoint)
+	if path == "" && strings.TrimSpace(in.StateDir) != "" {
+		path = ControlSocketPath(in.StateDir)
+	}
+	if path == "" {
+		return warn(doctorGroupSupervisor, id, "no state directory is configured, so the supervisor control endpoint could not be located")
+	}
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return pass(doctorGroupSupervisor, id,
+			"no supervisor is running: there is no control endpoint at "+path+". Start one with `zenchron-engineering serve`. "+
+				"When it exists it is a "+ControlEndpointMechanism+", and it is local-machine only: there is no network listener")
+	}
+	if err := AssertControlEndpointSecure(path); err != nil {
+		return fail(doctorGroupSupervisor, id, err.Error())
+	}
+	return pass(doctorGroupSupervisor, id,
+		"the supervisor control endpoint at "+path+" is a "+ControlEndpointMechanism+
+			". It is local-machine only and carries no stored credential: reaching it requires filesystem access to an owner-only path")
+}
+
+// doctorStateStorage reports what the runtime state directory holds against the
+// operator's ceiling. Parallel candidate clones make disk an operator-level
+// resource, and the honest failure is a typed refusal before allocation rather
+// than ENOSPC in the middle of a clone.
+func doctorStateStorage(in DoctorInput) DoctorCheck {
+	const id = "state.storage"
+	if strings.TrimSpace(in.StateDir) == "" {
+		return warn(doctorGroupState, id, "no state directory is configured, so its size could not be measured")
+	}
+	storage := in.Storage
+	if storage.Dir == "" {
+		storage.Dir = in.StateDir
+	}
+	used, err := storage.Usage()
+	if err != nil {
+		return warn(doctorGroupState, id, "the state directory size could not be measured: "+err.Error())
+	}
+	if storage.CeilingBytes <= 0 {
+		// No ceiling is the documented default, and it is what every
+		// configuration had before the bound existed. It is reported with its
+		// advice rather than as a warning: an operator who has not hit the
+		// problem has nothing to repair.
+		return pass(doctorGroupState, id, fmt.Sprintf(
+			"the state directory holds %d bytes and no ceiling is configured. Each concurrent run adds a full candidate clone, "+
+				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone", used))
+	}
+	if err := storage.Admit(); err != nil {
+		return fail(doctorGroupState, id, err.Error())
+	}
+	return pass(doctorGroupState, id, fmt.Sprintf(
+		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace",
+		used, storage.CeilingBytes))
 }

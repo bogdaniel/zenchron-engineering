@@ -33,6 +33,15 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// the runtime bound dropped, and a digest of what crossed. It asserts
 		// nothing an authority evaluator reads and satisfies no claim.
 		"PriorContext",
+		// Invocation is an observation ABOUT THE INVOCATION, not about the
+		// work: which executable, which version, which permission and sandbox
+		// mode, which non-secret arguments. It is deliberately admitted here
+		// because it is the record that makes a constrained run and an
+		// explicitly authorized bypass distinguishable forever - and because
+		// it claims nothing about acceptance: no authority condition reads it,
+		// no evidence class is satisfied by it, and a worker that reported a
+		// perfect posture still cannot authorize its own change.
+		"Invocation",
 	}
 	typ := reflect.TypeOf(ExecutionResult{})
 	var got []string

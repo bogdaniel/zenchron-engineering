@@ -37,6 +37,18 @@ type FakeGitHubAdapter struct {
 	// Refs maps a remote ref to its SHA: the push-landed question.
 	Refs     map[string]string
 	Comments map[int][]string
+	// ConversationComments is the issue/pull-request conversation thread, keyed
+	// by number. Feedback admission reads it through ForgeConversation.
+	ConversationComments map[int][]GitHubComment
+	// Permissions is each actor's current repository permission, keyed by
+	// lowercase login. A login that is absent resolves to PermissionNone, which
+	// models GitHub answering 404 for a non-collaborator - the ordinary case
+	// for a member of the public commenting on a public pull request.
+	Permissions map[string]GitHubPermission
+	// ViewerActor is the identity this adapter's credential acts as, which is
+	// how the runtime recognizes its own comments by identity rather than by
+	// matching their text.
+	ViewerActor GitHubActor
 	// NextNumber is the number CreatePullRequest assigns.
 	NextNumber int
 	// Discoveries scripts successive DiscoverIssues answers, consumed in order;
@@ -68,13 +80,15 @@ var _ GitHubAdapter = (*FakeGitHubAdapter)(nil)
 
 func NewFakeGitHubAdapter() *FakeGitHubAdapter {
 	return &FakeGitHubAdapter{
-		Issues:        map[int]GitHubIssue{},
-		PullRequests:  map[int]GitHubPullRequest{},
-		ChecksByHead:  map[string]GitHubCheckObservation{},
-		ReviewsByHead: map[string]GitHubReviewObservation{},
-		Refs:          map[string]string{},
-		Comments:      map[int][]string{},
-		NextNumber:    1,
+		Issues:               map[int]GitHubIssue{},
+		PullRequests:         map[int]GitHubPullRequest{},
+		ChecksByHead:         map[string]GitHubCheckObservation{},
+		ReviewsByHead:        map[string]GitHubReviewObservation{},
+		Refs:                 map[string]string{},
+		Comments:             map[int][]string{},
+		ConversationComments: map[int][]GitHubComment{},
+		Permissions:          map[string]GitHubPermission{},
+		NextNumber:           1,
 	}
 }
 
@@ -317,4 +331,49 @@ func discoverable(issues []GitHubIssue, label string) []GitHubIssue {
 		kept = append(kept, issue)
 	}
 	return kept
+}
+
+// ---------------------------------------------------------------------------
+// Optional forge capabilities
+// ---------------------------------------------------------------------------
+
+var (
+	_ ForgeActorPermissions = (*FakeGitHubAdapter)(nil)
+	_ ForgeConversation     = (*FakeGitHubAdapter)(nil)
+	_ ForgeViewer           = (*FakeGitHubAdapter)(nil)
+)
+
+func (f *FakeGitHubAdapter) RepositoryPermission(_ context.Context, repo GitHubRepo, login string) (GitHubPermission, error) {
+	if err := f.record(GitHubCall{Method: "RepositoryPermission", Repo: repo, Body: login}); err != nil {
+		return PermissionUnresolved, err
+	}
+	permission, ok := f.Permissions[strings.ToLower(login)]
+	if !ok {
+		// The real forge answers 404 for an identity that is not a
+		// collaborator. That is a real answer - no permission - and never an
+		// unresolved one.
+		return PermissionNone, nil
+	}
+	return permission, nil
+}
+
+func (f *FakeGitHubAdapter) PullRequestComments(_ context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	if err := f.record(GitHubCall{Method: "PullRequestComments", Repo: repo, Number: number}); err != nil {
+		return nil, err
+	}
+	return append([]GitHubComment(nil), f.ConversationComments[number]...), nil
+}
+
+func (f *FakeGitHubAdapter) IssueComments(_ context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	if err := f.record(GitHubCall{Method: "IssueComments", Repo: repo, Number: number}); err != nil {
+		return nil, err
+	}
+	return append([]GitHubComment(nil), f.ConversationComments[number]...), nil
+}
+
+func (f *FakeGitHubAdapter) Viewer(_ context.Context, repo GitHubRepo) (GitHubActor, error) {
+	if err := f.record(GitHubCall{Method: "Viewer", Repo: repo}); err != nil {
+		return GitHubActor{}, err
+	}
+	return f.ViewerActor, nil
 }

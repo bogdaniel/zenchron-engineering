@@ -2,6 +2,13 @@
 
 These principles define the initial architecture. Changes require an explicit ADR rather than silent drift.
 
+They answer what the system must be true **about**. How the code implementing
+them is expected to be built — DRY, Go-adapted SOLID, composition over
+inheritance, YAGNI — is a separate and equally binding set, stated in
+[`construction-principles.md`](construction-principles.md). Each construction
+principle names the governance principle below that it serves; neither document
+overrides the other, and P1–P12 are unchanged by its existence.
+
 ## P1 — Compile engineering obligations, not agent workflows
 
 Describe what must be established, not a permanent sequence of AI job titles. Execution planning is replaceable and may change as models improve.

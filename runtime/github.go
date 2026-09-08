@@ -61,6 +61,12 @@ const (
 type GitHubActor struct {
 	Login string
 	ID    int64
+	// Bot reports that the forge classifies this identity as an App or bot
+	// account rather than a person. It is an OBSERVATION used by feedback
+	// admission: an automation account that could direct a coding agent is an
+	// unattended actor holding the operator's permissions, so it is refused
+	// unless the operator allowlisted it by login.
+	Bot bool
 }
 
 // GitHubIssue is the normalized source issue.
@@ -168,6 +174,52 @@ type GitHubReviewObservation struct {
 	HeadSHA  string
 	Reviews  []GitHubReview
 	Comments []GitHubReviewComment
+}
+
+// GitHubComment is one conversation comment on a pull request or an issue.
+// Body is UntrustedText and stays that way all the way to the delimited block a
+// worker reads.
+type GitHubComment struct {
+	ID        int64
+	Author    GitHubActor
+	Body      UntrustedText
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ForgeActorPermissions is the OPTIONAL capability of resolving what an actor
+// may do in a repository. It is a separate interface from GitHubAdapter on
+// purpose: it is the only forge question feedback admission needs, a forge that
+// cannot answer it is legal, and consumers that do not gate feedback should not
+// have to implement it. An adapter that does not implement it makes feedback
+// admission impossible, which is reported as such - never as admission.
+type ForgeActorPermissions interface {
+	// RepositoryPermission is the actor's CURRENT permission. An actor the
+	// forge does not recognize as a collaborator resolves to PermissionNone,
+	// with a nil error; an error means the question could not be answered and
+	// nothing about permission may be inferred from it.
+	RepositoryPermission(ctx context.Context, repo GitHubRepo, login string) (GitHubPermission, error)
+}
+
+// ForgeViewer is the OPTIONAL capability of naming the identity the runtime's
+// own credential acts as. It exists for one reason: self-loop prevention has to
+// be decided by IDENTITY rather than by matching text a commenter controls, and
+// the runtime cannot recognize its own comments without knowing which account
+// it publishes under.
+type ForgeViewer interface {
+	// Viewer names the identity the credential AUTHORIZED FOR THIS REPOSITORY
+	// acts as. The repository is a parameter because the credential is
+	// repository-scoped: there is no ambient forge session here.
+	Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error)
+}
+
+// ForgeConversation is the OPTIONAL capability of reading conversation
+// comments - the pull request's own thread, and the source issue's. Inline
+// review comments are not here: they are already part of the head-bound
+// Reviews observation, which is where a comment about an exact diff belongs.
+type ForgeConversation interface {
+	PullRequestComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error)
+	IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error)
 }
 
 // RefObservation is the typed answer to "what is at this remote ref right
@@ -454,6 +506,53 @@ func (GitHubCLICredential) Credential(identity RemoteIdentity) (string, string, 
 	secret := strings.TrimSpace(string(out))
 	if secret == "" {
 		return "", "", &GitHubAuthError{Detail: "the local GitHub CLI returned no token"}
+	}
+	return gitHubCredentialUser, secret, nil
+}
+
+// GitHubTokenFileCredential resolves the PUBLICATION credential from a file the
+// operator provisioned - a GitHub App installation token or a dedicated runtime
+// account's token.
+//
+// It exists so the runtime can act as SOMEBODY ELSE. With the `gh` credential
+// the runtime authenticates as the operator, so a comment it publishes and a
+// review the operator writes are the same GitHub actor; the self-loop guard
+// then refuses the operator's own review, and the #63 workflow - review the
+// pull request, the right worker continues - cannot run on a single-account
+// installation. Separating the identity fixes that without weakening the guard:
+// admission stays decided by who wrote something, which is what makes it robust
+// against what the something says.
+//
+// The boundary is the same one GitHubCLICredential documents, with one addition:
+// the file must be owner-only, because a token another local account can read is
+// a publication identity that account also has.
+type GitHubTokenFileCredential struct{ Path string }
+
+func (c GitHubTokenFileCredential) Credential(identity RemoteIdentity) (string, string, error) {
+	if identity.URL == "" || identity.Transport() != "https" {
+		return "", "", &GitHubAuthError{Detail: "credential is only issued to the governed https remote"}
+	}
+	if strings.TrimSpace(c.Path) == "" {
+		return "", "", &GitHubAuthError{Detail: "no publication token path is configured"}
+	}
+	info, err := os.Stat(c.Path)
+	switch {
+	case err != nil:
+		return "", "", &GitHubAuthError{Detail: "the publication token file cannot be inspected"}
+	case !info.Mode().IsRegular():
+		return "", "", &GitHubAuthError{Detail: "the publication token path is not a regular file"}
+	case info.Mode().Perm()&0o077 != 0:
+		return "", "", &GitHubAuthError{Detail: "the publication token file is readable by other users; run chmod 600 on it"}
+	}
+	raw, err := os.ReadFile(c.Path)
+	if err != nil {
+		// The read error is not quoted: it can contain the path and, on some
+		// systems, content fragments.
+		return "", "", &GitHubAuthError{Detail: "the publication token file cannot be read"}
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", "", &GitHubAuthError{Detail: "the publication token file is empty"}
 	}
 	return gitHubCredentialUser, secret, nil
 }

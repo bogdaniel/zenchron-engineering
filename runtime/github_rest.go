@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -206,13 +207,220 @@ func safeSHA(sha string) error {
 type ghActor struct {
 	Login string `json:"login"`
 	ID    int64  `json:"id"`
+	// Type is GitHub's own classification: "User", "Bot", "Organization". It
+	// is the forge's answer to "is this a person", which feedback admission
+	// needs and which a login string cannot supply.
+	Type string `json:"type"`
 }
 
 func (a *ghActor) normalize() GitHubActor {
 	if a == nil {
 		return GitHubActor{}
 	}
-	return GitHubActor{Login: a.Login, ID: a.ID}
+	// A GitHub App comment is reported with type "Bot" and, conventionally, a
+	// login ending in "[bot]". Both are checked: the type is authoritative
+	// where present, and the suffix catches an App whose type the endpoint
+	// omitted. Neither is a text match on the COMMENT, which an author
+	// controls; both are properties of the identity.
+	return GitHubActor{
+		Login: a.Login, ID: a.ID,
+		Bot: strings.EqualFold(a.Type, "Bot") || strings.HasSuffix(strings.ToLower(a.Login), "[bot]"),
+	}
+}
+
+// RepositoryPermission resolves an actor's current permission. GitHub answers
+// 404 for an identity that is not a collaborator, which is a real answer - no
+// permission - rather than a failed observation, so it is normalized to
+// PermissionNone with a nil error.
+func (a GitHubRESTAdapter) RepositoryPermission(ctx context.Context, repo GitHubRepo, login string) (GitHubPermission, error) {
+	if err := safeLogin(login); err != nil {
+		return PermissionUnresolved, err
+	}
+	status, header, body, err := a.doRaw(ctx, repo, http.MethodGet,
+		repoPath(repo)+"/collaborators/"+url.PathEscape(login)+"/permission", nil, nil, nil)
+	if err != nil {
+		return PermissionUnresolved, err
+	}
+	if status == http.StatusNotFound {
+		return PermissionNone, nil
+	}
+	// The budget headers are read, because a 403 is GitHub's rate-limit refusal
+	// as well as its permission refusal. Discarding them would classify a
+	// throttled lookup as a credential fault, which never reaches the shared
+	// per-repository backoff and would have every run rediscovering the limit
+	// separately.
+	rate, reported := observeRateLimit(header, status)
+	if err := classifyGitHubStatus(status, rate, reported, "repository permission"); err != nil {
+		return PermissionUnresolved, err
+	}
+	var payload struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return PermissionUnresolved, &GitHubAPIError{Status: status, Detail: "unreadable repository permission response"}
+	}
+	permission := GitHubPermission(strings.ToLower(strings.TrimSpace(payload.Permission)))
+	if _, known := permissionRank[permission]; !known {
+		// An unrecognized spelling is UNRESOLVED, not a guess. Ranking it
+		// would be this adapter inventing a rung on GitHub's ladder.
+		return PermissionUnresolved, nil
+	}
+	return permission, nil
+}
+
+// Viewer names the identity this adapter's credential acts as. It is how the
+// runtime recognizes its own comments without matching on their text.
+func (a GitHubRESTAdapter) Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error) {
+	// Read through doRaw with typed status classification, not call().
+	//
+	// call() maps every 401 and 403 to GitHubAuthError and flattens 429 and 5xx
+	// into generic errors, discarding the budget headers. That was tolerable
+	// while this was an incidental lookup; it is now the observation that gates
+	// feedback admission, so a throttled /user has to be classified as a
+	// throttle - shared backoff and a later retry - rather than as a rejected
+	// credential, and a genuinely rejected credential has to stay
+	// distinguishable from both.
+	status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet, "/user", nil, nil, nil)
+	if err != nil {
+		return GitHubActor{}, err
+	}
+	rate, reported := observeRateLimit(header, status)
+	if err := classifyGitHubStatus(status, rate, reported, "publication identity"); err != nil {
+		return GitHubActor{}, err
+	}
+	var actor ghActor
+	if err := json.Unmarshal(raw, &actor); err != nil {
+		return GitHubActor{}, &GitHubAPIError{Status: status, Detail: "unreadable publication identity response"}
+	}
+	return actor.normalize(), nil
+}
+
+// safeLogin bounds the one path component this adapter interpolates from an
+// observed identity. GitHub logins are alphanumeric with hyphens, plus the
+// "[bot]" suffix Apps carry; nothing else may reach a URL path.
+func safeLogin(login string) error {
+	if login == "" || len(login) > 64 {
+		return fmt.Errorf("invalid actor login")
+	}
+	for _, r := range login {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '[', r == ']':
+		default:
+			return fmt.Errorf("invalid actor login")
+		}
+	}
+	return nil
+}
+
+// PullRequestComments and IssueComments both read GitHub's issue-comment
+// endpoint, because a pull request IS an issue there. They are separate methods
+// because they answer different engineering questions - what a reviewer said
+// about this change, and what someone added to the source issue afterwards -
+// and feedback admission records which one an item came from.
+func (a GitHubRESTAdapter) PullRequestComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	return a.issueComments(ctx, repo, number)
+}
+
+func (a GitHubRESTAdapter) IssueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	return a.issueComments(ctx, repo, number)
+}
+
+// pagedJSON walks every page of a list endpoint into out, which must be a
+// pointer to a slice. It exists so review metadata, inline review comments and
+// conversation comments obey ONE pagination law rather than three: each of them
+// feeds admission, and a silently truncated page is feedback that never reaches
+// a worker.
+//
+// It reads through doRaw with typed status classification, so a throttled page
+// is a throttle rather than a rejected credential, and it REFUSES at the bound
+// instead of returning a short answer.
+func (a GitHubRESTAdapter) pagedJSON(ctx context.Context, repo GitHubRepo, path, what string, out any) error {
+	value := reflect.ValueOf(out).Elem()
+	all := reflect.MakeSlice(value.Type(), 0, 0)
+	for page := 1; page <= maxConversationPages; page++ {
+		query := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet, path, query, nil, nil)
+		if err != nil {
+			return err
+		}
+		rate, reported := observeRateLimit(header, status)
+		if err := classifyGitHubStatus(status, rate, reported, what); err != nil {
+			return err
+		}
+		batch := reflect.New(value.Type())
+		if err := json.Unmarshal(raw, batch.Interface()); err != nil {
+			return &GitHubAPIError{Status: status, Detail: "unreadable " + what + " response"}
+		}
+		all = reflect.AppendSlice(all, batch.Elem())
+		if !hasNextPage(header.Get("Link")) {
+			value.Set(all)
+			return nil
+		}
+	}
+	return &GitHubAPIError{
+		Status: http.StatusOK,
+		Detail: fmt.Sprintf("%s in %s exceeded %d pages; refusing to report a truncated set", what, repo, maxConversationPages),
+	}
+}
+
+// maxConversationPages bounds the conversation walk, exactly as
+// maxDiscoveryPages bounds discovery. Reaching it is an error rather than a
+// silent truncation.
+const maxConversationPages = 50
+
+func (a GitHubRESTAdapter) issueComments(ctx context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
+	if number <= 0 {
+		return nil, fmt.Errorf("issue or pull request number must be positive")
+	}
+	// GitHub returns conversation comments OLDEST FIRST, so a single page holds
+	// the oldest hundred and the newest are on the last page. Reading one page
+	// therefore hid exactly the comments this feature exists to observe: on a
+	// busy thread the operator's latest review was never returned, never
+	// admitted, and never reached a worker - with no error, because a full first
+	// page is indistinguishable from a complete answer without following Link.
+	comments := []GitHubComment{}
+	for page := 1; page <= maxConversationPages; page++ {
+		var wire []struct {
+			ID        int64    `json:"id"`
+			User      *ghActor `json:"user"`
+			Body      string   `json:"body"`
+			CreatedAt string   `json:"created_at"`
+			UpdatedAt string   `json:"updated_at"`
+		}
+		query := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		// Read through doRaw rather than call() for the same reason as above:
+		// the budget headers are what separate a throttled read from a rejected
+		// credential, and only the first belongs in shared backoff.
+		status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet,
+			repoPath(repo)+"/issues/"+strconv.Itoa(number)+"/comments", query, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		rate, reported := observeRateLimit(header, status)
+		if err := classifyGitHubStatus(status, rate, reported, "conversation comments"); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			return nil, &GitHubAPIError{Status: status, Detail: "unreadable conversation comment response"}
+		}
+		for _, c := range wire {
+			comment := GitHubComment{ID: c.ID, Author: c.User.normalize(), Body: UntrustedText(c.Body)}
+			if at, ok := parseTime(c.CreatedAt); ok {
+				comment.CreatedAt = at
+			}
+			if at, ok := parseTime(c.UpdatedAt); ok {
+				comment.UpdatedAt = at
+			}
+			comments = append(comments, comment)
+		}
+		if !hasNextPage(header.Get("Link")) {
+			return comments, nil
+		}
+	}
+	return nil, &GitHubAPIError{
+		Status: http.StatusOK,
+		Detail: fmt.Sprintf("conversation %d in %s exceeded %d pages; refusing to report a truncated set", number, repo, maxConversationPages),
+	}
 }
 
 type ghIssue struct {
@@ -496,7 +704,6 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 		return GitHubReviewObservation{}, err
 	}
 	base := repoPath(repo) + "/pulls/" + strconv.Itoa(number)
-	query := url.Values{"per_page": {"100"}}
 	var reviews []struct {
 		ID          int64    `json:"id"`
 		User        *ghActor `json:"user"`
@@ -505,7 +712,12 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 		CommitID    string   `json:"commit_id"`
 		SubmittedAt string   `json:"submitted_at"`
 	}
-	if err := a.call(ctx, repo, http.MethodGet, base+"/reviews", query, nil, &reviews); err != nil {
+	// Reviews and inline comments paginate exactly like conversation comments,
+	// and for the same reason: retrieval happens BEFORE admission, so a
+	// maintainer's review pushed onto page 2 by a hundred earlier records is
+	// not merely slow to notice - it is permanently invisible, and anyone able
+	// to comment can push it there.
+	if err := a.pagedJSON(ctx, repo, base+"/reviews", "pull request reviews", &reviews); err != nil {
 		return GitHubReviewObservation{}, err
 	}
 	var comments []struct {
@@ -516,7 +728,7 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 		CommitID  string   `json:"commit_id"`
 		CreatedAt string   `json:"created_at"`
 	}
-	if err := a.call(ctx, repo, http.MethodGet, base+"/comments", query, nil, &comments); err != nil {
+	if err := a.pagedJSON(ctx, repo, base+"/comments", "pull request review comments", &comments); err != nil {
 		return GitHubReviewObservation{}, err
 	}
 	observation := GitHubReviewObservation{HeadSHA: headSHA}
