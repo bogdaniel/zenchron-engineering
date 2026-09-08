@@ -399,9 +399,26 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 			Detail: fmt.Sprintf("no work contract is stored for revision %d, so its stages cannot be resolved against the obligations it was planned under", plan.Revision),
 		}
 	}
+	// The assignments already executing are read back rather than recomputed.
+	// A stage that has run is executing under what an operator approved, and a
+	// downstream independence obligation is about the worker that actually
+	// produced the change - not about whichever worker would be chosen today.
+	frozen := map[string]domain.AgentAssignment{}
+	for stageID, projection := range snapshot.Stages {
+		if projection.AssignmentID == "" {
+			continue
+		}
+		assignment, found, err := s.Store.PlanAssignment(plan.ID, plan.Revision, stageID)
+		if err != nil {
+			return planning.Resolution{}, err
+		}
+		if found {
+			frozen[stageID] = assignment
+		}
+	}
 	return planning.Resolve(planning.ResolveInput{
 		Plan: plan, Registry: s.Registry, Agents: s.Agents,
-		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent,
+		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent, Frozen: frozen,
 	})
 }
 

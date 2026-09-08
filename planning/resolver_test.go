@@ -434,3 +434,47 @@ func TestARevisionCannotEscapeIndependenceByBecomingAGate(t *testing.T) {
 		t.Fatalf("a policy-permitted substitution was refused at the revision boundary: %v", err)
 	}
 }
+
+// A stage that has already run is NOT re-resolved. The work is executing under
+// the configuration an operator approved, and a downstream independence
+// obligation is about the worker that actually produced the change rather than
+// whichever worker would be chosen for it today.
+func TestAFrozenAssignmentIsUsedRatherThanRecomputed(t *testing.T) {
+	plan := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	frozen := domain.AgentAssignment{
+		SchemaVersion: domain.SchemaVersion, ID: "assignment-frozen", StageID: "implementation",
+		Role: domain.RoleImplementer,
+		Profile: domain.ProfileBinding{
+			ID: "retired-builder", Version: 1, Digest: strings.Repeat("b", 64),
+			Capabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}, TrustRequirement: domain.TrustRequirementOperatorTrusted,
+		},
+		Agent: domain.AgentBinding{
+			ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
+			TrustMode: domain.TrustRequirementOperatorTrusted,
+		},
+		InvocationMode: domain.InvocationModeMutating, TrustRequirement: domain.TrustRequirementOperatorTrusted,
+		Contract:  domain.ObjectRevision{ID: "contract", Revision: "1"},
+		Context:   domain.ContextPack{Objective: "the approved objective", AcceptanceCriteria: []string{"it works"}, Included: []domain.ContextClass{domain.ContextObjective}},
+		Selection: domain.ResolutionExplanation{Reason: "recorded when the stage was created"},
+	}
+	input := resolveInput(t, plan, claudeAgent(), codexAgent())
+	input.Frozen = map[string]domain.AgentAssignment{"implementation": frozen}
+
+	resolution, err := planning.Resolve(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation, ok := resolution.Assignment("implementation")
+	if !ok || implementation.ID != "assignment-frozen" || implementation.Profile.ID != "retired-builder" {
+		t.Fatalf("the frozen assignment was recomputed: %#v", implementation)
+	}
+	// And the downstream independence is judged against what ACTUALLY ran: the
+	// frozen assignment used Claude, so the reviewer must not.
+	review, ok := resolution.Assignment("security-reviewer")
+	if !ok {
+		t.Fatalf("the review stage did not resolve: %#v", resolution.Blocked)
+	}
+	if review.Agent.VendorFamily == "anthropic" {
+		t.Fatalf("the review resolved onto the frozen producer's vendor family %q", review.Agent.VendorFamily)
+	}
+}

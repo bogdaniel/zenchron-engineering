@@ -89,6 +89,15 @@ type ResolveInput struct {
 	// DefaultAgent is the operator's configured default. It is a PREFERENCE
 	// used to break ties deterministically, never an eligibility rule.
 	DefaultAgent string
+	// Frozen is the assignment a stage is ALREADY executing under, keyed by
+	// stage id.
+	//
+	// A stage that has run is not re-resolved. Two things depend on that: the
+	// work is executing under the configuration an operator approved, and a
+	// downstream independence obligation is evaluated against the worker that
+	// actually produced the change rather than against whichever worker would
+	// be chosen for it today.
+	Frozen map[string]domain.AgentAssignment
 }
 
 // Resolve assigns every agent stage it can and explains every stage it cannot.
@@ -106,6 +115,11 @@ func Resolve(input ResolveInput) (Resolution, error) {
 		if stage.Kind != domain.StageAgent {
 			// A gate is satisfied from existing evidence, authority or human
 			// decision state. Resolving one would be inventing a worker for it.
+			continue
+		}
+		if frozen, ok := input.Frozen[stage.ID]; ok {
+			assigned[stage.ID] = frozen
+			resolution.Assignments = append(resolution.Assignments, frozen)
 			continue
 		}
 		assignment, blocked, err := input.resolveStage(stage, profiles, assigned)

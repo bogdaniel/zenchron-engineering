@@ -161,10 +161,6 @@ func (r *EngineeringRuntime) PlanningArtifacts() ArtifactStore { return r.deps.A
 // invocation.
 func (r *EngineeringRuntime) ControllerIdentityID() string { return r.deps.ControllerID }
 
-// StateDirectory is where runtime-owned state - including a planning workspace
-// - lives.
-func (r *EngineeringRuntime) StateDirectory() string { return r.deps.StateDir }
-
 // PlanningRegistry is the operator customization registry this runtime was
 // built with.
 func (r *EngineeringRuntime) PlanningRegistry() interface{ Dir() string } { return r.deps.Planning }
