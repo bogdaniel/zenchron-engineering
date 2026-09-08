@@ -393,9 +393,16 @@ func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T
 		t.Fatalf("the supervisor could not listen: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	// A real Supervisor too: an operator decision is applied under the same
+	// lock the plan reconciler holds, so the handler needs the supervisor that
+	// owns it rather than a stand-in.
+	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	if err != nil {
+		t.Fatalf("the supervisor could not be built: %v", err)
+	}
 	go func() {
 		_ = listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
-			return supervisor.handleControl(context.Background(), nil, func() {}, request)
+			return supervisor.handleControl(context.Background(), driver, func() {}, request)
 		})
 	}()
 

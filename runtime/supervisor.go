@@ -145,6 +145,13 @@ type Supervisor struct {
 	// ceiling smaller than the active set is a rate limit rather than a fixed
 	// prefix; see rotate.
 	cursor int
+	// plansMu serializes everything that WRITES plan state: the reconciler's
+	// own pass and an operator decision arriving over the control endpoint.
+	// They read a snapshot and then append against it, so running them side by
+	// side means one can decide from state the other is changing - a stage
+	// started inside the window survives a supersession that changed it, and
+	// the invalidations are computed against a plan that has already moved.
+	plansMu sync.Mutex
 	// enginesMu guards the engine cache, which several run goroutines reach
 	// concurrently inside one tick. It is separate from mu on purpose: the
 	// lifecycle flags are read by operator commands, and a slow engine
@@ -307,6 +314,16 @@ func (s *Supervisor) Draining() bool {
 // journalled per run through the same single cancellation path `stop RUN` uses,
 // so a fleet cancellation is indistinguishable in the journal from cancelling
 // each run individually - because that is exactly what it is.
+// WithPlanLock runs one operator plan decision under the same lock the plan
+// reconciler holds, so a decision and a tick never interleave their
+// read-then-append. It is exported because the composition root - which owns
+// the control endpoint - is where an operator's decision arrives.
+func (s *Supervisor) WithPlanLock(do func() error) error {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	return do()
+}
+
 func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	if strings.TrimSpace(reason) == "" {
 		reason = "operator_stop_all"
@@ -533,8 +550,16 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	// from the durable transcript evidence, and hardcoding 1 made every retry
 	// collide with the first attempt's create-once transcript: the provider ran
 	// again - a real invocation, every tick - and then died storing its answer.
+	// The wall bound the stage states - which the assigned profile may have
+	// narrowed, and which the plan's remaining headroom may narrow further -
+	// bounds the invocation itself. Computing it and not passing it made the
+	// narrowing decorative.
+	budgets := ProviderBudget{}
+	if request.WallSeconds > 0 {
+		budgets.WallLimit = time.Duration(request.WallSeconds) * time.Second
+	}
 	return InvokePlanner(ctx, PlannerInput{
-		PlanID: request.Plan.ID, Revision: request.Plan.Revision,
+		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Budgets: budgets,
 		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),
 		ProfileID: request.Assignment.Profile.ID, Model: request.Assignment.Agent.Model,
 		Workspace: workspace, Contract: request.Contract,
@@ -558,6 +583,8 @@ func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
 	if s.deps.Plans.Store == nil {
 		return nil
 	}
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
 	plans, err := s.deps.Store.Plans()
 	if err != nil {
 		return []PlanTickReport{{Waiting: boundedDetail(err.Error())}}

@@ -419,7 +419,7 @@ func substituteHumanWithComposition(ctx context.Context, composed *planCompositi
 	claims := independentClaims(contract)
 	if len(claims) == 0 {
 		return runtime.ExitInvalid, fmt.Errorf(
-			"the work contract defines no claim requiring an independent producer, so there is nothing for a human decision gate to answer")
+			"the work contract defines no claim that requires an independent producer AND can be answered by a person, so a human decision gate would state something no decision could ever satisfy; the independence obligation stands and needs a second worker")
 	}
 	stages, err := planning.SubstituteHumanReview(view.Plan, flags.SubstituteHuman, claims)
 	if err != nil {
@@ -458,7 +458,13 @@ func substituteHumanWithComposition(ctx context.Context, composed *planCompositi
 func independentClaims(contract domain.EngineeringWorkContract) []string {
 	var claims []string
 	for id, claim := range contract.RequiredClaims {
-		if claim.IndependentFromChangeProducer {
+		// The claim must require independence AND be answerable by a person.
+		// A claim discharged by a test result or a security review is not
+		// discharged by someone saying so: handing those to a human decision
+		// gate produced a gate no decision could ever satisfy, which blocked
+		// everything downstream forever rather than refusing at the point the
+		// operator chose it.
+		if claim.IndependentFromChangeProducer && claim.EvidenceClass == runtime.HumanApprovalEvidenceClass {
 			claims = append(claims, id)
 		}
 	}

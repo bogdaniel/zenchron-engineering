@@ -428,6 +428,14 @@ func TestNestedCandidatesCannotMakeLocatingTheAnswerQuadratic(t *testing.T) {
 		t.Fatalf("locating the trailing answer took %s", elapsed)
 	}
 
+	// Trailing noise that PARSES and mentions the member is not an answer:
+	// `{"stages": 3}` is valid JSON, contains "stages", and would have stopped
+	// the search at a candidate the strict decode then refuses - a false
+	// refusal for a transcript that did contain an answer.
+	if found, err := extractJSONObject(answer + "\n" + `{"stages": 3}` + "\n"); err != nil || found != answer {
+		t.Fatalf("trailing noise displaced the answer: %q %v", found, err)
+	}
+
 	inner, err := extractJSONObject(`{"stages": {"stages": {"stages": []}}}` + "\n" + answer)
 	if err != nil || inner != answer {
 		t.Fatalf("the real answer after nested candidates was missed: %q %v", inner, err)

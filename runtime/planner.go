@@ -545,6 +545,16 @@ func readTail(path string, limit int64) (string, error) {
 	return tail, nil
 }
 
+// looksLikeProposal reports whether a candidate's "stages" member is an ARRAY,
+// which is the one structural fact that distinguishes an answer from a mention.
+// Everything else about the shape is the strict decode's business.
+func looksLikeProposal(candidate string) bool {
+	var shape struct {
+		Stages []json.RawMessage `json:"stages"`
+	}
+	return json.Unmarshal([]byte(candidate), &shape) == nil && shape.Stages != nil
+}
+
 // maxPlannerAnswerBytes bounds how much of a planning transcript is scanned for
 // the answer. It is generous - a plan document is kilobytes - and exists so an
 // enormous transcript cannot turn parsing into the expensive step.
@@ -750,7 +760,11 @@ func extractJSONObject(answer string) (string, error) {
 		if !strings.Contains(candidate, `"stages"`) {
 			continue
 		}
-		if json.Valid([]byte(candidate)) {
+		// VALID JSON is not enough: `{"stages": 3}` is valid, contains the
+		// member, and is not an answer. Decoding it here rather than at the
+		// caller means trailing noise that happens to parse does not stop the
+		// search at a candidate the strict decode would refuse.
+		if json.Valid([]byte(candidate)) && looksLikeProposal(candidate) {
 			return candidate, nil
 		}
 	}

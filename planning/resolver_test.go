@@ -653,6 +653,35 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 		}
 		gated.Stages = append(gated.Stages, stage)
 	}
+	// Nor by renaming the reviewer AND re-pointing the obligation at another
+	// stage: the role and the dimension survive, so a check that compares only
+	// those is satisfied while the new reviewer may share the vendor of the
+	// producer the removed one was about.
+	repointed := renamed
+	repointed.Stages = nil
+	for _, stage := range previous.Stages {
+		if stage.ID == reviewer.ID {
+			stage.ID = reviewer.ID + "-3"
+			independence := *reviewer.Independence
+			independence.DifferentFrom = []string{"second-implementation"}
+			stage.Independence = &independence
+			stage.DependsOn = []string{"second-implementation"}
+		}
+		repointed.Stages = append(repointed.Stages, stage)
+	}
+	repointed.Stages = append(repointed.Stages, domain.PlanStage{
+		ID: "second-implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+		Objective:            "Do the other half.",
+		RequiresCapabilities: planning.RoleCapabilities(domain.RoleImplementer),
+		InvocationMode:       domain.InvocationModeMutating,
+	})
+	if err := planning.Validate(repointed, planning.ValidationInput{
+		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
+		Previous: &previous,
+	}); err == nil {
+		t.Fatal("an obligation was dropped by renaming the reviewer and re-pointing it at another stage")
+	}
+
 	err = planning.Validate(gated, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
 		Previous: &previous,

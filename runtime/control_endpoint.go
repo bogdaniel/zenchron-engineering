@@ -112,8 +112,8 @@ type ControlRequest struct {
 	// PlanID, Revision, Digest and Note are one plan decision. They exist here
 	// because a plan decision is an OPERATOR act against work a supervisor is
 	// executing, and the supervisor is the process that owns that work: routing
-	// the decision to it means one writer applies it, in the order it arrived,
-	// against the state the supervisor is reconciling.
+	// the decision to it means one writer applies it against the state the
+	// supervisor is reconciling, under the same lock that reconciler holds.
 	//
 	// The digest is not optional in the service that receives this, so a
 	// request naming a revision without its content decides nothing.

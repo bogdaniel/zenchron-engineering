@@ -69,6 +69,9 @@ type PlanTickReport struct {
 	Settled []string `json:"settled,omitempty"`
 	// Blocked is every stage that cannot proceed, with the typed reason.
 	Blocked []PlanStageBlock `json:"blocked,omitempty"`
+	// Stopped names child runs this pass cancelled because a revision replaced
+	// the stage they were doing.
+	Stopped []string `json:"stopped,omitempty"`
 	// Consumed is the aggregate the plan has spent, after this pass.
 	Consumed domain.PlanConsumption `json:"consumed"`
 }
@@ -189,13 +192,23 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 	}
 	// And the runs of stages a revision INVALIDATED. Their stage no longer
 	// names them, and they can still be live: a run does not stop spending
-	// because the plan stopped looking at it.
+	// because the plan stopped looking at it. They are attributed, and then
+	// STOPPED - the plan created that run, the plan has replaced the stage it
+	// was doing, and leaving it running means two concurrent runs for one
+	// stage, one of them producing work the plan will never read.
 	for _, runID := range snapshot.RetiredRuns {
 		recorded, err := r.attributeRunSpend(plan, snapshot, "", runID)
 		if err != nil {
 			return report, err
 		}
 		attributed = attributed || recorded
+		stopped, err := r.stopRetiredRun(runID)
+		if err != nil {
+			return report, err
+		}
+		if stopped {
+			report.Stopped = append(report.Stopped, runID)
+		}
 	}
 	if attributed {
 		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
@@ -345,6 +358,25 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 		return snapshot, nil
 	}
 	return r.Store.ReplayPlan(planID)
+}
+
+// stopRetiredRun cancels a child run whose stage a revision replaced. It is the
+// plan's own work: the plan created the run, and the stage it was doing is no
+// longer in the plan. An operator's own run is never touched by this - only a
+// run this plan created and then superseded.
+func (r PlanReconciler) stopRetiredRun(runID string) (bool, error) {
+	run, found, err := r.Store.Run(runID)
+	if err != nil || !found {
+		return false, err
+	}
+	if run.Plan == nil || run.Disposition == Cancelled || terminalDisposition(run.Disposition) {
+		return false, nil
+	}
+	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256}
+	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, "plan_stage_superseded"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // reopenStaleGates un-satisfies any gate whose proof no longer describes the
@@ -690,7 +722,7 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			payload.ProvingRuns = append(payload.ProvingRuns, runID)
 			payload.ProvenHeads = append(payload.ProvenHeads, runID+"@"+projected.Head())
 		case domain.StageHumanDecisionGate:
-			decision, satisfied := humanDecision(events, stage.Action)
+			decision, satisfied := humanDecision(events, stage.Action, projected.Head())
 			if !satisfied {
 				continue
 			}
@@ -733,6 +765,14 @@ func answersClaims(decision humanDecisionReference, required []string) bool {
 	if len(required) == 0 {
 		return true
 	}
+	// A decision recorded before this evidence carried its claims answers by
+	// its existence, as it always did. Refusing it would invalidate approvals
+	// an operator already gave against a record that could not have carried
+	// what is now asked of it - the same grandfathering a gate without proven
+	// heads gets, for the same reason.
+	if len(decision.claims) == 0 {
+		return true
+	}
 	for _, claim := range required {
 		found := false
 		for _, answered := range decision.claims {
@@ -757,7 +797,7 @@ func answersClaims(decision humanDecisionReference, required []string) bool {
 // The evidence is the kernel's existing HumanAuthorityRecorded record - pinned
 // to a request, a candidate, a contract and a state digest - so the plan
 // invents no second approval system.
-func humanDecision(events []EngineeringEvent, action *domain.Action) (humanDecisionReference, bool) {
+func humanDecision(events []EngineeringEvent, action *domain.Action, head string) (humanDecisionReference, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
 		if event.Type != EventHumanAuthorityRecorded {
@@ -768,6 +808,15 @@ func humanDecision(events []EngineeringEvent, action *domain.Action) (humanDecis
 			continue
 		}
 		if action != nil && payload.Action != *action {
+			continue
+		}
+		// The decision has to be about THIS candidate. A person approves a
+		// change, not a run: carrying an approval of head A onto head B is the
+		// rule the run-level authority binding exists to prevent, and reading
+		// raw events here bypassed it - the gate re-opened when the head moved
+		// and then re-satisfied itself from the same stale approval, stamping
+		// it onto work nobody had seen.
+		if head != "" && payload.Candidate.Revision != head {
 			continue
 		}
 		// The NEWEST matching decision governs. Skipping a rejection to keep

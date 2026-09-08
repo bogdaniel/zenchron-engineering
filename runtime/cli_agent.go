@@ -487,15 +487,27 @@ func advertisesChoice(advertised, flag, value string) bool {
 // flagDescription is the run of help text belonging to one flag: everything up
 // to the next flag or the next blank line, whichever comes first.
 func flagDescription(text string) string {
+	// Normalized first: a CRLF help output would otherwise never match any of
+	// the cuts below and the whole remainder would count as one flag's
+	// description.
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	end := len(text)
+	cut := func(marker string) {
+		if next := strings.Index(text, marker); next >= 0 && next < end {
+			end = next
+		}
+	}
+	cut("\n  -")
+	cut("\n-")
+	// A blank line ends the description UNLESS the next block is this flag's
+	// own value list. clap prints "Possible values:" as an indented block after
+	// a blank line, so cutting at the blank line put the choices outside the
+	// description and withheld a capability the binary advertises.
 	if blank := strings.Index(text, "\n\n"); blank >= 0 && blank < end {
-		end = blank
-	}
-	if next := strings.Index(text, "\n  -"); next >= 0 && next < end {
-		end = next
-	}
-	if next := strings.Index(text, "\n-"); next >= 0 && next < end {
-		end = next
+		rest := text[blank:]
+		if values := strings.Index(rest, "ossible values"); values < 0 || (end-blank) < values {
+			end = blank
+		}
 	}
 	return text[:end]
 }

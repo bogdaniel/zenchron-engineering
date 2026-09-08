@@ -302,14 +302,17 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		}
 		return controlOK(outcome)
 	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
-		view, err := c.decidePlan(request)
-		if err != nil {
+		// Under the reconciler's own lock: a decision and a plan tick both read
+		// a snapshot and then append against it, and interleaving them lets one
+		// decide from state the other is changing.
+		var view runtime.PlanView
+		if err := supervisor.WithPlanLock(func() (err error) { view, err = c.decidePlan(request); return err }); err != nil {
 			return controlError(err)
 		}
 		return controlOK(view)
 	case runtime.ControlPlanRevise:
-		view, err := c.revisePlan(ctx, request)
-		if err != nil {
+		var view runtime.PlanView
+		if err := supervisor.WithPlanLock(func() (err error) { view, err = c.revisePlan(ctx, request); return err }); err != nil {
 			return controlError(err)
 		}
 		return controlOK(view)
@@ -368,8 +371,16 @@ func (c *composition) revisePlan(ctx context.Context, request runtime.ControlReq
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
-	target := runtime.RepositoryTarget{
-		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: watchedDefaultBranch,
+	// The repository's OWN default branch, resolved the same way the local
+	// command resolves it. Assuming one made a delegated revision compile
+	// against a branch the repository may not have, which is a difference an
+	// operator would experience as "it works in one terminal and not the
+	// other".
+	target, err := runtime.ResolveRepository(c.config.StateDir, repo.String())
+	if err != nil {
+		target = runtime.RepositoryTarget{
+			Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: watchedDefaultBranch,
+		}
 	}
 	engine, err := c.engine(target)
 	if err != nil {

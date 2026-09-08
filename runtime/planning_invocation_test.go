@@ -208,6 +208,19 @@ func TestAReadOnlyProbeRequiresTheChoiceOfTheFlagItPasses(t *testing.T) {
 			help:       "  --output <FORMAT>  table or json\n  --approval-mode <MODE>  one of: default, plan, yolo\n",
 			advertises: true,
 		},
+		{
+			// clap prints the value list as an indented block after a blank
+			// line. Cutting the description at the blank line put the choices
+			// outside it and withheld a capability the binary advertises.
+			name:       "a clap-style possible values block",
+			help:       "  --approval-mode <MODE>\n          How changes are approved\n\n          Possible values:\n          - default\n          - plan\n",
+			advertises: true,
+		},
+		{
+			name:       "CRLF help output",
+			help:       "  --approval-mode <MODE>  choices: default, plan\r\n  --output <FORMAT>\r\n",
+			advertises: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

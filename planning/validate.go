@@ -381,7 +381,7 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 			continue
 		}
 		if before.Independence != nil {
-			if !roleCarriesIndependence(plan, before.Role, before.Independence.Dimension, before.Independence.HumanSubstitutionPermitted) {
+			if !roleCarriesIndependence(plan, before, before.Independence.HumanSubstitutionPermitted) {
 				reasons = append(reasons, fmt.Sprintf(
 					"stage %q carried %q independence for role %q and the revision removes it without any stage in that role carrying it: an obligation cannot be dropped by renaming the stage that held it",
 					before.ID, before.Independence.Dimension, before.Role))
@@ -405,20 +405,42 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 // human decision gate is not an answer to the obligation - accepting one
 // anyway would reopen, through a rename, exactly the escape the same-id rule
 // closes.
-func roleCarriesIndependence(plan domain.EngineeringPlan, role domain.EngineeringRole, dimension domain.IndependenceDimension, substitutionPermitted bool) bool {
+func roleCarriesIndependence(plan domain.EngineeringPlan, before domain.PlanStage, substitutionPermitted bool) bool {
 	for _, stage := range plan.Stages {
 		switch {
-		case substitutionPermitted && stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role:
+		case substitutionPermitted && stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == before.Role:
 			// A person standing in for the role, where policy permitted that
 			// substitution, is the answer the permission describes.
 			return true
-		case stage.Role != role || stage.Independence == nil:
+		case stage.Role != before.Role || stage.Independence == nil:
 			continue
-		case dimensionStrength(stage.Independence.Dimension) >= dimensionStrength(dimension):
+		case dimensionStrength(stage.Independence.Dimension) < dimensionStrength(before.Independence.Dimension):
+			continue
+		case !carriesPeers(plan, stage.Independence.DifferentFrom, before.Independence.DifferentFrom):
+			// The DIMENSION is not the obligation. A replacement in the same
+			// role at the same strength that points somewhere else reviews
+			// different work, and may share the vendor of the producer the
+			// removed stage was about - the rename escape, one level down.
+			continue
+		default:
 			return true
 		}
 	}
 	return false
+}
+
+// carriesPeers reports whether a replacement still names every peer the removed
+// stage named, for the peers that remain stages of this plan.
+func carriesPeers(plan domain.EngineeringPlan, replacement, removed []string) bool {
+	for _, peer := range removed {
+		if _, remains := previousStage(plan, peer); !remains {
+			continue
+		}
+		if !namesPeer(replacement, peer) {
+			return false
+		}
+	}
+	return true
 }
 
 func roleCarriesTrust(plan domain.EngineeringPlan, role domain.EngineeringRole, trust domain.TrustRequirement, substitutionPermitted bool) bool {

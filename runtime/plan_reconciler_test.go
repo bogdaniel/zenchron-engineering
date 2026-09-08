@@ -1800,4 +1800,79 @@ func TestARetiredStagesRunIsStillAttributed(t *testing.T) {
 		t.Fatalf("a retired stage's live run spent more and the plan saw %d, unchanged from %d",
 			after.Consumed.ProviderInvocations, before)
 	}
+
+	// And it is STOPPED. The plan created that run, the stage it was doing is
+	// no longer in the plan, and leaving it running means two concurrent runs
+	// for one stage - one of them producing work the plan will never read.
+	stopped, _, err := fixture.store.Run(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Disposition != Cancelled {
+		t.Fatalf("the superseded stage's run is %q, want it cancelled", stopped.Disposition)
+	}
+	if stopped.Reason != "plan_stage_superseded" {
+		t.Fatalf("the cancellation reason is %q, which does not say why", stopped.Reason)
+	}
+}
+
+// A person approves a CHANGE, not a run.
+//
+// The gate binding built for assurance re-opened a human gate when the head
+// moved - and the next evaluation then re-satisfied it from the same stale
+// approval, stamping a verdict about candidate A onto candidate B, after which
+// the recorded heads matched and it never re-opened again.
+func TestAStaleHumanApprovalIsNotCarriedOntoANewCandidate(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "human", Kind: domain.StageHumanDecisionGate, DependsOn: []string{"implementation"},
+			SubstitutesRole: domain.RoleReviewer, RequiredClaims: []string{"human-approval"}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the stage created no run")
+	}
+
+	// Candidate A, approved by a person, and the gate is satisfied.
+	recordCandidate(t, fixture, runID, "aaaaaaaaaaaa")
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "human-a", RunID: runID,
+		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(30, 0).UTC(),
+		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
+			"evidence_id": "ev-a", "requires": []any{"human-approval"},
+			"candidate": map[string]any{"branch": "candidate", "revision": "aaaaaaaaaaaa", "tree": "aaaaaaaaaaaa"},
+		})),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plan, _, err := fixture.store.PlanRevision(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, _ := plan.Stage("human")
+	current, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, current); err != nil || !satisfied {
+		t.Fatalf("the gate was not satisfied by an approval of the candidate it is about: satisfied=%v err=%v", satisfied, err)
+	}
+
+	// The run moves to candidate B. The person has not seen it.
+	recordCandidate(t, fixture, runID, "bbbbbbbbbbbb")
+	moved, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, moved); err != nil || satisfied {
+		t.Fatalf("an approval of candidate A satisfied the gate for candidate B: satisfied=%v err=%v", satisfied, err)
+	}
 }
