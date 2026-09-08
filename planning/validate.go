@@ -328,7 +328,61 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 			}
 		}
 	}
+	// A stage can also be REMOVED, and the ratchet above only compares ids that
+	// exist in both revisions - so deleting `security-review` and adding
+	// `security-review-2` without the obligation weakened the plan without
+	// tripping a single rule. An obligation a revision drops has to still be
+	// carried by some stage in the same role.
+	for _, before := range previous.Stages {
+		if _, still := previousStage(plan, before.ID); still {
+			continue
+		}
+		if before.Independence != nil {
+			if !roleCarriesIndependence(plan, before.Role, before.Independence.Dimension) {
+				reasons = append(reasons, fmt.Sprintf(
+					"stage %q carried %q independence for role %q and the revision removes it without any stage in that role carrying it: an obligation cannot be dropped by renaming the stage that held it",
+					before.ID, before.Independence.Dimension, before.Role))
+			}
+		}
+		if before.Kind == domain.StageAgent && trustStrength(before.TrustRequirement) > 0 {
+			if !roleCarriesTrust(plan, before.Role, before.TrustRequirement) {
+				reasons = append(reasons, fmt.Sprintf(
+					"stage %q required %q trust for role %q and the revision removes it without any stage in that role requiring it",
+					before.ID, before.TrustRequirement, before.Role))
+			}
+		}
+	}
 	return reasons
+}
+
+// roleCarriesIndependence reports whether some stage in this role still carries
+// an independence obligation at least as strong as the one named.
+func roleCarriesIndependence(plan domain.EngineeringPlan, role domain.EngineeringRole, dimension domain.IndependenceDimension) bool {
+	for _, stage := range plan.Stages {
+		switch {
+		case stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role:
+			// A person standing in for the role is the policy-permitted answer,
+			// and it is stronger than any worker independence.
+			return true
+		case stage.Role != role || stage.Independence == nil:
+			continue
+		case dimensionStrength(stage.Independence.Dimension) >= dimensionStrength(dimension):
+			return true
+		}
+	}
+	return false
+}
+
+func roleCarriesTrust(plan domain.EngineeringPlan, role domain.EngineeringRole, trust domain.TrustRequirement) bool {
+	for _, stage := range plan.Stages {
+		if stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role {
+			return true
+		}
+		if stage.Role == role && trustStrength(stage.TrustRequirement) >= trustStrength(trust) {
+			return true
+		}
+	}
+	return false
 }
 
 func previousStage(plan domain.EngineeringPlan, id string) (domain.PlanStage, bool) {

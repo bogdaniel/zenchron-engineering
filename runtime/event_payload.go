@@ -785,6 +785,16 @@ type PlanGateSatisfiedPayload struct {
 // reported" and "zero" are opposite facts: a subscription CLI reports no cost,
 // and rendering that as zero would fabricate a currency figure.
 type PlanBudgetConsumedPayload struct {
+	// Key identifies WHAT was consumed, so the same consumption recorded twice
+	// counts once. The reconciler is idempotent by design - it re-derives the
+	// same run every tick - and a crash between two appends made it re-record
+	// a delta it had already recorded, permanently inflating the plan's
+	// consumption against its ceiling.
+	//
+	// It is omitempty because an event written before it existed has none, and
+	// those are counted exactly as they were: an absent key means "count this",
+	// which is what the projection did for every event until now.
+	Key                 string `json:"key,omitempty"`
 	StageID             string `json:"stage_id,omitempty"`
 	RunID               string `json:"run_id,omitempty"`
 	ChildRuns           int    `json:"child_runs,omitempty"`
@@ -925,6 +935,7 @@ var planPayloads = map[string]payloadValidator{
 			nonNegative("child_runs", p.ChildRuns),
 			nonNegative("provider_invocations", p.ProviderInvocations),
 			nonNegative("wall_seconds", p.WallSeconds),
+			bounded("key", p.Key),
 			bounded("stage_id", p.StageID),
 			bounded("run_id", p.RunID))
 	}),

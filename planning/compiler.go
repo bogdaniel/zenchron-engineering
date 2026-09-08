@@ -68,7 +68,11 @@ type CompileInput struct {
 	Reasoning *domain.PlanReasoningProvenance
 	// Previous is the revision this compilation replaces, when it is a
 	// revision rather than a first plan.
-	Previous   *domain.EngineeringPlan
+	Previous *domain.EngineeringPlan
+	// Consumed is what that plan has already spent. A revision may tighten the
+	// remaining envelope and may never claim back consumption, and passing it
+	// here is what makes that refusal reachable rather than theoretical.
+	Consumed   domain.PlanConsumption
 	ProposalID string
 }
 
@@ -450,13 +454,11 @@ func ensureAssuranceGate(stages []domain.PlanStage, contract domain.EngineeringW
 func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.PlanStage {
 	for i, stage := range stages {
 		if stage.Kind != domain.StageAgent {
-			// A gate carries no worker requirement at all. Clearing rather than
-			// ignoring means a template that stated one cannot leave a residue
-			// that later reads as a worker requirement.
-			stage.RequiresCapabilities = nil
-			stage.TrustRequirement = ""
-			stage.InvocationMode = ""
-			stage.Profile = ""
+			// A gate carries no worker requirement at all, and one that states
+			// them is REFUSED by the graph laws rather than quietly cleaned up
+			// here. Stripping them first laundered an anomalous proposal into a
+			// valid plan: a planner that asked for a gate performed by a worker
+			// got a gate, and nobody was told it had asked.
 			// An assurance gate that names no claim is completed from the work
 			// contract's own required claims. It is a safe completion in one
 			// direction only: the gate can gain claims the contract already

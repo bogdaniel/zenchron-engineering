@@ -123,11 +123,22 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		}
 	}
 
+	// What this plan has already spent. A revision that tightens the envelope
+	// below it is refused at compile time rather than approved and then blocked
+	// at the first stage that tries to run under it.
+	var consumed domain.PlanConsumption
+	if found {
+		snapshot, err := s.Store.ReplayPlan(input.PlanID)
+		if err != nil {
+			return domain.EngineeringPlan{}, err
+		}
+		consumed = snapshot.Consumed
+	}
 	plan, compileErr := planning.Compile(planning.CompileInput{
 		PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 		Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
 		Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
-		Reasoning: input.Reasoning, Previous: previous,
+		Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
 	})
 	if compileErr != nil {
 		// The refusal is durable when a plan already exists to record it

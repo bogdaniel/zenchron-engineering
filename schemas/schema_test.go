@@ -63,6 +63,10 @@ var invalidExpectations = map[string]invalidExpectation{
 	// Nested plans are not representable, in a template or in a plan.
 	"nested-plan.engineering-plan-template.json": {"/stages/0/kind", "enum"},
 	"nested-plan.engineering-plan.json":          {"/stages/0", "additionalProperties"},
+	// A gate is not performed by a worker. Go refuses this too; the schema
+	// refusing it as well is what stops such a document from being a plan at
+	// all, rather than a plan the compiler happens to clean up.
+	"gate-states-a-worker-role.engineering-plan.json": {"/stages/0", "then"},
 	// Roles come from the catalogue; an assignment cannot name a
 	// responsibility nothing can resolve.
 	"unknown-role.agent-assignment.json": {"/role", "enum"},

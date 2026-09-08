@@ -119,6 +119,14 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 	}
 	report.Revision = plan.Revision
 
+	// A supersession is recorded in a separate append from the approval that
+	// caused it, so a crash between the two lost the invalidations forever -
+	// and dependents would then build on work the approved revision had
+	// invalidated. It is re-derived here, once, from durable state.
+	if snapshot, err = r.recordMissingSupersession(planID, plan, snapshot); err != nil {
+		return report, err
+	}
+
 	resolution, err := r.Service.Resolve(plan, snapshot)
 	if err != nil {
 		return report, err
@@ -242,6 +250,39 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 	return report, nil
 }
 
+// recordMissingSupersession completes the record when the approved revision
+// replaced an earlier one and no supersession event says so.
+//
+// It is a top-up, not a second path: the same InvalidatedStages computation the
+// approval uses, applied to the same two revisions, appended once. A plan whose
+// approval and supersession both landed passes straight through.
+func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanSnapshot, error) {
+	previousRevision := plan.Provenance.PreviousRevision
+	if previousRevision == nil || *previousRevision >= plan.Revision {
+		return snapshot, nil
+	}
+	for _, recorded := range snapshot.Superseded {
+		if recorded.ToRevision == plan.Revision {
+			return snapshot, nil
+		}
+	}
+	previous, found, err := r.Store.PlanRevision(planID, *previousRevision)
+	if err != nil {
+		return snapshot, err
+	}
+	if !found {
+		return snapshot, nil
+	}
+	if err := r.appendPlan(planID, EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{
+		FromRevision: *previousRevision, ToRevision: plan.Revision,
+		ProposalID:        plan.Provenance.ProposalID,
+		InvalidatedStages: InvalidatedStages(previous, plan, snapshot),
+	}); err != nil {
+		return snapshot, err
+	}
+	return r.Store.ReplayPlan(planID)
+}
+
 // startAgentStage creates or associates the ordinary EngineeringRun for one
 // dependency-ready agent stage, within the plan's aggregate envelope.
 func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.EngineeringPlan, stage domain.PlanStage, snapshot PlanSnapshot, resolution planningResolution) (*PlanStageRun, *PlanStageBlock, error) {
@@ -271,12 +312,25 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if r.Engine == nil {
 		return nil, nil, &PlanRefusedError{PlanID: plan.ID, Detail: "no engine factory is configured, so no run can be created"}
 	}
+	if err := r.Store.PutPlanAssignment(plan.ID, plan.Revision, assignment); err != nil {
+		return nil, nil, err
+	}
+	// The STORED assignment is the one that runs. A row already frozen for this
+	// (plan, revision, stage) is kept, so a re-resolution that picked a
+	// different worker must not be what the journal, the run binding and the
+	// report describe: that is a tamper-evident journal naming worker B while
+	// worker A does the work.
+	frozen, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, stage.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !found {
+		return nil, nil, fmt.Errorf("assignment for plan %s revision %d stage %s was stored and could not be read back", plan.ID, plan.Revision, stage.ID)
+	}
+	assignment = frozen
 	engine, err := r.Engine(r.Repository, assignment.Agent.ID)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
-	}
-	if err := r.Store.PutPlanAssignment(plan.ID, plan.Revision, assignment); err != nil {
-		return nil, nil, err
 	}
 	binding := RunPlanBinding{
 		PlanID: plan.ID, Revision: plan.Revision, PlanDigest: plan.Digest,
@@ -299,18 +353,19 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	}); err != nil {
 		return nil, nil, err
 	}
-	if err := r.appendPlan(plan.ID, EventPlanRunStarted, PlanRunStartedPayload{StageID: stage.ID, RunID: outcome.RunID}); err != nil {
-		return nil, nil, err
-	}
 	// One child run consumed. Consumption is a delta against an immutable
 	// record, so nothing later - a revision, a restart, a reassignment - can
-	// take it back.
-	if !outcome.Adopted {
-		if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
-			StageID: stage.ID, RunID: outcome.RunID, ChildRuns: 1,
-		}); err != nil {
-			return nil, nil, err
-		}
+	// take it back. It is recorded BEFORE the run is announced and keyed by the
+	// run, so a crash between the two appends over-counts nothing on replay and
+	// loses nothing either: the next tick re-derives the same run and the same
+	// key, and the key is counted once.
+	if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
+		Key: "child_run:" + outcome.RunID, StageID: stage.ID, RunID: outcome.RunID, ChildRuns: 1,
+	}); err != nil {
+		return nil, nil, err
+	}
+	if err := r.appendPlan(plan.ID, EventPlanRunStarted, PlanRunStartedPayload{StageID: stage.ID, RunID: outcome.RunID}); err != nil {
+		return nil, nil, err
 	}
 	return &PlanStageRun{StageID: stage.ID, RunID: outcome.RunID, AgentID: assignment.Agent.ID}, nil, nil
 }
@@ -379,8 +434,12 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 			return settled, err
 		}
 		if invocations > 0 {
+			// Keyed by the run: settling is retried after a crash between this
+			// append and the settled event, and the invocations of one run are
+			// one fact however many times that retry happens.
 			if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
-				StageID: stage.ID, RunID: projection.RunID, ProviderInvocations: invocations,
+				Key: "invocations:" + projection.RunID, StageID: stage.ID, RunID: projection.RunID,
+				ProviderInvocations: invocations,
 			}); err != nil {
 				return settled, err
 			}

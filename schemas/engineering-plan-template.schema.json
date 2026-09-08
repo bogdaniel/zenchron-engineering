@@ -32,7 +32,61 @@
     "stages": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/template_stage"
+        "$ref": "#/$defs/template_stage",
+        "allOf": [
+          {
+            "description": "A gate is not performed by a worker: it references evidence, authority or a human decision that already exists. Stating a worker requirement on one is refused here as well as in Go, so a document that says it is never accepted as a plan.",
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "assurance_gate",
+                    "human_decision_gate"
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "profile"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "independence"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "requires_capabilities"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "trust_requirement"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "invocation_mode"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
       },
       "minItems": 1
     },

@@ -602,3 +602,40 @@ func TestAProfilesConstraintsAreFrozenIntoTheAssignment(t *testing.T) {
 		t.Fatalf("a profile widened the stage budget to %#v from %#v", relaxed.Budget, stage.Budget)
 	}
 }
+
+// The revision ratchet compares more than matching stage ids. Deleting the
+// stage that carried an obligation and adding a fresh one without it changed
+// nothing the old comparison could see, so the easiest way to drop an
+// independent review was to rename it.
+func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
+	previous := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	reviewer, found := stageForRole(previous, domain.RoleSecurityReviewer)
+	if !found || reviewer.Independence == nil {
+		t.Fatalf("the fixture has no independent review stage to drop: %#v", previous.Stages)
+	}
+
+	renamed := previous
+	renamed.Revision = previous.Revision + 1
+	previousRevision := previous.Revision
+	renamed.Provenance.PreviousRevision = &previousRevision
+	renamed.Stages = nil
+	for _, stage := range previous.Stages {
+		if stage.ID == reviewer.ID {
+			// Same role, new id, no independence: the rename escape.
+			stage.ID = reviewer.ID + "-2"
+			stage.Independence = nil
+		}
+		renamed.Stages = append(renamed.Stages, stage)
+	}
+
+	err := planning.Validate(renamed, planning.ValidationInput{
+		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
+		Previous: &previous,
+	})
+	if err == nil {
+		t.Fatal("a revision dropped an independence obligation by renaming the stage that held it")
+	}
+	if !strings.Contains(err.Error(), "renaming") {
+		t.Fatalf("the refusal does not name what happened: %v", err)
+	}
+}

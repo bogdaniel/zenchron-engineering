@@ -147,9 +147,13 @@ type PlanSnapshot struct {
 	// Consumed is summed from plan.budget_consumed events. It is a SUM over
 	// immutable records, so nothing - not a revision, not a restart, not a
 	// reassignment - can lower it.
-	Consumed    domain.PlanConsumption `json:"consumed"`
-	Cursor      Cursor                 `json:"journal_cursor"`
-	StateSHA256 string                 `json:"state_sha256"`
+	Consumed domain.PlanConsumption `json:"consumed"`
+	Cursor   Cursor                 `json:"journal_cursor"`
+	// consumedKeys is the set of consumption keys already counted. It is not
+	// exported and not part of the state digest: it is how the fold stays
+	// idempotent, not a fact about the plan.
+	consumedKeys map[string]bool `json:"-"`
+	StateSHA256  string          `json:"state_sha256"`
 }
 
 // ApprovedRevision reports the revision an operator approved, and whether one
@@ -347,6 +351,19 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		var payload PlanBudgetConsumedPayload
 		if err := json.Unmarshal(e.Payload, &payload); err != nil {
 			return err
+		}
+		if payload.Key != "" {
+			if s.consumedKeys == nil {
+				s.consumedKeys = map[string]bool{}
+			}
+			if s.consumedKeys[payload.Key] {
+				// Already counted. The reconciler re-derives the same work
+				// every tick, so a crash between two appends replays a delta
+				// that was already recorded - and consumption that can only go
+				// up must not go up twice for one thing.
+				return nil
+			}
+			s.consumedKeys[payload.Key] = true
 		}
 		s.Consumed.ChildRuns += payload.ChildRuns
 		s.Consumed.ProviderInvocations += payload.ProviderInvocations

@@ -1101,3 +1101,118 @@ func TestAProfilesNarrowingBindsTheWork(t *testing.T) {
 		t.Fatalf("a stage budget widened the operator's bound: %#v", widened)
 	}
 }
+
+// The journal names the worker that actually works.
+//
+// A stored assignment is kept - that is what freezing means - so a
+// re-resolution that picked a different worker must not be what the journal,
+// the run binding and the report describe. A tamper-evident journal naming
+// worker B while worker A does the work is worse than no record at all.
+func TestTheJournalNamesTheFrozenWorkerNotAReResolution(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+
+	// Freeze an assignment naming claude BEFORE the first reconcile, so the
+	// resolver's own answer (codex, the default) differs from what is stored.
+	resolution, err := fixture.service.Resolve(fixture.plan, PlanSnapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, ok := resolution.Assignment("implementation")
+	if !ok {
+		t.Fatalf("the stage did not resolve: %#v", resolution.Blocked)
+	}
+	if assignment.Agent.ID != "codex" {
+		t.Fatalf("the fixture resolved onto %q, expected the default codex", assignment.Agent.ID)
+	}
+	frozen := assignment
+	frozen.Agent = domain.AgentBinding{
+		ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
+		TrustMode: domain.TrustRequirementOperatorTrusted,
+	}
+	if err := fixture.store.PutPlanAssignment(fixture.plan.ID, fixture.plan.Revision, frozen); err != nil {
+		t.Fatal(err)
+	}
+
+	report := fixture.reconcile(t)
+	if len(report.Started) != 1 || report.Started[0].AgentID != "claude" {
+		t.Fatalf("the report names %#v, want the frozen worker claude", report.Started)
+	}
+	if len(fixture.engineCalls) == 0 || fixture.engineCalls[len(fixture.engineCalls)-1] != "claude" {
+		t.Fatalf("the engine was built for %v, want the frozen worker claude", fixture.engineCalls)
+	}
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent := snapshot.Stages["implementation"].AgentID; agent != "claude" {
+		t.Fatalf("the journal names worker %q while the frozen assignment names claude", agent)
+	}
+}
+
+// The supersession record survives a crash between the approval and it.
+//
+// They are two appends. A crash in between used to lose the invalidations
+// permanently - nothing re-derived them - so dependents could build on work the
+// approved revision had already invalidated.
+func TestALostSupersessionIsReDerivedOnTheNextTick(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	// Revision 2 changes the backend stage, which invalidates it.
+	second := fixture.plan
+	second.Revision = 2
+	previous := fixture.plan.Revision
+	second.Provenance.PreviousRevision = &previous
+	second.Stages = append([]domain.PlanStage(nil), fixture.plan.Stages...)
+	second.Stages[0].Objective = "Implement the backend half, differently."
+	digest, err := second.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
+	// The approval lands and the process dies before the supersession append:
+	// exactly what one durable event without the other looks like.
+	if err := fixture.service.appendPlanEvent(second.ID, EventPlanApproved, PlanDecisionPayload{
+		Revision: second.Revision, Digest: second.Digest, Operator: "operator",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.plan = second
+
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Superseded) != 1 {
+		t.Fatalf("the lost supersession was not re-derived: %#v", snapshot.Superseded)
+	}
+	if snapshot.Superseded[0].FromRevision != 1 || snapshot.Superseded[0].ToRevision != 2 {
+		t.Fatalf("the supersession names %#v, want revision 1 replaced by 2", snapshot.Superseded[0])
+	}
+	if len(snapshot.Superseded[0].InvalidatedStages) == 0 {
+		t.Fatal("the re-derived supersession invalidated nothing, so the stage that changed kept its old work")
+	}
+
+	// And it is recorded ONCE.
+	fixture.reconcile(t)
+	again, err := fixture.store.ReplayPlan(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Superseded) != 1 {
+		t.Fatalf("the top-up recorded the supersession %d times", len(again.Superseded))
+	}
+}

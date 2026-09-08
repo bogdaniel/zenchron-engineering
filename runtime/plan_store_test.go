@@ -11,6 +11,7 @@ package runtime
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -663,4 +664,60 @@ func asError[T error](err error, target *T) bool {
 		err = unwrapped.Unwrap()
 	}
 	return false
+}
+
+// Consumption is idempotent per keyed fact. The reconciler re-derives the same
+// work every tick, so a crash between two appends replays a delta that was
+// already recorded - and consumption that can only go up must not go up twice
+// for one thing.
+func TestConsumptionCountsOneFactOnce(t *testing.T) {
+	_, store := openPlanStore(t)
+	plan := planFixture(t, "plan-consumption", 1)
+	if _, err := store.ClaimPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := appendPlanBudget(t, store, plan.ID, PlanBudgetConsumedPayload{
+			Key: "child_run:run-1", StageID: "implementation", RunID: "run-1", ChildRuns: 1,
+		}, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A DIFFERENT run is a different fact.
+	if err := appendPlanBudget(t, store, plan.ID, PlanBudgetConsumedPayload{
+		Key: "child_run:run-2", StageID: "review", RunID: "run-2", ChildRuns: 1,
+	}, 3); err != nil {
+		t.Fatal(err)
+	}
+	// An event written before keys existed carries none and is counted, exactly
+	// as it always was.
+	if err := appendPlanBudget(t, store, plan.ID, PlanBudgetConsumedPayload{
+		StageID: "decomposition", ProviderInvocations: 1,
+	}, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.ReplayPlan(plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Consumed.ChildRuns != 2 {
+		t.Fatalf("consumed %d child runs, want 2: a replayed delta was counted twice", snapshot.Consumed.ChildRuns)
+	}
+	if snapshot.Consumed.ProviderInvocations != 1 {
+		t.Fatalf("consumed %d provider invocations, want 1", snapshot.Consumed.ProviderInvocations)
+	}
+}
+
+func appendPlanBudget(t *testing.T, store *SQLiteOperationStore, planID string, payload PlanBudgetConsumedPayload, seq int) error {
+	t.Helper()
+	body, err := marshalPayloadJSON(payload)
+	if err != nil {
+		return err
+	}
+	_, err = store.AppendPlanEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: fmt.Sprintf("budget-%d", seq), PlanID: planID,
+		Type: EventPlanBudgetConsumed, OccurredAt: time.Unix(int64(100+seq), 0).UTC(), Payload: body,
+	})
+	return err
 }

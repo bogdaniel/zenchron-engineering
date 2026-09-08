@@ -1056,6 +1056,17 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		if existing.Plan == nil || existing.Plan.PlanID != binding.PlanID || existing.Plan.StageID != binding.StageID {
 			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run belongs to a different plan stage"}
 		}
+		// The ASSIGNMENT is part of what the run is. Adopting a run created
+		// under a different assignment would silently hand this stage's work to
+		// a run bound to another worker, another profile and another frozen
+		// instruction set.
+		if existing.Plan.AssignmentID != binding.AssignmentID {
+			return StartOutcome{}, &RunConflictError{
+				RunID: runID,
+				Detail: fmt.Sprintf("durable run was created under assignment %s and this start names %s",
+					existing.Plan.AssignmentID, binding.AssignmentID),
+			}
+		}
 		// The run identity carries the repository, the issue, the configuration
 		// and the plan stage - but NOT the controller. Two controllers that
 		// share a configuration digest and differ in build or identity derive
