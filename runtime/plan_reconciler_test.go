@@ -943,6 +943,22 @@ func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
 	if payload.HumanEvidenceID == "" {
 		t.Fatal("the satisfaction records no human evidence, so nothing names the person who decided")
 	}
+
+	// And the NEWEST decision governs. A person who approved and then rejected
+	// has rejected; walking past the rejection to find the older approval would
+	// satisfy the gate with a decision that was reversed.
+	if _, err := fixture.store.AppendEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "human-2", RunID: runID,
+		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(22, 0).UTC(),
+		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
+			"evidence_id": "ev-2", "decision": "reject",
+		})),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot); err != nil || satisfied {
+		t.Fatalf("a reversed approval still satisfied the gate: satisfied=%v err=%v", satisfied, err)
+	}
 }
 
 // The aggregate provider-invocation ceiling is enforced BEFORE the provider

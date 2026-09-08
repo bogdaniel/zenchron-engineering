@@ -347,14 +347,14 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 			continue
 		}
 		if before.Independence != nil {
-			if !roleCarriesIndependence(plan, before.Role, before.Independence.Dimension) {
+			if !roleCarriesIndependence(plan, before.Role, before.Independence.Dimension, before.Independence.HumanSubstitutionPermitted) {
 				reasons = append(reasons, fmt.Sprintf(
 					"stage %q carried %q independence for role %q and the revision removes it without any stage in that role carrying it: an obligation cannot be dropped by renaming the stage that held it",
 					before.ID, before.Independence.Dimension, before.Role))
 			}
 		}
 		if before.Kind == domain.StageAgent && trustStrength(before.TrustRequirement) > 0 {
-			if !roleCarriesTrust(plan, before.Role, before.TrustRequirement) {
+			if !roleCarriesTrust(plan, before.Role, before.TrustRequirement, before.Independence != nil && before.Independence.HumanSubstitutionPermitted) {
 				reasons = append(reasons, fmt.Sprintf(
 					"stage %q required %q trust for role %q and the revision removes it without any stage in that role requiring it",
 					before.ID, before.TrustRequirement, before.Role))
@@ -366,12 +366,17 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 
 // roleCarriesIndependence reports whether some stage in this role still carries
 // an independence obligation at least as strong as the one named.
-func roleCarriesIndependence(plan domain.EngineeringPlan, role domain.EngineeringRole, dimension domain.IndependenceDimension) bool {
+// substitutionPermitted says whether the REMOVED stage carried the policy
+// permission for a person to answer in place of the worker. Without it, a
+// human decision gate is not an answer to the obligation - accepting one
+// anyway would reopen, through a rename, exactly the escape the same-id rule
+// closes.
+func roleCarriesIndependence(plan domain.EngineeringPlan, role domain.EngineeringRole, dimension domain.IndependenceDimension, substitutionPermitted bool) bool {
 	for _, stage := range plan.Stages {
 		switch {
-		case stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role:
-			// A person standing in for the role is the policy-permitted answer,
-			// and it is stronger than any worker independence.
+		case substitutionPermitted && stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role:
+			// A person standing in for the role, where policy permitted that
+			// substitution, is the answer the permission describes.
 			return true
 		case stage.Role != role || stage.Independence == nil:
 			continue
@@ -382,9 +387,9 @@ func roleCarriesIndependence(plan domain.EngineeringPlan, role domain.Engineerin
 	return false
 }
 
-func roleCarriesTrust(plan domain.EngineeringPlan, role domain.EngineeringRole, trust domain.TrustRequirement) bool {
+func roleCarriesTrust(plan domain.EngineeringPlan, role domain.EngineeringRole, trust domain.TrustRequirement, substitutionPermitted bool) bool {
 	for _, stage := range plan.Stages {
-		if stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role {
+		if substitutionPermitted && stage.Kind == domain.StageHumanDecisionGate && stage.SubstitutesRole == role {
 			return true
 		}
 		if stage.Role == role && trustStrength(stage.TrustRequirement) >= trustStrength(trust) {

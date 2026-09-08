@@ -638,6 +638,27 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 	if !strings.Contains(err.Error(), "renaming") {
 		t.Fatalf("the refusal does not name what happened: %v", err)
 	}
+
+	// Nor by replacing it with a human decision gate that policy never
+	// permitted: the same escape, one step further round.
+	gated := renamed
+	gated.Stages = nil
+	for _, stage := range previous.Stages {
+		if stage.ID == reviewer.ID {
+			stage = domain.PlanStage{
+				ID: reviewer.ID + "-by-person", Kind: domain.StageHumanDecisionGate,
+				DependsOn: stage.DependsOn, SubstitutesRole: reviewer.Role,
+				RequiredClaims: []string{"claim-independent-review"},
+			}
+		}
+		gated.Stages = append(gated.Stages, stage)
+	}
+	if err := planning.Validate(gated, planning.ValidationInput{
+		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
+		Previous: &previous,
+	}); err == nil {
+		t.Fatal("an obligation was answered by a human gate policy never permitted")
+	}
 }
 
 // An artifact the plan NAMES and nobody installed is refused with the

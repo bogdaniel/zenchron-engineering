@@ -582,11 +582,15 @@ func humanDecision(events []EngineeringEvent, action *domain.Action) (humanDecis
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			continue
 		}
-		if payload.Decision != "approve" {
-			continue
-		}
 		if action != nil && payload.Action != *action {
 			continue
+		}
+		// The NEWEST matching decision governs. Skipping a rejection to keep
+		// looking would let a gate be satisfied by an approval the person has
+		// since reversed, which is the opposite of what a human decision gate
+		// is for.
+		if payload.Decision != "approve" {
+			return humanDecisionReference{}, false
 		}
 		return humanDecisionReference{
 			decision:        Ref{ID: payload.Request.ID, Revision: payload.Request.Revision},
