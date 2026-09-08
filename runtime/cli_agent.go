@@ -79,12 +79,12 @@ func (e *UnsupportedAgentKindError) Error() string {
 type cliHelpProbe struct {
 	Args     []string
 	Required []string
-	// RequiredTokens must appear as WHOLE WORDS, delimited by anything that is
-	// not a letter, a digit or a hyphen. A substring is the wrong test for a
-	// short choice value: requiring "plan" in `--help` output is satisfied by
-	// "planned", "explanation" or a sentence about planning, which is no
-	// evidence at all that the mode this adapter is about to rely on exists.
-	RequiredTokens []string
+	// RequiredChoices are values that must be advertised AS A CHOICE OF a
+	// specific flag: the flag name, then the value, inside the same run of help
+	// text that describes it. Checking the flag and the value independently is
+	// not enough - unrelated help text elsewhere satisfies both - and a bare
+	// substring is not enough either, because "planned" contains "plan".
+	RequiredChoices []cliFlagChoice
 }
 
 // cliPermissionModes names the least-privilege automation mode this runtime
@@ -454,12 +454,50 @@ func (p CLIAgentProvider) probeCapability(ctx context.Context, capability cliHel
 			return ErrSandboxUnavailable
 		}
 	}
-	for _, token := range capability.RequiredTokens {
-		if !advertisesToken(advertised, token) {
+	for _, choice := range capability.RequiredChoices {
+		if !advertisesChoice(advertised, choice.Flag, choice.Value) {
 			return ErrSandboxUnavailable
 		}
 	}
 	return nil
+}
+
+// cliFlagChoice is one value a flag must advertise.
+type cliFlagChoice struct{ Flag, Value string }
+
+// advertisesChoice reports whether help output offers a value AS A CHOICE of a
+// flag. The value must appear as a whole word within the flag's own description
+// - the text from the flag name up to the next flag or blank line - so a
+// mention of the word elsewhere in the help output proves nothing about the
+// flag this adapter is about to pass.
+func advertisesChoice(advertised, flag, value string) bool {
+	for offset := 0; ; {
+		index := strings.Index(advertised[offset:], flag)
+		if index < 0 {
+			return false
+		}
+		start := offset + index + len(flag)
+		if advertisesToken(flagDescription(advertised[start:]), value) {
+			return true
+		}
+		offset = start
+	}
+}
+
+// flagDescription is the run of help text belonging to one flag: everything up
+// to the next flag or the next blank line, whichever comes first.
+func flagDescription(text string) string {
+	end := len(text)
+	if blank := strings.Index(text, "\n\n"); blank >= 0 && blank < end {
+		end = blank
+	}
+	if next := strings.Index(text, "\n  -"); next >= 0 && next < end {
+		end = next
+	}
+	if next := strings.Index(text, "\n-"); next >= 0 && next < end {
+		end = next
+	}
+	return text[:end]
 }
 
 // advertisesToken reports whether help output contains a token as a whole word.

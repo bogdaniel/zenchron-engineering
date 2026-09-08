@@ -186,21 +186,33 @@ func TestPlanningEnvelopeTellsTheWorkerItMayChangeNothing(t *testing.T) {
 // "planned", "explanation" or a sentence about planning all satisfy - so the
 // adapter could believe in a non-mutating mode the installed binary does not
 // have, which is the one belief this whole boundary rests on.
-func TestAReadOnlyProbeRequiresTheChoiceAsAWord(t *testing.T) {
+func TestAReadOnlyProbeRequiresTheChoiceOfTheFlagItPasses(t *testing.T) {
 	cases := []struct {
 		name       string
 		help       string
 		advertises bool
 	}{
-		{name: "quoted choice", help: `--approval-mode  choices: "default", "plan", "yolo"`, advertises: true},
-		{name: "bare choice", help: "--approval-mode {default,plan,yolo}", advertises: true},
-		{name: "prose only", help: "--approval-mode  how changes are planned and approved", advertises: false},
-		{name: "longer word", help: "--approval-mode  see the explanation in the manual", advertises: false},
+		{name: "quoted choice", help: `  --approval-mode  choices: "default", "plan", "yolo"`, advertises: true},
+		{name: "bare choice", help: "  --approval-mode {default,plan,yolo}", advertises: true},
+		{name: "prose only", help: "  --approval-mode  how changes are planned and approved", advertises: false},
+		{name: "longer word", help: "  --approval-mode  see the explanation in the manual", advertises: false},
+		{
+			// The word is there, and the flag is there, and they have nothing
+			// to do with each other. Checking them independently accepted this.
+			name:       "the word belongs to another flag",
+			help:       "  --approval-mode <MODE>\n  --output <FORMAT>  plan, table or json\n",
+			advertises: false,
+		},
+		{
+			name:       "the choice belongs to this flag among several",
+			help:       "  --output <FORMAT>  table or json\n  --approval-mode <MODE>  one of: default, plan, yolo\n",
+			advertises: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := advertisesToken(tc.help, "plan"); got != tc.advertises {
-				t.Fatalf("advertisesToken(%q) = %v, want %v", tc.help, got, tc.advertises)
+			if got := advertisesChoice(tc.help, "--approval-mode", "plan"); got != tc.advertises {
+				t.Fatalf("advertisesChoice(%q) = %v, want %v", tc.help, got, tc.advertises)
 			}
 		})
 	}

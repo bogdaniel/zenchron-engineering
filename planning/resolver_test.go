@@ -699,3 +699,49 @@ func TestAMissingOperatorArtifactIsNamed(t *testing.T) {
 		t.Fatalf("blocked = %#v, want the missing context policy named", blocked.Blocked)
 	}
 }
+
+// The ratchet holds the SHAPE of an obligation, not just its presence.
+//
+// A stage that keeps its id may not become a different role while formally
+// carrying the obligation, and an obligation may not be re-pointed at some
+// other stage: both leave the rule intact on paper while the reviewer may share
+// the producer's vendor.
+func TestARevisionCannotSwapTheRoleOrRepointTheObligation(t *testing.T) {
+	previous := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	reviewer, found := stageForRole(previous, domain.RoleSecurityReviewer)
+	if !found || reviewer.Independence == nil {
+		t.Fatalf("the fixture has no independent review stage: %#v", previous.Stages)
+	}
+	contract := contractFor(t, "security-sensitive.engineering-fact.json")
+
+	revise := func(mutate func(*domain.PlanStage)) error {
+		next := previous
+		next.Revision = previous.Revision + 1
+		revision := previous.Revision
+		next.Provenance.PreviousRevision = &revision
+		next.Stages = append([]domain.PlanStage(nil), previous.Stages...)
+		for i, stage := range next.Stages {
+			if stage.ID != reviewer.ID {
+				continue
+			}
+			mutate(&stage)
+			next.Stages[i] = stage
+		}
+		return planning.Validate(next, planning.ValidationInput{Contract: contract, Previous: &previous})
+	}
+
+	err := revise(func(stage *domain.PlanStage) { stage.Role = domain.RoleImplementer })
+	if err == nil || !strings.Contains(err.Error(), "changes role") {
+		t.Fatalf("a stage swapped its role across a revision: %v", err)
+	}
+
+	// Re-point the obligation at a stage that is not the producer.
+	err = revise(func(stage *domain.PlanStage) {
+		independence := *stage.Independence
+		independence.DifferentFrom = []string{stage.ID}
+		stage.Independence = &independence
+	})
+	if err == nil {
+		t.Fatal("an obligation was re-pointed away from the producer across a revision")
+	}
+}

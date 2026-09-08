@@ -1541,3 +1541,74 @@ func recordExecutionAttempts(t *testing.T, fixture *planRunFixture, runID string
 		t.Fatalf("record an execution operation: written=%v err=%v", written, err)
 	}
 }
+
+// The crash top-up supersedes from the revision that GOVERNED, not from the
+// highest stored one.
+//
+// After a rejected proposal, `Provenance.PreviousRevision` names a revision
+// that never ran, and invalidations computed against it are wrong in both
+// directions: work the governing revision changed is not invalidated, and work
+// it did not change is.
+func TestTheSupersessionTopUpUsesTheGoverningPredecessor(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	store := func(revision int, mutate func(*domain.EngineeringPlan)) domain.EngineeringPlan {
+		t.Helper()
+		next := fixture.plan
+		next.Revision = revision
+		previous := revision - 1
+		next.Provenance.PreviousRevision = &previous
+		next.Stages = append([]domain.PlanStage(nil), fixture.plan.Stages...)
+		mutate(&next)
+		digest, err := next.ContentDigest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		next.Digest = digest
+		if _, err := fixture.store.PutPlanRevision(next); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.store.PutPlanContract(next.ID, next.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+			t.Fatal(err)
+		}
+		return next
+	}
+
+	// Revision 2 is proposed and REJECTED: it never governs.
+	rejected := store(2, func(plan *domain.EngineeringPlan) {
+		plan.Stages[1].Objective = "Implement the frontend half, differently."
+	})
+	if _, err := fixture.service.Reject(rejected.ID, rejected.Revision, rejected.Digest, "operator", "no"); err != nil {
+		t.Fatal(err)
+	}
+	// Revision 3 changes the BACKEND stage, which revision 1 - the governing
+	// one - had running.
+	third := store(3, func(plan *domain.EngineeringPlan) {
+		plan.Stages[0].Objective = "Implement the backend half, differently."
+	})
+	// The approval lands and the process dies before the supersession append.
+	if err := fixture.service.appendPlanEvent(third.ID, EventPlanApproved, PlanDecisionPayload{
+		Revision: third.Revision, Digest: third.Digest, Operator: "operator",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.plan = third
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(third.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Superseded) != 1 {
+		t.Fatalf("the supersession was not re-derived: %#v", snapshot.Superseded)
+	}
+	if from := snapshot.Superseded[0].FromRevision; from != 1 {
+		t.Fatalf("superseded from revision %d, want the governing revision 1 rather than the rejected 2", from)
+	}
+	invalidated := strings.Join(snapshot.Superseded[0].InvalidatedStages, ",")
+	if !strings.Contains(invalidated, "backend") {
+		t.Fatalf("the backend stage, whose live work revision 3 changed, was not invalidated: %q", invalidated)
+	}
+}

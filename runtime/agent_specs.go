@@ -105,7 +105,13 @@ var codexSpec = cliAgentSpec{
 	// workspace writes is what withholds them here - there is no second
 	// mechanism to get wrong.
 	ReadOnly: &cliReadOnlyMode{
-		Probe:   cliHelpProbe{Args: []string{"exec", "--help"}, Required: []string{"read-only"}},
+		// `read-only` must be a CHOICE of --sandbox, not a phrase somewhere in
+		// the help text - the same association the qwen probe needs, since this
+		// adapter is about to pass `--sandbox read-only` and rely on it.
+		Probe: cliHelpProbe{
+			Args: []string{"exec", "--help"}, Required: []string{"--sandbox"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--sandbox", Value: "read-only"}},
+		},
 		Mode:    "read-only",
 		Sandbox: "read-only",
 		Args: func(i cliInvocation) []string {
@@ -277,7 +283,8 @@ var qwenSpec = cliAgentSpec{
 		// satisfied by "planned" or "explanation", which would let this adapter
 		// believe in a mode the installed binary does not have.
 		Probe: cliHelpProbe{
-			Args: []string{"--help"}, Required: []string{"--approval-mode"}, RequiredTokens: []string{"plan"},
+			Args: []string{"--help"}, Required: []string{"--approval-mode"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--approval-mode", Value: "plan"}},
 		},
 		Mode: "plan",
 		Args: func(i cliInvocation) []string {

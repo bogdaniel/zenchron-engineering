@@ -141,6 +141,10 @@ type PlanSnapshot struct {
 	// answer "keep the current plan", and without a durable record of it the
 	// proposal stayed pending forever and paused every new stage of the plan.
 	Rejected map[int]bool `json:"rejected,omitempty"`
+	// Governed is every revision an operator approved, in the order approved.
+	// A supersession replaces the revision that was GOVERNING, and a proposal
+	// that was never approved never governed anything.
+	Governed []int `json:"governed,omitempty"`
 	// Validation is the LATEST verdict, for display. Validations is every
 	// verdict BY REVISION, because a single slot meant a later revision's
 	// verdict replaced an earlier refusal - and a decision that consults only
@@ -168,6 +172,23 @@ type PlanSnapshot struct {
 	// idempotent, not a fact about the plan.
 	consumedKeys map[string]bool `json:"-"`
 	StateSHA256  string          `json:"state_sha256"`
+}
+
+// GoverningHistory is every revision an operator approved, in order. The
+// approval events are the record of which plan was executing when.
+func (s PlanSnapshot) GoverningHistory() []int { return append([]int(nil), s.Governed...) }
+
+// PreviousGoverning is the revision that governed BEFORE the given one, which
+// is what a supersession replaces. A revision that was proposed and never
+// approved never governed, so it is not a predecessor of anything.
+func (s PlanSnapshot) PreviousGoverning(revision int) (int, bool) {
+	previous, found := 0, false
+	for _, governed := range s.Governed {
+		if governed < revision && governed > previous {
+			previous, found = governed, true
+		}
+	}
+	return previous, found
 }
 
 // ApprovedRevision reports the revision an operator approved, and whether one
@@ -296,6 +317,15 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		// not a withdrawal of the approval the plan is already executing under.
 		if status == domain.ApprovalApproved && payload.Revision >= s.Approved.Revision {
 			s.Approved = decision
+		}
+		if status == domain.ApprovalApproved {
+			known := false
+			for _, governed := range s.Governed {
+				known = known || governed == payload.Revision
+			}
+			if !known {
+				s.Governed = append(s.Governed, payload.Revision)
+			}
 		}
 		if status == domain.ApprovalRejected {
 			if s.Rejected == nil {
@@ -433,10 +463,17 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		// assumptions still hold, which is the opposite of what the revision
 		// laws ask for.
 		for _, id := range payload.InvalidatedStages {
-			stage := s.stage(id)
-			stage.State = PlanStageInvalidated
-			stage.Reason = "superseded by revision " + fmt.Sprint(payload.ToRevision)
-			s.Stages[id] = stage
+			// The stage starts again under the new revision, so its lifecycle
+			// state from the old one is cleared rather than carried: a
+			// revision may legitimately change what a stage IS - policy
+			// permits an agent stage to become a human decision gate - and a
+			// preserved gate would refuse the replacement's run event, while a
+			// preserved run id would refuse its gate event.
+			s.Stages[id] = PlanStageProjection{
+				StageID: id,
+				State:   PlanStageInvalidated,
+				Reason:  "superseded by revision " + fmt.Sprint(payload.ToRevision),
+			}
 		}
 	}
 	return nil

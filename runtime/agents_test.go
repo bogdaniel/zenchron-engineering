@@ -96,7 +96,7 @@ const capableHelp = `Options:
   -p, --print
       --prompt <TEXT>
       --permission-mode <MODE>
-      --approval-mode <MODE>
+      --approval-mode <MODE>    (choices: default, auto-edit, plan, yolo)
       --safe-mode
       --extensions <NAME>
   -m, --model <MODEL>

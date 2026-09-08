@@ -277,8 +277,13 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 // approval uses, applied to the same two revisions, appended once. A plan whose
 // approval and supersession both landed passes straight through.
 func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanSnapshot, error) {
-	previousRevision := plan.Provenance.PreviousRevision
-	if previousRevision == nil || *previousRevision >= plan.Revision {
+	// The predecessor is the last revision that GOVERNED, which is not the
+	// revision this one was compiled against: after a rejected proposal,
+	// Provenance.PreviousRevision names the highest stored revision - including
+	// one that never ran - and invalidations computed against a plan that never
+	// executed are invalidations of the wrong work in both directions.
+	previousRevision, ok := snapshot.PreviousGoverning(plan.Revision)
+	if !ok {
 		return snapshot, nil
 	}
 	for _, recorded := range snapshot.Superseded {
@@ -286,7 +291,7 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 			return snapshot, nil
 		}
 	}
-	previous, found, err := r.Store.PlanRevision(planID, *previousRevision)
+	previous, found, err := r.Store.PlanRevision(planID, previousRevision)
 	if err != nil {
 		return snapshot, err
 	}
@@ -294,7 +299,7 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 		return snapshot, nil
 	}
 	if err := r.appendPlan(planID, EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{
-		FromRevision: *previousRevision, ToRevision: plan.Revision,
+		FromRevision: previousRevision, ToRevision: plan.Revision,
 		ProposalID:        plan.Provenance.ProposalID,
 		InvalidatedStages: InvalidatedStages(previous, plan, snapshot),
 	}); err != nil {

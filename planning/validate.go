@@ -332,6 +332,15 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 			}
 			continue
 		}
+		// A stage that keeps its id may not change what it IS. Formally
+		// carrying an obligation while becoming a different role is the same
+		// escape as dropping it: the reviewer that must differ from the
+		// producer cannot become an implementer and still be the reviewer.
+		if before.Kind == domain.StageAgent && stage.Kind == domain.StageAgent && before.Role != stage.Role {
+			reasons = append(reasons, fmt.Sprintf(
+				"stage %q changes role from %q to %q across a revision: a stage that keeps its id keeps what it is, and a new responsibility is a new stage",
+				stage.ID, before.Role, stage.Role))
+		}
 		if trustStrength(stage.TrustRequirement) < trustStrength(before.TrustRequirement) {
 			reasons = append(reasons, fmt.Sprintf("stage %q lowers its execution trust from %q to %q across a revision", stage.ID, before.TrustRequirement, stage.TrustRequirement))
 		}
@@ -343,6 +352,22 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 				reasons = append(reasons, fmt.Sprintf("stage %q weakens independence from %q to %q across a revision", stage.ID, before.Independence.Dimension, stage.Independence.Dimension))
 			case !before.Independence.HumanSubstitutionPermitted && stage.Independence.HumanSubstitutionPermitted:
 				reasons = append(reasons, fmt.Sprintf("stage %q gains a human substitution permission across a revision", stage.ID))
+			default:
+				// The PEER SET is ratcheted too. Keeping the dimension and
+				// re-pointing `different_from` at some other stage leaves the
+				// obligation formally intact while the reviewer may share the
+				// producer's vendor - the same escape one level down. A peer
+				// may only leave the set with the stage it names.
+				for _, peer := range before.Independence.DifferentFrom {
+					if _, stillAStage := previousStage(plan, peer); !stillAStage {
+						continue
+					}
+					if !namesPeer(stage.Independence.DifferentFrom, peer) {
+						reasons = append(reasons, fmt.Sprintf(
+							"stage %q stops requiring independence from %q across a revision while that stage remains: an obligation is not re-pointed, it is met",
+							stage.ID, peer))
+					}
+				}
 			}
 		}
 	}
@@ -402,6 +427,15 @@ func roleCarriesTrust(plan domain.EngineeringPlan, role domain.EngineeringRole, 
 			return true
 		}
 		if stage.Role == role && trustStrength(stage.TrustRequirement) >= trustStrength(trust) {
+			return true
+		}
+	}
+	return false
+}
+
+func namesPeer(peers []string, peer string) bool {
+	for _, named := range peers {
+		if named == peer {
 			return true
 		}
 	}
