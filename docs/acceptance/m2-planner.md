@@ -134,6 +134,10 @@ explicit block. A human substitution is offered only where policy permits it.
   boundary. The resulting gate records the role it stands in for, so the
   obligation stays checkable; a gate that names no role fulfils none, which is
   what stops "turn the reviewer into a gate" from being an escape.
+- **Live:** the dogfood satisfied the obligation rather than blocking on it, with
+  two eligible vendors: `codex` (openai) implemented and `claude` (anthropic)
+  reviewed, and the resolver recorded why the builder profile was ineligible for
+  the review stage - missing capability AND vendor family not independent.
 
 ## 12. Role-specific context
 
@@ -143,6 +147,9 @@ no reviewer inherits the producer's reasoning transcript.
 - `planning/context.go`.
 - **Proved:** `planning.TestImplementerAndIndependentReviewerReceiveDifferentPacks`,
   `planning.TestProducerReasoningIsNeverDelivered`.
+- **Live:** the dogfood reviewer worked from the published upstream candidate
+  delivered as delimited untrusted data, and its review cites the diff it was
+  given - not the producer's transcript, which it never received.
 
 ## 13. Deterministic safety validation
 
@@ -189,12 +196,25 @@ state and child runs from the durable store alone.
 
 ## 17. Self-building dogfood
 
-See `docs/acceptance/m2-dogfood.md` for the live record.
+Zenchron planned and executed a real Zenchron change: issue #77, planned by
+`claude` in `plan` mode, implemented by `codex`, reviewed independently by
+`claude` from the published candidate, assurance gate satisfied, resulting in
+[PR #105](https://github.com/bogdaniel/zenchron-engineering/pull/105) with CI
+green on the exact head. One operator decision, no intervention between approval
+and the satisfied gate, 8m15s wall clock.
+
+- **Live:** `docs/acceptance/m2-dogfood.md` - the full record, including the
+  three defects the exercise found in this branch and the one disruption I
+  caused myself.
 
 ## 18. Leverage measurement
 
-See `benchmarks/zenchron_planned/` for the #66-shaped result, reported as
-measured.
+- **Live:** `benchmarks/zenchron_planned/2026-09-08-issue-77.json`, in #66's
+  shape. Two child runs, two provider invocations, one operator decision,
+  495 seconds proposal to gate, cost `known: false`. No leverage ratio is
+  claimed: #66's harness, corpus and both baselines do not exist, and one
+  trivial documentation case proves nothing about leverage. Supervision minutes
+  are recorded as unmeasured rather than estimated.
 
 ## 19. Operator-owned customization boundary
 

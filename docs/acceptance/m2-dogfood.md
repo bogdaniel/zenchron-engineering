@@ -104,8 +104,88 @@ what a reviewer's workspace should contain.
 
 ## Outcome
 
-DOGFOOD_OUTCOME
+The last exercise ran end to end on issue #77, on the branch under review,
+with no intervention between approval and the satisfied gate.
+
+```text
+plan plan-92eea8c0b1a7e75858e8093f9d25855c revision 1 (approved)
+planned by: claude (claude_code, anthropic) in non_mutating_planning mode; workspace verified unchanged: true
+template: zenchron-docs-change v1
+stages:
+  implementation   agent            completed   role=implementer profile=zenchron-builder  agent=codex  (openai)
+  review           agent            completed   role=reviewer    profile=zenchron-reviewer agent=claude (anthropic)
+                                                independent-of=implementation in vendor_family
+  assurance        assurance_gate   satisfied   references claims claim-validation
+budget: child runs 2/6, provider invocations 2/14, concurrency ceiling 2
+cost: unknown - no configured provider reported one, and unknown is not zero
+```
+
+From the plan's own journal, in order:
+
+| time (UTC) | event |
+| --- | --- |
+| 12:42:03 | `plan_proposed`, `plan_validated` - the planner's answer compiled and passed deterministic validation |
+| 12:42:11 | `plan_approved` by the operator, 8 seconds later |
+| 12:42:17 | `stage_assigned` implementation -> codex, `run_started` `run-7bce...`, `budget_consumed` |
+| 12:45:22 | implementation `stage_completed` (`goal_state_reached`); review assigned to claude and started in the same tick |
+| 12:50:18 | review `stage_completed`; `gate_satisfied` on `claim-validation` |
+
+Three minutes five seconds of implementation, four minutes fifty-six of
+independent review, eight minutes fifteen from proposal to satisfied gate. The
+planning invocation itself is not separately instrumented - the plan's first
+journal event is the proposal.
+
+What it produced: [PR #105](https://github.com/bogdaniel/zenchron-engineering/pull/105),
+`docs/troubleshooting.md` +32/-3, no Go change, CI `go` green on the exact head.
+The assurance gate is satisfied by the evidence of the implementation run's own
+verification, at revision `7aed24f9f809d98f9743ad1314b6149685769f40`.
+
+The review is the part worth reading. The independent reviewer - a different
+vendor, working from the PUBLISHED candidate rather than the base - checked each
+acceptance criterion against the code the documentation describes, raised four
+findings (an incompletely stated containment rule that `doctor` does not catch, a
+bind mount the prose does not admit is writable, a diagnostic string presented as
+a gate, and two hardening flags the rest of the system sets), and then wrote
+this:
+
+> I could not execute `gofmt -l .`, `go vet ./...`, or `go test ./...` - the
+> sandbox refused each of those commands, including with the sandbox override, so
+> I have **no executed evidence** that they pass and I am not claiming they do.
+
+It went on to argue from the diff why those commands' outcomes must equal the
+base's, and marked the argument as an argument. That is the behaviour the
+independence obligation exists to buy: a second worker that will not certify
+what it did not run. Nothing here judged the findings for it - they are on the
+pull request for a person.
+
+This is one plan, one trivial documentation case. It shows the path works end to
+end; it shows nothing about leverage.
+
 
 ## Supervision
 
-DOGFOOD_SUPERVISION
+Honest accounting, because the number that flatters is the one that leaves out
+the failed attempts.
+
+**The successful #77 plan, proposal to satisfied gate:** one operator decision
+(the approval), zero interventions, 8m15s wall clock. No prompt was carried by
+hand: the objectives, the profiles, the diff the reviewer read and the base it
+read it from were all produced by the system.
+
+**The whole exercise that reached it:** heavy supervision, and it earned its
+keep.
+
+| supervision | what it cost | what it bought |
+| --- | --- | --- |
+| 4 deterministic refusals before any execution | 4 reviews of a refusal message, 1 operator config edit to raise a ceiling | budget ceiling honoured; a gate that proved nothing, an unrecognized field and an unbindable obligation all refused rather than executed |
+| 3 defects found by running it | 3 fix commits with regression tests | a missing registry, a wasted poll interval, and a reviewer reading the wrong tree - none of which any test in this branch caught |
+| 1 restart mid-plan | one `serve` kill and relaunch on a new binary | recovery proven live rather than only in tests |
+| 1 self-inflicted disruption | the exercise restarted on a fresh issue | I closed a pull request while its run was in flight; the runtime refused to continue on a candidate whose external state had changed, which is the correct behaviour and also entirely my fault |
+
+The supervision that mattered was engineering supervision of THIS branch, not
+supervision of the workers. Once the branch was correct, the plan needed one
+decision.
+
+No cost figure is claimed anywhere: both providers are subscription CLIs that
+report none, and `cost_known: false` is what the runtime recorded.
+
