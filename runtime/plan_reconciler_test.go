@@ -1745,3 +1745,59 @@ func appendRunEventFor(t *testing.T, fixture *planRunFixture, runID, head, kind 
 		t.Fatalf("append %s: %v", kind, err)
 	}
 }
+
+// A run does not stop spending because the plan stopped looking at it.
+//
+// Invalidating a stage clears its run id - the stage starts again under the new
+// revision - but the child run can still be live, and what it spends is still
+// the plan's. Dropping the reference made those invocations invisible to every
+// ceiling.
+func TestARetiredStagesRunIsStillAttributed(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := snapshot.Stages["implementation"].RunID
+	if runID == "" {
+		t.Fatal("the stage created no run")
+	}
+	recordExecutionAttempts(t, fixture, runID, 1)
+	fixture.reconcile(t)
+
+	// A revision invalidates the stage while its run is still live.
+	if err := fixture.service.appendPlanEvent(fixture.plan.ID, EventPlanRevisionSuperseded, PlanRevisionSupersededPayload{
+		FromRevision: 1, ToRevision: 2, InvalidatedStages: []string{"implementation"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.Stages["implementation"].RunID != "" {
+		t.Fatal("the invalidated stage kept its run id, which its replacement's events would refuse")
+	}
+	if len(retired.RetiredRuns) != 1 || retired.RetiredRuns[0] != runID {
+		t.Fatalf("the retired run was not retained for attribution: %#v", retired.RetiredRuns)
+	}
+	before := retired.Consumed.ProviderInvocations
+
+	// The live run spends more.
+	recordExecutionAttempts(t, fixture, runID, 4)
+	fixture.reconcile(t)
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Consumed.ProviderInvocations <= before {
+		t.Fatalf("a retired stage's live run spent more and the plan saw %d, unchanged from %d",
+			after.Consumed.ProviderInvocations, before)
+	}
+}

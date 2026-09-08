@@ -714,12 +714,12 @@ func TestARevisionCannotSwapTheRoleOrRepointTheObligation(t *testing.T) {
 	}
 	contract := contractFor(t, "security-sensitive.engineering-fact.json")
 
-	revise := func(mutate func(*domain.PlanStage)) error {
+	reviseWith := func(added []domain.PlanStage, mutate func(*domain.PlanStage)) error {
 		next := previous
 		next.Revision = previous.Revision + 1
 		revision := previous.Revision
 		next.Provenance.PreviousRevision = &revision
-		next.Stages = append([]domain.PlanStage(nil), previous.Stages...)
+		next.Stages = append(append([]domain.PlanStage(nil), previous.Stages...), added...)
 		for i, stage := range next.Stages {
 			if stage.ID != reviewer.ID {
 				continue
@@ -729,19 +729,37 @@ func TestARevisionCannotSwapTheRoleOrRepointTheObligation(t *testing.T) {
 		}
 		return planning.Validate(next, planning.ValidationInput{Contract: contract, Previous: &previous})
 	}
+	revise := func(mutate func(*domain.PlanStage)) error { return reviseWith(nil, mutate) }
 
 	err := revise(func(stage *domain.PlanStage) { stage.Role = domain.RoleImplementer })
 	if err == nil || !strings.Contains(err.Error(), "changes role") {
 		t.Fatalf("a stage swapped its role across a revision: %v", err)
 	}
 
-	// Re-point the obligation at a stage that is not the producer.
-	err = revise(func(stage *domain.PlanStage) {
+	// Re-point the obligation at ANOTHER material producer, leaving the graph
+	// perfectly valid: the stage it was about is still a stage, and the
+	// obligation now names someone else. Pointing it at the stage itself would
+	// be caught by the graph laws first and would leave the ratchet untested.
+	// A second producer, added by the revision itself, is a graph-valid peer
+	// that is NOT the one the obligation was about. Pointing the obligation at
+	// the stage itself would be caught by the graph laws first and would leave
+	// the ratchet untested.
+	decoy := domain.PlanStage{
+		ID: "second-implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+		Objective:            "Do the other half.",
+		RequiresCapabilities: planning.RoleCapabilities(domain.RoleImplementer),
+		InvocationMode:       domain.InvocationModeMutating,
+	}
+	err = reviseWith([]domain.PlanStage{decoy}, func(stage *domain.PlanStage) {
 		independence := *stage.Independence
-		independence.DifferentFrom = []string{stage.ID}
+		independence.DifferentFrom = []string{decoy.ID}
 		stage.Independence = &independence
+		stage.DependsOn = append(append([]string(nil), stage.DependsOn...), decoy.ID)
 	})
 	if err == nil {
 		t.Fatal("an obligation was re-pointed away from the producer across a revision")
+	}
+	if !strings.Contains(err.Error(), "stops requiring independence from") {
+		t.Fatalf("the refusal is not the peer-set ratchet: %v", err)
 	}
 }

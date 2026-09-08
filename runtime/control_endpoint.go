@@ -50,6 +50,21 @@ const ControlSocketName = "serve.sock"
 // leaves room for the file name.
 const maxControlSocketPath = 100
 
+// ControlDeadline is how long one control command may take, on BOTH sides of
+// the socket. It is per-command because the commands are not alike: a status
+// read answers immediately, while a plan revision clones a repository and
+// invokes a planner in its own non-mutating mode, which is bounded in minutes.
+//
+// A deadline shorter than the work does not stop the work - the supervisor
+// finishes and persists the revision either way - it only stops the operator
+// from being told. That is the worst of both: the effect without the answer.
+func ControlDeadline(command string) time.Duration {
+	if command == ControlPlanRevise {
+		return 20 * time.Minute
+	}
+	return 30 * time.Second
+}
+
 // ControlSocketPath is where a supervisor listens for one state directory. It
 // is derived, never configured: an operator names their state directory, and
 // the endpoint follows it, so there is no member a repository or a flag could
@@ -277,7 +292,7 @@ func (l *ControlListener) Serve(handle func(ControlRequest) ControlResponse) err
 
 func answerControlConnection(connection net.Conn, handle func(ControlRequest) ControlResponse) {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(ControlDeadline("")))
 	// The ceiling is enforced by the READER, not checked afterwards.
 	// bufio.ReadBytes grows its own buffer past the size hint, so a local
 	// process sending a line with no newline could make the supervisor allocate
@@ -298,6 +313,11 @@ func answerControlConnection(connection net.Conn, handle func(ControlRequest) Co
 		writeControlResponse(connection, ControlResponse{Error: "control request is not a JSON object"})
 		return
 	}
+	// The deadline is extended to what THIS command needs, now that the command
+	// is known. Reading the request stays on the short one: a client that opens
+	// a connection and says nothing holds a supervisor goroutine for exactly as
+	// long as it takes to say nothing.
+	_ = connection.SetDeadline(time.Now().Add(ControlDeadline(request.Command)))
 	writeControlResponse(connection, handle(request))
 }
 
@@ -322,7 +342,7 @@ func SendControl(stateDir string, request ControlRequest) (ControlResponse, erro
 		return ControlResponse{}, err
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(60 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(ControlDeadline(request.Command) + 30*time.Second))
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return ControlResponse{}, err

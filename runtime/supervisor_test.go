@@ -1751,3 +1751,22 @@ func TestConcurrentSupervisorStartsElectOneWinner(t *testing.T) {
 		t.Fatalf("%d supervisors bound the control endpoint at once, want exactly 1", winners)
 	}
 }
+
+// A control command's deadline covers the work it asks for.
+//
+// `plan revise` clones a repository and invokes a planner in its own
+// non-mutating mode, which is bounded in minutes. A 30-second deadline did not
+// stop that work - the supervisor finished and persisted the revision either
+// way - it only stopped the operator from being told, which is the effect
+// without the answer.
+func TestAControlDeadlineCoversTheWorkTheCommandAsksFor(t *testing.T) {
+	if quick, revise := ControlDeadline(ControlStatus), ControlDeadline(ControlPlanRevise); revise <= quick {
+		t.Fatalf("a plan revision is allowed %s and a status read %s: the long command needs the longer deadline", revise, quick)
+	}
+	if revise := ControlDeadline(ControlPlanRevise); revise < 10*time.Minute {
+		t.Fatalf("a plan revision is allowed %s, which is under the planner's own bound", revise)
+	}
+	if unknown := ControlDeadline("something-else"); unknown != ControlDeadline(ControlStatus) {
+		t.Fatalf("an unrecognized command is allowed %s, want the ordinary deadline", unknown)
+	}
+}

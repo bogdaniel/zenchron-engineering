@@ -187,6 +187,16 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		}
 		attributed = attributed || recorded
 	}
+	// And the runs of stages a revision INVALIDATED. Their stage no longer
+	// names them, and they can still be live: a run does not stop spending
+	// because the plan stopped looking at it.
+	for _, runID := range snapshot.RetiredRuns {
+		recorded, err := r.attributeRunSpend(plan, snapshot, "", runID)
+		if err != nil {
+			return report, err
+		}
+		attributed = attributed || recorded
+	}
 	if attributed {
 		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err

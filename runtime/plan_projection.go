@@ -143,6 +143,11 @@ type PlanSnapshot struct {
 	// answer "keep the current plan", and without a durable record of it the
 	// proposal stayed pending forever and paused every new stage of the plan.
 	Rejected map[int]bool `json:"rejected,omitempty"`
+	// RetiredRuns are child runs whose stage a revision invalidated. The stage
+	// no longer names them - it starts again under the new revision - but a run
+	// does not stop existing because the plan stopped looking at it, and what
+	// it spends is still the plan's.
+	RetiredRuns []string `json:"retired_runs,omitempty"`
 	// Governed is every revision an operator approved, in the order approved.
 	// A supersession replaces the revision that was GOVERNING, and a proposal
 	// that was never approved never governed anything.
@@ -472,6 +477,21 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			// permits an agent stage to become a human decision gate - and a
 			// preserved gate would refuse the replacement's run event, while a
 			// preserved run id would refuse its gate event.
+			//
+			// The RUN, though, does not stop existing because the plan stopped
+			// looking at it. An invalidated stage's child run can still be
+			// live, and what it spends is still the plan's - so the run id is
+			// retained here, apart from the stage, and the reconciler keeps
+			// attributing it.
+			if retired := s.Stages[id].RunID; retired != "" {
+				known := false
+				for _, run := range s.RetiredRuns {
+					known = known || run == retired
+				}
+				if !known {
+					s.RetiredRuns = append(s.RetiredRuns, retired)
+				}
+			}
 			s.Stages[id] = PlanStageProjection{
 				StageID: id,
 				State:   PlanStageInvalidated,
