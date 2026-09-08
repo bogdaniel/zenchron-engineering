@@ -22,7 +22,9 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -1084,7 +1086,9 @@ func (s *SQLiteOperationStore) PlanAssignment(planID string, revision int, stage
 	err := s.db.QueryRow(`SELECT document FROM plan_assignments WHERE plan_id = ? AND revision = ? AND stage_id = ?`,
 		planID, revision, stageID).Scan(&document)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
+		// The typed sentinel, not the driver's message. A message check is a
+		// dependency on prose that no compiler enforces and no driver promises.
+		if errors.Is(err, sql.ErrNoRows) {
 			return domain.AgentAssignment{}, false, nil
 		}
 		return domain.AgentAssignment{}, false, err

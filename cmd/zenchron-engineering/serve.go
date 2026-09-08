@@ -684,7 +684,16 @@ func delegate(stateDir string, request runtime.ControlRequest, stdout io.Writer)
 // command and a locally executed one produce the same output: an operator
 // should not be able to tell which process applied their decision.
 func delegatePayload(stateDir string, request runtime.ControlRequest) (bool, json.RawMessage, error) {
-	if !runtime.SupervisorRunning(stateDir) {
+	running, endpointPresent := runtime.SupervisorPresence(stateDir)
+	if !running {
+		if endpointPresent {
+			// The endpoint EXISTS and could not be reached. Deciding locally
+			// here would write beside a supervisor that may be alive, outside
+			// the lock that exists to prevent it, because one dial failed.
+			return true, nil, fmt.Errorf(
+				"a supervisor endpoint exists at %s and could not be reached; the decision was not applied - retry, or stop the supervisor if it is gone",
+				runtime.ControlSocketPath(stateDir))
+		}
 		return false, nil, nil
 	}
 	response, err := runtime.SendControl(stateDir, request)

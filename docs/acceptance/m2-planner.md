@@ -216,6 +216,16 @@ and the satisfied gate, 8m15s wall clock.
   trivial documentation case proves nothing about leverage. Supervision minutes
   are recorded as unmeasured rather than estimated.
 
+### A note on state created before the gate binding existed
+
+A human decision gate satisfied BEFORE the candidate binding landed carries a
+verdict that was never checked against the head it was about, and nothing
+re-opens it retroactively: the reopening rule compares recorded heads, and those
+records have none. No such state exists in this repository - the binding landed
+in the same branch as the gate - but an operator restoring a state directory
+from before it should re-approve any satisfied human gate rather than assume the
+verdict was head-bound.
+
 ## 19. Operator-owned customization boundary
 
 Repository or candidate configuration cannot create instruction packs, install

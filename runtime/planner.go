@@ -507,7 +507,8 @@ func stageIDs(plan domain.EngineeringPlan) []string {
 // reader of a provider transcript sees, credential values are already replaced
 // in it, and parsing the raw copy would make the planner the one component that
 // reads unredacted provider output.
-// fileDigest is one file's content hash, streamed.
+// fileDigest is one file's content hash, computed by streaming the file rather
+// than reading it into memory.
 func fileDigest(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {

@@ -259,6 +259,15 @@ func buildPlanComposition(flags autonomyFlags, overrides autonomyOverrides) (*pl
 
 // planPropose compiles a plan for one issue and records it awaiting approval.
 func planPropose(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, issue int, planID string, stdout io.Writer) (int, error) {
+	// A proposal for a plan that ALREADY EXISTS writes a new revision, which is
+	// the same read-then-append a decision performs - so it goes to the
+	// supervisor that owns the work, under the same lock, rather than beside a
+	// live reconciler. A FIRST proposal creates the plan and races nothing.
+	if planID != "" {
+		if delegated, code, err := delegatePlanRevision(flags, overrides, planID, stdout); delegated {
+			return code, err
+		}
+	}
 	composed, err := buildPlanComposition(flags, overrides)
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -586,6 +595,10 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if verb == "reject" {
 		command = runtime.ControlPlanReject
 	}
+	// A supervisor that is RUNNING but unreachable is not the same as no
+	// supervisor. Falling through to the local path would apply a decision
+	// beside a live reconciler, outside the lock that exists to stop exactly
+	// that, because a socket dial happened to fail.
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
 		Command: command, PlanID: planID, Revision: revision, Digest: digest, Note: flags.Note,
 	})
@@ -759,8 +772,21 @@ func revisionStatus(view runtime.PlanView) domain.ApprovalStatus {
 	if view.Snapshot.Rejected[revision] {
 		return domain.ApprovalRejected
 	}
+	// A revision that GOVERNED and was replaced is superseded, not pending. It
+	// was approved once, it ran, and calling it "pending" describes a revision
+	// awaiting a decision nobody is being asked for.
+	for _, governed := range view.Snapshot.GoverningHistory() {
+		if governed == revision {
+			return domain.ApprovalStatus("superseded")
+		}
+	}
 	if view.Snapshot.Approval.Revision == revision {
 		return view.Snapshot.Approval.Status
+	}
+	// A revision nobody has decided and that never governed is only "pending"
+	// if it was validated; otherwise its verdict is what to say about it.
+	if verdict, ok := view.Snapshot.Validations[revision]; ok && verdict.Status == domain.ProposalRefused {
+		return domain.ApprovalStatus("refused")
 	}
 	return domain.ApprovalPending
 }

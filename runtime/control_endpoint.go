@@ -378,10 +378,28 @@ func SendControl(stateDir string, request ControlRequest) (ControlResponse, erro
 // It is used to decide whether an operator command should delegate, so a
 // missing or stale endpoint simply means "drive it here" rather than an error.
 func SupervisorRunning(stateDir string) bool {
-	connection, err := net.DialTimeout("unix", ControlSocketPath(stateDir), 2*time.Second)
-	if err != nil {
-		return false
+	running, _ := SupervisorPresence(stateDir)
+	return running
+}
+
+// SupervisorPresence answers two different questions a dial cannot separate on
+// its own: is a supervisor listening, and does an endpoint EXIST that this
+// caller could not reach.
+//
+// They differ where it matters. A caller that reads "no supervisor" from a
+// transient dial failure applies its decision locally - beside a live
+// reconciler, outside the lock that exists to stop exactly that. A socket file
+// that is present but unreachable is a supervisor to be waited for, not an
+// absence to act around.
+func SupervisorPresence(stateDir string) (running bool, endpointPresent bool) {
+	path := ControlSocketPath(stateDir)
+	connection, err := net.DialTimeout("unix", path, 2*time.Second)
+	if err == nil {
+		_ = connection.Close()
+		return true, true
 	}
-	_ = connection.Close()
-	return true
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, true
+	}
+	return false, false
 }
