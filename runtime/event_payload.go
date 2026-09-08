@@ -776,6 +776,11 @@ type PlanGateSatisfiedPayload struct {
 	Evidence        Ref    `json:"evidence,omitzero"`
 	Decision        Ref    `json:"decision,omitzero"`
 	HumanEvidenceID string `json:"human_evidence_id,omitempty"`
+	// ProvingRuns is every upstream run that carried a verdict this gate was
+	// judged on. Evidence above names one bundle, and a gate over two producers
+	// is proved by both - recording only the last one left the record thinner
+	// than the check that produced it.
+	ProvingRuns []string `json:"proving_runs,omitempty"`
 }
 
 // PlanBudgetConsumedPayload is a DELTA, never a total. Totals are projected by
@@ -916,7 +921,8 @@ var planPayloads = map[string]payloadValidator{
 			boundedList("claims", p.Claims),
 			optionalRef("evidence", p.Evidence),
 			optionalRef("decision", p.Decision),
-			bounded("human_evidence_id", p.HumanEvidenceID))
+			bounded("human_evidence_id", p.HumanEvidenceID),
+			boundedList("proving_runs", p.ProvingRuns))
 	}),
 	EventPlanBudgetConsumed: payloadSchema(func(p PlanBudgetConsumedPayload) error {
 		if p.ChildRuns == 0 && p.ProviderInvocations == 0 && p.WallSeconds == 0 && p.CostMicros == nil {

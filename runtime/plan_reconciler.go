@@ -535,6 +535,7 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 				return payload, false, nil
 			}
 			payload.Evidence = projected.Assurance.Bundle
+			payload.ProvingRuns = append(payload.ProvingRuns, runID)
 		case domain.StageHumanDecisionGate:
 			decision, satisfied := humanDecision(events, stage.Action)
 			if !satisfied {
@@ -543,6 +544,7 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			proving++
 			payload.Decision = decision.decision
 			payload.HumanEvidenceID = decision.humanEvidenceID
+			payload.ProvingRuns = append(payload.ProvingRuns, runID)
 		}
 	}
 	if proving == 0 {

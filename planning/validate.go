@@ -75,8 +75,17 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 		if stage.Kind == domain.StageAgent {
 			continue
 		}
+		if input.Contract.ID == "" {
+			// No contract was supplied to validate against, so there is nothing
+			// to check the claims AGAINST. That is a caller that asked for the
+			// structural laws only.
+			continue
+		}
 		for _, claim := range stage.RequiredClaims {
-			if _, ok := input.Contract.RequiredClaims[claim]; !ok && len(input.Contract.RequiredClaims) > 0 {
+			if _, ok := input.Contract.RequiredClaims[claim]; !ok {
+				// A CLAIMLESS contract used to skip this check entirely, so a
+				// gate could reference claims nothing defines - valid at
+				// approval, and unsatisfiable forever at runtime.
 				add("stage %q is a %s referencing claim %q, which the work contract does not define", stage.ID, stage.Kind, claim)
 			}
 		}
