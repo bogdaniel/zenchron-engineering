@@ -265,10 +265,14 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 	if err != nil {
 		return PlanSnapshot{}, err
 	}
-	if snapshot.Validation.Revision == revision && snapshot.Validation.Status == domain.ProposalRefused {
+	// The verdict for THIS revision, not the latest verdict recorded. A single
+	// slot meant a later revision's validation replaced an earlier refusal, so
+	// the refused revision would pass this check by having been superseded in a
+	// field rather than by having been fixed.
+	if verdict, ok := snapshot.Validations[revision]; ok && verdict.Status == domain.ProposalRefused {
 		return PlanSnapshot{}, &PlanRefusedError{
 			PlanID: planID,
-			Detail: fmt.Sprintf("revision %d failed deterministic validation and cannot be approved: %s", revision, strings.Join(snapshot.Validation.Errors, "; ")),
+			Detail: fmt.Sprintf("revision %d failed deterministic validation and cannot be approved: %s", revision, strings.Join(verdict.Errors, "; ")),
 		}
 	}
 	if strings.TrimSpace(operator) == "" {

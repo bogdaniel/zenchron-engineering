@@ -256,3 +256,51 @@ func TestADecisionWithoutADigestIsRefusedAtTheServiceBoundary(t *testing.T) {
 		t.Fatalf("the exact digest was refused: %v", err)
 	}
 }
+
+// A refused revision stays refused, whatever is validated after it.
+//
+// The projection kept ONE validation record, and `decide` compared it by
+// revision - so a later revision's verdict replaced an earlier refusal and the
+// refused revision passed the check by having been superseded in a field
+// rather than by having been fixed.
+func TestARefusedRevisionStaysRefusedAfterALaterValidation(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+
+	// Revision 2 is stored and REFUSED.
+	second := fixture.plan
+	second.Revision = 2
+	second.Objective = "Make the widget idempotent, twice."
+	digest, err := second.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.recordValidation(second.ID, second.Revision, second.Digest,
+		domain.ProposalRefused, errors.New("the reviewer stage has no independent worker")); err != nil {
+		t.Fatal(err)
+	}
+	// Revision 3 is then validated, which used to overwrite the only record.
+	third := second
+	third.Revision = 3
+	third.Objective = "Make the widget idempotent, three times."
+	if digest, err = third.ContentDigest(); err != nil {
+		t.Fatal(err)
+	}
+	third.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(third); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.recordValidation(third.ID, third.Revision, third.Digest, domain.ProposalValid, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "operator", ""); err == nil {
+		t.Fatal("a refused revision was approved because a later revision was validated after it")
+	}
+	if _, err := fixture.service.Approve(third.ID, third.Revision, third.Digest, "operator", ""); err != nil {
+		t.Fatalf("the validated revision was refused: %v", err)
+	}
+}

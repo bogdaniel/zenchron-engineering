@@ -140,10 +140,15 @@ type PlanSnapshot struct {
 	// than a latest-decision field because rejecting a proposal is the ordinary
 	// answer "keep the current plan", and without a durable record of it the
 	// proposal stayed pending forever and paused every new stage of the plan.
-	Rejected   map[int]bool                   `json:"rejected,omitempty"`
-	Validation PlanValidation                 `json:"validation,omitzero"`
-	Stages     map[string]PlanStageProjection `json:"stages"`
-	Superseded []PlanSupersession             `json:"superseded,omitempty"`
+	Rejected map[int]bool `json:"rejected,omitempty"`
+	// Validation is the LATEST verdict, for display. Validations is every
+	// verdict BY REVISION, because a single slot meant a later revision's
+	// verdict replaced an earlier refusal - and a decision that consults only
+	// the latest record cannot see that the revision it is about was refused.
+	Validation  PlanValidation                 `json:"validation,omitzero"`
+	Validations map[int]PlanValidation         `json:"validations,omitempty"`
+	Stages      map[string]PlanStageProjection `json:"stages"`
+	Superseded  []PlanSupersession             `json:"superseded,omitempty"`
 	// Consumed is summed from plan.budget_consumed events. It is a SUM over
 	// immutable records, so nothing - not a revision, not a restart, not a
 	// reassignment - can lower it.
@@ -254,10 +259,15 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		if err := json.Unmarshal(e.Payload, &payload); err != nil {
 			return err
 		}
-		s.Validation = PlanValidation{
+		verdict := PlanValidation{
 			Revision: payload.Revision, Digest: payload.Digest,
 			Status: domain.ProposalValidationStatus(payload.Status), Errors: payload.Errors,
 		}
+		s.Validation = verdict
+		if s.Validations == nil {
+			s.Validations = map[int]PlanValidation{}
+		}
+		s.Validations[payload.Revision] = verdict
 	case EventPlanApproved, EventPlanRejected:
 		var payload PlanDecisionPayload
 		if err := json.Unmarshal(e.Payload, &payload); err != nil {
