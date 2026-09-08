@@ -153,6 +153,10 @@ which would be misleading under the same name, and misleading on exactly the
 machines where nobody would think to check. Where an installed CLI exposes no
 trustworthy credential artifact, the answer stays `unknown`.
 
+A present credential artifact proves that a credential **exists**, not that the
+session behind it is still valid. `local_cli_session` records that observation;
+it does not validate the sign-in.
+
 ## Readiness
 
 ```bash
@@ -172,6 +176,12 @@ being advertised, a version being printed and a credential file existing. A
 paid call is never made to prove a worker exists, and `ready` therefore means
 "can be invoked", not "has budget" — account state is only observable by making
 a paid request.
+
+A revoked or expired sign-in with its credential artifact still present therefore
+reports `ready yes` with an auth mode such as `local_cli_session`. The failure
+only surfaces at the first real invocation. It puts the run in the documented
+[`execution_provider_account_unavailable` wait](running-work.md#what-a-stop-means):
+the run waits for you to repair the account and `resume`, rather than dying.
 
 Readiness requires the installed CLI to **advertise** the exact flags the
 runtime passes. Each adapter states the flags it depends on twice: once as a
