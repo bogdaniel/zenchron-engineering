@@ -208,6 +208,14 @@ A revision may tighten the remaining envelope. Widening it requires the same
 explicit operator authority that could have granted the ceiling originally, and
 never a planner, profile or template statement.
 
+An operator decision reaches the plan through whichever process owns the work.
+Where a supervisor is running, the decision is applied inside it, under the same
+lock its plan reconciler holds: a decision and a reconciliation pass both read
+state and then append against it, and interleaving them lets one decide from
+state the other is changing. Where no supervisor is running, the operator's own
+terminal is the owner and applies it directly. The answer is the same either
+way.
+
 ## Revision and decomposition
 
 Plans are revisioned immutable artifacts:

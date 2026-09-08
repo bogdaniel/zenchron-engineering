@@ -399,7 +399,7 @@ planner, profile or template statement.
 ```text
 zenchron-engineering autonomy plan issue 123 [--template zenchron-feature]
                                              [--agent claude] [--deterministic]
-zenchron-engineering autonomy plan show PLAN [--text]
+zenchron-engineering autonomy plan show PLAN [--revision N] [--text]
 zenchron-engineering autonomy plan approve PLAN --revision N --digest SHA256 [--note "..."]
 zenchron-engineering autonomy plan reject  PLAN --revision N --digest SHA256 [--note "..."]
 zenchron-engineering autonomy plan revise PLAN [--template ...] [--deterministic]
@@ -421,6 +421,22 @@ plan.
 resolved assignments with the profile and worker each stage would use, the
 candidates that were considered and why they were rejected, any blockers, and the
 budget envelope with known and unknown fields distinguished.
+
+These commands work while `serve` is running, which is when they matter most:
+`serve` is what emits a decomposition proposal and then waits for an answer.
+
+- **Reads** - `show`, `status`, `list` - open the durable store and take no
+  runtime ownership. Reading a plan is not an act that owns anything.
+- **Decisions** - `approve`, `reject`, `revise` - go to the supervisor that owns
+  the work, over the same owner-only control endpoint `drain` and `shutdown`
+  use, and are applied under the same lock the plan reconciler holds. One writer
+  applies them against the state it is reconciling. With no supervisor running,
+  this terminal is the owner and decides directly; the output is identical
+  either way, so an operator cannot tell which process applied their decision.
+- `plan show --revision N` renders one exact revision. The default is the
+  governing one, which is not always the revision being ASKED about: a
+  decomposition proposal is stored as a new unapproved revision while the
+  approved one keeps executing.
 
 `plan approve` records the operator's decision and produces the approved
 immutable revision. It NAMES the revision and digest being decided, and
