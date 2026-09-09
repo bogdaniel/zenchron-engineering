@@ -396,6 +396,20 @@ type PlanView struct {
 	// operator something nobody measured.
 	Envelope domain.PlanBudgetEnvelope `json:"budget_envelope"`
 	Consumed domain.PlanConsumption    `json:"consumed"`
+	// Preview is present when the revision shown is NOT the one governing the
+	// work. The state beside it is then prospective - what approving this
+	// revision would leave - rather than a report of what is happening.
+	Preview *PlanPreview `json:"preview,omitempty"`
+}
+
+// PlanPreview says that a view is an answer to "what would approving this do",
+// and names what approving it would throw away.
+type PlanPreview struct {
+	// GoverningRevision is the revision actually executing.
+	GoverningRevision int `json:"governing_revision"`
+	// Invalidated is the stages whose completed work approving this revision
+	// would discard, in stage order.
+	Invalidated []string `json:"invalidated,omitempty"`
 }
 
 // View is the read behind `plan show` and `plan status`.
@@ -427,7 +441,22 @@ func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error)
 				PlanID: planID, Detail: fmt.Sprintf("revision %d does not exist", revision),
 			}
 		}
-		return s.viewOf(exact, snapshot)
+		// An exact revision that is not the governing one is a PREVIEW. It was
+		// rendered against live state, so a stage this revision materially
+		// changes still showed as "completed by" the worker that performed the
+		// PREVIOUS revision's version of it - work approving this revision
+		// would immediately invalidate and redo. That is not an approval
+		// preview; it is one document decorated with another's execution.
+		preview, prospective, err := s.previewSnapshot(exact, snapshot)
+		if err != nil {
+			return PlanView{}, err
+		}
+		view, err := s.viewOf(exact, prospective)
+		if err != nil {
+			return PlanView{}, err
+		}
+		view.Preview = preview
+		return view, nil
 	}
 	// The revision shown is the one that GOVERNS: the approved revision when
 	// there is one, and the latest proposal otherwise. Showing the newest
@@ -445,6 +474,57 @@ func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error)
 }
 
 // viewOf renders one exact plan document beside the plan's replayed state.
+// previewSnapshot answers what durable state WOULD look like if this revision
+// were approved now.
+//
+// It applies exactly the rule approval applies - InvalidatedStages, the one
+// computation that decides what a revision keeps and what it redoes - so the
+// preview cannot drift from the thing it previews. A stage whose content and
+// dependencies are unchanged keeps its completed work, because approving would
+// keep it; every other stage reads as pending, because approving would redo it.
+// Stages that exist only in the governing revision are absent, because this
+// document does not contain them.
+//
+// Nothing is written. It returns the governing revision unchanged when the
+// requested one IS governing, and when the governing document cannot be read it
+// refuses rather than falling back to live state, which is the thing that was
+// wrong.
+func (s PlanService) previewSnapshot(plan domain.EngineeringPlan, snapshot PlanSnapshot) (*PlanPreview, PlanSnapshot, error) {
+	governing, ok := snapshot.ApprovedRevision()
+	if !ok || governing == plan.Revision {
+		return nil, snapshot, nil
+	}
+	previous, found, err := s.Store.PlanRevision(plan.ID, governing)
+	if err != nil {
+		return nil, PlanSnapshot{}, err
+	}
+	if !found {
+		return nil, PlanSnapshot{}, &PlanRefusedError{
+			PlanID: plan.ID,
+			Detail: fmt.Sprintf("revision %d governs the work and is not stored, so revision %d cannot be previewed against it", governing, plan.Revision),
+		}
+	}
+	invalid := map[string]bool{}
+	for _, id := range InvalidatedStages(previous, plan, snapshot) {
+		invalid[id] = true
+	}
+	prospective := snapshot
+	prospective.Stages = make(map[string]PlanStageProjection, len(plan.Stages))
+	preview := &PlanPreview{GoverningRevision: governing}
+	for _, stage := range plan.Stages {
+		projection, executed := snapshot.Stages[stage.ID]
+		if executed && !invalid[stage.ID] {
+			prospective.Stages[stage.ID] = projection
+			continue
+		}
+		if executed && projection.State != PlanStagePending {
+			preview.Invalidated = append(preview.Invalidated, stage.ID)
+		}
+		prospective.Stages[stage.ID] = PlanStageProjection{StageID: stage.ID, State: PlanStagePending}
+	}
+	return preview, prospective, nil
+}
+
 func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
 	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
 	resolution, err := s.Resolve(plan, snapshot)

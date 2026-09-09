@@ -795,6 +795,17 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		fmt.Fprintf(stdout, "%s plan %s revision %d\n", action, view.Plan.ID, view.Plan.Revision)
 	}
 	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", view.Plan.ID, view.Plan.Revision, revisionStatus(view))
+	// A revision that is not governing is shown as a PREVIEW: the state beside
+	// each stage is what approving this revision would leave, not a report of
+	// what is happening. Saying so is the difference between an approval
+	// preview and a document decorated with another revision's execution.
+	if preview := view.Preview; preview != nil {
+		fmt.Fprintf(stdout, "preview: revision %d governs the work; the state below is what approving this revision would leave\n",
+			preview.GoverningRevision)
+		if len(preview.Invalidated) > 0 {
+			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(preview.Invalidated, ", "))
+		}
+	}
 	fmt.Fprintf(stdout, "objective: %s\n", singleLinePlan(view.Plan.Objective))
 	if reasoning := view.Plan.Provenance.Reasoning; reasoning != nil {
 		fmt.Fprintf(stdout, "planned by: %s (%s, %s) in %s mode; workspace verified unchanged: %v\n",
