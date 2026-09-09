@@ -276,6 +276,20 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 				if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 					return report, err
 				}
+				// The rest of this pass is abandoned if the approved revision
+				// moved while the planner ran. Every step after this point -
+				// the pending-proposal check, the dependency reads, the stage
+				// starts - uses the document loaded at the top, and a run
+				// started from it now would be created AFTER the supersession
+				// computed its invalidations: it would never appear in
+				// RetiredRuns, never be stopped, and would execute work the
+				// approved plan no longer contains.
+				if moved, err := r.approvedRevisionMoved(plan); err != nil {
+					return report, err
+				} else if moved != 0 {
+					report.Waiting = fmt.Sprintf("revision %d was approved during this pass; it is abandoned here and recomputed from the new revision on the next tick", moved)
+					return report, nil
+				}
 				// A decomposition that just proposed a MATERIAL revision pauses
 				// the rest of this pass. Continuing would start a stage whose
 				// dependency completed by proposing that this very stage should
@@ -938,6 +952,26 @@ func terminalStageState(state PlanStageState) bool {
 // the same as no headroom.
 type headroom struct{ invocations, wallSeconds int }
 
+// approvedRevisionMoved reports the approved revision when it is no longer the
+// one this pass loaded, and zero when it still is.
+//
+// It exists because one step of a pass gives the plan lock up: a planning
+// invocation runs unlocked, for minutes, and an operator decision in that
+// window changes which document is the plan. Re-reading the snapshot is not
+// enough - the pass holds a decoded plan document, and that is what its
+// remaining steps act on.
+func (r PlanReconciler) approvedRevisionMoved(plan domain.EngineeringPlan) (int, error) {
+	snapshot, err := r.Store.ReplayPlan(plan.ID)
+	if err != nil {
+		return 0, err
+	}
+	approved, ok := snapshot.ApprovedRevision()
+	if !ok || approved == plan.Revision {
+		return 0, nil
+	}
+	return approved, nil
+}
+
 func remainingHeadroom(plan domain.EngineeringPlan, snapshot PlanSnapshot) headroom {
 	left := headroom{}
 	if ceiling := plan.BudgetEnvelope.MaxProviderInvocations; ceiling > 0 {
@@ -956,8 +990,15 @@ func remainingHeadroom(plan domain.EngineeringPlan, snapshot PlanSnapshot) headr
 // tighten narrows a stage budget to the remainder. It only ever narrows: a
 // remainder larger than the stage's own bound changes nothing.
 func (h headroom) tighten(budget domain.StageBudget) domain.StageBudget {
-	if h.invocations > 0 && (budget.MaxExecutionAttempts <= 0 || h.invocations < budget.MaxExecutionAttempts) {
-		budget.MaxExecutionAttempts = h.invocations
+	// The plan's remaining invocations are a TOTAL for the run, and they are
+	// carried as one. They used to be written into MaxExecutionAttempts, which
+	// is the retry allowance of a single execution binding: a run with two
+	// invocations left could spend two on its initial binding and then a fresh
+	// two on a continuation, because a continuation is a new binding with its
+	// own allowance. The aggregate ceiling was enforced per binding, which is
+	// not enforcement of an aggregate at all.
+	if h.invocations > 0 && (budget.MaxProviderInvocations <= 0 || h.invocations < budget.MaxProviderInvocations) {
+		budget.MaxProviderInvocations = h.invocations
 	}
 	if h.wallSeconds > 0 && (budget.MaxWallSeconds <= 0 || h.wallSeconds < budget.MaxWallSeconds) {
 		budget.MaxWallSeconds = h.wallSeconds

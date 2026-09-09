@@ -73,26 +73,55 @@ func (r PlanReconciler) decomposeStage(ctx context.Context, plan domain.Engineer
 			Reason: fmt.Sprintf("the stage allows %d planning attempts and %d have been spent", attempts, spent),
 		}, nil
 	}
+	// The invocation is RESERVED before the provider is called, not recorded
+	// after it returns.
+	//
+	// The call crosses a real provider account boundary. Recording the spend
+	// afterwards left a window - the whole length of a planning invocation -
+	// in which a crash lost the fact that it happened: neither the aggregate
+	// nor the stage moved, so a restart found an apparently unspent ceiling
+	// and could invoke again, and a profile narrowing this stage to one
+	// planning attempt was bypassed in exactly that window.
+	//
+	// The key is the attempt this reservation IS, so the same reservation
+	// replayed twice counts once, and a reservation whose result is never
+	// proven stays spent. A ceiling that can be reset by dying is not a
+	// ceiling.
+	if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
+		Key:     fmt.Sprintf("planner_invocation:%s:%d", stage.ID, spent+1),
+		StageID: stage.ID, ProviderInvocations: 1,
+	}); err != nil {
+		return nil, err
+	}
 	output, plannerErr := r.Planner(ctx, PlanDecompositionRequest{
 		Plan: plan, Stage: stage, Assignment: assignment, Contract: contract,
 		// The wall bound the stage - and therefore the profile - states, or the
 		// plan's remaining wall headroom, whichever is smaller.
 		WallSeconds: remainingHeadroom(plan, snapshot).tighten(assignment.Budget).MaxWallSeconds,
 	})
-	// One provider invocation was spent whether or not the proposal is
-	// accepted, AND whether or not the invocation failed - the provider ran.
-	// Recording it only on success made every failure invisible to the
-	// aggregate.
-	if err := r.appendPlan(plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
-		StageID: stage.ID, ProviderInvocations: 1,
-	}); err != nil {
-		return nil, err
-	}
 	if plannerErr != nil {
 		// A refused planning invocation is a BLOCK on that stage, not a failed
 		// plan: the reason is typed, the operator can act on it, and the
 		// approved revision keeps executing whatever it can.
 		return &PlanStageBlock{StageID: stage.ID, Kind: "planner", Reason: boundedDetail(plannerErr.Error())}, nil
+	}
+	// The plan lock is RELEASED across the invocation above, so an operator
+	// decision can land while it runs - and it takes minutes. Everything from
+	// here on writes against the revision this pass loaded: the proposal would
+	// name it as its source, and the stage would be settled "completed" under
+	// it. If a different revision is approved now, both statements are about a
+	// document nobody is executing any more.
+	//
+	// The invocation itself stays spent. It happened, and the account was
+	// charged; only its RESULT is refused.
+	if moved, err := r.approvedRevisionMoved(plan); err != nil {
+		return nil, err
+	} else if moved != 0 {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "superseded",
+			Reason: fmt.Sprintf("revision %d was approved while this planning invocation was running, so the proposal it produced - compiled against revision %d - was not recorded",
+				moved, plan.Revision),
+		}, nil
 	}
 	proposal, err := r.recordProposal(plan, stage, contract, output)
 	if err != nil {
