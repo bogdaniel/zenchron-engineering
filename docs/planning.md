@@ -480,7 +480,14 @@ The stage is NOT performed again under the same revision, and the plan says so
 rather than pretending: a stage's run identity is fixed within a revision, so
 starting it again would adopt the very run whose work was marked unusable.
 The stage reports as blocked, naming what moved, and a revision is what has the
-work done again - because a revision is what produces a different run.
+work done again - because a revision is what produces a different run. The run
+that performed the discarded work is retired: still attributed to the plan's
+budget, and stopped rather than left executing what nobody will read.
+
+Any movement of the upstream candidate counts, including a base integration.
+A candidate that has absorbed its base is not the candidate that was reviewed,
+so the reviewer did not see what is now there. This errs toward asking for the
+work again rather than reusing a verdict about something else.
 
 `plan revise --substitute-human STAGE` is the operator acting on an independence
 shortage that policy permits a person to fill: the blocked worker stage becomes a
