@@ -530,6 +530,29 @@ its record under the older one - the ordinary result of propose, approve,
 propose, approve. Looking only under the revision governing now would find
 nothing to compare in exactly the histories this boundary exists for.
 
+That comparison therefore crosses revisions, and two of the things it compares
+are POINTERS rather than obligations. The assignment carries the plan revision
+and plan digest it was resolved under, and a per-revision pointer to the
+compiled contract; a stage carried forward unchanged into a later approved
+revision necessarily gets new values for all three, because the plan document
+and the stored contract are written per revision. Reading those as a changed
+obligation refused the renewal this boundary exists to permit - a stage whose
+upstream had moved could not be re-performed at all once any later revision had
+been approved.
+
+So they are erased from the structural comparison and replaced by what they
+point AT. The plan's durable identity has to be the same one, the renewal has
+to be resolved under the revision actually executing - which is the approved
+one - and the previous performance has to be recorded no later than it. The
+contract has to be the same contract by identity, and the compiled documents
+the two revisions were planned against have to say the same thing: the whole
+contract less its own revision string and the predecessor it names, compared as
+one canonical record. A revision whose recompiled contract obliges anything
+different - an added invariant, a changed required claim, a narrowed scope - is
+a different obligation and is blocked like any other authority change. A
+contract that cannot be read at all is blocked too, for the same reason an
+unreadable previous performance is.
+
 Upgrading an installation that already holds an old-style same-revision
 invalidation converges after one bounded extra cycle: the stored assignments
 become generation 0, the pending invalidation is re-derived once, and the stage
