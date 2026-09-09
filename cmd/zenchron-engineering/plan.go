@@ -137,21 +137,57 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 		return runtime.ExitFailed, cause
 	}
 	defer reader.release()
-	snapshot, err := reader.store.ReplayPlan(planID)
+	// The QUESTION is historical: did this exact decision event land? It is not
+	// "is this still the latest decision", which is what the snapshot's
+	// approval slot answers - and that slot is reset to pending by the next
+	// proposal. The supervisor's own reconcile appends one as soon as the
+	// approval unblocks a decomposition, so consulting the slot reported "the
+	// decision was NOT applied" for decisions that HAD been applied: the exact
+	// inverse of the defect this path exists to prevent.
+	events, err := reader.store.PlanEvents(planID)
 	if err != nil {
 		return runtime.ExitFailed, cause
 	}
-	decided := snapshot.Approval
-	applied := decided.Revision == revision && decided.Digest == digest &&
-		((verb == "approve" && decided.Status == domain.ApprovalApproved) ||
-			(verb == "reject" && decided.Status == domain.ApprovalRejected))
+	decided, applied := decisionEventFor(events, verb, revision, digest)
 	if !applied {
-		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: revision %d is %s)",
-			cause, decided.Revision, decided.Status)
+		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: no %s of revision %d at digest %s is recorded)",
+			cause, verb, revision, digest)
 	}
 	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, decided.Revision, decided.Status, decided.Operator)
 	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%v); the durable record above is what happened\n", cause)
 	return runtime.ExitCompleted, nil
+}
+
+// decisionEventFor finds the durable decision this invocation asked for, by
+// revision, digest and verb. It reads the journal rather than a projection
+// because a projection answers about the present and this question is about the
+// past: a later proposal, a later decision, or a supersession all move the
+// present without unmaking what already happened.
+func decisionEventFor(events []runtime.EngineeringEvent, verb string, revision int, digest string) (runtime.PlanApproval, bool) {
+	want := runtime.EventPlanApproved
+	status := domain.ApprovalApproved
+	if verb == "reject" {
+		want, status = runtime.EventPlanRejected, domain.ApprovalRejected
+	}
+	for _, event := range events {
+		if event.Type != want {
+			continue
+		}
+		var payload runtime.PlanDecisionPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			// An unreadable decision record is not this decision. It is also
+			// not a reason to claim one landed.
+			continue
+		}
+		if payload.Revision != revision || payload.Digest != digest {
+			continue
+		}
+		return runtime.PlanApproval{
+			Revision: payload.Revision, Digest: payload.Digest,
+			Status: status, Operator: payload.Operator, Note: payload.Note,
+		}, true
+	}
+	return runtime.PlanApproval{}, false
 }
 
 // renderDelegatedPlan prints a supervisor's answer exactly as a locally applied
@@ -626,11 +662,18 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
+	delegated, payload, sent, err := delegatePayloadSent(stateDir, runtime.ControlRequest{
 		Command: command, PlanID: planID, Revision: revision, Digest: digest,
 		Note: flags.Note, Operator: requester,
 	})
 	if delegated {
+		// Only a request that REACHED the supervisor can have been applied
+		// without answering. One refused before any connection was made was
+		// applied by nobody, and consulting the durable record for it would
+		// report an unrelated earlier decision as this one's outcome.
+		if err != nil && !sent {
+			return runtime.ExitFailed, err
+		}
 		if err != nil {
 			// The supervisor may have applied the decision and lost the reply -
 			// a connection deadline, a restart. Reporting a bare failure for a

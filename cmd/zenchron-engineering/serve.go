@@ -691,26 +691,41 @@ func delegate(stateDir string, request runtime.ControlRequest, stdout io.Writer)
 // command and a locally executed one produce the same output: an operator
 // should not be able to tell which process applied their decision.
 func delegatePayload(stateDir string, request runtime.ControlRequest) (bool, json.RawMessage, error) {
+	delegated, payload, _, err := delegatePayloadSent(stateDir, request)
+	return delegated, payload, err
+}
+
+// delegatePayloadSent additionally reports whether the request was actually
+// PUT ON THE WIRE. "The supervisor may have applied this and lost the reply" is
+// only true of a request that was sent; a request refused before any connection
+// was made was not applied by anybody, and telling an operator to consult the
+// durable record for it invites the opposite error.
+func delegatePayloadSent(stateDir string, request runtime.ControlRequest) (delegated bool, payload json.RawMessage, sent bool, err error) {
 	running, endpointPresent := runtime.SupervisorPresence(stateDir)
 	if !running {
 		if endpointPresent {
 			// The endpoint EXISTS and could not be reached. Deciding locally
 			// here would write beside a supervisor that may be alive, outside
 			// the lock that exists to prevent it, because one dial failed.
-			return true, nil, fmt.Errorf(
-				"a supervisor endpoint exists at %s and could not be reached; the decision was not applied - retry, or stop the supervisor if it is gone",
+			//
+			// Neither remedy in the old wording works after a crash: retrying
+			// dials the same dead socket, and there is no supervisor left to
+			// stop. Restarting one reclaims the socket; removing the file is
+			// the manual equivalent.
+			return true, nil, false, fmt.Errorf(
+				"a supervisor endpoint exists at %s and could not be reached; nothing was sent and the decision was not applied - start a supervisor with `zenchron-engineering serve`, which reclaims the socket, or remove that file if no supervisor will run again",
 				runtime.ControlSocketPath(stateDir))
 		}
-		return false, nil, nil
+		return false, nil, false, nil
 	}
 	response, err := runtime.SendControl(stateDir, request)
 	if err != nil {
-		return true, nil, err
+		return true, nil, true, err
 	}
 	if !response.OK {
-		return true, nil, errors.New(response.Error)
+		return true, nil, true, errors.New(response.Error)
 	}
-	return true, response.Payload, nil
+	return true, response.Payload, true, nil
 }
 
 // requireSupervisor is for the lifecycle verbs that have no meaning without a
