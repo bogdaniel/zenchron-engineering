@@ -255,8 +255,13 @@ type ProfileConstraints struct {
 	// MaxWallSeconds tightens the per-invocation wall bound.
 	MaxWallSeconds *int `json:"max_wall_seconds,omitempty"`
 	// MaxExecutionAttempts tightens the retry ceiling for stages this profile
-	// performs.
+	// performs. It bounds retries of ONE execution binding.
 	MaxExecutionAttempts *int `json:"max_execution_attempts,omitempty"`
+	// MaxProviderInvocations tightens the RUN TOTAL, across every binding. A
+	// profile that wants to bound how much a stage may spend in total states
+	// it here: the attempt ceiling above cannot express it, because a
+	// continuation is a new binding with its own allowance.
+	MaxProviderInvocations *int `json:"max_provider_invocations,omitempty"`
 	// DenyPermissionBypass refuses the provider's unsafe permission mode for
 	// this profile even where the agent has standing operator permission for
 	// it. There is no member that ALLOWS a bypass: that statement belongs to

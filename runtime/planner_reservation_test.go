@@ -88,3 +88,18 @@ func TestAnUnbudgetedPlanningInvocationStillHasADeadline(t *testing.T) {
 		t.Fatalf("a stage stating 60 seconds was bounded by %s", got)
 	}
 }
+
+// The planning wall bound narrows and never widens.
+//
+// A stage stating more than the operator configured was the one place a stated
+// bound could raise a configured one - the asymmetry tightenedBy refuses
+// everywhere else in this runtime.
+func TestAStatedPlanningWallBoundOnlyNarrows(t *testing.T) {
+	engine := &EngineeringRuntime{deps: Dependencies{Budgets: RunBudgets{WallLimit: 10 * time.Minute}}}
+	if got := engine.planningWallLimit(20 * 60); got != 10*time.Minute {
+		t.Fatalf("a stage widened the configured bound to %s", got)
+	}
+	if got := engine.planningWallLimit(60); got != time.Minute {
+		t.Fatalf("a tighter stated bound was ignored: %s", got)
+	}
+}

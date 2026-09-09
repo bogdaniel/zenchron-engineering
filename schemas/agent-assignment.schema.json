@@ -99,6 +99,10 @@
               "type": "integer",
               "minimum": 1
             },
+            "max_provider_invocations": {
+              "type": "integer",
+              "minimum": 1
+            },
             "deny_permission_bypass": {
               "type": "boolean"
             }

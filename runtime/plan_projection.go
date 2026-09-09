@@ -83,8 +83,14 @@ type PlanStageProjection struct {
 	// RunID is the ordinary #63 EngineeringRun this stage became. It is empty
 	// for every gate, which is how "typed gates create no worker runs" is
 	// answerable from replayed state alone.
-	RunID string                `json:"run_id,omitempty"`
-	Gate  *PlanGateSatisfaction `json:"gate,omitempty"`
+	RunID string `json:"run_id,omitempty"`
+	// InvalidatedUnder is the revision an invalidation happened under, when it
+	// happened under the revision the stage was performed under. A stage cannot
+	// be performed twice under one revision - the run identity is the same one -
+	// so this is what the reconciler reads to say so instead of starting it and
+	// adopting the discarded run.
+	InvalidatedUnder int                   `json:"invalidated_under,omitempty"`
+	Gate             *PlanGateSatisfaction `json:"gate,omitempty"`
 }
 
 // PlanApproval is the operator decision on one exact revision. Both the number
@@ -384,15 +390,22 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		case string(Failed):
 			stage.State = PlanStageFailed
 		default:
-			// The stage KEEPS its run. A stage's run identity is fixed within a
-			// revision, so an invalidated stage does not get a different run by
-			// starting again - it would adopt the same one. Retiring it here
-			// stopped the run the stage still named, and the next pass settled
-			// the stage failed: the invalidation destroyed the work instead of
-			// marking it unusable. A SUPERSESSION is the case where the run is
-			// retired, and it clears the stage as well, because the next
-			// revision produces a different run.
 			stage.State = PlanStageInvalidated
+			if payload.Revision > 0 {
+				// Invalidated UNDER the revision it was performed under. The
+				// run it named is retired - it does not stop existing because
+				// the plan stopped looking at it, and if it is still executing
+				// it is executing work that has been discarded - and the stage
+				// no longer names it, so nothing settles the stage from a run
+				// that was stopped on purpose. The revision is remembered,
+				// because a stage cannot be performed again under it.
+				s.retire(stage.RunID)
+				s.Stages[payload.StageID] = PlanStageProjection{
+					StageID: payload.StageID, State: PlanStageInvalidated,
+					Reason: payload.Reason, InvalidatedUnder: payload.Revision,
+				}
+				return nil
+			}
 		}
 		stage.Reason = payload.Reason
 		s.Stages[payload.StageID] = stage

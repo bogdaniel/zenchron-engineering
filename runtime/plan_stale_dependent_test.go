@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -131,6 +132,20 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 	if settled.Consumed.ChildRuns != before {
 		t.Fatalf("child runs went from %d to %d: the invalidation is looping", before, settled.Consumed.ChildRuns)
 	}
+	// The discarded run is RETIRED: it does not stop existing because the plan
+	// stopped looking at it, so it is attributed and stopped rather than left
+	// executing work nobody will read.
+	retired := false
+	for _, runID := range settled.RetiredRuns {
+		retired = retired || runID == review
+	}
+	if !retired {
+		t.Fatalf("the invalidated stage's run was not retired: %#v", settled.RetiredRuns)
+	}
+	if settled.Stages["review"].InvalidatedUnder != fixture.plan.Revision {
+		t.Fatalf("the invalidation does not record the revision it happened under: %#v", settled.Stages["review"])
+	}
+
 	// The freeze that describes what WAS performed is untouched: it is the
 	// record of a performance, and the performance happened.
 	if frozen, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, "review"); err != nil {
@@ -153,5 +168,72 @@ func settleRunAtGoalState(t *testing.T, fixture *planRunFixture, runID, head str
 	run.Candidate.Revision, run.Candidate.Tree = head, head
 	if err := fixture.store.PutRun(run); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The invalidation reason is a JOURNAL FIELD, and production ids overflow it.
+//
+// Two full 40-hex candidate heads plus a stage id is 186 bytes before the id.
+// The journal refuses a field above 200, so with ordinary stage ids the append
+// was refused, the sweep errored, and the reconciler failed on that plan every
+// tick, forever. The earlier test passed only because its heads were twelve
+// characters long - a regression test that stops short of production sizes is
+// how this ships green.
+func TestTheInvalidationReasonFitsTheJournal(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation-core", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "independent-review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation-core"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := snapshot.Stages["implementation-core"].RunID
+
+	// Real commit-sized heads, not twelve characters. The reason names both of
+	// them and the upstream stage id: 76 + 40 + 12 + 19 + 18 + 40 = 205 bytes,
+	// against a 200-byte field bound.
+	first := strings.Repeat("a", 40)
+	second := strings.Repeat("b", 40)
+	recordCandidateAndAssurance(t, fixture, implementation, first)
+	settleRunAtGoalState(t, fixture, implementation, first)
+	fixture.reconcile(t)
+
+	snapshot, err = fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := snapshot.Stages["independent-review"].RunID
+	if review == "" {
+		t.Fatal("the review stage created no run")
+	}
+	recordCandidateAndAssurance(t, fixture, review, strings.Repeat("r", 40))
+	settleRunAtGoalState(t, fixture, review, strings.Repeat("r", 40))
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	recordCandidate(t, fixture, implementation, second)
+	settleRunAtGoalState(t, fixture, implementation, second)
+
+	// The whole assertion: this pass does not error.
+	if _, err := fixture.reconciler.Reconcile(context.Background(), fixture.plan.ID); err != nil {
+		t.Fatalf("the invalidation could not be journalled: %v", err)
+	}
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Stages["independent-review"].State != PlanStageInvalidated {
+		t.Fatalf("the review was not invalidated: %#v", after.Stages["independent-review"])
+	}
+	if reason := after.Stages["independent-review"].Reason; len(reason) > maxPayloadFieldBytes {
+		t.Fatalf("the recorded reason is %d bytes", len(reason))
 	}
 }

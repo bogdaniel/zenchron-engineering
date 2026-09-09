@@ -352,7 +352,13 @@ func TestOneExecutionAgentBacksSeveralProfiles(t *testing.T) {
 // a bypass would have to be added here first, and adding one fails this test.
 func TestEscalatingCustomizationIsUnrepresentable(t *testing.T) {
 	constraints := reflect.TypeFor[domain.ProfileConstraints]()
-	allowed := map[string]bool{"MaxWallSeconds": true, "MaxExecutionAttempts": true, "DenyPermissionBypass": true}
+	// MaxProviderInvocations is a CEILING on a run total, reviewed against the
+	// law when it was added: it can lower what a stage may spend in total and
+	// there is no value of it that raises anything.
+	allowed := map[string]bool{
+		"MaxWallSeconds": true, "MaxExecutionAttempts": true,
+		"MaxProviderInvocations": true, "DenyPermissionBypass": true,
+	}
 	for i := range constraints.NumField() {
 		name := constraints.Field(i).Name
 		if !allowed[name] {

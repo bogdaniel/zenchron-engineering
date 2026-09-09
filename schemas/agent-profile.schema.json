@@ -67,6 +67,11 @@
           "type": "integer",
           "minimum": 1
         },
+        "max_provider_invocations": {
+          "description": "The RUN TOTAL of provider invocations this profile permits, across every execution binding. It narrows; it can never raise a plan's or an operator's bound.",
+          "type": "integer",
+          "minimum": 1
+        },
         "max_execution_attempts": {
           "type": "integer",
           "minimum": 1

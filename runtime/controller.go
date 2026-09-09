@@ -445,10 +445,16 @@ func (b RunBudgets) defaults() RunBudgets {
 // producer invocation is bounded by the configured limit; a planner is not
 // special enough to be exempt from it.
 func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
-	if stageSeconds > 0 {
-		return time.Duration(stageSeconds) * time.Second
+	configured := r.deps.Budgets.WallLimit
+	stated := time.Duration(stageSeconds) * time.Second
+	// NARROW ONLY, like every other budget in this runtime. A stage stating
+	// more than the operator configured was the one place a stated bound could
+	// widen a configured one, which is the asymmetry tightenedBy refuses
+	// everywhere else.
+	if stated <= 0 || (configured > 0 && stated > configured) {
+		return configured
 	}
-	return r.deps.Budgets.WallLimit
+	return stated
 }
 
 // tightenedBy narrows these budgets by a plan stage's own. It only ever

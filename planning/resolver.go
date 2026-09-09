@@ -429,8 +429,24 @@ func tightenedByProfile(budget domain.StageBudget, constraints domain.ProfileCon
 	if wall := constraints.MaxWallSeconds; wall != nil && *wall > 0 && (budget.MaxWallSeconds <= 0 || *wall < budget.MaxWallSeconds) {
 		budget.MaxWallSeconds = *wall
 	}
-	if attempts := constraints.MaxExecutionAttempts; attempts != nil && *attempts > 0 && (budget.MaxExecutionAttempts <= 0 || *attempts < budget.MaxExecutionAttempts) {
-		budget.MaxExecutionAttempts = *attempts
+	if total := constraints.MaxProviderInvocations; total != nil && *total > 0 && (budget.MaxProviderInvocations <= 0 || *total < budget.MaxProviderInvocations) {
+		budget.MaxProviderInvocations = *total
+	}
+	if attempts := constraints.MaxExecutionAttempts; attempts != nil && *attempts > 0 {
+		switch {
+		case budget.MaxExecutionAttempts > 0:
+			// An existing bound is only ever lowered.
+			if *attempts < budget.MaxExecutionAttempts {
+				budget.MaxExecutionAttempts = *attempts
+			}
+		case budget.MaxProviderInvocations <= 0 || *attempts <= budget.MaxProviderInvocations:
+			// The stage states no retry bound. Introducing one is a narrowing
+			// only while it stays inside the stage's TOTAL: a per-binding
+			// allowance larger than the whole run may spend is not a
+			// constraint, and writing it into the assignment would read as a
+			// profile raising a ceiling it cannot raise.
+			budget.MaxExecutionAttempts = *attempts
+		}
 	}
 	return budget
 }
@@ -645,11 +661,17 @@ func assignmentID(plan domain.EngineeringPlan, stage domain.PlanStage) string {
 }
 
 func boundedReason(detail string) string {
-	// Invalid bytes are dropped before the bound is measured: the reason is
+	// Invalid bytes are DROPPED before the bound is measured: the reason is
 	// journalled, and json.Marshal expands each invalid byte into a three-byte
 	// replacement character, so a detail cut to 200 bytes could encode to more
-	// than 200 and fail the append it was bounded to survive.
-	detail = strings.ToValidUTF8(strings.TrimSpace(detail), "")
+	// than 200 and fail the append it was bounded to survive. Dropping is
+	// silent alteration, so a detail that was entirely unreadable says that
+	// rather than reading as though nothing was reported.
+	raw := strings.TrimSpace(detail)
+	detail = strings.ToValidUTF8(raw, "")
+	if detail == "" && raw != "" {
+		return "the reported readiness detail was not readable text"
+	}
 	if detail == "" {
 		return "no readiness detail was reported"
 	}

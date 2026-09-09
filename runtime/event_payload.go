@@ -769,6 +769,16 @@ type PlanStageSettledPayload struct {
 	StageID string `json:"stage_id"`
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason,omitempty"`
+	// Revision is set on an INVALIDATION that happens under the revision the
+	// stage was performed under, rather than because a new revision replaced
+	// it. The two are different situations and the machinery around them is
+	// revision-scoped: a stage's run identity carries the revision, so a
+	// supersession-invalidated stage genuinely starts again as a new run, and
+	// a same-revision one would adopt the run whose work was just discarded.
+	//
+	// omitempty: an event written before this existed carries none, and none
+	// means the supersession case, which is what every such event was.
+	Revision int `json:"revision,omitempty"`
 }
 
 // PlanGateSatisfiedPayload records that a typed gate's EXISTING durable

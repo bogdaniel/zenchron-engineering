@@ -243,7 +243,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		// already reached. The plan says so instead of pretending, and a new
 		// revision is what re-performs the work: that is what produces a
 		// different run.
-		if projection.State == PlanStageInvalidated && projection.RunID != "" {
+		if projection.State == PlanStageInvalidated && projection.InvalidatedUnder == plan.Revision {
 			report.Blocked = append(report.Blocked, PlanStageBlock{
 				StageID: stage.ID, Kind: "invalidated",
 				Reason: "this stage's completed work is no longer valid (" + projection.Reason +
@@ -535,12 +535,31 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 			if head == "" || head == upstream.Candidate {
 				continue
 			}
-			stale[stage.ID] = fmt.Sprintf("it consumed %s from stage %s, which is now at %s", upstream.Candidate, upstream.StageID, head)
+			// Bounded, because it is a journal field: two full candidate heads
+			// and a stage id exceed the 200-byte field bound with ordinary
+			// production ids, and the append would be REFUSED - so the
+			// reconciler would error on this plan on every tick, forever. Every
+			// neighbouring append passes its detail through here; this one did
+			// not.
+			stale[stage.ID] = boundedDetail(fmt.Sprintf("it consumed %s from stage %s, which is now at %s",
+				upstream.Candidate, upstream.StageID, head))
 			break
 		}
 	}
 	if len(stale) == 0 {
 		return false, nil
+	}
+	// Propagation is seeded from DURABLE STATE as well as from what this pass
+	// just found, so it is idempotent and crash-safe. The settles below are
+	// separate appends: a crash between them used to leave a dependent
+	// completed under a dependency that had been invalidated, and nothing
+	// re-derived it - the root was no longer completed, and the dependent's own
+	// upstream had not moved. Re-reading the dependency's state every pass is
+	// what closes that, rather than ordering the appends and hoping.
+	for _, stage := range plan.Stages {
+		if projection, ok := snapshot.Stages[stage.ID]; ok && projection.State == PlanStageInvalidated {
+			stale[stage.ID] = "it was invalidated"
+		}
 	}
 	// Downstream of a stage that must be redone is also invalid: its input is
 	// about to be replaced. This is the same propagation a revision performs,
@@ -569,8 +588,8 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 	sort.Strings(ids)
 	for _, id := range ids {
 		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
-			StageID: id, Outcome: planStageInvalidated,
-			Reason: "the upstream work this stage was performed against has changed: " + stale[id],
+			StageID: id, Outcome: planStageInvalidated, Revision: plan.Revision,
+			Reason: boundedDetail("the upstream work this stage was performed against has changed: " + stale[id]),
 		}); err != nil {
 			return false, err
 		}

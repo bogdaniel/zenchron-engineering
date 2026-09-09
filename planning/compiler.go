@@ -667,9 +667,13 @@ func shareBudget(stages []domain.PlanStage, envelope domain.PlanBudgetEnvelope) 
 	if agents == 0 {
 		return stages
 	}
-	attempts := envelope.MaxProviderInvocations / agents
-	if attempts < 1 {
-		attempts = 1
+	// The share of an aggregate is itself a TOTAL. Writing it into
+	// MaxExecutionAttempts bounded retries of one execution binding, so a
+	// stage's continuations could each start a fresh allowance and one stage
+	// could legally spend the whole plan remainder rather than its share.
+	invocations := envelope.MaxProviderInvocations / agents
+	if invocations < 1 {
+		invocations = 1
 	}
 	wall := 0
 	if envelope.MaxWallSeconds > 0 {
@@ -679,8 +683,8 @@ func shareBudget(stages []domain.PlanStage, envelope domain.PlanBudgetEnvelope) 
 		if stage.Kind != domain.StageAgent {
 			continue
 		}
-		if stage.Budget.MaxExecutionAttempts <= 0 || stage.Budget.MaxExecutionAttempts > attempts {
-			stage.Budget.MaxExecutionAttempts = attempts
+		if stage.Budget.MaxProviderInvocations <= 0 || stage.Budget.MaxProviderInvocations > invocations {
+			stage.Budget.MaxProviderInvocations = invocations
 		}
 		if wall > 0 && (stage.Budget.MaxWallSeconds <= 0 || stage.Budget.MaxWallSeconds > wall) {
 			stage.Budget.MaxWallSeconds = wall
