@@ -126,6 +126,16 @@ type ControlRequest struct {
 	Revision int    `json:"revision,omitempty"`
 	Digest   string `json:"digest,omitempty"`
 	Note     string `json:"note,omitempty"`
+	// Operator is the identity of the person MAKING the request, resolved by
+	// their own process exactly as the local path resolves it.
+	//
+	// It is carried because a decision records who made it, and the supervisor
+	// resolving its own identity would record the supervisor - a service
+	// account, or another person's login - for a decision somebody else made in
+	// their terminal. The endpoint is owner-only, so the requester is the owner
+	// of this state directory; recording their stated identity is exactly what
+	// the local path records, with the same unverified provenance.
+	Operator string `json:"operator,omitempty"`
 	// Template, Deterministic and SubstituteHuman are a plan REVISION request,
 	// mirroring the flags of the command that would otherwise drive it here.
 	Template        string `json:"template,omitempty"`

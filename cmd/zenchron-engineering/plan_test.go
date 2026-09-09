@@ -475,3 +475,59 @@ func TestPlanShowRendersOneExactRevision(t *testing.T) {
 		t.Fatal("a revision that does not exist was rendered")
 	}
 }
+
+// A decision records WHO made it, not which process applied it.
+//
+// The supervisor resolves its own operator identity from its own configuration
+// and account; a decision delegated to it would therefore be journalled under
+// the supervisor - a service account, or another person's login - for a
+// decision somebody else made in their terminal.
+func TestADelegatedDecisionRecordsTheRequester(t *testing.T) {
+	stateDir, err := os.MkdirTemp("", "zc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, configPath := planWorkspaceIn(t, stateDir)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+
+	supervisor, err := newComposition(autonomyFlags{Config: configPath}, planOverrides(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(supervisor.release)
+	// The supervisor's own identity differs from the requester's, which is what
+	// makes the difference observable at all.
+	supervisor.config.OperatorConfig.Operator.ID = "the-supervisors-service-account"
+	listener, err := runtime.ListenControl(supervisor.config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_ = listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
+			return supervisor.handleControl(context.Background(), driver, func() {}, request)
+		})
+	}()
+
+	revision, digest := pendingDecision(t, configPath, planID, 41)
+	var approved bytes.Buffer
+	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision),
+		"--digest", digest, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
+		t.Fatalf("approve: %v\n%s", err, approved.String())
+	}
+	if !strings.Contains(approved.String(), "operator-1") {
+		t.Fatalf("the decision was not recorded against the requester: %q", approved.String())
+	}
+	if strings.Contains(approved.String(), "service-account") {
+		t.Fatalf("the decision was recorded against the supervisor: %q", approved.String())
+	}
+}

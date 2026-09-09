@@ -94,10 +94,15 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 		return false, 0, nil
 	}
 	stateDir := reader.config.StateDir
+	requester, operatorErr := reader.config.ResolveOperator()
 	reader.release()
+	if operatorErr != nil {
+		return true, runtime.ExitInvalid, operatorErr
+	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
 		Command: runtime.ControlPlanRevise, PlanID: planID, Template: flags.Template,
-		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman, Note: flags.Note,
+		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
+		Note: flags.Note, Operator: requester.ID,
 	})
 	if !delegated {
 		return false, 0, nil
@@ -107,6 +112,21 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 	}
 	code, err := renderDelegatedPlan(flags, payload, false, stdout)
 	return true, code, err
+}
+
+// resolveRequestingOperator is this terminal's operator identity, resolved the
+// same way the local decision path resolves it.
+func resolveRequestingOperator(flags autonomyFlags, overrides autonomyOverrides) (string, error) {
+	reader, err := openPlanReader(flags, overrides)
+	if err != nil {
+		return "", err
+	}
+	defer reader.release()
+	operator, err := reader.config.ResolveOperator()
+	if err != nil {
+		return "", err
+	}
+	return operator.ID, nil
 }
 
 // reportDelegatedDecision answers "did my decision happen" from the durable
@@ -599,8 +619,16 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	// supervisor. Falling through to the local path would apply a decision
 	// beside a live reconciler, outside the lock that exists to stop exactly
 	// that, because a socket dial happened to fail.
+	// The decision records WHO made it, so the requester's own resolved
+	// identity travels with the request rather than the supervisor recording
+	// itself for a decision somebody else made.
+	requester, err := resolveRequestingOperator(flags, overrides)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
-		Command: command, PlanID: planID, Revision: revision, Digest: digest, Note: flags.Note,
+		Command: command, PlanID: planID, Revision: revision, Digest: digest,
+		Note: flags.Note, Operator: requester,
 	})
 	if delegated {
 		if err != nil {

@@ -338,15 +338,22 @@ func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanVi
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
-	operator, err := c.config.ResolveOperator()
-	if err != nil {
-		return runtime.PlanView{}, err
+	// The REQUESTER's identity, where they sent one: a decision records who
+	// made it, and this process is applying it on their behalf. Falling back to
+	// this supervisor's own identity is for a request that carried none.
+	operator := strings.TrimSpace(request.Operator)
+	if operator == "" {
+		resolved, err := c.config.ResolveOperator()
+		if err != nil {
+			return runtime.PlanView{}, err
+		}
+		operator = resolved.ID
 	}
 	decide := plans.Approve
 	if request.Command == runtime.ControlPlanReject {
 		decide = plans.Reject
 	}
-	if _, err := decide(request.PlanID, request.Revision, request.Digest, operator.ID, request.Note); err != nil {
+	if _, err := decide(request.PlanID, request.Revision, request.Digest, operator, request.Note); err != nil {
 		return runtime.PlanView{}, err
 	}
 	return plans.View(request.PlanID)
