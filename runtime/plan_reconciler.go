@@ -164,6 +164,19 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 			return report, err
 		}
 	}
+	// A completed stage performed against upstream work that has since MOVED is
+	// invalidated before anything reads it, together with everything
+	// downstream. Reopening the gate above such a stage is not enough: the
+	// review under it would be reused unperformed.
+	staleWork, err := r.invalidateStaleCompletedStages(plan, snapshot)
+	if err != nil {
+		return report, err
+	}
+	if staleWork {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
+			return report, err
+		}
+	}
 	// A gate proved against work that has since MOVED is re-opened before
 	// anything reads it. A goal-state run is not finished: reviewer feedback
 	// re-activates it and it can produce a different candidate, and a verdict
@@ -432,19 +445,113 @@ func (r PlanReconciler) provenHeadsMoved(proven []string) (bool, error) {
 		if !ok || runID == "" {
 			continue
 		}
-		events, err := r.Store.Events(runID)
+		current, err := r.runHead(runID)
 		if err != nil {
 			return false, err
 		}
-		projected, err := Project(events)
-		if err != nil {
-			return false, err
-		}
-		if projected.Head() != head {
+		if current != head {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// runHead is one run's current candidate head, from its own journal.
+func (r PlanReconciler) runHead(runID string) (string, error) {
+	events, err := r.Store.Events(runID)
+	if err != nil {
+		return "", err
+	}
+	projected, err := Project(events)
+	if err != nil {
+		return "", err
+	}
+	return projected.Head(), nil
+}
+
+// invalidateStaleCompletedStages invalidates a COMPLETED agent stage whose
+// frozen upstream input has MOVED, and everything downstream of it.
+//
+// Reopening a stale gate is not enough. The shape that matters is
+// `implementation -> independent review -> gate`: the reviewer's frozen
+// assignment names the exact candidate it consumed, and a producer run at
+// goal_state_reached is not finished - reviewer feedback re-activates it and it
+// produces a different candidate. The gate above reopens, because its proof
+// names the producer's run; the REVIEW below it stayed completed, so the next
+// evaluation of that gate could be satisfied again by an independent review
+// that was never performed on the work now being gated.
+//
+// A run whose head cannot be read, or an assignment recorded before upstream
+// identity was captured, is left alone: this invalidates on proof that the
+// input moved, never on absence of proof that it did not. Where it does fire,
+// it errs toward performing the review again rather than reusing one whose
+// subject may have changed - the expensive direction is the safe one here.
+func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPlan, snapshot PlanSnapshot) (bool, error) {
+	stale := map[string]string{}
+	for _, stage := range plan.Stages {
+		projection, ok := snapshot.Stages[stage.ID]
+		if !ok || projection.State != PlanStageCompleted {
+			continue
+		}
+		assignment, found, err := r.Service.frozenAssignment(plan, projection, stage.ID)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			continue
+		}
+		for _, upstream := range assignment.Context.UpstreamOutputs {
+			if upstream.RunID == "" || upstream.Candidate == "" {
+				continue
+			}
+			head, err := r.runHead(upstream.RunID)
+			if err != nil {
+				return false, err
+			}
+			if head == "" || head == upstream.Candidate {
+				continue
+			}
+			stale[stage.ID] = fmt.Sprintf("it consumed %s from stage %s, which is now at %s", upstream.Candidate, upstream.StageID, head)
+			break
+		}
+	}
+	if len(stale) == 0 {
+		return false, nil
+	}
+	// Downstream of a stage that must be redone is also invalid: its input is
+	// about to be replaced. This is the same propagation a revision performs,
+	// for the same reason.
+	for progressed := true; progressed; {
+		progressed = false
+		for _, stage := range plan.Stages {
+			if _, already := stale[stage.ID]; already {
+				continue
+			}
+			for _, dependency := range stage.DependsOn {
+				if _, invalid := stale[dependency]; invalid {
+					stale[stage.ID] = "the work it depends on is being redone"
+					progressed = true
+					break
+				}
+			}
+		}
+	}
+	ids := make([]string, 0, len(stale))
+	for id := range stale {
+		if projection, ok := snapshot.Stages[id]; ok && projection.State != PlanStagePending {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+			StageID: id, Outcome: planStageInvalidated,
+			Reason: "the upstream work this stage was performed against has changed: " + stale[id],
+		}); err != nil {
+			return false, err
+		}
+	}
+	return len(ids) > 0, nil
 }
 
 // startAgentStage creates or associates the ordinary EngineeringRun for one
