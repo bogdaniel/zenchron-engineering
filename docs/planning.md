@@ -367,6 +367,14 @@ subscription CLI reports none, and unknown stays **unknown** in the approval vie
 and everywhere else. It is never rendered as zero, and no currency figure is
 invented.
 
+The plan's remaining provider invocations reach a child run as a RUN TOTAL,
+counted across every execution binding that run makes. It is a different
+resource from `max_execution_attempts`, which bounds retries of ONE binding: a
+continuation is a new binding with its own attempt allowance, so a plan
+remainder carried as an attempt ceiling could be spent twice over. The total
+refuses the next invocation; it never retroactively fails a run whose last
+permitted invocation finished the work.
+
 Consumption is derived from the durable journal rather than kept as a counter,
 so it survives a restart:
 
@@ -433,10 +441,22 @@ These commands work while `serve` is running, which is when they matter most:
   applies them against the state it is reconciling. With no supervisor running,
   this terminal is the owner and decides directly; the output is identical
   either way, so an operator cannot tell which process applied their decision.
+- **Proposals** - `plan issue N` and `plan revise` - go to the supervisor too,
+  first one included. The local path would take the exclusive ownership lock
+  `serve` already holds, so an operator could once decide plans while `serve`
+  ran but not start one.
 - `plan show --revision N` renders one exact revision. The default is the
   governing one, which is not always the revision being ASKED about: a
   decomposition proposal is stored as a new unapproved revision while the
   approved one keeps executing.
+
+  A revision that is not governing is shown as a PREVIEW: the state beside each
+  stage is what approving it WOULD leave, not what is happening now. It is built
+  by the same computation approval itself applies, so a stage the revision
+  changes reads as pending and re-resolves, an unchanged completed stage keeps
+  its work, and the view names the governing revision and lists the stages
+  approving would redo. Nothing is written, and the governing view is unchanged
+  by looking.
 
 `plan approve` records the operator's decision and produces the approved
 immutable revision. It NAMES the revision and digest being decided, and
@@ -446,6 +466,21 @@ one, on its own - and a decision that just took "whatever is newest" would
 approve something nobody read. `plan reject` records the refusal. `plan revise` produces a
 new proposal rather than editing an approved plan in place, because an approved
 revision is immutable and the work bound to it stays bound to what was approved.
+
+### Work whose input moved
+
+A completed stage is invalidated when the upstream work its frozen assignment
+names has been replaced - a producer at `goal_state_reached` is not finished,
+and reviewer feedback can move it to a different candidate. Everything
+downstream of that stage is invalidated with it. This is what stops a gate from
+being re-proved by an independent review that was performed on work nobody is
+proposing any more.
+
+The stage is NOT performed again under the same revision, and the plan says so
+rather than pretending: a stage's run identity is fixed within a revision, so
+starting it again would adopt the very run whose work was marked unusable.
+The stage reports as blocked, naming what moved, and a revision is what has the
+work done again - because a revision is what produces a different run.
 
 `plan revise --substitute-human STAGE` is the operator acting on an independence
 shortage that policy permits a person to fill: the blocked worker stage becomes a

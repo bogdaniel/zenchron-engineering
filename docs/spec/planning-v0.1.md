@@ -190,6 +190,13 @@ Consumption is a projection of the durable journal, never a stored counter:
 child_runs  provider_invocations  wall_seconds  cost_micros (+ cost_known)
 ```
 
+A stage budget states two different invocation bounds, and conflating them was
+a real defect: `max_execution_attempts` bounds retries of ONE execution binding,
+while `max_provider_invocations` is the RUN TOTAL across every binding. A
+continuation is a new binding with its own attempt allowance, so a plan's
+remaining aggregate carried as an attempt ceiling can be spent more than once.
+The plan's remainder is carried as the total.
+
 `child_runs`, `provider_invocations` and `wall_seconds` are attributed by the
 reconciler and ENFORCED against the envelope before a stage starts. Wall time is
 ACTIVE time, by the same definition a run's own wall budget uses: elapsed less
