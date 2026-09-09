@@ -25,6 +25,15 @@ func TestThePrivilegeBoundaryComparesAgainstAnEarlierRevisionsPerformance(t *tes
 	})
 	stage := fixture.plan.Stages[0]
 	performed := planFixtureAssignment(t, fixture.plan)
+	// The profile names its instruction packs and context policy by id; the
+	// registry freezes their CONTENT digests here.
+	performed.Profile.Instructions = []domain.PackRef{
+		{ID: "security-review-core", Revision: "3", Digest: strings.Repeat("1", 64)},
+	}
+	performed.Profile.ContextPolicy = &domain.PackRef{
+		ID: "reviewer-context", Revision: "2", Digest: strings.Repeat("2", 64),
+	}
+	performed.Budget = domain.StageBudget{MaxExecutionAttempts: 2, MaxProviderInvocations: 6, MaxWallSeconds: 900}
 	if err := fixture.store.PutPlanAssignment(fixture.plan.ID, 1, 0, performed); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +60,23 @@ func TestThePrivilegeBoundaryComparesAgainstAnEarlierRevisionsPerformance(t *tes
 		{"trust mode", func(a *domain.AgentAssignment) {
 			a.Agent.TrustMode = domain.TrustRequirementProtected
 		}},
+		// The pack was EDITED IN PLACE: same profile document, same id,
+		// version and digest, different instructions. This is the reachable
+		// path from operator configuration to what a worker is actually told.
+		{"instruction packs", func(a *domain.AgentAssignment) {
+			a.Profile.Instructions = []domain.PackRef{
+				{ID: "security-review-core", Revision: "4", Digest: strings.Repeat("9", 64)},
+			}
+		}},
+		{"context policy", func(a *domain.AgentAssignment) {
+			a.Profile.ContextPolicy = &domain.PackRef{
+				ID: "reviewer-context", Revision: "3", Digest: strings.Repeat("8", 64),
+			}
+		}},
+		{"provider invocation ceiling", func(a *domain.AgentAssignment) {
+			a.Budget.MaxProviderInvocations = 60
+		}},
+		{"wall clock ceiling", func(a *domain.AgentAssignment) { a.Budget.MaxWallSeconds = 0 }},
 	} {
 		next := performed
 		change.apply(&next)
@@ -69,10 +95,66 @@ func TestThePrivilegeBoundaryComparesAgainstAnEarlierRevisionsPerformance(t *tes
 		}
 	}
 
-	// A stage with NO previous performance anywhere is a first generation
-	// under a new identity, and there is nothing to renew: it is not blocked.
+	// Everything the named rows do NOT enumerate, structurally. These are the
+	// fields a future edit of that list would silently stop protecting, and the
+	// whole point of comparing the canonical record is that they are covered
+	// without anybody remembering them.
+	for _, change := range []struct {
+		what  string
+		apply func(*domain.AgentAssignment)
+	}{
+		{"profile capabilities", func(a *domain.AgentAssignment) {
+			a.Profile.Capabilities = []domain.EngineeringCapability{domain.CapabilityVerification}
+		}},
+		{"required capabilities", func(a *domain.AgentAssignment) {
+			a.RequiredCapabilities = []domain.EngineeringCapability{domain.CapabilityVerification}
+		}},
+		{"contract", func(a *domain.AgentAssignment) {
+			a.Contract = domain.ObjectRevision{ID: "contract", Revision: "2"}
+		}},
+		{"the context the worker is shown", func(a *domain.AgentAssignment) {
+			a.Context.PolicyExcerpts = []string{"a policy excerpt nobody approved"}
+		}},
+	} {
+		next := performed
+		change.apply(&next)
+		block := fixture.reconciler.refusePrivilegeChange(governing, stage, 1, next)
+		if block == nil {
+			t.Fatalf("re-performing the stage would change %s and nothing blocked", change.what)
+		}
+		if block.Kind != "authority" {
+			t.Fatalf("a changed %s blocked as %q", change.what, block.Kind)
+		}
+	}
+
+	// What a generation IS allowed to move: which performance it is, the run it
+	// became, the resolver's explanation, the upstream candidate whose
+	// replacement caused it - and a budget that NARROWS.
+	renewed := performed
+	renewed.ID = performed.ID + "-g1"
+	renewed.RunID = "run-something-else"
+	renewed.Selection = domain.ResolutionExplanation{
+		Considered: []domain.CandidateEvaluation{}, Selected: "codex", Reason: "a differently worded explanation",
+	}
+	renewed.Context.UpstreamOutputs = []domain.UpstreamOutput{
+		{StageID: "implementation", RunID: "run-b", Candidate: strings.Repeat("b", 40), Tree: strings.Repeat("b", 40)},
+	}
+	renewed.Budget = domain.StageBudget{MaxExecutionAttempts: 1, MaxProviderInvocations: 3, MaxWallSeconds: 600}
+	if block := fixture.reconciler.refusePrivilegeChange(governing, stage, 1, renewed); block != nil {
+		t.Fatalf("renewing the same obligation was refused: %s", block.Reason)
+	}
+
+	// And a stage being performed AGAIN whose previous performance cannot be
+	// found FAILS CLOSED. A later generation exists because an earlier one
+	// happened; not finding it proves nothing about whether the obligation is
+	// the same, and reading absence as sameness is how this boundary would be
+	// bypassed by deleting a row.
 	other := domain.PlanStage{ID: "never-performed", Kind: domain.StageAgent, Role: domain.RoleImplementer}
-	if block := fixture.reconciler.refusePrivilegeChange(governing, other, 1, performed); block != nil {
-		t.Fatalf("a stage that was never performed was blocked: %s", block.Reason)
+	block := fixture.reconciler.refusePrivilegeChange(governing, other, 1, performed)
+	if block == nil {
+		t.Fatal("a re-performance with no recoverable predecessor was allowed to start")
+	}
+	if !strings.Contains(block.Reason, "propose a revision") {
+		t.Fatalf("the block does not say what to do: %s", block.Reason)
 	}
 }

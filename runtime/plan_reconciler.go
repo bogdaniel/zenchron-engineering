@@ -21,6 +21,7 @@ package runtime
 // model.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -667,6 +668,14 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 // produce a different one of those, that is not the same obligation, and it
 // goes through the approval boundary as a revision like anything else.
 //
+// The comparison is STRUCTURAL, not a list of fields somebody remembered. The
+// named rows below exist to say WHICH thing changed in a message an operator
+// can act on; what decides is the canonical form of the whole assignment with
+// only the execution facts a generation is allowed to move erased. A field
+// added to AgentAssignment later is therefore protected by default rather than
+// by whoever edits this function next - which is how an authority boundary has
+// to fail.
+//
 // Obligation renewal may be automatic. Authority change may not.
 func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage domain.PlanStage, generation int, next domain.AgentAssignment) *PlanStageBlock {
 	// The PREVIOUS PERFORMANCE, wherever it was recorded - not
@@ -682,11 +691,25 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 		return &PlanStageBlock{StageID: stage.ID, Kind: "assignment", Reason: boundedDetail(err.Error())}
 	}
 	if !found {
-		return nil
+		// FAIL CLOSED. This stage is being performed AGAIN, so a previous
+		// performance exists by definition; not being able to read what it was
+		// frozen under proves nothing about whether the obligation is the same,
+		// and absence of proof was being read as proof of sameness.
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: "propose a revision: this stage is being performed again and the assignment its previous performance was frozen under cannot be read, so nothing proves the obligation is unchanged",
+		}
 	}
 	for _, difference := range []struct{ what, before, now string }{
 		{"role", string(previous.Role), string(next.Role)},
 		{"profile", fmt.Sprintf("%s v%d %s", previous.Profile.ID, previous.Profile.Version, previous.Profile.Digest), fmt.Sprintf("%s v%d %s", next.Profile.ID, next.Profile.Version, next.Profile.Digest)},
+		// The profile DOCUMENT names its instruction packs and context policy
+		// by id; the registry resolves and freezes their content digests
+		// separately. Editing a pack in place leaves the profile id, version
+		// and digest identical, so comparing those alone let a new generation
+		// execute different operator instructions with no approval.
+		{"instruction packs", packSummary(previous.Profile.Instructions), packSummary(next.Profile.Instructions)},
+		{"context policy", packSummary(contextPolicyRefs(previous.Profile)), packSummary(contextPolicyRefs(next.Profile))},
 		{"worker", previous.Agent.ID, next.Agent.ID},
 		// The WHOLE binding, field by field. Two registry entries can share an
 		// id and differ in what they actually are, and the independence
@@ -714,7 +737,97 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 				difference.what, shortValue(difference.before), shortValue(difference.now))),
 		}
 	}
+	// The stage's own bounds may NARROW - a profile that tightens is
+	// customization doing what it is allowed to do - and may not be raised.
+	if what := budgetEscalation(previous.Budget, next.Budget); what != "" {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: performing this stage again would raise its %s, which is more authority than the one approved", what)),
+		}
+	}
+	// EVERYTHING ELSE, structurally. Capabilities, contract identity, required
+	// capabilities, the context the worker is shown, the independence bindings
+	// - and whatever this record gains later.
+	before, beforeErr := domain.CanonicalJSON(renewalScope(previous))
+	now, nowErr := domain.CanonicalJSON(renewalScope(next))
+	if beforeErr != nil || nowErr != nil {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: "propose a revision: this stage's previous and next assignments could not be compared, and an unprovable obligation is not a renewed one",
+		}
+	}
+	if !bytes.Equal(before, now) {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: "propose a revision: performing this stage again would change what it was frozen under - the profile, context, contract or obligations it carries - which is a different obligation than the one approved",
+		}
+	}
 	return nil
+}
+
+// renewalScope is an assignment reduced to what a new execution generation may
+// NOT change.
+//
+// What it erases is the whole permitted difference between two performances of
+// the same approved obligation: which performance this is, the run it became,
+// the resolver's explanation of how it chose, the upstream candidate whose
+// replacement is the reason for the generation, and the budget - which is
+// compared separately because it may narrow.
+//
+// Everything left is durable configuration or authority, and it has to be
+// identical. The candidate a stage consumes moves; what an operator approved
+// about how it is worked does not.
+func renewalScope(assignment domain.AgentAssignment) domain.AgentAssignment {
+	assignment.ID = ""
+	assignment.RunID = ""
+	assignment.Selection = domain.ResolutionExplanation{}
+	assignment.Context.UpstreamOutputs = nil
+	assignment.Budget = domain.StageBudget{}
+	return assignment
+}
+
+// budgetEscalation names the first bound a re-performance would RAISE, or the
+// empty string. An absent bound is unbounded, so dropping one is an escalation
+// and adding one is a narrowing.
+func budgetEscalation(previous, next domain.StageBudget) string {
+	for _, bound := range []struct {
+		what        string
+		before, now int
+	}{
+		{"execution attempt ceiling", previous.MaxExecutionAttempts, next.MaxExecutionAttempts},
+		{"provider invocation ceiling", previous.MaxProviderInvocations, next.MaxProviderInvocations},
+		{"wall clock ceiling", previous.MaxWallSeconds, next.MaxWallSeconds},
+	} {
+		if bound.before <= 0 {
+			continue
+		}
+		if bound.now <= 0 || bound.now > bound.before {
+			return bound.what
+		}
+	}
+	return ""
+}
+
+// packSummary is a set of pack references as one comparable string, digests
+// included: the digest is the content, and the id alone is a name for whatever
+// the file says today.
+func packSummary(refs []domain.PackRef) string {
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		parts = append(parts, fmt.Sprintf("%s@%s/%s", ref.ID, ref.Revision, ref.Digest))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// contextPolicyRefs is the profile's context policy as a slice, so the same
+// comparison covers "there is one" and "there is none".
+func contextPolicyRefs(profile domain.ProfileBinding) []domain.PackRef {
+	if profile.ContextPolicy == nil {
+		return nil
+	}
+	return []domain.PackRef{*profile.ContextPolicy}
 }
 
 // shortValue keeps a comparison readable inside a bounded field. Identity is

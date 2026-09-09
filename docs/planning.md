@@ -508,6 +508,21 @@ family, model and trust mode), the invocation mode, the independence obligation
 obligation from the one approved, and it goes through the approval boundary as a
 revision. Obligation renewal may be automatic; authority change may not.
 
+The comparison is STRUCTURAL. What a generation may move is stated - which
+performance it is, the run it became, the resolver's explanation, the upstream
+candidate whose replacement caused it, and a budget that narrows - and
+everything else in the frozen assignment has to be identical, compared as one
+canonical record rather than as a list of fields somebody remembered. That
+matters because a profile document names its instruction packs and context
+policy by id while their CONTENT digests are frozen separately: editing a pack
+in place leaves the profile id, version and digest untouched, and a field-by-
+field comparison would have let a new generation execute different operator
+instructions with no approval.
+
+A stage being performed again whose previous performance cannot be read is
+BLOCKED. A later generation exists because an earlier one happened, so absence
+is not evidence that the obligation is unchanged.
+
 The comparison is against the PREVIOUS PERFORMANCE, wherever it was recorded. An
 assignment is stored under the revision that governed when the stage started, so
 a stage completed under one revision and carried unchanged into the next keeps
