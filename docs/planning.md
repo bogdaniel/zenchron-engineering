@@ -476,13 +476,26 @@ downstream of that stage is invalidated with it. This is what stops a gate from
 being re-proved by an independent review that was performed on work nobody is
 proposing any more.
 
-The stage is NOT performed again under the same revision, and the plan says so
-rather than pretending: a stage's run identity is fixed within a revision, so
-starting it again would adopt the very run whose work was marked unusable.
-The stage reports as blocked, naming what moved, and a revision is what has the
-work done again - because a revision is what produces a different run. The run
-that performed the discarded work is retired: still attributed to the plan's
-budget, and stopped rather than left executing what nobody will read.
+The stage is then performed AGAIN under the same approved plan, as a new
+EXECUTION GENERATION. A producer moving from candidate A to candidate B is an
+execution fact, not a change to the plan: the role, profile, worker, trust
+ceiling, permissions, independence requirement and topology an operator
+approved are all unchanged, and the obligation - review this work - is simply
+renewed. So nothing is re-planned and nobody is asked to approve anything.
+
+A generation is its own assignment and its own #63 run: the run identity carries
+it, so the new performance cannot adopt the run whose work was discarded, and
+the new assignment names the candidate it will actually consume. The old run is
+retired - still attributed to the plan's budget, and stopped rather than left
+executing what nobody will read - and the record of what it consumed is left
+exactly as it was, because that performance happened.
+
+Where re-performing WOULD change something governance-relevant - the role, the
+profile version or digest, the worker, the trust mode, the invocation mode, the
+independence obligation - the stage is blocked instead, naming what would
+change. That is a different obligation from the one approved, and it goes
+through the approval boundary as a revision. Obligation renewal may be
+automatic; authority change may not.
 
 Any movement of the upstream candidate counts, including a base integration.
 A candidate that has absorbed its base is not the candidate that was reviewed,

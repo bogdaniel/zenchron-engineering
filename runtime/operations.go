@@ -2033,7 +2033,7 @@ func (r *EngineeringRuntime) planStage(state *runState) (planStageContext, error
 	if binding == nil {
 		return planStageContext{}, nil
 	}
-	assignment, found, err := r.deps.Store.PlanAssignment(binding.PlanID, binding.Revision, binding.StageID)
+	assignment, found, err := r.deps.Store.PlanAssignment(binding.PlanID, binding.Revision, binding.Generation, binding.StageID)
 	if err != nil {
 		return planStageContext{}, err
 	}

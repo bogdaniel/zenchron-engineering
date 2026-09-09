@@ -85,12 +85,16 @@ type PlanStageProjection struct {
 	// answerable from replayed state alone.
 	RunID string `json:"run_id,omitempty"`
 	// InvalidatedUnder is the revision an invalidation happened under, when it
-	// happened under the revision the stage was performed under. A stage cannot
-	// be performed twice under one revision - the run identity is the same one -
-	// so this is what the reconciler reads to say so instead of starting it and
-	// adopting the discarded run.
-	InvalidatedUnder int                   `json:"invalidated_under,omitempty"`
-	Gate             *PlanGateSatisfaction `json:"gate,omitempty"`
+	// happened under the revision the stage was performed under.
+	InvalidatedUnder int `json:"invalidated_under,omitempty"`
+	// Generation is which EXECUTION of this stage, under this revision, is
+	// current. It advances when an already-approved stage has to be performed
+	// again because the upstream candidate it consumed was replaced: that is an
+	// execution fact, not a change to the approved plan, so the obligation is
+	// renewed rather than re-planned. It is part of the run identity, so each
+	// generation is its own #63 run.
+	Generation int                   `json:"generation,omitempty"`
+	Gate       *PlanGateSatisfaction `json:"gate,omitempty"`
 }
 
 // PlanApproval is the operator decision on one exact revision. Both the number
@@ -403,6 +407,10 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 				s.Stages[payload.StageID] = PlanStageProjection{
 					StageID: payload.StageID, State: PlanStageInvalidated,
 					Reason: payload.Reason, InvalidatedUnder: payload.Revision,
+					// The next performance of this stage is a new execution
+					// generation: a new assignment naming what it will actually
+					// consume, and a new run, under the same approved plan.
+					Generation: stage.Generation + 1,
 				}
 				return nil
 			}

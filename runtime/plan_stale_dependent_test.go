@@ -60,7 +60,7 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 	}
 	// The reviewer's frozen assignment must actually name what it consumed, or
 	// this test is asserting nothing.
-	assignment, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, "review")
+	assignment, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 0, "review")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,38 +105,71 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 		t.Fatal("the gate stayed satisfied over a review that was never performed on the current work")
 	}
 
-	// It does not churn. A stage's run identity is fixed within a revision, so
-	// performing it again under this one would adopt the very run whose work
-	// was just marked unusable. The plan says so and stops, rather than
-	// re-settling the same run every tick and spending the child-run envelope
-	// on it.
-	before := after.Consumed.ChildRuns
-	var blocked *PlanStageBlock
-	for i := 0; i < 3; i++ {
-		report := fixture.reconcile(t)
-		for index, block := range report.Blocked {
-			if block.StageID == "review" {
-				blocked = &report.Blocked[index]
-			}
-		}
+	// It is PERFORMED AGAIN under the same approved plan: a new execution
+	// generation, its own assignment and its own run. The approved obligation -
+	// this role, this profile version and digest, this worker, this trust
+	// ceiling - did not change, so nothing is re-planned and nobody is asked to
+	// approve anything.
+	fixture.reconcile(t)
+	redone, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if blocked == nil || !strings.Contains(blocked.Reason, "propose a revision") {
-		t.Fatalf("the plan does not say how the work gets done again: %#v", blocked)
+	if redone.Stages["review"].Generation != 1 {
+		t.Fatalf("the stage is at generation %d, want 1", redone.Stages["review"].Generation)
+	}
+	rerun := redone.Stages["review"].RunID
+	if rerun == "" || rerun == review {
+		t.Fatalf("the re-performance adopted the discarded run: %q", rerun)
+	}
+	next, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 1, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("the re-performance was not frozen against anything")
+	}
+	if got := next.Context.UpstreamOutputs[0].Candidate; got != "bbbbbbbbbbbb" {
+		t.Fatalf("the re-performance consumes %q, which is the candidate whose replacement caused it", got)
+	}
+	// Same obligation, exactly.
+	previous, _, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 0, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Role != previous.Role || next.Agent != previous.Agent ||
+		next.TrustRequirement != previous.TrustRequirement ||
+		next.InvocationMode != previous.InvocationMode ||
+		next.Profile.ID != previous.Profile.ID ||
+		next.Profile.Version != previous.Profile.Version ||
+		next.Profile.Digest != previous.Profile.Digest {
+		t.Fatalf("the re-performance changed the approved obligation:\n%#v\n%#v", previous, next)
+	}
+	// The discarded run is RETIRED: attributed and stopped, not left executing
+	// work nobody will read.
+	retired := false
+	for _, runID := range redone.RetiredRuns {
+		retired = retired || runID == review
+	}
+	if !retired {
+		t.Fatalf("the invalidated stage's run was not retired: %#v", redone.RetiredRuns)
+	}
+
+	// And it settles. Further passes neither re-invalidate nor start anything
+	// else: one replacement, not a loop.
+	for i := 0; i < 3; i++ {
+		fixture.reconcile(t)
 	}
 	settled, err := fixture.store.ReplayPlan(fixture.plan.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settled.Stages["review"].State != PlanStageInvalidated {
-		t.Fatalf("the invalidated stage moved on its own: %#v", settled.Stages["review"])
+	if settled.Stages["review"].RunID != rerun {
+		t.Fatalf("the stage was restarted again: %q then %q", rerun, settled.Stages["review"].RunID)
 	}
-	if settled.Consumed.ChildRuns != before {
-		t.Fatalf("child runs went from %d to %d: the invalidation is looping", before, settled.Consumed.ChildRuns)
+	if settled.Stages["review"].Generation != 1 {
+		t.Fatalf("the stage advanced to generation %d without its input moving again", settled.Stages["review"].Generation)
 	}
-	// Nor does it keep WRITING. A stage that is already invalidated under this
-	// revision has nothing left to invalidate, and re-appending the settle
-	// every tick would grow the journal without bound - the same livelock in a
-	// quieter form.
 	settledEvents := 0
 	events, err := fixture.store.PlanEvents(fixture.plan.ID)
 	if err != nil {
@@ -155,28 +188,12 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 		}
 	}
 	if settledEvents != 1 {
-		t.Fatalf("the review was invalidated %d times across four passes", settledEvents)
+		t.Fatalf("the review was invalidated %d times", settledEvents)
 	}
-	// The discarded run is RETIRED: it does not stop existing because the plan
-	// stopped looking at it, so it is attributed and stopped rather than left
-	// executing work nobody will read.
-	retired := false
-	for _, runID := range settled.RetiredRuns {
-		retired = retired || runID == review
-	}
-	if !retired {
-		t.Fatalf("the invalidated stage's run was not retired: %#v", settled.RetiredRuns)
-	}
-	if settled.Stages["review"].InvalidatedUnder != fixture.plan.Revision {
-		t.Fatalf("the invalidation does not record the revision it happened under: %#v", settled.Stages["review"])
-	}
-
-	// The freeze that describes what WAS performed is untouched: it is the
-	// record of a performance, and the performance happened.
-	if frozen, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, "review"); err != nil {
-		t.Fatal(err)
-	} else if !found || frozen.Context.UpstreamOutputs[0].Candidate != "aaaaaaaaaaaa" {
-		t.Fatalf("the record of what the review consumed was rewritten: %#v", frozen.Context.UpstreamOutputs)
+	// The record of what the FIRST performance consumed is untouched: it
+	// happened, and the journal says what it was.
+	if previous.Context.UpstreamOutputs[0].Candidate != "aaaaaaaaaaaa" {
+		t.Fatalf("the record of the first performance was rewritten: %#v", previous.Context.UpstreamOutputs)
 	}
 }
 
@@ -255,11 +272,35 @@ func TestTheInvalidationReasonFitsTheJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Stages["independent-review"].State != PlanStageInvalidated {
-		t.Fatalf("the review was not invalidated: %#v", after.Stages["independent-review"])
+	// The stage was invalidated and is being performed again, so the state has
+	// already moved on; what this test is about is the RECORD, which had to be
+	// appendable at all.
+	if after.Stages["independent-review"].InvalidatedUnder != fixture.plan.Revision {
+		t.Fatalf("the invalidation was not recorded: %#v", after.Stages["independent-review"])
 	}
-	if reason := after.Stages["independent-review"].Reason; len(reason) > maxPayloadFieldBytes {
-		t.Fatalf("the recorded reason is %d bytes", len(reason))
+	events, err := fixture.store.PlanEvents(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != EventPlanStageSettled {
+			continue
+		}
+		var payload PlanStageSettledPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Outcome != "invalidated" {
+			continue
+		}
+		found = true
+		if len(payload.Reason) > maxPayloadFieldBytes {
+			t.Fatalf("the journalled reason is %d bytes", len(payload.Reason))
+		}
+	}
+	if !found {
+		t.Fatal("no invalidation was journalled")
 	}
 }
 
@@ -350,5 +391,76 @@ func TestOnlyAnInvalidationIsScopedToARevision(t *testing.T) {
 		StageID: "s", Outcome: "completed",
 	})); err != nil {
 		t.Fatalf("an ordinary settle was refused: %v", err)
+	}
+}
+
+// A re-performance that would change the OBLIGATION is refused.
+//
+// A new execution generation exists because an execution fact moved. If
+// re-resolving would now produce a different role, profile, worker, trust mode
+// or independence binding, that is not the same obligation the operator
+// approved, and it goes through the approval boundary as a revision. Obligation
+// renewal may be automatic; authority change may not.
+func TestARePerformanceThatChangesTheObligationIsRefused(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	plan := fixture.plan
+	stage := plan.Stages[0]
+
+	previous := domain.AgentAssignment{
+		SchemaVersion: domain.SchemaVersion, ID: "assignment-a", StageID: stage.ID,
+		Plan: domain.PlanRef{ID: plan.ID, Revision: plan.Revision, Digest: plan.Digest},
+		Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating,
+		TrustRequirement: domain.TrustRequirementOperatorTrusted,
+		Profile: domain.ProfileBinding{
+			ID: "codex", Version: 1, Digest: strings.Repeat("d", 64),
+			Capabilities:     []domain.EngineeringCapability{domain.CapabilityCodeChange},
+			TrustRequirement: domain.TrustRequirementOperatorTrusted,
+		},
+		Agent: domain.AgentBinding{
+			ID: "codex", ProviderKind: "codex_cli", VendorFamily: "openai",
+			TrustMode: domain.TrustRequirementOperatorTrusted,
+		},
+		Contract: domain.ObjectRevision{ID: "contract", Revision: "1"},
+		Selection: domain.ResolutionExplanation{
+			Considered: []domain.CandidateEvaluation{},
+			Selected:   "codex", Reason: "the only eligible worker",
+		},
+		Context: domain.ContextPack{
+			Objective: "o", AcceptanceCriteria: []string{"a"},
+			Included: domain.RequiredContextClasses(), Excluded: []domain.ContextClass{},
+		},
+	}
+	if err := fixture.store.PutPlanAssignment(plan.ID, plan.Revision, 0, previous); err != nil {
+		t.Fatal(err)
+	}
+
+	same := previous
+	if block := fixture.reconciler.refusePrivilegeChange(plan, stage, 1, same); block != nil {
+		t.Fatalf("an unchanged obligation was refused: %#v", block)
+	}
+
+	for name, changed := range map[string]func(domain.AgentAssignment) domain.AgentAssignment{
+		"a different worker":  func(a domain.AgentAssignment) domain.AgentAssignment { a.Agent.ID = "claude"; return a },
+		"a different role":    func(a domain.AgentAssignment) domain.AgentAssignment { a.Role = domain.RoleReviewer; return a },
+		"a different profile": func(a domain.AgentAssignment) domain.AgentAssignment { a.Profile.Version = 2; return a },
+		"a lower trust mode": func(a domain.AgentAssignment) domain.AgentAssignment {
+			a.Agent.TrustMode = domain.TrustRequirementProtected
+			return a
+		},
+		"a different independence obligation": func(a domain.AgentAssignment) domain.AgentAssignment {
+			a.Independence = []domain.IndependenceBinding{{
+				Dimension: domain.IndependenceVendorFamily, DifferentFrom: []string{"backend"},
+				Class: "openai", SatisfiedBy: "distinct_worker",
+			}}
+			return a
+		},
+	} {
+		block := fixture.reconciler.refusePrivilegeChange(plan, stage, 1, changed(previous))
+		if block == nil {
+			t.Fatalf("%s was performed again without an approval", name)
+		}
+		if block.Kind != "authority" || !strings.Contains(block.Reason, "propose a revision") {
+			t.Fatalf("%s produced %#v", name, block)
+		}
 	}
 }

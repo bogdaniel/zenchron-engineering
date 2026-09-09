@@ -283,6 +283,15 @@ type RunPlanBinding struct {
 	// published, the field is empty and the stage is based on the trusted base
 	// with the upstream diff supplied as context instead.
 	BaseRevision string `json:"base_revision,omitempty"`
+	// Generation is which EXECUTION of this stage the run performs. It advances
+	// when an already-approved stage is performed again because the upstream
+	// candidate it consumed was replaced - an execution fact, not a change to
+	// the approved plan - and it is part of the run identity, so each
+	// generation is its own run rather than an adoption of the previous one.
+	//
+	// omitempty and zero for every first performance, so no existing run is
+	// re-identified.
+	Generation int `json:"generation,omitempty"`
 	// StageBudget is the plan stage's own bound, already narrowed by the
 	// assigned profile's constraints. The run persists its budgets narrowed by
 	// this, which is what makes a profile's `max_wall_seconds` and

@@ -196,6 +196,30 @@ CREATE TABLE plan_proposals (
 	document      TEXT NOT NULL
 );
 CREATE INDEX plan_proposals_by_plan ON plan_proposals(plan_id, to_revision);
+`, `
+-- An assignment is frozen per (plan, revision, stage, EXECUTION GENERATION).
+--
+-- A generation is what re-performs an already-approved stage whose upstream
+-- input moved: the producer's candidate changed, which is an execution fact,
+-- and the approved obligation - this role, this profile, this worker, this
+-- trust ceiling - is unchanged. The old generation's row stays exactly as it
+-- was, because it records a performance that happened.
+--
+-- Existing rows are generation 0, which is every assignment written before
+-- this existed and every first performance since.
+ALTER TABLE plan_assignments RENAME TO plan_assignments_v1;
+CREATE TABLE plan_assignments (
+	plan_id       TEXT NOT NULL REFERENCES plans(id),
+	revision      INTEGER NOT NULL,
+	stage_id      TEXT NOT NULL,
+	generation    INTEGER NOT NULL DEFAULT 0,
+	assignment_id TEXT NOT NULL,
+	document      TEXT NOT NULL,
+	PRIMARY KEY (plan_id, revision, stage_id, generation)
+);
+INSERT INTO plan_assignments (plan_id, revision, stage_id, generation, assignment_id, document)
+	SELECT plan_id, revision, stage_id, 0, assignment_id, document FROM plan_assignments_v1;
+DROP TABLE plan_assignments_v1;
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

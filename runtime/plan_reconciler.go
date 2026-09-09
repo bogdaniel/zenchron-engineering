@@ -176,6 +176,15 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err
 		}
+		// And RE-RESOLVED. The resolution above seeded every stage that had an
+		// assignment with the frozen one, which is the point - a stage already
+		// executing keeps the identity an operator approved. A stage this sweep
+		// just invalidated is no longer executing that performance, and reusing
+		// its frozen assignment would hand the next one the upstream candidate
+		// whose replacement caused the invalidation.
+		if resolution, err = r.Service.Resolve(plan, snapshot); err != nil {
+			return report, err
+		}
 	}
 	// A gate proved against work that has since MOVED is re-opened before
 	// anything reads it. A goal-state run is not finished: reviewer feedback
@@ -236,21 +245,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		if terminalStageState(projection.State) || projection.State == PlanStageRunning {
 			continue
 		}
-		// An invalidated stage that still names a run cannot be performed again
-		// under THIS revision: a stage's run identity is fixed within a
-		// revision, so starting it would adopt the same run - the one whose
-		// work was just marked unusable - and re-settle it from the state it
-		// already reached. The plan says so instead of pretending, and a new
-		// revision is what re-performs the work: that is what produces a
-		// different run.
-		if projection.State == PlanStageInvalidated && projection.InvalidatedUnder == plan.Revision {
-			report.Blocked = append(report.Blocked, PlanStageBlock{
-				StageID: stage.ID, Kind: "invalidated",
-				Reason: "this stage's completed work is no longer valid (" + projection.Reason +
-					"), and a stage cannot be performed twice under one revision: propose a revision to have it done again",
-			})
-			continue
-		}
+
 		if awaiting {
 			report.Waiting = fmt.Sprintf("awaiting operator approval of revision %d proposed by %s",
 				pending.Proposed.Revision, pending.ID)
@@ -614,6 +609,73 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 	return len(ids) > 0, nil
 }
 
+// refusePrivilegeChange is the boundary between renewing an obligation and
+// changing one.
+//
+// A new execution generation exists because an execution FACT moved: the
+// candidate this stage consumes was replaced. The approved obligation - this
+// role, this profile at this exact version and digest, this worker, this trust
+// ceiling, this invocation mode, this independence requirement - is unchanged,
+// and performing it again needs no new approval. If re-resolving would now
+// produce a different one of those, that is not the same obligation, and it
+// goes through the approval boundary as a revision like anything else.
+//
+// Obligation renewal may be automatic. Authority change may not.
+func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage domain.PlanStage, generation int, next domain.AgentAssignment) *PlanStageBlock {
+	previous, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation-1, stage.ID)
+	if err != nil {
+		return &PlanStageBlock{StageID: stage.ID, Kind: "assignment", Reason: boundedDetail(err.Error())}
+	}
+	if !found {
+		return nil
+	}
+	for _, difference := range []struct{ what, before, now string }{
+		{"role", string(previous.Role), string(next.Role)},
+		{"profile", fmt.Sprintf("%s v%d %s", previous.Profile.ID, previous.Profile.Version, previous.Profile.Digest), fmt.Sprintf("%s v%d %s", next.Profile.ID, next.Profile.Version, next.Profile.Digest)},
+		{"worker", previous.Agent.ID, next.Agent.ID},
+		{"trust mode", string(previous.Agent.TrustMode), string(next.Agent.TrustMode)},
+		{"trust requirement", string(previous.TrustRequirement), string(next.TrustRequirement)},
+		{"invocation mode", string(previous.InvocationMode), string(next.InvocationMode)},
+		{"independence", independenceSummary(previous), independenceSummary(next)},
+	} {
+		if difference.before == difference.now {
+			continue
+		}
+		// The REMEDY leads, and the values are shortened rather than the
+		// sentence: two profile digests are 128 characters, and a bound that
+		// cuts the end would take the actionable half of the message with it.
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: performing this stage again would change its %s, which is a different obligation than the one approved (%s becomes %s)",
+				difference.what, shortValue(difference.before), shortValue(difference.now))),
+		}
+	}
+	return nil
+}
+
+// shortValue keeps a comparison readable inside a bounded field. Identity is
+// established by the comparison itself; the message only has to say WHICH thing
+// differs, not carry two full digests.
+func shortValue(value string) string {
+	const enough = 24
+	if len(value) <= enough {
+		return value
+	}
+	return boundedTo(value, enough) + "..."
+}
+
+// independenceSummary is the independence obligation as one comparable string.
+func independenceSummary(assignment domain.AgentAssignment) string {
+	parts := make([]string, 0, len(assignment.Independence))
+	for _, binding := range assignment.Independence {
+		parts = append(parts, fmt.Sprintf("%s/%s/%s/%s", binding.Dimension,
+			strings.Join(binding.DifferentFrom, "+"), binding.Class, binding.SatisfiedBy))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
 // startAgentStage creates or associates the ordinary EngineeringRun for one
 // dependency-ready agent stage, within the plan's aggregate envelope.
 func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.EngineeringPlan, stage domain.PlanStage, snapshot PlanSnapshot, resolution planningResolution) (*PlanStageRun, *PlanStageBlock, error) {
@@ -643,7 +705,20 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if r.Engine == nil {
 		return nil, nil, &PlanRefusedError{PlanID: plan.ID, Detail: "no engine factory is configured, so no run can be created"}
 	}
-	if err := r.Store.PutPlanAssignment(plan.ID, plan.Revision, assignment); err != nil {
+	// WHICH EXECUTION of this stage this is. Zero is the first, and a later one
+	// exists only because the upstream candidate this stage consumed was
+	// replaced. The approved obligation is unchanged, so it is performed again
+	// under the same revision - but as its own assignment and its own run,
+	// because reusing either would hand the new performance the input whose
+	// replacement is the reason for it.
+	generation := snapshot.Stages[stage.ID].Generation
+	if generation > 0 {
+		if block := r.refusePrivilegeChange(plan, stage, generation, assignment); block != nil {
+			return nil, block, nil
+		}
+		assignment.ID = fmt.Sprintf("%s-g%d", assignment.ID, generation)
+	}
+	if err := r.Store.PutPlanAssignment(plan.ID, plan.Revision, generation, assignment); err != nil {
 		return nil, nil, err
 	}
 	// The STORED assignment is the one that runs. A row already frozen for this
@@ -651,7 +726,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	// different worker must not be what the journal, the run binding and the
 	// report describe: that is a tamper-evident journal naming worker B while
 	// worker A does the work.
-	frozen, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, stage.ID)
+	frozen, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation, stage.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -669,7 +744,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	}
 	binding := RunPlanBinding{
 		PlanID: plan.ID, Revision: plan.Revision, PlanDigest: plan.Digest,
-		StageID: stage.ID, AssignmentID: assignment.ID,
+		StageID: stage.ID, AssignmentID: assignment.ID, Generation: generation,
 		BaseRevision: upstreamBaseRevision,
 		// The assignment's budget is the stage's, already narrowed by the
 		// assigned profile's constraints, and narrowed AGAIN by what the plan
@@ -1265,7 +1340,7 @@ type planningResolution interface {
 // It is immutable per (plan, revision, stage): the assignment is what the run
 // was created under, and a later resolution producing a different worker must
 // be a new revision rather than a rewrite of work already in flight.
-func (s *SQLiteOperationStore) PutPlanAssignment(planID string, revision int, assignment domain.AgentAssignment) error {
+func (s *SQLiteOperationStore) PutPlanAssignment(planID string, revision, generation int, assignment domain.AgentAssignment) error {
 	if _, err := domain.Encode(assignment); err != nil {
 		return fmt.Errorf("assignment for stage %q is invalid: %w", assignment.StageID, err)
 	}
@@ -1273,9 +1348,9 @@ func (s *SQLiteOperationStore) PutPlanAssignment(planID string, revision int, as
 	if err != nil {
 		return err
 	}
-	result, err := s.db.Exec(`INSERT INTO plan_assignments (plan_id, revision, stage_id, assignment_id, document)
-		VALUES (?, ?, ?, ?, ?) ON CONFLICT(plan_id, revision, stage_id) DO NOTHING`,
-		planID, revision, assignment.StageID, assignment.ID, string(document))
+	result, err := s.db.Exec(`INSERT INTO plan_assignments (plan_id, revision, stage_id, generation, assignment_id, document)
+		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(plan_id, revision, stage_id, generation) DO NOTHING`,
+		planID, revision, assignment.StageID, generation, assignment.ID, string(document))
 	if err != nil {
 		return err
 	}
@@ -1289,10 +1364,10 @@ func (s *SQLiteOperationStore) PutPlanAssignment(planID string, revision int, as
 }
 
 // PlanAssignment returns the frozen assignment one run is executing under.
-func (s *SQLiteOperationStore) PlanAssignment(planID string, revision int, stageID string) (domain.AgentAssignment, bool, error) {
+func (s *SQLiteOperationStore) PlanAssignment(planID string, revision, generation int, stageID string) (domain.AgentAssignment, bool, error) {
 	var document string
-	err := s.db.QueryRow(`SELECT document FROM plan_assignments WHERE plan_id = ? AND revision = ? AND stage_id = ?`,
-		planID, revision, stageID).Scan(&document)
+	err := s.db.QueryRow(`SELECT document FROM plan_assignments WHERE plan_id = ? AND revision = ? AND stage_id = ? AND generation = ?`,
+		planID, revision, stageID, generation).Scan(&document)
 	if err != nil {
 		// The typed sentinel, not the driver's message. A message check is a
 		// dependency on prose that no compiler enforces and no driver promises.

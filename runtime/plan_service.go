@@ -619,7 +619,10 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 // The stage's own RUN carries the revision it was created under, so that is
 // what the search follows.
 func (s PlanService) frozenAssignment(plan domain.EngineeringPlan, projection PlanStageProjection, stageID string) (domain.AgentAssignment, bool, error) {
-	assignment, found, err := s.Store.PlanAssignment(plan.ID, plan.Revision, stageID)
+	// The generation the stage is CURRENTLY performing, so a re-performed stage
+	// is read through the assignment it is actually executing under rather than
+	// through the one whose work was invalidated.
+	assignment, found, err := s.Store.PlanAssignment(plan.ID, plan.Revision, projection.Generation, stageID)
 	if err != nil || found {
 		return assignment, found, err
 	}
@@ -633,7 +636,9 @@ func (s PlanService) frozenAssignment(plan domain.EngineeringPlan, projection Pl
 	if !runFound || run.Plan == nil || run.Plan.Revision == plan.Revision {
 		return domain.AgentAssignment{}, false, nil
 	}
-	return s.Store.PlanAssignment(plan.ID, run.Plan.Revision, stageID)
+	// The run records which generation it was created for, so an older
+	// revision's stage is read through the exact performance it executed.
+	return s.Store.PlanAssignment(plan.ID, run.Plan.Revision, run.Plan.Generation, stageID)
 }
 
 // ---------------------------------------------------------------------------

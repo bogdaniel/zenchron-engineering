@@ -216,7 +216,7 @@ func TestApprovedPlanCreatesOneRunPerAgentStageAndNoneForGates(t *testing.T) {
 		}
 	}
 	// The frozen assignment is durable, and it is what the run executes under.
-	assignment, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, "backend")
+	assignment, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 0, "backend")
 	if err != nil || !found {
 		t.Fatalf("assignment for backend: found=%v err=%v", found, err)
 	}
@@ -1189,7 +1189,7 @@ func TestTheJournalNamesTheFrozenWorkerNotAReResolution(t *testing.T) {
 		ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
 		TrustMode: domain.TrustRequirementOperatorTrusted,
 	}
-	if err := fixture.store.PutPlanAssignment(fixture.plan.ID, fixture.plan.Revision, frozen); err != nil {
+	if err := fixture.store.PutPlanAssignment(fixture.plan.ID, fixture.plan.Revision, 0, frozen); err != nil {
 		t.Fatal(err)
 	}
 

@@ -511,6 +511,11 @@ type planStageIdentity struct {
 	Plan     string `json:"plan"`
 	Revision int    `json:"revision"`
 	Stage    string `json:"stage"`
+	// Generation distinguishes one EXECUTION of a stage from the next, where
+	// the approved plan is unchanged and only the upstream candidate the stage
+	// consumes has moved. It is omitempty so every run identity derived before
+	// generations existed - and every first performance since - is unchanged.
+	Generation int `json:"generation,omitempty"`
 }
 
 func derivedRunID(repository string, issue int, config ConfigDigest, generation int, stage *planStageIdentity) (string, error) {
@@ -1076,6 +1081,7 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 	goal := issueGoal(r.deps.Repository.Identity, issue)
 	runID, err := derivedRunID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest, 0, &planStageIdentity{
 		Plan: binding.PlanID, Revision: binding.Revision, Stage: binding.StageID,
+		Generation: binding.Generation,
 	})
 	if err != nil {
 		return StartOutcome{}, err
