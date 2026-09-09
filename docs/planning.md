@@ -494,7 +494,12 @@ projection does not name, which is indistinguishable from a failed start by the
 plan journal alone. Discarding that freeze would leave the run executing,
 unstopped and attributed to no stage - consumed plan budget made invisible - so
 the durable runs are asked, the stage is associated with the run that exists,
-and the sweep below handles it from there.
+and the sweep below handles it from there. That run then finishes its work
+against the candidate it was created for and is invalidated when it completes,
+so it spends its invocations on a performance already known to be superseded.
+It is the same policy any run gets when its input moves underneath it, and
+stopping one here rather than at completion would be new machinery; it is
+recorded because the window makes it knowable earlier than usual.
 
 A completed stage is invalidated when the upstream work its frozen assignment
 names has been replaced - a producer at `goal_state_reached` is not finished,
