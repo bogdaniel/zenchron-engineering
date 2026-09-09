@@ -514,9 +514,11 @@ shown a blocker rather than an assignment, so there is no identity to hold
 execution to, and readiness at planning time was never a promise - an agent that
 authenticates an hour later performs the stage under whatever resolves then.
 That is a deliberate cut rather than an oversight, so the view NAMES those
-stages: `unbound` lists them, before and after the approval, because rendering
-them beside bound stages identically is what would let an operator believe an
-approval had covered them.
+stages: `unbound` lists them, because rendering them beside bound stages
+identically is what would let an operator believe an approval had covered them.
+The marker is today derived from the live resolution, so it stops naming a
+stage once its blocker clears - the window where it matters most - which #118
+closes by deriving it from the approval record instead.
 
 A revision approved before this boundary existed has no binding and resolves
 live, exactly as it did then.

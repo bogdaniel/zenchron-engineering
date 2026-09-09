@@ -383,6 +383,148 @@ func TestADecisionMayNameTheAssignmentSetItDecides(t *testing.T) {
 	}
 }
 
+// The named set means WHO performs the work under WHAT configuration, and not
+// the candidate they will consume.
+//
+// A producer settling between reading a proposal and deciding on it moves the
+// upstream a dependent assignment carries. That is an execution fact the
+// approval does not bind - it is rebound from the settled producer when the
+// stage starts - so a digest that moved with it would refuse the decision while
+// saying that who would perform the work had changed. It had not.
+func TestTheNamedSetDoesNotMoveWithTheUpstreamCandidate(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := snapshot.Stages["implementation"].RunID
+	if implementation == "" {
+		t.Fatal("the implementation stage created no run")
+	}
+
+	// A second revision, read while the producer has settled nothing.
+	second := approveableRevision(t, fixture)
+	before, err := fixture.service.ViewRevision(fixture.plan.ID, second.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The producer settles while the operator is reading.
+	recordCandidateAndAssurance(t, fixture, implementation, "aaaaaaaaaaaa")
+	settleRunAtGoalState(t, fixture, implementation, "aaaaaaaaaaaa")
+
+	after, err := fixture.service.ViewRevision(fixture.plan.ID, second.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, _ := assignmentFor(after.Assigned, "review"); len(resolved.Context.UpstreamOutputs) == 0 {
+		t.Fatal("this test needs the producer to have moved what the reviewer would consume, and it did not")
+	}
+	if after.AssignmentsDigest != before.AssignmentsDigest {
+		t.Fatalf("the named set moved with the upstream candidate: %s becomes %s", before.AssignmentsDigest, after.AssignmentsDigest)
+	}
+	// And the decision the operator was offered still applies.
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest,
+		before.AssignmentsDigest, "operator", ""); err != nil {
+		t.Fatalf("a decision naming the set that was read was refused because a producer settled: %v", err)
+	}
+}
+
+// A rejection binds nothing, so it cannot name a set to bind. Accepting the
+// argument and ignoring it would report a check nobody performed.
+func TestARejectionCannotNameAnAssignmentSet(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	view, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.Reject(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest,
+		view.AssignmentsDigest, "operator", "")
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("a rejection naming an assignment set was accepted: %v", err)
+	}
+	if !strings.Contains(refused.Detail, "binds no assignments") {
+		t.Fatalf("the refusal does not say why: %s", refused.Detail)
+	}
+}
+
+// "Nothing is bindable here" is itself a set an operator can name, so a set
+// that APPEARS between reading and deciding is refused like any other move.
+func TestAnEmptyNamedSetIsPinnable(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", Profile: "not-installed",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	view, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Assigned) != 0 {
+		t.Fatal("this test needs the plan to resolve nothing, and it resolved something")
+	}
+	if view.AssignmentsDigest == "" {
+		t.Fatal("a set of nothing has no digest, so it cannot be named")
+	}
+
+	// The blocker clears before the decision: a set has appeared where the
+	// operator read none.
+	dir := t.TempDir()
+	writeRegistryFile(t, dir, "profiles/not-installed.json", `{
+	  "execution_agent": "claude", "capabilities": ["repository_analysis", "code_change"]
+	}`)
+	useRegistry(t, fixture, dir)
+
+	_, err = fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest,
+		view.AssignmentsDigest, "operator", "")
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("a set that appeared after the operator read none was bound unchecked: %v", err)
+	}
+	if !strings.Contains(refused.Detail, "who would perform this work has changed") {
+		t.Fatalf("the refusal does not say what moved: %s", refused.Detail)
+	}
+}
+
+// approveableRevision stores a second revision carrying every stage forward,
+// so a test can read and decide one while the first is executing.
+func approveableRevision(t *testing.T, fixture *planRunFixture) domain.EngineeringPlan {
+	t.Helper()
+	previous := fixture.plan.Revision
+	next := fixture.plan
+	next.Revision = previous + 1
+	next.Provenance.PreviousRevision = &previous
+	next.Objective = fixture.plan.Objective + " Again."
+	digest, err := next.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(next); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.PutPlanContract(next.ID, next.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
+	return next
+}
+
 // A stage that showed a BLOCKER is bound to nothing, and the view says so
 // rather than rendering it later as though an approval had covered it.
 func TestAStageThatShowedABlockerIsReportedUnbound(t *testing.T) {

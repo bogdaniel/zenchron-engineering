@@ -150,9 +150,16 @@ execution is authorized to use. An edit produces a new revision.
   becomes performable - readiness at planning time was never a promise, and an
   agent that authenticates an hour after the approval performs the stage under
   whatever resolves then. This is ACCEPTED rather than closed, on the condition
-  that the surface says so: `PlanView.Unbound` names those stages before and
-  after the approval.
-  - **Proved:** `runtime.TestAStageThatShowedABlockerIsReportedUnbound`.
+  that the surface says so: `PlanView.Unbound` names those stages.
+  - **Proved:** `runtime.TestAStageThatShowedABlockerIsReportedUnbound` — while
+    the blocker persists, before and after the approval.
+  - **Not proved:** the marker is derived from the live resolution, so it stops
+    naming the stage once the blocker CLEARS - which is the window where it
+    matters - and `--text` does not render it at all. Tracked as #118, with the
+    derivation it needs: absence from `Store.ApprovedAssignments`, not absence
+    from a recomputed set. The authority boundary does not reopen there; what
+    executes in that window is the live assignment the surface showed, never a
+    bound one that drifted.
 - **Live:** the dogfood plan sat unapproved until `plan approve`, and `serve`
   reported `awaiting_operator_approval` for it.
 

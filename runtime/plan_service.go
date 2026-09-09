@@ -308,6 +308,15 @@ func (s PlanService) decide(planID string, revision int, digest, assignments, op
 	if strings.TrimSpace(operator) == "" {
 		return PlanSnapshot{}, &PlanRefusedError{PlanID: planID, Detail: "an approval records who made it"}
 	}
+	// A REJECTION binds nothing, so there is no set for it to name. Accepting
+	// the argument and ignoring it would tell an operator their decision had
+	// been checked against something when nothing had been checked at all.
+	if eventType != EventPlanApproved && strings.TrimSpace(assignments) != "" {
+		return PlanSnapshot{}, &PlanRefusedError{
+			PlanID: planID,
+			Detail: "a rejection binds no assignments, so it cannot name a set: drop --assignments, or approve the revision that set belongs to",
+		}
+	}
 	// Approval moves FORWARD. Re-approving a revision older than the one
 	// already governing would leave the durable approval record describing
 	// something other than the work being executed, and the supersession below
@@ -871,11 +880,24 @@ func (s *SQLiteOperationStore) PutApprovedAssignments(planID string, revision in
 // it over what it is about to bind. A second implementation would be a second
 // answer to "is this the set the operator read".
 func assignmentSetDigest(assignments []domain.AgentAssignment) (string, error) {
-	if len(assignments) == 0 {
-		return "", nil
+	ordered := make([]domain.AgentAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		// The UPSTREAM CANDIDATE is erased. It is the one execution fact an
+		// approval cannot bind and does not try to - it is rebound from the
+		// settled producer when the stage starts - so leaving it in would make
+		// the digest move when a producer settles between reading a proposal
+		// and deciding on it, and refuse the decision saying that who would
+		// perform the work had changed. It had not. What this names is who
+		// performs each stage and under what configuration, which is what the
+		// refusal claims and what the approval actually binds.
+		assignment.Context.UpstreamOutputs = nil
+		ordered = append(ordered, assignment)
 	}
-	ordered := append([]domain.AgentAssignment(nil), assignments...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].StageID < ordered[j].StageID })
+	// The EMPTY set digests too, rather than to the empty string. "Nothing is
+	// bindable here" is a fact an operator can read and name, and collapsing it
+	// into "no digest given" left the one direction unpinnable: a set that
+	// APPEARED between reading and deciding would have been bound unchecked.
 	return domain.Digest(ordered)
 }
 
@@ -913,6 +935,12 @@ func (s *SQLiteOperationStore) ApprovedAssignmentsDigest(planID string, revision
 	bound, err := s.ApprovedAssignments(planID, revision)
 	if err != nil {
 		return "", err
+	}
+	if len(bound) == 0 {
+		// NO BINDING, which is not the same as a binding of nothing: it is what
+		// a revision approved before this boundary existed has, and what a
+		// revision that has not been approved has.
+		return "", nil
 	}
 	assignments := make([]domain.AgentAssignment, 0, len(bound))
 	for _, assignment := range bound {
