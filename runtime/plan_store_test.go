@@ -128,7 +128,7 @@ func objectiveDigest(objective string) string {
 func TestPlanRevisionsAreImmutable(t *testing.T) {
 	_, store := openPlanStore(t)
 	plan := planFixture(t, "plan-sso", 1)
-	claimed, err := store.ClaimPlan(plan)
+	claimed, err := store.ClaimPlan(plan, time.Now())
 	if err != nil || !claimed {
 		t.Fatalf("claim: %v claimed=%v", err, claimed)
 	}
@@ -173,7 +173,7 @@ func TestPlanRevisionsAreImmutable(t *testing.T) {
 func TestRestartReconstructsPlanStateFromTheStoreAlone(t *testing.T) {
 	dir, store := openPlanStore(t)
 	plan := planFixture(t, "plan-sso", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	appendPlan(t, store, planEvent(t, plan.ID, "plan-sso-1", EventPlanProposed, proposedPayload(plan)))
@@ -254,7 +254,7 @@ func TestRestartReconstructsPlanStateFromTheStoreAlone(t *testing.T) {
 func TestConsumedBudgetSurvivesRevisionAndRestart(t *testing.T) {
 	dir, store := openPlanStore(t)
 	plan := planFixture(t, "plan-budget", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	appendPlan(t, store, planEvent(t, plan.ID, "b-1", EventPlanProposed, proposedPayload(plan)))
@@ -307,7 +307,7 @@ func TestConsumedBudgetSurvivesRevisionAndRestart(t *testing.T) {
 func TestUnknownCostStaysUnknownAndKnownCostAccumulates(t *testing.T) {
 	dir, store := openPlanStore(t)
 	plan := planFixture(t, "plan-cost", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	appendPlan(t, store, planEvent(t, plan.ID, "c-1", EventPlanProposed, proposedPayload(plan)))
@@ -350,7 +350,7 @@ func TestUnknownCostStaysUnknownAndKnownCostAccumulates(t *testing.T) {
 func TestCostPayloadsMustStateWhetherCostIsKnown(t *testing.T) {
 	_, store := openPlanStore(t)
 	plan := planFixture(t, "plan-cost-schema", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	appendPlan(t, store, planEvent(t, plan.ID, "s-1", EventPlanProposed, proposedPayload(plan)))
@@ -387,7 +387,7 @@ func TestRunAndPlanStreamsCoexistWithoutInterference(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := planFixture(t, "plan-coexist", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -522,7 +522,7 @@ func TestRunEventDocumentsAreUnchangedByThePlanStream(t *testing.T) {
 func TestPlanJournalRefusesATamperedChain(t *testing.T) {
 	dir, store := openPlanStore(t)
 	plan := planFixture(t, "plan-tamper", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	appendPlan(t, store, planEvent(t, plan.ID, "t-1", EventPlanProposed, proposedPayload(plan)))
@@ -643,7 +643,7 @@ func TestMigrationPreservesAPreExistingRunJournal(t *testing.T) {
 	}
 	// And the migrated database is usable for plan work immediately.
 	plan := planFixture(t, "plan-after-migration", 1)
-	if claimed, err := migrated.ClaimPlan(plan); err != nil || !claimed {
+	if claimed, err := migrated.ClaimPlan(plan, time.Now()); err != nil || !claimed {
 		t.Fatalf("claim after migration: %v claimed=%v", err, claimed)
 	}
 	appendPlan(t, migrated, planEvent(t, plan.ID, "am-1", EventPlanProposed, proposedPayload(plan)))
@@ -673,7 +673,7 @@ func asError[T error](err error, target *T) bool {
 func TestConsumptionCountsOneFactOnce(t *testing.T) {
 	_, store := openPlanStore(t)
 	plan := planFixture(t, "plan-consumption", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
@@ -729,7 +729,7 @@ func appendPlanBudget(t *testing.T, store *SQLiteOperationStore, planID string, 
 func TestAProposalOriginMustBeInTheCatalogue(t *testing.T) {
 	_, store := openPlanStore(t)
 	plan := planFixture(t, "plan-origin", 1)
-	if _, err := store.ClaimPlan(plan); err != nil {
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	digest, err := Digest(plan.Objective)

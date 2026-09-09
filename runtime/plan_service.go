@@ -154,7 +154,7 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 
 	claimedNow := false
 	if !found {
-		claimed, err := s.Store.ClaimPlan(plan)
+		claimed, err := s.Store.ClaimPlan(plan, s.now())
 		if err != nil {
 			return domain.EngineeringPlan{}, err
 		}

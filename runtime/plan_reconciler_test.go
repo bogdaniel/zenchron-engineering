@@ -76,7 +76,7 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 		t.Fatal(err)
 	}
 	plan.Digest = digest
-	if _, err := base.store.ClaimPlan(plan); err != nil {
+	if _, err := base.store.ClaimPlan(plan, base.clock.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := base.store.PutPlanRevision(plan); err != nil {

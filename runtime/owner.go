@@ -12,9 +12,12 @@ import (
 )
 
 // NewRuntimeOwner builds this process's lease-owner identity as
-// host/pid/process-start-token. The start token binds the identity to a single
-// process lifetime, so a recycled PID is never mistaken for the owner that
-// recorded the lease.
+// host/pid/process-start-token. Where the start time is readable - procfs - the
+// token binds the identity to a single process lifetime, so a recycled PID is
+// not mistaken for the owner that recorded the lease. Where it is not, the
+// token is empty and that binding is simply absent; liveness then falls back to
+// proving the PID gone, and anything short of that proof counts as alive. The
+// identity never claims a guarantee the platform did not give it.
 func NewRuntimeOwner() string {
 	token, _ := processStartToken(os.Getpid())
 	return fmt.Sprintf("%s/%d/%s", ownerHost(), os.Getpid(), token)

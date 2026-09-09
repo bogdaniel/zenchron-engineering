@@ -24,6 +24,43 @@ import (
 // for the SAME revision, which is exactly what the lost claim produced. The
 // interleaving cannot be forced through this seam, so the test drives the real
 // window and asserts that invariant rather than a schedule.
+
+// A plan row is stamped by the runtime's clock, not by the wall clock.
+//
+// Runs and operations carry the created instant their caller's clock produced;
+// the plan store read time.Now() itself. A plan document deliberately carries
+// no timestamp - it would make the digest depend on when the plan was written -
+// so this row is the only record of when a plan appeared, and a store that
+// reads its own clock puts it on a different axis from every other row and out
+// of reach of the clock the rest of the runtime is driven by.
+func TestAPlanIsStampedByTheRuntimeClock(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	contract := planFixtureContract(fixture.phase8Fixture)
+	before := fixture.clock.Now().UnixNano()
+	if _, err := fixture.service.Propose(context.Background(), ProposeInput{
+		PlanID: "plan-stamped", Objective: "Make the widget idempotent.",
+		Subject:  domain.Subject{Repository: "acme/repo", Revision: fixture.base},
+		Contract: contract, Issue: fixture.issue,
+		Model: domain.ProjectModel{
+			SchemaVersion: domain.SchemaVersion, ID: "project", Revision: "1",
+			Subject: domain.Subject{Repository: "acme/repo", Revision: fixture.base},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stamped int64
+	if err := fixture.store.db.QueryRow(`SELECT created_unix_nano FROM plans WHERE id = ?`, "plan-stamped").Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture clock advances on every read, so the assertion is that the
+	// stamp came from ITS timeline. A wall-clock read lands outside this
+	// window entirely: the fixture's clock is not set to the present.
+	if after := fixture.clock.Now().UnixNano(); stamped < before || stamped > after {
+		t.Fatalf("the plan is stamped %d, outside the runtime clock's window [%d, %d]", stamped, before, after)
+	}
+}
+
 func TestConcurrentProposalsNeverRecordOneRevisionTwice(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
 	contract := planFixtureContract(fixture.phase8Fixture)

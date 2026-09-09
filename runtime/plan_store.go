@@ -44,7 +44,13 @@ func (e *PlanRevisionConflictError) Error() string {
 // Like ClaimRun it is a conditional insert, so the database decides which
 // process created the plan and a caller that loses the race adopts the winner's
 // plan rather than overwriting it.
-func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan) (bool, error) {
+//
+// createdAt comes from the CALLER's clock, exactly as a run's does. The store
+// reads no clock of its own: a plan document carries no timestamp - it would
+// make the digest depend on when it was written - so this row is the only
+// record of when the plan appeared, and it must be on the same time axis as
+// every other row the runtime writes.
+func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan, createdAt time.Time) (bool, error) {
 	if err := validatePlanIdentity(plan); err != nil {
 		return false, err
 	}
@@ -58,7 +64,7 @@ func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan) (bool, err
 	}
 	defer tx.Rollback()
 	result, err := tx.Exec(`INSERT INTO plans (`+sqlitePlanColumns+`) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
-		plan.ID, plan.Subject.Repository, plan.Revision, time.Now().UnixNano())
+		plan.ID, plan.Subject.Repository, plan.Revision, createdAt.UnixNano())
 	if err != nil {
 		return false, err
 	}
