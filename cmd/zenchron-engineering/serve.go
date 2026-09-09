@@ -419,11 +419,22 @@ func (c *composition) planBaseBranch(planID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Stage order is FIXED, and retired runs count. Ranging a map made the
+	// answer depend on iteration order where stages recorded different bases,
+	// and a stage whose run was retired - the window between an invalidation
+	// and the next generation starting - clears its run id, so a plan that had
+	// resolved a base could fall back to the enrolment assumption for exactly
+	// as long as that window lasted.
+	runIDs := make([]string, 0, len(snapshot.Stages)+len(snapshot.RetiredRuns))
 	for _, stage := range snapshot.Stages {
-		if stage.RunID == "" {
-			continue
+		if stage.RunID != "" {
+			runIDs = append(runIDs, stage.RunID)
 		}
-		run, found, err := c.store.Run(stage.RunID)
+	}
+	sort.Strings(runIDs)
+	runIDs = append(runIDs, snapshot.RetiredRuns...)
+	for _, runID := range runIDs {
+		run, found, err := c.store.Run(runID)
 		if err != nil {
 			return "", err
 		}

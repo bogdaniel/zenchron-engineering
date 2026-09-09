@@ -800,8 +800,17 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 	// what is happening. Saying so is the difference between an approval
 	// preview and a document decorated with another revision's execution.
 	if preview := view.Preview; preview != nil {
-		fmt.Fprintf(stdout, "preview: revision %d governs the work; the state below is what approving this revision would leave\n",
-			preview.GoverningRevision)
+		// A REJECTED revision is not awaiting approval, and offering "what
+		// approving this would leave" beside a `(rejected)` header describes a
+		// decision nobody is being asked for. The state shown is the same
+		// hypothetical either way; what changes is whether it is on offer.
+		if revisionStatus(view) == domain.ApprovalRejected {
+			fmt.Fprintf(stdout, "preview: revision %d governs the work; this revision was rejected, and the state below is what it would have left\n",
+				preview.GoverningRevision)
+		} else {
+			fmt.Fprintf(stdout, "preview: revision %d governs the work; the state below is what approving this revision would leave\n",
+				preview.GoverningRevision)
+		}
 		if len(preview.Invalidated) > 0 {
 			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(preview.Invalidated, ", "))
 		}
@@ -827,6 +836,12 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			state = string(projection.State)
 		}
 		line := fmt.Sprintf("  %-18s %-20s %-11s", stage.ID, stage.Kind, state)
+		// WHICH EXECUTION of this stage this is. A stage performed again
+		// because its input moved is ordinary and automatic, and without this
+		// the only record of that churn was the snapshot JSON.
+		if projection, ok := view.Snapshot.Stages[stage.ID]; ok && projection.Generation > 0 {
+			line += fmt.Sprintf(" execution %d", projection.Generation+1)
+		}
 		switch {
 		case stage.Kind != domain.StageAgent:
 			line += fmt.Sprintf(" references claims %s", strings.Join(stage.RequiredClaims, ", "))
@@ -902,6 +917,22 @@ func writePlanBudget(stdout io.Writer, view runtime.PlanView) {
 		view.Consumed.ChildRuns, view.Envelope.MaxChildRuns,
 		view.Consumed.ProviderInvocations, view.Envelope.MaxProviderInvocations,
 		view.Envelope.MaxConcurrency)
+	// RE-PERFORMANCE HEADROOM, said out loud. A stage whose upstream candidate
+	// is replaced is performed again as a new execution generation, and that
+	// needs a child run - so an envelope with exactly one child run per agent
+	// stage is legal, approvable, and blocks on budget the first time anything
+	// upstream moves. An operator reading the envelope cannot see that from the
+	// numbers alone.
+	agentStages := 0
+	for _, stage := range view.Plan.Stages {
+		if stage.Kind == domain.StageAgent {
+			agentStages++
+		}
+	}
+	if agentStages > 0 && view.Envelope.MaxChildRuns <= agentStages {
+		fmt.Fprintf(stdout, "no re-performance headroom: %d agent stages and %d child runs, so a stage whose input moves blocks on budget until a revision raises max_child_runs\n",
+			agentStages, view.Envelope.MaxChildRuns)
+	}
 	switch {
 	case view.Consumed.CostKnown && view.Consumed.CostMicros != nil:
 		fmt.Fprintf(stdout, "cost: %d micros reported\n", *view.Consumed.CostMicros)
