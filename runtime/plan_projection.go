@@ -381,6 +381,12 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		}
 		stage.RunID = payload.RunID
 		stage.State = PlanStageRunning
+		// A stage that is RUNNING is not invalidated and has no reason. Both
+		// belong to the performance that ended, and leaving them on a healthy
+		// new generation showed operators an `invalidated_under` beside work
+		// that is under way.
+		stage.InvalidatedUnder = 0
+		stage.Reason = ""
 		s.Stages[payload.StageID] = stage
 	case EventPlanStageSettled:
 		var payload PlanStageSettledPayload

@@ -122,6 +122,12 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 	if rerun == "" || rerun == review {
 		t.Fatalf("the re-performance adopted the discarded run: %q", rerun)
 	}
+	// A stage that is RUNNING is not invalidated and has no reason. Both belong
+	// to the performance that ended, and leaving them showed an operator
+	// `invalidated_under` beside work that is under way.
+	if redone.Stages["review"].InvalidatedUnder != 0 || redone.Stages["review"].Reason != "" {
+		t.Fatalf("the new performance still carries the last one's invalidation: %#v", redone.Stages["review"])
+	}
 	next, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 1, "review")
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +159,31 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 	}
 	if !retired {
 		t.Fatalf("the invalidated stage's run was not retired: %#v", redone.RetiredRuns)
+	}
+	// Stopped for what actually happened. Nothing superseded this run: the
+	// revision that created it is still governing, and its stage is simply
+	// being performed again.
+	stoppedRun, found, err := fixture.store.Run(review)
+	if err != nil || !found {
+		t.Fatalf("read the retired run: found=%v err=%v", found, err)
+	}
+	if stoppedRun.Reason != "plan_stage_reperformed" {
+		t.Fatalf("the retired run was cancelled as %q, which says a revision replaced it", stoppedRun.Reason)
+	}
+	// And what it goes on spending is attributed TO ITS STAGE. The stage no
+	// longer names the run, so an attribution that took the stage id from the
+	// projection recorded none, and the per-stage totals a profile's own budget
+	// is enforced against undercounted every retired run.
+	spentBefore := redone.StageConsumed["review"].ProviderInvocations
+	recordExecutionAttempts(t, fixture, review, 3)
+	fixture.reconcile(t)
+	spent, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spent.StageConsumed["review"].ProviderInvocations <= spentBefore {
+		t.Fatalf("the retired run spent more and the review stage's total is %d, unchanged from %d",
+			spent.StageConsumed["review"].ProviderInvocations, spentBefore)
 	}
 
 	// And it settles. Further passes neither re-invalidate nor start anything
@@ -273,9 +304,11 @@ func TestTheInvalidationReasonFitsTheJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The stage was invalidated and is being performed again, so the state has
-	// already moved on; what this test is about is the RECORD, which had to be
-	// appendable at all.
-	if after.Stages["independent-review"].InvalidatedUnder != fixture.plan.Revision {
+	// already moved on - a running stage carries no invalidation. The
+	// GENERATION is what survives it, and it advances in one place only: the
+	// fold of a revision-scoped invalidation. What this test is about is the
+	// RECORD, which had to be appendable at all.
+	if after.Stages["independent-review"].Generation != 1 {
 		t.Fatalf("the invalidation was not recorded: %#v", after.Stages["independent-review"])
 	}
 	events, err := fixture.store.PlanEvents(fixture.plan.ID)
@@ -462,5 +495,112 @@ func TestARePerformanceThatChangesTheObligationIsRefused(t *testing.T) {
 		if block.Kind != "authority" || !strings.Contains(block.Reason, "propose a revision") {
 			t.Fatalf("%s produced %#v", name, block)
 		}
+	}
+}
+
+// A producer that is mid-remediation has not produced anything to review, and
+// the sweep must not spend a generation on its interim heads.
+//
+// The run row's candidate is refreshed on every reconcile of that run - every
+// commit and every checkpoint - not on publication or settlement. Reviewer
+// feedback re-activates the producer, and its first checkpoint moves the row.
+// Firing there froze the next generation against a head the producer was still
+// changing, which then had to be invalidated again the moment it settled: a
+// child run and a share of the approved invocation envelope burnt on every
+// cycle, and, if the interim commit never became reachable, a generation
+// pinned to a head nothing can build on.
+func TestTheSweepIgnoresAProducersInterimHeads(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := snapshot.Stages["implementation"].RunID
+	recordCandidateAndAssurance(t, fixture, implementation, "aaaaaaaaaaaa")
+	settleRunAtGoalState(t, fixture, implementation, "aaaaaaaaaaaa")
+	fixture.reconcile(t)
+
+	snapshot, err = fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := snapshot.Stages["review"].RunID
+	if review == "" {
+		t.Fatal("the review stage created no run against candidate A")
+	}
+	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
+	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	// Feedback re-activates the producer, and it checkpoints. This head is
+	// WORK IN PROGRESS: the run is active, and nobody has said it is done.
+	reactivateRunAtHead(t, fixture, implementation, "interim111111")
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	during, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if during.Stages["review"].State != PlanStageCompleted {
+		t.Fatalf("the review was invalidated against an interim head: %#v", during.Stages["review"])
+	}
+	if during.Stages["review"].Generation != 0 {
+		t.Fatalf("a generation was spent on an interim head: %#v", during.Stages["review"])
+	}
+
+	// The producer settles on the head it actually finished with. NOW the
+	// review is stale, and the new generation is frozen against that head -
+	// not against the checkpoint in between.
+	recordCandidate(t, fixture, implementation, "bbbbbbbbbbbb")
+	settleRunAtGoalState(t, fixture, implementation, "bbbbbbbbbbbb")
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Stages["review"].Generation != 1 {
+		t.Fatalf("the review was not performed again once the producer settled: %#v", after.Stages["review"])
+	}
+	next, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 1, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("the re-performance was not frozen against anything")
+	}
+	if got := next.Context.UpstreamOutputs[0].Candidate; got != "bbbbbbbbbbbb" {
+		t.Fatalf("the re-performance consumes %q, which is not the head the producer settled on", got)
+	}
+}
+
+// reactivateRunAtHead is a producer that reviewer feedback put back to work: it
+// is active again and has committed something, and it is not done.
+func reactivateRunAtHead(t *testing.T, fixture *planRunFixture, runID, head string) {
+	t.Helper()
+	recordCandidate(t, fixture, runID, head)
+	run, found, err := fixture.store.Run(runID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	run.Disposition = Active
+	run.Reason = ""
+	run.Candidate.Revision, run.Candidate.Tree = head, head
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
 	}
 }

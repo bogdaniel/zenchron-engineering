@@ -476,6 +476,15 @@ downstream of that stage is invalidated with it. This is what stops a gate from
 being re-proved by an independent review that was performed on work nobody is
 proposing any more.
 
+Only a head the producer is FINISHED WITH counts as movement. A run's recorded
+candidate advances on every commit and checkpoint, so a producer working through
+feedback moves it long before it has produced anything a reviewer should read.
+Re-performing against an interim head would pay for a review of work still being
+changed, invalidate it again the moment the producer settles, and - if that
+commit never became reachable - pin the new performance to a head nothing can be
+based on. A first performance gets this for free, because a stage starts only
+once its dependencies have settled; every later one is held to the same rule.
+
 The stage is then performed AGAIN under the same approved plan, as a new
 EXECUTION GENERATION. A producer moving from candidate A to candidate B is an
 execution fact, not a change to the plan: the role, profile, worker, trust
@@ -491,11 +500,23 @@ executing what nobody will read - and the record of what it consumed is left
 exactly as it was, because that performance happened.
 
 Where re-performing WOULD change something governance-relevant - the role, the
-profile version or digest, the worker, the trust mode, the invocation mode, the
-independence obligation - the stage is blocked instead, naming what would
-change. That is a different obligation from the one approved, and it goes
-through the approval boundary as a revision. Obligation renewal may be
-automatic; authority change may not.
+profile version or digest, the worker binding (its id, provider kind, vendor
+family, model and trust mode), the invocation mode, the independence obligation
+- the stage is blocked instead, naming what would change. That is a different
+obligation from the one approved, and it goes through the approval boundary as a
+revision. Obligation renewal may be automatic; authority change may not.
+
+The comparison is against the PREVIOUS PERFORMANCE, wherever it was recorded. An
+assignment is stored under the revision that governed when the stage started, so
+a stage completed under one revision and carried unchanged into the next keeps
+its record under the older one - the ordinary result of propose, approve,
+propose, approve. Looking only under the revision governing now would find
+nothing to compare in exactly the histories this boundary exists for.
+
+Upgrading an installation that already holds an old-style same-revision
+invalidation converges after one bounded extra cycle: the stored assignments
+become generation 0, the pending invalidation is re-derived once, and the stage
+is then performed as generation 1 like any other.
 
 Any movement of the upstream candidate counts, including a base integration.
 A candidate that has absorbed its base is not the candidate that was reviewed,

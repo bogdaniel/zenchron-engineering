@@ -221,12 +221,24 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 	// was doing, and leaving it running means two concurrent runs for one
 	// stage, one of them producing work the plan will never read.
 	for _, runID := range snapshot.RetiredRuns {
-		recorded, err := r.attributeRunSpend(plan, snapshot, "", runID)
+		run, found, err := r.Store.Run(runID)
+		if err != nil {
+			return report, err
+		}
+		// The STAGE it was doing comes from the run's own binding. The stage no
+		// longer names the run, so the projection cannot say - and attributing
+		// with an empty stage id kept the plan total right while every per-stage
+		// total silently undercounted what a retired run went on spending.
+		stageID := ""
+		if found && run.Plan != nil {
+			stageID = run.Plan.StageID
+		}
+		recorded, err := r.attributeRunSpend(plan, snapshot, stageID, runID)
 		if err != nil {
 			return report, err
 		}
 		attributed = attributed || recorded
-		stopped, err := r.stopRetiredRun(runID)
+		stopped, err := r.stopRetiredRun(runID, retirementReason(plan, snapshot, run, found))
 		if err != nil {
 			return report, err
 		}
@@ -403,7 +415,7 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 // plan's own work: the plan created the run, and the stage it was doing is no
 // longer in the plan. An operator's own run is never touched by this - only a
 // run this plan created and then superseded.
-func (r PlanReconciler) stopRetiredRun(runID string) (bool, error) {
+func (r PlanReconciler) stopRetiredRun(runID, reason string) (bool, error) {
 	run, found, err := r.Store.Run(runID)
 	if err != nil || !found {
 		return false, err
@@ -412,10 +424,28 @@ func (r PlanReconciler) stopRetiredRun(runID string) (bool, error) {
 		return false, nil
 	}
 	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256}
-	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, "plan_stage_superseded"); err != nil {
+	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// retirementReason says WHY the plan stopped a child run, which is not always
+// supersession. A run retired because its stage is being PERFORMED AGAIN under
+// the revision that is still governing was not superseded by anything, and
+// recording that word would tell an operator a revision replaced work when none
+// did.
+func retirementReason(plan domain.EngineeringPlan, snapshot PlanSnapshot, run EngineeringRun, found bool) string {
+	if !found || run.Plan == nil || run.Plan.Revision != plan.Revision {
+		return "plan_stage_superseded"
+	}
+	// Under the SAME revision, the one thing that retires a run is the stage
+	// moving to a later execution generation. A supersession resets the stage's
+	// generation, so this cannot mistake one for the other.
+	if run.Plan.Generation < snapshot.Stages[run.Plan.StageID].Generation {
+		return "plan_stage_reperformed"
+	}
+	return "plan_stage_superseded"
 }
 
 // reopenStaleGates un-satisfies any gate whose proof no longer describes the
@@ -523,10 +553,27 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 			if err != nil {
 				return false, err
 			}
-			head := ""
-			if found {
-				head = run.Candidate.Revision
+			if !found {
+				continue
 			}
+			// Only a head the producer is FINISHED WITH counts as movement.
+			// The run row's candidate is refreshed on every reconcile of that
+			// run - every commit and checkpoint - not on publication or
+			// settlement. A producer re-activated by reviewer feedback moves it
+			// on the first checkpoint, long before it has produced anything a
+			// reviewer should consume, and firing there would freeze the next
+			// generation against an interim, possibly unpushed head: a paid
+			// review of work still being changed, invalidated again the moment
+			// the producer settles, burning a child run and invocations from
+			// the approved envelope on every cycle.
+			//
+			// Generation 0 gets this invariant for free - a stage starts when
+			// its dependencies have SETTLED - and this is the same rule applied
+			// to every later generation.
+			if _, settled := stageOutcome(run); !settled {
+				continue
+			}
+			head := run.Candidate.Revision
 			if head == "" || head == upstream.Candidate {
 				continue
 			}
@@ -622,7 +669,15 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 //
 // Obligation renewal may be automatic. Authority change may not.
 func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage domain.PlanStage, generation int, next domain.AgentAssignment) *PlanStageBlock {
-	previous, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation-1, stage.ID)
+	// The PREVIOUS PERFORMANCE, wherever it was recorded - not
+	// (this revision, generation-1). Assignment rows are written under the
+	// revision that governed when the stage started, and a revision that did
+	// not change the stage leaves its completed work, and its row, under the
+	// older one. Looking only under the current revision missed the row
+	// exactly in the multi-revision histories this guard exists for, found
+	// nothing to compare, and let the re-performance freeze whatever the
+	// registry resolves today - a different worker included, with no block.
+	previous, found, err := r.Store.PreviousPlanAssignment(plan.ID, plan.Revision, generation, stage.ID)
 	if err != nil {
 		return &PlanStageBlock{StageID: stage.ID, Kind: "assignment", Reason: boundedDetail(err.Error())}
 	}
@@ -633,6 +688,14 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 		{"role", string(previous.Role), string(next.Role)},
 		{"profile", fmt.Sprintf("%s v%d %s", previous.Profile.ID, previous.Profile.Version, previous.Profile.Digest), fmt.Sprintf("%s v%d %s", next.Profile.ID, next.Profile.Version, next.Profile.Digest)},
 		{"worker", previous.Agent.ID, next.Agent.ID},
+		// The WHOLE binding, field by field. Two registry entries can share an
+		// id and differ in what they actually are, and the independence
+		// obligations downstream stages carry are stated in terms of provider
+		// kind and vendor family - so an id-only comparison would call a
+		// different provider the same obligation.
+		{"provider kind", previous.Agent.ProviderKind, next.Agent.ProviderKind},
+		{"vendor family", previous.Agent.VendorFamily, next.Agent.VendorFamily},
+		{"model", previous.Agent.Model, next.Agent.Model},
 		{"trust mode", string(previous.Agent.TrustMode), string(next.Agent.TrustMode)},
 		{"trust requirement", string(previous.TrustRequirement), string(next.TrustRequirement)},
 		{"invocation mode", string(previous.InvocationMode), string(next.InvocationMode)},
@@ -1361,6 +1424,35 @@ func (s *SQLiteOperationStore) PutPlanAssignment(planID string, revision, genera
 	// freeze real: the run is executing under the configuration this row
 	// records, whatever the registry says now.
 	return nil
+}
+
+// PreviousPlanAssignment returns the assignment the PREVIOUS performance of a
+// stage was frozen under: the row with the greatest (revision, generation)
+// ordered strictly before the one asked about.
+//
+// It is not (revision, generation-1). A stage completed under one revision and
+// carried unchanged into the next keeps its row under the revision it executed
+// under, so the performance before generation N of revision R legitimately
+// lives at an earlier revision. That is the case the authority boundary has to
+// see: an execution generation renews an obligation, and the obligation it
+// renews is whatever was last actually performed.
+func (s *SQLiteOperationStore) PreviousPlanAssignment(planID string, revision, generation int, stageID string) (domain.AgentAssignment, bool, error) {
+	var document string
+	err := s.db.QueryRow(`SELECT document FROM plan_assignments
+		WHERE plan_id = ? AND stage_id = ? AND (revision < ? OR (revision = ? AND generation < ?))
+		ORDER BY revision DESC, generation DESC LIMIT 1`,
+		planID, stageID, revision, revision, generation).Scan(&document)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.AgentAssignment{}, false, nil
+		}
+		return domain.AgentAssignment{}, false, err
+	}
+	assignment, err := domain.Decode[domain.AgentAssignment]([]byte(document))
+	if err != nil {
+		return domain.AgentAssignment{}, false, fmt.Errorf("decode durable assignment: %w", err)
+	}
+	return assignment, true, nil
 }
 
 // PlanAssignment returns the frozen assignment one run is executing under.
