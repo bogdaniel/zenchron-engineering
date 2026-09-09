@@ -758,3 +758,108 @@ func TestAProposalOriginMustBeInTheCatalogue(t *testing.T) {
 		t.Fatalf("the catalogue's own origin was refused: %v", err)
 	}
 }
+
+// An assignment written before execution generations existed reads back as
+// generation zero.
+//
+// The generation is part of the assignment key, so the table was rebuilt. A
+// rebuild that dropped or renumbered a row would strand the frozen record of a
+// performance that happened - which is what the whole freeze is for.
+func TestMigrationKeepsPreGenerationAssignments(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db")+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Everything up to and including the schema that had plan_assignments
+	// keyed without a generation, which is every migration before the last.
+	for _, migration := range sqliteMigrations[:len(sqliteMigrations)-1] {
+		if _, err := db.Exec(migration); err != nil {
+			t.Fatalf("apply pre-generation schema: %v", err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(sqliteMigrations)-1)); err != nil {
+		t.Fatal(err)
+	}
+	plan := planFixture(t, "plan-pre-generation", 1)
+	document, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plans (`+sqlitePlanColumns+`) VALUES (?, ?, ?, ?)`,
+		plan.ID, plan.Subject.Repository, plan.Revision, time.Unix(1, 0).UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan_revisions (plan_id, revision, digest, document) VALUES (?, ?, ?, ?)`,
+		plan.ID, plan.Revision, plan.Digest, string(document)); err != nil {
+		t.Fatal(err)
+	}
+	assignment := planFixtureAssignment(t, plan)
+	assignmentDocument, err := CanonicalJSON(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan_assignments (plan_id, revision, stage_id, assignment_id, document) VALUES (?, ?, ?, ?, ?)`,
+		plan.ID, plan.Revision, assignment.StageID, assignment.ID, string(assignmentDocument)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	read, found, err := migrated.PlanAssignment(plan.ID, plan.Revision, 0, assignment.StageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("an assignment written before generations existed was lost by the migration")
+	}
+	if read.ID != assignment.ID {
+		t.Fatalf("the migrated assignment is %q, want %q", read.ID, assignment.ID)
+	}
+	// And a later generation is a different row, not a conflict with it.
+	next := assignment
+	next.ID = assignment.ID + "-g1"
+	if err := migrated.PutPlanAssignment(plan.ID, plan.Revision, 1, next); err != nil {
+		t.Fatal(err)
+	}
+	if again, _, err := migrated.PlanAssignment(plan.ID, plan.Revision, 0, assignment.StageID); err != nil {
+		t.Fatal(err)
+	} else if again.ID != assignment.ID {
+		t.Fatalf("storing generation 1 rewrote generation 0: %q", again.ID)
+	}
+}
+
+// planFixtureAssignment is a schema-valid assignment for a plan fixture.
+func planFixtureAssignment(t *testing.T, plan domain.EngineeringPlan) domain.AgentAssignment {
+	t.Helper()
+	return domain.AgentAssignment{
+		SchemaVersion: domain.SchemaVersion, ID: "assignment-" + plan.ID + "-r1-" + plan.Stages[0].ID,
+		StageID: plan.Stages[0].ID,
+		Plan:    domain.PlanRef{ID: plan.ID, Revision: plan.Revision, Digest: plan.Digest},
+		Role:    plan.Stages[0].Role, InvocationMode: domain.InvocationModeMutating,
+		TrustRequirement: domain.TrustRequirementOperatorTrusted,
+		Profile: domain.ProfileBinding{
+			ID: "codex", Version: 1, Digest: strings.Repeat("d", 64),
+			Capabilities:     []domain.EngineeringCapability{domain.CapabilityCodeChange},
+			TrustRequirement: domain.TrustRequirementOperatorTrusted,
+		},
+		Agent: domain.AgentBinding{
+			ID: "codex", ProviderKind: "codex_cli", VendorFamily: "openai",
+			TrustMode: domain.TrustRequirementOperatorTrusted,
+		},
+		Contract: domain.ObjectRevision{ID: "contract", Revision: "1"},
+		Selection: domain.ResolutionExplanation{
+			Considered: []domain.CandidateEvaluation{}, Selected: "codex", Reason: "the only eligible worker",
+		},
+		Context: domain.ContextPack{
+			Objective: "o", AcceptanceCriteria: []string{"a"},
+			Included: domain.RequiredContextClasses(), Excluded: []domain.ContextClass{},
+		},
+	}
+}
