@@ -556,8 +556,18 @@ type PlanBudgetEnvelope struct {
 // StageBudget is one stage's share, resolved into the assignment. It is bounded
 // by the envelope and by the operator's per-run budgets.
 type StageBudget struct {
+	// MaxExecutionAttempts is retries of ONE execution binding, the meaning
+	// #63 gives it. It is not a total: a continuation is a different binding
+	// with its own attempt allowance, so a run bounded only by this can spend
+	// more provider invocations than any single number here suggests.
 	MaxExecutionAttempts int `json:"max_execution_attempts,omitempty"`
-	MaxWallSeconds       int `json:"max_wall_seconds,omitempty"`
+	// MaxProviderInvocations is the RUN TOTAL: every execution invocation of
+	// every binding, counted together. A plan's remaining aggregate headroom
+	// is a total and belongs here; writing it into the per-binding retry
+	// ceiling let a continuation start a fresh allowance under a ceiling that
+	// was supposed to be exhausted.
+	MaxProviderInvocations int `json:"max_provider_invocations,omitempty"`
+	MaxWallSeconds         int `json:"max_wall_seconds,omitempty"`
 }
 
 // PlanStage is one node of the plan graph.

@@ -754,6 +754,14 @@ func (s *runState) conditions() (Disposition, string) {
 	if s.continuationCeilingReached() {
 		return Failed, "execution_continuations_exhausted"
 	}
+	// The RUN TOTAL of provider invocations, across every binding. This is the
+	// bound a plan's remaining aggregate headroom becomes: continuation depth
+	// bounds how many bindings there may be and the attempt budget bounds
+	// retries within one, but neither of them bounds the sum, and a plan
+	// ceiling is a sum.
+	if s.providerInvocationCeilingReached() {
+		return Failed, "run_provider_invocations_exhausted"
+	}
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
 		return Waiting, "requested_privilege_expansion"
 	}
@@ -969,6 +977,29 @@ func (s *runState) startedContinuationBindings() map[string]bool {
 		}
 	}
 	return started
+}
+
+// providerInvocationCeilingReached reports that this run has spent every
+// provider invocation it was created with.
+//
+// It counts ATTEMPTS - one per execution invocation actually begun - because
+// that is what a provider account is charged for. The count comes from the
+// projection of durable events, so a restart resumes at the same total rather
+// than at zero.
+func (s *runState) providerInvocationCeilingReached() bool {
+	limit := s.providerInvocationLimit()
+	return limit > 0 && s.projection.Attempts[OpExecutionInvoke] >= limit
+}
+
+// providerInvocationLimit is the run's total, taken from what the run
+// persisted. Absent means unbounded, exactly as it does for every run created
+// before this bound existed: a run is judged by the budgets it was created
+// with, never by whatever is configured now.
+func (s *runState) providerInvocationLimit() int {
+	if budgets := s.run.Budgets; budgets != nil {
+		return budgets.MaxProviderInvocations
+	}
+	return 0
 }
 
 // continuationLimit is the run's continuation bound, taken from durable state.

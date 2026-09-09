@@ -452,6 +452,12 @@
       "additionalProperties": false,
       "properties": {
         "max_execution_attempts": {
+          "description": "Retries of ONE execution binding, never a run total: a continuation is a different binding with its own allowance.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_provider_invocations": {
+          "description": "The RUN TOTAL of provider invocations, across every binding. A plan's remaining aggregate headroom is a total and is carried here.",
           "type": "integer",
           "minimum": 1
         },

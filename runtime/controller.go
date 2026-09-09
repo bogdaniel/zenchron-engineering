@@ -157,8 +157,17 @@ type RunBudgets struct {
 	// It is omitempty because a run persisted before #54 has no value for it,
 	// and that absence is meaningful - see runState.continuationLimit.
 	MaxExecutionContinuations int `json:"max_execution_continuations,omitempty"`
-	MaxRemediationAttempts    int `json:"max_remediation_attempts"`
-	MaxAssuranceAttempts      int `json:"max_assurance_attempts"`
+	// MaxProviderInvocations bounds EVERY execution invocation this run makes,
+	// across every binding. MaxExecutionAttempts bounds retries of one
+	// binding and MaxExecutionContinuations bounds how many bindings there
+	// may be; neither of them is a total, and a plan-wide allowance is one.
+	//
+	// omitempty, and absent means unbounded: a run persisted before this
+	// existed was never judged by it, and its identity is derived from its
+	// canonical document.
+	MaxProviderInvocations int `json:"max_provider_invocations,omitempty"`
+	MaxRemediationAttempts int `json:"max_remediation_attempts"`
+	MaxAssuranceAttempts   int `json:"max_assurance_attempts"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -440,6 +449,9 @@ func (b RunBudgets) tightenedBy(stage domain.StageBudget) RunBudgets {
 	}
 	if attempts := stage.MaxExecutionAttempts; attempts > 0 && (b.MaxExecutionAttempts <= 0 || attempts < b.MaxExecutionAttempts) {
 		b.MaxExecutionAttempts = attempts
+	}
+	if total := stage.MaxProviderInvocations; total > 0 && (b.MaxProviderInvocations <= 0 || total < b.MaxProviderInvocations) {
+		b.MaxProviderInvocations = total
 	}
 	return b
 }
