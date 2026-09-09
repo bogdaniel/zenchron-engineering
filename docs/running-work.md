@@ -121,7 +121,10 @@ function of the rest: the same durable state always yields the same sentence.
 `logs` prints the SANITIZED transcript of each provider attempt, with a header
 naming the operation, the attempt number and the agent that produced it. The raw
 transcript beside it is local-only forensic material and is deliberately never
-rendered. `events` renders the journal in persisted order, opening the store
+rendered. Each stream of an attempt is captured up to 8 MiB; a provider that
+prints more ends its transcript with a line naming how many further bytes were
+produced and not kept, so a truncated transcript never reads as a complete
+record of what the provider said. `events` renders the journal in persisted order, opening the store
 directly: it takes no ownership of the state directory and no run-driving lease,
 so it is safe to tail a run a supervisor is driving. A payload above 1 KiB is
 replaced by its size and digest rather than truncated into JSON that no longer
