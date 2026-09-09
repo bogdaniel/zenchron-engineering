@@ -747,6 +747,32 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		// The resolver already recorded why, and that block is in the report.
 		return nil, nil, nil
 	}
+	// The upstream heads this assignment would FREEZE have to be heads their
+	// producers are FINISHED WITH. A stage stays completed in plan state while
+	// its run is re-activated by reviewer feedback, and the run row's candidate
+	// moves on the first checkpoint after that - so a stage starting in the
+	// window between "settled" and "back at work" would freeze itself against a
+	// head that is being changed while it reads it. The sweep applies the same
+	// rule to deciding that work is stale; this applies it to what a new
+	// performance is bound to.
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		if upstream.RunID == "" {
+			continue
+		}
+		run, found, err := r.Store.Run(upstream.RunID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found {
+			continue
+		}
+		if _, settled := stageOutcome(run); !settled {
+			return nil, &PlanStageBlock{
+				StageID: stage.ID, Kind: "upstream",
+				Reason: boundedDetail(fmt.Sprintf("stage %s is producing a different candidate; this stage starts against the head it settles on", upstream.StageID)),
+			}, nil
+		}
+	}
 	// BUDGET, before anything durable happens. The aggregate envelope is what
 	// an operator approved, and a plan that has spent it stops rather than
 	// quietly exceeding it.

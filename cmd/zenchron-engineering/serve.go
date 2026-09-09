@@ -419,7 +419,7 @@ func (c *composition) planBaseBranch(planID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Stage order is FIXED, and retired runs count. Ranging a map made the
+	// The order is FIXED, and retired runs count. Ranging a map made the
 	// answer depend on iteration order where stages recorded different bases,
 	// and a stage whose run was retired - the window between an invalidation
 	// and the next generation starting - clears its run id, so a plan that had

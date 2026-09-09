@@ -588,6 +588,100 @@ func TestTheSweepIgnoresAProducersInterimHeads(t *testing.T) {
 	}
 }
 
+// The same rule where it matters most: at the moment a performance is FROZEN.
+//
+// Deciding that work is stale and binding its replacement are two separate
+// reads of the producer's head, and they are not always the same pass: a stage
+// whose start was blocked - by the plan's concurrency ceiling, its budget, an
+// engine that could not be built - starts on a later tick, and feedback can put
+// the producer back to work in between. Starting there froze the replacement,
+// immutably, against a head being changed while it read it.
+func TestANewGenerationIsNotFrozenAgainstAReactivatedProducer(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := snapshot.Stages["implementation"].RunID
+	recordCandidateAndAssurance(t, fixture, implementation, "aaaaaaaaaaaa")
+	settleRunAtGoalState(t, fixture, implementation, "aaaaaaaaaaaa")
+
+	// The producer is back at work on an interim head, and the review stage is
+	// asked to start now - which is the state a blocked start leaves behind.
+	reactivateRunAtHead(t, fixture, implementation, "interim222222")
+	snapshot, err = fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := fixture.plan.Stages[1]
+	resolution, err := fixture.service.Resolve(fixture.plan, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, ok := resolution.Assignment(stage.ID)
+	if !ok {
+		t.Fatal("the review stage could not be assigned, so this test asserts nothing")
+	}
+	if got := assignment.Context.UpstreamOutputs[0].Candidate; got != "interim222222" {
+		t.Fatalf("resolution read %q, so the interim head is not what a start would freeze", got)
+	}
+
+	started, blocked, err := fixture.reconciler.startAgentStage(context.Background(),
+		fixture.plan, stage, snapshot, resolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started != nil {
+		t.Fatalf("the stage started against a head its producer is still changing: %#v", started)
+	}
+	if blocked == nil || blocked.Kind != "upstream" {
+		t.Fatalf("the start was not refused for the reason it happened: %#v", blocked)
+	}
+	if !strings.Contains(blocked.Reason, "implementation") {
+		t.Fatalf("the block does not name the producer: %s", blocked.Reason)
+	}
+	// And NOTHING durable was written. The freeze is immutable, so a row
+	// written here would bind every later attempt to the interim head.
+	if _, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 0, stage.ID); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("the replacement was frozen against the interim head")
+	}
+
+	// Once the producer settles, the same call starts against the head it
+	// settled on.
+	recordCandidateAndAssurance(t, fixture, implementation, "cccccccccccc")
+	settleRunAtGoalState(t, fixture, implementation, "cccccccccccc")
+	fixture.reconcile(t)
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Stages["review"].RunID == "" {
+		t.Fatalf("the review never started once its producer settled: %#v", after.Stages["review"])
+	}
+	frozen, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, 0, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("the review was not frozen against anything")
+	}
+	if got := frozen.Context.UpstreamOutputs[0].Candidate; got != "cccccccccccc" {
+		t.Fatalf("the review consumes %q, which is not the head the producer settled on", got)
+	}
+}
+
 // reactivateRunAtHead is a producer that reviewer feedback put back to work: it
 // is active again and has committed something, and it is not done.
 func reactivateRunAtHead(t *testing.T, fixture *planRunFixture, runID, head string) {
