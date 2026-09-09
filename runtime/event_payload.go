@@ -928,6 +928,17 @@ var planPayloads = map[string]payloadValidator{
 		default:
 			return fmt.Errorf("stage outcome %q must be %q, %q or %q", p.Outcome, Completed, Failed, planStageInvalidated)
 		}
+		// The revision says "invalidated UNDER this revision", which is what
+		// makes a stage unperformable until a new one. It is meaningless on any
+		// other outcome, and a negative one is not a revision at all: neither
+		// is written by this runtime, and neither should be readable back as a
+		// blocking state nobody recorded.
+		if p.Revision < 0 {
+			return fmt.Errorf("stage settled revision %d is not a revision", p.Revision)
+		}
+		if p.Revision > 0 && p.Outcome != planStageInvalidated {
+			return fmt.Errorf("stage outcome %q carries revision %d: only an %s outcome is scoped to a revision", p.Outcome, p.Revision, planStageInvalidated)
+		}
 		return errors.Join(required("stage_id", p.StageID), bounded("reason", p.Reason))
 	}),
 	EventPlanGateSatisfied: payloadSchema(func(p PlanGateSatisfiedPayload) error {

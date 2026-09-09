@@ -325,3 +325,30 @@ func TestPropagationIsRederivedAfterACrashBetweenAppends(t *testing.T) {
 		t.Fatalf("the dependent of an invalidated stage stayed usable: %#v", after.Stages["review"])
 	}
 }
+
+// The revision scope is only meaningful on an invalidation.
+//
+// It is what makes a stage unperformable until a new revision, so a completed
+// or failed settle carrying one would read back as a blocking state nobody
+// recorded, and a negative one is not a revision at all.
+func TestOnlyAnInvalidationIsScopedToARevision(t *testing.T) {
+	for name, payload := range map[string]PlanStageSettledPayload{
+		"completed with a revision": {StageID: "s", Outcome: "completed", Revision: 2},
+		"failed with a revision":    {StageID: "s", Outcome: "failed", Revision: 2},
+		"a negative revision":       {StageID: "s", Outcome: "invalidated", Revision: -1},
+	} {
+		if err := eventPayloads[EventPlanStageSettled](mustPayload(t, payload)); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+	if err := eventPayloads[EventPlanStageSettled](mustPayload(t, PlanStageSettledPayload{
+		StageID: "s", Outcome: "invalidated", Revision: 2,
+	})); err != nil {
+		t.Fatalf("a revision-scoped invalidation was refused: %v", err)
+	}
+	if err := eventPayloads[EventPlanStageSettled](mustPayload(t, PlanStageSettledPayload{
+		StageID: "s", Outcome: "completed",
+	})); err != nil {
+		t.Fatalf("an ordinary settle was refused: %v", err)
+	}
+}
