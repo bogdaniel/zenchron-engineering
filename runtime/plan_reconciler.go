@@ -546,20 +546,28 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 			break
 		}
 	}
-	if len(stale) == 0 {
-		return false, nil
-	}
 	// Propagation is seeded from DURABLE STATE as well as from what this pass
 	// just found, so it is idempotent and crash-safe. The settles below are
-	// separate appends: a crash between them used to leave a dependent
-	// completed under a dependency that had been invalidated, and nothing
-	// re-derived it - the root was no longer completed, and the dependent's own
-	// upstream had not moved. Re-reading the dependency's state every pass is
-	// what closes that, rather than ordering the appends and hoping.
+	// separate appends: a crash between them left a dependent completed under a
+	// dependency that had been invalidated, and nothing re-derived it - the
+	// root was no longer completed, so the head-movement sweep above no longer
+	// saw it, and the dependent's own upstream had never moved. Re-reading the
+	// dependency's state every pass is what closes that, rather than ordering
+	// the appends and hoping.
+	//
+	// ONLY a same-revision invalidation seeds it. A stage a SUPERSESSION
+	// invalidated is waiting to be performed under the new revision, and
+	// propagating from it would mark its dependents as invalidated under this
+	// one - which is the state that says "not performable here" and would
+	// block the whole graph permanently.
 	for _, stage := range plan.Stages {
-		if projection, ok := snapshot.Stages[stage.ID]; ok && projection.State == PlanStageInvalidated {
+		projection, ok := snapshot.Stages[stage.ID]
+		if ok && projection.State == PlanStageInvalidated && projection.InvalidatedUnder == plan.Revision {
 			stale[stage.ID] = "it was invalidated"
 		}
+	}
+	if len(stale) == 0 {
+		return false, nil
 	}
 	// Downstream of a stage that must be redone is also invalid: its input is
 	// about to be replaced. This is the same propagation a revision performs,
@@ -581,9 +589,18 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 	}
 	ids := make([]string, 0, len(stale))
 	for id := range stale {
-		if projection, ok := snapshot.Stages[id]; ok && projection.State != PlanStagePending {
-			ids = append(ids, id)
+		projection, ok := snapshot.Stages[id]
+		if !ok || projection.State == PlanStagePending {
+			// A stage that never did anything has nothing to invalidate; it is
+			// simply performed under whatever the plan says now.
+			continue
 		}
+		if projection.State == PlanStageInvalidated && projection.InvalidatedUnder == plan.Revision {
+			// Already recorded. Appending it again on every tick is the same
+			// unbounded loop in a quieter form.
+			continue
+		}
+		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {

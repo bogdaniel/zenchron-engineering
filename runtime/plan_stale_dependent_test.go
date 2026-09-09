@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -132,6 +133,30 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 	if settled.Consumed.ChildRuns != before {
 		t.Fatalf("child runs went from %d to %d: the invalidation is looping", before, settled.Consumed.ChildRuns)
 	}
+	// Nor does it keep WRITING. A stage that is already invalidated under this
+	// revision has nothing left to invalidate, and re-appending the settle
+	// every tick would grow the journal without bound - the same livelock in a
+	// quieter form.
+	settledEvents := 0
+	events, err := fixture.store.PlanEvents(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type != EventPlanStageSettled {
+			continue
+		}
+		var payload PlanStageSettledPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.StageID == "review" && payload.Outcome == "invalidated" {
+			settledEvents++
+		}
+	}
+	if settledEvents != 1 {
+		t.Fatalf("the review was invalidated %d times across four passes", settledEvents)
+	}
 	// The discarded run is RETIRED: it does not stop existing because the plan
 	// stopped looking at it, so it is attributed and stopped rather than left
 	// executing work nobody will read.
@@ -235,5 +260,68 @@ func TestTheInvalidationReasonFitsTheJournal(t *testing.T) {
 	}
 	if reason := after.Stages["independent-review"].Reason; len(reason) > maxPayloadFieldBytes {
 		t.Fatalf("the recorded reason is %d bytes", len(reason))
+	}
+}
+
+// A crash between the two settle appends is re-derived, not lost.
+//
+// Invalidating a stage and invalidating its dependents are separate appends. A
+// crash in between left the dependent COMPLETED under a dependency that had
+// been invalidated, and nothing brought it back: the head-movement sweep only
+// looks at completed stages whose upstream moved, and by then the root was no
+// longer completed and the dependent's own upstream had never moved. The
+// propagation is re-derived from durable state every pass instead.
+func TestPropagationIsRederivedAfterACrashBetweenAppends(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := snapshot.Stages["implementation"].RunID
+	recordCandidateAndAssurance(t, fixture, implementation, "aaaaaaaaaaaa")
+	settleRunAtGoalState(t, fixture, implementation, "aaaaaaaaaaaa")
+	fixture.reconcile(t)
+	snapshot, err = fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := snapshot.Stages["review"].RunID
+	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
+	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	fixture.reconcile(t)
+
+	// The crash: the ROOT's invalidation landed and the dependent's did not.
+	if err := appendPlanEvent(fixture.store, fixture.clock.Now(), fixture.plan.ID,
+		EventPlanStageSettled, PlanStageSettledPayload{
+			StageID: "implementation", Outcome: "invalidated", Revision: fixture.plan.Revision,
+			Reason: "invalidated by an operator action that then crashed",
+		}); err != nil {
+		t.Fatal(err)
+	}
+	crashed, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if crashed.Stages["review"].State != PlanStageCompleted {
+		t.Fatalf("the fixture does not reproduce the crash window: %#v", crashed.Stages["review"])
+	}
+
+	fixture.reconcile(t)
+	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Stages["review"].State != PlanStageInvalidated {
+		t.Fatalf("the dependent of an invalidated stage stayed usable: %#v", after.Stages["review"])
 	}
 }
