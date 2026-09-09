@@ -36,6 +36,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -803,6 +804,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// the process exited on its own - and the CLI adapters are exactly the ones
 	// given read-only planning modes, so it was the primary planner path that
 	// was unbounded.
+	// The parent is kept: the derived deadline below is indistinguishable from
+	// a supervisor shutdown through ctx.Err() alone, and the two mean opposite
+	// things to the run.
+	parent := ctx
 	if limit := request.Budgets.WallLimit; limit > 0 {
 		bounded, cancel := context.WithTimeout(ctx, limit)
 		defer cancel()
@@ -824,7 +829,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			Classification:   classifyAgentFailure(spec, output.Stdout, output.Stderr),
 			RawDiagnosticRef: artifacts[0].Path,
 		}
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
+			// THIS INVOCATION ran out of its own wall bound. Nothing stopped,
+			// and saying "the controller stopped" was affirmatively false: it
+			// routed to RouteWait, so a provider that always overruns its bound
+			// was re-invoked every tick, each attempt paid for, each one
+			// journalled as a shutdown. It is a runtime bound reached with work
+			// preserved, which is what execution_incomplete means, and that
+			// routes to a bounded retry.
+			result.Failure.Classification = FailureExecutionIncomplete
+		case ctx.Err() != nil:
 			// The CONTROLLER stopped, not the work. Recording this as
 			// FailureUnknown routed it to RouteStop and terminalized a run that
 			// a shutdown is supposed to leave resumable.

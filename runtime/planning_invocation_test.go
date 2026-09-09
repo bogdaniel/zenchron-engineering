@@ -253,3 +253,42 @@ func TestACLIInvocationIsBoundedByItsStatedWallLimit(t *testing.T) {
 		t.Fatalf("the invocation ran %s against a 50ms bound", elapsed)
 	}
 }
+
+// A wall expiry is the INVOCATION's bound, not a controller shutdown.
+//
+// The derived deadline and a supervisor shutdown are indistinguishable through
+// ctx.Err(), and the failure branch was written for the shutdown. So an
+// invocation that overran its own bound was journalled as "the controller
+// stopped" - affirmatively false - and controller_shutdown routes to a WAIT: a
+// provider that always overruns was re-invoked every tick, each attempt paid
+// for, bounded only by the cumulative wall budget.
+func TestAWallExpiryIsNotRecordedAsAControllerShutdown(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.block = true
+	request.Budgets = ProviderBudget{WallLimit: 50 * time.Millisecond}
+
+	result, err := provider.Execute(context.Background(), request)
+	if err == nil {
+		t.Fatal("an invocation past its wall bound returned success")
+	}
+	if result.Outcome != OperationFailed {
+		t.Fatalf("outcome = %q, want %q: nothing cancelled this", result.Outcome, OperationFailed)
+	}
+	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete {
+		t.Fatalf("classification = %#v, want %q", result.Failure, FailureExecutionIncomplete)
+	}
+	if route := RouteFailure(result.Failure.Classification); route != RouteRetry {
+		t.Fatalf("a wall expiry routes to %q; a paid re-invocation every tick is what RouteWait produced", route)
+	}
+
+	// A real shutdown still reads as one, and still leaves the run resumable.
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	shutdown, _ := provider.Execute(stopped, request)
+	if shutdown.Outcome != OperationCancelled {
+		t.Fatalf("a cancelled controller produced outcome %q", shutdown.Outcome)
+	}
+	if shutdown.Failure == nil || shutdown.Failure.Classification != FailureControllerShutdown {
+		t.Fatalf("a cancelled controller produced %#v", shutdown.Failure)
+	}
+}
