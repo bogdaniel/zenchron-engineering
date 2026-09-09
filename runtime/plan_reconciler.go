@@ -730,6 +730,19 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 				next.Plan.Revision, plan.Revision)),
 		}
 	}
+	// The DIGEST too, for the same reason and with no more trust. Equal by
+	// construction on the production path - the resolver stamps it from the
+	// plan being executed, and an approval verified it - but the assignment
+	// this writes is a durable provenance claim, and a row recording a digest
+	// the executing revision does not have is a false one whatever produced it.
+	if next.Plan.Digest != plan.Digest {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: this stage's renewal names plan content %s and revision %d is %s, so it was not resolved from the approved document",
+				shortValue(next.Plan.Digest), plan.Revision, shortValue(plan.Digest))),
+		}
+	}
 	if previous.Plan.Revision > plan.Revision {
 		return &PlanStageBlock{
 			StageID: stage.ID, Kind: "authority",

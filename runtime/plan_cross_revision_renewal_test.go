@@ -125,8 +125,8 @@ func TestAnUnchangedStageRenewsAcrossAnApprovedRevision(t *testing.T) {
 	// own copy of the same compiled contract.
 	second := approveNextRevision(t, fixture, carriedContract(fixture.phase8Fixture, "2", "1"))
 	fixture.reconcile(t)
-	if second.Revision != 2 || second.Digest == fixture.plan.Provenance.Contract.Revision {
-		t.Fatalf("revision 2 is not stored as a distinct revision: %#v", second.Provenance)
+	if second.Revision != 2 || second.Provenance.PreviousRevision == nil || *second.Provenance.PreviousRevision != 1 {
+		t.Fatalf("revision 2 is not stored as a revision that follows revision 1: %#v", second.Provenance)
 	}
 	firstPerformance, found, err := fixture.store.PlanAssignment(fixture.plan.ID, 1, 0, "review")
 	if err != nil || !found {
@@ -208,12 +208,15 @@ func TestAnUnchangedStageRenewsAcrossAnApprovedRevision(t *testing.T) {
 //
 // The change is a compiled INVARIANT, deliberately. Objectives, acceptance
 // criteria, obligations, permissions, prohibitions and required claims all
-// reach the worker through the ContextPack, so a change to any of those is
-// already visible in the assignment record and blocks without reading the
-// contract at all. Invariants are compiled into the contract and appear
-// nowhere in any role's pack: nothing but comparing the contract itself can
-// see one move, which is what makes this a causal test of #114's fix rather
-// than of the structural comparison beside it.
+// reach this stage's worker through the ContextPack, so a change to any of
+// those is already visible in the assignment record and blocks without reading
+// the contract at all. Invariants reach a REVIEWER's pack through no class at
+// all - they are not obligations, not policy excerpts, not architecture notes -
+// so nothing but comparing the contract itself can see one move under the roles
+// this test uses. That is what makes it a causal test of #114's fix rather than
+// of the structural comparison beside it. (An implementer's pack does surface
+// invariants through architecture notes, so the same change would block twice
+// there and prove less.)
 func TestChangedCompiledObligationsRefuseAutomaticRenewal(t *testing.T) {
 	fixture := newPlanRunFixture(t, reviewStages())
 	implementation := performUnderRevisionOne(t, fixture)

@@ -543,7 +543,8 @@ been approved.
 So they are erased from the structural comparison and replaced by what they
 point AT. The plan's durable identity has to be the same one, the renewal has
 to be resolved under the revision actually executing - which is the approved
-one - and the previous performance has to be recorded no later than it. The
+one - and to name that revision's own content, and the previous performance has
+to be recorded no later than it. The
 contract has to be the same contract by identity, and the compiled documents
 the two revisions were planned against have to say the same thing: the whole
 contract less its own revision string and the predecessor it names, compared as

@@ -231,6 +231,22 @@ func TestARenewalMustBeResolvedUnderTheExecutingRevision(t *testing.T) {
 		t.Fatalf("the refusal does not name the mismatch: %q %s", block.Kind, block.Reason)
 	}
 
+	// A renewal naming plan CONTENT the executing revision does not have was
+	// not resolved from the approved document, whatever revision number it
+	// carries. The assignment it would freeze is a durable provenance claim,
+	// and a false one is refused rather than written.
+	forged := performed
+	forged.Plan.Revision = 2
+	forged.Plan.Digest = strings.Repeat("f", 64)
+	forged.Contract = domain.ObjectRevision{ID: "contract", Revision: "2"}
+	block = fixture.reconciler.refusePrivilegeChange(governing, stage, 1, forged)
+	if block == nil {
+		t.Fatal("a renewal naming plan content the executing revision does not have was accepted")
+	}
+	if block.Kind != "authority" || !strings.Contains(block.Reason, "plan content") {
+		t.Fatalf("the refusal does not name the content mismatch: %q %s", block.Kind, block.Reason)
+	}
+
 	// And a predecessor whose DOCUMENT claims a revision later than the one
 	// executing is not a performance this one renews. The row is found by its
 	// storage key; what it says about itself is what the comparison then reads,
