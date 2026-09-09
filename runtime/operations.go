@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
-	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -70,14 +69,7 @@ func boundedDetail(detail string) string { return boundedField(detail) }
 // This is the second time a byte-offset cut has been wrong in this package;
 // there is one implementation now, and both callers use it.
 func boundedField(text string) string {
-	if len(text) <= maxPayloadFieldBytes {
-		return text
-	}
-	cut := maxPayloadFieldBytes
-	for cut > 0 && !utf8.ValidString(text[:cut]) {
-		cut--
-	}
-	return text[:cut]
+	return boundedTo(text, maxPayloadFieldBytes)
 }
 
 // handle dispatches on the operation kind. This is a dispatch table for
@@ -252,10 +244,7 @@ func (r *EngineeringRuntime) untrustedSource(record sourceRecord) (untrustedSour
 
 func boundUntrusted(text string, limit int) string {
 	text = strings.ToValidUTF8(strings.ReplaceAll(text, "\x00", ""), "")
-	if len(text) <= limit {
-		return text
-	}
-	return text[:limit]
+	return boundedTo(text, limit)
 }
 
 func textDigest(text string) string {
@@ -2117,7 +2106,7 @@ func readCandidateDiff(dir, base, candidate string) (string, bool) {
 	if len(out) <= maxUpstreamDiffBytes {
 		return out, false
 	}
-	return out[:maxUpstreamDiffBytes], true
+	return boundedTo(out, maxUpstreamDiffBytes), true
 }
 
 // frozenInstructions resolves the instruction text an assignment froze by

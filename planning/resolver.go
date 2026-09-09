@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -649,7 +650,18 @@ func boundedReason(detail string) string {
 		return "no readiness detail was reported"
 	}
 	if len(detail) > 200 {
-		return detail[:200]
+		// Cut on a rune boundary. A readiness detail is free text from a
+		// provider or an operator, and half a character is not a reason - it
+		// is invalid UTF-8 that json.Marshal turns into a replacement
+		// character, which is how a bounded field grows past its own bound.
+		cut := 200
+		for back := 0; back < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(detail[cut]); back++ {
+			cut--
+		}
+		if !utf8.RuneStart(detail[cut]) {
+			cut = 200
+		}
+		return detail[:cut]
 	}
 	return detail
 }

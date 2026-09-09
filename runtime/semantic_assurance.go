@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -140,7 +141,7 @@ func (v ReadOnlyView) bound(out string) string {
 	if len(out) <= limit {
 		return out
 	}
-	return out[:limit] + "\n[truncated by Zenchron: tool result exceeded " + strconv.Itoa(limit) + " bytes]"
+	return boundedTo(out, limit) + "\n[truncated by Zenchron: tool result exceeded " + strconv.Itoa(limit) + " bytes]"
 }
 
 // invoke performs one read-only capability. An unknown name is refused by name
@@ -349,11 +350,30 @@ func decodeSemanticVerdict(raw []byte, requested []SemanticClaimRequest) (map[st
 	return results, nil
 }
 
+// boundedTo cuts text to at most limit BYTES without splitting a rune. It is
+// the one truncator in this package: a byte offset landing inside a multi-byte
+// character has been wrong here three times, in a stored field, in an operator
+// note, and in every tool result a non-ASCII repository produces.
+//
+// It backs up over continuation bytes only, so text that is not valid UTF-8 to
+// begin with - a diff of a binary file, say - is still cut near the limit
+// rather than reduced to nothing.
 func boundedTo(text string, limit int) string {
-	if len(text) > limit {
-		return text[:limit]
+	if len(text) <= limit {
+		return text
 	}
-	return text
+	// A UTF-8 sequence is at most four bytes, so a boundary is at most three
+	// bytes back. Past that the text is not UTF-8 here at all - a diff of a
+	// binary file, say - and it is cut at the limit rather than walked down
+	// towards nothing looking for a boundary that does not exist.
+	cut := limit
+	for back := 0; back < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(text[cut]); back++ {
+		cut--
+	}
+	if !utf8.RuneStart(text[cut]) {
+		cut = limit
+	}
+	return text[:cut]
 }
 
 // semanticEvidenceStatus maps a verdict status onto the durable evidence

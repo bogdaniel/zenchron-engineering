@@ -1813,8 +1813,9 @@ func TestALongNoteIsTruncatedRatherThanRefused(t *testing.T) {
 func TestTruncationNeverSplitsARune(t *testing.T) {
 	note := strings.Repeat("a", maxPayloadFieldBytes-1) + strings.Repeat("ă", 4)
 	for name, bounded := range map[string]string{
-		"BoundedNote":   BoundedNote(note),
-		"boundedDetail": boundedDetail(note),
+		"BoundedNote":    BoundedNote(note),
+		"boundedDetail":  boundedDetail(note),
+		"boundUntrusted": boundUntrusted(note, maxPayloadFieldBytes),
 	} {
 		if len(bounded) > maxPayloadFieldBytes {
 			t.Fatalf("%s produced %d bytes, above the %d-byte bound", name, len(bounded), maxPayloadFieldBytes)
@@ -1845,6 +1846,44 @@ func TestTruncationNeverSplitsARune(t *testing.T) {
 // it stalled every run in the fleet - the tick takes the same lock before it
 // drives anything - so a single delegated revision froze work that had nothing
 // to do with plans.
+
+// Every truncator in the package cuts the same way.
+//
+// The rune-splitting cut was found twice in stored fields and fixed twice, in
+// two separate helpers, while the tool-result bound - the one a non-ASCII
+// repository hits on every single read - kept cutting by raw byte offset. They
+// are one function now, and this is what says so.
+//
+// The binary case is the reason it backs up over continuation bytes rather than
+// re-validating the prefix: a diff of a binary file is not valid UTF-8 anywhere,
+// and a validity-based cut walks such a string all the way down to nothing.
+func TestEveryTruncatorCutsOnARuneBoundary(t *testing.T) {
+	const limit = 9
+	text := "abcdefgh" + strings.Repeat("ă", 4)
+	for name, bounded := range map[string]string{
+		"boundedTo":      boundedTo(text, limit),
+		"boundUntrusted": boundUntrusted(text, limit),
+		"ReadOnlyView":   ReadOnlyView{MaxResultBytes: limit}.bound(text),
+		"ToolSurface":    ToolSurface{MaxResultBytes: limit}.bound(text),
+	} {
+		// The tool-result bounds append a truncation notice, so the assertion
+		// is about the cut itself: the text kept must be whole characters.
+		kept, _, _ := strings.Cut(bounded, "\n[truncated by Zenchron")
+		if len(kept) > limit {
+			t.Fatalf("%s kept %d bytes, above the %d-byte limit", name, len(kept), limit)
+		}
+		if !utf8.ValidString(kept) {
+			t.Fatalf("%s produced invalid UTF-8: %q", name, kept)
+		}
+	}
+
+	// Not valid UTF-8 anywhere. It must still be cut near the limit.
+	binary := string([]byte{0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89})
+	if cut := boundedTo(binary, 6); len(cut) != 6 {
+		t.Fatalf("a binary string bounded to 6 bytes became %d bytes", len(cut))
+	}
+}
+
 func TestThePlanLockIsReleasedAcrossAProviderCall(t *testing.T) {
 	supervisor := &Supervisor{}
 	invoked := make(chan struct{})
