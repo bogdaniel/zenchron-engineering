@@ -988,7 +988,18 @@ func (s *runState) startedContinuationBindings() map[string]bool {
 // than at zero.
 func (s *runState) providerInvocationCeilingReached() bool {
 	limit := s.providerInvocationLimit()
-	return limit > 0 && s.projection.Attempts[OpExecutionInvoke] >= limit
+	if limit <= 0 {
+		return false
+	}
+	// A ceiling refuses the NEXT invocation; it does not retroactively fail a
+	// run that spent its last one productively. Without this, a run whose final
+	// permitted invocation completed the candidate read as failed the moment it
+	// finished - the continuation ceiling has the same exemption, for the same
+	// reason.
+	if _, wanted := bindExecutionInvoke(s); !wanted {
+		return false
+	}
+	return s.projection.Attempts[OpExecutionInvoke] >= limit
 }
 
 // providerInvocationLimit is the run's total, taken from what the run

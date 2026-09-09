@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -83,7 +84,12 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 
 	// Feedback re-activates the producer, which moves to candidate B. The
 	// review that was performed was about A.
+	//
+	// The run's own record moves with the journal, exactly as the runtime's
+	// reconcile of that run does it - the event and the row are written by the
+	// same pass, and the plan compares against the row the assignment froze.
 	recordCandidate(t, fixture, implementation, "bbbbbbbbbbbb")
+	settleRunAtGoalState(t, fixture, implementation, "bbbbbbbbbbbb")
 	fixture.reconcile(t)
 
 	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
@@ -95,6 +101,42 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 	}
 	if after.Stages["assurance"].State == PlanStageSatisfied {
 		t.Fatal("the gate stayed satisfied over a review that was never performed on the current work")
+	}
+
+	// It does not churn. A stage's run identity is fixed within a revision, so
+	// performing it again under this one would adopt the very run whose work
+	// was just marked unusable. The plan says so and stops, rather than
+	// re-settling the same run every tick and spending the child-run envelope
+	// on it.
+	before := after.Consumed.ChildRuns
+	var blocked *PlanStageBlock
+	for i := 0; i < 3; i++ {
+		report := fixture.reconcile(t)
+		for index, block := range report.Blocked {
+			if block.StageID == "review" {
+				blocked = &report.Blocked[index]
+			}
+		}
+	}
+	if blocked == nil || !strings.Contains(blocked.Reason, "propose a revision") {
+		t.Fatalf("the plan does not say how the work gets done again: %#v", blocked)
+	}
+	settled, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Stages["review"].State != PlanStageInvalidated {
+		t.Fatalf("the invalidated stage moved on its own: %#v", settled.Stages["review"])
+	}
+	if settled.Consumed.ChildRuns != before {
+		t.Fatalf("child runs went from %d to %d: the invalidation is looping", before, settled.Consumed.ChildRuns)
+	}
+	// The freeze that describes what WAS performed is untouched: it is the
+	// record of a performance, and the performance happened.
+	if frozen, found, err := fixture.store.PlanAssignment(fixture.plan.ID, fixture.plan.Revision, "review"); err != nil {
+		t.Fatal(err)
+	} else if !found || frozen.Context.UpstreamOutputs[0].Candidate != "aaaaaaaaaaaa" {
+		t.Fatalf("the record of what the review consumed was rewritten: %#v", frozen.Context.UpstreamOutputs)
 	}
 }
 

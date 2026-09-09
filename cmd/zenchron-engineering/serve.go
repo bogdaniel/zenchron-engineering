@@ -411,12 +411,23 @@ func (c *composition) planSubject(supervisor *runtime.Supervisor, request runtim
 // by a path that did resolve it. The enrolment assumption remains the fallback
 // for a plan whose stages have not started yet.
 func (c *composition) planBaseBranch(planID string) (string, error) {
-	runs, err := c.store.Runs()
+	// Through the PLAN's own stages, not by loading every run this state
+	// directory has ever held. A revise on a long-lived installation would
+	// otherwise read the whole run table into memory to answer a question about
+	// one plan.
+	snapshot, err := c.store.ReplayPlan(planID)
 	if err != nil {
 		return "", err
 	}
-	for _, run := range runs {
-		if run.Plan != nil && run.Plan.PlanID == planID && strings.TrimSpace(run.Base.ID) != "" {
+	for _, stage := range snapshot.Stages {
+		if stage.RunID == "" {
+			continue
+		}
+		run, found, err := c.store.Run(stage.RunID)
+		if err != nil {
+			return "", err
+		}
+		if found && strings.TrimSpace(run.Base.ID) != "" {
 			return run.Base.ID, nil
 		}
 	}

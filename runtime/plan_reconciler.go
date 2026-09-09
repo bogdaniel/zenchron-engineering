@@ -236,6 +236,21 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		if terminalStageState(projection.State) || projection.State == PlanStageRunning {
 			continue
 		}
+		// An invalidated stage that still names a run cannot be performed again
+		// under THIS revision: a stage's run identity is fixed within a
+		// revision, so starting it would adopt the same run - the one whose
+		// work was just marked unusable - and re-settle it from the state it
+		// already reached. The plan says so instead of pretending, and a new
+		// revision is what re-performs the work: that is what produces a
+		// different run.
+		if projection.State == PlanStageInvalidated && projection.RunID != "" {
+			report.Blocked = append(report.Blocked, PlanStageBlock{
+				StageID: stage.ID, Kind: "invalidated",
+				Reason: "this stage's completed work is no longer valid (" + projection.Reason +
+					"), and a stage cannot be performed twice under one revision: propose a revision to have it done again",
+			})
+			continue
+		}
 		if awaiting {
 			report.Waiting = fmt.Sprintf("awaiting operator approval of revision %d proposed by %s",
 				pending.Proposed.Revision, pending.ID)
@@ -504,9 +519,18 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 			if upstream.RunID == "" || upstream.Candidate == "" {
 				continue
 			}
-			head, err := r.runHead(upstream.RunID)
+			// Compared against the SAME field the freeze copied - the run's own
+			// record of its candidate - so the two are like for like. The
+			// journal projection can be momentarily ahead of it, mid-pass,
+			// which would read as movement and throw away a review that had
+			// just been performed against the candidate the assignment names.
+			run, found, err := r.Store.Run(upstream.RunID)
 			if err != nil {
 				return false, err
+			}
+			head := ""
+			if found {
+				head = run.Candidate.Revision
 			}
 			if head == "" || head == upstream.Candidate {
 				continue

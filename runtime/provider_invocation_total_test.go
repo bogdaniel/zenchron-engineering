@@ -83,6 +83,18 @@ func TestTheRunTotalBoundsInvocationsAcrossDistinctBindings(t *testing.T) {
 		t.Fatal("a run inside its total was terminated")
 	}
 
+	// A ceiling refuses the NEXT invocation and never retroactively fails a run
+	// that spent its last one productively. A complete candidate wants no
+	// further invocation, so it is not failed by a ceiling it has reached.
+	finished := totalInvocationState(t, 2, 3, "checkpoint-a")
+	finished.projection.CandidateComplete = true
+	if finished.providerInvocationCeilingReached() {
+		t.Fatal("a run whose final permitted invocation completed the candidate was refused")
+	}
+	if disposition, reason := finished.conditions(); disposition == Failed && reason == "run_provider_invocations_exhausted" {
+		t.Fatal("a finished run was retroactively failed by the ceiling it had reached")
+	}
+
 	// A run persisted before the bound existed is unbounded by it, exactly as
 	// it was when it ran.
 	legacy := totalInvocationState(t, 0, 9, "checkpoint-a")
