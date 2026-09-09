@@ -467,6 +467,36 @@ approve something nobody read. `plan reject` records the refusal. `plan revise` 
 new proposal rather than editing an approved plan in place, because an approved
 revision is immutable and the work bound to it stays bound to what was approved.
 
+An approval also binds the ASSIGNMENTS it was shown. The plan digest binds the
+document that was read; on its own it says nothing about who will perform it.
+Resolution is otherwise recomputed from the live registry and workforce on
+every look, so a stage that had not started yet resolved again when it became
+dependency-ready - and an instruction pack edited in place, a profile edited,
+or a changed default worker between the approval and the first run meant the
+first execution froze a configuration nobody had approved. Those assignments
+are now recorded when the approval is, immutably per stage, and the approval
+event carries their canonical digest so the binding sits in the journal rather
+than only in the table beside it. Resolution reads them back for stages that
+have not started, which is the same law that already applied to stages that had.
+
+What approval cannot bind is bound when the stage starts. A stage approved
+before its producer ran was approved with no upstream at all, so the upstream
+outputs it consumes are rebound from the settled producer at that point, and
+only where the approved assignment's own context selection says the worker is
+entitled to them. Approval freezes what the operator authorized, not facts that
+did not exist yet.
+
+One identity the assignment cannot carry is the provider behind an agent id:
+the engine is built from live agent configuration. An id re-pointed at another
+provider kind, another vendor family or a weaker trust mode is refused before
+the run is created, because otherwise an independence obligation stated in
+terms of vendor family would be quietly false.
+
+A stage that resolved to a BLOCKER at approval is not bound - the operator was
+shown a blocker rather than an assignment, and readiness at planning time was
+never a promise - and a revision approved before this boundary existed has no
+binding and resolves live, exactly as it did then.
+
 ### Work whose input moved
 
 A completed stage is invalidated when the upstream work its frozen assignment
