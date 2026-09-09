@@ -125,7 +125,7 @@ func TestConcurrentProposalsNeverRecordOneRevisionTwice(t *testing.T) {
 // the next supersession measure against the wrong predecessor.
 func TestApprovingASupersededRevisionIsRefused(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
-	if _, err := fixture.service.Approve(fixture.plan.ID, 1, fixture.plan.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(fixture.plan.ID, 1, fixture.plan.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	second := fixture.plan
@@ -145,11 +145,11 @@ func TestApprovingASupersededRevisionIsRefused(t *testing.T) {
 	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(second.ID, 2, second.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(second.ID, 2, second.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = fixture.service.Approve(fixture.plan.ID, 1, fixture.plan.Digest, "operator", "")
+	_, err = fixture.service.Approve(fixture.plan.ID, 1, fixture.plan.Digest, "", "operator", "")
 	var refused *PlanRefusedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("approving the superseded revision 1 was allowed: %v", err)
@@ -168,7 +168,7 @@ func TestApprovingASupersededRevisionIsRefused(t *testing.T) {
 // proposing a revision resets that decision to pending.
 func TestApprovingALaterRevisionRecordsTheSupersession(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
-	if _, err := fixture.service.Approve(fixture.plan.ID, 1, fixture.plan.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(fixture.plan.ID, 1, fixture.plan.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	second := fixture.plan
@@ -197,7 +197,7 @@ func TestApprovingALaterRevisionRecordsTheSupersession(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(second.ID, 2, second.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(second.ID, 2, second.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,10 +289,10 @@ func TestADecisionWithoutADigestIsRefusedAtTheServiceBoundary(t *testing.T) {
 	}
 
 	for _, digest := range []string{"", "   "} {
-		if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, digest, "operator", ""); err == nil {
+		if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, digest, "", "operator", ""); err == nil {
 			t.Fatalf("an approval naming digest %q was accepted", digest)
 		}
-		if _, err := fixture.service.Reject(fixture.plan.ID, fixture.plan.Revision, digest, "operator", ""); err == nil {
+		if _, err := fixture.service.Reject(fixture.plan.ID, fixture.plan.Revision, digest, "", "operator", ""); err == nil {
 			t.Fatalf("a rejection naming digest %q was accepted", digest)
 		}
 	}
@@ -303,7 +303,7 @@ func TestADecisionWithoutADigestIsRefusedAtTheServiceBoundary(t *testing.T) {
 	if len(after) != len(before) {
 		t.Fatalf("a digestless decision appended %d events", len(after)-len(before))
 	}
-	if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest, "", "operator", ""); err != nil {
 		t.Fatalf("the exact digest was refused: %v", err)
 	}
 }
@@ -362,10 +362,10 @@ func TestARefusedRevisionStaysRefusedAfterALaterValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "operator", ""); err == nil {
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "", "operator", ""); err == nil {
 		t.Fatal("a refused revision was approved because a later revision was validated after it")
 	}
-	if _, err := fixture.service.Approve(third.ID, third.Revision, third.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(third.ID, third.Revision, third.Digest, "", "operator", ""); err != nil {
 		t.Fatalf("the validated revision was refused: %v", err)
 	}
 }
@@ -377,13 +377,13 @@ func TestAnOperatorCanApproveAfterRejecting(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
 	id, revision, digest := fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest
 
-	if _, err := fixture.service.Approve(id, revision, digest, "operator", "yes"); err != nil {
+	if _, err := fixture.service.Approve(id, revision, digest, "", "operator", "yes"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Reject(id, revision, digest, "operator", "on reflection, no"); err != nil {
+	if _, err := fixture.service.Reject(id, revision, digest, "", "operator", "on reflection, no"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(id, revision, digest, "operator", "yes after all"); err != nil {
+	if _, err := fixture.service.Approve(id, revision, digest, "", "operator", "yes after all"); err != nil {
 		t.Fatalf("an operator could not approve after rejecting: %v", err)
 	}
 

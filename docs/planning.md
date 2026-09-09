@@ -479,6 +479,23 @@ event carries their canonical digest so the binding sits in the journal rather
 than only in the table beside it. Resolution reads them back for stages that
 have not started, which is the same law that already applied to stages that had.
 
+The binding is taken against the state approving WOULD leave, not the state it
+replaces - the same computation `plan show --revision N` renders. That matters
+for the most ordinary flow there is: revising a plan while it executes. The
+supersession an approval records resets a stage the revision materially changes
+to a zero projection, lifecycle cleared and generation back to zero, so reading
+the pre-approval state saw it as "already started" and left it unbound - and
+nothing then governed it, because the privilege comparison engages only above
+generation zero and the supersession had just taken it back to zero.
+
+A decision may also NAME the assignment set it decides. The revision digest
+binds the document an operator read and does not move when a profile, an
+instruction pack or the workforce is edited, so an edit landing between reading
+a proposal and deciding on it would be bound as what the operator saw. `plan
+show` prints the set's digest in the command it offers, and
+`plan approve --assignments SHA256` refuses when the set has moved since - the
+same shape that stops a revision number alone from deciding an unread document.
+
 What approval cannot bind is bound when the stage starts. A stage approved
 before its producer ran was approved with no upstream at all, so the upstream
 outputs it consumes are rebound from the settled producer at that point, and
@@ -492,10 +509,17 @@ provider kind, another vendor family or a weaker trust mode is refused before
 the run is created, because otherwise an independence obligation stated in
 terms of vendor family would be quietly false.
 
-A stage that resolved to a BLOCKER at approval is not bound - the operator was
-shown a blocker rather than an assignment, and readiness at planning time was
-never a promise - and a revision approved before this boundary existed has no
-binding and resolves live, exactly as it did then.
+A stage that resolved to a BLOCKER at approval is not bound. The operator was
+shown a blocker rather than an assignment, so there is no identity to hold
+execution to, and readiness at planning time was never a promise - an agent that
+authenticates an hour later performs the stage under whatever resolves then.
+That is a deliberate cut rather than an oversight, so the view NAMES those
+stages: `unbound` lists them, before and after the approval, because rendering
+them beside bound stages identically is what would let an operator believe an
+approval had covered them.
+
+A revision approved before this boundary existed has no binding and resolves
+live, exactly as it did then.
 
 ### Work whose input moved
 

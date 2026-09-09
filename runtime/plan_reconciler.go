@@ -1014,6 +1014,17 @@ func (r PlanReconciler) refuseWorkerDrift(stage domain.PlanStage, assignment dom
 			{"provider kind", assignment.Agent.ProviderKind, agent.ProviderKind},
 			{"vendor family", assignment.Agent.VendorFamily, agent.VendorFamily},
 			{"trust mode", string(assignment.Agent.TrustMode), string(agent.TrustMode)},
+			// The MODEL binds itself where the assignment names one: the
+			// runtime passes it as the invocation's model preference and the
+			// adapter prefers it over the worker's configured default, so a
+			// configured model moving underneath a named one changes nothing.
+			//
+			// What does NOT bind is a model nobody named. An assignment
+			// approved against a worker with no configured model falls through
+			// to whatever the worker's configuration says at invocation time,
+			// so a model configured after the approval would be run under an
+			// approval that never saw one.
+			{"model", "(none configured)", modelAppearedSince(assignment, agent)},
 		} {
 			if drift.before == drift.now {
 				continue
@@ -1032,6 +1043,21 @@ func (r PlanReconciler) refuseWorkerDrift(stage domain.PlanStage, assignment dom
 		Reason: boundedDetail(fmt.Sprintf(
 			"worker %s is not registered, and this stage was approved to be performed by it", assignment.Agent.ID)),
 	}
+}
+
+// modelAppearedSince names a model the worker has gained since an assignment
+// was approved against it having none, or the sentinel that compares equal.
+//
+// It is deliberately one-directional. An assignment that NAMES a model carries
+// it to the invocation and the adapter prefers it, so nothing the worker's
+// configuration does afterwards can displace it - and a profile that pinned a
+// model is exactly that case. Only the absence is unbound, so only the absence
+// is checked.
+func modelAppearedSince(assignment domain.AgentAssignment, agent domain.ExecutionAgentDescriptor) string {
+	if assignment.Agent.Model == "" && agent.Model != "" {
+		return agent.Model
+	}
+	return "(none configured)"
 }
 
 // upstreamBase is the published upstream candidate this stage should build on.

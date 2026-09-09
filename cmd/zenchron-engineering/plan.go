@@ -29,7 +29,7 @@ import (
 )
 
 const planUsage = "usage: zenchron-engineering autonomy plan {issue <number> [--template <id>] [--agent <id>] [--deterministic]|" +
-	"show <plan> [--revision <n>]|approve <plan> --revision <n> --digest <sha256> [--note <text>]|" +
+	"show <plan> [--revision <n>]|approve <plan> --revision <n> --digest <sha256> [--assignments <sha256>] [--note <text>]|" +
 	"reject <plan> --revision <n> --digest <sha256> [--note <text>]|" +
 	"revise <plan> [--template <id>] [--deterministic] [--substitute-human <stage>]|" +
 	"status <plan>|list} [--text] [--repo owner/name] [--config <path>]"
@@ -685,7 +685,8 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	}
 	delegated, payload, sent, err := delegatePayloadSent(stateDir, runtime.ControlRequest{
 		Command: command, PlanID: planID, Revision: revision, Digest: digest,
-		Note: flags.Note, Operator: requester,
+		AssignmentsDigest: strings.TrimSpace(flags.Assignments),
+		Note:              flags.Note, Operator: requester,
 	})
 	if delegated {
 		// Only a request that REACHED the supervisor can have been applied
@@ -719,7 +720,7 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if verb == "reject" {
 		decide = composed.service.Reject
 	}
-	snapshot, err := decide(planID, revision, digest, operator.ID, flags.Note)
+	snapshot, err := decide(planID, revision, digest, strings.TrimSpace(flags.Assignments), operator.ID, flags.Note)
 	if err != nil {
 		return exitFor(err, runtime.ExitFailed), err
 	}
@@ -872,8 +873,15 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		if awaiting.Revision != view.Plan.Revision {
 			fmt.Fprintf(stdout, "awaiting a decision: revision %d (digest %s)\n", awaiting.Revision, awaiting.Digest)
 		}
-		fmt.Fprintf(stdout, "nothing executes until it is approved: `autonomy plan approve %s --revision %d --digest %s`\n",
-			view.Plan.ID, awaiting.Revision, awaiting.Digest)
+		// The assignments digest is only printed where the view rendered IS
+		// the revision awaiting the decision. Naming the set from a different
+		// revision's view would refuse every approval.
+		assignments := ""
+		if awaiting.Revision == view.Plan.Revision && view.AssignmentsDigest != "" {
+			assignments = " --assignments " + view.AssignmentsDigest
+		}
+		fmt.Fprintf(stdout, "nothing executes until it is approved: `autonomy plan approve %s --revision %d --digest %s%s`\n",
+			view.Plan.ID, awaiting.Revision, awaiting.Digest, assignments)
 	}
 	return planExit(view), nil
 }

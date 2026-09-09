@@ -198,6 +198,13 @@ type autonomyFlags struct {
 	// be a proposal that landed after the operator looked.
 	Revision int
 	Digest   string
+	// Assignments names the assignment set a decision is about: who would
+	// perform each stage, under which profile, packs and worker. It is
+	// OPTIONAL and separate from Digest because the plan document's digest does
+	// not move when operator configuration does - so an edit landing between
+	// reading a proposal and deciding on it would otherwise be bound as what
+	// the operator saw.
+	Assignments string
 	// SubstituteHuman names the blocked agent stage an operator is replacing
 	// with an independent human review. It is only ever accepted where POLICY
 	// permitted that substitution; the permission comes from the obligation
@@ -1043,6 +1050,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.SubstituteHuman = args[1]
 		case "--digest":
 			flags.Digest = args[1]
+		case "--assignments":
+			flags.Assignments = args[1]
 		case "--revision":
 			revision, err := strconv.Atoi(args[1])
 			if err != nil || revision < 1 {

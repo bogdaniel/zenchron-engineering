@@ -136,7 +136,7 @@ func planFixtureContract(base *phase8Fixture) domain.EngineeringWorkContract {
 
 func (f *planRunFixture) approve(t *testing.T) {
 	t.Helper()
-	if _, err := f.service.Approve(f.plan.ID, f.plan.Revision, f.plan.Digest, "operator", "looks right"); err != nil {
+	if _, err := f.service.Approve(f.plan.ID, f.plan.Revision, f.plan.Digest, "", "operator", "looks right"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 }
@@ -305,7 +305,7 @@ func TestTheAggregateEnvelopeBoundsChildRuns(t *testing.T) {
 	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = tightened
@@ -525,7 +525,7 @@ func TestDecompositionEmitsAProposalAndPausesAffectedWork(t *testing.T) {
 
 	// Approving the proposed revision releases it, and consumption carries
 	// across the revision rather than resetting.
-	if _, err := fixture.service.Approve(fixture.plan.ID, proposal.Proposed.Revision, proposal.Proposed.Digest, "operator", "approved"); err != nil {
+	if _, err := fixture.service.Approve(fixture.plan.ID, proposal.Proposed.Revision, proposal.Proposed.Digest, "", "operator", "approved"); err != nil {
 		t.Fatalf("approve revision: %v", err)
 	}
 	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
@@ -1029,7 +1029,7 @@ func TestAFailedPlanningInvocationIsCountedAndTheCeilingStopsIt(t *testing.T) {
 	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = tightened
@@ -1114,7 +1114,7 @@ func TestRejectingAProposalReleasesTheApprovedPlan(t *testing.T) {
 	}
 
 	// The operator says no. The plan keeps executing the revision it approved.
-	if _, err := fixture.service.Reject(fixture.plan.ID, proposals[0].Proposed.Revision, proposals[0].Proposed.Digest, "operator", "keep the current plan"); err != nil {
+	if _, err := fixture.service.Reject(fixture.plan.ID, proposals[0].Proposed.Revision, proposals[0].Proposed.Digest, "", "operator", "keep the current plan"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	released := fixture.reconcile(t)
@@ -1304,7 +1304,7 @@ func TestThePlanWallCeilingIsAttributedAndEnforced(t *testing.T) {
 	if err := fixture.store.PutPlanContract(bounded.ID, bounded.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(bounded.ID, bounded.Revision, bounded.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(bounded.ID, bounded.Revision, bounded.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = bounded
@@ -1457,7 +1457,7 @@ func TestAFrozenAssignmentSurvivesARevision(t *testing.T) {
 	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "", "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1619,7 +1619,7 @@ func TestTheSupersessionTopUpUsesTheGoverningPredecessor(t *testing.T) {
 	rejected := store(2, func(plan *domain.EngineeringPlan) {
 		plan.Stages[1].Objective = "Implement the frontend half, differently."
 	})
-	if _, err := fixture.service.Reject(rejected.ID, rejected.Revision, rejected.Digest, "operator", "no"); err != nil {
+	if _, err := fixture.service.Reject(rejected.ID, rejected.Revision, rejected.Digest, "", "operator", "no"); err != nil {
 		t.Fatal(err)
 	}
 	// Revision 3 changes the BACKEND stage, which revision 1 - the governing

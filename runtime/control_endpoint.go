@@ -132,6 +132,12 @@ type ControlRequest struct {
 	Revision int    `json:"revision,omitempty"`
 	Digest   string `json:"digest,omitempty"`
 	Note     string `json:"note,omitempty"`
+	// AssignmentsDigest is the assignment set the requester read, where they
+	// named one. The revision digest binds the plan DOCUMENT and does not move
+	// when a profile, an instruction pack or the workforce is edited, so this
+	// is what binds who would perform the work. It is optional, and checked
+	// where present.
+	AssignmentsDigest string `json:"assignments_digest,omitempty"`
 	// Operator is the identity of the person MAKING the request, resolved by
 	// their own process exactly as the local path resolves it.
 	//

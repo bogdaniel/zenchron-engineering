@@ -14,6 +14,7 @@ package runtime
 // authorized to use.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -180,6 +181,96 @@ func TestApprovalBindsTheWorkerAndADefaultChangeDoesNotMoveIt(t *testing.T) {
 	}
 }
 
+// A revision that materially CHANGES a started stage binds that stage too.
+//
+// This is the ordinary flow - revise a plan while it is executing - and it was
+// the hole the first version of this boundary left. The supersession an
+// approval records resets an invalidated stage to a zero projection: lifecycle
+// cleared, generation back to zero, no assignment. So reading the pre-approval
+// snapshot saw the stage as "already started" and left it unbound, and then
+// nothing governed it at all - the privilege comparison engages only above
+// generation zero, and the supersession had just taken it back to zero. The
+// changed stage live-resolved from whatever the registry said at first run.
+//
+// The binding is taken against the state approving WOULD leave, which is the
+// same computation `plan show --revision N` renders.
+func TestARevisionThatChangesAStartedStageBindsItToo(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+	started, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Stages["implementation"].AssignmentID == "" {
+		t.Fatal("this test needs the stage to have STARTED under revision 1, and it did not")
+	}
+
+	// Revision 2 changes that stage, so approving it discards the work and
+	// performs the stage again.
+	second := fixture.plan
+	second.Revision = 2
+	previous := fixture.plan.Revision
+	second.Provenance.PreviousRevision = &previous
+	second.Stages = append([]domain.PlanStage(nil), fixture.plan.Stages...)
+	second.Stages[0].Objective = "Do the work, differently."
+	digest, digestErr := second.ContentDigest()
+	if digestErr != nil {
+		t.Fatal(digestErr)
+	}
+	second.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
+
+	// WHAT THE OPERATOR IS SHOWN when they read the proposal: the preview,
+	// which resolves the stage this revision will redo rather than decorating
+	// it with the previous revision's performance.
+	preview, err := fixture.service.ViewRevision(fixture.plan.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown, ok := assignmentFor(preview.Assigned, "implementation")
+	if !ok {
+		t.Fatalf("the preview showed no assignment for the stage it will redo: %#v", preview.Blocked)
+	}
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "", "operator", ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.plan = second
+
+	bound, err := fixture.store.ApprovedAssignments(fixture.plan.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bound["implementation"]; !ok {
+		t.Fatalf("the revision that redoes this stage bound nothing for it: %#v", bound)
+	}
+
+	// The operator's default moves before the replacement performance starts.
+	fixture.service.DefaultAgent = "claude"
+	fixture.reconciler.Service = fixture.service
+	fixture.reconcile(t)
+
+	executed, found, err := fixture.store.PlanAssignment(fixture.plan.ID, 2, 0, "implementation")
+	if err != nil || !found {
+		t.Fatalf("the replacement performance froze nothing: found=%v err=%v", found, err)
+	}
+	if executed.Agent != shown.Agent {
+		t.Fatalf("the replacement executed worker %#v and the approval surface showed %#v", executed.Agent, shown.Agent)
+	}
+	if len(fixture.engineCalls) == 0 || fixture.engineCalls[len(fixture.engineCalls)-1] != shown.Agent.ID {
+		t.Fatalf("the engine was built for %v, want the approved worker %s", fixture.engineCalls, shown.Agent.ID)
+	}
+}
+
 // An agent id re-pointed at a different provider is refused rather than
 // executed under the approved worker's name.
 //
@@ -228,6 +319,96 @@ func TestAWorkerRepointedAtAnotherProviderIsRefused(t *testing.T) {
 	}
 	if snapshot.Stages["implementation"].RunID != "" {
 		t.Fatalf("the refused stage started run %s anyway", snapshot.Stages["implementation"].RunID)
+	}
+}
+
+// A decision may NAME the assignment set it decides, and then it decides that
+// set or nothing.
+//
+// The revision digest binds the plan document an operator read. It does not
+// move when a profile, an instruction pack or the workforce is edited, so an
+// edit landing between `plan show` and `plan approve` was bound as "what the
+// operator saw" - true only in the sense that nobody looked again. The set
+// digest the view prints closes that the same way the revision digest closed
+// deciding a document nobody read.
+func TestADecisionMayNameTheAssignmentSetItDecides(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	view, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.AssignmentsDigest == "" {
+		t.Fatal("the approval surface printed no assignment set to name")
+	}
+
+	// The operator's default moves between reading and deciding.
+	fixture.service.DefaultAgent = "claude"
+	_, err = fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest,
+		view.AssignmentsDigest, "operator", "")
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("a decision naming a set that had moved was applied: %v", err)
+	}
+	if !strings.Contains(refused.Detail, "who would perform this work has changed") {
+		t.Fatalf("the refusal does not say what moved: %s", refused.Detail)
+	}
+	if bound, err := fixture.store.ApprovedAssignments(fixture.plan.ID, fixture.plan.Revision); err != nil {
+		t.Fatal(err)
+	} else if len(bound) != 0 {
+		t.Fatalf("the refused decision bound something anyway: %#v", bound)
+	}
+
+	// Read it again, decide on what is there now: accepted, and bound to it.
+	after, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.AssignmentsDigest == view.AssignmentsDigest {
+		t.Fatal("the edit did not move the set, so this test proves nothing")
+	}
+	if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest,
+		after.AssignmentsDigest, "operator", ""); err != nil {
+		t.Fatalf("a decision naming the current set was refused: %v", err)
+	}
+	bound, err := fixture.store.ApprovedAssignments(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound["implementation"].Agent.ID != "claude" {
+		t.Fatalf("the approval bound %q and the operator read claude", bound["implementation"].Agent.ID)
+	}
+}
+
+// A stage that showed a BLOCKER is bound to nothing, and the view says so
+// rather than rendering it later as though an approval had covered it.
+func TestAStageThatShowedABlockerIsReportedUnbound(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", Profile: "not-installed",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	view, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Blocked) == 0 {
+		t.Fatal("this test needs the stage to be BLOCKED at approval, and it resolved")
+	}
+	if len(view.Unbound) != 1 || view.Unbound[0] != "implementation" {
+		t.Fatalf("the view does not report the stage as unbound: %#v", view.Unbound)
+	}
+	fixture.approve(t)
+	after, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Unbound) != 1 || after.Unbound[0] != "implementation" {
+		t.Fatalf("after approval the unbound stage is no longer reported: %#v", after.Unbound)
 	}
 }
 

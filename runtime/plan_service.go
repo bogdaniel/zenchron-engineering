@@ -223,12 +223,16 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 
 // unstarted is the assignments an approval can still bind.
 //
-// A stage that has already started is executing under the row it froze, and
-// that row is what every later look reads. Binding it again here would record
-// the revision it STARTED under as this revision's approval, which is a claim
-// about the wrong performance; what governs a started stage being performed
-// again is the privilege comparison against its previous performance, not this
-// boundary.
+// A stage that is still executing under the row it froze is not bound again:
+// that row is what every later look reads, and recording it here would file the
+// revision it STARTED under as this revision's approval, which is a claim about
+// the wrong performance. What governs it being performed again under the SAME
+// revision is the privilege comparison against its previous performance.
+//
+// The snapshot handed in decides which stages those are, and it must be the
+// state approving would leave. A stage this revision invalidates has started
+// under the old one and not under this one, so the prospective state reads it
+// as pending and it IS bound here.
 //
 // A stage that resolved to nothing is not bound either: the operator was shown
 // a blocker rather than an assignment, and there is nothing to hold execution
@@ -249,17 +253,20 @@ func unstarted(assignments []domain.AgentAssignment, snapshot PlanSnapshot) []do
 // The digest is checked, not merely the number: approving a revision number
 // whose content could since have changed would be approving something nobody
 // looked at.
-func (s PlanService) Approve(planID string, revision int, digest, operator, note string) (PlanSnapshot, error) {
-	return s.decide(planID, revision, digest, operator, note, EventPlanApproved)
+// The assignments digest is OPTIONAL and, when given, checked: it is what
+// `plan show` printed beside the revision, and naming it refuses a decision
+// whose assignment set moved between reading and deciding.
+func (s PlanService) Approve(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
+	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanApproved)
 }
 
 // Reject records a refusal. It is durable for the same reason an approval is:
 // "we looked at this and said no" is a fact about the work.
-func (s PlanService) Reject(planID string, revision int, digest, operator, note string) (PlanSnapshot, error) {
-	return s.decide(planID, revision, digest, operator, note, EventPlanRejected)
+func (s PlanService) Reject(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
+	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanRejected)
 }
 
-func (s PlanService) decide(planID string, revision int, digest, operator, note, eventType string) (PlanSnapshot, error) {
+func (s PlanService) decide(planID string, revision int, digest, assignments, operator, note, eventType string) (PlanSnapshot, error) {
 	plan, found, err := s.Store.PlanRevision(planID, revision)
 	if err != nil {
 		return PlanSnapshot{}, err
@@ -325,11 +332,46 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 	// approval whose binding was lost.
 	assignmentsDigest := ""
 	if eventType == EventPlanApproved {
-		resolution, err := s.Resolve(plan, snapshot)
+		// Against the state approving WOULD leave, not the state it replaces.
+		//
+		// This is the same computation `plan show --revision N` renders, and
+		// using anything else binds a different document than the operator was
+		// shown. A stage this revision materially changes is reset by the
+		// supersession below - lifecycle cleared, generation back to zero - so
+		// reading the pre-approval snapshot saw it as "already started", left
+		// it unbound, and then nothing governed it: the privilege comparison
+		// engages only above generation zero, and the supersession had just
+		// taken it back to zero. The most ordinary flow there is, revising a
+		// plan mid-execution, therefore live-resolved the changed stage from
+		// whatever the registry said at first run.
+		_, prospective, err := s.previewSnapshot(plan, snapshot)
 		if err != nil {
 			return PlanSnapshot{}, err
 		}
-		if assignmentsDigest, err = s.Store.PutApprovedAssignments(planID, revision, unstarted(resolution.Assignments, snapshot)); err != nil {
+		resolution, err := s.Resolve(plan, prospective)
+		if err != nil {
+			return PlanSnapshot{}, err
+		}
+		bindable := unstarted(resolution.Assignments, prospective)
+		// The decision may NAME the set it decides, and then it decides that
+		// set or nothing. The revision digest binds the document an operator
+		// read; it does not move when a profile, a pack or the workforce is
+		// edited, so without this the assignments bound here are "what the
+		// operator saw" only in the sense that nobody looked again.
+		if named := strings.TrimSpace(assignments); named != "" {
+			shown, err := assignmentSetDigest(bindable)
+			if err != nil {
+				return PlanSnapshot{}, err
+			}
+			if named != shown {
+				return PlanSnapshot{}, &PlanRefusedError{
+					PlanID: planID,
+					Detail: fmt.Sprintf("revision %d now resolves assignments %s and the decision names %s: read it again, because who would perform this work has changed since you looked",
+						revision, short12(shown), short12(named)),
+				}
+			}
+		}
+		if assignmentsDigest, err = s.Store.PutApprovedAssignments(planID, revision, bindable); err != nil {
 			return PlanSnapshot{}, err
 		}
 	}
@@ -446,6 +488,21 @@ type PlanView struct {
 	// work. The state beside it is then prospective - what approving this
 	// revision would leave - rather than a report of what is happening.
 	Preview *PlanPreview `json:"preview,omitempty"`
+	// AssignmentsDigest is the digest of the assignments approving THIS view
+	// would bind: who performs each stage that has not started, under which
+	// profile, packs, context and worker.
+	//
+	// It exists so a decision can name it. The plan digest binds the document,
+	// and registry and workforce edits do not change that document - so an edit
+	// landing between reading a proposal and deciding on it would be bound as
+	// "what the operator saw". Naming this closes that the same way naming the
+	// revision digest closed deciding an unread document.
+	AssignmentsDigest string `json:"assignments_digest,omitempty"`
+	// Unbound is the stages this revision's approval bound NOTHING for, in
+	// stage order: they showed a blocker rather than an assignment, so there
+	// was no identity to hold execution to and they resolve live when they
+	// become performable.
+	Unbound []string `json:"unbound,omitempty"`
 }
 
 // PlanPreview says that a view is an answer to "what would approving this do",
@@ -578,6 +635,29 @@ func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) 
 		return PlanView{}, err
 	}
 	view.Assigned, view.Blocked = resolution.Assignments, resolution.Blocked
+	bindable := unstarted(resolution.Assignments, snapshot)
+	if view.AssignmentsDigest, err = assignmentSetDigest(bindable); err != nil {
+		return PlanView{}, err
+	}
+	// What approving would NOT bind, said out loud. A stage that showed a
+	// blocker has no approval-visible assignment, so it resolves live when the
+	// blocker clears - and rendering it later beside bound stages, identically,
+	// is what would let an operator believe it was approved.
+	assigned := make(map[string]bool, len(bindable))
+	for _, assignment := range bindable {
+		assigned[assignment.StageID] = true
+	}
+	for _, stage := range plan.Stages {
+		if stage.Kind != domain.StageAgent {
+			continue
+		}
+		if projection, started := snapshot.Stages[stage.ID]; started && projection.AssignmentID != "" {
+			continue
+		}
+		if !assigned[stage.ID] {
+			view.Unbound = append(view.Unbound, stage.ID)
+		}
+	}
 	return view, nil
 }
 
@@ -749,8 +829,14 @@ func (s *SQLiteOperationStore) PlanContract(planID string, revision int) (domain
 //
 // It is immutable per (plan, revision, stage). Re-recording the same document
 // is a no-op, so a retry after a crash between this and the approval event
-// completes; a DIFFERENT document is refused, because what an approval bound
-// cannot be changed under the approval.
+// ordinarily completes; a DIFFERENT document is refused, because what an
+// approval bound cannot be changed under the approval.
+//
+// "Ordinarily", because the retry re-resolves: a producer that settled inside
+// that window changes the upstream a dependent assignment carries, and the
+// retry then refuses. That is fail-closed and rare, and the remedy is a new
+// proposal rather than anything this function can do - so the refusal says
+// which stage disagreed.
 func (s *SQLiteOperationStore) PutApprovedAssignments(planID string, revision int, assignments []domain.AgentAssignment) (string, error) {
 	for _, assignment := range assignments {
 		if _, err := domain.Encode(assignment); err != nil {
@@ -776,6 +862,21 @@ func (s *SQLiteOperationStore) PutApprovedAssignments(planID string, revision in
 		}
 	}
 	return s.ApprovedAssignmentsDigest(planID, revision)
+}
+
+// assignmentSetDigest is the canonical digest of one bound set, in stage order.
+//
+// It is ONE function because two callers have to agree exactly: the approval
+// surface computes it over what it is about to show, and the approval computes
+// it over what it is about to bind. A second implementation would be a second
+// answer to "is this the set the operator read".
+func assignmentSetDigest(assignments []domain.AgentAssignment) (string, error) {
+	if len(assignments) == 0 {
+		return "", nil
+	}
+	ordered := append([]domain.AgentAssignment(nil), assignments...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].StageID < ordered[j].StageID })
+	return domain.Digest(ordered)
 }
 
 // ApprovedAssignments returns what one revision's approval bound, keyed by
@@ -813,19 +914,11 @@ func (s *SQLiteOperationStore) ApprovedAssignmentsDigest(planID string, revision
 	if err != nil {
 		return "", err
 	}
-	if len(bound) == 0 {
-		return "", nil
+	assignments := make([]domain.AgentAssignment, 0, len(bound))
+	for _, assignment := range bound {
+		assignments = append(assignments, assignment)
 	}
-	stages := make([]string, 0, len(bound))
-	for stageID := range bound {
-		stages = append(stages, stageID)
-	}
-	sort.Strings(stages)
-	ordered := make([]domain.AgentAssignment, 0, len(stages))
-	for _, stageID := range stages {
-		ordered = append(ordered, bound[stageID])
-	}
-	return domain.Digest(ordered)
+	return assignmentSetDigest(assignments)
 }
 
 // ---------------------------------------------------------------------------

@@ -129,6 +129,8 @@ execution is authorized to use. An edit produces a new revision.
   `runtime.TestAnUnapprovedPlanCreatesNothing`,
   `runtime.TestApprovalBindsTheAssignmentTheOperatorSaw`,
   `runtime.TestApprovalBindsTheWorkerAndADefaultChangeDoesNotMoveIt`,
+  `runtime.TestARevisionThatChangesAStartedStageBindsItToo`,
+  `runtime.TestADecisionMayNameTheAssignmentSetItDecides`,
   `runtime.TestAWorkerRepointedAtAnotherProviderIsRefused`.
 - The first three prove the plan DOCUMENT is what was approved: the digest is
   named at the decision boundary and an unapproved plan creates nothing. They
@@ -137,12 +139,20 @@ execution is authorized to use. An edit produces a new revision.
   configuration on every look. The last three prove the binding: an edited
   profile or pack, a changed default worker, and an agent id re-pointed at
   another provider.
-- **Not bound:** a stage that resolved to a BLOCKER at approval time has no
-  approval-visible assignment to bind, and resolves live when it becomes
-  performable - readiness at planning time was never a promise. A stage a later
-  revision INVALIDATES is bound by that revision's approval only if it had not
-  already started; otherwise the boundary that governs it is the privilege
-  comparison against its previous performance.
+- The binding is taken against the state approving WOULD leave, so a stage a
+  revision materially CHANGES is bound by that revision's approval even when it
+  had already started under the previous one. An earlier version of this
+  boundary read the pre-approval state instead, left that stage unbound, and
+  then nothing governed it: the supersession resets such a stage to generation
+  zero and the privilege comparison engages only above zero.
+- **Not bound, by decision:** a stage that resolved to a BLOCKER at approval
+  time has no approval-visible assignment to bind, and resolves live when it
+  becomes performable - readiness at planning time was never a promise, and an
+  agent that authenticates an hour after the approval performs the stage under
+  whatever resolves then. This is ACCEPTED rather than closed, on the condition
+  that the surface says so: `PlanView.Unbound` names those stages before and
+  after the approval.
+  - **Proved:** `runtime.TestAStageThatShowedABlockerIsReportedUnbound`.
 - **Live:** the dogfood plan sat unapproved until `plan approve`, and `serve`
   reported `awaiting_operator_approval` for it.
 

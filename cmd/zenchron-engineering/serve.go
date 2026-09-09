@@ -353,7 +353,7 @@ func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanVi
 	if request.Command == runtime.ControlPlanReject {
 		decide = plans.Reject
 	}
-	if _, err := decide(request.PlanID, request.Revision, request.Digest, operator, request.Note); err != nil {
+	if _, err := decide(request.PlanID, request.Revision, request.Digest, request.AssignmentsDigest, operator, request.Note); err != nil {
 		return runtime.PlanView{}, err
 	}
 	return plans.View(request.PlanID)
