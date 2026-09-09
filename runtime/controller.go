@@ -661,7 +661,11 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 		return err
 	}
 	state := &runState{run: run, events: events}
-	if state.recordedAgent().AgentID != "" {
+	recorded, err := state.recordedAgent()
+	if err != nil {
+		return err
+	}
+	if recorded.AgentID != "" {
 		return nil
 	}
 	payload, err := marshalPayloadJSON(AgentAssignedPayload{

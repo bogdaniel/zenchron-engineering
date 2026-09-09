@@ -12,6 +12,17 @@ import (
 	"testing"
 )
 
+// recordedAgentOf reads the durable binding and fails the test if it cannot be
+// read, so every assertion below is about the identity itself.
+func recordedAgentOf(t *testing.T, state *runState) AgentIdentity {
+	t.Helper()
+	agent, err := state.recordedAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent
+}
+
 func handoffRegistry(t *testing.T) AgentRegistry {
 	t.Helper()
 	registry, err := OperatorConfig{
@@ -48,6 +59,42 @@ func handoffFixture(t *testing.T) (*phase8Fixture, string) {
 	return fixture, runID
 }
 
+// An assignment that cannot be read is not an unbound run.
+//
+// The zero identity is a PERMISSION here, not an absence: repairAgentBinding
+// backfills a binding onto an unbound run from whichever agent is running now,
+// and TrustDowngradeRefused compares a zero From against TrustProtected and
+// finds no downgrade. Answering an unreadable assignment as "unbound" would
+// therefore let a corrupt event rebind a protected run to an operator-trusted
+// worker, and journal the rebinding as legitimate. The absence keeps its
+// documented legacy meaning; only the unreadable case becomes an error.
+func TestAnUnreadableAgentAssignmentIsNotReadAsUnbound(t *testing.T) {
+	assigned := func(payload string) *runState {
+		return &runState{
+			run:    EngineeringRun{ID: "run-1"},
+			events: []EngineeringEvent{{Type: EventRunAgentAssigned, Payload: []byte(payload)}},
+		}
+	}
+
+	unreadable, err := assigned("[]").recordedAgent()
+	if err == nil {
+		t.Fatalf("an unreadable agent assignment read back as the identity %#v", unreadable)
+	}
+	if !strings.Contains(err.Error(), "run-1") {
+		t.Fatalf("the refusal does not name the run it is about: %q", err.Error())
+	}
+
+	// An assignment that IS readable still answers, and a run with none at all
+	// still reads back as the legacy zero identity rather than an error.
+	readable := recordedAgentOf(t, assigned(`{"agent_id":"codex","provider_kind":"codex_cli","trust_mode":"operator_trusted"}`))
+	if readable.AgentID != "codex" || readable.TrustMode != TrustOperatorTrusted {
+		t.Fatalf("a readable assignment did not answer: %#v", readable)
+	}
+	if legacy := recordedAgentOf(t, &runState{run: EngineeringRun{ID: "run-1"}}); legacy.AgentID != "" {
+		t.Fatalf("a run with no assignment invented one: %#v", legacy)
+	}
+}
+
 // TestRunIsBoundToItsAgentInTheJournal is the binding law: which worker a run
 // is worked by is answerable from the append-only log alone.
 func TestRunIsBoundToItsAgentInTheJournal(t *testing.T) {
@@ -56,7 +103,7 @@ func TestRunIsBoundToItsAgentInTheJournal(t *testing.T) {
 	if countType(state.events, EventRunAgentAssigned) != 1 {
 		t.Fatalf("the agent binding was not journalled exactly once: %v", journalTypes(state.events))
 	}
-	recorded := state.recordedAgent()
+	recorded := recordedAgentOf(t, state)
 	if recorded.AgentID != "codex" || recorded.Kind != AgentKindCodexCLI || recorded.TrustMode != TrustOperatorTrusted {
 		t.Fatalf("the journal does not name the agent this run was created with: %#v", recorded)
 	}
@@ -127,8 +174,8 @@ func TestHandoffRefusalCarriesTheWholeTransition(t *testing.T) {
 	if len(after.projection.EvidenceBundles) != len(before.projection.EvidenceBundles) {
 		t.Fatal("a refused handoff changed the evidence")
 	}
-	if after.recordedAgent().AgentID != "codex" {
-		t.Fatalf("a refused handoff moved the agent binding: %#v", after.recordedAgent())
+	if recordedAgentOf(t, after).AgentID != "codex" {
+		t.Fatalf("a refused handoff moved the agent binding: %#v", recordedAgentOf(t, after))
 	}
 	if countType(after.events, EventRunAgentHandoffRefused) != 1 {
 		t.Fatalf("the attempted transition was not journalled exactly once: %v", journalTypes(after.events))
@@ -219,7 +266,7 @@ func TestAdoptingALiveGenerationWithAnotherAgentIsRefused(t *testing.T) {
 	if !errors.As(err, &refused) {
 		t.Fatalf("a live generation was silently adopted by a different agent: %v", err)
 	}
-	if fixture.state(runID).recordedAgent().AgentID != "codex" {
+	if recordedAgentOf(t, fixture.state(runID)).AgentID != "codex" {
 		t.Fatal("the refused adoption changed the run's agent binding")
 	}
 }
@@ -250,7 +297,7 @@ func TestALegacyRunIsAdoptedRatherThanRefused(t *testing.T) {
 		t.Fatalf("the existing run was not adopted: %#v", outcome)
 	}
 	// The absence is not backfilled with an invented identity.
-	if recorded := fixture.state(runID).recordedAgent(); recorded.AgentID != "" {
+	if recorded := recordedAgentOf(t, fixture.state(runID)); recorded.AgentID != "" {
 		t.Fatalf("an agent identity was invented for a legacy run: %#v", recorded)
 	}
 }

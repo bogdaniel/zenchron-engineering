@@ -260,7 +260,12 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	// The journal is the authority for the agent binding; the row is only a
 	// projection of it, so a row that somehow disagrees loses.
 	state := &runState{run: run, snapshot: snapshot, events: events, projection: projection}
-	if agent := state.recordedAgent(); agent.AgentID != "" {
+	agent, err := state.recordedAgent()
+	if err != nil {
+		summary.Error = boundedDetail(err.Error())
+		return summary
+	}
+	if agent.AgentID != "" {
 		summary.Agent, summary.ProviderKind = agent.AgentID, agent.Kind
 		summary.TrustMode, summary.Model = agent.TrustMode, agent.Model
 	}

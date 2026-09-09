@@ -672,7 +672,7 @@ func TestOneSupervisorDrivesEachRunWithItsOwnAgent(t *testing.T) {
 
 	// And each run's binding is unchanged: being driven is not a handoff.
 	for runID, agentID := range started {
-		if recorded := fixture.state(runID).recordedAgent().AgentID; recorded != agentID {
+		if recorded := recordedAgentOf(t, fixture.state(runID)).AgentID; recorded != agentID {
 			t.Fatalf("run %s was bound to %q and is now %q", runID, agentID, recorded)
 		}
 	}
@@ -711,7 +711,7 @@ func TestSupervisorAcceptsASubmissionForAnyConfiguredAgent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("submitting issue %d to agent %q was refused: %v", issue, agentID, err)
 		}
-		if recorded := fixture.state(outcome.RunID).recordedAgent().AgentID; recorded != agentID {
+		if recorded := recordedAgentOf(t, fixture.state(outcome.RunID)).AgentID; recorded != agentID {
 			t.Fatalf("issue %d was bound to %q, want %q", issue, recorded, agentID)
 		}
 	}
@@ -1455,7 +1455,7 @@ func TestASupervisorRestartResumesWorkWithoutDuplicatingIt(t *testing.T) {
 	// The journalled binding is the authority. Reading it here also stops the
 	// comparison below from being satisfied by two empty strings, which is what
 	// it silently was when this test was first written against an unbound run.
-	boundAgent := fixture.state(runID).recordedAgent().AgentID
+	boundAgent := recordedAgentOf(t, fixture.state(runID)).AgentID
 	if boundAgent == "" {
 		t.Fatal("the run carries no agent binding, so the restart comparison would prove nothing")
 	}
@@ -1510,7 +1510,7 @@ func TestASupervisorRestartResumesWorkWithoutDuplicatingIt(t *testing.T) {
 	// The binding survives the process, not merely the tick. A restart that
 	// re-derived the agent from today's default would silently move a run to a
 	// different worker, which is the failure this is really guarding.
-	if resumedAgent := fixture.state(runID).recordedAgent().AgentID; resumedAgent != boundAgent {
+	if resumedAgent := recordedAgentOf(t, fixture.state(runID)).AgentID; resumedAgent != boundAgent {
 		t.Fatalf("the agent binding changed across the restart: %q then %q", boundAgent, resumedAgent)
 	}
 	if resumed.Base.Revision != run.Base.Revision {
