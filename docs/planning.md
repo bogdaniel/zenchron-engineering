@@ -482,8 +482,10 @@ feedback moves it long before it has produced anything a reviewer should read.
 Re-performing against an interim head would pay for a review of work still being
 changed, invalidate it again the moment the producer settles, and - if that
 commit never became reachable - pin the new performance to a head nothing can be
-based on. A first performance gets this for free, because a stage starts only
-once its dependencies have settled; every later one is held to the same rule.
+based on. The same rule guards the freeze itself: a stage does not start - and
+does not bind itself to an upstream head - while the run that produced that head
+is back at work. That covers a first performance too, because a plan stage stays
+completed while its run is re-activated.
 
 The stage is then performed AGAIN under the same approved plan, as a new
 EXECUTION GENERATION. A producer moving from candidate A to candidate B is an
