@@ -167,6 +167,20 @@ func TestHandoffRefusalCarriesTheWholeTransition(t *testing.T) {
 	if record.Budgets.Tokens.Known || record.Budgets.Cost.Known {
 		t.Fatalf("an unreported budget dimension was invented as a number: %#v", record.Budgets)
 	}
+	// The RUN TOTAL is one of the carried dimensions. It is a different bound
+	// from the per-binding retry allowance beside it, and it is the one a
+	// successor cannot recover by starting a fresh binding - a record without
+	// it described itself as complete while omitting the only ceiling that
+	// spans bindings. This run states none, so it is UNKNOWN rather than zero.
+	if record.Budgets.ProviderInvocations.Known {
+		t.Fatalf("a run with no stated invocation total reported one: %#v", record.Budgets)
+	}
+	bounded := fixture.state(runID)
+	bounded.run.Budgets = &RunBudgets{MaxProviderInvocations: 5}
+	if got := fixture.runtime.remainingBudgets(bounded).ProviderInvocations; !got.Known || got.Remaining != int64(5-bounded.projection.Attempts[OpExecutionInvoke]) {
+		t.Fatalf("the stated run total was not carried: %#v, after %d invocations",
+			got, bounded.projection.Attempts[OpExecutionInvoke])
+	}
 
 	// The refusal mutates nothing.
 	after := fixture.state(runID)

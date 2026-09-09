@@ -62,8 +62,15 @@ func KnownBudget(remaining int64) BudgetDimension {
 // forward unchanged. Budgets do not reset on a provider change; that is the
 // whole point of recording them here.
 type RemainingBudgets struct {
-	WallSeconds         BudgetDimension `json:"wall_seconds"`
-	ExecutionAttempts   BudgetDimension `json:"execution_attempts"`
+	WallSeconds       BudgetDimension `json:"wall_seconds"`
+	ExecutionAttempts BudgetDimension `json:"execution_attempts"`
+	// ProviderInvocations is the RUN TOTAL left - every execution invocation of
+	// every binding, counted together - which is a different bound from the
+	// per-binding retry allowance above it. A record that carried only the
+	// retry allowance described itself as the complete cumulative allowance
+	// while omitting the one ceiling a successor cannot recover by starting a
+	// new binding.
+	ProviderInvocations BudgetDimension `json:"provider_invocations"`
 	RemediationAttempts BudgetDimension `json:"remediation_attempts"`
 	AssuranceAttempts   BudgetDimension `json:"assurance_attempts"`
 	Continuations       BudgetDimension `json:"continuations"`
@@ -259,9 +266,22 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	if continuations < 0 {
 		continuations = 0
 	}
+	// A run total is OPTIONAL - a plan states it, an ordinary run may not - and
+	// where none was stated the answer is not zero and not a number the runtime
+	// made up. It is unknown, by the same rule the provider-reported dimensions
+	// follow.
+	invocations := UnknownBudget()
+	if limit := state.providerInvocationLimit(); limit > 0 {
+		left := limit - state.projection.Attempts[OpExecutionInvoke]
+		if left < 0 {
+			left = 0
+		}
+		invocations = KnownBudget(int64(left))
+	}
 	return RemainingBudgets{
 		WallSeconds:         KnownBudget(wall),
 		ExecutionAttempts:   remaining(OpExecutionInvoke, budgets.MaxExecutionAttempts),
+		ProviderInvocations: invocations,
 		RemediationAttempts: remaining(OpRemediationGofmt, budgets.MaxRemediationAttempts),
 		AssuranceAttempts:   remaining(OpAssuranceGo, budgets.MaxAssuranceAttempts),
 		Continuations:       KnownBudget(int64(continuations)),
