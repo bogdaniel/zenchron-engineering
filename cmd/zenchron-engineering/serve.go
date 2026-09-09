@@ -365,17 +365,42 @@ func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanVi
 // composition: the engine it already built, the store it already owns, and -
 // where the operator did not ask for the deterministic compilation - the same
 // verified non-mutating planning invocation.
+// planSubject is the repository and issue a proposal is about.
+//
+// An EXISTING plan already answers it: the durable source binding is what every
+// stage run answers, and a request cannot redirect it. A FIRST proposal has no
+// plan yet, so the request names the subject - and the supervisor still refuses
+// a repository it does not govern, because naming one is a selection among what
+// the operator enrolled and never an introduction.
+func (c *composition) planSubject(supervisor *runtime.Supervisor, request runtime.ControlRequest) (string, int, error) {
+	if request.PlanID != "" {
+		repository, issue, found, err := c.store.PlanSource(request.PlanID)
+		if err != nil {
+			return "", 0, err
+		}
+		if !found || issue <= 0 {
+			return "", 0, fmt.Errorf("plan %s records no source issue, so it cannot be revised", request.PlanID)
+		}
+		return repository, issue, nil
+	}
+	if request.Issue <= 0 {
+		return "", 0, fmt.Errorf("a first proposal names the issue it plans, and this request names none")
+	}
+	governed, ok := supervisor.GovernedRepository(request.Repository)
+	if !ok {
+		return "", 0, fmt.Errorf("repository %q is not governed by this supervisor", request.Repository)
+	}
+	return governed.String(), request.Issue, nil
+}
+
 func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Supervisor, request runtime.ControlRequest) (runtime.PlanView, error) {
 	plans, err := c.planService()
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
-	repository, issue, found, err := c.store.PlanSource(request.PlanID)
+	repository, issue, err := c.planSubject(supervisor, request)
 	if err != nil {
 		return runtime.PlanView{}, err
-	}
-	if !found || issue <= 0 {
-		return runtime.PlanView{}, fmt.Errorf("plan %s records no source issue, so it cannot be revised", request.PlanID)
 	}
 	repo, err := runtime.ParseGitHubRepo(repository)
 	if err != nil {
@@ -405,8 +430,20 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		Template: request.Template, Deterministic: request.Deterministic,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
 	}
+	// A first proposal has no id yet. It is derived exactly as the local path
+	// derives it - from the issue, deterministically - so the view returned
+	// afterwards is of the plan this call created rather than of nothing.
+	planID := request.PlanID
+	if planID == "" {
+		if planID, err = engine.PlanID(issue); err != nil {
+			return runtime.PlanView{}, err
+		}
+	}
 	serialize := supervisor.WithPlanLock
 	if flags.SubstituteHuman != "" {
+		if request.PlanID == "" {
+			return runtime.PlanView{}, errors.New("substituting a human names the plan whose stage is being substituted")
+		}
 		// The substitution compiles deterministically - no provider call - so
 		// the whole of it is short enough to serialize.
 		if err := serialize(func() error {
@@ -417,10 +454,10 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		}
 		return plans.View(request.PlanID)
 	}
-	if _, err := proposeSerialized(ctx, composed, flags, issue, request.PlanID, io.Discard, serialize); err != nil {
+	if _, err := proposeSerialized(ctx, composed, flags, issue, planID, io.Discard, serialize); err != nil {
 		return runtime.PlanView{}, err
 	}
-	return plans.View(request.PlanID)
+	return plans.View(planID)
 }
 
 func controlOK(payload any) runtime.ControlResponse {

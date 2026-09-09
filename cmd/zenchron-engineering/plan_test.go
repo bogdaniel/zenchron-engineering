@@ -531,3 +531,76 @@ func TestADelegatedDecisionRecordsTheRequester(t *testing.T) {
 		t.Fatalf("the decision was recorded against the supervisor: %q", approved.String())
 	}
 }
+
+// A first plan can be started while `serve` owns the state directory.
+//
+// Delegation was only attempted for a plan that already existed, on the
+// reasoning that a first proposal races nothing. Racing was never the obstacle:
+// the local path builds a composition, and a composition takes the exclusive
+// ownership lock a running `serve` already holds. So an operator could revise
+// and decide plans while the persistent runtime ran, and could not START one
+// without stopping it - which is the runtime's whole point.
+func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
+	stateDir, err := os.MkdirTemp("", "zc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, configPath := planWorkspaceIn(t, stateDir)
+	t.Chdir(dir)
+
+	// A real supervisor, holding the ownership lock and answering on the
+	// control endpoint, exactly as `serve` leaves it.
+	supervisor, err := newComposition(autonomyFlags{Config: configPath}, planOverrides(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(supervisor.release)
+	listener, err := runtime.ListenControl(supervisor.config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_ = listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
+			return supervisor.handleControl(context.Background(), driver, func() {}, request)
+		})
+	}()
+
+	var proposed bytes.Buffer
+	if _, err := autonomy([]string{"plan", "issue", "41", "--deterministic", "--config", configPath},
+		planOverrides(t, 41), &proposed); err != nil {
+		t.Fatalf("a first proposal was refused while a supervisor was running: %v\n%s", err, proposed.String())
+	}
+
+	// It is a real plan, in the supervisor's own store, and it can be decided
+	// through the same running supervisor.
+	var view struct {
+		Plan struct {
+			ID       string `json:"id"`
+			Revision int    `json:"revision"`
+			Digest   string `json:"digest"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(proposed.Bytes(), &view); err != nil {
+		t.Fatalf("proposal output is not a plan view: %v\n%s", err, proposed.String())
+	}
+	if view.Plan.ID == "" || view.Plan.Digest == "" {
+		t.Fatalf("the proposal named no plan: %s", proposed.String())
+	}
+	var approved bytes.Buffer
+	if _, err := autonomy([]string{"plan", "approve", view.Plan.ID, "--revision", strconv.Itoa(view.Plan.Revision),
+		"--digest", view.Plan.Digest, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
+		t.Fatalf("approve: %v\n%s", err, approved.String())
+	}
+	if !strings.Contains(approved.String(), "approved") {
+		t.Fatalf("the plan proposed through the supervisor could not be approved: %q", approved.String())
+	}
+}

@@ -88,7 +88,7 @@ func autonomyPlan(ctx context.Context, args []string, overrides autonomyOverride
 
 // delegatePlanRevision sends a revision request to a running supervisor, for
 // the same reason a decision goes there: it owns the work being revised.
-func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (bool, int, error) {
+func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, planID string, issue int, stdout io.Writer) (bool, int, error) {
 	reader, err := openPlanReader(flags, overrides)
 	if err != nil {
 		return false, 0, nil
@@ -99,8 +99,26 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 	if operatorErr != nil {
 		return true, runtime.ExitInvalid, operatorErr
 	}
+	// A FIRST proposal names its subject: the supervisor governs several
+	// repositories and has no plan to read the answer from. It resolves the
+	// same way the local path resolves it, and the supervisor still refuses a
+	// repository it does not govern - naming one is a selection, never an
+	// introduction.
+	repository := ""
+	if planID == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return true, runtime.ExitInvalid, err
+		}
+		target, err := repositoryTarget(cwd, flags.Repo)
+		if err != nil {
+			return true, runtime.ExitInvalid, err
+		}
+		repository = target.Identity
+	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
-		Command: runtime.ControlPlanRevise, PlanID: planID, Template: flags.Template,
+		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue,
+		Repository: repository, Template: flags.Template,
 		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
 		Note: flags.Note, Operator: requester.ID,
 	})
@@ -315,14 +333,17 @@ func buildPlanComposition(flags autonomyFlags, overrides autonomyOverrides) (*pl
 
 // planPropose compiles a plan for one issue and records it awaiting approval.
 func planPropose(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, issue int, planID string, stdout io.Writer) (int, error) {
-	// A proposal for a plan that ALREADY EXISTS writes a new revision, which is
-	// the same read-then-append a decision performs - so it goes to the
-	// supervisor that owns the work, under the same lock, rather than beside a
-	// live reconciler. A FIRST proposal creates the plan and races nothing.
-	if planID != "" {
-		if delegated, code, err := delegatePlanRevision(flags, overrides, planID, stdout); delegated {
-			return code, err
-		}
+	// EVERY proposal goes to the supervisor when one is running - a first one
+	// as much as a revision.
+	//
+	// A first proposal does race nothing, but that was never the obstacle: the
+	// local path builds a composition, and a composition takes the exclusive
+	// ownership lock on the state directory, which a running `serve` already
+	// holds. So an operator could revise and decide plans while `serve` ran but
+	// could not START one without stopping the persistent runtime, which is the
+	// runtime's whole point.
+	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, issue, stdout); delegated {
+		return code, err
 	}
 	composed, err := buildPlanComposition(flags, overrides)
 	if err != nil {
@@ -464,7 +485,7 @@ func requirePlanningMode(composed *planComposition, agent runtime.ResolvedAgent)
 // in-place change: it goes through the same validation and the same approval as
 // any other revision.
 func planRevise(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (int, error) {
-	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, stdout); delegated {
+	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, 0, stdout); delegated {
 		return code, err
 	}
 	composed, err := buildPlanComposition(flags, overrides)
@@ -496,7 +517,7 @@ func planRevise(ctx context.Context, flags autonomyFlags, overrides autonomyOver
 // revision that goes through the same validation and the same approval as any
 // other, because replacing a worker with a person changes what the plan is.
 func planSubstituteHuman(ctx context.Context, flags autonomyFlags, overrides autonomyOverrides, planID string, stdout io.Writer) (int, error) {
-	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, stdout); delegated {
+	if delegated, code, err := delegatePlanRevision(flags, overrides, planID, 0, stdout); delegated {
 		return code, err
 	}
 	composed, err := buildPlanComposition(flags, overrides)

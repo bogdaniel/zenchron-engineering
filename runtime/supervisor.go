@@ -253,6 +253,14 @@ func (s *Supervisor) engine(identity, agentID string) (*EngineeringRuntime, erro
 	return slot.engine, nil
 }
 
+// GovernedRepository is governedRepository for the composition root, which
+// needs it to refuse control requests naming a repository this supervisor does
+// not govern. A control request selects among what the operator enrolled; it
+// can never introduce a repository.
+func (s *Supervisor) GovernedRepository(identity string) (GitHubRepo, bool) {
+	return s.governedRepository(identity)
+}
+
 // governedRepository resolves an identity to an ENROLLED repository. Enrolment
 // is operator configuration, so this answers from the configured set and never
 // from the request.
