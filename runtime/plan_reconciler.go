@@ -936,6 +936,19 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		return nil, nil, fmt.Errorf("assignment for plan %s revision %d stage %s was stored and could not be read back", plan.ID, plan.Revision, stage.ID)
 	}
 	assignment = frozen
+	// The worker this assignment NAMES has to still be that worker.
+	//
+	// The assignment carries almost everything an approval bound - the profile
+	// version and digest, the instruction packs by digest, the compiled
+	// context, the model preference - and the runtime reads them from it. What
+	// it cannot carry is the provider behind an agent id: the engine is built
+	// from live agent configuration, so re-pointing an id at another provider
+	// kind, another vendor family or a weaker trust mode would run a different
+	// worker under an approved worker's name, and every independence
+	// obligation stated in terms of vendor family would be quietly false.
+	if block := r.refuseWorkerDrift(stage, assignment); block != nil {
+		return nil, block, nil
+	}
 	engine, err := r.Engine(r.Repository, assignment.Agent.ID)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
@@ -984,6 +997,41 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		return nil, nil, err
 	}
 	return &PlanStageRun{StageID: stage.ID, RunID: outcome.RunID, AgentID: assignment.Agent.ID}, nil, nil
+}
+
+// refuseWorkerDrift refuses an assignment whose worker is no longer the worker
+// it was approved against.
+//
+// It applies to every performance, not only a first one: an id re-pointed at
+// another provider is the same defect whether the assignment was bound by an
+// approval or frozen by an earlier generation.
+func (r PlanReconciler) refuseWorkerDrift(stage domain.PlanStage, assignment domain.AgentAssignment) *PlanStageBlock {
+	for _, agent := range r.Service.Agents {
+		if agent.ID != assignment.Agent.ID {
+			continue
+		}
+		for _, drift := range []struct{ what, before, now string }{
+			{"provider kind", assignment.Agent.ProviderKind, agent.ProviderKind},
+			{"vendor family", assignment.Agent.VendorFamily, agent.VendorFamily},
+			{"trust mode", string(assignment.Agent.TrustMode), string(agent.TrustMode)},
+		} {
+			if drift.before == drift.now {
+				continue
+			}
+			return &PlanStageBlock{
+				StageID: stage.ID, Kind: "authority",
+				Reason: boundedDetail(fmt.Sprintf(
+					"propose and approve a revision: worker %s now has %s %s and this stage was approved against %s",
+					assignment.Agent.ID, drift.what, shortValue(drift.now), shortValue(drift.before))),
+			}
+		}
+		return nil
+	}
+	return &PlanStageBlock{
+		StageID: stage.ID, Kind: "agent",
+		Reason: boundedDetail(fmt.Sprintf(
+			"worker %s is not registered, and this stage was approved to be performed by it", assignment.Agent.ID)),
+	}
 }
 
 // upstreamBase is the published upstream candidate this stage should build on.

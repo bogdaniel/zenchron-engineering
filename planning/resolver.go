@@ -105,6 +105,22 @@ type ResolveInput struct {
 	// actually produced the change rather than against whichever worker would
 	// be chosen for it today.
 	Frozen map[string]domain.AgentAssignment
+	// Authorized is the assignment an operator APPROVED for a stage that has
+	// not started yet, keyed by stage id.
+	//
+	// It is the same law as Frozen, applied one step earlier. An operator
+	// approves a plan by looking at its assignments; re-resolving an unstarted
+	// stage from the live registry when it finally becomes dependency-ready
+	// meant the configuration that executes could be one nobody had seen - an
+	// edited profile, an edited instruction pack, a different worker after the
+	// operator's default changed. Approval binds WHO does the work and under
+	// WHAT configuration, so what was approved is what resolves.
+	//
+	// It does not bind the upstream candidate: a stage approved before its
+	// producer ran was approved with no upstream at all. That one execution
+	// fact is rebound here, and only where the approved assignment's own
+	// context selection says the worker is entitled to it.
+	Authorized map[string]domain.AgentAssignment
 }
 
 // Resolve assigns every agent stage it can and explains every stage it cannot.
@@ -139,6 +155,15 @@ func Resolve(input ResolveInput) (Resolution, error) {
 		if frozen, ok := input.Frozen[stage.ID]; ok {
 			assigned[stage.ID] = frozen
 			resolution.Assignments = append(resolution.Assignments, frozen)
+			continue
+		}
+		// An approved but unstarted stage. Frozen wins where both exist: a
+		// stage that is executing is executing under what it froze, and the
+		// approval that authorized it is the same document anyway.
+		if authorized, ok := input.Authorized[stage.ID]; ok {
+			bound := rebindUpstream(authorized, input.Upstream[stage.ID])
+			assigned[stage.ID] = bound
+			resolution.Assignments = append(resolution.Assignments, bound)
 			continue
 		}
 		// An artifact the plan NAMES and the operator has not installed is a
@@ -322,6 +347,29 @@ func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain
 		return domain.AgentAssignment{}, nil, fmt.Errorf("resolved assignment for stage %q is invalid: %w", stage.ID, err)
 	}
 	return assignment, nil, nil
+}
+
+// rebindUpstream is one authorized assignment carrying the upstream outputs it
+// will actually consume.
+//
+// Approval cannot bind a candidate that does not exist yet, and freezing the
+// empty upstream an approval-time resolution saw would hand an independent
+// reviewer nothing to review. Everything else in the assignment is what the
+// operator approved and is left exactly as it is.
+//
+// The entitlement is read from the assignment's OWN context selection rather
+// than from the role table, because that selection is what the operator
+// approved: a ContextPolicy that excluded upstream outputs excluded them, and
+// re-deriving the answer here would be a second opinion about it.
+func rebindUpstream(assignment domain.AgentAssignment, upstream []domain.UpstreamOutput) domain.AgentAssignment {
+	assignment.Context.UpstreamOutputs = nil
+	for _, class := range assignment.Context.Included {
+		if class == domain.ContextUpstreamOutputs {
+			assignment.Context.UpstreamOutputs = sortedUpstream(upstream)
+			break
+		}
+	}
+	return assignment
 }
 
 // eligibility answers why a profile may NOT perform a stage. An empty result is

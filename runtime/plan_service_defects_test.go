@@ -138,6 +138,13 @@ func TestApprovingASupersededRevisionIsRefused(t *testing.T) {
 	if _, err := fixture.store.PutPlanRevision(second); err != nil {
 		t.Fatal(err)
 	}
+	// The contract this revision was planned against. Approval binds the
+	// assignments it resolves, and resolution reads the obligations from
+	// here - so a revision stored without one is a state the propose path
+	// never produces.
+	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.service.Approve(second.ID, 2, second.Digest, "operator", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +180,13 @@ func TestApprovingALaterRevisionRecordsTheSupersession(t *testing.T) {
 	}
 	second.Digest = digest
 	if _, err := fixture.store.PutPlanRevision(second); err != nil {
+		t.Fatal(err)
+	}
+	// The contract this revision was planned against. Approval binds the
+	// assignments it resolves, and resolution reads the obligations from
+	// here - so a revision stored without one is a state the propose path
+	// never produces.
+	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
 	// A proposal resets the pending decision, exactly as the real path does.
@@ -315,6 +329,13 @@ func TestARefusedRevisionStaysRefusedAfterALaterValidation(t *testing.T) {
 	if _, err := fixture.store.PutPlanRevision(second); err != nil {
 		t.Fatal(err)
 	}
+	// The contract this revision was planned against. Approval binds the
+	// assignments it resolves, and resolution reads the obligations from
+	// here - so a revision stored without one is a state the propose path
+	// never produces.
+	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.service.recordValidation(second.ID, second.Revision, second.Digest,
 		domain.ProposalRefused, errors.New("the reviewer stage has no independent worker")); err != nil {
 		t.Fatal(err)
@@ -328,6 +349,13 @@ func TestARefusedRevisionStaysRefusedAfterALaterValidation(t *testing.T) {
 	}
 	third.Digest = digest
 	if _, err := fixture.store.PutPlanRevision(third); err != nil {
+		t.Fatal(err)
+	}
+	// The contract this revision was planned against. Approval binds the
+	// assignments it resolves, and resolution reads the obligations from
+	// here - so a revision stored without one is a state the propose path
+	// never produces.
+	if err := fixture.store.PutPlanContract(third.ID, third.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.service.recordValidation(third.ID, third.Revision, third.Digest, domain.ProposalValid, nil); err != nil {

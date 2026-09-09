@@ -735,6 +735,16 @@ type PlanDecisionPayload struct {
 	Digest   string `json:"digest"`
 	Operator string `json:"operator"`
 	Note     string `json:"note,omitempty"`
+	// AssignmentsDigest is the canonical digest of the assignments this
+	// approval bound - who performs each stage, under which profile,
+	// instruction packs, context policy and worker.
+	//
+	// The plan digest binds the document an operator read. This binds what
+	// they were told would perform it, so the two cannot drift apart between
+	// the approval and the first run. It is absent on a rejection, on an
+	// approval of a revision whose every stage was blocked, and on approvals
+	// recorded before this boundary existed.
+	AssignmentsDigest string `json:"assignments_digest,omitempty"`
 }
 
 // PlanStageAssignedPayload freezes which configuration performed a stage. The

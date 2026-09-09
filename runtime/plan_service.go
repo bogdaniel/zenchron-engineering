@@ -221,6 +221,29 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	return plan, nil
 }
 
+// unstarted is the assignments an approval can still bind.
+//
+// A stage that has already started is executing under the row it froze, and
+// that row is what every later look reads. Binding it again here would record
+// the revision it STARTED under as this revision's approval, which is a claim
+// about the wrong performance; what governs a started stage being performed
+// again is the privilege comparison against its previous performance, not this
+// boundary.
+//
+// A stage that resolved to nothing is not bound either: the operator was shown
+// a blocker rather than an assignment, and there is nothing to hold execution
+// to.
+func unstarted(assignments []domain.AgentAssignment, snapshot PlanSnapshot) []domain.AgentAssignment {
+	bound := make([]domain.AgentAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		if projection, ok := snapshot.Stages[assignment.StageID]; ok && projection.AssignmentID != "" {
+			continue
+		}
+		bound = append(bound, assignment)
+	}
+	return bound
+}
+
 // Approve records the operator's decision on ONE exact revision.
 //
 // The digest is checked, not merely the number: approving a revision number
@@ -288,8 +311,31 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 			Detail: fmt.Sprintf("revision %d is older than the approved revision %d: a plan is not un-revised by approving what it superseded", revision, governing),
 		}
 	}
+	// WHAT THE OPERATOR IS APPROVING, durably, before the approval exists.
+	//
+	// An approval is a decision about a document AND about the assignments
+	// shown beside it. Resolution is otherwise recomputed from the live
+	// registry on every look, so an unstarted stage was re-resolved when it
+	// finally became dependency-ready: an edited profile, an edited
+	// instruction pack or a changed default worker between the approval and
+	// the first run meant execution froze a configuration nobody had seen.
+	//
+	// Written FIRST, so a crash before the event leaves rows nothing points at
+	// - which the retried approval re-writes identically - rather than an
+	// approval whose binding was lost.
+	assignmentsDigest := ""
+	if eventType == EventPlanApproved {
+		resolution, err := s.Resolve(plan, snapshot)
+		if err != nil {
+			return PlanSnapshot{}, err
+		}
+		if assignmentsDigest, err = s.Store.PutApprovedAssignments(planID, revision, unstarted(resolution.Assignments, snapshot)); err != nil {
+			return PlanSnapshot{}, err
+		}
+	}
 	if err := s.appendPlanEvent(planID, eventType, PlanDecisionPayload{
 		Revision: revision, Digest: plan.Digest, Operator: operator, Note: boundedDetail(note),
+		AssignmentsDigest: assignmentsDigest,
 	}); err != nil {
 		return PlanSnapshot{}, err
 	}
@@ -599,9 +645,18 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 			frozen[stageID] = assignment
 		}
 	}
+	// And the assignments this revision's APPROVAL bound, for the stages that
+	// have not started. A stage that has started is read through what it
+	// froze; a stage that has not is resolved to what the operator approved
+	// rather than to whatever the registry would choose today.
+	authorized, err := s.Store.ApprovedAssignments(plan.ID, plan.Revision)
+	if err != nil {
+		return planning.Resolution{}, err
+	}
 	return planning.Resolve(planning.ResolveInput{
 		Plan: plan, Registry: s.Registry, Agents: s.Agents,
-		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent, Frozen: frozen,
+		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent,
+		Frozen: frozen, Authorized: authorized,
 	})
 }
 
@@ -683,6 +738,94 @@ func (s *SQLiteOperationStore) PlanContract(planID string, revision int) (domain
 	}
 	contract, err := domain.Decode[domain.EngineeringWorkContract]([]byte(document))
 	return contract, err == nil, err
+}
+
+// ---------------------------------------------------------------------------
+// The assignments an approval bound
+// ---------------------------------------------------------------------------
+
+// PutApprovedAssignments records the assignments an operator saw when they
+// approved one revision, and returns the canonical digest of the bound set.
+//
+// It is immutable per (plan, revision, stage). Re-recording the same document
+// is a no-op, so a retry after a crash between this and the approval event
+// completes; a DIFFERENT document is refused, because what an approval bound
+// cannot be changed under the approval.
+func (s *SQLiteOperationStore) PutApprovedAssignments(planID string, revision int, assignments []domain.AgentAssignment) (string, error) {
+	for _, assignment := range assignments {
+		if _, err := domain.Encode(assignment); err != nil {
+			return "", fmt.Errorf("approved assignment for stage %q is invalid: %w", assignment.StageID, err)
+		}
+		document, err := CanonicalJSON(assignment)
+		if err != nil {
+			return "", err
+		}
+		var stored string
+		switch err := s.db.QueryRow(`SELECT document FROM plan_approved_assignments WHERE plan_id = ? AND revision = ? AND stage_id = ?`,
+			planID, revision, assignment.StageID).Scan(&stored); {
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := s.db.Exec(`INSERT INTO plan_approved_assignments (plan_id, revision, stage_id, document) VALUES (?, ?, ?, ?)`,
+				planID, revision, assignment.StageID, string(document)); err != nil {
+				return "", err
+			}
+		case err != nil:
+			return "", err
+		case stored != string(document):
+			return "", fmt.Errorf("plan %s revision %d already bound stage %s to a different assignment; an approval's assignments are immutable",
+				planID, revision, assignment.StageID)
+		}
+	}
+	return s.ApprovedAssignmentsDigest(planID, revision)
+}
+
+// ApprovedAssignments returns what one revision's approval bound, keyed by
+// stage. An empty map means the revision has not been approved, or was
+// approved before this boundary existed.
+func (s *SQLiteOperationStore) ApprovedAssignments(planID string, revision int) (map[string]domain.AgentAssignment, error) {
+	rows, err := s.db.Query(`SELECT stage_id, document FROM plan_approved_assignments WHERE plan_id = ? AND revision = ? ORDER BY stage_id`, planID, revision)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bound := map[string]domain.AgentAssignment{}
+	for rows.Next() {
+		var stageID, document string
+		if err := rows.Scan(&stageID, &document); err != nil {
+			return nil, err
+		}
+		// Decoded through the SCHEMA, like every other durable artifact this
+		// package reads back. A row that no longer satisfies it authorizes
+		// nothing.
+		assignment, err := domain.Decode[domain.AgentAssignment]([]byte(document))
+		if err != nil {
+			return nil, fmt.Errorf("decode approved assignment for stage %q: %w", stageID, err)
+		}
+		bound[stageID] = assignment
+	}
+	return bound, rows.Err()
+}
+
+// ApprovedAssignmentsDigest is the canonical digest of the whole bound set, in
+// stage order. It is what the approval event carries, so the binding lives in
+// the hash-chained journal and not only in a table beside it.
+func (s *SQLiteOperationStore) ApprovedAssignmentsDigest(planID string, revision int) (string, error) {
+	bound, err := s.ApprovedAssignments(planID, revision)
+	if err != nil {
+		return "", err
+	}
+	if len(bound) == 0 {
+		return "", nil
+	}
+	stages := make([]string, 0, len(bound))
+	for stageID := range bound {
+		stages = append(stages, stageID)
+	}
+	sort.Strings(stages)
+	ordered := make([]domain.AgentAssignment, 0, len(stages))
+	for _, stageID := range stages {
+		ordered = append(ordered, bound[stageID])
+	}
+	return domain.Digest(ordered)
 }
 
 // ---------------------------------------------------------------------------
