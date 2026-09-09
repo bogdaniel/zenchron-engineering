@@ -104,7 +104,7 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 	// same way the local path resolves it, and the supervisor still refuses a
 	// repository it does not govern - naming one is a selection, never an
 	// introduction.
-	repository := ""
+	repository, defaultBranch := "", ""
 	if planID == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -114,11 +114,11 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 		if err != nil {
 			return true, runtime.ExitInvalid, err
 		}
-		repository = target.Identity
+		repository, defaultBranch = target.Identity, target.DefaultBranch
 	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
 		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue,
-		Repository: repository, Template: flags.Template,
+		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template,
 		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
 		Note: flags.Note, Operator: requester.ID,
 	})

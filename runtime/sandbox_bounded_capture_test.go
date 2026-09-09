@@ -55,3 +55,47 @@ func TestABoundedCaptureNeverSplitsARune(t *testing.T) {
 		t.Fatalf("a second read returned %q, want %q", second, captured)
 	}
 }
+
+// A complete capture is returned byte for byte.
+//
+// The rune trim ran unconditionally, so output that reached no bound at all -
+// a transcript legitimately ending in U+FFFD, or binary output ending on a
+// lead byte - lost one to three real bytes, silently, while the code claimed
+// such output was left exactly as captured. And where the trim IS right, the
+// bytes it removes are bytes the caller does not get: counting only the
+// refused writes made the notice's exact number short by up to three.
+func TestACompleteCaptureIsNotTrimmed(t *testing.T) {
+	for name, body := range map[string]string{
+		"a legitimate replacement character": "abc�",
+		"binary ending on a lead byte":       string([]byte{0x61, 0x62, 0xC4}),
+	} {
+		buffer := &boundedBuffer{limit: 64}
+		if _, err := buffer.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+		if got := string(buffer.Bytes()); got != body {
+			t.Fatalf("%s: capture returned %q, want %q", name, got, body)
+		}
+	}
+}
+
+func TestTheTruncationNoticeCountsTheBytesTheTrimRemoved(t *testing.T) {
+	// Eight ASCII bytes then four two-byte characters, bounded to nine: the
+	// ninth byte is a lead byte the trim removes, and the remaining seven were
+	// refused outright.
+	buffer := &boundedBuffer{limit: 9}
+	if _, err := buffer.Write([]byte("abcdefgh" + strings.Repeat("ă", 4))); err != nil {
+		t.Fatal(err)
+	}
+	out := string(buffer.Bytes())
+	kept, notice, found := strings.Cut(out, "\n[truncated by Zenchron: ")
+	if !found {
+		t.Fatalf("no truncation notice: %q", out)
+	}
+	if kept != "abcdefgh" {
+		t.Fatalf("kept %q", kept)
+	}
+	if !strings.HasPrefix(notice, "8 further bytes") {
+		t.Fatalf("the notice does not account for the trimmed byte: %q", notice)
+	}
+}

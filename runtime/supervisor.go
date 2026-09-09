@@ -543,6 +543,29 @@ func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) err
 // The workspace is materialized from the plan's exact subject revision and
 // removed afterwards: it is derived state, and the snapshot it held is recorded
 // in the resulting proposal's provenance.
+// planningSeam is the reconciler's Planner, and the one place the plan lock is
+// released across a provider call.
+//
+// The lock serializes read-then-append against an operator decision, which
+// takes microseconds; holding it across a repository clone and a live planning
+// invocation stalled every run in the fleet for minutes, because the tick takes
+// the same lock before it drives anything.
+//
+// Releasing here is safe because the caller re-reads plan state afterwards and
+// ABANDONS the pass if the approved revision moved - a decision that lands in
+// the window is acted on rather than written over.
+//
+// It is a method rather than a closure inside the tick so a test can drive the
+// real thing. The replica a test used to hand-write would have kept passing
+// through any regression in this code.
+func (s *Supervisor) planningSeam(repository string) func(context.Context, PlanDecompositionRequest) (PlannerOutput, error) {
+	return func(ctx context.Context, request PlanDecompositionRequest) (PlannerOutput, error) {
+		s.plansMu.Unlock()
+		defer s.plansMu.Lock()
+		return s.decomposeWithAgent(ctx, repository, request)
+	}
+}
+
 func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, request PlanDecompositionRequest) (PlannerOutput, error) {
 	engine, err := s.engine(repository, request.Assignment.Agent.ID)
 	if err != nil {
@@ -562,10 +585,13 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	// narrowed, and which the plan's remaining headroom may narrow further -
 	// bounds the invocation itself. Computing it and not passing it made the
 	// narrowing decorative.
-	budgets := ProviderBudget{}
-	if request.WallSeconds > 0 {
-		budgets.WallLimit = time.Duration(request.WallSeconds) * time.Second
-	}
+	//
+	// A stage that states no wall bound, under a plan that states none either,
+	// still gets one: the operator's configured run wall limit, which is what
+	// every producer invocation is bounded by. Zero here meant NO deadline at
+	// all, so the one stage type that runs unattended against a provider was
+	// the only one that could run forever.
+	budgets := ProviderBudget{WallLimit: engine.planningWallLimit(request.WallSeconds)}
 	return InvokePlanner(ctx, PlannerInput{
 		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Budgets: budgets,
 		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),
@@ -625,22 +651,7 @@ func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
 			// its assignment resolved to, in the same verified non-mutating mode
 			// the initial planner uses. The supervisor supplies the seam and
 			// learns nothing about providers.
-			Planner: func(ctx context.Context, request PlanDecompositionRequest) (PlannerOutput, error) {
-				// The provider call happens with the plan lock RELEASED. The
-				// lock serializes read-then-append against an operator
-				// decision, which takes microseconds; holding it across a
-				// repository clone and a live planning invocation stalled
-				// every run in the fleet for minutes, because this tick takes
-				// the same lock before it drives anything.
-				//
-				// Releasing here is safe because the caller re-reads plan state
-				// after the invocation: the proposal is compiled and recorded
-				// against a snapshot taken afterwards, so a decision that lands
-				// in the window is seen rather than overwritten.
-				s.plansMu.Unlock()
-				defer s.plansMu.Lock()
-				return s.decomposeWithAgent(ctx, repository, request)
-			},
+			Planner: s.planningSeam(repository),
 		}
 		report, err := reconciler.Reconcile(ctx, plan.ID)
 		if err != nil {

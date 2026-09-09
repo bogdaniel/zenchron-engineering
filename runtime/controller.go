@@ -435,6 +435,22 @@ func (b RunBudgets) defaults() RunBudgets {
 	return b
 }
 
+// planningWallLimit is the deadline one planning invocation runs under: the
+// bound the STAGE states - already narrowed by the assigned profile and by the
+// plan's remaining headroom - and otherwise the operator's configured run wall
+// limit.
+//
+// Zero used to mean no deadline at all, which made the one stage type that runs
+// unattended against a provider the only one that could run forever. Every
+// producer invocation is bounded by the configured limit; a planner is not
+// special enough to be exempt from it.
+func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
+	if stageSeconds > 0 {
+		return time.Duration(stageSeconds) * time.Second
+	}
+	return r.deps.Budgets.WallLimit
+}
+
 // tightenedBy narrows these budgets by a plan stage's own. It only ever
 // narrows: a stage budget larger than the operator's configured bound is not
 // authority to exceed it, and a stage that states none keeps the configured

@@ -645,7 +645,11 @@ func assignmentID(plan domain.EngineeringPlan, stage domain.PlanStage) string {
 }
 
 func boundedReason(detail string) string {
-	detail = strings.TrimSpace(detail)
+	// Invalid bytes are dropped before the bound is measured: the reason is
+	// journalled, and json.Marshal expands each invalid byte into a three-byte
+	// replacement character, so a detail cut to 200 bytes could encode to more
+	// than 200 and fail the append it was bounded to survive.
+	detail = strings.ToValidUTF8(strings.TrimSpace(detail), "")
 	if detail == "" {
 		return "no readiness detail was reported"
 	}

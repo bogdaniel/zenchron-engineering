@@ -103,7 +103,13 @@ type ControlRequest struct {
 	// Repository is owner/name for a submission. It must already be a
 	// repository this supervisor was constructed to govern.
 	Repository string `json:"repository,omitempty"`
-	Issue      int    `json:"issue,omitempty"`
+	// DefaultBranch is the base branch the REQUESTER resolved for that
+	// repository, the same way the local path resolves it from origin/HEAD. It
+	// selects a branch within a repository the supervisor already governs; it
+	// is not a permission, and a request that carries none falls back to what
+	// durable state or the enrolment assumption says.
+	DefaultBranch string `json:"default_branch,omitempty"`
+	Issue         int    `json:"issue,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.

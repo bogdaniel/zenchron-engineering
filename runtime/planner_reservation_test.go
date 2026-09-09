@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -65,5 +66,25 @@ func TestAPlannerInvocationIsReservedBeforeTheProviderRuns(t *testing.T) {
 	}
 	if durable.Consumed.ProviderInvocations != 2 {
 		t.Fatalf("two invocations recorded %d, want 2", durable.Consumed.ProviderInvocations)
+	}
+}
+
+// A planning invocation is never unbounded.
+//
+// The stage's wall bound - narrowed by the profile, narrowed again by the
+// plan's remaining headroom - bounds the invocation. Where none of the three
+// states one, the computed bound is zero, and zero meant no deadline at all:
+// the one stage type that runs unattended against a provider was the only one
+// that could run forever. The operator's configured run wall limit, which
+// bounds every producer invocation, is the floor.
+func TestAnUnbudgetedPlanningInvocationStillHasADeadline(t *testing.T) {
+	engine := &EngineeringRuntime{deps: Dependencies{Budgets: RunBudgets{WallLimit: 42 * time.Minute}}}
+	if got := engine.planningWallLimit(0); got != 42*time.Minute {
+		t.Fatalf("an unbudgeted planning invocation is bounded by %s, want the configured %s", got, 42*time.Minute)
+	}
+	// A stated bound still wins, in both directions: it is the stage's, and a
+	// stage may state less than the configured default or more.
+	if got := engine.planningWallLimit(60); got != time.Minute {
+		t.Fatalf("a stage stating 60 seconds was bounded by %s", got)
 	}
 }

@@ -604,3 +604,65 @@ func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
 		t.Fatalf("the plan proposed through the supervisor could not be approved: %q", approved.String())
 	}
 }
+
+// The delegated path resolves the base branch instead of assuming one.
+//
+// The local path reads origin/HEAD from a checkout. A supervisor has none, so
+// it assumed "main": the same revision requested in a terminal and through
+// `serve` compiled against different bases - the works-in-one-terminal-not-the-
+// other divergence reported for the plan's remote, in the other half of the
+// same target. Durable state answers it for a plan whose stages have started,
+// and a first proposal states what its requester resolved.
+func TestTheDelegatedPathDoesNotAssumeTheBaseBranch(t *testing.T) {
+	stateDir, err := os.MkdirTemp("", "zc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, configPath := planWorkspaceIn(t, stateDir)
+	t.Chdir(dir)
+	planID := proposePlan(t, configPath, 41)
+
+	built, err := newComposition(autonomyFlags{Config: configPath}, planOverrides(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(built.release)
+	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A first proposal uses the branch the requester resolved, not the
+	// enrolment assumption.
+	_, _, branch, err := built.planSubject(driver, runtime.ControlRequest{
+		Issue: 41, Repository: "zenchron/seeded", DefaultBranch: "trunk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch != "trunk" {
+		t.Fatalf("a first proposal compiled against %q, and its requester resolved %q", branch, "trunk")
+	}
+
+	// A repository this supervisor does not govern is refused, so naming one
+	// stays a selection rather than an introduction.
+	if _, _, _, err := built.planSubject(driver, runtime.ControlRequest{
+		Issue: 41, Repository: "somebody/else", DefaultBranch: "trunk",
+	}); err == nil {
+		t.Fatal("a proposal named an ungoverned repository and was accepted")
+	}
+
+	// A revision answers from the plan's own runs where it has any, and from
+	// the enrolment assumption where it has none.
+	_, _, revised, err := built.planSubject(driver, runtime.ControlRequest{PlanID: planID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revised == "" {
+		t.Fatal("a revision resolved no base branch at all")
+	}
+}

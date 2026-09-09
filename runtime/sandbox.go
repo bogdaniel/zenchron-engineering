@@ -83,29 +83,39 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // truncation would make a transcript that reads as a complete record of what
 // the provider said.
 func (b *boundedBuffer) Bytes() []byte {
-	// The bound can land inside a multi-byte character, the same way a byte
-	// cut anywhere else in this package can. Back up to the last rune that
-	// starts within three bytes of the end and drop it if it is incomplete;
-	// output that is not UTF-8 at all - a provider printing binary - is left
-	// exactly as it was captured.
+	// A capture that was never cut is returned EXACTLY as the process produced
+	// it. The rune trim below exists because the bound can land inside a
+	// character; where no bound was reached there is no such split, and
+	// trimming anyway removed real trailing bytes from complete output - a
+	// legitimate final U+FFFD, or binary ending on a lead byte - while the
+	// comment claimed such output was left as captured.
+	if b.dropped == 0 {
+		return b.buf
+	}
+	// Back up to the last rune that starts within three bytes of the end and
+	// drop it if it is incomplete. Output that is not UTF-8 at all is left
+	// where it was cut rather than walked backwards looking for a boundary
+	// that does not exist.
 	captured := b.buf
+	trimmed := 0
 	for i := 1; i <= utf8.UTFMax-1 && i <= len(captured); i++ {
 		start := len(captured) - i
 		if !utf8.RuneStart(captured[start]) {
 			continue
 		}
 		if r, size := utf8.DecodeRune(captured[start:]); r == utf8.RuneError || size != i {
-			captured = captured[:start]
+			captured, trimmed = captured[:start], i
 		}
 		break
 	}
-	if b.dropped == 0 {
-		return captured
-	}
+	// The notice counts what this buffer did NOT return, which includes the
+	// bytes the trim removed. Reporting only the refused writes would state an
+	// exact number that is short by up to three.
+	omitted := b.dropped + trimmed
 	// A fresh slice: appending onto `captured` would write the notice into the
 	// buffer's own array, over the bytes it just trimmed, and a second read
 	// would return that.
-	notice := fmt.Sprintf("\n[truncated by Zenchron: %d further bytes were produced and not captured]\n", b.dropped)
+	notice := fmt.Sprintf("\n[truncated by Zenchron: %d further bytes were produced and not captured]\n", omitted)
 	return append(append(make([]byte, 0, len(captured)+len(notice)), captured...), notice...)
 }
 

@@ -69,7 +69,13 @@ func boundedDetail(detail string) string { return boundedField(detail) }
 // This is the second time a byte-offset cut has been wrong in this package;
 // there is one implementation now, and both callers use it.
 func boundedField(text string) string {
-	return boundedTo(text, maxPayloadFieldBytes)
+	// A journal field is measured BEFORE it is marshalled, and json.Marshal
+	// turns each invalid byte into a three-byte replacement character - so a
+	// field cut to fit could still overflow the bound once encoded, which is
+	// the append the bound exists to keep possible. Invalid bytes are replaced
+	// here, where the cost is known, rather than expanded later where it is
+	// not.
+	return boundedTo(strings.ToValidUTF8(text, ""), maxPayloadFieldBytes)
 }
 
 // handle dispatches on the operation kind. This is a dispatch table for

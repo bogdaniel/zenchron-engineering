@@ -93,6 +93,12 @@ func TestAnUnreadableAgentAssignmentIsNotReadAsUnbound(t *testing.T) {
 	if legacy := recordedAgentOf(t, &runState{run: EngineeringRun{ID: "run-1"}}); legacy.AgentID != "" {
 		t.Fatalf("a run with no assignment invented one: %#v", legacy)
 	}
+	// A journal that recorded the event with NO CONTENT keeps the legacy
+	// meaning the previous code gave it. Failing every adoption pass over such
+	// a journal would be worse than the answer it already had.
+	if empty := recordedAgentOf(t, assigned("")); empty.AgentID != "" {
+		t.Fatalf("a zero-length assignment payload was read as an identity: %#v", empty)
+	}
 }
 
 // TestRunIsBoundToItsAgentInTheJournal is the binding law: which worker a run

@@ -212,6 +212,14 @@ func (s *runState) recordedAgent() (AgentIdentity, error) {
 		if event.Type != EventRunAgentAssigned {
 			continue
 		}
+		if len(event.Payload) == 0 {
+			// A journal that recorded the event with no content at all. The
+			// previous code tolerated exactly this and read it as the legacy
+			// zero identity; failing every adoption pass over such a journal
+			// would be a worse answer than the meaning it already had. A
+			// payload that HAS content and does not decode is still an error.
+			break
+		}
 		var payload AgentAssignedPayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return AgentIdentity{}, fmt.Errorf("run %s records an agent assignment that cannot be read: %w", s.run.ID, err)

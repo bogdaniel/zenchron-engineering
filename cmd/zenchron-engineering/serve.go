@@ -372,25 +372,55 @@ func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanVi
 // plan yet, so the request names the subject - and the supervisor still refuses
 // a repository it does not govern, because naming one is a selection among what
 // the operator enrolled and never an introduction.
-func (c *composition) planSubject(supervisor *runtime.Supervisor, request runtime.ControlRequest) (string, int, error) {
+func (c *composition) planSubject(supervisor *runtime.Supervisor, request runtime.ControlRequest) (string, int, string, error) {
 	if request.PlanID != "" {
 		repository, issue, found, err := c.store.PlanSource(request.PlanID)
 		if err != nil {
-			return "", 0, err
+			return "", 0, "", err
 		}
 		if !found || issue <= 0 {
-			return "", 0, fmt.Errorf("plan %s records no source issue, so it cannot be revised", request.PlanID)
+			return "", 0, "", fmt.Errorf("plan %s records no source issue, so it cannot be revised", request.PlanID)
 		}
-		return repository, issue, nil
+		branch, err := c.planBaseBranch(request.PlanID)
+		if err != nil {
+			return "", 0, "", err
+		}
+		return repository, issue, branch, nil
 	}
 	if request.Issue <= 0 {
-		return "", 0, fmt.Errorf("a first proposal names the issue it plans, and this request names none")
+		return "", 0, "", fmt.Errorf("a first proposal names the issue it plans, and this request names none")
 	}
 	governed, ok := supervisor.GovernedRepository(request.Repository)
 	if !ok {
-		return "", 0, fmt.Errorf("repository %q is not governed by this supervisor", request.Repository)
+		return "", 0, "", fmt.Errorf("repository %q is not governed by this supervisor", request.Repository)
 	}
-	return governed.String(), request.Issue, nil
+	branch := strings.TrimSpace(request.DefaultBranch)
+	if branch == "" {
+		branch = watchedDefaultBranch
+	}
+	return governed.String(), request.Issue, branch, nil
+}
+
+// planBaseBranch is the branch this plan's work is already based on.
+//
+// The local path resolves origin/HEAD from a checkout; a supervisor has none,
+// and assuming "main" made a revision requested through `serve` compile against
+// a different base than the same revision requested in a terminal - the same
+// works-in-one-terminal-not-the-other divergence reported for the plan's
+// remote. The plan's OWN runs answer it from durable state: they were created
+// by a path that did resolve it. The enrolment assumption remains the fallback
+// for a plan whose stages have not started yet.
+func (c *composition) planBaseBranch(planID string) (string, error) {
+	runs, err := c.store.Runs()
+	if err != nil {
+		return "", err
+	}
+	for _, run := range runs {
+		if run.Plan != nil && run.Plan.PlanID == planID && strings.TrimSpace(run.Base.ID) != "" {
+			return run.Base.ID, nil
+		}
+	}
+	return watchedDefaultBranch, nil
 }
 
 func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Supervisor, request runtime.ControlRequest) (runtime.PlanView, error) {
@@ -398,7 +428,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
-	repository, issue, err := c.planSubject(supervisor, request)
+	repository, issue, defaultBranch, err := c.planSubject(supervisor, request)
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
@@ -417,7 +447,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	// several repositories; the plan says which one, and nothing about the
 	// process's own working directory does.
 	target := runtime.RepositoryTarget{
-		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: watchedDefaultBranch,
+		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: defaultBranch,
 	}
 	engine, err := c.engine(target)
 	if err != nil {

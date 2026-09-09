@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -1877,6 +1879,29 @@ func TestEveryTruncatorCutsOnARuneBoundary(t *testing.T) {
 		}
 	}
 
+	// A bounded JOURNAL field survives its own encoding. The bound is measured
+	// before marshalling and json.Marshal expands each invalid byte into a
+	// three-byte replacement character, so binary content cut to fit could
+	// still overflow the bound once encoded - and that append is what the
+	// bound exists to keep possible.
+	binaryField := strings.Repeat("a", maxPayloadFieldBytes-8) + string([]byte{0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87})
+	for name, bounded := range map[string]string{
+		"BoundedNote":   BoundedNote(binaryField),
+		"boundedDetail": boundedDetail(binaryField),
+	} {
+		encoded, err := json.Marshal(map[string]string{"note": bounded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var round map[string]string
+		if err := json.Unmarshal(encoded, &round); err != nil {
+			t.Fatal(err)
+		}
+		if len(round["note"]) > maxPayloadFieldBytes {
+			t.Fatalf("%s encoded binary content to %d bytes, above the %d-byte bound", name, len(round["note"]), maxPayloadFieldBytes)
+		}
+	}
+
 	// Not valid UTF-8 anywhere. It must still be cut near the limit.
 	binary := string([]byte{0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89})
 	if cut := boundedTo(binary, 6); len(cut) != 6 {
@@ -1885,9 +1910,31 @@ func TestEveryTruncatorCutsOnARuneBoundary(t *testing.T) {
 }
 
 func TestThePlanLockIsReleasedAcrossAProviderCall(t *testing.T) {
-	supervisor := &Supervisor{}
-	invoked := make(chan struct{})
-	released := make(chan struct{})
+	// The REAL seam, from the supervisor that builds it for the reconciler. A
+	// hand-written replica of these three lines would keep passing through any
+	// regression in them, which is the only thing this test exists to catch.
+	invoked, released := make(chan struct{}), make(chan struct{})
+	agents := handoffRegistry(t)
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: store, Owner: "owner-1", Agents: agents,
+		Repositories: []GitHubRepo{{Owner: "acme", Name: "repo"}},
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) {
+			// Standing in for the clone and the provider call: the slow part,
+			// which must run with the lock released.
+			close(invoked)
+			<-released
+			return nil, errors.New("this test needs no engine")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seam := supervisor.planningSeam("acme/repo")
 
 	supervisor.plansMu.Lock()
 	go func() {
@@ -1900,16 +1947,20 @@ func TestThePlanLockIsReleasedAcrossAProviderCall(t *testing.T) {
 		close(released)
 	}()
 
-	// The seam the reconciler calls, with the lock held around it.
-	func() {
-		supervisor.plansMu.Unlock()
-		defer supervisor.plansMu.Lock()
-		close(invoked)
-		select {
-		case <-released:
-		case <-time.After(5 * time.Second):
-			t.Error("a decision could not take the plan lock while a provider call was in flight")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := seam(context.Background(), PlanDecompositionRequest{
+			Plan:       domain.EngineeringPlan{ID: "plan-1", Revision: 1},
+			Assignment: domain.AgentAssignment{Agent: domain.AgentBinding{ID: "codex"}},
+		}); err == nil {
+			t.Error("the seam reported success without an engine")
 		}
 	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a decision could not take the plan lock while a provider call was in flight")
+	}
 	supervisor.plansMu.Unlock()
 }
