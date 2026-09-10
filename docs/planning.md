@@ -544,6 +544,38 @@ rather than trusted.
 
 ### Work whose input moved
 
+The assignment a stage will actually execute is the DURABLE one. It is
+persisted before the engine is built and before the run exists, and the
+`plan.stage_assigned` association is appended only after the run exists - so a
+start that failed in between leaves a frozen row that nothing points at, and
+the row is kept on the next attempt because assignments are immutable per
+revision, stage and generation. Every guard therefore applies to that row and
+not to whatever the resolver produced this pass: checking the fresh resolution
+meant the safety check protected an assignment that was about to be discarded,
+while the one that ran was never checked at all.
+
+A frozen assignment nothing ever ran is intent, not history. If its input has
+been replaced since it was frozen, the performance it was frozen for will never
+happen, and refusing it would refuse it forever - the row cannot change. So the
+stage advances an execution generation instead, exactly as it would if that
+performance had run and been invalidated: the abandoned row stays where it is,
+the next performance is frozen against what the producer actually settled, and
+the privilege boundary compares the two. A retry the producer did not outrun
+re-uses the assignment it froze and burns no generation.
+
+The one exception is a freeze whose RUN survived. The association is appended
+after the run is created, so a crash between the two leaves a live run the
+projection does not name, which is indistinguishable from a failed start by the
+plan journal alone. Discarding that freeze would leave the run executing,
+unstopped and attributed to no stage - consumed plan budget made invisible - so
+the durable runs are asked, the stage is associated with the run that exists,
+and the sweep below handles it from there. That run then finishes its work
+against the candidate it was created for and is invalidated when it completes,
+so it spends its invocations on a performance already known to be superseded.
+It is the same policy any run gets when its input moves underneath it, and
+stopping one here rather than at completion would be new machinery; it is
+recorded because the window makes it knowable earlier than usual.
+
 A completed stage is invalidated when the upstream work its frozen assignment
 names has been replaced - a producer at `goal_state_reached` is not finished,
 and reviewer feedback can move it to a different candidate. Everything
@@ -604,6 +636,30 @@ a stage completed under one revision and carried unchanged into the next keeps
 its record under the older one - the ordinary result of propose, approve,
 propose, approve. Looking only under the revision governing now would find
 nothing to compare in exactly the histories this boundary exists for.
+
+That comparison therefore crosses revisions, and two of the things it compares
+are POINTERS rather than obligations. The assignment carries the plan revision
+and plan digest it was resolved under, and a per-revision pointer to the
+compiled contract; a stage carried forward unchanged into a later approved
+revision necessarily gets new values for all three, because the plan document
+and the stored contract are written per revision. Reading those as a changed
+obligation refused the renewal this boundary exists to permit - a stage whose
+upstream had moved could not be re-performed at all once any later revision had
+been approved.
+
+So they are erased from the structural comparison and replaced by what they
+point AT. The plan's durable identity has to be the same one, the renewal has
+to be resolved under the revision actually executing - which is the approved
+one - and to name that revision's own content, and the previous performance has
+to be recorded no later than it. The
+contract has to be the same contract by identity, and the compiled documents
+the two revisions were planned against have to say the same thing: the whole
+contract less its own revision string and the predecessor it names, compared as
+one canonical record. A revision whose recompiled contract obliges anything
+different - an added invariant, a changed required claim, a narrowed scope - is
+a different obligation and is blocked like any other authority change. A
+contract that cannot be read at all is blocked too, for the same reason an
+unreadable previous performance is.
 
 Upgrading an installation that already holds an old-style same-revision
 invalidation converges after one bounded extra cycle: the stored assignments

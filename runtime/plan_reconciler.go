@@ -541,52 +541,12 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 		if !found {
 			continue
 		}
-		for _, upstream := range assignment.Context.UpstreamOutputs {
-			if upstream.RunID == "" || upstream.Candidate == "" {
-				continue
-			}
-			// Compared against the SAME field the freeze copied - the run's own
-			// record of its candidate - so the two are like for like. The
-			// journal projection can be momentarily ahead of it, mid-pass,
-			// which would read as movement and throw away a review that had
-			// just been performed against the candidate the assignment names.
-			run, found, err := r.Store.Run(upstream.RunID)
-			if err != nil {
-				return false, err
-			}
-			if !found {
-				continue
-			}
-			// Only a head the producer is FINISHED WITH counts as movement.
-			// The run row's candidate is refreshed on every reconcile of that
-			// run - every commit and checkpoint - not on publication or
-			// settlement. A producer re-activated by reviewer feedback moves it
-			// on the first checkpoint, long before it has produced anything a
-			// reviewer should consume, and firing there would freeze the next
-			// generation against an interim, possibly unpushed head: a paid
-			// review of work still being changed, invalidated again the moment
-			// the producer settles, burning a child run and invocations from
-			// the approved envelope on every cycle.
-			//
-			// Generation 0 gets this invariant for free - a stage starts when
-			// its dependencies have SETTLED - and this is the same rule applied
-			// to every later generation.
-			if _, settled := stageOutcome(run); !settled {
-				continue
-			}
-			head := run.Candidate.Revision
-			if head == "" || head == upstream.Candidate {
-				continue
-			}
-			// Bounded, because it is a journal field: two full candidate heads
-			// and a stage id exceed the 200-byte field bound with ordinary
-			// production ids, and the append would be REFUSED - so the
-			// reconciler would error on this plan on every tick, forever. Every
-			// neighbouring append passes its detail through here; this one did
-			// not.
-			stale[stage.ID] = boundedDetail(fmt.Sprintf("it consumed %s from stage %s, which is now at %s",
-				upstream.Candidate, upstream.StageID, head))
-			break
+		moved, err := r.movedUpstream(assignment)
+		if err != nil {
+			return false, err
+		}
+		if moved != "" {
+			stale[stage.ID] = moved
 		}
 	}
 	// Propagation is seeded from DURABLE STATE as well as from what this pass
@@ -657,6 +617,87 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 	return len(ids) > 0, nil
 }
 
+// startedRun reports whether a run already exists for one performance of a
+// stage, whatever the plan journal says about it.
+//
+// It asks the durable RUNS rather than the projection, because the projection
+// is exactly what can be missing: `plan.stage_assigned` is appended after the
+// run is created, so a crash between the two leaves a live run nothing names.
+//
+// It scans, and that is deliberate: there is no plan index over runs, and this
+// is only reached on the rare path where a start failed AND the input it froze
+// has since been replaced. An index for a branch taken that seldom would be
+// carried by every write for the benefit of almost none.
+func (r PlanReconciler) startedRun(plan domain.EngineeringPlan, stageID string, generation int) (bool, error) {
+	runs, err := r.Store.Runs()
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if run.Plan == nil {
+			continue
+		}
+		if run.Plan.PlanID == plan.ID && run.Plan.Revision == plan.Revision &&
+			run.Plan.StageID == stageID && run.Plan.Generation == generation {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// movedUpstream names the first upstream output an assignment froze whose
+// producer has since SETTLED on a different candidate, or the empty string.
+//
+// It is ONE predicate with two callers, deliberately. The sweep uses it to
+// decide that completed work is stale; the start path uses it to decide that a
+// durable assignment nothing ever ran is stale. Two copies would be two answers
+// to "did this stage's input move", and for a long time the second copy simply
+// did not exist - which is how an assignment frozen against a candidate that
+// had since been replaced could still be the one that executed.
+//
+// Two things make it conservative on purpose:
+//
+//   - It compares against the RUN'S OWN record of its candidate, which is the
+//     same field the freeze copied, so the two are like for like. The journal
+//     projection can be momentarily ahead of it mid-pass, which would read as
+//     movement and throw away a review that had just been performed against the
+//     candidate the assignment names.
+//   - Only a head the producer is FINISHED WITH counts. The run row's candidate
+//     is refreshed on every reconcile of that run - every commit and checkpoint
+//   - not on publication or settlement. A producer re-activated by reviewer
+//     feedback moves it on the first checkpoint, long before it has produced
+//     anything a reviewer should consume, and firing there would bind the next
+//     performance to an interim, possibly unpushed head.
+//
+// The detail is BOUNDED, because it becomes a journal field: two full candidate
+// heads and a stage id exceed the 200-byte field bound with ordinary production
+// ids, and the append would be refused - so the reconciler would error on that
+// plan on every tick, forever.
+func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string, error) {
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		if upstream.RunID == "" || upstream.Candidate == "" {
+			continue
+		}
+		run, found, err := r.Store.Run(upstream.RunID)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			continue
+		}
+		if _, settled := stageOutcome(run); !settled {
+			continue
+		}
+		head := run.Candidate.Revision
+		if head == "" || head == upstream.Candidate {
+			continue
+		}
+		return boundedDetail(fmt.Sprintf("it consumed %s from stage %s, which is now at %s",
+			upstream.Candidate, upstream.StageID, head)), nil
+	}
+	return "", nil
+}
+
 // refusePrivilegeChange is the boundary between renewing an obligation and
 // changing one.
 //
@@ -700,8 +741,63 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 			Reason: "propose a revision: this stage is being performed again and the assignment its previous performance was frozen under cannot be read, so nothing proves the obligation is unchanged",
 		}
 	}
+	// APPROVED-PLAN PROVENANCE MAY ADVANCE. It is not authority.
+	//
+	// A stage carried forward unchanged into a later approved revision is
+	// performed again under THAT revision, so the assignment resolved for the
+	// renewal necessarily carries the new revision number and the new plan
+	// digest. Reading that as a changed obligation refused exactly the renewal
+	// this boundary exists to permit.
+	//
+	// What may not move is the plan's durable IDENTITY, and the direction of
+	// travel. The renewal runs under the revision the reconciler is executing -
+	// which is the APPROVED one, because nothing else reaches here - and the
+	// performance it renews is an earlier one under the same plan. Stating both
+	// structurally is what keeps "the revision advanced" from becoming a way to
+	// compare against something that was never approved.
+	if previous.Plan.ID != next.Plan.ID {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: performing this stage again would change its plan, which is a different obligation than the one approved (%s becomes %s)",
+				shortValue(previous.Plan.ID), shortValue(next.Plan.ID))),
+		}
+	}
+	if next.Plan.Revision != plan.Revision {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: this stage's renewal was resolved under revision %d while revision %d is executing, so nothing proves it renews what was approved",
+				next.Plan.Revision, plan.Revision)),
+		}
+	}
+	// The DIGEST too, for the same reason and with no more trust. Equal by
+	// construction on the production path - the resolver stamps it from the
+	// plan being executed, and an approval verified it - but the assignment
+	// this writes is a durable provenance claim, and a row recording a digest
+	// the executing revision does not have is a false one whatever produced it.
+	if next.Plan.Digest != plan.Digest {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: this stage's renewal names plan content %s and revision %d is %s, so it was not resolved from the approved document",
+				shortValue(next.Plan.Digest), plan.Revision, shortValue(plan.Digest))),
+		}
+	}
+	if previous.Plan.Revision > plan.Revision {
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: this stage's previous performance is recorded under revision %d, which is later than the executing revision %d, so it is not a performance this one renews",
+				previous.Plan.Revision, plan.Revision)),
+		}
+	}
 	for _, difference := range []struct{ what, before, now string }{
 		{"role", string(previous.Role), string(next.Role)},
+		// Contract IDENTITY. The per-revision pointer beside it may advance
+		// with the approved plan and is compared by CONTENT below; which
+		// contract this stage answers may not change at all.
+		{"contract", previous.Contract.ID, next.Contract.ID},
 		{"profile", fmt.Sprintf("%s v%d %s", previous.Profile.ID, previous.Profile.Version, previous.Profile.Digest), fmt.Sprintf("%s v%d %s", next.Profile.ID, next.Profile.Version, next.Profile.Digest)},
 		// The profile DOCUMENT names its instruction packs and context policy
 		// by id; the registry resolves and freezes their content digests
@@ -736,6 +832,11 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 				"propose a revision: performing this stage again would change its %s, which is a different obligation than the one approved (%s becomes %s)",
 				difference.what, shortValue(difference.before), shortValue(difference.now))),
 		}
+	}
+	// The OBLIGATIONS, by content. The pointer to them advances with the
+	// approved plan; what they say may not change without approval.
+	if block := r.refuseContractChange(plan, stage, previous, next); block != nil {
+		return block
 	}
 	// The stage's own bounds may NARROW - a profile that tightens is
 	// customization doing what it is allowed to do - and may not be raised.
@@ -772,8 +873,16 @@ func (r PlanReconciler) refusePrivilegeChange(plan domain.EngineeringPlan, stage
 // What it erases is the whole permitted difference between two performances of
 // the same approved obligation: which performance this is, the run it became,
 // the resolver's explanation of how it chose, the upstream candidate whose
-// replacement is the reason for the generation, and the budget - which is
-// compared separately because it may narrow.
+// replacement is the reason for the generation, the budget - which is compared
+// separately because it may narrow - and the two POINTERS that name where the
+// approved obligation is written down rather than what it says.
+//
+// The pointers are the plan's revision and digest, and the contract's revision.
+// Both advance when a stage is carried forward unchanged into a later approved
+// revision, and both are checked by the comparisons above this: the plan by
+// identity and direction of travel, the contract by identity and by the content
+// of the compiled document itself. Erasing them here without those checks would
+// move an authority boundary, not relax a false one.
 //
 // Everything left is durable configuration or authority, and it has to be
 // identical. The candidate a stage consumes moves; what an operator approved
@@ -784,7 +893,84 @@ func renewalScope(assignment domain.AgentAssignment) domain.AgentAssignment {
 	assignment.Selection = domain.ResolutionExplanation{}
 	assignment.Context.UpstreamOutputs = nil
 	assignment.Budget = domain.StageBudget{}
+	assignment.Plan.Revision, assignment.Plan.Digest = 0, ""
+	assignment.Contract.Revision = ""
 	return assignment
+}
+
+// refusePrivilegeChange's boundary, applied to the OBLIGATIONS a stage is
+// performed under.
+//
+// Compiled contracts are stored per plan revision, so a stage carried forward
+// unchanged into a later approved revision references a different contract
+// revision while the document says exactly the same thing. The revision is a
+// POINTER: comparing it refused renewals that changed nothing. Comparing
+// nothing at all would be worse - a materially different compiled contract is a
+// different obligation and goes through the approval boundary like any other.
+//
+// So the CONTENT is what is compared, and it is read from the durable contracts
+// the two revisions were actually planned against rather than from the pointer
+// the assignment carries.
+func (r PlanReconciler) refuseContractChange(plan domain.EngineeringPlan, stage domain.PlanStage, previous, next domain.AgentAssignment) *PlanStageBlock {
+	if previous.Plan.Revision == next.Plan.Revision {
+		// One contract governs one revision and is immutable under it, so both
+		// performances were resolved against the same stored document.
+		return nil
+	}
+	before, block := r.obligationDigest(plan.ID, previous.Plan.Revision, stage)
+	if block != nil {
+		return block
+	}
+	now, block := r.obligationDigest(plan.ID, next.Plan.Revision, stage)
+	if block != nil {
+		return block
+	}
+	if before == now {
+		return nil
+	}
+	return &PlanStageBlock{
+		StageID: stage.ID, Kind: "authority",
+		Reason: boundedDetail(fmt.Sprintf(
+			"propose a revision: performing this stage again would perform it under different compiled obligations, which is a different obligation than the one approved (%s becomes %s)",
+			shortValue(before), shortValue(now))),
+	}
+}
+
+// obligationDigest is what one revision's compiled contract OBLIGES, as one
+// comparable value.
+//
+// The contract's own revision string and the predecessor it names are erased:
+// they are where the document sits in a chain, not what it requires. Everything
+// else - objective, acceptance intent, subject, scope, facts, invariants,
+// obligations, required claims, permissions, prohibitions, authority
+// conditions, plan requirements, and the project model and policy it was
+// compiled from - is content, and content is the invariant.
+//
+// A contract that cannot be read FAILS CLOSED. A stage is being performed
+// again, so both revisions were planned against something; not being able to
+// read one proves nothing about whether the obligations are the same.
+func (r PlanReconciler) obligationDigest(planID string, revision int, stage domain.PlanStage) (string, *PlanStageBlock) {
+	contract, found, err := r.Store.PlanContract(planID, revision)
+	if err != nil {
+		return "", &PlanStageBlock{StageID: stage.ID, Kind: "assignment", Reason: boundedDetail(err.Error())}
+	}
+	if !found {
+		return "", &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: boundedDetail(fmt.Sprintf(
+				"propose a revision: this stage is being performed again and the contract revision %d was planned against cannot be read, so nothing proves its obligations are unchanged", revision)),
+		}
+	}
+	contract.Revision = ""
+	contract.Provenance.PreviousContractRevision = nil
+	digest, err := domain.Digest(contract)
+	if err != nil {
+		return "", &PlanStageBlock{
+			StageID: stage.ID, Kind: "authority",
+			Reason: "propose a revision: this stage's previous and next obligations could not be compared, and an unprovable obligation is not a renewed one",
+		}
+	}
+	return digest, nil
 }
 
 // budgetEscalation names the first bound a re-performance would RAISE, or the
@@ -860,7 +1046,78 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		// The resolver already recorded why, and that block is in the report.
 		return nil, nil, nil
 	}
-	// The upstream heads this assignment would FREEZE have to be heads their
+	// WHICH EXECUTION of this stage this is. Zero is the first, and a later one
+	// exists only because the upstream candidate this stage consumed was
+	// replaced. The approved obligation is unchanged, so it is performed again
+	// under the same revision - but as its own assignment and its own run,
+	// because reusing either would hand the new performance the input whose
+	// replacement is the reason for it.
+	generation := snapshot.Stages[stage.ID].Generation
+	// THE ASSIGNMENT THAT WILL ACTUALLY EXECUTE, before anything is checked
+	// against it.
+	//
+	// PutPlanAssignment keeps the first row written for a (revision, stage,
+	// generation), so a row frozen by an earlier start attempt is what a retry
+	// executes - not the resolution this pass just produced. Every guard below
+	// therefore has to see that row. Checking the fresh resolution instead
+	// checked an assignment that was about to be discarded on conflict, and the
+	// one that ran was never checked at all: a start that failed after the
+	// freeze, followed by the producer settling a different candidate, left the
+	// stale frozen assignment to be loaded and executed while the guard passed
+	// on the replacement it would never use.
+	durable, frozenAlready, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation, stage.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if frozenAlready {
+		// A frozen assignment NOTHING EVER RAN is intent, not history. The
+		// stage_assigned projection is written only after a run was created
+		// under it, so an assignment the projection does not name is one whose
+		// start never completed - the engine refused, the process died, the
+		// tick errored.
+		//
+		// If its input has since been replaced, the performance it was frozen
+		// for will never happen. Blocking would be safe and permanent: the row
+		// is immutable, so every later tick would read the same stale
+		// assignment and refuse again. So the stage advances an execution
+		// GENERATION instead, exactly as it would if that performance had run
+		// and been invalidated - the abandoned row stays where it is, the next
+		// performance is frozen against what the producer actually settled, and
+		// the privilege boundary compares the two.
+		if snapshot.Stages[stage.ID].AssignmentID == "" {
+			moved, err := r.movedUpstream(durable)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Unless a RUN was created under it after all. The association
+			// event is appended after the run exists, so a crash between the
+			// two leaves a live run the projection does not name; discarding
+			// that freeze would advance the generation and leave the run
+			// executing, unstopped and attributed to nothing. Its stage is
+			// associated instead, and the ordinary sweep invalidates and
+			// retires it the way it does any run whose input moved under it.
+			started := false
+			if moved != "" {
+				if started, err = r.startedRun(plan, stage.ID, generation); err != nil {
+					return nil, nil, err
+				}
+			}
+			if moved != "" && !started {
+				if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+					StageID: stage.ID, Outcome: planStageInvalidated, Revision: plan.Revision,
+					Reason: boundedDetail("an assignment was frozen for this stage and no run was created under it, and " + moved),
+				}); err != nil {
+					return nil, nil, err
+				}
+				// The next tick performs the new generation. Nothing started
+				// here, and nothing is blocked: the stage is simply not yet at
+				// the assignment it will run.
+				return nil, nil, nil
+			}
+		}
+		assignment = durable
+	}
+	// The upstream heads this assignment FREEZES have to be heads their
 	// producers are FINISHED WITH. A stage stays completed in plan state while
 	// its run is re-activated by reviewer feedback, and the run row's candidate
 	// moves on the first checkpoint after that - so a stage starting in the
@@ -907,14 +1164,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if r.Engine == nil {
 		return nil, nil, &PlanRefusedError{PlanID: plan.ID, Detail: "no engine factory is configured, so no run can be created"}
 	}
-	// WHICH EXECUTION of this stage this is. Zero is the first, and a later one
-	// exists only because the upstream candidate this stage consumed was
-	// replaced. The approved obligation is unchanged, so it is performed again
-	// under the same revision - but as its own assignment and its own run,
-	// because reusing either would hand the new performance the input whose
-	// replacement is the reason for it.
-	generation := snapshot.Stages[stage.ID].Generation
-	if generation > 0 {
+	if generation > 0 && !frozenAlready {
 		if block := r.refusePrivilegeChange(plan, stage, generation, assignment); block != nil {
 			return nil, block, nil
 		}
@@ -924,10 +1174,10 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		return nil, nil, err
 	}
 	// The STORED assignment is the one that runs. A row already frozen for this
-	// (plan, revision, stage) is kept, so a re-resolution that picked a
-	// different worker must not be what the journal, the run binding and the
-	// report describe: that is a tamper-evident journal naming worker B while
-	// worker A does the work.
+	// (plan, revision, stage, generation) is kept, so a re-resolution that
+	// picked a different worker must not be what the journal, the run binding
+	// and the report describe: that is a tamper-evident journal naming worker B
+	// while worker A does the work.
 	frozen, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation, stage.ID)
 	if err != nil {
 		return nil, nil, err
