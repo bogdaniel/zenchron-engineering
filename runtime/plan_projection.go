@@ -106,6 +106,19 @@ type PlanApproval struct {
 	Digest   string                `json:"digest"`
 	Operator string                `json:"operator,omitempty"`
 	Note     string                `json:"note,omitempty"`
+	// AssignmentsDigest is the assignment set this decision bound, carried out
+	// of the hash-chained event rather than re-derived.
+	//
+	// The approved assignments live in a table beside the journal, and a table
+	// is editable. Replaying the digest the approval actually recorded is what
+	// lets those rows be CHECKED before they authorize anything: without it the
+	// two durable sources could disagree and the side table would win.
+	//
+	// Empty means no binding was recorded at all - an approval written before
+	// this boundary existed. That is a different fact from an approval that
+	// deliberately bound nothing, which carries the canonical digest of the
+	// empty set, and the two must not collapse into each other.
+	AssignmentsDigest string `json:"assignments_digest,omitempty"`
 }
 
 // PlanValidation is the latest deterministic verdict on the current revision.
@@ -327,6 +340,7 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		decision := PlanApproval{
 			Status: status, Revision: payload.Revision, Digest: payload.Digest,
 			Operator: payload.Operator, Note: payload.Note,
+			AssignmentsDigest: payload.AssignmentsDigest,
 		}
 		s.Approval = decision
 		// An approval is sticky and monotonic. A REJECTION of a later revision

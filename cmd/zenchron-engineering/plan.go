@@ -659,9 +659,17 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 				"plan %s has no revision awaiting a decision (revision %d is %s); `autonomy plan show %s` shows its state",
 				planID, awaiting.Approval.Revision, awaiting.Approval.Status, planID)
 		}
+		// An APPROVAL also names the assignment set it approves, and this path
+		// has not resolved one - so the offered command names it as something
+		// to fill in from `plan show` rather than printing a command that would
+		// be refused. A rejection binds no assignments and needs none.
+		set := ""
+		if verb != "reject" {
+			set = " --assignments <the assignments_digest `plan show` prints>"
+		}
 		return runtime.ExitInvalid, fmt.Errorf(
-			"%s names the exact revision it decides: run `autonomy plan show %s` and use the command it prints (currently `autonomy plan %s %s --revision %d --digest %s`)",
-			verb, planID, verb, planID, awaiting.Approval.Revision, awaiting.Approval.Digest)
+			"%s names the exact revision it decides: run `autonomy plan show %s` and use the command it prints (currently `autonomy plan %s %s --revision %d --digest %s%s`)",
+			verb, planID, verb, planID, awaiting.Approval.Revision, awaiting.Approval.Digest, set)
 	}
 	// A DECISION about work a supervisor is executing goes to that supervisor.
 	// It is the process that owns the work, so it applies the decision against

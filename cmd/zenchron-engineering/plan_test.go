@@ -136,10 +136,10 @@ func TestPlanApprovalIsRecordedAgainstTheExactRevision(t *testing.T) {
 
 	planID := proposePlan(t, configPath, 41)
 
-	revision, digest := pendingDecision(t, configPath, planID, 41)
+	revision, digest, assignments := pendingDecision(t, configPath, planID, 41)
 	var approved bytes.Buffer
 	code, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision), "--digest", digest,
-		"--note", "read it", "--text", "--config", configPath},
+		"--assignments", assignments, "--note", "read it", "--text", "--config", configPath},
 		planOverrides(t, 41), &approved)
 	if err != nil || code != runtime.ExitCompleted {
 		t.Fatalf("approve: code=%d err=%v\n%s", code, err, approved.String())
@@ -216,7 +216,10 @@ func TestPlanListShowsProposedPlans(t *testing.T) {
 // proposePlan runs a deterministic proposal and returns the plan id.
 // pendingDecision is the revision an operator is being asked about, with its
 // digest - what `plan show` prints and what a decision has to name.
-func pendingDecision(t *testing.T, configPath, planID string, issue int) (int, string) {
+// pendingDecision reads what an operator reads: the revision awaiting a
+// decision, the plan digest that identifies its content, and the digest of the
+// assignments approving it would bind. An approval names all three.
+func pendingDecision(t *testing.T, configPath, planID string, issue int) (int, string, string) {
 	t.Helper()
 	var out bytes.Buffer
 	if _, err := autonomy([]string{"plan", "show", planID, "--config", configPath},
@@ -224,7 +227,8 @@ func pendingDecision(t *testing.T, configPath, planID string, issue int) (int, s
 		t.Fatalf("show: %v\n%s", err, out.String())
 	}
 	var view struct {
-		Snapshot struct {
+		AssignmentsDigest string `json:"assignments_digest"`
+		Snapshot          struct {
 			Approval struct {
 				Revision int    `json:"revision"`
 				Digest   string `json:"digest"`
@@ -237,7 +241,10 @@ func pendingDecision(t *testing.T, configPath, planID string, issue int) (int, s
 	if view.Snapshot.Approval.Revision == 0 {
 		t.Fatalf("plan show reports no revision awaiting a decision:\n%s", out.String())
 	}
-	return view.Snapshot.Approval.Revision, view.Snapshot.Approval.Digest
+	if view.AssignmentsDigest == "" {
+		t.Fatalf("plan show printed no assignment set to name:\n%s", out.String())
+	}
+	return view.Snapshot.Approval.Revision, view.Snapshot.Approval.Digest, view.AssignmentsDigest
 }
 
 func proposePlan(t *testing.T, configPath string, issue int) string {
@@ -303,20 +310,21 @@ func TestApprovalTargetsTheRevisionAwaitingADecision(t *testing.T) {
 	planID := proposePlan(t, configPath, 41)
 
 	// Approve revision 1, then propose revision 2 by re-planning.
-	first, firstDigest := pendingDecision(t, configPath, planID, 41)
-	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(first), "--digest", firstDigest, "--config", configPath},
+	first, firstDigest, firstAssignments := pendingDecision(t, configPath, planID, 41)
+	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(first), "--digest", firstDigest,
+		"--assignments", firstAssignments, "--config", configPath},
 		planOverrides(t, 41), &bytes.Buffer{}); err != nil {
 		t.Fatalf("approve r1: %v", err)
 	}
 	proposePlan(t, configPath, 41)
 
-	second, secondDigest := pendingDecision(t, configPath, planID, 41)
+	second, secondDigest, secondAssignments := pendingDecision(t, configPath, planID, 41)
 	if second != 2 {
 		t.Fatalf("the plan is awaiting a decision on revision %d, want 2", second)
 	}
 	var out bytes.Buffer
 	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(second), "--digest", secondDigest,
-		"--text", "--config", configPath}, planOverrides(t, 41), &out); err != nil {
+		"--assignments", secondAssignments, "--text", "--config", configPath}, planOverrides(t, 41), &out); err != nil {
 		t.Fatalf("approve r2: %v\n%s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "revision 2 approved") {
@@ -332,7 +340,7 @@ func TestADecisionMustNameTheRevisionTheOperatorRead(t *testing.T) {
 	dir, configPath := planWorkspace(t)
 	t.Chdir(dir)
 	planID := proposePlan(t, configPath, 41)
-	revision, digest := pendingDecision(t, configPath, planID, 41)
+	revision, digest, _ := pendingDecision(t, configPath, planID, 41)
 
 	var bare bytes.Buffer
 	code, err := autonomy([]string{"plan", "approve", planID, "--config", configPath}, planOverrides(t, 41), &bare)
@@ -415,10 +423,10 @@ func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T
 		t.Fatalf("plan show printed no plan:\n%s", shown.String())
 	}
 
-	revision, digest := pendingDecision(t, configPath, planID, 41)
+	revision, digest, assignments := pendingDecision(t, configPath, planID, 41)
 	var approved bytes.Buffer
 	if code, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision),
-		"--digest", digest, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
+		"--digest", digest, "--assignments", assignments, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
 		t.Fatalf("plan approve while a supervisor owns the state dir: code=%d err=%v\n%s", code, err, approved.String())
 	}
 	if !strings.Contains(approved.String(), "approved by") {
@@ -444,9 +452,9 @@ func TestPlanShowRendersOneExactRevision(t *testing.T) {
 	dir, configPath := planWorkspace(t)
 	t.Chdir(dir)
 	planID := proposePlan(t, configPath, 41)
-	first, firstDigest := pendingDecision(t, configPath, planID, 41)
+	first, firstDigest, firstAssignments := pendingDecision(t, configPath, planID, 41)
 	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(first),
-		"--digest", firstDigest, "--config", configPath}, planOverrides(t, 41), &bytes.Buffer{}); err != nil {
+		"--digest", firstDigest, "--assignments", firstAssignments, "--config", configPath}, planOverrides(t, 41), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	proposePlan(t, configPath, 41)
@@ -518,10 +526,10 @@ func TestADelegatedDecisionRecordsTheRequester(t *testing.T) {
 		})
 	}()
 
-	revision, digest := pendingDecision(t, configPath, planID, 41)
+	revision, digest, assignments := pendingDecision(t, configPath, planID, 41)
 	var approved bytes.Buffer
 	if _, err := autonomy([]string{"plan", "approve", planID, "--revision", strconv.Itoa(revision),
-		"--digest", digest, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
+		"--digest", digest, "--assignments", assignments, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
 		t.Fatalf("approve: %v\n%s", err, approved.String())
 	}
 	if !strings.Contains(approved.String(), "operator-1") {
@@ -588,6 +596,7 @@ func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
 			Revision int    `json:"revision"`
 			Digest   string `json:"digest"`
 		} `json:"plan"`
+		AssignmentsDigest string `json:"assignments_digest"`
 	}
 	if err := json.Unmarshal(proposed.Bytes(), &view); err != nil {
 		t.Fatalf("proposal output is not a plan view: %v\n%s", err, proposed.String())
@@ -595,9 +604,13 @@ func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
 	if view.Plan.ID == "" || view.Plan.Digest == "" {
 		t.Fatalf("the proposal named no plan: %s", proposed.String())
 	}
+	if view.AssignmentsDigest == "" {
+		t.Fatalf("the proposal named no assignment set to approve: %s", proposed.String())
+	}
 	var approved bytes.Buffer
 	if _, err := autonomy([]string{"plan", "approve", view.Plan.ID, "--revision", strconv.Itoa(view.Plan.Revision),
-		"--digest", view.Plan.Digest, "--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
+		"--digest", view.Plan.Digest, "--assignments", view.AssignmentsDigest,
+		"--text", "--config", configPath}, planOverrides(t, 41), &approved); err != nil {
 		t.Fatalf("approve: %v\n%s", err, approved.String())
 	}
 	if !strings.Contains(approved.String(), "approved") {

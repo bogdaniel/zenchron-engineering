@@ -488,13 +488,28 @@ the pre-approval state saw it as "already started" and left it unbound - and
 nothing then governed it, because the privilege comparison engages only above
 generation zero and the supersession had just taken it back to zero.
 
-A decision may also NAME the assignment set it decides. The revision digest
-binds the document an operator read and does not move when a profile, an
-instruction pack or the workforce is edited, so an edit landing between reading
-a proposal and deciding on it would be bound as what the operator saw. `plan
-show` prints the set's digest in the command it offers, and
-`plan approve --assignments SHA256` refuses when the set has moved since - the
-same shape that stops a revision number alone from deciding an unread document.
+An approval NAMES the assignment set it approves. The revision digest binds the
+document an operator read and does not move when a profile, an instruction pack
+or the workforce is edited, so an approval that named only the document
+authorized whichever assignments the registry happened to resolve at decide
+time. `plan show` prints the set's digest in the command it offers, and
+`plan approve --assignments SHA256` is REQUIRED and refuses when the set has
+moved since - the same shape that stops a revision number alone from deciding an
+unread document. A rejection binds no assignments and refuses the argument.
+
+Requiring it applies to new approvals. An approval already durable in a journal
+was written before this existed, stays readable, and keeps executing under the
+compatibility rule below; what cannot happen is a NEW one being written without
+naming what it authorizes.
+
+And the approval AUTHORIZES the rows. The bound assignments live in a table
+beside the journal, and a table is editable while a hash-chained event is not -
+so the digest the approval recorded is replayed with the rest of the approval,
+and those rows are read, digested with the same definition the approval used,
+and refused unless they are the set the operator approved. Two durable sources
+that can disagree are one durable source and one opportunity, and without this
+the side table was the one that won. A disagreement fails closed: nothing
+resolves and no run is created.
 
 What approval cannot bind is bound when the stage starts. A stage approved
 before its producer ran was approved with no upstream at all, so the upstream
@@ -521,7 +536,11 @@ stage once its blocker clears - the window where it matters most - which #118
 closes by deriving it from the approval record instead.
 
 A revision approved before this boundary existed has no binding and resolves
-live, exactly as it did then.
+live, exactly as it did then. That is the ABSENCE of a recorded digest, and it
+stays distinct from an approval that deliberately bound nothing - which records
+the canonical digest of the empty set, and can therefore be named and checked
+like any other. Rows appearing under an approval that named none are refused
+rather than trusted.
 
 ### Work whose input moved
 

@@ -53,7 +53,7 @@ func TestADecisionDuringAPlanningInvocationEndsThePass(t *testing.T) {
 		if err := fixture.store.PutPlanContract(next.ID, next.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.service.Approve(next.ID, next.Revision, next.Digest, "", "operator", "the two-half split"); err != nil {
+		if _, err := fixture.service.Approve(next.ID, next.Revision, next.Digest, shownAssignments(t, fixture.service, next.ID, next.Revision), "operator", "the two-half split"); err != nil {
 			t.Fatal(err)
 		}
 		return PlannerOutput{

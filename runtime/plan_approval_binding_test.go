@@ -14,6 +14,7 @@ package runtime
 // authorized to use.
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -241,7 +242,7 @@ func TestARevisionThatChangesAStartedStageBindsItToo(t *testing.T) {
 	if !ok {
 		t.Fatalf("the preview showed no assignment for the stage it will redo: %#v", preview.Blocked)
 	}
-	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "", "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, shownAssignments(t, fixture.service, second.ID, second.Revision), "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = second
@@ -525,6 +526,164 @@ func approveableRevision(t *testing.T, fixture *planRunFixture) domain.Engineeri
 	return next
 }
 
+// An approval NAMES the assignment set it approves, or it is refused.
+//
+// The revision digest binds the plan document, and operator configuration is
+// not in that document. So an approval that named only the revision authorized
+// whichever assignments the registry happened to resolve at decide time: read
+// set A, edit a profile, approve the exact revision and digest, execute B. The
+// operator authorized work they never read, and nothing in the durable record
+// showed it.
+func TestAnApprovalMustNameTheAssignmentSetItApproves(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	view, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown, ok := assignmentFor(view.Assigned, "implementation")
+	if !ok {
+		t.Fatal("the approval surface showed no assignment")
+	}
+
+	// The workforce moves after the operator read it.
+	fixture.service.DefaultAgent = "claude"
+	fixture.reconciler.Service = fixture.service
+	moved, err := fixture.service.View(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.AssignmentsDigest == view.AssignmentsDigest {
+		t.Fatal("the edit did not move the resolved set, so this test proves nothing")
+	}
+
+	// An approval naming only the revision is REFUSED, and leaves nothing.
+	_, err = fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest,
+		"", "operator", "")
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("an approval naming no assignment set was applied: %v", err)
+	}
+	if !strings.Contains(refused.Detail, "must name the assignments it approves") {
+		t.Fatalf("the refusal does not say what is missing: %s", refused.Detail)
+	}
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Approved.Revision != 0 || snapshot.Approval.Status == domain.ApprovalApproved {
+		t.Fatalf("the refused approval was recorded anyway: %#v", snapshot.Approval)
+	}
+	if bound, err := fixture.store.ApprovedAssignments(fixture.plan.ID, fixture.plan.Revision); err != nil {
+		t.Fatal(err)
+	} else if len(bound) != 0 {
+		t.Fatalf("the refused approval bound %d assignments", len(bound))
+	}
+	fixture.reconcile(t)
+	if started := mustReplayApproval(t, fixture); started.Stages["implementation"].RunID != "" {
+		t.Fatal("a plan with no applied approval executed")
+	}
+
+	// Naming the set that is there NOW is accepted, and binds exactly it.
+	if _, err := fixture.service.Approve(fixture.plan.ID, fixture.plan.Revision, fixture.plan.Digest,
+		moved.AssignmentsDigest, "operator", ""); err != nil {
+		t.Fatalf("an approval naming the current set was refused: %v", err)
+	}
+	bound, err := fixture.store.ApprovedAssignments(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound["implementation"].Agent.ID != "claude" || bound["implementation"].Agent == shown.Agent {
+		t.Fatalf("the approval bound %#v, want the set the operator read the second time", bound["implementation"].Agent)
+	}
+}
+
+// The approval EVENT authorizes the approved-assignment table, and a table that
+// disagrees with it executes nothing.
+//
+// The rows live beside the hash-chained journal, and a table is editable while
+// an event is not. Without the journalled digest surviving replay there was no
+// journal-rooted expectation to check them against, so after a restart a
+// replaced row set could authorize a worker no approval ever named.
+func TestApprovedRowsThatDisagreeWithTheApprovalExecuteNothing(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+	})
+	fixture.approve(t)
+
+	// The journal recorded the set, and the rows are that set.
+	approved := mustReplayApproval(t, fixture)
+	if approved.Approved.AssignmentsDigest == "" {
+		t.Fatal("the replayed approval carries no assignment set, so nothing can be checked against it")
+	}
+	stored, err := fixture.store.ApprovedAssignmentsDigest(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != approved.Approved.AssignmentsDigest {
+		t.Fatalf("the approval names %s and the rows digest to %s before anything was touched", approved.Approved.AssignmentsDigest, stored)
+	}
+
+	// The ordinary restart: journal and rows agree, and the approved
+	// assignment is still what executes.
+	restarted := restartPlanService(t, fixture)
+	resolution, err := restarted.Resolve(fixture.plan, mustReplayApproval(t, fixture))
+	if err != nil {
+		t.Fatalf("a restart over agreeing state refused to resolve: %v", err)
+	}
+	if assignment, ok := resolution.Assignment("implementation"); !ok || assignment.Agent.ID != "codex" {
+		t.Fatalf("the approved assignment did not survive the restart: %#v", assignment)
+	}
+
+	// The table is now replaced with a DIFFERENT set. The journal is unchanged.
+	replaceApprovedRow(t, fixture, "implementation", func(a *domain.AgentAssignment) {
+		a.Agent = domain.AgentBinding{
+			ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
+			TrustMode: domain.TrustRequirementOperatorTrusted,
+		}
+	})
+	after, err := fixture.store.ApprovedAssignmentsDigest(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == approved.Approved.AssignmentsDigest {
+		t.Fatal("the row was not actually replaced, so this test proves nothing")
+	}
+
+	// Read back through a SECOND store over the same durable state: nothing
+	// this process held in memory decides the outcome.
+	fresh := restartPlanService(t, fixture)
+	snapshot := mustReplayApproval(t, fixture)
+	if snapshot.Approved.AssignmentsDigest != approved.Approved.AssignmentsDigest {
+		t.Fatalf("replay lost the approval's assignment set: %q", snapshot.Approved.AssignmentsDigest)
+	}
+	_, err = fresh.Resolve(fixture.plan, snapshot)
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("assignments the approval never named were treated as authority: %v", err)
+	}
+	if !strings.Contains(refused.Detail, "disagree") {
+		t.Fatalf("the refusal does not name the disagreement: %s", refused.Detail)
+	}
+
+	// And the reconciler starts nothing.
+	reconciler := fixture.reconciler
+	reconciler.Service = fresh
+	reconciler.Store = fresh.Store
+	if _, err := reconciler.Reconcile(context.Background(), fixture.plan.ID); err == nil {
+		t.Fatal("the reconciler executed against assignments the approval never named")
+	}
+	final := mustReplayApproval(t, fixture)
+	if final.Stages["implementation"].RunID != "" {
+		t.Fatalf("a run was created from the replaced row: %s", final.Stages["implementation"].RunID)
+	}
+}
+
 // A stage that showed a BLOCKER is bound to nothing, and the view says so
 // rather than rendering it later as though an approval had covered it.
 func TestAStageThatShowedABlockerIsReportedUnbound(t *testing.T) {
@@ -580,6 +739,24 @@ func TestARevisionApprovedWithoutABindingStillResolves(t *testing.T) {
 	}
 	if snapshot.Stages["implementation"].RunID == "" {
 		t.Fatal("a plan approved before the binding existed no longer executes")
+	}
+
+	// But rows that no approval NAMES are not authority either. "This approval
+	// recorded no binding" and "these rows are the binding it recorded" are
+	// different facts, and rows appearing under an approval that named none is
+	// the disagreement in its starkest form.
+	planted := planFixtureAssignment(t, fixture.plan)
+	if _, err := fixture.store.PutApprovedAssignments(fixture.plan.ID, fixture.plan.Revision,
+		[]domain.AgentAssignment{planted}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.Resolve(fixture.plan, mustReplayApproval(t, fixture))
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("assignments no approval names were treated as authority: %v", err)
+	}
+	if !strings.Contains(refused.Detail, "its approval names none") {
+		t.Fatalf("the refusal does not say why: %s", refused.Detail)
 	}
 }
 
@@ -675,4 +852,52 @@ func liveResolution(t *testing.T, fixture *planRunFixture) []domain.AgentAssignm
 		t.Fatal(err)
 	}
 	return resolution.Assignments
+}
+
+func mustReplayApproval(t *testing.T, fixture *planRunFixture) PlanSnapshot {
+	t.Helper()
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+// restartPlanService builds a service over a SECOND store opened on the same
+// durable state, so what it decides comes from what survived rather than from
+// anything the first one held.
+func restartPlanService(t *testing.T, fixture *planRunFixture) PlanService {
+	t.Helper()
+	store, err := OpenSQLiteOperationStore(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	service := fixture.service
+	service.Store = store
+	return service
+}
+
+// replaceApprovedRow edits one durable approved-assignment row in place, which
+// is what a table nobody checks makes possible.
+func replaceApprovedRow(t *testing.T, fixture *planRunFixture, stageID string, apply func(*domain.AgentAssignment)) {
+	t.Helper()
+	bound, err := fixture.store.ApprovedAssignments(fixture.plan.ID, fixture.plan.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, ok := bound[stageID]
+	if !ok {
+		t.Fatalf("no approved assignment for stage %q to replace", stageID)
+	}
+	apply(&assignment)
+	document, err := CanonicalJSON(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.db.Exec(
+		`UPDATE plan_approved_assignments SET document = ? WHERE plan_id = ? AND revision = ? AND stage_id = ?`,
+		string(document), fixture.plan.ID, fixture.plan.Revision, stageID); err != nil {
+		t.Fatal(err)
+	}
 }

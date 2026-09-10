@@ -134,9 +134,21 @@ func planFixtureContract(base *phase8Fixture) domain.EngineeringWorkContract {
 	}
 }
 
+// shownAssignments is the assignment-set digest `plan show` prints for one
+// revision. An approval has to name it, so a test that approves has to read it
+// the same way an operator does rather than inventing one.
+func shownAssignments(t *testing.T, service PlanService, planID string, revision int) string {
+	t.Helper()
+	view, err := service.ViewRevision(planID, revision)
+	if err != nil {
+		t.Fatalf("read the approval surface for revision %d: %v", revision, err)
+	}
+	return view.AssignmentsDigest
+}
+
 func (f *planRunFixture) approve(t *testing.T) {
 	t.Helper()
-	if _, err := f.service.Approve(f.plan.ID, f.plan.Revision, f.plan.Digest, "", "operator", "looks right"); err != nil {
+	if _, err := f.service.Approve(f.plan.ID, f.plan.Revision, f.plan.Digest, shownAssignments(t, f.service, f.plan.ID, f.plan.Revision), "operator", "looks right"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 }
@@ -305,7 +317,7 @@ func TestTheAggregateEnvelopeBoundsChildRuns(t *testing.T) {
 	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "", "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, shownAssignments(t, fixture.service, tightened.ID, tightened.Revision), "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = tightened
@@ -525,7 +537,7 @@ func TestDecompositionEmitsAProposalAndPausesAffectedWork(t *testing.T) {
 
 	// Approving the proposed revision releases it, and consumption carries
 	// across the revision rather than resetting.
-	if _, err := fixture.service.Approve(fixture.plan.ID, proposal.Proposed.Revision, proposal.Proposed.Digest, "", "operator", "approved"); err != nil {
+	if _, err := fixture.service.Approve(fixture.plan.ID, proposal.Proposed.Revision, proposal.Proposed.Digest, shownAssignments(t, fixture.service, fixture.plan.ID, proposal.Proposed.Revision), "operator", "approved"); err != nil {
 		t.Fatalf("approve revision: %v", err)
 	}
 	after, err := fixture.store.ReplayPlan(fixture.plan.ID)
@@ -1029,7 +1041,7 @@ func TestAFailedPlanningInvocationIsCountedAndTheCeilingStopsIt(t *testing.T) {
 	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, "", "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, shownAssignments(t, fixture.service, tightened.ID, tightened.Revision), "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = tightened
@@ -1304,7 +1316,7 @@ func TestThePlanWallCeilingIsAttributedAndEnforced(t *testing.T) {
 	if err := fixture.store.PutPlanContract(bounded.ID, bounded.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(bounded.ID, bounded.Revision, bounded.Digest, "", "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(bounded.ID, bounded.Revision, bounded.Digest, shownAssignments(t, fixture.service, bounded.ID, bounded.Revision), "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.plan = bounded
@@ -1457,7 +1469,7 @@ func TestAFrozenAssignmentSurvivesARevision(t *testing.T) {
 	if err := fixture.store.PutPlanContract(second.ID, second.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, "", "operator", ""); err != nil {
+	if _, err := fixture.service.Approve(second.ID, second.Revision, second.Digest, shownAssignments(t, fixture.service, second.ID, second.Revision), "operator", ""); err != nil {
 		t.Fatal(err)
 	}
 

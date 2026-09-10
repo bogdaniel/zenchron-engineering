@@ -131,6 +131,8 @@ execution is authorized to use. An edit produces a new revision.
   `runtime.TestApprovalBindsTheWorkerAndADefaultChangeDoesNotMoveIt`,
   `runtime.TestARevisionThatChangesAStartedStageBindsItToo`,
   `runtime.TestADecisionMayNameTheAssignmentSetItDecides`,
+  `runtime.TestAnApprovalMustNameTheAssignmentSetItApproves`,
+  `runtime.TestApprovedRowsThatDisagreeWithTheApprovalExecuteNothing`,
   `runtime.TestAWorkerRepointedAtAnotherProviderIsRefused`.
 - The first three prove the plan DOCUMENT is what was approved: the digest is
   named at the decision boundary and an unapproved plan creates nothing. They
@@ -139,6 +141,15 @@ execution is authorized to use. An edit produces a new revision.
   configuration on every look. The last three prove the binding: an edited
   profile or pack, a changed default worker, and an agent id re-pointed at
   another provider.
+- An approval NAMES the set it approves: `plan approve` requires
+  `--assignments`, which `plan show` prints. The plan digest binds the document
+  and does not move when operator configuration does, so an approval naming only
+  the revision authorized assignments nobody read. New approvals only; approvals
+  already durable stay operable.
+- The approval AUTHORIZES the rows. The digest the approval recorded survives
+  replay, and the stored approved assignments are refused unless they digest to
+  it - so the editable table beside the hash-chained journal cannot be the
+  source that wins. A disagreement fails closed: nothing resolves, no run.
 - The binding is taken against the state approving WOULD leave, so a stage a
   revision materially CHANGES is bound by that revision's approval even when it
   had already started under the previous one. An earlier version of this
