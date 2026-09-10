@@ -168,6 +168,44 @@ func TestAnUnchangedStageRenewsAcrossAnApprovedRevision(t *testing.T) {
 	if got := next.Context.UpstreamOutputs[0].Candidate; got != "bbbbbbbbbbbb" {
 		t.Fatalf("the renewal consumes %q, want the candidate whose replacement caused it", got)
 	}
+	// WHERE THE TWO BOUNDARIES MEET.
+	//
+	// Revision 2 binds nothing for this stage, and that is correct rather than
+	// a gap: the stage had already started under revision 1 and revision 2
+	// carries it forward unchanged, so it is still executing under the row it
+	// froze. What authorizes the renewal is not a second approval of the same
+	// obligation - it is the privilege comparison against that performance, and
+	// that performance was itself bound by revision 1's approval. The chain
+	// back to an operator is unbroken without re-binding anything.
+	secondBinding, err := fixture.store.ApprovedAssignments(fixture.plan.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, rebound := secondBinding["review"]; rebound {
+		t.Fatalf("revision 2 re-bound a stage that was already performing under revision 1: %#v", secondBinding["review"])
+	}
+	firstBinding, err := fixture.store.ApprovedAssignments(fixture.plan.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, ok := firstBinding["review"]
+	if !ok {
+		t.Fatalf("revision 1 bound nothing for the stage it performed: %#v", firstBinding)
+	}
+	if firstPerformance.Agent != authorized.Agent ||
+		firstPerformance.Profile.Digest != authorized.Profile.Digest ||
+		firstPerformance.TrustRequirement != authorized.TrustRequirement ||
+		packSummary(firstPerformance.Profile.Instructions) != packSummary(authorized.Profile.Instructions) {
+		t.Fatalf("the performance being renewed was not the one an approval authorized:\napproved %#v\nperformed %#v",
+			authorized.Agent, firstPerformance.Agent)
+	}
+	// So the renewal carries approval-authorized configuration forward.
+	if next.Agent != authorized.Agent || next.Profile.Digest != authorized.Profile.Digest ||
+		next.TrustRequirement != authorized.TrustRequirement ||
+		packSummary(next.Profile.Instructions) != packSummary(authorized.Profile.Instructions) {
+		t.Fatalf("the renewal executed a configuration no approval authorized:\napproved %#v\nexecuting %#v",
+			authorized.Agent, next.Agent)
+	}
 	// The frozen renewal IS the resolver's revision-2 output, and all three
 	// approved-plan pointers really did advance. Without this the test would
 	// pass against a renewal that had never crossed a revision at all.

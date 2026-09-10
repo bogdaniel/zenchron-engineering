@@ -132,11 +132,16 @@ type ControlRequest struct {
 	Revision int    `json:"revision,omitempty"`
 	Digest   string `json:"digest,omitempty"`
 	Note     string `json:"note,omitempty"`
-	// AssignmentsDigest is the assignment set the requester read, where they
-	// named one. The revision digest binds the plan DOCUMENT and does not move
-	// when a profile, an instruction pack or the workforce is edited, so this
-	// is what binds who would perform the work. It is optional, and checked
-	// where present.
+	// AssignmentsDigest is the assignment set the requester read. The revision
+	// digest binds the plan DOCUMENT and does not move when a profile, an
+	// instruction pack or the workforce is edited, so this is what binds who
+	// would perform the work.
+	//
+	// It is optional ON THE WIRE - a rejection binds no assignments and carries
+	// none, and neither does a request from a client that predates this field -
+	// and the service is where that is decided: an APPROVAL is refused without
+	// it, and a rejection is refused with it. The transport does not get to be
+	// the authority on which commands bind what.
 	AssignmentsDigest string `json:"assignments_digest,omitempty"`
 	// Operator is the identity of the person MAKING the request, resolved by
 	// their own process exactly as the local path resolves it.

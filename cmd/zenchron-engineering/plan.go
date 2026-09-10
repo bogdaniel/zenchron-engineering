@@ -29,7 +29,7 @@ import (
 )
 
 const planUsage = "usage: zenchron-engineering autonomy plan {issue <number> [--template <id>] [--agent <id>] [--deterministic]|" +
-	"show <plan> [--revision <n>]|approve <plan> --revision <n> --digest <sha256> [--assignments <sha256>] [--note <text>]|" +
+	"show <plan> [--revision <n>]|approve <plan> --revision <n> --digest <sha256> --assignments <sha256> [--note <text>]|" +
 	"reject <plan> --revision <n> --digest <sha256> [--note <text>]|" +
 	"revise <plan> [--template <id>] [--deterministic] [--substitute-human <stage>]|" +
 	"status <plan>|list} [--text] [--repo owner/name] [--config <path>]"
