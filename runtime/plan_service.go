@@ -221,22 +221,53 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	return plan, nil
 }
 
+// unstarted is the assignments an approval can still bind.
+//
+// A stage that is still executing under the row it froze is not bound again:
+// that row is what every later look reads, and recording it here would file the
+// revision it STARTED under as this revision's approval, which is a claim about
+// the wrong performance. What governs it being performed again under the SAME
+// revision is the privilege comparison against its previous performance.
+//
+// The snapshot handed in decides which stages those are, and it must be the
+// state approving would leave. A stage this revision invalidates has started
+// under the old one and not under this one, so the prospective state reads it
+// as pending and it IS bound here.
+//
+// A stage that resolved to nothing is not bound either: the operator was shown
+// a blocker rather than an assignment, and there is nothing to hold execution
+// to.
+func unstarted(assignments []domain.AgentAssignment, snapshot PlanSnapshot) []domain.AgentAssignment {
+	bound := make([]domain.AgentAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		if projection, ok := snapshot.Stages[assignment.StageID]; ok && projection.AssignmentID != "" {
+			continue
+		}
+		bound = append(bound, assignment)
+	}
+	return bound
+}
+
 // Approve records the operator's decision on ONE exact revision.
 //
 // The digest is checked, not merely the number: approving a revision number
 // whose content could since have changed would be approving something nobody
 // looked at.
-func (s PlanService) Approve(planID string, revision int, digest, operator, note string) (PlanSnapshot, error) {
-	return s.decide(planID, revision, digest, operator, note, EventPlanApproved)
+// The assignments digest is REQUIRED: it is what `plan show` printed beside the
+// revision, and an approval that named only the revision authorized whichever
+// assignments the registry happened to resolve at decide time. Naming it is
+// what makes the approval a decision about work the operator actually read.
+func (s PlanService) Approve(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
+	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanApproved)
 }
 
 // Reject records a refusal. It is durable for the same reason an approval is:
 // "we looked at this and said no" is a fact about the work.
-func (s PlanService) Reject(planID string, revision int, digest, operator, note string) (PlanSnapshot, error) {
-	return s.decide(planID, revision, digest, operator, note, EventPlanRejected)
+func (s PlanService) Reject(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
+	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanRejected)
 }
 
-func (s PlanService) decide(planID string, revision int, digest, operator, note, eventType string) (PlanSnapshot, error) {
+func (s PlanService) decide(planID string, revision int, digest, assignments, operator, note, eventType string) (PlanSnapshot, error) {
 	plan, found, err := s.Store.PlanRevision(planID, revision)
 	if err != nil {
 		return PlanSnapshot{}, err
@@ -278,6 +309,15 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 	if strings.TrimSpace(operator) == "" {
 		return PlanSnapshot{}, &PlanRefusedError{PlanID: planID, Detail: "an approval records who made it"}
 	}
+	// A REJECTION binds nothing, so there is no set for it to name. Accepting
+	// the argument and ignoring it would tell an operator their decision had
+	// been checked against something when nothing had been checked at all.
+	if eventType != EventPlanApproved && strings.TrimSpace(assignments) != "" {
+		return PlanSnapshot{}, &PlanRefusedError{
+			PlanID: planID,
+			Detail: "a rejection binds no assignments, so it cannot name a set: drop --assignments, or approve the revision that set belongs to",
+		}
+	}
 	// Approval moves FORWARD. Re-approving a revision older than the one
 	// already governing would leave the durable approval record describing
 	// something other than the work being executed, and the supersession below
@@ -288,8 +328,79 @@ func (s PlanService) decide(planID string, revision int, digest, operator, note,
 			Detail: fmt.Sprintf("revision %d is older than the approved revision %d: a plan is not un-revised by approving what it superseded", revision, governing),
 		}
 	}
+	// WHAT THE OPERATOR IS APPROVING, durably, before the approval exists.
+	//
+	// An approval is a decision about a document AND about the assignments
+	// shown beside it. Resolution is otherwise recomputed from the live
+	// registry on every look, so an unstarted stage was re-resolved when it
+	// finally became dependency-ready: an edited profile, an edited
+	// instruction pack or a changed default worker between the approval and
+	// the first run meant execution froze a configuration nobody had seen.
+	//
+	// Written FIRST, so a crash before the event leaves rows nothing points at
+	// - which the retried approval re-writes identically - rather than an
+	// approval whose binding was lost.
+	// AN APPROVAL NAMES THE SET IT APPROVES.
+	//
+	// The revision digest binds the plan DOCUMENT, and operator configuration
+	// is not in that document: a profile, an instruction pack or the workforce
+	// edited between reading a proposal and deciding on it leaves the plan
+	// digest identical while changing who would perform the work. An approval
+	// that names only the document therefore authorizes assignments nobody
+	// read, which is the whole of what this boundary exists to stop - so it is
+	// REQUIRED rather than checked-if-offered.
+	//
+	// It is required of new approvals only. An approval already durable in a
+	// journal was written before this existed and stays readable and operable;
+	// what cannot happen is a NEW one being written without it.
+	if eventType == EventPlanApproved && strings.TrimSpace(assignments) == "" {
+		return PlanSnapshot{}, &PlanRefusedError{
+			PlanID: planID,
+			Detail: fmt.Sprintf("an approval of revision %d must name the assignments it approves as well as the revision: run `autonomy plan show %s` and use the command it prints", revision, planID),
+		}
+	}
+	assignmentsDigest := ""
+	if eventType == EventPlanApproved {
+		// Against the state approving WOULD leave, not the state it replaces.
+		//
+		// This is the same computation `plan show --revision N` renders, and
+		// using anything else binds a different document than the operator was
+		// shown. A stage this revision materially changes is reset by the
+		// supersession below - lifecycle cleared, generation back to zero - so
+		// reading the pre-approval snapshot saw it as "already started", left
+		// it unbound, and then nothing governed it: the privilege comparison
+		// engages only above generation zero, and the supersession had just
+		// taken it back to zero. The most ordinary flow there is, revising a
+		// plan mid-execution, therefore live-resolved the changed stage from
+		// whatever the registry said at first run.
+		_, prospective, err := s.previewSnapshot(plan, snapshot)
+		if err != nil {
+			return PlanSnapshot{}, err
+		}
+		resolution, err := s.Resolve(plan, prospective)
+		if err != nil {
+			return PlanSnapshot{}, err
+		}
+		bindable := unstarted(resolution.Assignments, prospective)
+		// The decision decides the set it named, or nothing.
+		shown, err := assignmentSetDigest(bindable)
+		if err != nil {
+			return PlanSnapshot{}, err
+		}
+		if named := strings.TrimSpace(assignments); named != shown {
+			return PlanSnapshot{}, &PlanRefusedError{
+				PlanID: planID,
+				Detail: fmt.Sprintf("revision %d now resolves assignments %s and the decision names %s: read it again, because who would perform this work has changed since you looked",
+					revision, short12(shown), short12(named)),
+			}
+		}
+		if assignmentsDigest, err = s.Store.PutApprovedAssignments(planID, revision, bindable); err != nil {
+			return PlanSnapshot{}, err
+		}
+	}
 	if err := s.appendPlanEvent(planID, eventType, PlanDecisionPayload{
 		Revision: revision, Digest: plan.Digest, Operator: operator, Note: boundedDetail(note),
+		AssignmentsDigest: assignmentsDigest,
 	}); err != nil {
 		return PlanSnapshot{}, err
 	}
@@ -400,6 +511,21 @@ type PlanView struct {
 	// work. The state beside it is then prospective - what approving this
 	// revision would leave - rather than a report of what is happening.
 	Preview *PlanPreview `json:"preview,omitempty"`
+	// AssignmentsDigest is the digest of the assignments approving THIS view
+	// would bind: who performs each stage that has not started, under which
+	// profile, packs, context and worker.
+	//
+	// It exists so a decision can name it. The plan digest binds the document,
+	// and registry and workforce edits do not change that document - so an edit
+	// landing between reading a proposal and deciding on it would be bound as
+	// "what the operator saw". Naming this closes that the same way naming the
+	// revision digest closed deciding an unread document.
+	AssignmentsDigest string `json:"assignments_digest,omitempty"`
+	// Unbound is the stages this revision's approval bound NOTHING for, in
+	// stage order: they showed a blocker rather than an assignment, so there
+	// was no identity to hold execution to and they resolve live when they
+	// become performable.
+	Unbound []string `json:"unbound,omitempty"`
 }
 
 // PlanPreview says that a view is an answer to "what would approving this do",
@@ -532,6 +658,29 @@ func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) 
 		return PlanView{}, err
 	}
 	view.Assigned, view.Blocked = resolution.Assignments, resolution.Blocked
+	bindable := unstarted(resolution.Assignments, snapshot)
+	if view.AssignmentsDigest, err = assignmentSetDigest(bindable); err != nil {
+		return PlanView{}, err
+	}
+	// What approving would NOT bind, said out loud. A stage that showed a
+	// blocker has no approval-visible assignment, so it resolves live when the
+	// blocker clears - and rendering it later beside bound stages, identically,
+	// is what would let an operator believe it was approved.
+	assigned := make(map[string]bool, len(bindable))
+	for _, assignment := range bindable {
+		assigned[assignment.StageID] = true
+	}
+	for _, stage := range plan.Stages {
+		if stage.Kind != domain.StageAgent {
+			continue
+		}
+		if projection, started := snapshot.Stages[stage.ID]; started && projection.AssignmentID != "" {
+			continue
+		}
+		if !assigned[stage.ID] {
+			view.Unbound = append(view.Unbound, stage.ID)
+		}
+	}
 	return view, nil
 }
 
@@ -599,10 +748,72 @@ func (s PlanService) Resolve(plan domain.EngineeringPlan, snapshot PlanSnapshot)
 			frozen[stageID] = assignment
 		}
 	}
+	// And the assignments this revision's APPROVAL bound, for the stages that
+	// have not started. A stage that has started is read through what it
+	// froze; a stage that has not is resolved to what the operator approved
+	// rather than to whatever the registry would choose today.
+	authorized, err := s.authorizedAssignments(plan, snapshot)
+	if err != nil {
+		return planning.Resolution{}, err
+	}
 	return planning.Resolve(planning.ResolveInput{
 		Plan: plan, Registry: s.Registry, Agents: s.Agents,
-		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent, Frozen: frozen,
+		Contract: contract, Upstream: upstream, DefaultAgent: s.DefaultAgent,
+		Frozen: frozen, Authorized: authorized,
 	})
+}
+
+// authorizedAssignments is what this revision's approval bound, and only what
+// its approval bound.
+//
+// The rows live in a table beside the journal, and a table is editable while a
+// hash-chained event is not. So the digest the approval RECORDED is what
+// decides whether those rows may authorize anything: they are read, digested
+// with the same definition the approval used, and refused unless they are the
+// set the operator approved. Two durable sources that can disagree are one
+// durable source and one opportunity, and the side table must not be the one
+// that wins.
+//
+// Three shapes, deliberately distinguished:
+//
+//   - The revision is not the one an operator approved. Nothing it may have
+//     rows for is authority here; a preview resolves live, which is what a
+//     preview is for.
+//   - The approval recorded NO digest. It was written before this boundary
+//     existed, so it bound nothing and there is nothing to check rows against -
+//     and rows existing anyway is a disagreement in its starkest form.
+//   - The approval recorded one. The rows have to be it.
+func (s PlanService) authorizedAssignments(plan domain.EngineeringPlan, snapshot PlanSnapshot) (map[string]domain.AgentAssignment, error) {
+	rows, err := s.Store.ApprovedAssignments(plan.ID, plan.Revision)
+	if err != nil {
+		return nil, err
+	}
+	approved := snapshot.Approved
+	if approved.Status != domain.ApprovalApproved || approved.Revision != plan.Revision {
+		return nil, nil
+	}
+	if approved.AssignmentsDigest == "" {
+		if len(rows) > 0 {
+			return nil, &PlanRefusedError{
+				PlanID: plan.ID,
+				Detail: fmt.Sprintf("revision %d has %d stored approved assignments and its approval names none, so nothing proves an operator approved them",
+					plan.Revision, len(rows)),
+			}
+		}
+		return nil, nil
+	}
+	stored, err := assignmentSetDigest(assignmentsOf(rows))
+	if err != nil {
+		return nil, err
+	}
+	if stored != approved.AssignmentsDigest {
+		return nil, &PlanRefusedError{
+			PlanID: plan.ID,
+			Detail: fmt.Sprintf("revision %d was approved with assignments %s and the stored assignments are %s: the approval and what it authorized disagree, so nothing executes",
+				plan.Revision, short12(approved.AssignmentsDigest), short12(stored)),
+		}
+	}
+	return rows, nil
 }
 
 // frozenAssignment is the assignment a stage ACTUALLY executed under, which is
@@ -683,6 +894,132 @@ func (s *SQLiteOperationStore) PlanContract(planID string, revision int) (domain
 	}
 	contract, err := domain.Decode[domain.EngineeringWorkContract]([]byte(document))
 	return contract, err == nil, err
+}
+
+// ---------------------------------------------------------------------------
+// The assignments an approval bound
+// ---------------------------------------------------------------------------
+
+// PutApprovedAssignments records the assignments an operator saw when they
+// approved one revision, and returns the canonical digest of the bound set.
+//
+// It is immutable per (plan, revision, stage). Re-recording the same document
+// is a no-op, so a retry after a crash between this and the approval event
+// ordinarily completes; a DIFFERENT document is refused, because what an
+// approval bound cannot be changed under the approval.
+//
+// "Ordinarily", because the retry re-resolves: a producer that settled inside
+// that window changes the upstream a dependent assignment carries, and the
+// retry then refuses. That is fail-closed and rare, and the remedy is a new
+// proposal rather than anything this function can do - so the refusal says
+// which stage disagreed.
+func (s *SQLiteOperationStore) PutApprovedAssignments(planID string, revision int, assignments []domain.AgentAssignment) (string, error) {
+	for _, assignment := range assignments {
+		if _, err := domain.Encode(assignment); err != nil {
+			return "", fmt.Errorf("approved assignment for stage %q is invalid: %w", assignment.StageID, err)
+		}
+		document, err := CanonicalJSON(assignment)
+		if err != nil {
+			return "", err
+		}
+		var stored string
+		switch err := s.db.QueryRow(`SELECT document FROM plan_approved_assignments WHERE plan_id = ? AND revision = ? AND stage_id = ?`,
+			planID, revision, assignment.StageID).Scan(&stored); {
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := s.db.Exec(`INSERT INTO plan_approved_assignments (plan_id, revision, stage_id, document) VALUES (?, ?, ?, ?)`,
+				planID, revision, assignment.StageID, string(document)); err != nil {
+				return "", err
+			}
+		case err != nil:
+			return "", err
+		case stored != string(document):
+			return "", fmt.Errorf("plan %s revision %d already bound stage %s to a different assignment; an approval's assignments are immutable",
+				planID, revision, assignment.StageID)
+		}
+	}
+	return s.ApprovedAssignmentsDigest(planID, revision)
+}
+
+// assignmentSetDigest is the canonical digest of one bound set, in stage order.
+//
+// It is ONE function because two callers have to agree exactly: the approval
+// surface computes it over what it is about to show, and the approval computes
+// it over what it is about to bind. A second implementation would be a second
+// answer to "is this the set the operator read".
+func assignmentSetDigest(assignments []domain.AgentAssignment) (string, error) {
+	ordered := make([]domain.AgentAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		// The UPSTREAM CANDIDATE is erased. It is the one execution fact an
+		// approval cannot bind and does not try to - it is rebound from the
+		// settled producer when the stage starts - so leaving it in would make
+		// the digest move when a producer settles between reading a proposal
+		// and deciding on it, and refuse the decision saying that who would
+		// perform the work had changed. It had not. What this names is who
+		// performs each stage and under what configuration, which is what the
+		// refusal claims and what the approval actually binds.
+		assignment.Context.UpstreamOutputs = nil
+		ordered = append(ordered, assignment)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].StageID < ordered[j].StageID })
+	// The EMPTY set digests too, rather than to the empty string. "Nothing is
+	// bindable here" is a fact an operator can read and name, and collapsing it
+	// into "no digest given" left the one direction unpinnable: a set that
+	// APPEARED between reading and deciding would have been bound unchecked.
+	return domain.Digest(ordered)
+}
+
+// ApprovedAssignments returns what one revision's approval bound, keyed by
+// stage. An empty map means the revision has not been approved, or was
+// approved before this boundary existed.
+func (s *SQLiteOperationStore) ApprovedAssignments(planID string, revision int) (map[string]domain.AgentAssignment, error) {
+	rows, err := s.db.Query(`SELECT stage_id, document FROM plan_approved_assignments WHERE plan_id = ? AND revision = ? ORDER BY stage_id`, planID, revision)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bound := map[string]domain.AgentAssignment{}
+	for rows.Next() {
+		var stageID, document string
+		if err := rows.Scan(&stageID, &document); err != nil {
+			return nil, err
+		}
+		// Decoded through the SCHEMA, like every other durable artifact this
+		// package reads back. A row that no longer satisfies it authorizes
+		// nothing.
+		assignment, err := domain.Decode[domain.AgentAssignment]([]byte(document))
+		if err != nil {
+			return nil, fmt.Errorf("decode approved assignment for stage %q: %w", stageID, err)
+		}
+		bound[stageID] = assignment
+	}
+	return bound, rows.Err()
+}
+
+// ApprovedAssignmentsDigest is the canonical digest of the rows AS THEY STAND
+// for one revision. It is what the approval event carries, so the binding lives
+// in the hash-chained journal and not only in a table beside it - and it is
+// what those rows are checked against before they authorize anything.
+//
+// Zero rows digest to the canonical digest of the empty set rather than to the
+// empty string. "This approval bound nothing" is a fact the journal can record
+// and this can confirm; "no binding was ever recorded" is the ABSENCE of a
+// digest in the approval event, and the two are not the same.
+func (s *SQLiteOperationStore) ApprovedAssignmentsDigest(planID string, revision int) (string, error) {
+	bound, err := s.ApprovedAssignments(planID, revision)
+	if err != nil {
+		return "", err
+	}
+	return assignmentSetDigest(assignmentsOf(bound))
+}
+
+// assignmentsOf is a bound set as a slice, in no particular order:
+// assignmentSetDigest imposes the canonical one.
+func assignmentsOf(bound map[string]domain.AgentAssignment) []domain.AgentAssignment {
+	assignments := make([]domain.AgentAssignment, 0, len(bound))
+	for _, assignment := range bound {
+		assignments = append(assignments, assignment)
+	}
+	return assignments
 }
 
 // ---------------------------------------------------------------------------

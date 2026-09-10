@@ -88,13 +88,22 @@ obligations the template omitted.
 
 ## 8. Immutable composition identity
 
-A profile or instruction pack edited after approval does not rewrite work in
-flight, and the exact digests stay reconstructable.
+A profile or instruction pack edited after approval does not rewrite work that
+was approved against the old one, in flight or not yet started, and the exact
+digests stay reconstructable.
 
 - `runtime/operations.go` — `frozenInstructions`; `runtime/plan_store.go` —
-  immutable revisions.
+  immutable revisions; `runtime/plan_service.go` — `PutApprovedAssignments`,
+  the assignments an approval bound.
 - **Proved:** `runtime.TestAnEditedInstructionPackRefusesRatherThanRewritingApprovedWork`,
-  `runtime.TestPlanRevisionsAreImmutable`.
+  `runtime.TestPlanRevisionsAreImmutable`,
+  `runtime.TestApprovalBindsTheAssignmentTheOperatorSaw`.
+- The first two prove work ALREADY IN FLIGHT. Until the approval bound its
+  assignments, a stage that had not started yet was re-resolved from the live
+  registry when it became dependency-ready, so an edit between the approval and
+  the first run reached it: `frozenInstructions` saw a pack digest that matched,
+  because the assignment had just been resolved against the edited pack. The
+  third test covers that window through the production path.
 
 ## 9. Planner uses the registered workforce
 
@@ -111,12 +120,57 @@ provider API, endpoint or credential path exists behind the planner.
 ## 10. Operator approval
 
 A proposed plan is visible with its assignments, blockers and budget, and does
-not execute until approved. An edit produces a new revision.
+not execute until approved. What was visible as the assignment is what
+execution is authorized to use. An edit produces a new revision.
 
 - `runtime/plan_service.go`, `cmd/zenchron-engineering/plan.go`.
 - **Proved:** `cmd.TestPlanProposalAwaitsApproval`,
   `cmd.TestPlanApprovalIsRecordedAgainstTheExactRevision`,
-  `runtime.TestAnUnapprovedPlanCreatesNothing`.
+  `runtime.TestAnUnapprovedPlanCreatesNothing`,
+  `runtime.TestApprovalBindsTheAssignmentTheOperatorSaw`,
+  `runtime.TestApprovalBindsTheWorkerAndADefaultChangeDoesNotMoveIt`,
+  `runtime.TestARevisionThatChangesAStartedStageBindsItToo`,
+  `runtime.TestADecisionMayNameTheAssignmentSetItDecides`,
+  `runtime.TestAnApprovalMustNameTheAssignmentSetItApproves`,
+  `runtime.TestApprovedRowsThatDisagreeWithTheApprovalExecuteNothing`,
+  `runtime.TestAWorkerRepointedAtAnotherProviderIsRefused`.
+- The first three prove the plan DOCUMENT is what was approved: the digest is
+  named at the decision boundary and an unapproved plan creates nothing. They
+  say nothing about the assignments shown beside it, and until those were bound
+  the approval did not either - the assignments were recomputed from live
+  configuration on every look. The last three prove the binding: an edited
+  profile or pack, a changed default worker, and an agent id re-pointed at
+  another provider.
+- An approval NAMES the set it approves: `plan approve` requires
+  `--assignments`, which `plan show` prints. The plan digest binds the document
+  and does not move when operator configuration does, so an approval naming only
+  the revision authorized assignments nobody read. New approvals only; approvals
+  already durable stay operable.
+- The approval AUTHORIZES the rows. The digest the approval recorded survives
+  replay, and the stored approved assignments are refused unless they digest to
+  it - so the editable table beside the hash-chained journal cannot be the
+  source that wins. A disagreement fails closed: nothing resolves, no run.
+- The binding is taken against the state approving WOULD leave, so a stage a
+  revision materially CHANGES is bound by that revision's approval even when it
+  had already started under the previous one. An earlier version of this
+  boundary read the pre-approval state instead, left that stage unbound, and
+  then nothing governed it: the supersession resets such a stage to generation
+  zero and the privilege comparison engages only above zero.
+- **Not bound, by decision:** a stage that resolved to a BLOCKER at approval
+  time has no approval-visible assignment to bind, and resolves live when it
+  becomes performable - readiness at planning time was never a promise, and an
+  agent that authenticates an hour after the approval performs the stage under
+  whatever resolves then. This is ACCEPTED rather than closed, on the condition
+  that the surface says so: `PlanView.Unbound` names those stages.
+  - **Proved:** `runtime.TestAStageThatShowedABlockerIsReportedUnbound` — while
+    the blocker persists, before and after the approval.
+  - **Not proved:** the marker is derived from the live resolution, so it stops
+    naming the stage once the blocker CLEARS - which is the window where it
+    matters - and `--text` does not render it at all. Tracked as #118, with the
+    derivation it needs: absence from `Store.ApprovedAssignments`, not absence
+    from a recomputed set. The authority boundary does not reopen there; what
+    executes in that window is the live assignment the surface showed, never a
+    bound one that drifted.
 - **Live:** the dogfood plan sat unapproved until `plan approve`, and `serve`
   reported `awaiting_operator_approval` for it.
 

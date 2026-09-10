@@ -1186,6 +1186,19 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		return nil, nil, fmt.Errorf("assignment for plan %s revision %d stage %s was stored and could not be read back", plan.ID, plan.Revision, stage.ID)
 	}
 	assignment = frozen
+	// The worker this assignment NAMES has to still be that worker.
+	//
+	// The assignment carries almost everything an approval bound - the profile
+	// version and digest, the instruction packs by digest, the compiled
+	// context, the model preference - and the runtime reads them from it. What
+	// it cannot carry is the provider behind an agent id: the engine is built
+	// from live agent configuration, so re-pointing an id at another provider
+	// kind, another vendor family or a weaker trust mode would run a different
+	// worker under an approved worker's name, and every independence
+	// obligation stated in terms of vendor family would be quietly false.
+	if block := r.refuseWorkerDrift(stage, assignment); block != nil {
+		return nil, block, nil
+	}
 	engine, err := r.Engine(r.Repository, assignment.Agent.ID)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
@@ -1234,6 +1247,67 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		return nil, nil, err
 	}
 	return &PlanStageRun{StageID: stage.ID, RunID: outcome.RunID, AgentID: assignment.Agent.ID}, nil, nil
+}
+
+// refuseWorkerDrift refuses an assignment whose worker is no longer the worker
+// it was approved against.
+//
+// It applies to every performance, not only a first one: an id re-pointed at
+// another provider is the same defect whether the assignment was bound by an
+// approval or frozen by an earlier generation.
+func (r PlanReconciler) refuseWorkerDrift(stage domain.PlanStage, assignment domain.AgentAssignment) *PlanStageBlock {
+	for _, agent := range r.Service.Agents {
+		if agent.ID != assignment.Agent.ID {
+			continue
+		}
+		for _, drift := range []struct{ what, before, now string }{
+			{"provider kind", assignment.Agent.ProviderKind, agent.ProviderKind},
+			{"vendor family", assignment.Agent.VendorFamily, agent.VendorFamily},
+			{"trust mode", string(assignment.Agent.TrustMode), string(agent.TrustMode)},
+			// The MODEL binds itself where the assignment names one: the
+			// runtime passes it as the invocation's model preference and the
+			// adapter prefers it over the worker's configured default, so a
+			// configured model moving underneath a named one changes nothing.
+			//
+			// What does NOT bind is a model nobody named. An assignment
+			// approved against a worker with no configured model falls through
+			// to whatever the worker's configuration says at invocation time,
+			// so a model configured after the approval would be run under an
+			// approval that never saw one.
+			{"model", "(none configured)", modelAppearedSince(assignment, agent)},
+		} {
+			if drift.before == drift.now {
+				continue
+			}
+			return &PlanStageBlock{
+				StageID: stage.ID, Kind: "authority",
+				Reason: boundedDetail(fmt.Sprintf(
+					"propose and approve a revision: worker %s now has %s %s and this stage was approved against %s",
+					assignment.Agent.ID, drift.what, shortValue(drift.now), shortValue(drift.before))),
+			}
+		}
+		return nil
+	}
+	return &PlanStageBlock{
+		StageID: stage.ID, Kind: "agent",
+		Reason: boundedDetail(fmt.Sprintf(
+			"worker %s is not registered, and this stage was approved to be performed by it", assignment.Agent.ID)),
+	}
+}
+
+// modelAppearedSince names a model the worker has gained since an assignment
+// was approved against it having none, or the sentinel that compares equal.
+//
+// It is deliberately one-directional. An assignment that NAMES a model carries
+// it to the invocation and the adapter prefers it, so nothing the worker's
+// configuration does afterwards can displace it - and a profile that pinned a
+// model is exactly that case. Only the absence is unbound, so only the absence
+// is checked.
+func modelAppearedSince(assignment domain.AgentAssignment, agent domain.ExecutionAgentDescriptor) string {
+	if assignment.Agent.Model == "" && agent.Model != "" {
+		return agent.Model
+	}
+	return "(none configured)"
 }
 
 // upstreamBase is the published upstream candidate this stage should build on.

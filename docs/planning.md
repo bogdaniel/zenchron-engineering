@@ -467,6 +467,81 @@ approve something nobody read. `plan reject` records the refusal. `plan revise` 
 new proposal rather than editing an approved plan in place, because an approved
 revision is immutable and the work bound to it stays bound to what was approved.
 
+An approval also binds the ASSIGNMENTS it was shown. The plan digest binds the
+document that was read; on its own it says nothing about who will perform it.
+Resolution is otherwise recomputed from the live registry and workforce on
+every look, so a stage that had not started yet resolved again when it became
+dependency-ready - and an instruction pack edited in place, a profile edited,
+or a changed default worker between the approval and the first run meant the
+first execution froze a configuration nobody had approved. Those assignments
+are now recorded when the approval is, immutably per stage, and the approval
+event carries their canonical digest so the binding sits in the journal rather
+than only in the table beside it. Resolution reads them back for stages that
+have not started, which is the same law that already applied to stages that had.
+
+The binding is taken against the state approving WOULD leave, not the state it
+replaces - the same computation `plan show --revision N` renders. That matters
+for the most ordinary flow there is: revising a plan while it executes. The
+supersession an approval records resets a stage the revision materially changes
+to a zero projection, lifecycle cleared and generation back to zero, so reading
+the pre-approval state saw it as "already started" and left it unbound - and
+nothing then governed it, because the privilege comparison engages only above
+generation zero and the supersession had just taken it back to zero.
+
+An approval NAMES the assignment set it approves. The revision digest binds the
+document an operator read and does not move when a profile, an instruction pack
+or the workforce is edited, so an approval that named only the document
+authorized whichever assignments the registry happened to resolve at decide
+time. `plan show` prints the set's digest in the command it offers, and
+`plan approve --assignments SHA256` is REQUIRED and refuses when the set has
+moved since - the same shape that stops a revision number alone from deciding an
+unread document. A rejection binds no assignments and refuses the argument.
+
+Requiring it applies to new approvals. An approval already durable in a journal
+was written before this existed, stays readable, and keeps executing under the
+compatibility rule below; what cannot happen is a NEW one being written without
+naming what it authorizes.
+
+And the approval AUTHORIZES the rows. The bound assignments live in a table
+beside the journal, and a table is editable while a hash-chained event is not -
+so the digest the approval recorded is replayed with the rest of the approval,
+and those rows are read, digested with the same definition the approval used,
+and refused unless they are the set the operator approved. Two durable sources
+that can disagree are one durable source and one opportunity, and without this
+the side table was the one that won. A disagreement fails closed: nothing
+resolves and no run is created.
+
+What approval cannot bind is bound when the stage starts. A stage approved
+before its producer ran was approved with no upstream at all, so the upstream
+outputs it consumes are rebound from the settled producer at that point, and
+only where the approved assignment's own context selection says the worker is
+entitled to them. Approval freezes what the operator authorized, not facts that
+did not exist yet.
+
+One identity the assignment cannot carry is the provider behind an agent id:
+the engine is built from live agent configuration. An id re-pointed at another
+provider kind, another vendor family or a weaker trust mode is refused before
+the run is created, because otherwise an independence obligation stated in
+terms of vendor family would be quietly false.
+
+A stage that resolved to a BLOCKER at approval is not bound. The operator was
+shown a blocker rather than an assignment, so there is no identity to hold
+execution to, and readiness at planning time was never a promise - an agent that
+authenticates an hour later performs the stage under whatever resolves then.
+That is a deliberate cut rather than an oversight, so the view NAMES those
+stages: `unbound` lists them, because rendering them beside bound stages
+identically is what would let an operator believe an approval had covered them.
+The marker is today derived from the live resolution, so it stops naming a
+stage once its blocker clears - the window where it matters most - which #118
+closes by deriving it from the approval record instead.
+
+A revision approved before this boundary existed has no binding and resolves
+live, exactly as it did then. That is the ABSENCE of a recorded digest, and it
+stays distinct from an approval that deliberately bound nothing - which records
+the canonical digest of the empty set, and can therefore be named and checked
+like any other. Rows appearing under an approval that named none are refused
+rather than trusted.
+
 ### Work whose input moved
 
 The assignment a stage will actually execute is the DURABLE one. It is

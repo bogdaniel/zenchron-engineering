@@ -220,6 +220,31 @@ CREATE TABLE plan_assignments (
 INSERT INTO plan_assignments (plan_id, revision, stage_id, generation, assignment_id, document)
 	SELECT plan_id, revision, stage_id, 0, assignment_id, document FROM plan_assignments_v1;
 DROP TABLE plan_assignments_v1;
+`, `
+-- The assignments an operator SAW when they approved one plan revision.
+--
+-- Approval is a decision about a document AND about who will perform it under
+-- what configuration. Resolution is otherwise recomputed from the live
+-- registry on every look, so an unstarted stage could be re-resolved after the
+-- approval - onto an edited profile, an edited instruction pack, or a
+-- different worker after the operator's default changed - and the first
+-- execution would freeze something nobody had approved.
+--
+-- These rows are what the approval bound. They are immutable per (plan,
+-- revision, stage) for the same reason the revision document is: an approval
+-- that could be rewritten afterwards is not an approval. The approval event
+-- carries their canonical digest, so the binding is in the hash-chained
+-- journal and not only in a table beside it.
+--
+-- A revision approved before this existed has no rows and no digest, and
+-- resolves live exactly as it did then.
+CREATE TABLE plan_approved_assignments (
+	plan_id  TEXT NOT NULL REFERENCES plans(id),
+	revision INTEGER NOT NULL,
+	stage_id TEXT NOT NULL,
+	document TEXT NOT NULL,
+	PRIMARY KEY (plan_id, revision, stage_id)
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

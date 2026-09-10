@@ -46,7 +46,14 @@ func TestADecisionDuringAPlanningInvocationEndsThePass(t *testing.T) {
 		if _, err := fixture.store.PutPlanRevision(next); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.service.Approve(next.ID, next.Revision, next.Digest, "operator", "the two-half split"); err != nil {
+		// The contract this revision was planned against. Approval binds the
+		// assignments it resolves, and resolution reads the obligations from
+		// here - so a revision stored without one is a state the propose path
+		// never produces.
+		if err := fixture.store.PutPlanContract(next.ID, next.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.service.Approve(next.ID, next.Revision, next.Digest, shownAssignments(t, fixture.service, next.ID, next.Revision), "operator", "the two-half split"); err != nil {
 			t.Fatal(err)
 		}
 		return PlannerOutput{
