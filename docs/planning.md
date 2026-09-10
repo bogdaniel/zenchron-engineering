@@ -469,6 +469,38 @@ revision is immutable and the work bound to it stays bound to what was approved.
 
 ### Work whose input moved
 
+The assignment a stage will actually execute is the DURABLE one. It is
+persisted before the engine is built and before the run exists, and the
+`plan.stage_assigned` association is appended only after the run exists - so a
+start that failed in between leaves a frozen row that nothing points at, and
+the row is kept on the next attempt because assignments are immutable per
+revision, stage and generation. Every guard therefore applies to that row and
+not to whatever the resolver produced this pass: checking the fresh resolution
+meant the safety check protected an assignment that was about to be discarded,
+while the one that ran was never checked at all.
+
+A frozen assignment nothing ever ran is intent, not history. If its input has
+been replaced since it was frozen, the performance it was frozen for will never
+happen, and refusing it would refuse it forever - the row cannot change. So the
+stage advances an execution generation instead, exactly as it would if that
+performance had run and been invalidated: the abandoned row stays where it is,
+the next performance is frozen against what the producer actually settled, and
+the privilege boundary compares the two. A retry the producer did not outrun
+re-uses the assignment it froze and burns no generation.
+
+The one exception is a freeze whose RUN survived. The association is appended
+after the run is created, so a crash between the two leaves a live run the
+projection does not name, which is indistinguishable from a failed start by the
+plan journal alone. Discarding that freeze would leave the run executing,
+unstopped and attributed to no stage - consumed plan budget made invisible - so
+the durable runs are asked, the stage is associated with the run that exists,
+and the sweep below handles it from there. That run then finishes its work
+against the candidate it was created for and is invalidated when it completes,
+so it spends its invocations on a performance already known to be superseded.
+It is the same policy any run gets when its input moves underneath it, and
+stopping one here rather than at completion would be new machinery; it is
+recorded because the window makes it knowable earlier than usual.
+
 A completed stage is invalidated when the upstream work its frozen assignment
 names has been replaced - a producer at `goal_state_reached` is not finished,
 and reviewer feedback can move it to a different candidate. Everything

@@ -541,52 +541,12 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 		if !found {
 			continue
 		}
-		for _, upstream := range assignment.Context.UpstreamOutputs {
-			if upstream.RunID == "" || upstream.Candidate == "" {
-				continue
-			}
-			// Compared against the SAME field the freeze copied - the run's own
-			// record of its candidate - so the two are like for like. The
-			// journal projection can be momentarily ahead of it, mid-pass,
-			// which would read as movement and throw away a review that had
-			// just been performed against the candidate the assignment names.
-			run, found, err := r.Store.Run(upstream.RunID)
-			if err != nil {
-				return false, err
-			}
-			if !found {
-				continue
-			}
-			// Only a head the producer is FINISHED WITH counts as movement.
-			// The run row's candidate is refreshed on every reconcile of that
-			// run - every commit and checkpoint - not on publication or
-			// settlement. A producer re-activated by reviewer feedback moves it
-			// on the first checkpoint, long before it has produced anything a
-			// reviewer should consume, and firing there would freeze the next
-			// generation against an interim, possibly unpushed head: a paid
-			// review of work still being changed, invalidated again the moment
-			// the producer settles, burning a child run and invocations from
-			// the approved envelope on every cycle.
-			//
-			// Generation 0 gets this invariant for free - a stage starts when
-			// its dependencies have SETTLED - and this is the same rule applied
-			// to every later generation.
-			if _, settled := stageOutcome(run); !settled {
-				continue
-			}
-			head := run.Candidate.Revision
-			if head == "" || head == upstream.Candidate {
-				continue
-			}
-			// Bounded, because it is a journal field: two full candidate heads
-			// and a stage id exceed the 200-byte field bound with ordinary
-			// production ids, and the append would be REFUSED - so the
-			// reconciler would error on this plan on every tick, forever. Every
-			// neighbouring append passes its detail through here; this one did
-			// not.
-			stale[stage.ID] = boundedDetail(fmt.Sprintf("it consumed %s from stage %s, which is now at %s",
-				upstream.Candidate, upstream.StageID, head))
-			break
+		moved, err := r.movedUpstream(assignment)
+		if err != nil {
+			return false, err
+		}
+		if moved != "" {
+			stale[stage.ID] = moved
 		}
 	}
 	// Propagation is seeded from DURABLE STATE as well as from what this pass
@@ -655,6 +615,87 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 		}
 	}
 	return len(ids) > 0, nil
+}
+
+// startedRun reports whether a run already exists for one performance of a
+// stage, whatever the plan journal says about it.
+//
+// It asks the durable RUNS rather than the projection, because the projection
+// is exactly what can be missing: `plan.stage_assigned` is appended after the
+// run is created, so a crash between the two leaves a live run nothing names.
+//
+// It scans, and that is deliberate: there is no plan index over runs, and this
+// is only reached on the rare path where a start failed AND the input it froze
+// has since been replaced. An index for a branch taken that seldom would be
+// carried by every write for the benefit of almost none.
+func (r PlanReconciler) startedRun(plan domain.EngineeringPlan, stageID string, generation int) (bool, error) {
+	runs, err := r.Store.Runs()
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if run.Plan == nil {
+			continue
+		}
+		if run.Plan.PlanID == plan.ID && run.Plan.Revision == plan.Revision &&
+			run.Plan.StageID == stageID && run.Plan.Generation == generation {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// movedUpstream names the first upstream output an assignment froze whose
+// producer has since SETTLED on a different candidate, or the empty string.
+//
+// It is ONE predicate with two callers, deliberately. The sweep uses it to
+// decide that completed work is stale; the start path uses it to decide that a
+// durable assignment nothing ever ran is stale. Two copies would be two answers
+// to "did this stage's input move", and for a long time the second copy simply
+// did not exist - which is how an assignment frozen against a candidate that
+// had since been replaced could still be the one that executed.
+//
+// Two things make it conservative on purpose:
+//
+//   - It compares against the RUN'S OWN record of its candidate, which is the
+//     same field the freeze copied, so the two are like for like. The journal
+//     projection can be momentarily ahead of it mid-pass, which would read as
+//     movement and throw away a review that had just been performed against the
+//     candidate the assignment names.
+//   - Only a head the producer is FINISHED WITH counts. The run row's candidate
+//     is refreshed on every reconcile of that run - every commit and checkpoint
+//   - not on publication or settlement. A producer re-activated by reviewer
+//     feedback moves it on the first checkpoint, long before it has produced
+//     anything a reviewer should consume, and firing there would bind the next
+//     performance to an interim, possibly unpushed head.
+//
+// The detail is BOUNDED, because it becomes a journal field: two full candidate
+// heads and a stage id exceed the 200-byte field bound with ordinary production
+// ids, and the append would be refused - so the reconciler would error on that
+// plan on every tick, forever.
+func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string, error) {
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		if upstream.RunID == "" || upstream.Candidate == "" {
+			continue
+		}
+		run, found, err := r.Store.Run(upstream.RunID)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			continue
+		}
+		if _, settled := stageOutcome(run); !settled {
+			continue
+		}
+		head := run.Candidate.Revision
+		if head == "" || head == upstream.Candidate {
+			continue
+		}
+		return boundedDetail(fmt.Sprintf("it consumed %s from stage %s, which is now at %s",
+			upstream.Candidate, upstream.StageID, head)), nil
+	}
+	return "", nil
 }
 
 // refusePrivilegeChange is the boundary between renewing an obligation and
@@ -1005,7 +1046,78 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		// The resolver already recorded why, and that block is in the report.
 		return nil, nil, nil
 	}
-	// The upstream heads this assignment would FREEZE have to be heads their
+	// WHICH EXECUTION of this stage this is. Zero is the first, and a later one
+	// exists only because the upstream candidate this stage consumed was
+	// replaced. The approved obligation is unchanged, so it is performed again
+	// under the same revision - but as its own assignment and its own run,
+	// because reusing either would hand the new performance the input whose
+	// replacement is the reason for it.
+	generation := snapshot.Stages[stage.ID].Generation
+	// THE ASSIGNMENT THAT WILL ACTUALLY EXECUTE, before anything is checked
+	// against it.
+	//
+	// PutPlanAssignment keeps the first row written for a (revision, stage,
+	// generation), so a row frozen by an earlier start attempt is what a retry
+	// executes - not the resolution this pass just produced. Every guard below
+	// therefore has to see that row. Checking the fresh resolution instead
+	// checked an assignment that was about to be discarded on conflict, and the
+	// one that ran was never checked at all: a start that failed after the
+	// freeze, followed by the producer settling a different candidate, left the
+	// stale frozen assignment to be loaded and executed while the guard passed
+	// on the replacement it would never use.
+	durable, frozenAlready, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation, stage.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if frozenAlready {
+		// A frozen assignment NOTHING EVER RAN is intent, not history. The
+		// stage_assigned projection is written only after a run was created
+		// under it, so an assignment the projection does not name is one whose
+		// start never completed - the engine refused, the process died, the
+		// tick errored.
+		//
+		// If its input has since been replaced, the performance it was frozen
+		// for will never happen. Blocking would be safe and permanent: the row
+		// is immutable, so every later tick would read the same stale
+		// assignment and refuse again. So the stage advances an execution
+		// GENERATION instead, exactly as it would if that performance had run
+		// and been invalidated - the abandoned row stays where it is, the next
+		// performance is frozen against what the producer actually settled, and
+		// the privilege boundary compares the two.
+		if snapshot.Stages[stage.ID].AssignmentID == "" {
+			moved, err := r.movedUpstream(durable)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Unless a RUN was created under it after all. The association
+			// event is appended after the run exists, so a crash between the
+			// two leaves a live run the projection does not name; discarding
+			// that freeze would advance the generation and leave the run
+			// executing, unstopped and attributed to nothing. Its stage is
+			// associated instead, and the ordinary sweep invalidates and
+			// retires it the way it does any run whose input moved under it.
+			started := false
+			if moved != "" {
+				if started, err = r.startedRun(plan, stage.ID, generation); err != nil {
+					return nil, nil, err
+				}
+			}
+			if moved != "" && !started {
+				if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+					StageID: stage.ID, Outcome: planStageInvalidated, Revision: plan.Revision,
+					Reason: boundedDetail("an assignment was frozen for this stage and no run was created under it, and " + moved),
+				}); err != nil {
+					return nil, nil, err
+				}
+				// The next tick performs the new generation. Nothing started
+				// here, and nothing is blocked: the stage is simply not yet at
+				// the assignment it will run.
+				return nil, nil, nil
+			}
+		}
+		assignment = durable
+	}
+	// The upstream heads this assignment FREEZES have to be heads their
 	// producers are FINISHED WITH. A stage stays completed in plan state while
 	// its run is re-activated by reviewer feedback, and the run row's candidate
 	// moves on the first checkpoint after that - so a stage starting in the
@@ -1052,14 +1164,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if r.Engine == nil {
 		return nil, nil, &PlanRefusedError{PlanID: plan.ID, Detail: "no engine factory is configured, so no run can be created"}
 	}
-	// WHICH EXECUTION of this stage this is. Zero is the first, and a later one
-	// exists only because the upstream candidate this stage consumed was
-	// replaced. The approved obligation is unchanged, so it is performed again
-	// under the same revision - but as its own assignment and its own run,
-	// because reusing either would hand the new performance the input whose
-	// replacement is the reason for it.
-	generation := snapshot.Stages[stage.ID].Generation
-	if generation > 0 {
+	if generation > 0 && !frozenAlready {
 		if block := r.refusePrivilegeChange(plan, stage, generation, assignment); block != nil {
 			return nil, block, nil
 		}
@@ -1069,10 +1174,10 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		return nil, nil, err
 	}
 	// The STORED assignment is the one that runs. A row already frozen for this
-	// (plan, revision, stage) is kept, so a re-resolution that picked a
-	// different worker must not be what the journal, the run binding and the
-	// report describe: that is a tamper-evident journal naming worker B while
-	// worker A does the work.
+	// (plan, revision, stage, generation) is kept, so a re-resolution that
+	// picked a different worker must not be what the journal, the run binding
+	// and the report describe: that is a tamper-evident journal naming worker B
+	// while worker A does the work.
 	frozen, found, err := r.Store.PlanAssignment(plan.ID, plan.Revision, generation, stage.ID)
 	if err != nil {
 		return nil, nil, err
