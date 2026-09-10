@@ -695,7 +695,10 @@ func (r *EngineeringRuntime) recordHumanAuthority(state *runState, request Autho
 		Contract:      request.Contract,
 		StateSHA256:   request.StateSHA256,
 		OccurredAt:    r.deps.Clock.Now(),
-		Note:          in.Note,
+		// The claims this request was ABOUT, so the evidence says what was
+		// answered rather than only that something was.
+		Requires: append([]string(nil), request.Requires...),
+		Note:     in.Note,
 	}
 	raw, err := marshalPayloadJSON(payload)
 	if err != nil {

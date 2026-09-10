@@ -1,0 +1,215 @@
+{
+  "schema_version": "0.1",
+  "id": "proposal-sso-003",
+  "source": {
+    "id": "plan-sso-001",
+    "revision": 3,
+    "digest": "8bb7027a0c7581f5b6eff392a0121736019980f565229b1c1d849ecd415912f7"
+  },
+  "proposed_revision": {
+    "schema_version": "0.1",
+    "id": "plan-sso-001",
+    "revision": 4,
+    "digest": "e3bdace686801783adadb19ae1a214699c4a0d312958f1adafdcd87e6225e2b6",
+    "objective": "Add enterprise SSO to the payments service.",
+    "subject": {
+      "repository": "acme/payments",
+      "revision": "rev-b"
+    },
+    "budget_envelope": {
+      "max_child_runs": 8,
+      "max_concurrency": 3,
+      "max_provider_invocations": 24,
+      "max_wall_seconds": 21600
+    },
+    "stages": [
+      {
+        "id": "architecture",
+        "kind": "agent",
+        "role": "system_architect",
+        "objective": "State the SSO integration boundary and the modules it touches.",
+        "requires_capabilities": [
+          "architecture_reasoning",
+          "repository_analysis"
+        ],
+        "invocation_mode": "mutating",
+        "budget": {
+          "max_execution_attempts": 2,
+          "max_wall_seconds": 3600
+        },
+        "rationale": "The change crosses an authentication boundary, so the integration shape is decided before code is written."
+      },
+      {
+        "id": "implementation",
+        "kind": "agent",
+        "role": "implementer",
+        "objective": "Implement the SSO endpoints and session exchange.",
+        "depends_on": [
+          "architecture"
+        ],
+        "requires_capabilities": [
+          "code_change",
+          "repository_analysis"
+        ],
+        "invocation_mode": "mutating",
+        "budget": {
+          "max_execution_attempts": 2,
+          "max_wall_seconds": 5400
+        }
+      },
+      {
+        "id": "frontend",
+        "kind": "agent",
+        "role": "implementer",
+        "objective": "Implement the SSO sign-in surface.",
+        "depends_on": [
+          "architecture"
+        ],
+        "requires_capabilities": [
+          "code_change"
+        ],
+        "invocation_mode": "mutating",
+        "budget": {
+          "max_execution_attempts": 2,
+          "max_wall_seconds": 5400
+        }
+      },
+      {
+        "id": "security-review",
+        "kind": "agent",
+        "role": "security_reviewer",
+        "objective": "Review the candidate for authentication and session defects.",
+        "depends_on": [
+          "implementation"
+        ],
+        "requires_capabilities": [
+          "security_review"
+        ],
+        "independence": {
+          "dimension": "vendor_family",
+          "different_from": [
+            "implementation"
+          ]
+        },
+        "invocation_mode": "mutating",
+        "profile": "zenchron-security-reviewer",
+        "context_policy": "independent-review",
+        "budget": {
+          "max_execution_attempts": 1,
+          "max_wall_seconds": 1800
+        },
+        "rationale": "EngineeringPolicy requires a security review independent of the material producer's vendor family."
+      },
+      {
+        "id": "assurance",
+        "kind": "assurance_gate",
+        "depends_on": [
+          "security-review"
+        ],
+        "required_claims": [
+          "claim-tests"
+        ],
+        "rationale": "Satisfied from the existing evidence bundle; it creates no EngineeringRun."
+      },
+      {
+        "id": "release-decision",
+        "kind": "human_decision_gate",
+        "depends_on": [
+          "assurance"
+        ],
+        "required_claims": [
+          "claim-human-approval"
+        ],
+        "action": {
+          "type": "git.pull_request.create",
+          "target": "acme/payments"
+        },
+        "rationale": "Publication remains an authority decision a person makes."
+      }
+    ],
+    "provenance": {
+      "compiler_version": "plan-compiler-v0.1",
+      "project_model": {
+        "id": "project-acme-payments",
+        "revision": "1"
+      },
+      "policy": {
+        "id": "policy-engineering-baseline",
+        "revision": "1"
+      },
+      "contract": {
+        "id": "contract-sso",
+        "revision": "3"
+      },
+      "template": {
+        "id": "security-sensitive-feature",
+        "version": 1,
+        "digest": "13c9b9b122628a11d0f4f321a92b049906d4ea44bac69ad4c16600f8727402cb"
+      },
+      "reasoning": {
+        "agent_id": "claude",
+        "provider_kind": "claude_code",
+        "vendor_family": "anthropic",
+        "trust_mode": "operator_trusted",
+        "model": "sonnet",
+        "invocation_mode": "non_mutating_planning",
+        "provider_mode": "plan",
+        "workspace_digest_before": "5a3f0f1f6b0e3a2d4c5b6a798899101112131415161718192021222324252627",
+        "workspace_digest_after": "5a3f0f1f6b0e3a2d4c5b6a798899101112131415161718192021222324252627",
+        "workspace_unchanged": true
+      },
+      "previous_revision": 3,
+      "proposal_id": "proposal-sso-003"
+    }
+  },
+  "reason": "The architecture stage found an independent frontend surface that can be implemented in parallel.",
+  "provenance": {
+    "origin": "planner_role_decomposition",
+    "stage_id": "architecture",
+    "reasoning": {
+      "agent_id": "claude",
+      "provider_kind": "claude_code",
+      "vendor_family": "anthropic",
+      "trust_mode": "operator_trusted",
+      "model": "sonnet",
+      "invocation_mode": "non_mutating_planning",
+      "provider_mode": "plan",
+      "workspace_digest_before": "5a3f0f1f6b0e3a2d4c5b6a798899101112131415161718192021222324252627",
+      "workspace_digest_after": "5a3f0f1f6b0e3a2d4c5b6a798899101112131415161718192021222324252627",
+      "workspace_unchanged": true
+    }
+  },
+  "budget": {
+    "current": {
+      "max_child_runs": 8,
+      "max_concurrency": 3,
+      "max_provider_invocations": 24,
+      "max_wall_seconds": 21600
+    },
+    "proposed": {
+      "max_child_runs": 8,
+      "max_concurrency": 3,
+      "max_provider_invocations": 24,
+      "max_wall_seconds": 21600
+    },
+    "consumed": {
+      "child_runs": 2,
+      "provider_invocations": 3,
+      "wall_seconds": 1840,
+      "cost_known": false
+    },
+    "widened": false
+  },
+  "changes": {
+    "added_stages": [
+      "frontend"
+    ],
+    "material": true
+  },
+  "validation": {
+    "status": "valid"
+  },
+  "approval": {
+    "status": "pending"
+  }
+}

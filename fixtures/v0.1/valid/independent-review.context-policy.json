@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "id": "independent-review",
+  "revision": "1",
+  "digest": "fd820f41309c98abf4e035ee57ac284801fa8f35a9e6bab3fa7d9baac914d6de",
+  "source": {
+    "type": "operator_file",
+    "location": "/home/operator/.config/zenchron/context/independent-review.json"
+  },
+  "include": [
+    "objective",
+    "acceptance_criteria",
+    "obligations",
+    "permissions",
+    "prohibitions",
+    "candidate_diff",
+    "policy_excerpts"
+  ],
+  "exclude": [
+    "producer_reasoning"
+  ]
+}

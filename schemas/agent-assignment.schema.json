@@ -1,0 +1,491 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/agent-assignment.schema.json",
+  "title": "AgentAssignment v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "plan",
+    "stage_id",
+    "role",
+    "profile",
+    "agent",
+    "invocation_mode",
+    "trust_requirement",
+    "contract",
+    "context",
+    "selection"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "plan": {
+      "$ref": "#/$defs/plan_ref"
+    },
+    "stage_id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "role": {
+      "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "digest",
+        "capabilities",
+        "trust_requirement"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "instructions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pack_ref"
+          },
+          "minItems": 1
+        },
+        "context_policy": {
+          "$ref": "#/$defs/pack_ref"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
+          },
+          "uniqueItems": true
+        },
+        "trust_requirement": {
+          "enum": [
+            "operator_trusted",
+            "protected"
+          ]
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The profile's narrowing, frozen with it. Every member NARROWS: there is deliberately no member that raises a ceiling or permits a bypass.",
+          "properties": {
+            "max_wall_seconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_execution_attempts": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_provider_invocations": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "deny_permission_bypass": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider_kind",
+        "vendor_family",
+        "trust_mode"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "provider_kind": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "vendor_family": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "trust_mode": {
+          "enum": [
+            "operator_trusted",
+            "protected"
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "invocation_mode": {
+      "enum": [
+        "mutating",
+        "non_mutating_planning"
+      ]
+    },
+    "trust_requirement": {
+      "enum": [
+        "operator_trusted",
+        "protected"
+      ]
+    },
+    "contract": {
+      "$ref": "#/$defs/object_revision"
+    },
+    "context": {
+      "$ref": "#/$defs/context_pack"
+    },
+    "budget": {
+      "$ref": "#/$defs/stage_budget"
+    },
+    "independence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "dimension",
+          "different_from",
+          "class",
+          "satisfied_by"
+        ],
+        "properties": {
+          "dimension": {
+            "enum": [
+              "agent_profile",
+              "execution_agent",
+              "provider_kind",
+              "vendor_family",
+              "human"
+            ]
+          },
+          "different_from": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "uniqueItems": true
+          },
+          "class": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "other_classes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "satisfied_by": {
+            "enum": [
+              "independent_worker",
+              "independent_human_review"
+            ]
+          }
+        }
+      },
+      "minItems": 1
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "considered",
+        "reason"
+      ],
+      "properties": {
+        "considered": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile",
+              "agent",
+              "eligible"
+            ],
+            "properties": {
+              "profile": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "agent": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "eligible": {
+                "type": "boolean"
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/non_empty_string"
+                },
+                "minItems": 1
+              }
+            }
+          }
+        },
+        "selected": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "reason": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "run_id": {
+      "$ref": "#/$defs/non_empty_string"
+    }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "plan_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "pack_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "revision": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "context_pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objective",
+        "acceptance_criteria",
+        "included"
+      ],
+      "properties": {
+        "objective": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          }
+        },
+        "obligations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "prohibitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "architecture_notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "policy_excerpts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "repository_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        },
+        "upstream_outputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stage_id"
+            ],
+            "properties": {
+              "stage_id": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "candidate": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "tree": {
+                "$ref": "#/$defs/non_empty_string"
+              },
+              "summary": {
+                "$ref": "#/$defs/non_empty_string"
+              }
+            }
+          },
+          "minItems": 1
+        },
+        "included": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "objective",
+              "acceptance_criteria",
+              "obligations",
+              "permissions",
+              "prohibitions",
+              "project_model_facts",
+              "architecture_notes",
+              "policy_excerpts",
+              "repository_paths",
+              "upstream_stage_outputs",
+              "candidate_diff",
+              "prior_findings",
+              "producer_reasoning"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "objective",
+              "acceptance_criteria",
+              "obligations",
+              "permissions",
+              "prohibitions",
+              "project_model_facts",
+              "architecture_notes",
+              "policy_excerpts",
+              "repository_paths",
+              "upstream_stage_outputs",
+              "candidate_diff",
+              "prior_findings",
+              "producer_reasoning"
+            ]
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        }
+      }
+    },
+    "stage_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_execution_attempts": {
+          "description": "Retries of ONE execution binding, never a run total: a continuation is a different binding with its own allowance.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_provider_invocations": {
+          "description": "The RUN TOTAL of provider invocations, across every binding. A plan's remaining aggregate headroom is a total and is carried here.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_wall_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "object_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "revision": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    }
+  }
+}

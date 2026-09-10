@@ -332,10 +332,17 @@ func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epo
 // The set is closed and fail-closed: a reason that is not listed here SPENDS
 // the budget. A new wait pauses the clock only when somebody decides it should,
 // which is the safe direction for a bound whose whole job is to end things.
+// ReasonGoalStateReached is the wait a run settles into when it has done
+// everything it can: the candidate is produced, assurance has judged it, and
+// what remains is a person in the forge. It is named because a PLAN reads it -
+// a stage whose run reached its goal state has produced its output, and the
+// stages that depend on it can proceed while the run itself waits for review.
+const ReasonGoalStateReached = "goal_state_reached"
+
 var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
-	"goal_state_reached":            true,
+	ReasonGoalStateReached:          true,
 	"awaiting_authority":            true,
 	"authority_blocked":             true,
 	"authority_unknown":             true,
@@ -374,20 +381,11 @@ var externalWaitReasons = map[string]bool{
 // waiting - polling the pull request, re-reading the issue - is real work and is
 // counted; only the idle gap between ticks is excluded.
 func (s *runState) activeElapsed(now time.Time) time.Duration {
-	elapsed := now.Sub(s.run.CreatedAt)
+	// The MEMOIZED fold - a loaded run state's events never change and
+	// conditions() asks several times per pass - through the same arithmetic
+	// the plan's ceiling uses.
 	excluded, openSince, openWork := s.externalWait()
-	// An open wait runs to now, less the work already performed inside it. This
-	// is the only part of the answer that depends on the clock, and therefore
-	// the only part that cannot be computed once.
-	if !openSince.IsZero() {
-		if idle := now.Sub(openSince) - openWork; idle > 0 {
-			excluded += idle
-		}
-	}
-	if excluded > elapsed {
-		return 0
-	}
-	return elapsed - excluded
+	return activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)
 }
 
 // externalWait folds the journal once: the total of the CLOSED external-wait
@@ -420,6 +418,18 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 	if s.waitComputed {
 		return s.waitExcluded, s.waitOpenSince, s.waitOpenWork
 	}
+	excluded, waitingSince, work := foldExternalWait(s.events)
+	s.waitExcluded, s.waitOpenSince, s.waitOpenWork, s.waitComputed = excluded, waitingSince, work, true
+	return excluded, waitingSince, work
+}
+
+// foldExternalWait is the fold itself, over events alone.
+//
+// It is a package-level function rather than a method because the PLAN needs
+// the same answer for a stage's child run and must not have a second definition
+// of what counts as active time: a plan wall ceiling judged by different
+// arithmetic from the run wall ceiling would be two budgets wearing one name.
+func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSince time.Time, openWork time.Duration) {
 	var waitingSince time.Time
 	var work time.Duration
 	started := map[string]time.Time{}
@@ -433,7 +443,7 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 		waitingSince, work = time.Time{}, 0
 		started = map[string]time.Time{}
 	}
-	for _, event := range s.events {
+	for _, event := range events {
 		switch event.Type {
 		case EventRunWaiting:
 			if externalWaitReasons[payloadReason(event.Payload)] {
@@ -461,8 +471,38 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 			}
 		}
 	}
-	s.waitExcluded, s.waitOpenSince, s.waitOpenWork, s.waitComputed = excluded, waitingSince, work, true
 	return excluded, waitingSince, work
+}
+
+// ActiveElapsed is how long a run has been WORKING, from its own durable
+// record: total elapsed time less the intervals it spent waiting on something
+// external, plus back the work it performed inside those intervals.
+//
+// The plan's aggregate wall ceiling is attributed with this, so "active time"
+// means exactly what it means for a run's own wall budget.
+func ActiveElapsed(run EngineeringRun, events []EngineeringEvent, now time.Time) time.Duration {
+	excluded, openSince, openWork := foldExternalWait(events)
+	return activeFrom(run.CreatedAt, excluded, openSince, openWork, now)
+}
+
+// activeFrom is the arithmetic itself, over a fold either caller supplies. It
+// is one function because the run's wall budget and the plan's wall ceiling
+// must mean the same thing by construction: two copies of this could drift, and
+// two ceilings that disagree about what "active" means would be two budgets
+// wearing one name.
+func activeFrom(createdAt time.Time, excluded time.Duration, openSince time.Time, openWork time.Duration, now time.Time) time.Duration {
+	elapsed := now.Sub(createdAt)
+	// An open wait runs to now, less the work already performed inside it. This
+	// is the only part of the answer that depends on the clock.
+	if !openSince.IsZero() {
+		if idle := now.Sub(openSince) - openWork; idle > 0 {
+			excluded += idle
+		}
+	}
+	if excluded > elapsed {
+		return 0
+	}
+	return elapsed - excluded
 }
 
 // pinnedBase is the base revision the run was compiled and cloned against. It
@@ -470,6 +510,20 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 // base.integrate and reassessment, never by silently recompiling the contract
 // against a base the candidate was never built on.
 func (s *runState) pinnedBase() string {
+	// A PLAN STAGE that continues upstream work is based on that work, not on
+	// the branch the plan started from. Without this a reviewer or an
+	// integrator gets a workspace at the trusted base and has nothing to review
+	// or integrate - which is exactly what the first live dogfood review
+	// reported as a blocking finding about its own workspace.
+	//
+	// The override is the upstream candidate commit the plan reconciler
+	// recorded when it created this run, and it is only ever recorded for an
+	// upstream candidate that was PUBLISHED: a commit that exists only in
+	// another run's local workspace is not something the governed remote can
+	// clone.
+	if s.run.Plan != nil && s.run.Plan.BaseRevision != "" {
+		return s.run.Plan.BaseRevision
+	}
 	if len(s.sources) == 0 {
 		return ""
 	}
@@ -663,7 +717,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
-	if limit := s.rt.deps.Budgets.WallLimit; limit > 0 && s.activeElapsed(now) > limit {
+	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
 		return Failed, "run_wall_budget_exhausted"
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
@@ -699,6 +753,14 @@ func (s *runState) conditions() (Disposition, string) {
 	// distinct continuation bindings, terminated while still productive.
 	if s.continuationCeilingReached() {
 		return Failed, "execution_continuations_exhausted"
+	}
+	// The RUN TOTAL of provider invocations, across every binding. This is the
+	// bound a plan's remaining aggregate headroom becomes: continuation depth
+	// bounds how many bindings there may be and the attempt budget bounds
+	// retries within one, but neither of them bounds the sum, and a plan
+	// ceiling is a sum.
+	if s.providerInvocationCeilingReached() {
+		return Failed, "run_provider_invocations_exhausted"
 	}
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
 		return Waiting, "requested_privilege_expansion"
@@ -764,9 +826,35 @@ func (s *runState) plan() (desiredOperation, bool) {
 		if s.satisfied(spec.kind, key) {
 			continue
 		}
-		return desiredOperation{kind: spec.kind, key: key, maxAttempts: s.rt.attemptsFor(spec.kind)}, true
+		return desiredOperation{kind: spec.kind, key: key, maxAttempts: s.attemptsFor(spec.kind)}, true
 	}
 	return desiredOperation{}, false
+}
+
+// budgets is the bound THIS run is judged by: the operator's configuration,
+// narrowed by whatever the run persisted at creation. A plan stage run persists
+// its stage budget - already narrowed by the assigned profile's constraints -
+// so a profile that tightens wall time or attempts tightens the actual work
+// rather than only the document describing it.
+func (s *runState) budgets() RunBudgets {
+	budgets := s.rt.deps.Budgets.defaults()
+	if s.run.Budgets == nil {
+		return budgets
+	}
+	if wall := s.run.Budgets.WallLimit; wall > 0 && wall < budgets.WallLimit {
+		budgets.WallLimit = wall
+	}
+	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
+		budgets.MaxExecutionAttempts = attempts
+	}
+	return budgets
+}
+
+func (s *runState) attemptsFor(kind string) int {
+	if kind == OpExecutionInvoke {
+		return s.budgets().MaxExecutionAttempts
+	}
+	return s.rt.attemptsFor(kind)
 }
 
 func (r *EngineeringRuntime) attemptsFor(kind string) int {
@@ -889,6 +977,40 @@ func (s *runState) startedContinuationBindings() map[string]bool {
 		}
 	}
 	return started
+}
+
+// providerInvocationCeilingReached reports that this run has spent every
+// provider invocation it was created with.
+//
+// It counts ATTEMPTS - one per execution invocation actually begun - because
+// that is what a provider account is charged for. The count comes from the
+// projection of durable events, so a restart resumes at the same total rather
+// than at zero.
+func (s *runState) providerInvocationCeilingReached() bool {
+	limit := s.providerInvocationLimit()
+	if limit <= 0 {
+		return false
+	}
+	// A ceiling refuses the NEXT invocation; it does not retroactively fail a
+	// run that spent its last one productively. Without this, a run whose final
+	// permitted invocation completed the candidate read as failed the moment it
+	// finished - the continuation ceiling has the same exemption, for the same
+	// reason.
+	if _, wanted := bindExecutionInvoke(s); !wanted {
+		return false
+	}
+	return s.projection.Attempts[OpExecutionInvoke] >= limit
+}
+
+// providerInvocationLimit is the run's total, taken from what the run
+// persisted. Absent means unbounded, exactly as it does for every run created
+// before this bound existed: a run is judged by the budgets it was created
+// with, never by whatever is configured now.
+func (s *runState) providerInvocationLimit() int {
+	if budgets := s.run.Budgets; budgets != nil {
+		return budgets.MaxProviderInvocations
+	}
+	return 0
 }
 
 // continuationLimit is the run's continuation bound, taken from durable state.
@@ -1287,7 +1409,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			}
 		}
 		if !wanted {
-			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, "goal_state_reached"))
+			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, ReasonGoalStateReached))
 		}
 		if err := state.validate(desired, live); err != nil {
 			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, "operation_refused"))

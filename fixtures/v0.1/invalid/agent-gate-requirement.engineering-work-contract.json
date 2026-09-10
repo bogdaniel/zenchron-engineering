@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "id": "contract-invalid-gate",
+  "revision": "1",
+  "objective": "Change session validation.",
+  "acceptance_intent": ["Invalid sessions remain rejected"],
+  "subject": {
+    "repository": "acme/payments",
+    "revision": "rev-b"
+  },
+  "scope": {
+    "stage": "observed",
+    "allowed_paths": ["internal/auth/session.go"],
+    "prohibited_paths": []
+  },
+  "facts": ["fact-auth-2"],
+  "invariants": {},
+  "obligations": {},
+  "required_claims": {},
+  "permissions": [],
+  "prohibitions": [],
+  "authority_conditions": [],
+  "plan_requirements": {
+    "gates": [
+      {
+        "kind": "agent",
+        "statement": "A gate that is really a worker run."
+      }
+    ]
+  },
+  "provenance": {
+    "project_model": { "id": "project-acme-payments", "revision": "1" },
+    "policy": { "id": "policy-engineering-baseline", "revision": "1" },
+    "compiler_version": "compiler-v0.1"
+  }
+}

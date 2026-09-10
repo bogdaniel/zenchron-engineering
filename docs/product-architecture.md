@@ -11,18 +11,20 @@ The two are not alternatives. Every path below ends at the same kernel.
 ```text
                         operator                      GitHub
                             |                            |
-              chooses work, |                            | issues, reviews,
-              reviews PRs   |                            | comments, CI
+              states work,  |                            | issues, reviews,
+              approves      |                            | comments, CI
+              plans,        |                            |
+              reviews PRs   |                            |
                             v                            v
                     +---------------------------------------------+
                     |   zenchron-engineering serve                |
                     |   persistent supervisor, owns the scheduler |
                     +---------------------------------------------+
-                       |            |            |            |
-             agent     |   run      |  shared    |  control   |
-             registry  |  scheduler |  forge     |  endpoint  |
-                       |            |  observer  |  (local)   |
-                       v            v            v            v
+                       |          |          |          |         |
+             agent     |  plan    |   run    | shared   | control |
+             registry  |  recon-  | scheduler| forge    | endpoint|
+             + profiles|  ciler   |          | observer | (local) |
+                       v          v          v          v         v
                     +---------------------------------------------+
                     |        durable EngineeringRuns              |
                     |        one per task, in one SQLite store    |
@@ -51,7 +53,7 @@ The two are not alternatives. Every path below ends at the same kernel.
                               human review in GitHub
 ```
 
-Three things about this diagram are load-bearing.
+Four things about this diagram are load-bearing.
 
 **The agents are at the bottom, not the middle.** They author changes. Every
 arrow from the candidate workspace THROUGH publication is runtime-owned, and
@@ -67,6 +69,96 @@ journal and no second authority system.
 **The control endpoint is inside the box.** It is local-only and owner-only,
 because anything that can submit work to it can start coding agents under the
 operator's account. See [`supervisor.md`](supervisor.md).
+
+**The plan reconciler is beside the scheduler, not above it.** It answers which
+dependency-ready stage should become a run and which typed gate has been
+satisfied. It never decides when a run executes, never holds a lease, and never
+duplicates a concurrency ceiling: the scheduler that was already there does all
+of that. See [`planning.md`](planning.md).
+
+## Where a plan sits
+
+```text
+engineering intent (an issue, an objective)
+        |
+        +---- ProjectModel facts ----+
+        +---- EngineeringPolicy -----+     compiled obligations:
+        +---- PlanTemplate ----------+     roles, capabilities,
+                                     |     independence, gates
+                                     v
+                          Engineering Planner
+              deterministic compilation, plus optional reasoning
+              through a registered agent in a NON-MUTATING mode
+                                     |
+                                     v
+                          proposed EngineeringPlan
+                                     |
+                          deterministic validation
+                          (cycles, references, trust,
+                           capability, budget, independence)
+                                     |
+                                     v
+                        OPERATOR PLAN APPROVAL
+              decomposition, assignments, blockers, budget envelope
+                                     |
+                                     v
+                       approved immutable plan revision
+                                     |
+                          plan reconciler inside serve
+             run state + assurance/evidence + human decisions
+                                     |
+                        dependency-ready stages and gates
+                                     |
+                    +----------------+----------------+
+                    v                                 v
+             AgentAssignments                   typed gates
+             (agent stages only)         assurance_gate, human_decision_gate
+                    |                                 |
+                    v                                 |
+          ordinary #63 EngineeringRuns                |
+                    |                                 |
+                    +----------------+----------------+
+                                     v
+                        assurance + AuthorityDecision
+                                     |
+                                     v
+                          external human authority
+```
+
+The two halves of that picture answer different questions. The planner decides
+**what work is required**; the reconciler decides **which dependency-ready stage
+becomes a run and which gate is satisfied**; the existing scheduler decides
+**when an eligible run executes**; the Authorization Kernel decides **what may be
+committed to the world**. Nothing was moved between them.
+
+An approved plan is operator authority to execute within already-existing policy
+and permission ceilings. It is not merge authority, not release authority, and
+not acceptance authority. Only `agent` stages become runs: a gate references
+evidence, authority or human-decision state that other machinery already owns,
+because a gate that created a worker run would be asserting evidence nothing
+produced.
+
+## Composition: profiles over agents
+
+```text
+   operator planning_dir            registry                    a plan stage
+
+   instructions/<id>.json  -->  InstructionPack  --+
+   context/<id>.json       -->  ContextPolicy   ---+--> AgentProfile
+   profiles/<id>.json      -->  AgentProfile  -----+         |
+   templates/<id>.json     -->  PlanTemplate                 | resolved for
+                                                             | role +
+                                                             | capabilities +
+   agents:                                                   | independence +
+     codex  -> codex_cli   -->  ExecutionAgent  <------------+ invocation mode
+     claude -> claude_code
+```
+
+One `ExecutionAgent` backs several profiles; one role resolves to whichever
+profile is eligible. A profile is a specialization of a worker the operator
+already registered: it can narrow capabilities, add operator-owned instructions,
+select context and tighten constraints, and it can never raise trust, widen
+access or grant authority. See [`planning.md`](planning.md).
 
 ## Two intake paths
 
@@ -120,24 +212,30 @@ The loop from review back to the agent is what removes the operator from the
 message bus. What it does not do is remove them from the decision: merge stays
 external, and no configuration in this repository authorizes self-adoption.
 
-## The agent registry, and the seam it leaves
+## The agent registry, and what the planner reads from it
 
 ```text
-   operator configuration            runtime                     future (#64)
+   operator configuration            runtime                     planner (#64)
 
    agents:                       AgentRegistry              EngineeringPlan
      codex   -> codex_cli    ->    resolve id        ->       role: implementer
      claude  -> claude_code        trust mode                 capability: code change
-     gemini  -> gemini_cli         readiness                  selects an agent
-     qwen    -> qwen_cli           model/version              by capability
-     openai  -> openai_responses   capabilities
+     gemini  -> gemini_cli         readiness                  vendor family
+     qwen    -> qwen_cli           model/version              invocation modes
+     openai  -> openai_responses   capabilities               -> eligible profile
 ```
 
 An agent id, a provider kind and a trust mode are three separate facts. Keeping
 them separate is what lets an operator rename a worker without changing its
 trust, lets a run stay bound to the worker it started with while defaults move
-underneath it, and lets a future planner reason about capability without the
-kernel learning any provider's name.
+underneath it, and lets the planner reason about capability without the kernel
+learning any provider's name.
+
+The planner reads a projection of that registry — id, vendor family, trust mode,
+capabilities, invocation modes, readiness — and nothing else. Vendor family is a
+separate fact from provider kind on purpose: two adapter ids backed by the same
+vendor are not vendor-family independent, so a plan requiring vendor independence
+cannot be satisfied by adding another adapter for the same models.
 
 Adding a provider touches an adapter spec, a registration in the composition
 root, and tests. It does not touch the scheduler, the reconciler, the kernel,
@@ -178,28 +276,39 @@ change and cannot accept it; a `protected` one cannot either.
 Unchanged, and deliberately unaware of everything above:
 
 ```text
-domain/        typed facts, contracts, evidence, authority decisions
-policy/        deterministic policy resolution
+domain/        typed facts, contracts, evidence, authority decisions,
+               and the M2 planning artifacts
+policy/        deterministic policy resolution, including the role,
+               capability, independence and gate obligations
 authority/     action-scoped authority evaluation
 evidence/      evidence binding and staleness
 reassessment/  observed-scope reassessment
 analysis/      project model and observed change
 
+planning/      the Engineering Planner: plan compilation, graph
+               validation, the operator customization registry and
+               role-to-profile resolution. No scheduler, no policy
+               engine, no authority, and no provider names.
+
 runtime/       the operational layer: scheduler, journal, Git, forge,
-               providers, supervisor. Provider-specific knowledge lives
-               here and nowhere below it.
+               providers, supervisor, plan reconciler. Provider-specific
+               knowledge lives here and nowhere below it.
 cmd/           composition root: builds real components, translates
                outcomes into exit codes, owns no orchestration
 ```
 
-No package under `domain/`, `policy/`, `authority/`, `evidence/` or
-`reassessment/` mentions Codex, Claude, Gemini, Qwen or OpenAI. That is the
-boundary the provider work was measured against.
+No package under `domain/`, `policy/`, `authority/`, `evidence/`,
+`reassessment/` or `planning/` mentions Codex, Claude, Gemini, Qwen or OpenAI.
+That is the boundary the provider work was measured against, and the planner is
+measured against it too: it reasons over vendor families and invocation modes
+that `runtime/` projects for it, never over a provider's name.
 
 ## Related documents
 
-- [`../ROADMAP.md`](../ROADMAP.md) — where this sits, and what #64 adds
+- [`../ROADMAP.md`](../ROADMAP.md) — where this sits, and what each milestone adds
 - [`supervisor.md`](supervisor.md) — what `serve` owns and refuses
 - [`agents.md`](agents.md) — the workers, their trust modes and provenance
+- [`planning.md`](planning.md) — profiles, templates, plans and approval
+- [`spec/planning-v0.1.md`](spec/planning-v0.1.md) — the normative planning artifacts
 - [`architecture.md`](architecture.md) — the Authorization Kernel
 - [`principles.md`](principles.md) — architectural and construction principles

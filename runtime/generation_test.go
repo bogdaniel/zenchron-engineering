@@ -182,3 +182,50 @@ func TestWatchKeepsAdoptionSemantics(t *testing.T) {
 		t.Fatalf("the watch entry point created a second generation: %s then %s", first, again)
 	}
 }
+
+// A plan stage run is an ordinary run, so it is refused on the same terms. The
+// stage identity carries the plan, revision and stage but NOT the controller,
+// so two controllers that share a configuration digest and differ only in build
+// derive the same id - and without the check the second one would drive the
+// first one's live stage.
+func TestAPlanStageRunIsNotAdoptedAcrossControllers(t *testing.T) {
+	fixture := startFixture(t)
+	binding := RunPlanBinding{
+		PlanID: "plan-adoption", Revision: 1, StageID: "implementation",
+		AssignmentID: "assignment-plan-adoption-r1-implementation",
+	}
+	first, err := fixture.runtime.StartPlanStageRun(context.Background(), fixture.issue, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Adopted {
+		t.Fatal("the first start adopted something that did not exist")
+	}
+
+	again, err := fixture.runtime.StartPlanStageRun(context.Background(), fixture.issue, binding)
+	if err != nil {
+		t.Fatalf("the reconciler could not re-derive its own stage run: %v", err)
+	}
+	if !again.Adopted || again.RunID != first.RunID {
+		t.Fatalf("same-controller start returned %+v, want an adoption of %s", again, first.RunID)
+	}
+
+	before := len(journalOf(t, fixture.runtime, first.RunID))
+	other := fixture.deps
+	other.ControllerBuild = ControllerBuild{
+		Kind: ControllerPreAdoptionBuild, Version: "other", SourceRevision: "r", SourceTree: "t",
+		BinarySHA256: "00000000000000000000000000000000000000000000000000000000000000ff",
+	}
+	stranger := fixture.newRuntime(other)
+	_, err = stranger.StartPlanStageRun(context.Background(), fixture.issue, binding)
+	var refused *RunAdoptionRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("a foreign controller adopted a live plan stage run: %v", err)
+	}
+	if refused.RunID != first.RunID {
+		t.Fatalf("the refusal names run %q, want %q", refused.RunID, first.RunID)
+	}
+	if after := len(journalOf(t, fixture.runtime, first.RunID)); after != before {
+		t.Fatalf("a refused adoption appended %d events to the existing run", after-before)
+	}
+}

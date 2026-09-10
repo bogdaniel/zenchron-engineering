@@ -57,8 +57,28 @@ type ExecutionRequest struct {
 	Prohibitions          []string
 	Permissions           []string
 	TrustedInstructions   string
-	Purpose               InvocationPurpose
-	Findings              []Finding
+	// Instructions are the operator-owned InstructionPack lines an AgentProfile
+	// contributes. They are TRUSTED text and reach the worker alongside the
+	// runtime's own instructions, which is exactly why they may come only from
+	// the operator-owned planning directory. Candidate content never arrives
+	// here; it arrives as delimited untrusted data.
+	Instructions []string
+	Purpose      InvocationPurpose
+	// Mode is what this invocation requires of the provider. The zero value is
+	// the ordinary mutating invocation, so every existing caller keeps its
+	// exact behaviour; a planner-role stage sets the non-mutating mode and an
+	// adapter that cannot prove one refuses.
+	Mode domain.InvocationMode
+	// ModelPreference is the AgentProfile's model preference for this
+	// invocation. Empty means the agent's own configured default.
+	ModelPreference string
+	// DenyPermissionBypass is an AgentProfile's refusal of the provider's
+	// unsafe permission mode for this stage, even where the agent has standing
+	// operator permission for it. It is a NARROWING and there is no member
+	// beside it that permits one: a profile can refuse the bypass and can never
+	// grant it.
+	DenyPermissionBypass bool
+	Findings             []Finding
 	// Feedback is the admitted, applicable, undelivered reviewer feedback this
 	// invocation is being given. It is UNTRUSTED DATA: it reaches the worker
 	// inside explicit delimiters, framed by the runtime-owned trusted
@@ -66,6 +86,16 @@ type ExecutionRequest struct {
 	// expands no permission. Every item in it has already passed the actor
 	// admission gate; nothing that failed that gate is ever placed here.
 	Feedback []FeedbackContext
+	// Upstream is the accepted output of the plan stages this one depends on:
+	// the exact commit and tree, and the DIFF itself.
+	//
+	// The diff is candidate content, so it reaches the worker the way every
+	// other piece of candidate-derived text does - as delimited untrusted data
+	// framed by the runtime-owned instructions - and it is never stored in a
+	// durable payload. It exists because a reviewer that cannot see the change
+	// is not reviewing it: an independent review stage runs in its own
+	// workspace at the trusted base, and this is what makes its work real.
+	Upstream []UpstreamContext
 	Budgets  ProviderBudget
 }
 
@@ -75,6 +105,11 @@ type InvocationPurpose string
 const (
 	InvocationInitial     InvocationPurpose = "initial_implementation"
 	InvocationRemediation InvocationPurpose = "remediation"
+	// InvocationPlanning is REASONING about what work is required. It produces
+	// a structured proposal and changes nothing: it is the only purpose that
+	// runs in a non-mutating provider mode, and the runtime verifies the
+	// workspace afterwards rather than trusting that claim.
+	InvocationPlanning InvocationPurpose = "planning"
 	// InvocationContinuation resumes work a bounded stop interrupted. It is
 	// exact-bound to the runtime-owned checkpoint commit and tree the previous
 	// invocation produced, so the provider sees a clean workspace at a known
@@ -82,6 +117,21 @@ const (
 	// judged the work, it was simply cut off.
 	InvocationContinuation InvocationPurpose = "continuation"
 )
+
+// UpstreamContext is one completed upstream stage's output as a downstream
+// stage sees it.
+type UpstreamContext struct {
+	StageID string
+	RunID   string
+	Commit  string
+	Tree    string
+	// Diff is the change that stage produced, bounded by the runtime. Empty
+	// means the runtime could not read it, which is stated rather than hidden.
+	Diff string
+	// Truncated reports that the diff was cut to the runtime's bound, so a
+	// reviewer knows it is reading part of a change rather than all of it.
+	Truncated bool
+}
 
 type Finding struct {
 	Classification         FailureClass
@@ -573,4 +623,26 @@ func (b HumanAuthorityBinding) Validate(s RunSnapshot) error {
 		return fmt.Errorf("invalid human decision")
 	}
 	return nil
+}
+
+// InvocationModeUnsupportedError is the typed refusal for an invocation an
+// adapter cannot perform in the mode the work requires.
+//
+// It exists so a planner-role stage whose provider has no provable read-only
+// mode produces an EXPLAINABLE ineligibility - which the resolver turns into
+// another eligible selection or a typed blocked state - rather than a silent
+// downgrade into a mode that may write.
+type InvocationModeUnsupportedError struct {
+	AgentID string
+	Kind    string
+	Mode    domain.InvocationMode
+	Detail  string
+}
+
+func (e *InvocationModeUnsupportedError) Error() string {
+	detail := e.Detail
+	if detail == "" {
+		detail = "this provider exposes no mode whose non-mutating boundary the runtime can prove, so it is ineligible rather than run permissively"
+	}
+	return fmt.Sprintf("agent %q (%s) cannot perform a %q invocation: %s", e.AgentID, e.Kind, e.Mode, detail)
 }

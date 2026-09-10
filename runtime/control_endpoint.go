@@ -50,6 +50,26 @@ const ControlSocketName = "serve.sock"
 // leaves room for the file name.
 const maxControlSocketPath = 100
 
+// BoundedNote is one operator annotation, truncated to the bound a durable
+// payload field holds. It is the same bound the local path applies, so a note
+// reaches the journal identically whichever process records it.
+func BoundedNote(note string) string { return boundedField(note) }
+
+// ControlDeadline is how long one control command may take, on BOTH sides of
+// the socket. It is per-command because the commands are not alike: a status
+// read answers immediately, while a plan revision clones a repository and
+// invokes a planner in its own non-mutating mode, which is bounded in minutes.
+//
+// A deadline shorter than the work does not stop the work - the supervisor
+// finishes and persists the revision either way - it only stops the operator
+// from being told. That is the worst of both: the effect without the answer.
+func ControlDeadline(command string) time.Duration {
+	if command == ControlPlanRevise {
+		return 20 * time.Minute
+	}
+	return 30 * time.Second
+}
+
 // ControlSocketPath is where a supervisor listens for one state directory. It
 // is derived, never configured: an operator names their state directory, and
 // the endpoint follows it, so there is no member a repository or a flag could
@@ -83,7 +103,13 @@ type ControlRequest struct {
 	// Repository is owner/name for a submission. It must already be a
 	// repository this supervisor was constructed to govern.
 	Repository string `json:"repository,omitempty"`
-	Issue      int    `json:"issue,omitempty"`
+	// DefaultBranch is the base branch the REQUESTER resolved for that
+	// repository, the same way the local path resolves it from origin/HEAD. It
+	// selects a branch within a repository the supervisor already governs; it
+	// is not a permission, and a request that carries none falls back to what
+	// durable state or the enrolment assumption says.
+	DefaultBranch string `json:"default_branch,omitempty"`
+	Issue         int    `json:"issue,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
@@ -94,6 +120,44 @@ type ControlRequest struct {
 	NewGeneration bool `json:"new_generation,omitempty"`
 	// Reason is the operator's stated cause for a cancellation.
 	Reason string `json:"reason,omitempty"`
+	// PlanID, Revision, Digest and Note are one plan decision. They exist here
+	// because a plan decision is an OPERATOR act against work a supervisor is
+	// executing, and the supervisor is the process that owns that work: routing
+	// the decision to it means one writer applies it against the state the
+	// supervisor is reconciling, under the same lock that reconciler holds.
+	//
+	// The digest is not optional in the service that receives this, so a
+	// request naming a revision without its content decides nothing.
+	PlanID   string `json:"plan_id,omitempty"`
+	Revision int    `json:"revision,omitempty"`
+	Digest   string `json:"digest,omitempty"`
+	Note     string `json:"note,omitempty"`
+	// AssignmentsDigest is the assignment set the requester read. The revision
+	// digest binds the plan DOCUMENT and does not move when a profile, an
+	// instruction pack or the workforce is edited, so this is what binds who
+	// would perform the work.
+	//
+	// It is optional ON THE WIRE - a rejection binds no assignments and carries
+	// none, and neither does a request from a client that predates this field -
+	// and the service is where that is decided: an APPROVAL is refused without
+	// it, and a rejection is refused with it. The transport does not get to be
+	// the authority on which commands bind what.
+	AssignmentsDigest string `json:"assignments_digest,omitempty"`
+	// Operator is the identity of the person MAKING the request, resolved by
+	// their own process exactly as the local path resolves it.
+	//
+	// It is carried because a decision records who made it, and the supervisor
+	// resolving its own identity would record the supervisor - a service
+	// account, or another person's login - for a decision somebody else made in
+	// their terminal. The endpoint is owner-only, so the requester is the owner
+	// of this state directory; recording their stated identity is exactly what
+	// the local path records, with the same unverified provenance.
+	Operator string `json:"operator,omitempty"`
+	// Template, Deterministic and SubstituteHuman are a plan REVISION request,
+	// mirroring the flags of the command that would otherwise drive it here.
+	Template        string `json:"template,omitempty"`
+	Deterministic   bool   `json:"deterministic,omitempty"`
+	SubstituteHuman string `json:"substitute_human,omitempty"`
 }
 
 // Control commands. Each maps to one supervisor action.
@@ -106,6 +170,13 @@ const (
 	ControlStop     = "stop"
 	ControlStopAll  = "stop-all"
 	ControlPing     = "ping"
+	// The plan lifecycle verbs. Each is an operator decision that already
+	// exists as a command; the endpoint exists so the decision reaches the
+	// supervisor that owns the work rather than racing it from a second
+	// process.
+	ControlPlanApprove = "plan-approve"
+	ControlPlanReject  = "plan-reject"
+	ControlPlanRevise  = "plan-revise"
 )
 
 // ControlResponse is the answer. Payload is the command's own JSON result.
@@ -253,7 +324,7 @@ func (l *ControlListener) Serve(handle func(ControlRequest) ControlResponse) err
 
 func answerControlConnection(connection net.Conn, handle func(ControlRequest) ControlResponse) {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(ControlDeadline("")))
 	// The ceiling is enforced by the READER, not checked afterwards.
 	// bufio.ReadBytes grows its own buffer past the size hint, so a local
 	// process sending a line with no newline could make the supervisor allocate
@@ -274,6 +345,11 @@ func answerControlConnection(connection net.Conn, handle func(ControlRequest) Co
 		writeControlResponse(connection, ControlResponse{Error: "control request is not a JSON object"})
 		return
 	}
+	// The deadline is extended to what THIS command needs, now that the command
+	// is known. Reading the request stays on the short one: a client that opens
+	// a connection and says nothing holds a supervisor goroutine for exactly as
+	// long as it takes to say nothing.
+	_ = connection.SetDeadline(time.Now().Add(ControlDeadline(request.Command)))
 	writeControlResponse(connection, handle(request))
 }
 
@@ -289,6 +365,13 @@ func writeControlResponse(connection net.Conn, response ControlResponse) {
 // client half, used by ordinary operator commands so they can delegate to a
 // running supervisor instead of driving the work in their own terminal.
 func SendControl(stateDir string, request ControlRequest) (ControlResponse, error) {
+	// The operator's note is TRUNCATED to what a payload field holds, exactly
+	// as the local path truncates it before journalling. Sending it whole and
+	// letting the request bound refuse the connection made a long note behave
+	// differently depending on which process applied the decision, which is the
+	// one thing the delegated path is supposed to make invisible.
+	request.Note = BoundedNote(request.Note)
+	request.Reason = BoundedNote(request.Reason)
 	path := ControlSocketPath(stateDir)
 	if err := AssertControlEndpointSecure(path); err != nil {
 		return ControlResponse{}, err
@@ -298,7 +381,7 @@ func SendControl(stateDir string, request ControlRequest) (ControlResponse, erro
 		return ControlResponse{}, err
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(60 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(ControlDeadline(request.Command) + 30*time.Second))
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return ControlResponse{}, err
@@ -322,10 +405,28 @@ func SendControl(stateDir string, request ControlRequest) (ControlResponse, erro
 // It is used to decide whether an operator command should delegate, so a
 // missing or stale endpoint simply means "drive it here" rather than an error.
 func SupervisorRunning(stateDir string) bool {
-	connection, err := net.DialTimeout("unix", ControlSocketPath(stateDir), 2*time.Second)
-	if err != nil {
-		return false
+	running, _ := SupervisorPresence(stateDir)
+	return running
+}
+
+// SupervisorPresence answers two different questions a dial cannot separate on
+// its own: is a supervisor listening, and does an endpoint EXIST that this
+// caller could not reach.
+//
+// They differ where it matters. A caller that reads "no supervisor" from a
+// transient dial failure applies its decision locally - beside a live
+// reconciler, outside the lock that exists to stop exactly that. A socket file
+// that is present but unreachable is a supervisor to be waited for, not an
+// absence to act around.
+func SupervisorPresence(stateDir string) (running bool, endpointPresent bool) {
+	path := ControlSocketPath(stateDir)
+	connection, err := net.DialTimeout("unix", path, 2*time.Second)
+	if err == nil {
+		_ = connection.Close()
+		return true, true
 	}
-	_ = connection.Close()
-	return true
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, true
+	}
+	return false, false
 }

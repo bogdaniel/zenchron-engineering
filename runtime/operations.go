@@ -56,11 +56,26 @@ func failed(err error) effect {
 	}{boundedDetail(err.Error())}}
 }
 
-func boundedDetail(detail string) string {
-	if len(detail) > maxPayloadFieldBytes {
-		return detail[:maxPayloadFieldBytes]
-	}
-	return detail
+func boundedDetail(detail string) string { return boundedField(detail) }
+
+// boundedField truncates to the payload field bound WITHOUT splitting a rune.
+//
+// A byte slice through a multi-byte character produces invalid UTF-8, and
+// json.Marshal then substitutes U+FFFD - three bytes for one - so the field
+// grows past the bound it was just cut to and the journal refuses the append.
+// The truncation that was supposed to make a note storable is what stops it
+// from being stored.
+//
+// This is the second time a byte-offset cut has been wrong in this package;
+// there is one implementation now, and both callers use it.
+func boundedField(text string) string {
+	// A journal field is measured BEFORE it is marshalled, and json.Marshal
+	// turns each invalid byte into a three-byte replacement character - so a
+	// field cut to fit could still overflow the bound once encoded, which is
+	// the append the bound exists to keep possible. Invalid bytes are replaced
+	// here, where the cost is known, rather than expanded later where it is
+	// not.
+	return boundedTo(strings.ToValidUTF8(text, ""), maxPayloadFieldBytes)
 }
 
 // handle dispatches on the operation kind. This is a dispatch table for
@@ -235,10 +250,7 @@ func (r *EngineeringRuntime) untrustedSource(record sourceRecord) (untrustedSour
 
 func boundUntrusted(text string, limit int) string {
 	text = strings.ToValidUTF8(strings.ReplaceAll(text, "\x00", ""), "")
-	if len(text) <= limit {
-		return text
-	}
-	return text[:limit]
+	return boundedTo(text, limit)
 }
 
 func textDigest(text string) string {
@@ -501,7 +513,18 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
 	priorFailure, _ := state.lastFailure(operation.ID)
-	result, execErr := r.deps.Provider.Execute(ctx, ExecutionRequest{
+	// A PLAN STAGE run executes under its frozen assignment: the stage
+	// objective the operator approved, the context that stage's role receives,
+	// and the instruction packs its profile named - by digest. An ordinary run
+	// is unchanged and takes the contract's own objective.
+	stage, err := r.planStage(state)
+	if err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
+	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -529,8 +552,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Purpose:               purpose,
 		Findings:              findings,
 		Feedback:              feedback,
-		Budgets:               ProviderBudget{WallLimit: r.deps.Budgets.WallLimit},
-	})
+		Budgets:               ProviderBudget{WallLimit: state.budgets().WallLimit},
+	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
 	}
@@ -1953,4 +1976,159 @@ func decodeJSON(raw []byte, target any) error {
 		return fmt.Errorf("empty operation result")
 	}
 	return json.Unmarshal(raw, target)
+}
+
+// ---------------------------------------------------------------------------
+// Plan stage execution
+// ---------------------------------------------------------------------------
+
+// planStageContext is what a plan stage adds to an ordinary invocation. The
+// zero value adds nothing, which is exactly what an ordinary run needs.
+type planStageContext struct {
+	assignment   *domain.AgentAssignment
+	instructions []string
+	upstream     []UpstreamContext
+}
+
+// apply narrows the request to the stage the operator approved.
+//
+// Everything it replaces is a STATEMENT OF WHAT THIS STAGE IS FOR: its
+// objective, the acceptance it is judged against, the obligations it carries
+// and the context its role receives. It never widens anything: permissions and
+// prohibitions still come from the compiled contract, and the trusted
+// instruction text is still the runtime's own with the operator's packs beside
+// it.
+func (p planStageContext) apply(request ExecutionRequest) ExecutionRequest {
+	if p.assignment == nil {
+		return request
+	}
+	context := p.assignment.Context
+	if strings.TrimSpace(context.Objective) != "" {
+		request.Objective = context.Objective
+	}
+	if len(context.AcceptanceCriteria) > 0 {
+		request.AcceptanceObligations = context.AcceptanceCriteria
+	}
+	if len(context.Obligations) > 0 {
+		request.Constraints = context.Obligations
+	}
+	request.Instructions = p.instructions
+	request.ModelPreference = p.assignment.Agent.Model
+	request.Upstream = p.upstream
+	if constraints := p.assignment.Profile.Constraints; constraints != nil {
+		request.DenyPermissionBypass = constraints.DenyPermissionBypass
+	}
+	return request
+}
+
+// planStage loads the frozen assignment for a plan stage run and resolves the
+// instruction text it names.
+//
+// The digest check is the point. An assignment names instruction packs by
+// content digest; if the operator has edited one since the plan was approved,
+// the text no longer matches what was approved and this REFUSES rather than
+// delivering the new text to work already in flight.
+func (r *EngineeringRuntime) planStage(state *runState) (planStageContext, error) {
+	binding := state.run.Plan
+	if binding == nil {
+		return planStageContext{}, nil
+	}
+	assignment, found, err := r.deps.Store.PlanAssignment(binding.PlanID, binding.Revision, binding.Generation, binding.StageID)
+	if err != nil {
+		return planStageContext{}, err
+	}
+	if !found {
+		return planStageContext{}, fmt.Errorf("run %s is bound to plan %s stage %s and no approved assignment is stored for it",
+			state.run.ID, binding.PlanID, binding.StageID)
+	}
+	if assignment.ID != binding.AssignmentID {
+		return planStageContext{}, fmt.Errorf("run %s was created under assignment %s and the stored assignment is %s",
+			state.run.ID, binding.AssignmentID, assignment.ID)
+	}
+	instructions, err := r.frozenInstructions(assignment)
+	if err != nil {
+		return planStageContext{}, err
+	}
+	upstream, err := r.upstreamOutputs(assignment)
+	if err != nil {
+		return planStageContext{}, err
+	}
+	return planStageContext{assignment: &assignment, instructions: instructions, upstream: upstream}, nil
+}
+
+// maxUpstreamDiffBytes bounds one upstream diff. A reviewer reading a truncated
+// diff is told it is truncated; a prompt that grew without limit would fail the
+// invocation instead.
+//
+// ponytail: a flat byte bound. Per-file selection driven by the stage's own
+// context policy is the upgrade if reviewing large changes becomes routine.
+const maxUpstreamDiffBytes = 96 << 10
+
+// upstreamOutputs reads what the stages this one depends on actually produced.
+//
+// The diff is read from the upstream run's own runtime-owned workspace through
+// the same local Git boundary everything else uses. It is READ ONLY: nothing
+// here touches another run's workspace, and a workspace that has been reclaimed
+// simply yields no diff rather than failing the stage.
+func (r *EngineeringRuntime) upstreamOutputs(assignment domain.AgentAssignment) ([]UpstreamContext, error) {
+	outputs := make([]UpstreamContext, 0, len(assignment.Context.UpstreamOutputs))
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		context := UpstreamContext{
+			StageID: upstream.StageID, RunID: upstream.RunID,
+			Commit: upstream.Candidate, Tree: upstream.Tree,
+		}
+		if upstream.RunID != "" && upstream.Candidate != "" {
+			dir := candidateDir(r.deps.StateDir, upstream.RunID)
+			if dirExists(dir) {
+				run, found, err := r.deps.Store.Run(upstream.RunID)
+				if err != nil {
+					return nil, err
+				}
+				base := ""
+				if found {
+					base = run.Base.Revision
+				}
+				if diff, truncated := readCandidateDiff(dir, base, upstream.Candidate); diff != "" {
+					context.Diff, context.Truncated = diff, truncated
+				}
+			}
+		}
+		outputs = append(outputs, context)
+	}
+	return outputs, nil
+}
+
+// readCandidateDiff reads one upstream run's change. It is best effort by
+// design: a reclaimed workspace is a missing diff, not a failed stage, and the
+// reviewer is told the diff could not be read rather than being handed silence.
+func readCandidateDiff(dir, base, candidate string) (string, bool) {
+	if strings.TrimSpace(base) == "" || strings.TrimSpace(candidate) == "" {
+		return "", false
+	}
+	out, err := gitOutput(dir, "diff", base+".."+candidate)
+	if err != nil {
+		return "", false
+	}
+	if len(out) <= maxUpstreamDiffBytes {
+		return out, false
+	}
+	return boundedTo(out, maxUpstreamDiffBytes), true
+}
+
+// frozenInstructions resolves the instruction text an assignment froze by
+// digest, refusing anything that has changed underneath it.
+func (r *EngineeringRuntime) frozenInstructions(assignment domain.AgentAssignment) ([]string, error) {
+	var instructions []string
+	for _, reference := range assignment.Profile.Instructions {
+		pack, err := r.deps.Planning.Pack(reference.ID)
+		if err != nil {
+			return nil, fmt.Errorf("assignment %s names instruction pack %q, which is no longer installed: %w", assignment.ID, reference.ID, err)
+		}
+		if pack.Digest != reference.Digest {
+			return nil, fmt.Errorf("instruction pack %q now digests to %s and assignment %s was approved against %s: an approved plan executes under the configuration it was approved with",
+				reference.ID, short12(pack.Digest), assignment.ID, short12(reference.Digest))
+		}
+		instructions = append(instructions, pack.Instructions...)
+	}
+	return instructions, nil
 }

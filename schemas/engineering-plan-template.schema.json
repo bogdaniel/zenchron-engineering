@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/engineering-plan-template.schema.json",
+  "title": "EngineeringPlanTemplate v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "digest",
+    "stages",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "description": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/template_stage",
+        "allOf": [
+          {
+            "description": "A gate is not performed by a worker: it references evidence, authority or a human decision that already exists. Stating a worker requirement on one is refused here as well as in Go, so a document that says it is never accepted as a plan.",
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "assurance_gate",
+                    "human_decision_gate"
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "profile"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "independence"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "requires_capabilities"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "trust_requirement"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "invocation_mode"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 1
+    },
+    "budget_envelope": {
+      "$ref": "#/$defs/budget_envelope"
+    },
+    "source": {
+      "$ref": "#/$defs/artifact_source"
+    }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "location"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "operator_config",
+            "operator_file"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "template_stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "kind": {
+          "enum": [
+            "agent",
+            "assurance_gate",
+            "human_decision_gate"
+          ]
+        },
+        "role": {
+          "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
+        },
+        "objective": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "requires_capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "independence": {
+          "$ref": "#/$defs/independence"
+        },
+        "profile": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "context_policy": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "required_claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "action": {
+          "$ref": "#/$defs/action"
+        }
+      }
+    },
+    "independence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension",
+        "different_from"
+      ],
+      "properties": {
+        "dimension": {
+          "enum": [
+            "agent_profile",
+            "execution_agent",
+            "provider_kind",
+            "vendor_family",
+            "human"
+          ]
+        },
+        "different_from": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true
+        },
+        "human_substitution_permitted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact",
+        "equals"
+      ],
+      "properties": {
+        "fact": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "equals": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "const": "unknown"
+            }
+          ]
+        },
+        "stage": {
+          "enum": [
+            "predicted",
+            "observed",
+            "verified"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/non_empty_string"
+            },
+            "producer": {
+              "$ref": "#/$defs/non_empty_string"
+            }
+          }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "target"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "target": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "budget_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_child_runs",
+        "max_concurrency",
+        "max_provider_invocations"
+      ],
+      "properties": {
+        "max_child_runs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_provider_invocations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_wall_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_cost_micros": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

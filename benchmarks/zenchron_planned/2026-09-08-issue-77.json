@@ -1,0 +1,105 @@
+{
+  "schema_version": "0.1",
+  "benchmark": "zenchron-leverage",
+  "corpus_version": "unversioned-single-observation",
+  "mode": "zenchron_planned",
+  "recorded_at": "2026-09-08T12:50:18Z",
+  "harness": {
+    "implemented": false,
+    "note": "#66 defines the benchmark and is not implemented. This is a raw record of one zenchron_planned execution in the shape #66 asks results to identify themselves by. There is no corpus, no direct_agent baseline and no zenchron_explicit baseline, so no ratio is computed and none may be inferred from this file."
+  },
+  "case": {
+    "id": "issue-77-dependency-cache-provisioning",
+    "class": "trivial/documentation",
+    "source": "https://github.com/bogdaniel/zenchron-engineering/issues/77",
+    "acceptance": "docs/troubleshooting.md gives a copy-pasteable command that provisions the dependency cache with the digest-pinned assurance image, and explains why verification cannot fill the cache itself"
+  },
+  "subject": {
+    "repository": "bogdaniel/zenchron-engineering",
+    "base_revision": "9dcdf77c2cf626ef3ce32bad52e0195acb75f09b",
+    "controller": {
+      "kind": "unattested",
+      "note": "a plain `go build` of zenchron/64-engineering-planner, the branch under review"
+    }
+  },
+  "plan": {
+    "id": "plan-92eea8c0b1a7e75858e8093f9d25855c",
+    "revision": 1,
+    "digest": "536887448f517f9207a09fec4b83d11d820518ddff413b1b0837d59652016640",
+    "template": "zenchron-docs-change@1",
+    "reasoning": {
+      "agent_id": "claude",
+      "provider_kind": "claude_code",
+      "vendor_family": "anthropic",
+      "invocation_mode": "non_mutating_planning",
+      "provider_mode": "plan",
+      "workspace_unchanged": true
+    },
+    "stages": [
+      {
+        "id": "implementation",
+        "kind": "agent",
+        "role": "implementer",
+        "agent_id": "codex",
+        "vendor_family": "openai",
+        "outcome": "completed"
+      },
+      {
+        "id": "review",
+        "kind": "agent",
+        "role": "reviewer",
+        "agent_id": "claude",
+        "vendor_family": "anthropic",
+        "independent_of": [
+          "implementation"
+        ],
+        "independence_dimension": "vendor_family",
+        "outcome": "completed"
+      },
+      {
+        "id": "assurance",
+        "kind": "assurance_gate",
+        "claims": [
+          "claim-validation"
+        ],
+        "outcome": "satisfied"
+      }
+    ]
+  },
+  "measured": {
+    "child_runs": 2,
+    "provider_invocations": 2,
+    "operator_decisions": 1,
+    "operator_interventions_after_approval": 0,
+    "wall_seconds_proposal_to_satisfied_gate": 495,
+    "wall_seconds_implementation_stage": 185,
+    "wall_seconds_review_stage": 296,
+    "planning_invocation_wall_seconds": null,
+    "supervision_minutes": null,
+    "cost": {
+      "known": false,
+      "currency": null,
+      "amount": null,
+      "reason": "both providers are subscription CLIs and reported no cost; unknown is not zero"
+    },
+    "provider_invocations_note": "Attributed to the plan by the reconciler: the two stage runs. The PLANNING invocation that produced the plan is a third real provider call and is not in this number - it happens before the plan exists to attribute it to. Read the total as 3 when comparing against a mode that includes its own planning."
+  },
+  "unmeasured": [
+    "planning_invocation_wall_seconds - the planner invocation is not separately instrumented; the plan's first journal event is the proposal",
+    "supervision_minutes - operator attention was not wall-clock measured. It was not zero: the exercise that reached this run cost 4 pre-execution refusals, 3 defect fixes in the branch under review, 1 restart and 1 self-inflicted disruption. Only the successful plan's 1 approval and 0 interventions are counted above.",
+    "direct_agent and zenchron_explicit baselines for this case - not run"
+  ],
+  "outcome": {
+    "result": "accepted_for_review",
+    "artifact": "https://github.com/bogdaniel/zenchron-engineering/pull/105",
+    "candidate_revision": "7aed24f9f809d98f9743ad1314b6149685769f40",
+    "diff": "docs/troubleshooting.md +32/-3, no Go change",
+    "ci": "go: SUCCESS on the exact head",
+    "assurance": "claim-validation satisfied by evidence-run-7bcede3f40463bb86f74f6134d66ce38",
+    "independent_review": "4 findings raised; the reviewer explicitly refused to certify gofmt/go vet/go test because its sandbox refused to run them, and said so rather than claiming a pass"
+  },
+  "interpretation": {
+    "leverage_claim": "none",
+    "note": "One observation, one trivial documentation case, no baseline. It shows the planned path executes end to end and that the independence obligation produced a genuinely independent review. It shows nothing about leverage, and this record must not be read as a positive leverage result."
+  }
+}

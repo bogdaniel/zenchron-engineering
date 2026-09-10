@@ -30,6 +30,9 @@ type fakeAgentExecutor struct {
 	found   bool
 	err     error
 	outputs []CommandOutput
+	// block makes Run wait for the context, as a provider that has not finished
+	// does. It is how a wall bound is observable in a test at all.
+	block bool
 }
 
 func (f *fakeAgentExecutor) LookPath(string) error {
@@ -39,8 +42,12 @@ func (f *fakeAgentExecutor) LookPath(string) error {
 	return errors.New("missing")
 }
 
-func (f *fakeAgentExecutor) Run(_ context.Context, name string, args []string, dir string, env []string, _ time.Duration) (CommandOutput, error) {
+func (f *fakeAgentExecutor) Run(ctx context.Context, name string, args []string, dir string, env []string, _ time.Duration) (CommandOutput, error) {
 	f.record(name, args, dir, env)
+	if f.block {
+		<-ctx.Done()
+		return CommandOutput{}, ctx.Err()
+	}
 	if len(f.outputs) > 0 {
 		out := f.outputs[0]
 		f.outputs = f.outputs[1:]
@@ -96,10 +103,11 @@ const capableHelp = `Options:
   -p, --print
       --prompt <TEXT>
       --permission-mode <MODE>
-      --approval-mode <MODE>
+      --approval-mode <MODE>    (choices: default, auto-edit, plan, yolo)
       --safe-mode
       --extensions <NAME>
   -m, --model <MODEL>
+      --permission-mode <mode>  (choices: "acceptEdits", "bypassPermissions", "plan")
 `
 
 // agentFixture builds one native CLI agent over a fake executor, with a home

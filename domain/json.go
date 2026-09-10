@@ -12,9 +12,13 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/schemas"
 )
 
-// Contract is the set of durable v0.1 root contracts.
+// Contract is the set of durable v0.1 root contracts. The M2 planning
+// artifacts are members for the same reason the kernel contracts are: they are
+// canonical JSON documents whose shape is defined by a schema, and Decode/Encode
+// is the ONE path that validates one.
 type Contract interface {
-	ProjectModel | EngineeringFact | EngineeringPolicy | EngineeringWorkContract | EvidenceBundle | AuthorityDecision
+	ProjectModel | EngineeringFact | EngineeringPolicy | EngineeringWorkContract | EvidenceBundle | AuthorityDecision |
+		InstructionPack | ContextPolicy | AgentProfile | EngineeringPlanTemplate | EngineeringPlan | AgentAssignment | PlanRevisionProposal
 }
 
 // DuplicateMemberError reports an ambiguous JSON object member. Path is the
@@ -82,6 +86,20 @@ func schemaName[T Contract]() string {
 		return schemas.EvidenceBundle
 	case AuthorityDecision:
 		return schemas.AuthorityDecision
+	case InstructionPack:
+		return schemas.InstructionPack
+	case ContextPolicy:
+		return schemas.ContextPolicy
+	case AgentProfile:
+		return schemas.AgentProfile
+	case EngineeringPlanTemplate:
+		return schemas.EngineeringPlanTemplate
+	case EngineeringPlan:
+		return schemas.EngineeringPlan
+	case AgentAssignment:
+		return schemas.AgentAssignment
+	case PlanRevisionProposal:
+		return schemas.PlanRevisionProposal
 	default:
 		panic("unreachable contract type")
 	}

@@ -105,6 +105,7 @@ func Compile(input CompileInput) (domain.EngineeringWorkContract, error) {
 		Permissions:         sortedActions(state.permissions),
 		Prohibitions:        sortedActions(state.prohibitions),
 		AuthorityConditions: sortedConditions(state.conditions),
+		PlanRequirements:    state.planRequirements(),
 		Provenance: domain.ContractProvenance{
 			ProjectModel:             domain.ObjectRevision{ID: input.ProjectModel.ID, Revision: input.ProjectModel.Revision},
 			Policy:                   domain.ObjectRevision{ID: input.Policy.ID, Revision: input.Policy.Revision},
@@ -212,6 +213,13 @@ type resolution struct {
 	// acceptanceDischarge is what policy says it takes to believe the run's own
 	// acceptance criteria were met.
 	acceptanceDischarge []string
+	// roles, capabilities and gates are the PLAN-SHAPED obligations. They
+	// resolve here, through this compiler, rather than in a planner-local rule
+	// engine: role, capability, independence and gate requirements are
+	// governance, and this repository has exactly one governance compiler.
+	roles        map[domain.EngineeringRole]domain.RoleRequirement
+	capabilities map[domain.EngineeringCapability]bool
+	gates        map[string]domain.GateRequirement
 }
 
 type conditionEntry struct {
@@ -238,6 +246,9 @@ func newResolution() *resolution {
 		prohibitions:          make(map[domain.Action]string),
 		conditions:            make(map[domain.Action]conditionEntry),
 		references:            make(map[string]string),
+		roles:                 make(map[domain.EngineeringRole]domain.RoleRequirement),
+		capabilities:          make(map[domain.EngineeringCapability]bool),
+		gates:                 make(map[string]domain.GateRequirement),
 	}
 }
 
@@ -280,6 +291,11 @@ func (r *resolution) addEffect(ruleID string, effect domain.PolicyEffect) error 
 	if effect.Prohibitions != nil {
 		for _, action := range *effect.Prohibitions {
 			r.prohibitions[action] = ruleID
+		}
+	}
+	if effect.EngineeringRequirements != nil {
+		if err := r.addEngineeringRequirements(ruleID, *effect.EngineeringRequirements); err != nil {
+			return err
 		}
 	}
 	if effect.AuthorityConditions != nil {
@@ -512,4 +528,213 @@ func MaterialDischargeClaims(contract domain.EngineeringWorkContract) []string {
 		}
 	}
 	return sortedUnique(claims)
+}
+
+// ---------------------------------------------------------------------------
+// Plan-shaped obligations
+// ---------------------------------------------------------------------------
+
+// addEngineeringRequirements resolves the role, capability and gate obligations
+// one matching rule states.
+//
+// Obligations are CONJUNCTIVE, which is what makes merging them safe rather
+// than a precedence rule in disguise: two rules that both require a security
+// reviewer are both satisfied by one reviewer that meets the union of what they
+// asked for. So capabilities union, the independence dimension takes the
+// STRONGER of the two, and the required trust takes the stronger. Nothing here
+// can weaken an obligation another rule already stated.
+//
+// The one member that is a PERMISSION rather than an obligation -
+// human_substitution_permitted - is intersected instead: a substitution is
+// permitted only if every rule requiring that independence permits it. Merging
+// it the other way would let one permissive rule unlock a substitution a
+// stricter rule refused.
+func (r *resolution) addEngineeringRequirements(ruleID string, requirements domain.PlanRequirements) error {
+	for _, role := range requirements.Roles {
+		if !domain.KnownRole(role.Role) {
+			return fmt.Errorf("rule %q requires unknown engineering role %q", ruleID, role.Role)
+		}
+		for _, capability := range role.Capabilities {
+			if !domain.KnownCapability(capability) {
+				return fmt.Errorf("rule %q requires unknown capability %q for role %q", ruleID, capability, role.Role)
+			}
+		}
+		if role.Independence != nil && !knownDimension(role.Independence.Dimension) {
+			return fmt.Errorf("rule %q requires unknown independence dimension %q", ruleID, role.Independence.Dimension)
+		}
+		if role.TrustRequirement != "" && role.TrustRequirement != domain.TrustRequirementOperatorTrusted && role.TrustRequirement != domain.TrustRequirementProtected {
+			return fmt.Errorf("rule %q requires unknown execution trust %q", ruleID, role.TrustRequirement)
+		}
+		existing, exists := r.roles[role.Role]
+		if !exists {
+			r.roles[role.Role] = normalizeRoleRequirement(role)
+			continue
+		}
+		merged, err := mergeRoleRequirements(existing, normalizeRoleRequirement(role))
+		if err != nil {
+			return fmt.Errorf("rule %q: %w", ruleID, err)
+		}
+		r.roles[role.Role] = merged
+	}
+	for _, capability := range requirements.Capabilities {
+		if !domain.KnownCapability(capability) {
+			return fmt.Errorf("rule %q requires unknown capability %q", ruleID, capability)
+		}
+		r.capabilities[capability] = true
+	}
+	for _, gate := range requirements.Gates {
+		if gate.Kind != domain.StageAssuranceGate && gate.Kind != domain.StageHumanDecisionGate {
+			return fmt.Errorf("rule %q requires gate kind %q, which is not a gate: only %q and %q are gates, and an %q stage is worker execution",
+				ruleID, gate.Kind, domain.StageAssuranceGate, domain.StageHumanDecisionGate, domain.StageAgent)
+		}
+		key := gateKey(gate)
+		existing, exists := r.gates[key]
+		if !exists {
+			r.gates[key] = normalizeGateRequirement(gate)
+			continue
+		}
+		existing.RequiredClaims = sortedUnique(append(existing.RequiredClaims, gate.RequiredClaims...))
+		r.gates[key] = existing
+	}
+	// Every claim a gate names has to be a claim the contract actually defines.
+	// Without this, a gate could reference a claim nothing can produce and would
+	// read as merely outstanding forever rather than as unsatisfiable.
+	for _, gate := range requirements.Gates {
+		for _, claim := range gate.RequiredClaims {
+			r.references[claim] = ruleID
+		}
+	}
+	return nil
+}
+
+// gateKey identifies one gate obligation. Two rules asking for the same kind of
+// gate over the same action are ONE gate whose claims are the union; two gates
+// over different actions are different gates.
+func gateKey(gate domain.GateRequirement) string {
+	if gate.Action == nil {
+		return string(gate.Kind)
+	}
+	return string(gate.Kind) + "\x00" + actionKey(*gate.Action)
+}
+
+func normalizeGateRequirement(gate domain.GateRequirement) domain.GateRequirement {
+	gate.RequiredClaims = sortedUnique(gate.RequiredClaims)
+	return gate
+}
+
+func normalizeRoleRequirement(role domain.RoleRequirement) domain.RoleRequirement {
+	role.Capabilities = sortedUniqueCapabilities(role.Capabilities)
+	if role.Independence != nil {
+		independence := *role.Independence
+		independence.DifferentFrom = sortedUnique(independence.DifferentFrom)
+		role.Independence = &independence
+	}
+	return role
+}
+
+// mergeRoleRequirements takes the stronger of every obligation and the
+// intersection of the one permission.
+func mergeRoleRequirements(left, right domain.RoleRequirement) (domain.RoleRequirement, error) {
+	merged := left
+	merged.Capabilities = sortedUniqueCapabilities(append(append([]domain.EngineeringCapability{}, left.Capabilities...), right.Capabilities...))
+	if left.Statement != right.Statement {
+		merged.Statement = left.Statement + " " + right.Statement
+	}
+	switch {
+	case right.Independence == nil:
+	case left.Independence == nil:
+		merged.Independence = right.Independence
+	default:
+		strongest := left.Independence
+		if dimensionStrength(right.Independence.Dimension) > dimensionStrength(left.Independence.Dimension) {
+			strongest = right.Independence
+		}
+		independence := *strongest
+		independence.DifferentFrom = sortedUnique(append(append([]string{}, left.Independence.DifferentFrom...), right.Independence.DifferentFrom...))
+		// A substitution is permitted only where BOTH rules permit it.
+		independence.HumanSubstitutionPermitted = left.Independence.HumanSubstitutionPermitted && right.Independence.HumanSubstitutionPermitted
+		merged.Independence = &independence
+	}
+	if trustStrength(right.TrustRequirement) > trustStrength(left.TrustRequirement) {
+		merged.TrustRequirement = right.TrustRequirement
+	}
+	return merged, nil
+}
+
+// dimensionStrength orders the independence dimensions. A stronger dimension
+// implies the weaker ones, so taking the maximum can never satisfy less than
+// either rule asked for.
+func dimensionStrength(dimension domain.IndependenceDimension) int {
+	for strength, known := range domain.IndependenceDimensions() {
+		if known == dimension {
+			return strength
+		}
+	}
+	return -1
+}
+
+func knownDimension(dimension domain.IndependenceDimension) bool {
+	return dimensionStrength(dimension) >= 0
+}
+
+// trustStrength orders execution trust. Protected is stricter than
+// operator-trusted, and an unstated requirement is weaker than both.
+func trustStrength(trust domain.TrustRequirement) int {
+	switch trust {
+	case domain.TrustRequirementProtected:
+		return 2
+	case domain.TrustRequirementOperatorTrusted:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// planRequirements emits the resolved plan-shaped obligations in canonical
+// order, or nil when policy stated none. Nil is the point: a contract compiled
+// from a policy without plan obligations stays byte-identical to one compiled
+// before this member existed.
+func (r *resolution) planRequirements() *domain.PlanRequirements {
+	if len(r.roles) == 0 && len(r.capabilities) == 0 && len(r.gates) == 0 {
+		return nil
+	}
+	requirements := domain.PlanRequirements{}
+	for _, role := range domain.EngineeringRoles() {
+		if requirement, ok := r.roles[role]; ok {
+			requirements.Roles = append(requirements.Roles, requirement)
+		}
+	}
+	for _, capability := range domain.EngineeringCapabilities() {
+		if r.capabilities[capability] {
+			requirements.Capabilities = append(requirements.Capabilities, capability)
+		}
+	}
+	keys := make([]string, 0, len(r.gates))
+	for key := range r.gates {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		requirements.Gates = append(requirements.Gates, r.gates[key])
+	}
+	return &requirements
+}
+
+func sortedUniqueCapabilities(values []domain.EngineeringCapability) []domain.EngineeringCapability {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[domain.EngineeringCapability]bool, len(values))
+	for _, value := range values {
+		seen[value] = true
+	}
+	result := make([]domain.EngineeringCapability, 0, len(seen))
+	// Canonical order is the ONTOLOGY's order, not the input's, so two rules
+	// stating the same capabilities in different orders compile identically.
+	for _, capability := range domain.EngineeringCapabilities() {
+		if seen[capability] {
+			result = append(result, capability)
+		}
+	}
+	return result
 }

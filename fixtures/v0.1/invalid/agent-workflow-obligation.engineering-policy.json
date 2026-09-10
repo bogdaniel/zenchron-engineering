@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-invalid-agent-workflow",
+  "revision": "1",
+  "rules": {
+    "RULE-001": {
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": true
+      },
+      "effect": {
+        "engineering_requirements": {
+          "roles": [
+            {
+              "role": "security_reviewer",
+              "agent": "claude",
+              "statement": "Security review must be performed by claude."
+            }
+          ]
+        }
+      }
+    }
+  }
+}

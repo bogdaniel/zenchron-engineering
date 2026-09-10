@@ -30,10 +30,12 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
+	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
@@ -187,6 +189,33 @@ type autonomyFlags struct {
 	PermissionBypass bool
 	// Reason is the operator's stated cause for a governed transition.
 	Reason string
+	// Template names the operator's reusable EngineeringPlanTemplate for a plan
+	// proposal. Empty means the planner compiles from policy and intent alone.
+	Template string
+	// Revision and Digest name the EXACT plan revision a decision is about.
+	// They are what an operator read: without them the CLI would decide
+	// whatever the highest revision happened to be at decide time, which can
+	// be a proposal that landed after the operator looked.
+	Revision int
+	Digest   string
+	// Assignments names the assignment set a decision is about: who would
+	// perform each stage, under which profile, packs and worker. It is
+	// OPTIONAL and separate from Digest because the plan document's digest does
+	// not move when operator configuration does - so an edit landing between
+	// reading a proposal and deciding on it would otherwise be bound as what
+	// the operator saw.
+	Assignments string
+	// SubstituteHuman names the blocked agent stage an operator is replacing
+	// with an independent human review. It is only ever accepted where POLICY
+	// permitted that substitution; the permission comes from the obligation
+	// that required the independence, and neither an operator nor a plan may
+	// grant it.
+	SubstituteHuman string
+	// Deterministic compiles a plan with NO model invocation. It is the honest
+	// alternative to reasoning rather than a fallback from it: the same
+	// obligations, the same validation, and a plan that says a model was not
+	// consulted.
+	Deterministic bool
 	// Detached submits work to a running supervisor instead of driving it in
 	// this terminal. It is implied when a supervisor owns the state directory.
 	Detached bool
@@ -229,6 +258,12 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		return autonomyWatch(context.Background(), flags, overrides, stdout)
 	case "gc":
 		return autonomyGC(rest, overrides, stdout)
+	case "plan":
+		// The plan lifecycle. It is under `autonomy` beside `run` because it is
+		// the same operator asking for the same work at a different altitude:
+		// `run issue N` starts one governed run, `plan issue N` proposes the
+		// decomposition that several of them would execute.
+		return autonomyPlan(context.Background(), rest, overrides, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
@@ -523,6 +558,12 @@ type composition struct {
 	agents   runtime.AgentRegistry
 	agent    runtime.ResolvedAgent
 	feedback runtime.FeedbackPolicy
+	// planning is the operator's customization registry. It is loaded ONCE
+	// here and handed to every engine, because a run executing a plan stage
+	// resolves its frozen instruction packs through it: an engine built
+	// without it would refuse work the operator approved, on the grounds that
+	// a pack it was never given is "no longer installed".
+	planning planning.Registry
 	storage  runtime.StateStorage
 	// sandbox and permissionBypass are kept so an engine can be built for an
 	// agent other than the one this invocation resolved. providerInjected
@@ -624,6 +665,11 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		release()
 		return nil, err
 	}
+	customization, err := planning.LoadRegistry(config.PlanningDir)
+	if err != nil {
+		release()
+		return nil, err
+	}
 	// NewEngineeringRuntime fails closed on provider isolation, so there is no
 	// second check here.
 	provider, providerInjected := overrides.Provider, overrides.Provider != nil
@@ -646,7 +692,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		config: config, store: store, owner: owner, model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
-		agents: registry, agent: agent, feedback: feedback,
+		agents: registry, agent: agent, feedback: feedback, planning: customization,
 		sandbox: sandbox, permissionBypass: flags.PermissionBypass, providerInjected: providerInjected,
 		storage: runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
 		release: release,
@@ -682,6 +728,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Store:             c.store,
 		Agent:             agent,
 		Agents:            c.agents,
+		Planning:          c.planning,
 		Feedback:          feedback,
 		Storage:           c.storage,
 		Clock:             runtime.RealClock{},
@@ -966,6 +1013,13 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
 			continue
+		case "--deterministic":
+			// Compile the plan with NO model invocation. It is the honest
+			// alternative to reasoning, not a fallback from it: a provider that
+			// cannot plan is refused with its reason rather than quietly
+			// producing a deterministic plan the operator did not ask for.
+			flags.Deterministic, args = true, args[1:]
+			continue
 		case "--approve", "--reject":
 			// The two decisions are mutually exclusive flags rather than one
 			// --decision value, so a typo is a usage error instead of an
@@ -990,6 +1044,20 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Agent = args[1]
 		case "--reason":
 			flags.Reason = args[1]
+		case "--template":
+			flags.Template = args[1]
+		case "--substitute-human":
+			flags.SubstituteHuman = args[1]
+		case "--digest":
+			flags.Digest = args[1]
+		case "--assignments":
+			flags.Assignments = args[1]
+		case "--revision":
+			revision, err := strconv.Atoi(args[1])
+			if err != nil || revision < 1 {
+				return autonomyFlags{}, fmt.Errorf("--revision must be a positive integer, got %q", args[1])
+			}
+			flags.Revision = revision
 		case "--assign":
 			issue, agent, ok := strings.Cut(args[1], "=")
 			number, err := strconv.Atoi(strings.TrimSpace(issue))

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 )
 
 // ---------------------------------------------------------------------------
@@ -156,8 +157,17 @@ type RunBudgets struct {
 	// It is omitempty because a run persisted before #54 has no value for it,
 	// and that absence is meaningful - see runState.continuationLimit.
 	MaxExecutionContinuations int `json:"max_execution_continuations,omitempty"`
-	MaxRemediationAttempts    int `json:"max_remediation_attempts"`
-	MaxAssuranceAttempts      int `json:"max_assurance_attempts"`
+	// MaxProviderInvocations bounds EVERY execution invocation this run makes,
+	// across every binding. MaxExecutionAttempts bounds retries of one
+	// binding and MaxExecutionContinuations bounds how many bindings there
+	// may be; neither of them is a total, and a plan-wide allowance is one.
+	//
+	// omitempty, and absent means unbounded: a run persisted before this
+	// existed was never judged by it, and its identity is derived from its
+	// canonical document.
+	MaxProviderInvocations int `json:"max_provider_invocations,omitempty"`
+	MaxRemediationAttempts int `json:"max_remediation_attempts"`
+	MaxAssuranceAttempts   int `json:"max_assurance_attempts"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -181,6 +191,16 @@ type Dependencies struct {
 	// against. It is optional: a runtime constructed to drive exactly one run
 	// needs only Agent, and only the handoff path consults the registry.
 	Agents AgentRegistry
+	// Planning is the operator's customization registry: instruction packs,
+	// context policies, profiles and templates. It is optional - a runtime
+	// driving ordinary issue runs never consults it - and it is READ-ONLY here.
+	//
+	// A plan stage run uses it to resolve the instruction TEXT its frozen
+	// assignment names by digest, and refuses when the digest no longer
+	// matches. That refusal is the mechanism behind "editing profile v3 into v4
+	// does not rewrite work already approved": the run executes under the
+	// configuration the operator approved, or it does not execute.
+	Planning planning.Registry
 	// Feedback is the operator's admission rule for model-visible GitHub
 	// feedback. Its zero value is the SAFE default - collaborator-equivalent
 	// write permission, no allowlisted automation - so a configuration that
@@ -415,6 +435,49 @@ func (b RunBudgets) defaults() RunBudgets {
 	return b
 }
 
+// planningWallLimit is the deadline one planning invocation runs under: the
+// bound the STAGE states - already narrowed by the assigned profile and by the
+// plan's remaining headroom - and otherwise the operator's configured run wall
+// limit.
+//
+// Zero used to mean no deadline at all, which made the one stage type that runs
+// unattended against a provider the only one that could run forever. Every
+// producer invocation is bounded by the configured limit; a planner is not
+// special enough to be exempt from it.
+func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
+	configured := r.deps.Budgets.WallLimit
+	stated := time.Duration(stageSeconds) * time.Second
+	// NARROW ONLY, like every other budget in this runtime. A stage stating
+	// more than the operator configured was the one place a stated bound could
+	// widen a configured one, which is the asymmetry tightenedBy refuses
+	// everywhere else.
+	if stated <= 0 || (configured > 0 && stated > configured) {
+		return configured
+	}
+	return stated
+}
+
+// tightenedBy narrows these budgets by a plan stage's own. It only ever
+// narrows: a stage budget larger than the operator's configured bound is not
+// authority to exceed it, and a stage that states none keeps the configured
+// bound exactly.
+//
+// The runtime reads a run's persisted budgets through the run state, so this is
+// what makes an AgentProfile's `max_wall_seconds` and `max_execution_attempts`
+// bind the work rather than merely be recorded in the assignment.
+func (b RunBudgets) tightenedBy(stage domain.StageBudget) RunBudgets {
+	if wall := time.Duration(stage.MaxWallSeconds) * time.Second; wall > 0 && (b.WallLimit <= 0 || wall < b.WallLimit) {
+		b.WallLimit = wall
+	}
+	if attempts := stage.MaxExecutionAttempts; attempts > 0 && (b.MaxExecutionAttempts <= 0 || attempts < b.MaxExecutionAttempts) {
+		b.MaxExecutionAttempts = attempts
+	}
+	if total := stage.MaxProviderInvocations; total > 0 && (b.MaxProviderInvocations <= 0 || total < b.MaxProviderInvocations) {
+		b.MaxProviderInvocations = total
+	}
+	return b
+}
+
 // ParseGitHubRepo is the exported form for composition roots that hold an
 // owner/name identity and need the typed repository.
 func ParseGitHubRepo(identity string) (GitHubRepo, error) { return parseGitHubRepo(identity) }
@@ -436,12 +499,33 @@ func parseGitHubRepo(identity string) (GitHubRepo, error) {
 // nothing else. In particular it never binds a filesystem path, so the same
 // logical run is found again from any checkout.
 func issueRunID(repository string, issue int, config ConfigDigest, generation int) (string, error) {
+	return derivedRunID(repository, issue, config, generation, nil)
+}
+
+// planStageIdentity is the part of a run identity that belongs to a plan stage.
+// It is a POINTER member of the digested document and omitempty, so a run that
+// is not a plan stage digests exactly as it did before plans existed - run
+// identities are derived from this document, and an added member would
+// re-identify every historical run.
+type planStageIdentity struct {
+	Plan     string `json:"plan"`
+	Revision int    `json:"revision"`
+	Stage    string `json:"stage"`
+	// Generation distinguishes one EXECUTION of a stage from the next, where
+	// the approved plan is unchanged and only the upstream candidate the stage
+	// consumes has moved. It is omitempty so every run identity derived before
+	// generations existed - and every first performance since - is unchanged.
+	Generation int `json:"generation,omitempty"`
+}
+
+func derivedRunID(repository string, issue int, config ConfigDigest, generation int, stage *planStageIdentity) (string, error) {
 	d, err := Digest(struct {
-		Repository string       `json:"repository"`
-		Issue      int          `json:"issue"`
-		Config     ConfigDigest `json:"config"`
-		Generation int          `json:"generation"`
-	}{repository, issue, config, generation})
+		Repository string             `json:"repository"`
+		Issue      int                `json:"issue"`
+		Config     ConfigDigest       `json:"config"`
+		Generation int                `json:"generation"`
+		PlanStage  *planStageIdentity `json:"plan_stage,omitempty"`
+	}{repository, issue, config, generation, stage})
 	if err != nil {
 		return "", err
 	}
@@ -538,7 +622,7 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal)
+			created, err := r.createRun(ctx, runID, goal, nil, domain.StageBudget{})
 			return StartOutcome{RunID: created}, err
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
@@ -616,7 +700,11 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 		return err
 	}
 	state := &runState{run: run, events: events}
-	if state.recordedAgent().AgentID != "" {
+	recorded, err := state.recordedAgent()
+	if err != nil {
+		return err
+	}
+	if recorded.AgentID != "" {
 		return nil
 	}
 	payload, err := marshalPayloadJSON(AgentAssignedPayload{
@@ -639,9 +727,9 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (string, error) {
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, stageBudget domain.StageBudget) (string, error) {
 	now := r.deps.Clock.Now()
-	budgets := r.deps.Budgets.defaults()
+	budgets := r.deps.Budgets.defaults().tightenedBy(stageBudget)
 	run := EngineeringRun{
 		SchemaVersion:    SchemaVersion,
 		ID:               runID,
@@ -658,8 +746,13 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string) (s
 		// than from whatever is configured afterwards; the wall limit and the
 		// attempt ceilings are still read live. Persisting the whole record
 		// now is what lets the rest follow without another schema change.
-		Budgets:   &budgets,
-		AgentID:   r.deps.Agent.ID,
+		Budgets: &budgets,
+		AgentID: r.deps.Agent.ID,
+		// The plan binding is part of the run AS CREATED, never attached
+		// afterwards: the genesis event is hashed against this row, and a row
+		// that gained its binding later would leave the two disagreeing about
+		// what the run is.
+		Plan:      plan,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -960,4 +1053,81 @@ func marshalPayloadJSON(payload any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(raw), nil
+}
+
+// ---------------------------------------------------------------------------
+// Plan stage runs
+// ---------------------------------------------------------------------------
+
+// StartPlanStageRun creates the ordinary EngineeringRun for one dependency-ready
+// agent stage.
+//
+// It is deliberately the same run every other path creates: same identity
+// derivation, same claim, same genesis and agent-binding events, same
+// scheduler, same leases, same candidate lifecycle. What a plan adds is the
+// BINDING - which plan revision, which stage, which assignment - and nothing
+// else. A second kind of run would be a second runtime.
+//
+// The identity includes the plan revision and the stage, so two stages of one
+// plan are two runs and a new revision's stage is a new run rather than a
+// silent continuation of work approved under different terms.
+func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, binding RunPlanBinding) (StartOutcome, error) {
+	if issue <= 0 {
+		return StartOutcome{}, fmt.Errorf("a plan stage run answers a source issue, and none was given")
+	}
+	if binding.PlanID == "" || binding.StageID == "" || binding.AssignmentID == "" || binding.Revision < 1 {
+		return StartOutcome{}, fmt.Errorf("a plan stage run needs the plan, revision, stage and assignment it was created for")
+	}
+	goal := issueGoal(r.deps.Repository.Identity, issue)
+	runID, err := derivedRunID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest, 0, &planStageIdentity{
+		Plan: binding.PlanID, Revision: binding.Revision, Stage: binding.StageID,
+		Generation: binding.Generation,
+	})
+	if err != nil {
+		return StartOutcome{}, err
+	}
+	existing, found, err := r.deps.Store.Run(runID)
+	if err != nil {
+		return StartOutcome{}, err
+	}
+	if found {
+		// The reconciler is idempotent: it re-derives the same identity every
+		// tick, so finding the run it created before is the ordinary case, not
+		// a conflict. A row describing different work IS a conflict.
+		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
+			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
+		}
+		if existing.Plan == nil || existing.Plan.PlanID != binding.PlanID || existing.Plan.StageID != binding.StageID {
+			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run belongs to a different plan stage"}
+		}
+		// The ASSIGNMENT is part of what the run is. Adopting a run created
+		// under a different assignment would silently hand this stage's work to
+		// a run bound to another worker, another profile and another frozen
+		// instruction set.
+		if existing.Plan.AssignmentID != binding.AssignmentID {
+			return StartOutcome{}, &RunConflictError{
+				RunID: runID,
+				Detail: fmt.Sprintf("durable run was created under assignment %s and this start names %s",
+					existing.Plan.AssignmentID, binding.AssignmentID),
+			}
+		}
+		// The run identity carries the repository, the issue, the configuration
+		// and the plan stage - but NOT the controller. Two controllers that
+		// share a configuration digest and differ in build or identity derive
+		// the same id, so without this check the second one would adopt the
+		// first one's live work. StartIssueRun refuses exactly this, and a plan
+		// stage run is an ordinary run: it is refused here on the same terms.
+		if existing.ControllerSHA256 != r.controller {
+			return StartOutcome{}, &RunAdoptionRefusedError{
+				RunID: runID, Owner: existing.ControllerSHA256,
+				Detail: "adopting it would reconcile another controller's work under this one",
+			}
+		}
+		if err := r.repairAgentBinding(runID, existing); err != nil {
+			return StartOutcome{}, err
+		}
+		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
+	}
+	created, err := r.createRun(ctx, runID, goal, &binding, binding.StageBudget)
+	return StartOutcome{RunID: created}, err
 }

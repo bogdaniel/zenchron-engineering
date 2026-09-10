@@ -3,18 +3,13 @@
 package runtime
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
-	"github.com/gowebpki/jcs"
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 const SchemaVersion = "0.1"
@@ -133,9 +128,69 @@ const (
 	EventGitHubReviewObserved      = "github.review_observed"
 	EventGitHubPRObserved          = "github.pr_observed"
 	EventHumanAuthorityRecorded    = "human.authority_recorded"
+
+	// The plan lifecycle. These events belong to a PLAN stream rather than a
+	// run stream, and they live in the same append-only journal, in the same
+	// table, under the same hash chain: #64 forbids a second event journal, and
+	// two journals would be two answers to "what happened to this work".
+	//
+	// A plan event never carries a run id and a run event never carries a plan
+	// id. The association between them is stated explicitly by
+	// plan.run_started, so "which run belongs to which stage" is a recorded
+	// fact rather than something a reader infers from two streams.
+
+	// EventPlanProposed is a plan revision offered for approval. It is the only
+	// event that introduces a revision, and it never implies approval: a
+	// proposal that executed because it parsed is exactly what the approval
+	// boundary exists to prevent.
+	EventPlanProposed = "plan.proposed"
+	// EventPlanValidated is the deterministic validator's verdict on a
+	// revision. A refusal is journalled rather than only returned: refusing
+	// quietly would lose the reason a reasoning agent asked for something it
+	// may not have.
+	EventPlanValidated = "plan.validated"
+	// EventPlanApproved and EventPlanRejected are the operator's answer. The
+	// approval is authority to EXECUTE within existing policy and permission
+	// ceilings, and is never merge, release or acceptance authority.
+	EventPlanApproved = "plan.approved"
+	EventPlanRejected = "plan.rejected"
+	// EventPlanStageAssigned freezes which profile, which underlying agent and
+	// which invocation mode an executable stage resolved to. Editing the
+	// profile afterwards cannot rewrite this: the digests are recorded here.
+	EventPlanStageAssigned = "plan.stage_assigned"
+	// EventPlanRunStarted associates one agent stage with one ordinary #63
+	// EngineeringRun. Only agent stages ever produce one of these.
+	EventPlanRunStarted = "plan.run_started"
+	// EventPlanStageSettled records how a stage ended: completed, failed, or
+	// invalidated by an upstream change.
+	EventPlanStageSettled = "plan.stage_settled"
+	// EventPlanGateSatisfied records that a typed gate's existing durable
+	// references - evidence, authority decision, human decision - now prove it.
+	// A gate is never satisfied by a worker run, because it never creates one.
+	EventPlanGateSatisfied = "plan.gate_satisfied"
+	// EventPlanBudgetConsumed is a DELTA against the plan's aggregate envelope.
+	// Consumption is a projection summed from these events rather than a stored
+	// counter, which is what makes "a revision, restart or reassignment cannot
+	// reset consumed budget" a property of the representation instead of a rule
+	// somebody has to remember.
+	EventPlanBudgetConsumed = "plan.budget_consumed"
+	// EventPlanRevisionSuperseded records one approved revision replacing
+	// another, and exactly which downstream stages that invalidated.
+	EventPlanRevisionSuperseded = "plan.revision_superseded"
 )
 
-var eventTypes = map[string]bool{EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+
+// planEventTypes is the plan stream's own vocabulary. It exists so an event
+// cannot be appended to the wrong stream: a plan event in a run's hash chain
+// would put a plan's history inside a run's identity, and a run event in a
+// plan's chain would make a plan's state digest depend on work it does not own.
+var planEventTypes = map[string]bool{
+	EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true,
+	EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true,
+	EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true,
+	EventPlanRevisionSuperseded: true,
+}
 
 type Ref struct {
 	ID       string `json:"id"`
@@ -191,11 +246,63 @@ type EngineeringRun struct {
 	// has none, and that absence has a documented legacy meaning: the run was
 	// worked by whichever single provider the operator configuration named at
 	// the time. No identity is backfilled for it.
-	AgentID   string    `json:"agent_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Cursor    Cursor    `json:"journal_cursor"`
+	AgentID string `json:"agent_id,omitempty"`
+	// Plan binds this run to the plan stage that created it, when a plan did.
+	// It is a POINTER with omitempty for the same reason Budgets is: a run that
+	// no plan created must canonicalize exactly as it did before plans existed.
+	//
+	// It carries IDENTITIES and nothing else. The stage objective, the context
+	// pack and the frozen profile configuration live in the durable
+	// AgentAssignment this points at, so the run row cannot drift from the
+	// assignment an operator approved.
+	Plan      *RunPlanBinding `json:"plan,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+	Cursor    Cursor          `json:"journal_cursor"`
 }
+
+// RunPlanBinding is the durable link from an ordinary EngineeringRun back to
+// the plan stage that created it.
+//
+// Only `agent` stages ever produce one. A gate creates no run at all, so no
+// gate can appear here - which is how "typed gates create no worker runs" stays
+// answerable from the run row as well as from the plan journal.
+type RunPlanBinding struct {
+	PlanID       string `json:"plan_id"`
+	Revision     int    `json:"revision"`
+	PlanDigest   string `json:"plan_digest"`
+	StageID      string `json:"stage_id"`
+	AssignmentID string `json:"assignment_id"`
+	// BaseRevision is the UPSTREAM candidate this stage builds on, when its
+	// dependencies produced and published one. A reviewing or integrating stage
+	// based on the trusted branch would have nothing to review or integrate;
+	// this is what makes its workspace contain the work.
+	//
+	// It is only ever set to a published commit, because the governed remote is
+	// the only thing a candidate is cloned from. Where the upstream work is not
+	// published, the field is empty and the stage is based on the trusted base
+	// with the upstream diff supplied as context instead.
+	BaseRevision string `json:"base_revision,omitempty"`
+	// Generation is which EXECUTION of this stage the run performs. It advances
+	// when an already-approved stage is performed again because the upstream
+	// candidate it consumed was replaced - an execution fact, not a change to
+	// the approved plan - and it is part of the run identity, so each
+	// generation is its own run rather than an adoption of the previous one.
+	//
+	// omitempty and zero for every first performance, so no existing run is
+	// re-identified.
+	Generation int `json:"generation,omitempty"`
+	// StageBudget is the plan stage's own bound, already narrowed by the
+	// assigned profile's constraints. The run persists its budgets narrowed by
+	// this, which is what makes a profile's `max_wall_seconds` and
+	// `max_execution_attempts` bind the work instead of being recorded and
+	// ignored.
+	//
+	// omitempty, because a run created before it existed must canonicalize
+	// exactly as it did: the genesis event is hashed against the run document.
+	StageBudget domain.StageBudget `json:"stage_budget,omitzero"`
+}
+
 type RunOperation struct {
 	SchemaVersion    string          `json:"schema_version"`
 	ID               string          `json:"id"`
@@ -223,9 +330,17 @@ type Lease struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 type EngineeringEvent struct {
-	SchemaVersion     string          `json:"schema_version"`
-	ID                string          `json:"id"`
-	RunID             string          `json:"run_id"`
+	SchemaVersion string `json:"schema_version"`
+	ID            string `json:"id"`
+	RunID         string `json:"run_id"`
+	// PlanID names the plan stream this event belongs to, and is empty for
+	// every run event.
+	//
+	// omitempty is load-bearing rather than tidy: a run event's canonical
+	// document is what its hash chain, its state digests and - through them -
+	// its run identity are computed over. A member that appeared as an empty
+	// string would re-identify every event ever written.
+	PlanID            string          `json:"plan_id,omitempty"`
 	Sequence          int64           `json:"sequence"`
 	Type              string          `json:"type"`
 	OccurredAt        time.Time       `json:"occurred_at"`
@@ -246,97 +361,17 @@ type RunSnapshot struct {
 }
 
 // CanonicalJSON serializes a typed runtime value to JSON, then applies RFC 8785
-// JSON Canonicalization Scheme (JCS). encoding/json only creates the input JSON;
-// it is not itself a canonical serializer.
-func CanonicalJSON(v any) ([]byte, error) {
-	if err := validateIJSONValue(reflect.ValueOf(v)); err != nil {
-		return nil, err
-	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	return jcs.Transform(raw)
-}
+// JSON Canonicalization Scheme (JCS).
+//
+// It delegates to domain.CanonicalJSON so the runtime journal, the kernel
+// contracts and the M2 planning artifacts are canonicalized by exactly ONE
+// implementation. Two canonicalizers would be two definitions of "the same
+// document", which is the one thing a hash chain cannot tolerate.
+func CanonicalJSON(v any) ([]byte, error) { return domain.CanonicalJSON(v) }
 
-const maxSafeInteger = int64(1<<53 - 1)
+// Digest is the SHA-256 of the canonical document.
+func Digest(v any) (string, error) { return domain.Digest(v) }
 
-// validateIJSONValue rejects Go values whose JSON representation would silently
-// replace invalid string data or lose integer precision before JCS sees it.
-// RawMessage remains JSON input: JCS then rejects duplicate names and invalid
-// JSON-number representations rather than falling back to encoding/json output.
-func validateIJSONValue(v reflect.Value) error {
-	if !v.IsValid() {
-		return nil
-	}
-	if v.Type() == reflect.TypeFor[json.RawMessage]() {
-		raw := v.Bytes()
-		if raw == nil {
-			return nil
-		}
-		if !utf8.Valid(raw) || !json.Valid(raw) {
-			return fmt.Errorf("invalid JSON raw message")
-		}
-		return nil
-	}
-	switch v.Kind() {
-	case reflect.Interface, reflect.Pointer:
-		if v.IsNil() {
-			return nil
-		}
-		return validateIJSONValue(v.Elem())
-	case reflect.String:
-		if !utf8.ValidString(v.String()) {
-			return fmt.Errorf("invalid UTF-8 string")
-		}
-	case reflect.Float32, reflect.Float64:
-		if f := v.Float(); math.IsNaN(f) || math.IsInf(f, 0) {
-			return fmt.Errorf("non-finite JSON number")
-		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if n := v.Int(); n < -maxSafeInteger || n > maxSafeInteger {
-			return fmt.Errorf("integer %d exceeds the I-JSON interoperable range", n)
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		if n := v.Uint(); n > uint64(maxSafeInteger) {
-			return fmt.Errorf("integer %d exceeds the I-JSON interoperable range", n)
-		}
-	case reflect.Array, reflect.Slice:
-		for i := 0; i < v.Len(); i++ {
-			if err := validateIJSONValue(v.Index(i)); err != nil {
-				return err
-			}
-		}
-	case reflect.Map:
-		iter := v.MapRange()
-		for iter.Next() {
-			if err := validateIJSONValue(iter.Key()); err != nil {
-				return err
-			}
-			if err := validateIJSONValue(iter.Value()); err != nil {
-				return err
-			}
-		}
-	case reflect.Struct:
-		for i := 0; i < v.NumField(); i++ {
-			if v.Type().Field(i).PkgPath != "" {
-				continue
-			}
-			if err := validateIJSONValue(v.Field(i)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-func Digest(v any) (string, error) {
-	b, e := CanonicalJSON(v)
-	if e != nil {
-		return "", e
-	}
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:]), nil
-}
 func StateDigest(s RunSnapshot) (string, error) {
 	s.StateSHA256 = ""
 	s.Cursor = Cursor{}

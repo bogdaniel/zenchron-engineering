@@ -231,5 +231,5 @@ func (s ToolSurface) bound(output string) string {
 	if len(output) <= limit {
 		return output
 	}
-	return output[:limit] + "\n[truncated by Zenchron: tool result exceeded " + strconv.Itoa(limit) + " bytes]"
+	return boundedTo(output, limit) + "\n[truncated by Zenchron: tool result exceeded " + strconv.Itoa(limit) + " bytes]"
 }

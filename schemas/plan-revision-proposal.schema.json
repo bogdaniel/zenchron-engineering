@@ -1,0 +1,322 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/plan-revision-proposal.schema.json",
+  "title": "PlanRevisionProposal v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "source",
+    "proposed_revision",
+    "reason",
+    "provenance",
+    "budget",
+    "changes",
+    "validation",
+    "approval"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "proposed_revision": {
+      "$ref": "engineering-plan.schema.json",
+      "description": "The plan this proposal asks for, validated as a plan. The compiler registers every schema in this directory as a resource named after its file, so this reference resolves offline with no network and no second definition of what a plan is - the earlier structural restatement here accepted plan bodies the plan schema refuses."
+    },
+    "reason": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin"
+      ],
+      "properties": {
+        "origin": {
+          "enum": [
+            "initial_plan",
+            "planner_role_decomposition",
+            "operator_edit",
+            "remediation"
+          ]
+        },
+        "stage_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "operator": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "reasoning": {
+          "$ref": "#/$defs/reasoning"
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current",
+        "proposed",
+        "consumed",
+        "widened"
+      ],
+      "properties": {
+        "current": {
+          "$ref": "#/$defs/budget_envelope"
+        },
+        "proposed": {
+          "$ref": "#/$defs/budget_envelope"
+        },
+        "consumed": {
+          "$ref": "#/$defs/consumption"
+        },
+        "widened": {
+          "type": "boolean"
+        }
+      }
+    },
+    "changes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "material"
+      ],
+      "properties": {
+        "added_stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "removed_stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "changed_stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "invalidated_stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "material": {
+          "type": "boolean"
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "valid",
+            "refused"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ]
+        },
+        "operator": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "note": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "budget_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_child_runs",
+        "max_concurrency",
+        "max_provider_invocations"
+      ],
+      "properties": {
+        "max_child_runs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_provider_invocations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_wall_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_cost_micros": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "consumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "child_runs",
+        "provider_invocations",
+        "wall_seconds",
+        "cost_known"
+      ],
+      "properties": {
+        "child_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_invocations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_micros": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_known": {
+          "type": "boolean"
+        }
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "provider_kind",
+        "trust_mode",
+        "invocation_mode",
+        "workspace_digest_before",
+        "workspace_digest_after",
+        "workspace_unchanged"
+      ],
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "provider_kind": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "vendor_family": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "trust_mode": {
+          "enum": [
+            "operator_trusted",
+            "protected"
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "profile_id": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "invocation_mode": {
+          "enum": [
+            "mutating",
+            "non_mutating_planning"
+          ]
+        },
+        "provider_mode": {
+          "$ref": "#/$defs/non_empty_string"
+        },
+        "workspace_digest_before": {
+          "$ref": "#/$defs/digest"
+        },
+        "workspace_digest_after": {
+          "$ref": "#/$defs/digest"
+        },
+        "workspace_unchanged": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

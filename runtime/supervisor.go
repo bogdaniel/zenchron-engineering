@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // SupervisorDependencies is the complete input. Like the runtime's own
@@ -68,6 +70,10 @@ type SupervisorDependencies struct {
 	Discovery *WatchController
 	// Agents is the registry a control request resolves an agent id against.
 	Agents AgentRegistry
+	// Plans is the plan lifecycle service, or the zero value when no plan has
+	// ever been proposed. It is what the plan reconciler resolves assignments
+	// through, and it contacts nothing.
+	Plans PlanService
 }
 
 // SupervisorReport is one tick's account of what the supervisor did.
@@ -93,6 +99,10 @@ type SupervisorReport struct {
 	Active   int `json:"active"`
 	// NextEligibleAt is when the supervisor intends to look again.
 	NextEligibleAt time.Time `json:"next_eligible_at"`
+	// Plans is what the plan reconciler did this tick, one entry per plan it
+	// looked at. A plan awaiting approval appears here saying so, which is how
+	// an operator sees that the runtime is waiting on THEM rather than on work.
+	Plans []PlanTickReport `json:"plans,omitempty"`
 	// Error is a tick that could not enumerate work. It is REPORTED rather
 	// than returned, because a supervisor that exited on one unreadable read
 	// would take every healthy run down with it - the same isolation rule that
@@ -135,6 +145,13 @@ type Supervisor struct {
 	// ceiling smaller than the active set is a rate limit rather than a fixed
 	// prefix; see rotate.
 	cursor int
+	// plansMu serializes everything that WRITES plan state: the reconciler's
+	// own pass and an operator decision arriving over the control endpoint.
+	// They read a snapshot and then append against it, so running them side by
+	// side means one can decide from state the other is changing - a stage
+	// started inside the window survives a supersession that changed it, and
+	// the invalidations are computed against a plan that has already moved.
+	plansMu sync.Mutex
 	// enginesMu guards the engine cache, which several run goroutines reach
 	// concurrently inside one tick. It is separate from mu on purpose: the
 	// lifecycle flags are read by operator commands, and a slow engine
@@ -236,6 +253,14 @@ func (s *Supervisor) engine(identity, agentID string) (*EngineeringRuntime, erro
 	return slot.engine, nil
 }
 
+// GovernedRepository is governedRepository for the composition root, which
+// needs it to refuse control requests naming a repository this supervisor does
+// not govern. A control request selects among what the operator enrolled; it
+// can never introduce a repository.
+func (s *Supervisor) GovernedRepository(identity string) (GitHubRepo, bool) {
+	return s.governedRepository(identity)
+}
+
 // governedRepository resolves an identity to an ENROLLED repository. Enrolment
 // is operator configuration, so this answers from the configured set and never
 // from the request.
@@ -297,6 +322,16 @@ func (s *Supervisor) Draining() bool {
 // journalled per run through the same single cancellation path `stop RUN` uses,
 // so a fleet cancellation is indistinguishable in the journal from cancelling
 // each run individually - because that is exactly what it is.
+// WithPlanLock runs one operator plan decision under the same lock the plan
+// reconciler holds, so a decision and a tick never interleave their
+// read-then-append. It is exported because the composition root - which owns
+// the control endpoint - is where an operator's decision arrives.
+func (s *Supervisor) WithPlanLock(do func() error) error {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	return do()
+}
+
 func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	if strings.TrimSpace(reason) == "" {
 		reason = "operator_stop_all"
@@ -346,6 +381,19 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 		} else {
 			report.Discovery = &discovery
 		}
+	}
+	// PLANS are reconciled BEFORE the run list is read, so a stage that became
+	// dependency-ready since the last tick gets its run created and then driven
+	// in the SAME pass rather than waiting a whole poll interval. Reading the
+	// runs first would enumerate the fleet as it was before the plan added to
+	// it.
+	//
+	// This is dependency gating, not scheduling: it creates or associates
+	// ordinary EngineeringRuns and stops. Everything below - the ceiling, the
+	// rotation, the leases - is unchanged and remains the only thing that
+	// decides when a run executes.
+	if !report.Draining {
+		report.Plans = s.reconcilePlans(ctx)
 	}
 	runs, err := s.deps.Store.Runs()
 	if err != nil {
@@ -487,4 +535,130 @@ func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) err
 		}
 	}
 	return nil
+}
+
+// decomposeWithAgent performs one decomposition invocation through the agent
+// the stage's assignment resolved to.
+//
+// The workspace is materialized from the plan's exact subject revision and
+// removed afterwards: it is derived state, and the snapshot it held is recorded
+// in the resulting proposal's provenance.
+// planningSeam is the reconciler's Planner, and the one place the plan lock is
+// released across a provider call.
+//
+// The lock serializes read-then-append against an operator decision, which
+// takes microseconds; holding it across a repository clone and a live planning
+// invocation stalled every run in the fleet for minutes, because the tick takes
+// the same lock before it drives anything.
+//
+// Releasing here is safe because the caller re-reads plan state afterwards and
+// ABANDONS the pass if the approved revision moved - a decision that lands in
+// the window is acted on rather than written over.
+//
+// It is a method rather than a closure inside the tick so a test can drive the
+// real thing. The replica a test used to hand-write would have kept passing
+// through any regression in this code.
+func (s *Supervisor) planningSeam(repository string) func(context.Context, PlanDecompositionRequest) (PlannerOutput, error) {
+	return func(ctx context.Context, request PlanDecompositionRequest) (PlannerOutput, error) {
+		s.plansMu.Unlock()
+		defer s.plansMu.Lock()
+		return s.decomposeWithAgent(ctx, repository, request)
+	}
+}
+
+func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, request PlanDecompositionRequest) (PlannerOutput, error) {
+	engine, err := s.engine(repository, request.Assignment.Agent.ID)
+	if err != nil {
+		return PlannerOutput{}, err
+	}
+	workspace, err := engine.MaterializePlanningWorkspace(request.Plan.ID, request.Plan.Subject.Revision)
+	if err != nil {
+		return PlannerOutput{}, err
+	}
+	defer workspace.Remove()
+
+	// The ATTEMPT is deliberately not stated here. InvokePlanner derives it
+	// from the durable transcript evidence, and hardcoding 1 made every retry
+	// collide with the first attempt's create-once transcript: the provider ran
+	// again - a real invocation, every tick - and then died storing its answer.
+	// The wall bound the stage states - which the assigned profile may have
+	// narrowed, and which the plan's remaining headroom may narrow further -
+	// bounds the invocation itself. Computing it and not passing it made the
+	// narrowing decorative.
+	//
+	// A stage that states no wall bound, under a plan that states none either,
+	// still gets one: the operator's configured run wall limit, which is what
+	// every producer invocation is bounded by. Zero here meant NO deadline at
+	// all, so the one stage type that runs unattended against a provider was
+	// the only one that could run forever.
+	budgets := ProviderBudget{WallLimit: engine.planningWallLimit(request.WallSeconds)}
+	return InvokePlanner(ctx, PlannerInput{
+		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Budgets: budgets,
+		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),
+		ProfileID: request.Assignment.Profile.ID, Model: request.Assignment.Agent.Model,
+		Workspace: workspace, Contract: request.Contract,
+		Objective:      request.Stage.Objective,
+		Base:           Ref{Revision: request.Plan.Subject.Revision},
+		SourceSnapshot: Ref{ID: request.Plan.ID, Revision: request.Plan.Digest},
+		ControllerID:   engine.ControllerIdentityID(),
+		Current:        &request.Plan,
+		AvailableRoles: domain.EngineeringRoles(), AvailableCapabilities: domain.EngineeringCapabilities(),
+		Artifacts: engine.PlanningArtifacts(),
+	})
+}
+
+// reconcilePlans advances every plan the supervisor governs.
+//
+// A per-plan failure is REPORTED, never returned, for exactly the reason a
+// per-run failure is: one plan whose agent is unavailable must not stop the
+// runtime, and a plan that cannot resolve a stage is a state an operator acts
+// on rather than an outage.
+func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
+	if s.deps.Plans.Store == nil {
+		return nil
+	}
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	plans, err := s.deps.Store.Plans()
+	if err != nil {
+		return []PlanTickReport{{Waiting: boundedDetail(err.Error())}}
+	}
+	reports := make([]PlanTickReport, 0, len(plans))
+	for _, plan := range plans {
+		repository, issue, found, err := s.deps.Store.PlanSource(plan.ID)
+		if err != nil {
+			reports = append(reports, PlanTickReport{PlanID: plan.ID, Waiting: boundedDetail(err.Error())})
+			continue
+		}
+		if !found || issue <= 0 {
+			// A plan with no recorded source cannot create a run: every stage
+			// run answers the source the plan was proposed for. Saying so is
+			// more useful than silently skipping it.
+			reports = append(reports, PlanTickReport{PlanID: plan.ID, Waiting: "no source issue is recorded for this plan"})
+			continue
+		}
+		if _, governed := s.governedRepository(repository); !governed {
+			reports = append(reports, PlanTickReport{PlanID: plan.ID, Waiting: "repository " + repository + " is not governed by this supervisor"})
+			continue
+		}
+		reconciler := PlanReconciler{
+			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.deps.Plans,
+			Repository: repository, Issue: issue,
+			Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
+				return s.engine(repository, agentID)
+			},
+			// A decomposition stage runs through the engine bound to the agent
+			// its assignment resolved to, in the same verified non-mutating mode
+			// the initial planner uses. The supervisor supplies the seam and
+			// learns nothing about providers.
+			Planner: s.planningSeam(repository),
+		}
+		report, err := reconciler.Reconcile(ctx, plan.ID)
+		if err != nil {
+			report.PlanID = plan.ID
+			report.Waiting = boundedDetail(err.Error())
+		}
+		reports = append(reports, report)
+	}
+	return reports
 }

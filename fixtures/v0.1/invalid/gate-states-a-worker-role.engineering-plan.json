@@ -1,0 +1,41 @@
+{
+  "schema_version": "0.1",
+  "id": "plan-gate-with-worker",
+  "revision": 1,
+  "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "objective": "A gate that claims to be performed by a worker.",
+  "subject": {
+    "repository": "acme/repo",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "budget_envelope": {
+    "max_child_runs": 2,
+    "max_concurrency": 1,
+    "max_provider_invocations": 4
+  },
+  "stages": [
+    {
+      "id": "assurance",
+      "kind": "assurance_gate",
+      "role": "reviewer",
+      "required_claims": [
+        "claim-tests"
+      ]
+    }
+  ],
+  "provenance": {
+    "compiler_version": "0.1",
+    "project_model": {
+      "id": "m",
+      "revision": "1"
+    },
+    "policy": {
+      "id": "p",
+      "revision": "1"
+    },
+    "contract": {
+      "id": "c",
+      "revision": "1"
+    }
+  }
+}

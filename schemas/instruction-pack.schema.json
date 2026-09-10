@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/instruction-pack.schema.json",
+  "title": "InstructionPack v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "revision",
+    "digest",
+    "source",
+    "instructions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "id": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "revision": {
+      "$ref": "#/$defs/non_empty_string"
+    },
+    "digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "source": {
+      "$ref": "#/$defs/artifact_source"
+    },
+    "instructions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/non_empty_string"
+      },
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "location"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "operator_config",
+            "operator_file"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    }
+  }
+}

@@ -17,6 +17,21 @@ const (
 	EngineeringWorkContract = "engineering-work-contract"
 	EvidenceBundle          = "evidence-bundle"
 	ProjectModel            = "project-model"
+	// The M2 planning artifacts. They follow exactly the same discipline as
+	// the kernel contracts above - one schema, valid and invalid fixtures, one
+	// validation path - because a second validation framework beside this one
+	// would be a second definition of what a durable artifact is.
+	AgentAssignment         = "agent-assignment"
+	AgentProfile            = "agent-profile"
+	ContextPolicy           = "context-policy"
+	EngineeringPlan         = "engineering-plan"
+	EngineeringPlanTemplate = "engineering-plan-template"
+	InstructionPack         = "instruction-pack"
+	PlanRevisionProposal    = "plan-revision-proposal"
+	// PlanningVocabulary is not a document type. It is the one definition of
+	// the role and capability catalogues, referenced by the schemas that used
+	// to restate them, and it is compiled here so those references resolve.
+	PlanningVocabulary = "planning-vocabulary"
 )
 
 //go:embed *.schema.json
@@ -41,6 +56,14 @@ func mustCompile() map[string]*jsonschema.Schema {
 		EngineeringWorkContract,
 		EvidenceBundle,
 		ProjectModel,
+		AgentAssignment,
+		AgentProfile,
+		ContextPolicy,
+		EngineeringPlan,
+		EngineeringPlanTemplate,
+		InstructionPack,
+		PlanRevisionProposal,
+		PlanningVocabulary,
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()
@@ -58,10 +81,26 @@ func mustCompile() map[string]*jsonschema.Schema {
 		if err := compiler.AddResource(file, document); err != nil {
 			panic(err)
 		}
+		// ALSO under the document's own $id. A `$ref` inside a schema resolves
+		// against that schema's base URI, which is its $id - so a reference
+		// between two of these files becomes the https form, and without this
+		// the compiler would try to fetch it. Registering both names is what
+		// lets one schema reference another with no network and no second copy
+		// of the referenced definition.
+		if id, ok := document.(map[string]any)["$id"].(string); ok && id != "" {
+			if err := compiler.AddResource(id, document); err != nil {
+				panic(err)
+			}
+		}
 	}
 
 	compiled := make(map[string]*jsonschema.Schema, len(names))
 	for _, name := range names {
+		if name == PlanningVocabulary {
+			// A vocabulary is referenced, never validated against: no artifact
+			// is "a planning vocabulary".
+			continue
+		}
 		validator, err := compiler.Compile(name + ".schema.json")
 		if err != nil {
 			panic(err)

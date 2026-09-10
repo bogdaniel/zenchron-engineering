@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -41,13 +42,91 @@ type CommandExecutor interface {
 type OSCommandExecutor struct{}
 
 func (OSCommandExecutor) LookPath(name string) error { _, err := exec.LookPath(name); return err }
+
+// maxCapturedProcessBytes bounds what one child process stream can make this
+// controller hold. A provider is a subprocess whose output volume nothing here
+// controls - a test loop it starts can print without end - and an unbounded
+// capture turns that into the controller's memory, then into a transcript on
+// disk, then into a whole-file read when the next attempt replays it.
+//
+// It is a var only so a test can lower it and drive a real process through the
+// real path rather than asserting against a hand-built buffer.
+var maxCapturedProcessBytes = 8 << 20
+
+// boundedBuffer captures at most limit bytes and counts the rest.
+//
+// Write always reports the full length: a short write would give the child an
+// I/O error on its own stdout, which is a different behaviour from being
+// noisy, and the bound exists to protect this process rather than to punish
+// that one.
+type boundedBuffer struct {
+	limit   int
+	buf     []byte
+	dropped int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - len(b.buf); room > 0 {
+		if len(p) <= room {
+			b.buf = append(b.buf, p...)
+			return len(p), nil
+		}
+		b.buf = append(b.buf, p[:room]...)
+		b.dropped += len(p) - room
+		return len(p), nil
+	}
+	b.dropped += len(p)
+	return len(p), nil
+}
+
+// Bytes is the captured output, and it SAYS when it is not all of it. Silent
+// truncation would make a transcript that reads as a complete record of what
+// the provider said.
+func (b *boundedBuffer) Bytes() []byte {
+	// A capture that was never cut is returned EXACTLY as the process produced
+	// it. The rune trim below exists because the bound can land inside a
+	// character; where no bound was reached there is no such split, and
+	// trimming anyway removed real trailing bytes from complete output - a
+	// legitimate final U+FFFD, or binary ending on a lead byte - while the
+	// comment claimed such output was left as captured.
+	if b.dropped == 0 {
+		return b.buf
+	}
+	// Back up to the last rune that starts within three bytes of the end and
+	// drop it if it is incomplete. Output that is not UTF-8 at all is left
+	// where it was cut rather than walked backwards looking for a boundary
+	// that does not exist.
+	captured := b.buf
+	trimmed := 0
+	for i := 1; i <= utf8.UTFMax-1 && i <= len(captured); i++ {
+		start := len(captured) - i
+		if !utf8.RuneStart(captured[start]) {
+			continue
+		}
+		if r, size := utf8.DecodeRune(captured[start:]); r == utf8.RuneError || size != i {
+			captured, trimmed = captured[:start], i
+		}
+		break
+	}
+	// The notice counts what this buffer did NOT return, which includes the
+	// bytes the trim removed. Reporting only the refused writes would state an
+	// exact number that is short by up to three.
+	omitted := b.dropped + trimmed
+	// A fresh slice: appending onto `captured` would write the notice into the
+	// buffer's own array, over the bytes it just trimmed, and a second read
+	// would return that.
+	notice := fmt.Sprintf("\n[truncated by Zenchron: %d further bytes were produced and not captured]\n", omitted)
+	return append(append(make([]byte, 0, len(captured)+len(notice)), captured...), notice...)
+}
+
 func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir, cmd.Env = dir, env
-	var out, errOut strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &errOut
+	out := &boundedBuffer{limit: maxCapturedProcessBytes}
+	errOut := &boundedBuffer{limit: maxCapturedProcessBytes}
+	cmd.Stdout, cmd.Stderr = out, errOut
 	err := runBoundedProcess(ctx, cmd, grace)
-	result := CommandOutput{Stdout: []byte(out.String()), Stderr: []byte(errOut.String())}
+	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
 	if exit, ok := err.(*exec.ExitError); ok {
 		result.ExitCode = exit.ExitCode()
 	}
@@ -725,6 +804,28 @@ func attemptObservations(transcript []byte) []byte {
 // percent-encoded rather than trusted - an identity is not a path until
 // something makes it one, and "..", a separator or a NUL inside a component
 // must not be able to become one.
+// NextAttempt is the first attempt number for which no transcript exists.
+//
+// It reads the durable evidence rather than a counter, because the evidence is
+// what the create-once transcript rule is about: an attempt whose transcript is
+// already stored happened, and the next invocation is the next attempt. A store
+// it cannot read answers 1, which is the honest default - the write that
+// follows will refuse if that turns out to collide.
+func (s ArtifactStore) NextAttempt(providerID string, attempt ExecutionAttemptRef) int {
+	const maxProbedAttempts = 1024
+	for candidate := 1; candidate <= maxProbedAttempts; candidate++ {
+		attempt.Attempt = candidate
+		prefix, err := attemptTranscriptPrefix(providerID, attempt)
+		if err != nil {
+			return 1
+		}
+		if _, err := os.Stat(filepath.Join(s.Root, prefix+".raw.log")); err != nil {
+			return candidate
+		}
+	}
+	return maxProbedAttempts
+}
+
 func attemptTranscriptPrefix(providerID string, attempt ExecutionAttemptRef) (string, error) {
 	if err := attempt.Validate(); err != nil {
 		return "", err
@@ -892,10 +993,28 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + feedbackBlock(r.Feedback)
+	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback)
+}
+
+// planningEnvelope is the envelope for a NON-MUTATING invocation. It is a
+// separate sentence rather than a flag inside the mutating one because the two
+// say opposite things: the ordinary envelope tells a worker which directory it
+// may change, and this one tells it that it may change nothing at all.
+//
+// The provider mode is what actually enforces this, and the runtime verifies
+// the workspace afterwards. The text exists so the model is not asked to guess
+// what the restriction it is running under means.
+func planningEnvelope(r ExecutionRequest) string {
+	return fmt.Sprintf("Read %s to reason about the work. This invocation is NON-MUTATING: make no edit, no commit and no network request, and produce only the structured answer requested. Run=%s source=%s controller=%s base=%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s.",
+		r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Contract.ID, r.Contract.Revision, r.Purpose,
+		r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "),
+		strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "))
 }
 
 func providerEnvelope(r ExecutionRequest) string {
+	if r.Mode == domain.InvocationModeNonMutatingPlanning {
+		return planningEnvelope(r)
+	}
 	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %v. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), r.Findings)
 }
 

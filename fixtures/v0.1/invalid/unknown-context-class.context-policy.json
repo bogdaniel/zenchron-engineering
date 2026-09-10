@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "id": "everything",
+  "revision": "1",
+  "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source": {
+    "type": "operator_config",
+    "location": "context_policies.everything"
+  },
+  "exclude": [
+    "operator_credentials"
+  ]
+}

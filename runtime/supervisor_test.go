@@ -19,6 +19,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -671,7 +674,7 @@ func TestOneSupervisorDrivesEachRunWithItsOwnAgent(t *testing.T) {
 
 	// And each run's binding is unchanged: being driven is not a handoff.
 	for runID, agentID := range started {
-		if recorded := fixture.state(runID).recordedAgent().AgentID; recorded != agentID {
+		if recorded := recordedAgentOf(t, fixture.state(runID)).AgentID; recorded != agentID {
 			t.Fatalf("run %s was bound to %q and is now %q", runID, agentID, recorded)
 		}
 	}
@@ -710,7 +713,7 @@ func TestSupervisorAcceptsASubmissionForAnyConfiguredAgent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("submitting issue %d to agent %q was refused: %v", issue, agentID, err)
 		}
-		if recorded := fixture.state(outcome.RunID).recordedAgent().AgentID; recorded != agentID {
+		if recorded := recordedAgentOf(t, fixture.state(outcome.RunID)).AgentID; recorded != agentID {
 			t.Fatalf("issue %d was bound to %q, want %q", issue, recorded, agentID)
 		}
 	}
@@ -1454,7 +1457,7 @@ func TestASupervisorRestartResumesWorkWithoutDuplicatingIt(t *testing.T) {
 	// The journalled binding is the authority. Reading it here also stops the
 	// comparison below from being satisfied by two empty strings, which is what
 	// it silently was when this test was first written against an unbound run.
-	boundAgent := fixture.state(runID).recordedAgent().AgentID
+	boundAgent := recordedAgentOf(t, fixture.state(runID)).AgentID
 	if boundAgent == "" {
 		t.Fatal("the run carries no agent binding, so the restart comparison would prove nothing")
 	}
@@ -1509,7 +1512,7 @@ func TestASupervisorRestartResumesWorkWithoutDuplicatingIt(t *testing.T) {
 	// The binding survives the process, not merely the tick. A restart that
 	// re-derived the agent from today's default would silently move a run to a
 	// different worker, which is the failure this is really guarding.
-	if resumedAgent := fixture.state(runID).recordedAgent().AgentID; resumedAgent != boundAgent {
+	if resumedAgent := recordedAgentOf(t, fixture.state(runID)).AgentID; resumedAgent != boundAgent {
 		t.Fatalf("the agent binding changed across the restart: %q then %q", boundAgent, resumedAgent)
 	}
 	if resumed.Base.Revision != run.Base.Revision {
@@ -1750,4 +1753,214 @@ func TestConcurrentSupervisorStartsElectOneWinner(t *testing.T) {
 	if winners != 1 {
 		t.Fatalf("%d supervisors bound the control endpoint at once, want exactly 1", winners)
 	}
+}
+
+// A control command's deadline covers the work it asks for.
+//
+// `plan revise` clones a repository and invokes a planner in its own
+// non-mutating mode, which is bounded in minutes. A 30-second deadline did not
+// stop that work - the supervisor finished and persisted the revision either
+// way - it only stopped the operator from being told, which is the effect
+// without the answer.
+func TestAControlDeadlineCoversTheWorkTheCommandAsksFor(t *testing.T) {
+	if quick, revise := ControlDeadline(ControlStatus), ControlDeadline(ControlPlanRevise); revise <= quick {
+		t.Fatalf("a plan revision is allowed %s and a status read %s: the long command needs the longer deadline", revise, quick)
+	}
+	if revise := ControlDeadline(ControlPlanRevise); revise < 10*time.Minute {
+		t.Fatalf("a plan revision is allowed %s, which is under the planner's own bound", revise)
+	}
+	if unknown := ControlDeadline("something-else"); unknown != ControlDeadline(ControlStatus) {
+		t.Fatalf("an unrecognized command is allowed %s, want the ordinary deadline", unknown)
+	}
+}
+
+// An operator's note reaches the journal the same way whichever process
+// records the decision.
+//
+// The local path truncates a note to the payload field bound before
+// journalling; the delegated path sent it whole and let the request size bound
+// refuse the connection, so a long note failed the command in one terminal and
+// was accepted in the other.
+func TestALongNoteIsTruncatedRatherThanRefused(t *testing.T) {
+	long := strings.Repeat("z", 32<<10)
+	bounded := BoundedNote(long)
+	if len(bounded) != maxPayloadFieldBytes {
+		t.Fatalf("a note of %d bytes bounded to %d, want the payload field bound %d", len(long), len(bounded), maxPayloadFieldBytes)
+	}
+	if short := BoundedNote("read it"); short != "read it" {
+		t.Fatalf("a short note was altered: %q", short)
+	}
+
+	// And the bounded request fits the socket's own request bound with room to
+	// spare, so the command is never refused for its note.
+	encoded, err := json.Marshal(ControlRequest{
+		Command: ControlPlanApprove, PlanID: "plan-x", Revision: 1,
+		Digest: strings.Repeat("a", 64), Note: bounded,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= maxControlRequestBytes {
+		t.Fatalf("a bounded request is %d bytes, at or above the %d-byte request bound", len(encoded), maxControlRequestBytes)
+	}
+}
+
+// Truncation must not split a rune.
+//
+// A byte cut through a multi-byte character produces invalid UTF-8; json.Marshal
+// substitutes U+FFFD - three bytes for one - so the field grows PAST the bound it
+// was just cut to and the journal refuses the append. The truncation meant to
+// make a note storable is what stopped it from being stored, on both the local
+// and the delegated path.
+func TestTruncationNeverSplitsARune(t *testing.T) {
+	note := strings.Repeat("a", maxPayloadFieldBytes-1) + strings.Repeat("ă", 4)
+	for name, bounded := range map[string]string{
+		"BoundedNote":    BoundedNote(note),
+		"boundedDetail":  boundedDetail(note),
+		"boundUntrusted": boundUntrusted(note, maxPayloadFieldBytes),
+	} {
+		if len(bounded) > maxPayloadFieldBytes {
+			t.Fatalf("%s produced %d bytes, above the %d-byte bound", name, len(bounded), maxPayloadFieldBytes)
+		}
+		if !utf8.ValidString(bounded) {
+			t.Fatalf("%s produced invalid UTF-8", name)
+		}
+		// The journal's own check is what this has to survive: marshalling must
+		// not grow the field past the bound.
+		encoded, err := json.Marshal(map[string]string{"note": bounded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var round map[string]string
+		if err := json.Unmarshal(encoded, &round); err != nil {
+			t.Fatal(err)
+		}
+		if len(round["note"]) > maxPayloadFieldBytes {
+			t.Fatalf("%s grew to %d bytes through a JSON round trip", name, len(round["note"]))
+		}
+	}
+}
+
+// The plan lock is not held across a provider call.
+//
+// It serializes read-then-append against an operator decision, which takes
+// microseconds. Held across a repository clone and a live planning invocation,
+// it stalled every run in the fleet - the tick takes the same lock before it
+// drives anything - so a single delegated revision froze work that had nothing
+// to do with plans.
+
+// Every truncator in the package cuts the same way.
+//
+// The rune-splitting cut was found twice in stored fields and fixed twice, in
+// two separate helpers, while the tool-result bound - the one a non-ASCII
+// repository hits on every single read - kept cutting by raw byte offset. They
+// are one function now, and this is what says so.
+//
+// The binary case is the reason it backs up over continuation bytes rather than
+// re-validating the prefix: a diff of a binary file is not valid UTF-8 anywhere,
+// and a validity-based cut walks such a string all the way down to nothing.
+func TestEveryTruncatorCutsOnARuneBoundary(t *testing.T) {
+	const limit = 9
+	text := "abcdefgh" + strings.Repeat("ă", 4)
+	for name, bounded := range map[string]string{
+		"boundedTo":      boundedTo(text, limit),
+		"boundUntrusted": boundUntrusted(text, limit),
+		"ReadOnlyView":   ReadOnlyView{MaxResultBytes: limit}.bound(text),
+		"ToolSurface":    ToolSurface{MaxResultBytes: limit}.bound(text),
+	} {
+		// The tool-result bounds append a truncation notice, so the assertion
+		// is about the cut itself: the text kept must be whole characters.
+		kept, _, _ := strings.Cut(bounded, "\n[truncated by Zenchron")
+		if len(kept) > limit {
+			t.Fatalf("%s kept %d bytes, above the %d-byte limit", name, len(kept), limit)
+		}
+		if !utf8.ValidString(kept) {
+			t.Fatalf("%s produced invalid UTF-8: %q", name, kept)
+		}
+	}
+
+	// A bounded JOURNAL field survives its own encoding. The bound is measured
+	// before marshalling and json.Marshal expands each invalid byte into a
+	// three-byte replacement character, so binary content cut to fit could
+	// still overflow the bound once encoded - and that append is what the
+	// bound exists to keep possible.
+	binaryField := strings.Repeat("a", maxPayloadFieldBytes-8) + string([]byte{0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87})
+	for name, bounded := range map[string]string{
+		"BoundedNote":   BoundedNote(binaryField),
+		"boundedDetail": boundedDetail(binaryField),
+	} {
+		encoded, err := json.Marshal(map[string]string{"note": bounded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var round map[string]string
+		if err := json.Unmarshal(encoded, &round); err != nil {
+			t.Fatal(err)
+		}
+		if len(round["note"]) > maxPayloadFieldBytes {
+			t.Fatalf("%s encoded binary content to %d bytes, above the %d-byte bound", name, len(round["note"]), maxPayloadFieldBytes)
+		}
+	}
+
+	// Not valid UTF-8 anywhere. It must still be cut near the limit.
+	binary := string([]byte{0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89})
+	if cut := boundedTo(binary, 6); len(cut) != 6 {
+		t.Fatalf("a binary string bounded to 6 bytes became %d bytes", len(cut))
+	}
+}
+
+func TestThePlanLockIsReleasedAcrossAProviderCall(t *testing.T) {
+	// The REAL seam, from the supervisor that builds it for the reconciler. A
+	// hand-written replica of these three lines would keep passing through any
+	// regression in them, which is the only thing this test exists to catch.
+	invoked, released := make(chan struct{}), make(chan struct{})
+	agents := handoffRegistry(t)
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: store, Owner: "owner-1", Agents: agents,
+		Repositories: []GitHubRepo{{Owner: "acme", Name: "repo"}},
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) {
+			// Standing in for the clone and the provider call: the slow part,
+			// which must run with the lock released.
+			close(invoked)
+			<-released
+			return nil, errors.New("this test needs no engine")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seam := supervisor.planningSeam("acme/repo")
+
+	supervisor.plansMu.Lock()
+	go func() {
+		<-invoked
+		// A decision arriving while the provider runs must be able to take the
+		// lock; if the reconciler still held it, this would block until the
+		// invocation finished.
+		supervisor.plansMu.Lock()
+		supervisor.plansMu.Unlock()
+		close(released)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := seam(context.Background(), PlanDecompositionRequest{
+			Plan:       domain.EngineeringPlan{ID: "plan-1", Revision: 1},
+			Assignment: domain.AgentAssignment{Agent: domain.AgentBinding{ID: "codex"}},
+		}); err == nil {
+			t.Error("the seam reported success without an engine")
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a decision could not take the plan lock while a provider call was in flight")
+	}
+	supervisor.plansMu.Unlock()
 }

@@ -62,8 +62,15 @@ func KnownBudget(remaining int64) BudgetDimension {
 // forward unchanged. Budgets do not reset on a provider change; that is the
 // whole point of recording them here.
 type RemainingBudgets struct {
-	WallSeconds         BudgetDimension `json:"wall_seconds"`
-	ExecutionAttempts   BudgetDimension `json:"execution_attempts"`
+	WallSeconds       BudgetDimension `json:"wall_seconds"`
+	ExecutionAttempts BudgetDimension `json:"execution_attempts"`
+	// ProviderInvocations is the RUN TOTAL left - every execution invocation of
+	// every binding, counted together - which is a different bound from the
+	// per-binding retry allowance above it. A record that carried only the
+	// retry allowance described itself as the complete cumulative allowance
+	// while omitting the one ceiling a successor cannot recover by starting a
+	// new binding.
+	ProviderInvocations BudgetDimension `json:"provider_invocations"`
 	RemediationAttempts BudgetDimension `json:"remediation_attempts"`
 	AssuranceAttempts   BudgetDimension `json:"assurance_attempts"`
 	Continuations       BudgetDimension `json:"continuations"`
@@ -198,21 +205,38 @@ func (r AgentHandoffRecord) TrustDowngradeRefused() bool {
 // created before the registry existed reads back as the zero identity, which is
 // its documented legacy meaning: the single provider the operator configuration
 // named at the time. No identity is invented for it.
-func (s *runState) recordedAgent() AgentIdentity {
+//
+// An assignment that IS present and cannot be read is a different thing
+// entirely, and it is an error rather than a zero identity. The zero identity
+// means "unbound", and unbound is a permission here, not an absence: the
+// controller backfills a binding onto an unbound run from whichever agent is
+// running now, and a zero From makes TrustDowngradeRefused false. An
+// unreadable assignment answered as "unbound" would therefore let a corrupt
+// event rebind a protected run to an operator-trusted worker and record the
+// rebinding as legitimate.
+func (s *runState) recordedAgent() (AgentIdentity, error) {
 	for _, event := range s.events {
 		if event.Type != EventRunAgentAssigned {
 			continue
 		}
-		var payload AgentAssignedPayload
-		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &payload) == nil {
-			return AgentIdentity{
-				AgentID: payload.AgentID, Kind: payload.ProviderKind,
-				TrustMode: payload.TrustMode, Model: payload.Model,
-			}
+		if len(event.Payload) == 0 {
+			// A journal that recorded the event with no content at all. The
+			// previous code tolerated exactly this and read it as the legacy
+			// zero identity; failing every adoption pass over such a journal
+			// would be a worse answer than the meaning it already had. A
+			// payload that HAS content and does not decode is still an error.
+			break
 		}
-		break
+		var payload AgentAssignedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return AgentIdentity{}, fmt.Errorf("run %s records an agent assignment that cannot be read: %w", s.run.ID, err)
+		}
+		return AgentIdentity{
+			AgentID: payload.AgentID, Kind: payload.ProviderKind,
+			TrustMode: payload.TrustMode, Model: payload.Model,
+		}, nil
 	}
-	return AgentIdentity{}
+	return AgentIdentity{}, nil
 }
 
 // remainingBudgets is the cumulative allowance left on this run. The runtime's
@@ -220,7 +244,7 @@ func (s *runState) recordedAgent() AgentIdentity {
 // dimensions stay unknown, because no configured worker in #63 reports them for
 // a subscription CLI and inventing a number would be worse than saying so.
 func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets {
-	budgets := r.deps.Budgets.defaults()
+	budgets := state.budgets()
 	// ACTIVE time, by the same rule conditions() enforces the budget with.
 	// Raw elapsed contradicted it: a run that sat overnight awaiting review
 	// would record wall_seconds: 0 in a durable handoff record while the
@@ -242,9 +266,22 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	if continuations < 0 {
 		continuations = 0
 	}
+	// A run total is OPTIONAL - a plan states it, an ordinary run may not - and
+	// where none was stated the answer is not zero and not a number the runtime
+	// made up. It is unknown, by the same rule the provider-reported dimensions
+	// follow.
+	invocations := UnknownBudget()
+	if limit := state.providerInvocationLimit(); limit > 0 {
+		left := limit - state.projection.Attempts[OpExecutionInvoke]
+		if left < 0 {
+			left = 0
+		}
+		invocations = KnownBudget(int64(left))
+	}
 	return RemainingBudgets{
 		WallSeconds:         KnownBudget(wall),
 		ExecutionAttempts:   remaining(OpExecutionInvoke, budgets.MaxExecutionAttempts),
+		ProviderInvocations: invocations,
 		RemediationAttempts: remaining(OpRemediationGofmt, budgets.MaxRemediationAttempts),
 		AssuranceAttempts:   remaining(OpAssuranceGo, budgets.MaxAssuranceAttempts),
 		Continuations:       KnownBudget(int64(continuations)),
@@ -272,11 +309,15 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 	if err != nil {
 		return AgentHandoffRecord{}, err
 	}
+	from, err := state.recordedAgent()
+	if err != nil {
+		return AgentHandoffRecord{}, err
+	}
 	record := AgentHandoffRecord{
 		RunID:             runID,
 		CandidateRevision: state.projection.CandidateRevision,
 		CandidateTree:     state.projection.CandidateTree,
-		From:              state.recordedAgent(),
+		From:              from,
 		To: AgentIdentity{
 			AgentID: target.ID, Kind: target.Kind,
 			TrustMode: target.TrustMode, Model: target.Model,

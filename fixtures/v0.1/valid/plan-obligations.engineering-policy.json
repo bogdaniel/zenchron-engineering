@@ -1,0 +1,56 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-plan-obligations",
+  "revision": "1",
+  "rules": {
+    "RULE-SECURITY-REVIEW": {
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": true
+      },
+      "effect": {
+        "required_claims": {
+          "claim-security-review": {
+            "evidence_class": "security_review",
+            "independent_from_change_producer": true
+          }
+        },
+        "obligations": {
+          "security-review": {
+            "statement": "An independent security review must pass.",
+            "required_claims": ["claim-security-review"]
+          }
+        },
+        "engineering_requirements": {
+          "roles": [
+            {
+              "role": "security_reviewer",
+              "capabilities": ["security_review"],
+              "independence": {
+                "dimension": "vendor_family",
+                "human_substitution_permitted": true
+              },
+              "statement": "A security reviewer from a different vendor family than the material producer is required."
+            }
+          ],
+          "capabilities": ["repository_analysis"],
+          "gates": [
+            {
+              "kind": "assurance_gate",
+              "required_claims": ["claim-security-review"],
+              "statement": "Assurance must record the independent security review before publication is decided."
+            },
+            {
+              "kind": "human_decision_gate",
+              "action": {
+                "type": "git.pull_request.create",
+                "target": "acme/payments"
+              },
+              "statement": "A person decides publication for a change on the authentication boundary."
+            }
+          ]
+        }
+      }
+    }
+  }
+}

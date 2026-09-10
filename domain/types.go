@@ -147,6 +147,17 @@ type PolicyEffect struct {
 	Permissions               *[]Action                     `json:"permissions,omitempty"`
 	Prohibitions              *[]Action                     `json:"prohibitions,omitempty"`
 	AuthorityConditions       *[]AuthorityCondition         `json:"authority_conditions,omitempty"`
+	// EngineeringRequirements are the PLAN-SHAPED obligations policy emits:
+	// which roles must be fulfilled, which capabilities must exist somewhere in
+	// the plan, which independence a reviewing role must hold, and which typed
+	// gates must appear. They compile through this same compiler into the work
+	// contract, which is what keeps EngineeringPolicy the ONLY obligation
+	// system: there is no PlannerPolicy and no workflow-local rule engine.
+	//
+	// It is deliberately not a workflow. A rule states an obligation - "a
+	// security reviewer independent of the material producer is required" - and
+	// never an ordered list of agents to run.
+	EngineeringRequirements *PlanRequirements `json:"engineering_requirements,omitempty"`
 }
 
 // Requirement states a contract invariant or obligation.
@@ -224,7 +235,13 @@ type EngineeringWorkContract struct {
 	Permissions         []Action                 `json:"permissions"`
 	Prohibitions        []Action                 `json:"prohibitions"`
 	AuthorityConditions []AuthorityCondition     `json:"authority_conditions"`
-	Provenance          ContractProvenance       `json:"provenance"`
+	// PlanRequirements are the compiled plan-shaped obligations. It is a
+	// POINTER so a contract compiled from a policy that states none is
+	// byte-identical to one compiled before this member existed - contract
+	// revisions and run identities are derived from that document, and an added
+	// empty object would re-identify every historical contract.
+	PlanRequirements *PlanRequirements  `json:"plan_requirements,omitempty"`
+	Provenance       ContractProvenance `json:"provenance"`
 }
 
 // ProducerType identifies the class of an evidence producer.

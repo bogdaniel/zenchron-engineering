@@ -229,6 +229,9 @@
           "items": {
             "$ref": "#/$defs/non_empty_string"
           }
+        },
+        "engineering_requirements": {
+          "$ref": "#/$defs/engineering_requirements"
         }
       }
     },
@@ -245,6 +248,127 @@
         },
         "effect": {
           "$ref": "#/$defs/effect"
+        }
+      }
+    },
+    "independence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension"
+      ],
+      "properties": {
+        "dimension": {
+          "enum": [
+            "agent_profile",
+            "execution_agent",
+            "provider_kind",
+            "vendor_family",
+            "human"
+          ]
+        },
+        "different_from": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true
+        },
+        "human_substitution_permitted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "role_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "statement"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "independence": {
+          "$ref": "#/$defs/independence"
+        },
+        "trust_requirement": {
+          "enum": [
+            "operator_trusted",
+            "protected"
+          ]
+        },
+        "statement": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "gate_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "statement"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "assurance_gate",
+            "human_decision_gate"
+          ]
+        },
+        "required_claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/non_empty_string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "action": {
+          "$ref": "#/$defs/action"
+        },
+        "statement": {
+          "$ref": "#/$defs/non_empty_string"
+        }
+      }
+    },
+    "engineering_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/role_requirement"
+          },
+          "minItems": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/capability"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate_requirement"
+          },
+          "minItems": 1
         }
       }
     }

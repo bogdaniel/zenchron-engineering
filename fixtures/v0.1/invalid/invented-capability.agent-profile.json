@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "deployer",
+  "version": 1,
+  "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "execution_agent": "codex",
+  "capabilities": [
+    "deploy_production"
+  ],
+  "trust_requirement": "operator_trusted",
+  "source": {
+    "type": "operator_config",
+    "location": "profiles.deployer"
+  }
+}

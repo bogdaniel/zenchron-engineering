@@ -25,6 +25,13 @@ zenchron-engineering serve
 zenchron-engineering autonomy run issue 123 --agent codex
 zenchron-engineering autonomy run issue 124 --agent claude
 
+# 4b. Or state the outcome and let it plan the work: which roles are needed,
+#     which of your workers is eligible for each, what must be independent of
+#     what. It proposes; nothing runs until you approve.
+zenchron-engineering autonomy plan issue 125 --template zenchron-feature
+zenchron-engineering autonomy plan show PLAN --text
+zenchron-engineering autonomy plan approve PLAN --revision N --digest SHA256
+
 # 5. Watch all of it from one place.
 zenchron-engineering autonomy status --text
 zenchron-engineering autonomy logs RUN --follow
@@ -35,10 +42,15 @@ zenchron-engineering autonomy logs RUN --follow
 # 7. Merge when satisfied. That decision stays yours.
 ```
 
-Start at [`docs/getting-started.md`](docs/getting-started.md).
+Start at [`docs/getting-started.md`](docs/getting-started.md), and read
+[`docs/planning.md`](docs/planning.md) for the planning layer.
 
 ```text
     you                          zenchron-engineering serve                GitHub
+     |                                      |                                |
+     |-- plan issue 125 -------------------->|  compile roles, capabilities,  |
+     |<-- proposed plan + assignments -------|  independence, gates, budget   |
+     |-- plan approve PLAN --revision --digest >| nothing ran before this       |
      |                                      |                                |
      |-- run issue 123 --agent codex ------>|                                |
      |-- run issue 124 --agent claude ----->|                                |
@@ -87,6 +99,7 @@ requires protected execution" - see the known limitations in `ROADMAP.md`.
 | [`docs/running-multiple-tasks.md`](docs/running-multiple-tasks.md) | several at once, and what happens when one merges first |
 | [`docs/github-feedback.md`](docs/github-feedback.md) | the review loop, and who is allowed to direct a worker |
 | [`docs/agents.md`](docs/agents.md) | the workers, trust modes, provenance |
+| [`docs/planning.md`](docs/planning.md) | agent profiles, plan templates, and the approval boundary |
 | [`docs/supervisor.md`](docs/supervisor.md) | `serve`, its control endpoint, drain/shutdown/stop-all |
 | [`docs/configuration.md`](docs/configuration.md) | every configuration member and which layer owns it |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | symptom, cause, fix |
@@ -95,6 +108,8 @@ requires protected execution" - see the known limitations in `ROADMAP.md`.
 | [`docs/architecture.md`](docs/architecture.md) | the Authorization Kernel |
 | [`docs/principles.md`](docs/principles.md) | architectural principles P1-P12 |
 | [`docs/construction-principles.md`](docs/construction-principles.md) | how the code implementing them is built |
+| [`docs/spec/planning-v0.1.md`](docs/spec/planning-v0.1.md) | the normative planning artifacts |
+| [`docs/acceptance/`](docs/acceptance/) | milestone acceptance records and their evidence |
 
 ## Product separation
 
@@ -412,10 +427,15 @@ docs/architecture.md            Authorization Kernel architecture
 docs/adr/                       Architecture decisions
 docs/spec/v0.1.md               Initial domain specification
 docs/spec/runtime-v0.1.md       Local runtime specification
+docs/spec/planning-v0.1.md      Planning artifacts: profiles, templates, plans
+docs/planning.md                The planning layer, for an operator
+docs/acceptance/                Milestone acceptance records and their evidence
 schemas/                        Canonical JSON Schemas and Go validation tests
 domain/                         Go v0.1 representations and canonical JSON codecs
+planning/                       Plan compilation, validation, resolution, context
 reassessment/                   Observed-scope validation and contract reassessment
 runtime/                        Local runtime, adapters, supervisor, scheduler, state
+benchmarks/                     Recorded leverage results, in #66's shape
 fixtures/v0.1/                  Positive and targeted invalid schema fixtures
 cmd/zenchron-engineering/       CLI entry point and composition root
 ```

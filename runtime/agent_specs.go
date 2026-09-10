@@ -95,10 +95,33 @@ var codexSpec = cliAgentSpec{
 			args = append(args, "-c", "sandbox_workspace_write.network_access=false")
 		}
 		args = append(args, "-c", "project_doc_max_bytes=0")
-		if i.Agent.Model != "" {
-			args = append(args, "--model", i.Agent.Model)
+		if i.Model() != "" {
+			args = append(args, "--model", i.Model())
 		}
 		return append(args, "--cd", i.CandidateDir, i.Prompt)
+	},
+	// Codex's own read-only sandbox. The mode is one of the sandbox policy's
+	// stated values, so the same flag the ordinary invocation uses to permit
+	// workspace writes is what withholds them here - there is no second
+	// mechanism to get wrong.
+	ReadOnly: &cliReadOnlyMode{
+		// `read-only` must be a CHOICE of --sandbox, not a phrase somewhere in
+		// the help text - the same association the qwen probe needs, since this
+		// adapter is about to pass `--sandbox read-only` and rely on it.
+		Probe: cliHelpProbe{
+			Args: []string{"exec", "--help"}, Required: []string{"--sandbox"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--sandbox", Value: "read-only"}},
+		},
+		Mode:    "read-only",
+		Sandbox: "read-only",
+		Args: func(i cliInvocation) []string {
+			args := []string{"--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--ignore-user-config",
+				"-c", "sandbox_workspace_write.network_access=false", "-c", "project_doc_max_bytes=0"}
+			if i.Model() != "" {
+				args = append(args, "--model", i.Model())
+			}
+			return append(args, "--cd", i.CandidateDir, i.Prompt)
+		},
 	},
 }
 
@@ -139,10 +162,33 @@ var claudeSpec = cliAgentSpec{
 			mode = "bypassPermissions"
 		}
 		args := []string{"--print", "--permission-mode", mode, "--safe-mode"}
-		if i.Agent.Model != "" {
-			args = append(args, "--model", i.Agent.Model)
+		if i.Model() != "" {
+			args = append(args, "--model", i.Model())
 		}
 		return append(args, i.Prompt)
+	},
+	// Claude Code's `plan` permission mode. It is the session mode in which the
+	// model may read and reason and may not edit, which is exactly what a
+	// planner-role stage needs. The probe requires the quoted choice as the CLI
+	// prints it, so a renamed or removed mode makes the agent ineligible for
+	// planning rather than quietly running it in an editing mode.
+	ReadOnly: &cliReadOnlyMode{
+		// Bound to the FLAG that carries it, like the codex and qwen probes.
+		// Requiring the quoted token alone was tighter than a bare substring
+		// and still not an association: help text that quotes "plan" for any
+		// other reason satisfied it.
+		Probe: cliHelpProbe{
+			Args: []string{"--help"}, Required: []string{"--permission-mode"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--permission-mode", Value: "plan"}},
+		},
+		Mode: "plan",
+		Args: func(i cliInvocation) []string {
+			args := []string{"--print", "--permission-mode", "plan", "--safe-mode"}
+			if i.Model() != "" {
+				args = append(args, "--model", i.Model())
+			}
+			return append(args, i.Prompt)
+		},
 	},
 }
 
@@ -153,6 +199,11 @@ var claudeSpec = cliAgentSpec{
 // everything and is the bypass this runtime never selects on its own. -e none
 // disables extensions, which is the closest thing the CLI offers to Codex's
 // instruction isolation.
+//
+// Gemini also has NO ReadOnly mode here, which is the same kind of honest gap:
+// its approval modes bound what is auto-approved rather than proving the model
+// cannot write, so this adapter is ineligible for planner-role stages instead
+// of claiming a restriction it cannot enforce.
 //
 // SuppressesWorkspaceInstructions is FALSE here, and that is a real difference
 // rather than an oversight: the Gemini CLI exposes no flag that stops it
@@ -176,8 +227,8 @@ var geminiSpec = cliAgentSpec{
 			mode = "yolo"
 		}
 		args := []string{"--approval-mode", mode, "--extensions", "none"}
-		if i.Agent.Model != "" {
-			args = append(args, "--model", i.Agent.Model)
+		if i.Model() != "" {
+			args = append(args, "--model", i.Model())
 		}
 		return append(args, "--prompt", i.Prompt)
 	},
@@ -223,9 +274,32 @@ var qwenSpec = cliAgentSpec{
 			mode = "yolo"
 		}
 		args := []string{"--approval-mode", mode, "--safe-mode"}
-		if i.Agent.Model != "" {
-			args = append(args, "--model", i.Agent.Model)
+		if i.Model() != "" {
+			args = append(args, "--model", i.Model())
 		}
 		return append(args, i.Prompt)
+	},
+	// Qwen Code inherited Gemini CLI's approval-mode flag and gained a `plan`
+	// value of its own. Like every other flag in this file it is PROBED against
+	// the installed binary: this adapter is not live-qualified here, so the
+	// probe is what stands between an upstream difference and a planning
+	// invocation that could write.
+	ReadOnly: &cliReadOnlyMode{
+		// The flag must be there AND `plan` must appear as a choice rather than
+		// as a word in a sentence. A bare substring match on "plan" is
+		// satisfied by "planned" or "explanation", which would let this adapter
+		// believe in a mode the installed binary does not have.
+		Probe: cliHelpProbe{
+			Args: []string{"--help"}, Required: []string{"--approval-mode"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--approval-mode", Value: "plan"}},
+		},
+		Mode: "plan",
+		Args: func(i cliInvocation) []string {
+			args := []string{"--approval-mode", "plan", "--safe-mode"}
+			if i.Model() != "" {
+				args = append(args, "--model", i.Model())
+			}
+			return append(args, i.Prompt)
+		},
 	},
 }

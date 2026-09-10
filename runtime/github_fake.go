@@ -3,14 +3,20 @@ package runtime
 // FakeGitHubAdapter is the in-memory GitHubAdapter ordinary tests use. It needs
 // no token and no network, so `go test ./...` is offline by construction.
 //
-// It is a single-goroutine test double: the state is exported so a test scripts
-// it by assignment, and there is no locking.
+// The state is exported so a test scripts it by assignment. Its METHODS are
+// serialized by one mutex, because the supervisor genuinely drives several runs
+// at once and every one of them reaches this double: a test double that races
+// under the concurrency the product produces reports a defect in itself. The
+// mutex is coarse on purpose - every method here is a map lookup - and it does
+// not make direct field access from a test goroutine safe, which stays the
+// caller's business.
 
 import (
 	"context"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +35,10 @@ type GitHubCall struct {
 }
 
 type FakeGitHubAdapter struct {
+	// mu serializes the adapter's own methods. It is deliberately not exported:
+	// a test scripting fields before the runtime starts needs no lock, and one
+	// reading them while it runs has a race the double cannot fix for it.
+	mu           sync.Mutex
 	Issues       map[int]GitHubIssue
 	PullRequests map[int]GitHubPullRequest
 	// Keyed by the exact head SHA, which is how the real thing is queried.
@@ -92,7 +102,10 @@ func NewFakeGitHubAdapter() *FakeGitHubAdapter {
 	}
 }
 
-func (f *FakeGitHubAdapter) record(call GitHubCall) error {
+// recordLocked appends one invocation and applies the failure seam. The caller
+// holds the mutex, so the Fail hook - which tests use to mutate this double's
+// own state - runs under it too.
+func (f *FakeGitHubAdapter) recordLocked(call GitHubCall) error {
 	f.Calls = append(f.Calls, call)
 	if f.Fail != nil {
 		return f.Fail(call)
@@ -103,6 +116,8 @@ func (f *FakeGitHubAdapter) record(call GitHubCall) error {
 // Methods is the recorded call sequence, for asserting what was and was not
 // invoked.
 func (f *FakeGitHubAdapter) Methods() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	names := make([]string, 0, len(f.Calls))
 	for _, c := range f.Calls {
 		names = append(names, c.Method)
@@ -112,19 +127,25 @@ func (f *FakeGitHubAdapter) Methods() []string {
 
 // Merge and Close script the transitions the reconciler has to observe.
 func (f *FakeGitHubAdapter) Merge(number int, at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	pr := f.PullRequests[number]
 	pr.State, pr.Merged, pr.MergedAt = GitHubClosed, true, at
 	f.PullRequests[number] = pr
 }
 
 func (f *FakeGitHubAdapter) Close(number int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	pr := f.PullRequests[number]
 	pr.State, pr.Merged = GitHubClosed, false
 	f.PullRequests[number] = pr
 }
 
 func (f *FakeGitHubAdapter) Issue(_ context.Context, repo GitHubRepo, number int) (GitHubIssue, error) {
-	if err := f.record(GitHubCall{Method: "Issue", Repo: repo, Number: number}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "Issue", Repo: repo, Number: number}); err != nil {
 		return GitHubIssue{}, err
 	}
 	issue, ok := f.Issues[number]
@@ -135,7 +156,9 @@ func (f *FakeGitHubAdapter) Issue(_ context.Context, repo GitHubRepo, number int
 }
 
 func (f *FakeGitHubAdapter) FindPullRequests(_ context.Context, repo GitHubRepo, headRef, baseRef string) ([]GitHubPullRequest, error) {
-	if err := f.record(GitHubCall{Method: "FindPullRequests", Repo: repo, Ref: headRef, BaseRef: baseRef}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "FindPullRequests", Repo: repo, Ref: headRef, BaseRef: baseRef}); err != nil {
 		return nil, err
 	}
 	var found []GitHubPullRequest
@@ -149,7 +172,9 @@ func (f *FakeGitHubAdapter) FindPullRequests(_ context.Context, repo GitHubRepo,
 }
 
 func (f *FakeGitHubAdapter) CreatePullRequest(_ context.Context, repo GitHubRepo, request GitHubPullRequestCreate) (GitHubPullRequest, error) {
-	if err := f.record(GitHubCall{Method: "CreatePullRequest", Repo: repo, Ref: request.HeadRef, BaseRef: request.BaseRef, Body: request.Body.Body()}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "CreatePullRequest", Repo: repo, Ref: request.HeadRef, BaseRef: request.BaseRef, Body: request.Body.Body()}); err != nil {
 		return GitHubPullRequest{}, err
 	}
 	if request.HeadRef == "" || request.BaseRef == "" || request.Title == "" {
@@ -174,7 +199,9 @@ func (f *FakeGitHubAdapter) CreatePullRequest(_ context.Context, repo GitHubRepo
 }
 
 func (f *FakeGitHubAdapter) UpdatePullRequest(_ context.Context, repo GitHubRepo, number int, update GitHubPullRequestUpdate) (GitHubPullRequest, error) {
-	if err := f.record(GitHubCall{Method: "UpdatePullRequest", Repo: repo, Number: number, Body: update.Body.Body()}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "UpdatePullRequest", Repo: repo, Number: number, Body: update.Body.Body()}); err != nil {
 		return GitHubPullRequest{}, err
 	}
 	pr, ok := f.PullRequests[number]
@@ -189,7 +216,9 @@ func (f *FakeGitHubAdapter) UpdatePullRequest(_ context.Context, repo GitHubRepo
 }
 
 func (f *FakeGitHubAdapter) PullRequest(_ context.Context, repo GitHubRepo, number int) (GitHubPullRequest, error) {
-	if err := f.record(GitHubCall{Method: "PullRequest", Repo: repo, Number: number}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "PullRequest", Repo: repo, Number: number}); err != nil {
 		return GitHubPullRequest{}, err
 	}
 	pr, ok := f.PullRequests[number]
@@ -200,7 +229,9 @@ func (f *FakeGitHubAdapter) PullRequest(_ context.Context, repo GitHubRepo, numb
 }
 
 func (f *FakeGitHubAdapter) Checks(_ context.Context, repo GitHubRepo, headSHA string) (GitHubCheckObservation, error) {
-	if err := f.record(GitHubCall{Method: "Checks", Repo: repo, SHA: headSHA}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "Checks", Repo: repo, SHA: headSHA}); err != nil {
 		return GitHubCheckObservation{}, err
 	}
 	if headSHA == "" {
@@ -215,7 +246,9 @@ func (f *FakeGitHubAdapter) Checks(_ context.Context, repo GitHubRepo, headSHA s
 }
 
 func (f *FakeGitHubAdapter) Reviews(_ context.Context, repo GitHubRepo, number int, headSHA string) (GitHubReviewObservation, error) {
-	if err := f.record(GitHubCall{Method: "Reviews", Repo: repo, Number: number, SHA: headSHA}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "Reviews", Repo: repo, Number: number, SHA: headSHA}); err != nil {
 		return GitHubReviewObservation{}, err
 	}
 	if headSHA == "" {
@@ -239,7 +272,9 @@ func (f *FakeGitHubAdapter) Reviews(_ context.Context, repo GitHubRepo, number i
 }
 
 func (f *FakeGitHubAdapter) CommentOnPullRequest(_ context.Context, repo GitHubRepo, number int, body Publication) error {
-	if err := f.record(GitHubCall{Method: "CommentOnPullRequest", Repo: repo, Number: number, Body: body.Body()}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "CommentOnPullRequest", Repo: repo, Number: number, Body: body.Body()}); err != nil {
 		return err
 	}
 	if body.Body() == "" {
@@ -256,7 +291,9 @@ func (f *FakeGitHubAdapter) CommentOnPullRequest(_ context.Context, repo GitHubR
 // false and the error is nil. Scripting an observation *failure* instead (as
 // opposed to absence) is what Fail is for - the two are never conflated here.
 func (f *FakeGitHubAdapter) RefSHA(_ context.Context, repo GitHubRepo, ref string) (RefObservation, error) {
-	if err := f.record(GitHubCall{Method: "RefSHA", Repo: repo, Ref: ref}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "RefSHA", Repo: repo, Ref: ref}); err != nil {
 		return RefObservation{}, err
 	}
 	sha, ok := f.Refs[ref]
@@ -272,11 +309,13 @@ func (f *FakeGitHubAdapter) RefSHA(_ context.Context, repo GitHubRepo, ref strin
 // request or an issue that does not carry the opt-in label - the invariants a
 // test asserts against the fake are the invariants the real thing enforces.
 func (f *FakeGitHubAdapter) DiscoverIssues(_ context.Context, query DiscoveryQuery) (DiscoveryResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	label := query.Label
 	if label == "" {
 		label = DefaultDiscoveryLabel
 	}
-	if err := f.record(GitHubCall{Method: "DiscoverIssues", Repo: query.Repo, Label: label, ETag: query.ETag}); err != nil {
+	if err := f.recordLocked(GitHubCall{Method: "DiscoverIssues", Repo: query.Repo, Label: label, ETag: query.ETag}); err != nil {
 		return DiscoveryResult{}, err
 	}
 	step := f.nextDiscovery()
@@ -344,7 +383,9 @@ var (
 )
 
 func (f *FakeGitHubAdapter) RepositoryPermission(_ context.Context, repo GitHubRepo, login string) (GitHubPermission, error) {
-	if err := f.record(GitHubCall{Method: "RepositoryPermission", Repo: repo, Body: login}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "RepositoryPermission", Repo: repo, Body: login}); err != nil {
 		return PermissionUnresolved, err
 	}
 	permission, ok := f.Permissions[strings.ToLower(login)]
@@ -358,21 +399,27 @@ func (f *FakeGitHubAdapter) RepositoryPermission(_ context.Context, repo GitHubR
 }
 
 func (f *FakeGitHubAdapter) PullRequestComments(_ context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
-	if err := f.record(GitHubCall{Method: "PullRequestComments", Repo: repo, Number: number}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "PullRequestComments", Repo: repo, Number: number}); err != nil {
 		return nil, err
 	}
 	return append([]GitHubComment(nil), f.ConversationComments[number]...), nil
 }
 
 func (f *FakeGitHubAdapter) IssueComments(_ context.Context, repo GitHubRepo, number int) ([]GitHubComment, error) {
-	if err := f.record(GitHubCall{Method: "IssueComments", Repo: repo, Number: number}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "IssueComments", Repo: repo, Number: number}); err != nil {
 		return nil, err
 	}
 	return append([]GitHubComment(nil), f.ConversationComments[number]...), nil
 }
 
 func (f *FakeGitHubAdapter) Viewer(_ context.Context, repo GitHubRepo) (GitHubActor, error) {
-	if err := f.record(GitHubCall{Method: "Viewer", Repo: repo}); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "Viewer", Repo: repo}); err != nil {
 		return GitHubActor{}, err
 	}
 	return f.ViewerActor, nil

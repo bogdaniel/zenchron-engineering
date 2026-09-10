@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -214,8 +215,18 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 			return nil, err
 		}
 	}
+	// The plan lifecycle service the supervisor's plan reconciler resolves
+	// through. It is built from the SAME store, the same customization
+	// registry and the same workforce every plan command uses, so `serve`
+	// cannot resolve a stage differently from what an operator was shown when
+	// they approved it.
+	plans, err := c.planService()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store:             c.store,
+		Plans:             plans,
 		Clock:             runtime.RealClock{},
 		Owner:             c.owner,
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
@@ -232,6 +243,26 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 			}, agent)
 		},
 	})
+}
+
+// planService builds the plan lifecycle service for this composition.
+//
+// Readiness is probed here for the same reason it is probed for a plan
+// command: which workers can take a stage is part of what the reconciler
+// decides, and a stale answer would block a plan on an agent that has since
+// become available.
+func (c *composition) planService() (runtime.PlanService, error) {
+	registry := c.planning
+	agents := runtime.DescribeExecutionAgents(context.Background(), c.agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
+		return runtime.AgentProberFor(agent, c.artifacts, c.config.StateDir)
+	})
+	if err := registry.Bind(agents); err != nil {
+		return runtime.PlanService{}, err
+	}
+	return runtime.PlanService{
+		Store: c.store, Clock: runtime.RealClock{}, Registry: registry,
+		Agents: agents, DefaultAgent: c.agents.Default(), Envelope: c.config.PlanEnvelope(),
+	}, nil
 }
 
 // handleControl answers one operator request. Every verb here already exists as
@@ -270,6 +301,24 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
+		// Under the reconciler's own lock: a decision and a plan tick both read
+		// a snapshot and then append against it, and interleaving them lets one
+		// decide from state the other is changing.
+		var view runtime.PlanView
+		if err := supervisor.WithPlanLock(func() (err error) { view, err = c.decidePlan(request); return err }); err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
+	case runtime.ControlPlanRevise:
+		// NOT wrapped in the plan lock: revising runs a planning invocation,
+		// and the lock is taken inside, around the durable write alone. A lock
+		// held across a provider call stalls every run in the fleet.
+		view, err := c.revisePlan(ctx, supervisor, request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlStopAll:
 		outcomes, err := supervisor.StopAll(request.Reason)
 		if err != nil {
@@ -279,6 +328,188 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	default:
 		return controlError(fmt.Errorf("unknown control command %q", request.Command))
 	}
+}
+
+// decidePlan applies an operator's approval or rejection inside the supervisor
+// that owns the work. The digest requirement lives in PlanService, so a request
+// naming a revision without its content is refused there rather than here.
+func (c *composition) decidePlan(request runtime.ControlRequest) (runtime.PlanView, error) {
+	plans, err := c.planService()
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	// The REQUESTER's identity, where they sent one: a decision records who
+	// made it, and this process is applying it on their behalf. Falling back to
+	// this supervisor's own identity is for a request that carried none.
+	operator := strings.TrimSpace(request.Operator)
+	if operator == "" {
+		resolved, err := c.config.ResolveOperator()
+		if err != nil {
+			return runtime.PlanView{}, err
+		}
+		operator = resolved.ID
+	}
+	decide := plans.Approve
+	if request.Command == runtime.ControlPlanReject {
+		decide = plans.Reject
+	}
+	if _, err := decide(request.PlanID, request.Revision, request.Digest, request.AssignmentsDigest, operator, request.Note); err != nil {
+		return runtime.PlanView{}, err
+	}
+	return plans.View(request.PlanID)
+}
+
+// revisePlan proposes a new revision of a plan this supervisor is executing.
+//
+// It runs the same propose the command would, through this supervisor's own
+// composition: the engine it already built, the store it already owns, and -
+// where the operator did not ask for the deterministic compilation - the same
+// verified non-mutating planning invocation.
+// planSubject is the repository and issue a proposal is about.
+//
+// An EXISTING plan already answers it: the durable source binding is what every
+// stage run answers, and a request cannot redirect it. A FIRST proposal has no
+// plan yet, so the request names the subject - and the supervisor still refuses
+// a repository it does not govern, because naming one is a selection among what
+// the operator enrolled and never an introduction.
+func (c *composition) planSubject(supervisor *runtime.Supervisor, request runtime.ControlRequest) (string, int, string, error) {
+	if request.PlanID != "" {
+		repository, issue, found, err := c.store.PlanSource(request.PlanID)
+		if err != nil {
+			return "", 0, "", err
+		}
+		if !found || issue <= 0 {
+			return "", 0, "", fmt.Errorf("plan %s records no source issue, so it cannot be revised", request.PlanID)
+		}
+		branch, err := c.planBaseBranch(request.PlanID)
+		if err != nil {
+			return "", 0, "", err
+		}
+		return repository, issue, branch, nil
+	}
+	if request.Issue <= 0 {
+		return "", 0, "", fmt.Errorf("a first proposal names the issue it plans, and this request names none")
+	}
+	governed, ok := supervisor.GovernedRepository(request.Repository)
+	if !ok {
+		return "", 0, "", fmt.Errorf("repository %q is not governed by this supervisor", request.Repository)
+	}
+	branch := strings.TrimSpace(request.DefaultBranch)
+	if branch == "" {
+		branch = watchedDefaultBranch
+	}
+	return governed.String(), request.Issue, branch, nil
+}
+
+// planBaseBranch is the branch this plan's work is already based on.
+//
+// The local path resolves origin/HEAD from a checkout; a supervisor has none,
+// and assuming "main" made a revision requested through `serve` compile against
+// a different base than the same revision requested in a terminal - the same
+// works-in-one-terminal-not-the-other divergence reported for the plan's
+// remote. The plan's OWN runs answer it from durable state: they were created
+// by a path that did resolve it. The enrolment assumption remains the fallback
+// for a plan whose stages have not started yet.
+func (c *composition) planBaseBranch(planID string) (string, error) {
+	// Through the PLAN's own stages, not by loading every run this state
+	// directory has ever held. A revise on a long-lived installation would
+	// otherwise read the whole run table into memory to answer a question about
+	// one plan.
+	snapshot, err := c.store.ReplayPlan(planID)
+	if err != nil {
+		return "", err
+	}
+	// The order is FIXED, and retired runs count. Ranging a map made the
+	// answer depend on iteration order where stages recorded different bases,
+	// and a stage whose run was retired - the window between an invalidation
+	// and the next generation starting - clears its run id, so a plan that had
+	// resolved a base could fall back to the enrolment assumption for exactly
+	// as long as that window lasted.
+	runIDs := make([]string, 0, len(snapshot.Stages)+len(snapshot.RetiredRuns))
+	for _, stage := range snapshot.Stages {
+		if stage.RunID != "" {
+			runIDs = append(runIDs, stage.RunID)
+		}
+	}
+	sort.Strings(runIDs)
+	runIDs = append(runIDs, snapshot.RetiredRuns...)
+	for _, runID := range runIDs {
+		run, found, err := c.store.Run(runID)
+		if err != nil {
+			return "", err
+		}
+		if found && strings.TrimSpace(run.Base.ID) != "" {
+			return run.Base.ID, nil
+		}
+	}
+	return watchedDefaultBranch, nil
+}
+
+func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Supervisor, request runtime.ControlRequest) (runtime.PlanView, error) {
+	plans, err := c.planService()
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	repository, issue, defaultBranch, err := c.planSubject(supervisor, request)
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	repo, err := runtime.ParseGitHubRepo(repository)
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	// Derived from the plan's own repository IDENTITY, exactly as the local
+	// command derives it when a repository is named explicitly.
+	//
+	// An earlier attempt at this ran `git remote get-url origin` in the STATE
+	// DIRECTORY, which is not a checkout of anything: usually it errors and the
+	// fallback silently assumed a default branch, and where the state directory
+	// happens to sit inside some unrelated git repository it succeeded and bound
+	// a governed-remote system to that repository's origin. A supervisor governs
+	// several repositories; the plan says which one, and nothing about the
+	// process's own working directory does.
+	target := runtime.RepositoryTarget{
+		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: defaultBranch,
+	}
+	engine, err := c.engine(target)
+	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	composed := &planComposition{
+		built: c, engine: engine, service: plans, target: target, release: func() {},
+	}
+	flags := autonomyFlags{
+		Template: request.Template, Deterministic: request.Deterministic,
+		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
+	}
+	// A first proposal has no id yet. It is derived exactly as the local path
+	// derives it - from the issue, deterministically - so the view returned
+	// afterwards is of the plan this call created rather than of nothing.
+	planID := request.PlanID
+	if planID == "" {
+		if planID, err = engine.PlanID(issue); err != nil {
+			return runtime.PlanView{}, err
+		}
+	}
+	serialize := supervisor.WithPlanLock
+	if flags.SubstituteHuman != "" {
+		if request.PlanID == "" {
+			return runtime.PlanView{}, errors.New("substituting a human names the plan whose stage is being substituted")
+		}
+		// The substitution compiles deterministically - no provider call - so
+		// the whole of it is short enough to serialize.
+		if err := serialize(func() error {
+			_, err := substituteHumanWithComposition(ctx, composed, flags, request.PlanID, io.Discard)
+			return err
+		}); err != nil {
+			return runtime.PlanView{}, err
+		}
+		return plans.View(request.PlanID)
+	}
+	if _, err := proposeSerialized(ctx, composed, flags, issue, planID, io.Discard, serialize); err != nil {
+		return runtime.PlanView{}, err
+	}
+	return plans.View(planID)
 }
 
 func controlOK(payload any) runtime.ControlResponse {
@@ -401,8 +632,40 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 			issueLabel(run), orDash(run.Agent), stateLabel(run), locationLabel(run),
 			elapsedLabel(run.Elapsed), run.Reason)
 	}
+	// PLANS, beside the runs. A plan awaiting approval is the runtime waiting on
+	// a PERSON, and that has to be visible where an operator looks to see
+	// whether anything is happening at all.
+	if len(fleet.Plans) > 0 {
+		fmt.Fprintf(stdout, "\n%-38s %-6s %-18s %-22s %s\n", "PLAN", "REV", "STATE", "STAGES", "CHILD RUNS")
+		for _, plan := range fleet.Plans {
+			fmt.Fprintf(stdout, "%-38s %-6s %-18s %-22s %d\n",
+				plan.PlanID, revisionLabel(plan), plan.State, stageLabel(plan), len(plan.Runs))
+		}
+		fmt.Fprintln(stdout, "\n`autonomy plan show PLAN --text` explains one plan; a plan awaiting approval executes nothing until `autonomy plan approve PLAN`.")
+	}
 	fmt.Fprintln(stdout, "\n`autonomy status RUN --text` explains one run; `autonomy logs RUN` shows what its worker is saying.")
 	return runtime.ExitCompleted, nil
+}
+
+// revisionLabel shows the governing revision beside the latest one when they
+// differ, because "executing r2 while r3 waits for you" is the whole state.
+func revisionLabel(plan runtime.PlanSummary) string {
+	if plan.ApprovedRevision != 0 && plan.ApprovedRevision != plan.Revision {
+		return fmt.Sprintf("%d<%d", plan.ApprovedRevision, plan.Revision)
+	}
+	return strconv.Itoa(plan.Revision)
+}
+
+func stageLabel(plan runtime.PlanSummary) string {
+	states := make([]string, 0, len(plan.Stages))
+	for state, count := range plan.Stages {
+		states = append(states, fmt.Sprintf("%d %s", count, state))
+	}
+	sort.Strings(states)
+	if len(states) == 0 {
+		return "-"
+	}
+	return strings.Join(states, ", ")
 }
 
 func issueLabel(run runtime.RunSummary) string {
@@ -500,22 +763,58 @@ func autonomyLogs(ctx context.Context, flags autonomyFlags, overrides autonomyOv
 // false when no supervisor owns this state directory, which is the signal to
 // drive the work in this terminal exactly as before `serve` existed.
 func delegate(stateDir string, request runtime.ControlRequest, stdout io.Writer) (bool, int, error) {
-	if !runtime.SupervisorRunning(stateDir) {
-		return false, 0, nil
+	delegated, payload, err := delegatePayload(stateDir, request)
+	if !delegated || err != nil {
+		return delegated, runtime.ExitFailed, err
 	}
-	response, err := runtime.SendControl(stateDir, request)
-	if err != nil {
-		return true, runtime.ExitFailed, err
-	}
-	if !response.OK {
-		return true, runtime.ExitFailed, errors.New(response.Error)
-	}
-	if len(response.Payload) > 0 {
-		if _, err := fmt.Fprintln(stdout, string(response.Payload)); err != nil {
+	if len(payload) > 0 {
+		if _, err := fmt.Fprintln(stdout, string(payload)); err != nil {
 			return true, runtime.ExitFailed, err
 		}
 	}
 	return true, runtime.ExitCompleted, nil
+}
+
+// delegatePayload is the same submission with the answer RETURNED rather than
+// printed, for a command that renders its own view. It exists so a delegated
+// command and a locally executed one produce the same output: an operator
+// should not be able to tell which process applied their decision.
+func delegatePayload(stateDir string, request runtime.ControlRequest) (bool, json.RawMessage, error) {
+	delegated, payload, _, err := delegatePayloadSent(stateDir, request)
+	return delegated, payload, err
+}
+
+// delegatePayloadSent additionally reports whether the request was actually
+// PUT ON THE WIRE. "The supervisor may have applied this and lost the reply" is
+// only true of a request that was sent; a request refused before any connection
+// was made was not applied by anybody, and telling an operator to consult the
+// durable record for it invites the opposite error.
+func delegatePayloadSent(stateDir string, request runtime.ControlRequest) (delegated bool, payload json.RawMessage, sent bool, err error) {
+	running, endpointPresent := runtime.SupervisorPresence(stateDir)
+	if !running {
+		if endpointPresent {
+			// The endpoint EXISTS and could not be reached. Deciding locally
+			// here would write beside a supervisor that may be alive, outside
+			// the lock that exists to prevent it, because one dial failed.
+			//
+			// Neither remedy in the old wording works after a crash: retrying
+			// dials the same dead socket, and there is no supervisor left to
+			// stop. Restarting one reclaims the socket; removing the file is
+			// the manual equivalent.
+			return true, nil, false, fmt.Errorf(
+				"a supervisor endpoint exists at %s and could not be reached; nothing was sent and the decision was not applied - start a supervisor with `zenchron-engineering serve`, which reclaims the socket, or remove that file if no supervisor will run again",
+				runtime.ControlSocketPath(stateDir))
+		}
+		return false, nil, false, nil
+	}
+	response, err := runtime.SendControl(stateDir, request)
+	if err != nil {
+		return true, nil, true, err
+	}
+	if !response.OK {
+		return true, nil, true, errors.New(response.Error)
+	}
+	return true, response.Payload, true, nil
 }
 
 // requireSupervisor is for the lifecycle verbs that have no meaning without a

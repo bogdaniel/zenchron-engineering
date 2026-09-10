@@ -1,0 +1,128 @@
+{
+  "schema_version": "0.1",
+  "id": "assignment-sso-security-review",
+  "plan": {
+    "id": "plan-sso-001",
+    "revision": 3,
+    "digest": "8bb7027a0c7581f5b6eff392a0121736019980f565229b1c1d849ecd415912f7"
+  },
+  "stage_id": "security-review",
+  "role": "security_reviewer",
+  "required_capabilities": [
+    "security_review"
+  ],
+  "profile": {
+    "id": "zenchron-security-reviewer",
+    "version": 3,
+    "digest": "c0a7b8ce791a15bf43a25d8a976840b0f76464354a251a09c9954f367730683b",
+    "instructions": [
+      {
+        "id": "security-review-core",
+        "revision": "2",
+        "digest": "20a7fbdb3239eb8ecd262021d721aadacc5a05ac87b8d84f6079b7c5d1bd0e58"
+      }
+    ],
+    "context_policy": {
+      "id": "independent-review",
+      "revision": "1",
+      "digest": "fd820f41309c98abf4e035ee57ac284801fa8f35a9e6bab3fa7d9baac914d6de"
+    },
+    "capabilities": [
+      "repository_analysis",
+      "security_review",
+      "verification"
+    ],
+    "trust_requirement": "operator_trusted"
+  },
+  "agent": {
+    "id": "claude",
+    "provider_kind": "claude_code",
+    "vendor_family": "anthropic",
+    "trust_mode": "operator_trusted",
+    "model": "sonnet"
+  },
+  "invocation_mode": "mutating",
+  "trust_requirement": "operator_trusted",
+  "contract": {
+    "id": "contract-sso",
+    "revision": "3"
+  },
+  "context": {
+    "objective": "Review the candidate for authentication and session defects.",
+    "acceptance_criteria": [
+      "Invalid sessions remain rejected"
+    ],
+    "obligations": [
+      "Security review must pass."
+    ],
+    "permissions": [
+      "git.pull_request.create:acme/payments"
+    ],
+    "prohibitions": [
+      "secret.read:*"
+    ],
+    "policy_excerpts": [
+      "An implementing producer may not be the sole source of acceptance evidence."
+    ],
+    "upstream_outputs": [
+      {
+        "stage_id": "implementation",
+        "run_id": "run-implementation",
+        "candidate": "c0ffee00",
+        "tree": "7ea7ree0",
+        "summary": "SSO endpoints and session exchange."
+      }
+    ],
+    "included": [
+      "objective",
+      "acceptance_criteria",
+      "obligations",
+      "permissions",
+      "prohibitions",
+      "policy_excerpts",
+      "upstream_stage_outputs",
+      "candidate_diff"
+    ],
+    "excluded": [
+      "producer_reasoning"
+    ]
+  },
+  "budget": {
+    "max_execution_attempts": 1,
+    "max_wall_seconds": 1800
+  },
+  "independence": [
+    {
+      "dimension": "vendor_family",
+      "different_from": [
+        "implementation"
+      ],
+      "class": "anthropic",
+      "other_classes": [
+        "openai"
+      ],
+      "satisfied_by": "independent_worker"
+    }
+  ],
+  "selection": {
+    "considered": [
+      {
+        "profile": "zenchron-security-reviewer",
+        "agent": "claude",
+        "eligible": true
+      },
+      {
+        "profile": "general-implementer",
+        "agent": "codex",
+        "eligible": false,
+        "reasons": [
+          "vendor family openai is not independent of stage implementation",
+          "profile does not advertise security_review"
+        ]
+      }
+    ],
+    "selected": "zenchron-security-reviewer",
+    "reason": "the only eligible profile advertising security_review with a vendor family independent of the material producer"
+  },
+  "run_id": "run-security-review"
+}
