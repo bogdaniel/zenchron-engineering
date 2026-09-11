@@ -154,6 +154,54 @@ The plan now carries two pending revisions, r1 from attempt 3 and r2 from
 attempt 4, which is the ordinary result of proposing twice. r2 is the one
 awaiting a decision.
 
+## Attempt 5 — refused, and this time the refusal was the product working
+
+Candidate `a0ad64a`, carrying the attempt-identity fix and the review repairs.
+Two of those changes touch what the planner is shown and how its answer is read
+— fences are line-anchored now, and an HTML entity is no longer a citation — so
+the experiment was repeated again.
+
+```text
+zenchron-engineering: plan plan-bf8f68e5... is invalid: stage
+"independent-verification" carried "execution_agent" independence for role
+"reviewer" and the revision removes it without any stage in that role carrying
+it: an obligation cannot be dropped by renaming the stage that held it
+the proposal and its evidence are preserved as plan attempt
+attempt-plan-bf8f68e58adc7f91f2a2425922ee2c37-r3-1
+```
+
+Nothing in this branch caused that. `planning/validate.go` is untouched since
+`a556efd`; the refusal is the #64 cross-revision law. This plan identity now
+holds r2, whose reviewer carries `execution_agent` independence. The planner
+proposed a reviewer carrying `agent_profile`, which is weaker, so revision 3
+would have dropped an obligation r2 established. The machine refused it. That is
+the law working, on the third re-proposal of one plan.
+
+What the run does demonstrate is everything upstream of that law, at the exact
+delivered commit:
+
+```text
+the answer was located and decoded          3 stages, correct roles
+the reviewer stated explicit peers           different_from: [harden-planner-cohort]
+the gate carried no worker fields            assurance_gate, no role
+referenced issues reached the planner        9 pinned, 1 unavailable (#106, a PR)
+the workspace was verified unchanged         true
+```
+
+And it is the first time the #120 repair itself ran in production rather than in
+a regression. The refusal is durable, typed and inspectable:
+
+```text
+$ zenchron-engineering autonomy plan show plan-bf8f68e5... --text
+earlier attempt attempt-plan-bf8f68e5...-r3-1 was refused: stage
+"independent-verification" carried "execution_agent" independence ...
+```
+
+with the attempt identity allocated by the journal, the reasoning provenance,
+all three proposed stages, the typed reason, both transcripts by path and the
+referenced-issue provenance — none of which existed before this branch. r2 is
+untouched and still pending.
+
 ## What did not happen
 
 Nothing was approved. Nothing executed. No run was created, no child run was
@@ -163,15 +211,21 @@ to make plannable, and it is the operator's to approve.
 
 ## What these runs did not exercise
 
-The durable attempt record. Attempt 1 predates it, attempt 2 failed on the path
-that did not yet record one, and attempts 3 and 4 both succeeded — so nothing
-was refused after the code that records it existed. Its behaviour, including
-that it survives a restart unchanged and that concurrent refusals of one
-revision get distinct identities, is proven by regressions rather than by the
-dogfood.
-
-Nor did they exercise concurrency at all: each run was one operator, one
-command. The attempt-identity race is reachable only through the supervisor's
-control endpoint, which answers connections concurrently; it is covered by
+Concurrency. Each run was one operator issuing one command, so the
+attempt-identity race never arose: it is reachable only through the supervisor's
+control endpoint, which answers connections concurrently. It is covered by
 `TestConcurrentRefusalsOfOneRevisionGetDistinctIdentities` under `-race`, which
-fails reliably against the pre-fix derivation.
+fails reliably against the pre-fix derivation, and by a deterministic test
+proving the identity is a function of the stream rather than of the payload.
+
+Restart. Attempt 5's record was read in the same process that wrote it. That it
+survives a restart with the same identities is proven by regressions.
+
+And the acceptance itself — reaching an operator-reviewable plan — was
+demonstrated at `c5c67d1` and `8be8d1d`, not at `a0ad64a`. At the delivered
+commit the same command is refused, by a law this branch does not touch, because
+this plan identity has now been proposed against three times. That is not the
+acceptance failing; it is what happens when you re-plan a plan that already
+carries an obligation. Reaching a reviewable plan again on this identity would
+require the planner to propose independence at least as strong as r2's, which is
+the model's decision and costs an invocation to sample.
