@@ -459,7 +459,13 @@ func recordPlanningRefusal(composed *planComposition, input runtime.ProposeInput
 	if err != nil {
 		return fmt.Errorf("%w (and the refused attempt could not be recorded: %v)", cause, err)
 	}
-	return fmt.Errorf("%w\nthe invocation and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
+	// ONE LINE. The diagnostic is escaped at the print site, and a newline the
+	// runtime put there would be escaped with everything else - so a message
+	// that spelled its second half on its own line printed a literal "\x0a"
+	// instead. Splitting the escape per line is not the alternative: an
+	// attacker newline inside an interpolated value would then forge output
+	// lines, which is exactly what the escaping exists to stop.
+	return fmt.Errorf("%w; the invocation and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
 		cause, attempt, input.PlanID)
 }
 
@@ -971,7 +977,7 @@ func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer
 			// not exist. What IS true is that planning was attempted and
 			// refused, and that is what the row says.
 			fmt.Fprintf(stdout, "%s  --  %-9s  no plan: %d refused reasoning attempt(s), read with `autonomy plan show %s`\n",
-				item.PlanID, "unplanned", item.Attempts, item.PlanID)
+				terminalSafe(item.PlanID), "unplanned", item.Attempts, terminalSafe(item.PlanID))
 			continue
 		}
 		fmt.Fprintf(stdout, "%s  r%d  %-9s  %s\n", terminalSafe(item.PlanID), item.Revision, terminalSafe(item.Approval), singleLinePlan(item.Objective))
@@ -1189,10 +1195,15 @@ func planExit(view runtime.PlanView) int {
 // singleLinePlan collapses an objective onto one line.
 //
 // The objective is derived from an issue title and body, so it is third-party
-// text on a terminal: strings.Fields drops CR and LF, which is what the
-// collapsing is for, and leaves ESC exactly where it was.
+// text on a terminal. The ORDER of the two passes is the whole of it: the
+// collapse runs first, because every real objective is multi-line - the runtime
+// builds it with the UNTRUSTED-SOURCE markers on their own lines - and escaping
+// before the collapse turns those legitimate newlines into literal "\x0a" that
+// strings.Fields can no longer remove, so every ordinary row prints litter.
+// Escaping last is still correct for the case the wrap exists for: ESC survives
+// Fields, and by then the legitimate CR, LF and tabs are already gone.
 func singleLinePlan(text string) string {
-	line := strings.Join(strings.Fields(strings.ReplaceAll(terminalSafe(text), "\n", " ")), " ")
+	line := terminalSafe(strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " "))
 	if runes := []rune(line); len(runes) > 120 {
 		return string(runes[:117]) + "..."
 	}

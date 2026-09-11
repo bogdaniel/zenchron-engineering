@@ -112,7 +112,10 @@ type PlanAttemptRefusedError struct {
 }
 
 func (e *PlanAttemptRefusedError) Error() string {
-	return fmt.Sprintf("%s\nthe proposal and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
+	// ONE LINE, for the same reason its CLI sibling is: the diagnostic is
+	// escaped where it is printed, and a newline the runtime chose would be
+	// escaped along with an attacker's.
+	return fmt.Sprintf("%s; the proposal and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
 		e.cause.Error(), e.AttemptID, e.PlanID)
 }
 

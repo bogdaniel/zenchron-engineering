@@ -22,9 +22,9 @@ import (
 
 // seedRefusedAttempt records one refused reasoning proposal in the operator's
 // own state directory, exactly as a refused `plan issue N` would.
-func seedRefusedAttempt(t *testing.T, configPath, dir, planID string) {
+func seedRefusedAttempt(t *testing.T, configPath, dir, planID string) error {
 	t.Helper()
-	seedProposal(t, configPath, dir, planID, true)
+	return seedProposal(t, configPath, dir, planID, true)
 }
 
 // seedRecoveredPlan proposes a COMPILABLE revision for the same plan identity,
@@ -47,12 +47,12 @@ func seedHostileAttempt(t *testing.T, configPath, dir, planID, hostile string) {
 	seedProposalNamed(t, configPath, dir, planID, true, hostile, true)
 }
 
-func seedProposal(t *testing.T, configPath, dir, planID string, defective bool) {
+func seedProposal(t *testing.T, configPath, dir, planID string, defective bool) error {
 	t.Helper()
-	seedProposalNamed(t, configPath, dir, planID, defective, "harden-runtime-transitions", false)
+	return seedProposalNamed(t, configPath, dir, planID, defective, "harden-runtime-transitions", false)
 }
 
-func seedProposalNamed(t *testing.T, configPath, dir, planID string, defective bool, firstStage string, cyclic bool) {
+func seedProposalNamed(t *testing.T, configPath, dir, planID string, defective bool, firstStage string, cyclic bool) error {
 	t.Helper()
 	config, err := runtime.LoadConfig(configPath, dir)
 	if err != nil {
@@ -135,7 +135,7 @@ func seedProposalNamed(t *testing.T, configPath, dir, planID string, defective b
 		if err != nil {
 			t.Fatalf("the corrected proposal was refused: %v", err)
 		}
-		return
+		return nil
 	}
 	if err == nil {
 		t.Fatal("the dogfood proposal compiled")
@@ -143,6 +143,7 @@ func seedProposalNamed(t *testing.T, configPath, dir, planID string, defective b
 	if !strings.Contains(err.Error(), "autonomy plan show "+planID) {
 		t.Fatalf("the refusal does not point at the attempt: %v", err)
 	}
+	return err
 }
 
 // `plan list` names the plan whose every attempt was refused, instead of
@@ -441,5 +442,66 @@ func TestTerminalSafeLeavesOrdinaryTextAlone(t *testing.T) {
 	}
 	if got := terminalSafe("a\tb"); got != `a\x09b` {
 		t.Fatalf("a tab was not escaped: %q", got)
+	}
+}
+
+// The escape pass must not eat the CLI's own formatting.
+//
+// Every real objective is multi-line: the runtime builds it with the
+// UNTRUSTED-SOURCE markers on their own lines. Escaping before the collapse
+// turned those legitimate newlines into literal "\x0a" that strings.Fields
+// could no longer remove, so every ordinary `plan list` row printed litter -
+// visible only when the objective was short enough to survive truncation.
+func TestSingleLinePlanCollapsesBeforeItEscapes(t *testing.T) {
+	objective := "Address issue #119.\n<<<UNTRUSTED-SOURCE\ntitle\nbody\nUNTRUSTED-SOURCE"
+
+	line := singleLinePlan(objective)
+	if strings.Contains(line, `\x0a`) || strings.Contains(line, `\x0d`) {
+		t.Fatalf("a legitimate newline survived as literal escape text: %q", line)
+	}
+	if strings.ContainsAny(line, "\n\r") {
+		t.Fatalf("a raw newline reached the row: %q", line)
+	}
+	if line != "Address issue #119. <<<UNTRUSTED-SOURCE title body UNTRUSTED-SOURCE" {
+		t.Fatalf("line = %q", line)
+	}
+
+	// And the case the wrap exists for still holds: ESC survives Fields, so it
+	// has to be escaped after the collapse rather than never.
+	hostile := singleLinePlan("objective\x1b[2J with an escape")
+	if strings.Contains(hostile, "\x1b") {
+		t.Fatalf("an escape reached the row: %q", hostile)
+	}
+	if !strings.Contains(hostile, `\x1b`) {
+		t.Fatalf("the escape was not made visible: %q", hostile)
+	}
+}
+
+// The refusal an operator actually sees prints on one line.
+//
+// The diagnostic is escaped at the print site, so a newline the runtime chose
+// would be escaped along with an attacker's and render as literal "\x0a" on the
+// primary refusal path this branch built. Splitting the escape per line is not
+// the alternative: an attacker newline inside an interpolated value would then
+// forge output lines.
+func TestTheRefusalDiagnosticIsOneEscapableLine(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+
+	refusal := seedRefusedAttempt(t, configPath, dir, "plan-oneline")
+	if refusal == nil {
+		t.Fatal("the seeded proposal compiled")
+	}
+	text := refusal.Error()
+	if strings.ContainsAny(text, "\n\r") {
+		t.Fatalf("the refusal spans more than one line, so escaping it prints litter: %q", text)
+	}
+	if !strings.Contains(text, "preserved as plan attempt") {
+		t.Fatalf("the refusal no longer tells the operator where to read it: %q", text)
+	}
+	// Escaping it at the print site changes nothing, which is the property that
+	// makes the blanket escape safe to keep.
+	if got := terminalSafe(text); got != text {
+		t.Fatalf("the refusal is not already terminal-safe:\n%q\n%q", text, got)
 	}
 }
