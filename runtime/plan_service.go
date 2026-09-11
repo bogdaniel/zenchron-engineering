@@ -1279,8 +1279,8 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 	payload := PlanAttemptRefusedPayload{
 		AttemptID: attemptID, Revision: revision, Origin: origin, Issue: input.Issue,
 		Stages: stages, Errors: boundedPayloadList(reasons),
-		Evidence:   boundedPayloadList2(attemptEvidence(input.Evidence)),
-		References: boundedPayloadList2(input.References),
+		Evidence:   boundedPayloadList(attemptEvidence(input.Evidence)),
+		References: boundedPayloadList(input.References),
 	}
 	if input.Reasoning != nil {
 		payload.Reasoning = reasoningPayload(*input.Reasoning)
@@ -1333,11 +1333,6 @@ func boundedPayloadList[T any](values []T) []T {
 	}
 	return values
 }
-
-// boundedPayloadList2 is boundedPayloadList for the struct lists; Go needs the
-// two instantiations named separately only because the first is used on
-// []string at a point where the compiler cannot infer through append.
-func boundedPayloadList2[T any](values []T) []T { return boundedPayloadList(values) }
 
 func attemptEvidence(artifacts []Artifact) []PlanAttemptEvidenceRef {
 	refs := make([]PlanAttemptEvidenceRef, 0, len(artifacts))
