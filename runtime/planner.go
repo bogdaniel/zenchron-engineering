@@ -791,12 +791,31 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 // located rather than assumed to be the whole output: the LAST balanced JSON
 // object containing a "stages" member wins, because a model that restates its
 // answer ends with the one it means.
+//
+// The FENCE is tried first, and it is not a convenience. The brace scan below
+// treats a whole transcript as brace-and-quote structure, and a coding CLI's
+// transcript is mostly not that: it echoes Go source, test names and prose, so
+// unmatched braces and odd quotes accumulate and the scanner's idea of "inside a
+// string" stops matching reality. On a real #119 planning transcript that left
+// 29 unclosed braces and 16 recorded spans, the model's perfectly good answer
+// never formed a span at all, and the last thing that did parse was the output
+// contract's own example - which the provider had echoed as part of the prompt.
+// The runtime then refused a stage called "kebab-case-id".
+//
+// A fence has none of that ambiguity: the contract asks for the answer in a
+// fenced json block, the provider echoes the contract as plain text rather than
+// as a fence, and the fence delimiters say exactly where the answer starts and
+// stops. The brace scan stays as the fallback for a model that answers without
+// one.
 // It is a SINGLE pass over the transcript, keeping the position of every open
 // brace on a stack. The earlier form restarted the scan at each unclosed brace,
 // which is quadratic in the number of unclosed braces - and a coding CLI that
 // echoes source code produces plenty of those, so an ordinary transcript could
 // stall planning for minutes before the answer was even parsed.
 func extractJSONObject(answer string) (string, error) {
+	if candidate, found := lastFencedProposal(answer); found {
+		return candidate, nil
+	}
 	// ONE pass records where each balanced span begins and ends. Nothing is
 	// parsed here: recording a span costs the two indices, whatever the span
 	// contains.
@@ -862,4 +881,55 @@ func extractJSONObject(answer string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no JSON object with a stages member was found in the answer")
+}
+
+// maxPlannerFences bounds how many fenced blocks are remembered. A transcript
+// that is nothing but code fences cannot grow this without limit, and the
+// answer ends the output, so the newest fences are the ones that matter.
+const maxPlannerFences = 512
+
+// lastFencedProposal is the last fenced block that parses as a proposal.
+//
+// Fences are paired in order - open, close, open, close - and searched from the
+// END, because a model that restates its answer ends with the one it means. A
+// final fence the provider never closed is still read: its content is the rest
+// of the output, and an answer cut off mid-fence fails to parse here rather than
+// being mistaken for something else.
+func lastFencedProposal(answer string) (string, bool) {
+	const fence = "```"
+	var marks []int
+	for offset := 0; ; {
+		next := strings.Index(answer[offset:], fence)
+		if next < 0 {
+			break
+		}
+		marks = append(marks, offset+next)
+		offset += next + len(fence)
+		// Dropped in PAIRS, so the open/close alternation the pairing below
+		// depends on is preserved whatever is discarded.
+		if len(marks) > maxPlannerFences {
+			marks = marks[2:]
+		}
+	}
+	type block struct{ open, end int }
+	blocks := make([]block, 0, len(marks)/2+1)
+	for i := 0; i < len(marks); i += 2 {
+		end := len(answer)
+		if i+1 < len(marks) {
+			end = marks[i+1]
+		}
+		blocks = append(blocks, block{open: marks[i], end: end})
+	}
+	for i := len(blocks) - 1; i >= 0; i-- {
+		body := strings.TrimSpace(answer[blocks[i].open+len(fence) : blocks[i].end])
+		// The optional language tag is the remainder of the fence's own line.
+		// A first line carrying a brace is content rather than a tag.
+		if newline := strings.IndexByte(body, '\n'); newline >= 0 && !strings.ContainsAny(body[:newline], "{}") {
+			body = strings.TrimSpace(body[newline+1:])
+		}
+		if json.Valid([]byte(body)) && looksLikeProposal(body) {
+			return body, true
+		}
+	}
+	return "", false
 }

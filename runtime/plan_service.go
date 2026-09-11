@@ -1264,10 +1264,23 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 		}
 	}
 	attemptID := fmt.Sprintf("attempt-%s-r%d-%d", input.PlanID, revision, attempt)
+	// The journal's list bounds apply here like anywhere else, and they bite
+	// hardest exactly when the proposal is worst: a decomposition with many
+	// defective stages produces many reasons, and a payload refused for being
+	// too long would lose the whole record of the thing it describes. So the
+	// bounds are applied by TRUNCATING and saying so, never by failing to
+	// write.
+	stages, droppedStages := attemptStages(input.Reasoned)
+	reasons := boundedReasons(refusalReasons(cause))
+	if droppedStages > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d further proposed stages are not recorded on this attempt: the durable record holds at most %d",
+			droppedStages, maxPayloadListItems))
+	}
 	payload := PlanAttemptRefusedPayload{
 		AttemptID: attemptID, Revision: revision, Origin: origin, Issue: input.Issue,
-		Stages: attemptStages(input.Reasoned), Errors: boundedReasons(refusalReasons(cause)),
-		Evidence: attemptEvidence(input.Evidence), References: input.References,
+		Stages: stages, Errors: boundedPayloadList(reasons),
+		Evidence:   boundedPayloadList2(attemptEvidence(input.Evidence)),
+		References: boundedPayloadList2(input.References),
 	}
 	if input.Reasoning != nil {
 		payload.Reasoning = reasoningPayload(*input.Reasoning)
@@ -1282,12 +1295,17 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 // attemptStages reduces the proposal to the members that decide whether it is
 // executable. Objectives and rationales are provider prose and stay in the
 // transcript; the journal carries no provider text.
-func attemptStages(stages []domain.PlanStage) []PlanAttemptStagePayload {
+func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int) {
+	dropped := 0
+	if len(stages) > maxPayloadListItems {
+		dropped = len(stages) - maxPayloadListItems
+		stages = stages[:maxPayloadListItems]
+	}
 	proposed := make([]PlanAttemptStagePayload, 0, len(stages))
 	for _, stage := range stages {
 		item := PlanAttemptStagePayload{
 			ID: stage.ID, Kind: string(stage.Kind), Role: string(stage.Role),
-			DependsOn: stage.DependsOn,
+			DependsOn: boundedPayloadList(stage.DependsOn),
 		}
 		if stage.Independence != nil {
 			// DifferentFrom is copied EXACTLY, empty included. An empty list is
@@ -1297,13 +1315,29 @@ func attemptStages(stages []domain.PlanStage) []PlanAttemptStagePayload {
 			// independence over nothing".
 			item.Independence = &PlanAttemptIndependencePayload{
 				Dimension:     string(stage.Independence.Dimension),
-				DifferentFrom: append([]string{}, stage.Independence.DifferentFrom...),
+				DifferentFrom: boundedPayloadList(append([]string{}, stage.Independence.DifferentFrom...)),
 			}
 		}
 		proposed = append(proposed, item)
 	}
-	return proposed
+	return proposed, dropped
 }
+
+// boundedPayloadList truncates a list to the journal's element bound. It is a
+// truncation rather than a refusal because the alternative - a payload the
+// journal declines - loses the entire durable record of an attempt, which is
+// the one thing this event exists to preserve.
+func boundedPayloadList[T any](values []T) []T {
+	if len(values) > maxPayloadListItems {
+		return values[:maxPayloadListItems]
+	}
+	return values
+}
+
+// boundedPayloadList2 is boundedPayloadList for the struct lists; Go needs the
+// two instantiations named separately only because the first is used on
+// []string at a point where the compiler cannot infer through append.
+func boundedPayloadList2[T any](values []T) []T { return boundedPayloadList(values) }
 
 func attemptEvidence(artifacts []Artifact) []PlanAttemptEvidenceRef {
 	refs := make([]PlanAttemptEvidenceRef, 0, len(artifacts))
@@ -1328,6 +1362,41 @@ type PlanAttemptsView struct {
 	Issue      int           `json:"source_issue,omitempty"`
 	Executable bool          `json:"executable_plan_exists"`
 	Attempts   []PlanAttempt `json:"attempts"`
+}
+
+// RecordPlanningRefusal preserves a reasoning invocation that never reached
+// compilation at all.
+//
+// A proposal the compiler refuses and an answer the runtime cannot read are the
+// same product event from an operator's chair: they asked for a plan, an
+// invocation was spent, and there is no plan. The first was already durable;
+// this makes the second durable too, through exactly the same attempt record.
+// Without it, a planner whose answer could not be decoded still vanished into a
+// transcript file - which is the gap #120 names, one layer further up than the
+// compiler.
+//
+// It records evidence and grants nothing. There is no revision, so there is
+// nothing to approve and nothing to execute.
+func (s PlanService) RecordPlanningRefusal(input ProposeInput, cause error) (string, error) {
+	if s.Store == nil {
+		return "", &PlanRefusedError{Detail: "a durable store is required"}
+	}
+	existing, found, err := s.Store.Plan(input.PlanID)
+	if err != nil {
+		return "", err
+	}
+	revision := 1
+	if found {
+		revision = existing.Revision + 1
+	}
+	origin := input.Origin
+	if origin == "" {
+		origin = domain.ProposalOriginInitial
+		if found {
+			origin = domain.ProposalOriginOperatorEdit
+		}
+	}
+	return s.recordRefusedAttempt(input, revision, origin, cause)
 }
 
 // AttemptsView reads the refused planning attempts of one plan identity.

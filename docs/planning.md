@@ -825,14 +825,32 @@ not available to the planner and why — because a plan reasoned from four of fi
 referenced issues is a different plan from one reasoned from all five, and the
 operator deciding whether to approve it should know which they have.
 
+### Reading the model's answer
+
+The contract asks for the answer in a fenced json block, and the runtime reads
+the **last fenced block** that parses as a proposal. A coding CLI's transcript is
+mostly not JSON — it echoes Go source, test names and prose — so scanning the
+whole of it for balanced braces desynchronizes on the first unmatched brace or
+odd quote. On a real #119 transcript that left 29 unclosed braces, the model's
+correct answer never formed a candidate at all, and the last thing that still
+parsed was the output contract's own example, echoed as part of the prompt. The
+runtime refused a stage called `kebab-case-id`.
+
+A fence has no such ambiguity: it says where the answer starts and stops, and the
+echoed contract is not inside one. The brace scan remains the fallback for a
+model that answers without a fence.
+
 ### When reasoning does not reach a plan
 
 A proposal the deterministic compiler refuses used to leave nothing behind on a
 first plan: there was no revision document, so there was no plan, so `plan list`
 said "no plans" and `plan show` said "no such plan" about work an operator had
-just spent a provider invocation on.
+just spent a provider invocation on. An answer the runtime could not read at all
+left even less, because it never reached compilation.
 
-A refused proposal is now a durable **planning attempt**:
+Both are now a durable **planning attempt**: from an operator's chair they are
+the same event — an invocation was spent and there is no plan — so they get the
+same record.
 
 ```text
 plan identity        a plans row with no revision. Nothing that lists or reads

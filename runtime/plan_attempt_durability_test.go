@@ -296,3 +296,52 @@ func TestAPlanWhoseFirstAttemptFailedCanStillBeProposed(t *testing.T) {
 		t.Fatalf("attempts view after a successful proposal = %#v", view)
 	}
 }
+
+// A reasoning invocation whose ANSWER could not be read is durable too.
+//
+// The #120 dogfood failed here rather than at compilation: the model answered
+// correctly and the runtime read the wrong object out of the transcript. That
+// refusal happens before any proposal exists to compile, and it used to leave
+// nothing behind at all - the same product gap, one layer further up.
+func TestAPlannerRefusalBeforeCompilationIsDurableToo(t *testing.T) {
+	f := newAttemptFixture(t)
+	input := refusedProposal(f)
+	// No stages: the answer never decoded, so there is no proposal.
+	input.Reasoned = nil
+	transcript := filepath.Join(f.stateDir, "unreadable.log")
+	if err := os.WriteFile(transcript, []byte("the provider said something else"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input.Evidence = []Artifact{{
+		Path: transcript, SHA256: textDigest("the provider said something else"),
+		MediaType: "text/plain", LocalOnly: true,
+	}}
+	cause := &PlannerRefusedError{AgentID: "codex", Detail: `proposed stage "kebab-case-id" has kind "agent|assurance_gate|human_decision_gate", which is not a stage kind`}
+
+	attemptID, err := f.service.RecordPlanningRefusal(input, cause)
+	if err != nil {
+		t.Fatalf("a planner refusal could not be recorded: %v", err)
+	}
+	view, err := f.service.AttemptsView("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Executable || len(view.Attempts) != 1 {
+		t.Fatalf("attempts view = %#v", view)
+	}
+	attempt := view.Attempts[0]
+	switch {
+	case attempt.AttemptID != attemptID:
+		t.Fatalf("attempt id = %q, want %q", attempt.AttemptID, attemptID)
+	case attempt.Reasoning == nil || attempt.Reasoning.AgentID != "codex":
+		t.Fatal("the reasoning provenance of an unreadable answer was lost")
+	case len(attempt.Evidence) != 1:
+		t.Fatal("the transcript of an unreadable answer was lost")
+	case len(attempt.Errors) == 0 || !strings.Contains(strings.Join(attempt.Errors, " "), "not a stage kind"):
+		t.Fatalf("the typed refusal was not preserved: %#v", attempt.Errors)
+	}
+	// It is still not a plan, and still not approvable.
+	if _, found, err := f.store.Plan("plan-attempt"); err != nil || found {
+		t.Fatalf("an unreadable answer produced a plan document (found=%v, err=%v)", found, err)
+	}
+}

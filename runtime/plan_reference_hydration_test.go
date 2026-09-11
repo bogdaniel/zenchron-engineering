@@ -19,6 +19,22 @@ import (
 	"time"
 )
 
+// hydratedIntent is the two steps the reasoning path performs: compile the
+// intent, then hydrate the issues the pinned primary text cites. Splitting them
+// is the point - a deterministic compilation performs only the first.
+func hydratedIntent(t *testing.T, fixture *phase8Fixture) (PlanIntent, error) {
+	t.Helper()
+	intent, err := fixture.runtime.CompilePlanIntent(context.Background(), fixture.issue)
+	if err != nil {
+		return intent, err
+	}
+	if len(intent.References) != 0 {
+		t.Fatal("compiling the intent hydrated references on its own: a deterministic plan would pay for context nobody reads")
+	}
+	intent.References, err = fixture.runtime.HydrateReferences(context.Background(), intent)
+	return intent, err
+}
+
 // The citation set is extracted from the PINNED text and is deterministic.
 func TestReferencedIssueNumbersAreExplicitCitationsOnly(t *testing.T) {
 	cases := []struct {
@@ -63,7 +79,7 @@ func TestReferencedIssuesArePinnedThroughTheForgeBoundary(t *testing.T) {
 		}
 	}
 
-	intent, err := fixture.runtime.CompilePlanIntent(context.Background(), fixture.issue)
+	intent, err := hydratedIntent(t, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +123,7 @@ func TestAnUnreadableReferencedIssueBecomesVisibleState(t *testing.T) {
 	primary.Body = UntrustedText(fmt.Sprintf("resolve #%d", fixture.issue+9))
 	fixture.forge.Issues[fixture.issue] = primary
 
-	intent, err := fixture.runtime.CompilePlanIntent(context.Background(), fixture.issue)
+	intent, err := hydratedIntent(t, fixture)
 	if err != nil {
 		t.Fatalf("one unreadable reference stopped planning entirely: %v", err)
 	}
@@ -143,7 +159,7 @@ func TestReferenceHydrationFanOutIsBoundedAndStated(t *testing.T) {
 	primary.Body = UntrustedText("resolve " + strings.Join(citations, ", "))
 	fixture.forge.Issues[fixture.issue] = primary
 
-	intent, err := fixture.runtime.CompilePlanIntent(context.Background(), fixture.issue)
+	intent, err := hydratedIntent(t, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +201,7 @@ func TestReferenceHydrationDoesNotRecurse(t *testing.T) {
 		UpdatedAt: time.Unix(1_700_000_100, 0).UTC(), Author: GitHubActor{Login: "operator", ID: 7},
 	}
 
-	intent, err := fixture.runtime.CompilePlanIntent(context.Background(), fixture.issue)
+	intent, err := hydratedIntent(t, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}

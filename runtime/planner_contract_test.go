@@ -167,3 +167,80 @@ func TestReferencedSourcesReachThePlannerAsUntrustedText(t *testing.T) {
 		t.Fatal("the planner is no longer told it may make no network request")
 	}
 }
+
+// The answer is located by its FENCE, not by scanning a whole transcript for
+// balanced braces.
+//
+// This is the #120 dogfood's second failure, and the worse one: the model
+// answered correctly and the runtime read the output contract's own example
+// instead. A coding CLI transcript is full of Go source, so unmatched braces and
+// odd quotes accumulate and the brace scanner's idea of "inside a string" stops
+// matching reality - and the contract example, echoed as part of the prompt, was
+// the last thing that still parsed.
+func TestTheAnswerIsReadFromItsFenceRatherThanFromTheProseAroundIt(t *testing.T) {
+	// A transcript shaped exactly like the real one: the echoed prompt with the
+	// output contract's example in it, then Go source with unbalanced braces,
+	// then the model's fenced answer.
+	echoedContract := `{"stages": [{"id": "kebab-case-id", "kind": "agent|assurance_gate|human_decision_gate",` +
+		` "role": "one of: implementer", "depends_on": ["ids"], "rationale": "why"}], "notes": "a paragraph"}`
+	source := "runtime/plan_reconciler.go:40:func TestAFreeze(t *testing.T) {\n" +
+		"runtime/plan_service.go:152:\tif projection.RunID == \"\" {\n" +
+		"an unmatched \" quote in prose, and a stray } too\n"
+	answer := "I will answer below.\n" + echoedContract + "\n" + source +
+		"```json\n{\"stages\":[{\"id\":\"real-answer\",\"kind\":\"agent\",\"role\":\"implementer\",\"objective\":\"do the work\"}]," +
+		"\"notes\":\"the answer\"}\n```\ntokens used\n34.106\n"
+
+	input, _ := plannerFixture(t, answer)
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatalf("the model's fenced answer was not read: %v", err)
+	}
+	if len(output.Stages) != 1 || output.Stages[0].ID != "real-answer" {
+		t.Fatalf("stages = %#v, want the fenced answer rather than the echoed contract", output.Stages)
+	}
+	if output.Notes != "the answer" {
+		t.Fatalf("notes = %q", output.Notes)
+	}
+}
+
+// A model that restates its answer ends with the one it means, fenced or not.
+func TestTheLastFencedAnswerWins(t *testing.T) {
+	answer := "```json\n{\"stages\":[{\"id\":\"first\",\"kind\":\"agent\",\"role\":\"implementer\"}]}\n```\n" +
+		"On reflection:\n```json\n{\"stages\":[{\"id\":\"second\",\"kind\":\"agent\",\"role\":\"implementer\"}]}\n```\n"
+	input, _ := plannerFixture(t, answer)
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Stages[0].ID != "second" {
+		t.Fatalf("stages = %#v", output.Stages)
+	}
+}
+
+// An answer with no fence still works: the brace scan is the fallback, not a
+// thing that was replaced.
+func TestAnUnfencedAnswerIsStillRead(t *testing.T) {
+	answer := "Here is the plan.\n{\"stages\":[{\"id\":\"unfenced\",\"kind\":\"agent\",\"role\":\"implementer\"}]}\n"
+	input, _ := plannerFixture(t, answer)
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Stages[0].ID != "unfenced" {
+		t.Fatalf("stages = %#v", output.Stages)
+	}
+}
+
+// A fence the provider never closed is still the answer: an output cut short is
+// not a reason to read something older instead.
+func TestAnUnclosedFinalFenceIsStillTheAnswer(t *testing.T) {
+	answer := "```json\n{\"stages\":[{\"id\":\"cut-short\",\"kind\":\"agent\",\"role\":\"implementer\"}]}\n"
+	input, _ := plannerFixture(t, answer)
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Stages[0].ID != "cut-short" {
+		t.Fatalf("stages = %#v", output.Stages)
+	}
+}

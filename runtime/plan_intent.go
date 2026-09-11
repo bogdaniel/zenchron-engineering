@@ -38,7 +38,8 @@ type PlanIntent struct {
 	Source sourceRecord
 	// References is the explicitly referenced same-repository issue context,
 	// pinned through the governed forge boundary BEFORE the reasoning
-	// invocation.
+	// invocation. It is filled by HydrateReferences, which the caller invokes
+	// only when a model will actually be given it.
 	//
 	// It is not part of the plan objective and never becomes one: the objective
 	// is what the plan document carries and what its digest is over, and
@@ -111,10 +112,6 @@ func (r *EngineeringRuntime) CompilePlanIntent(ctx context.Context, issue int) (
 		return PlanIntent{}, err
 	}
 	return PlanIntent{
-		// The references are hydrated from the PINNED primary text, not from a
-		// second forge read of the issue: the citation set is a fact about the
-		// snapshot this attempt is bound to.
-		References:     r.hydrateReferencedSources(ctx, issue, text.Title, text.Body),
 		Objective:      source.Objective,
 		Subject:        subject,
 		Contract:       kernel.Contract,
@@ -178,3 +175,21 @@ func (r *EngineeringRuntime) ControllerIdentityID() string { return r.deps.Contr
 // PlanningRegistry is the operator customization registry this runtime was
 // built with.
 func (r *EngineeringRuntime) PlanningRegistry() interface{ Dir() string } { return r.deps.Planning }
+
+// HydrateReferences reads the same-repository issues the primary issue cites.
+//
+// It is a SEPARATE step from compiling the intent because it is input for a
+// model: a deterministic compilation gives the references to nobody, and
+// spending forge reads to record context that no planner saw would be both a
+// cost and a false claim on the plan.
+//
+// The citation set comes from the PINNED primary text - the local snapshot this
+// intent is already bound to - so no second read of the primary issue happens
+// and the set is a fact about the snapshot rather than about the clock.
+func (r *EngineeringRuntime) HydrateReferences(ctx context.Context, intent PlanIntent) ([]ReferencedSource, error) {
+	text, err := r.untrustedSource(intent.Source)
+	if err != nil {
+		return nil, err
+	}
+	return r.hydrateReferencedSources(ctx, intent.Source.Issue, text.Title, text.Body), nil
+}

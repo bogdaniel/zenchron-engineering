@@ -61,6 +61,7 @@ var issueReferencePattern = regexp.MustCompile(`#([0-9]{1,7})`)
 type ReferencedSource struct {
 	Repository string
 	Issue      int
+	URL        string
 	// Digest pins the exact text, and is empty when the read failed.
 	Digest string
 	Title  string
@@ -181,6 +182,7 @@ func (r *EngineeringRuntime) hydrateReferencedSources(ctx context.Context, self 
 		}
 		budget -= cost
 		reference.Digest, reference.Title, reference.Body = record.Digest, text.Title, text.Body
+		reference.URL = record.URL
 		reference.SnapshotPath, reference.Available = record.SnapshotPath, true
 		references = append(references, reference)
 	}

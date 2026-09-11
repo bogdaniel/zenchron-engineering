@@ -389,21 +389,32 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	// for an operator who does not want to spend an invocation: it compiles the
 	// same obligations with no model at all, and says so.
 	if !flags.Deterministic {
-		output, err := reasonAboutPlan(ctx, composed, intent, planID, flags.Template)
+		// Referenced same-repository issue context, read through the governed
+		// forge boundary HERE rather than during intent compilation: it is
+		// planning input for a MODEL, and a deterministic compilation has no
+		// model to give it to. Recording it on a plan nothing reasoned about
+		// would claim the planner was given context when no planner ran.
+		references, err := composed.engine.HydrateReferences(ctx, intent)
 		if err != nil {
 			return runtime.ExitFailed, err
 		}
-		input.Reasoned, input.Reasoning = output.Stages, &output.Reasoning
-		// The transcripts travel WITH the proposal. A proposal the compiler
-		// refuses is preserved as durable evidence, and evidence that does not
-		// name its own transcript is evidence an operator has to go looking for.
-		input.Evidence = output.Artifacts
+		intent.References = references
+		input.References = intent.ReferencePayloads()
+
+		output, err := reasonAboutPlan(ctx, composed, intent, planID, flags.Template)
+		// The transcripts travel WITH the proposal, and they travel with a
+		// REFUSAL too. An answer the runtime could not read is the same product
+		// event as a proposal it could not compile: an invocation was spent and
+		// there is no plan, and the operator needs the same record of it.
+		input.Reasoned, input.Evidence = output.Stages, output.Artifacts
+		if output.Reasoning.AgentID != "" {
+			reasoning := output.Reasoning
+			input.Reasoning = &reasoning
+		}
+		if err != nil {
+			return exitFor(err, runtime.ExitFailed), recordPlanningRefusal(composed, input, err)
+		}
 	}
-	// What referenced-issue hydration produced, whether or not the proposal
-	// compiles. A planner that reasoned without a material referenced issue
-	// produced a different proposal than one that had it, and that is a fact
-	// about the plan rather than a detail of the invocation.
-	input.References = intent.ReferencePayloads()
 	var plan domain.EngineeringPlan
 	write := func() (err error) { plan, err = composed.service.Propose(ctx, input); return err }
 	if under != nil {
@@ -419,6 +430,22 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 		return runtime.ExitFailed, err
 	}
 	return planOutput(flags, view, stdout, "proposed")
+}
+
+// recordPlanningRefusal preserves a refused reasoning invocation and returns the
+// refusal to report.
+//
+// The refusal itself is what the operator gets back either way. Recording it is
+// best-effort in one direction only: a record that could not be written is
+// stated alongside the refusal rather than replacing it, because the answer to
+// "why did planning fail" must not become "and also the evidence system failed".
+func recordPlanningRefusal(composed *planComposition, input runtime.ProposeInput, cause error) error {
+	attempt, err := composed.service.RecordPlanningRefusal(input, cause)
+	if err != nil {
+		return fmt.Errorf("%w (and the refused attempt could not be recorded: %v)", cause, err)
+	}
+	return fmt.Errorf("%w\nthe invocation and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
+		cause, attempt, input.PlanID)
 }
 
 // reasonAboutPlan performs one bounded planning invocation.
@@ -453,6 +480,9 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 		}
 		template = &chosen
 	}
+	// InvokePlanner returns its provenance and transcripts even when it
+	// refuses, and they are returned to the caller unchanged: a refused
+	// invocation still happened, and the evidence of it is the point.
 	output, err := runtime.InvokePlanner(ctx, runtime.PlannerInput{
 		PlanID: planID, Revision: 1, Template: template,
 		Agent: composed.engine.PlanningAgent(), Provider: composed.engine.PlanningProvider(),
@@ -469,10 +499,7 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 		// issue.
 		References: intent.References,
 	})
-	if err != nil {
-		return runtime.PlannerOutput{}, err
-	}
-	return output, nil
+	return output, err
 }
 
 // requirePlanningMode refuses a planner whose adapter cannot enter a provable
