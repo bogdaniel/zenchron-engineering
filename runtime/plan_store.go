@@ -298,6 +298,10 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 	}
 	return s.appendToStream(e, journalStream{
 		kind: streamPlan, id: e.PlanID,
+		// A refused planning attempt is the one plan event whose payload
+		// carries an identity derived from what the stream already holds, so it
+		// is the one that allocates inside the transaction.
+		allocate: planAttemptAllocator(e),
 		// The plan row is read inside the transaction, for the same reason the
 		// run row is: an event may not be journalled against a plan that does
 		// not exist.
@@ -385,4 +389,59 @@ func decodePlan(document string) (domain.EngineeringPlan, error) {
 		return domain.EngineeringPlan{}, fmt.Errorf("decode durable plan: %w", err)
 	}
 	return plan, nil
+}
+
+// PendingAttemptID is what a caller writes into a plan.attempt_refused payload
+// where its identity will go.
+//
+// The identity is ALLOCATED BY THE JOURNAL, exactly as the sequence, the chain
+// links and the state digests are, and for exactly the same reason: it counts
+// what the stream already holds, and only the append transaction can count that
+// without a gap. A caller that supplies anything else is refused rather than
+// silently overwritten - being told your identity was replaced is the whole
+// value of not being allowed to choose it.
+const PendingAttemptID = "attempt-pending"
+
+// planAttemptAllocator returns the allocator for a refused-attempt event, or
+// nil for every other plan event.
+func planAttemptAllocator(e EngineeringEvent) func([]EngineeringEvent, EngineeringEvent) (EngineeringEvent, error) {
+	if e.Type != EventPlanAttemptRefused {
+		return nil
+	}
+	return func(existing []EngineeringEvent, event EngineeringEvent) (EngineeringEvent, error) {
+		var payload PlanAttemptRefusedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return EngineeringEvent{}, err
+		}
+		if payload.AttemptID != PendingAttemptID {
+			return EngineeringEvent{}, fmt.Errorf(
+				"a refused planning attempt carries attempt id %q: the identity is allocated by the journal, not the caller, so the payload names %q until it is",
+				payload.AttemptID, PendingAttemptID)
+		}
+		// Counted from the PROJECTION rather than from a second rule about
+		// rows, so what an operator reads and what the journal allocated are
+		// the same derivation.
+		snapshot, err := ReducePlan(event.PlanID, existing)
+		if err != nil {
+			return EngineeringEvent{}, err
+		}
+		ordinal := 1
+		for _, previous := range snapshot.Attempts {
+			if previous.Revision == payload.Revision {
+				ordinal++
+			}
+		}
+		payload.AttemptID = PlanAttemptID(event.PlanID, payload.Revision, ordinal)
+		if event.Payload, err = marshalPayloadJSON(payload); err != nil {
+			return EngineeringEvent{}, err
+		}
+		return event, nil
+	}
+}
+
+// PlanAttemptID is the durable identity of one refused planning attempt: which
+// plan, which revision it would have produced, and which try at that revision
+// it was.
+func PlanAttemptID(planID string, revision, ordinal int) string {
+	return fmt.Sprintf("attempt-%s-r%d-%d", planID, revision, ordinal)
 }

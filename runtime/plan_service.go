@@ -14,6 +14,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1133,19 +1134,20 @@ func (s PlanService) appendPlanEvent(planID, eventType string, payload any) erro
 // path: the journal allocates the sequence and links the chain, and no caller
 // chooses either.
 func appendPlanEvent(store *SQLiteOperationStore, at time.Time, planID, eventType string, payload any) error {
-	return appendPlanEventWithArtifacts(store, at, planID, eventType, payload, nil)
+	_, err := appendPlanEventWithArtifacts(store, at, planID, eventType, payload, nil)
+	return err
 }
 
 // appendPlanEventWithArtifacts is the same append with durable evidence
 // attached. The artifacts go through the journal's own ValidateArtifact
 // discipline, so a plan event cannot reference evidence that would not be
 // accepted anywhere else in this runtime.
-func appendPlanEventWithArtifacts(store *SQLiteOperationStore, at time.Time, planID, eventType string, payload any, artifacts []Artifact) error {
+func appendPlanEventWithArtifacts(store *SQLiteOperationStore, at time.Time, planID, eventType string, payload any, artifacts []Artifact) (EngineeringEvent, error) {
 	encoded, err := marshalPayloadJSON(payload)
 	if err != nil {
-		return err
+		return EngineeringEvent{}, err
 	}
-	_, err = store.AppendPlanEvent(EngineeringEvent{
+	return store.AppendPlanEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
 		ID:            newEventID(planID),
 		PlanID:        planID,
@@ -1154,7 +1156,6 @@ func appendPlanEventWithArtifacts(store *SQLiteOperationStore, at time.Time, pla
 		Payload:       encoded,
 		Artifacts:     artifacts,
 	})
-	return err
 }
 
 func (s PlanService) recordValidation(planID string, revision int, digest string, status domain.ProposalValidationStatus, cause error) error {
@@ -1241,12 +1242,6 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 	if _, err := s.Store.ClaimPlanAttempt(input.PlanID, repository, s.now()); err != nil {
 		return "", err
 	}
-	// The attempt NUMBER is counted from the durable journal, which is ordered
-	// by the same append this record goes through. Two refusals racing at one
-	// revision would compute the same number; what prevents that is the
-	// ownership boundary that already prevents two proposers - the exclusive
-	// lock on the state directory, or the supervisor that owns it - rather than
-	// anything here. It is an OS advisory lock, not process-local state.
 	// The identity answers the SOURCE, whether or not it ever reached a plan.
 	// Binding it here is what lets `plan show` say which issue the operator was
 	// planning; without it the record described an attempt at nothing in
@@ -1256,20 +1251,14 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 			return "", err
 		}
 	}
-	// WHICH try this is, counted from the durable journal rather than from a
-	// field somebody increments. Two refusals at the same revision are two
-	// attempts, and a restart between them does not restart the count.
-	snapshot, err := s.Store.ReplayPlan(input.PlanID)
-	if err != nil {
-		return "", err
-	}
-	attempt := 1
-	for _, previous := range snapshot.Attempts {
-		if previous.Revision == revision {
-			attempt++
-		}
-	}
-	attemptID := fmt.Sprintf("attempt-%s-r%d-%d", input.PlanID, revision, attempt)
+	// WHICH try this is is NOT decided here. Deriving it from a read and
+	// appending afterwards leaves a gap, and two refusals of the same revision
+	// racing through that gap - two goroutines inside one supervisor, or two
+	// processes - would both derive the same number and file two attempts under
+	// one identity. The journal allocates it inside the append transaction,
+	// exactly as it allocates the sequence, and this payload names the
+	// placeholder until it does.
+	//
 	// The journal's list bounds apply here like anywhere else, and they bite
 	// hardest exactly when the proposal is worst: a decomposition with many
 	// defective stages produces many reasons, and a payload refused for being
@@ -1277,16 +1266,28 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 	// bounds are applied by TRUNCATING and saying so, never by failing to
 	// write.
 	stages, droppedStages, substituted := attemptStages(input.Reasoned)
-	reasons := boundedReasons(refusalReasons(cause))
+	var notices []string
 	if droppedStages > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d further proposed stages are not recorded on this attempt: the durable record holds at most %d",
+		notices = append(notices, fmt.Sprintf("%d further proposed stages are not recorded on this attempt: the durable record holds at most %d",
 			droppedStages, maxPayloadListItems))
 	}
 	if substituted > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d proposed stages named no id or no kind, and are recorded under a placeholder", substituted))
+		notices = append(notices, fmt.Sprintf("%d proposed stages were shortened or filled in to fit the durable record", substituted))
 	}
+	// The notices keep their SLOTS. Appending them to a full list and cutting
+	// the result to the bound dropped exactly them, so the record understated
+	// itself and said nothing about doing so - which is the failure they exist
+	// to report.
+	reasons := boundedReasons(refusalReasons(cause))
+	if room := maxPayloadListItems - len(notices); len(reasons) > room {
+		reasons = reasons[:room]
+		notices = append(notices, fmt.Sprintf("further deterministic reasons are not recorded: the durable record holds at most %d", maxPayloadListItems))
+		notices = notices[:min(len(notices), maxPayloadListItems)]
+		reasons = reasons[:max(0, maxPayloadListItems-len(notices))]
+	}
+	reasons = append(reasons, notices...)
 	payload := PlanAttemptRefusedPayload{
-		AttemptID: attemptID, Revision: revision, Origin: origin, Issue: input.Issue,
+		AttemptID: PendingAttemptID, Revision: revision, Origin: origin, Issue: input.Issue,
 		Stages: stages, Errors: boundedPayloadList(reasons),
 		Evidence:   boundedPayloadList(attemptEvidence(input.Evidence)),
 		References: boundedPayloadList(input.References),
@@ -1297,8 +1298,19 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 	// The transcripts are attached as event ARTIFACTS as well as referenced in
 	// the payload, so they pass the same ValidateArtifact discipline every other
 	// piece of durable evidence passes on the way in and on every replay.
-	return attemptID, appendPlanEventWithArtifacts(s.Store, s.now(), input.PlanID,
+	appended, err := appendPlanEventWithArtifacts(s.Store, s.now(), input.PlanID,
 		EventPlanAttemptRefused, payload, input.Evidence)
+	if err != nil {
+		return "", err
+	}
+	// The identity comes back FROM the journal, because the journal is what
+	// decided it. Recomputing it here would be a second derivation with nothing
+	// keeping the two in step.
+	var recorded PlanAttemptRefusedPayload
+	if err := json.Unmarshal(appended.Payload, &recorded); err != nil {
+		return "", err
+	}
+	return recorded.AttemptID, nil
 }
 
 // attemptStages reduces the proposal to the members that decide whether it is
@@ -1312,23 +1324,35 @@ func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int, i
 	}
 	proposed := make([]PlanAttemptStagePayload, 0, len(stages))
 	for position, stage := range stages {
+		// EVERY string here is model-supplied, and the journal refuses a field
+		// or a list element over its bound. Truncating the count alone was not
+		// enough: a stage id, role or dependency longer than the field bound
+		// made the append fail, and the attempt was lost for exactly the
+		// proposal that was most broken - which is the gap this record exists
+		// to close. The bounds are applied by TRUNCATING and saying so, never
+		// by failing to write.
+		changed := false
+		note := func(before, after string) string {
+			if before != after {
+				changed = true
+			}
+			return after
+		}
 		// An id or kind the proposal never stated is recorded as a stated
-		// PLACEHOLDER. The payload requires both, so copying the empty value
-		// through would make the journal refuse the record - and the record
-		// would be lost for exactly the proposal that was most broken. The
-		// substitution is counted and stated as a reason, so nothing is
-		// silently invented.
+		// PLACEHOLDER, for the same reason.
 		if strings.TrimSpace(stage.ID) == "" {
 			stage.ID = fmt.Sprintf("(unnamed stage %d)", position+1)
-			substituted++
+			changed = true
 		}
 		if strings.TrimSpace(string(stage.Kind)) == "" {
 			stage.Kind = "(unstated)"
-			substituted++
+			changed = true
 		}
 		item := PlanAttemptStagePayload{
-			ID: stage.ID, Kind: string(stage.Kind), Role: string(stage.Role),
-			DependsOn: boundedPayloadList(stage.DependsOn),
+			ID:        note(stage.ID, boundedField(stage.ID)),
+			Kind:      note(string(stage.Kind), boundedField(string(stage.Kind))),
+			Role:      note(string(stage.Role), boundedField(string(stage.Role))),
+			DependsOn: boundedPayloadElements(stage.DependsOn, &changed),
 		}
 		if stage.Independence != nil {
 			// DifferentFrom is copied EXACTLY, empty included. An empty list is
@@ -1337,13 +1361,40 @@ func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int, i
 			// difference between "asked for no independence" and "asked for
 			// independence over nothing".
 			item.Independence = &PlanAttemptIndependencePayload{
-				Dimension:     string(stage.Independence.Dimension),
-				DifferentFrom: boundedPayloadList(append([]string{}, stage.Independence.DifferentFrom...)),
+				Dimension: note(string(stage.Independence.Dimension), boundedField(string(stage.Independence.Dimension))),
+				DifferentFrom: boundedPayloadElements(
+					append([]string{}, stage.Independence.DifferentFrom...), &changed),
 			}
+		}
+		// Counted per STAGE, not per field: a stage missing both its id and its
+		// kind is one stage the record had to fill in, and saying "two" would
+		// describe a proposal nobody made.
+		if changed {
+			substituted++
 		}
 		proposed = append(proposed, item)
 	}
 	return proposed, dropped, substituted
+}
+
+// boundedPayloadElements truncates a list to the journal's element bound AND
+// each element to the element-size bound, reporting whether anything changed.
+func boundedPayloadElements(values []string, changed *bool) []string {
+	if len(values) > maxPayloadListItems {
+		values, *changed = values[:maxPayloadListItems], true
+	}
+	bounded := make([]string, 0, len(values))
+	for _, value := range values {
+		cut := boundedField(value)
+		if cut != value {
+			*changed = true
+		}
+		bounded = append(bounded, cut)
+	}
+	if len(bounded) == 0 {
+		return nil
+	}
+	return bounded
 }
 
 // boundedPayloadList truncates a list to the journal's element bound. It is a

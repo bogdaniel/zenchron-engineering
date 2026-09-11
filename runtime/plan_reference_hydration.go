@@ -28,6 +28,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -47,9 +48,11 @@ const (
 	maxHydratedReferenceBytes = 24000
 )
 
-// issueReferencePattern finds a "#N" token. The preceding character is captured
-// so a reference embedded in a path or another number can be rejected: "#4" in
-// "sha256#4" or "/issues/#4" is not a citation of issue 4.
+// issueReferencePattern finds a "#N" token. What precedes and follows it is
+// checked by referencedIssueNumbers rather than by the pattern, because the
+// rejections are about neighbouring bytes rather than about the token: "#4" in
+// "sha256#4", in "/issues/#4" or in the HTML entity "&#39;" is not a citation
+// of issue 4.
 var issueReferencePattern = regexp.MustCompile(`#([0-9]{1,7})`)
 
 // ReferencedSource is one same-repository issue the primary issue points at.
@@ -96,10 +99,15 @@ func referencedIssueNumbers(self int, title, body string) []int {
 	for _, text := range []string{title, body} {
 		for _, match := range issueReferencePattern.FindAllStringSubmatchIndex(text, -1) {
 			start, numberStart, numberEnd := match[0], match[2], match[3]
-			// A "#" that continues a word or a path is not a citation.
+			// A "#" that continues a word, a path or an HTML entity is not a
+			// citation. "&" matters more than it looks: a body pasted from
+			// rendered HTML is full of "&#39;", and reading those as citations
+			// both spends forge reads on unrelated issues and - because the
+			// result is sorted ascending and capped - can push the real cohort
+			// references past the fan-out bound.
 			if start > 0 {
 				previous := text[start-1]
-				if isReferenceWordByte(previous) || previous == '/' || previous == '#' {
+				if isReferenceWordByte(previous) || previous == '/' || previous == '#' || previous == '&' {
 					continue
 				}
 			}
@@ -177,6 +185,10 @@ func (r *EngineeringRuntime) hydrateReferencedSources(ctx context.Context, self 
 		cost := len(text.Title) + len(text.Body)
 		if cost > budget {
 			reference.Detail = fmt.Sprintf("the pinned referenced issues reached the %d byte planning-context bound before this one", maxHydratedReferenceBytes)
+			// Nothing will point at this snapshot, so it does not stay on disk.
+			// It is third-party text in an owner-only file, and a file no
+			// record references is one nobody can account for.
+			_ = os.Remove(record.SnapshotPath)
 			references = append(references, reference)
 			continue
 		}
@@ -240,7 +252,13 @@ func referencedSourceText(references []ReferencedSource) string {
 				reference.Repository, reference.Issue, reference.Detail))
 		default:
 			builder.WriteString(fmt.Sprintf("\n%s issue #%d, pinned at %s:\n<<<UNTRUSTED-SOURCE\n%s\n\n%s\nUNTRUSTED-SOURCE\n",
-				reference.Repository, reference.Issue, short12(reference.Digest), reference.Title, reference.Body))
+				reference.Repository, reference.Issue, short12(reference.Digest),
+				// Neutralized again HERE, not only where the snapshot was
+				// written. Sanitizing at store time leaves any snapshot written
+				// before that rule existed carrying a live fence, and this is
+				// the boundary that actually matters: the point where
+				// third-party text enters a prompt.
+				neutralizeFences(reference.Title), neutralizeFences(reference.Body)))
 		}
 	}
 	return builder.String()

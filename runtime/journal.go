@@ -173,6 +173,18 @@ type journalStream struct {
 	events   func(*sql.Tx) ([]EngineeringEvent, error)
 	digest   func([]EngineeringEvent) (string, error)
 	insert   func(*sql.Tx, EngineeringEvent, string) error
+	// allocate finalizes a payload member whose value depends on the events
+	// already in the stream, INSIDE the append transaction and against the
+	// events this append is ordered after.
+	//
+	// It exists for the same reason the sequence allocation does. A caller that
+	// reads the stream, derives an identity from what it saw and appends
+	// afterwards has a gap between the read and the write, and anything that
+	// appends in that gap makes the derived identity wrong. The sequence was
+	// never allowed to be derived that way; nor is anything else that counts
+	// what is already there. Nil for every stream and every event type that
+	// derives nothing.
+	allocate func([]EngineeringEvent, EngineeringEvent) (EngineeringEvent, error)
 }
 
 // appendToStream is the ONE append implementation. Allocating a sequence,
@@ -201,6 +213,25 @@ func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journal
 	existing, err := stream.events(tx)
 	if err != nil {
 		return EngineeringEvent{}, err
+	}
+	if stream.allocate != nil {
+		// Allocated HERE: after the prior events are read under the write lock
+		// this transaction already holds, and before anything is hashed over
+		// the payload. A concurrent append cannot land between the two, in this
+		// process or any other, because SQLite serializes the transactions
+		// themselves.
+		if e, err = stream.allocate(existing, e); err != nil {
+			return EngineeringEvent{}, err
+		}
+		// The payload the journal STORES is the payload the journal validated.
+		// The pre-transaction check above ran against a document that still
+		// carried the placeholder, so it proved nothing about this one.
+		if err := validateEventPayload(e); err != nil {
+			return EngineeringEvent{}, err
+		}
+		if err := rejectEmbeddedTranscript(e); err != nil {
+			return EngineeringEvent{}, err
+		}
 	}
 	before, err := stream.digest(existing)
 	if err != nil {

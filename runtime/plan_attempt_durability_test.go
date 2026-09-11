@@ -11,10 +11,13 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -376,7 +379,7 @@ func TestAnAttemptRecordsStagesThatNamedNoIdentity(t *testing.T) {
 	if !found {
 		t.Fatalf("the nameless stage is not in the record: %#v", attempt.Stages)
 	}
-	if !strings.Contains(strings.Join(attempt.Errors, " "), "named no id or no kind") {
+	if !strings.Contains(strings.Join(attempt.Errors, " "), "shortened or filled in") {
 		t.Fatalf("the substitution was not stated as a reason: %#v", attempt.Errors)
 	}
 }
@@ -402,5 +405,293 @@ func TestPromotingAnAttemptCarriesTheRevisionRepository(t *testing.T) {
 	}
 	if len(identities) != 1 || identities[0].Repository != good.Subject.Repository {
 		t.Fatalf("the promoted plan reports repository %#v, want %q", identities, good.Subject.Repository)
+	}
+}
+
+// Two refusals of the SAME plan revision, racing, get two identities.
+//
+// This is the reachable production race, not a hypothetical one. The supervisor
+// answers control connections concurrently - ControlListener.Serve spawns a
+// goroutine per connection - and proposeSerialized deliberately runs the
+// planning invocation OUTSIDE the plan lock, because holding it across a
+// provider call would stall every run in the fleet. So two operators asking to
+// plan the same issue at the same time reach this record concurrently, inside
+// one process, where no advisory file lock separates them.
+//
+// The test drives the seam the race actually runs through rather than the
+// control endpoint above it: the causal claim is about read-then-append, and
+// exercising it directly means the proof does not depend on whether the layers
+// above happen to serialize today. Nothing here takes a lock; the journal's own
+// append transaction is what makes the allocation atomic.
+func TestConcurrentRefusalsOfOneRevisionGetDistinctIdentities(t *testing.T) {
+	f := newAttemptFixture(t)
+	// The plan identity exists first, so both racers are recording against one
+	// stream rather than also racing to create it - which is a different,
+	// already-settled question (ClaimPlanAttempt is a conditional insert).
+	if _, err := f.store.ClaimPlanAttempt("plan-attempt", "acme/repo", f.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 8
+	start := make(chan struct{})
+	identities := make([]string, racers)
+	failures := make([]error, racers)
+	var waiting, done sync.WaitGroup
+	waiting.Add(racers)
+	done.Add(racers)
+	for i := 0; i < racers; i++ {
+		go func(i int) {
+			defer done.Done()
+			input := refusedProposal(f)
+			cause := &PlannerRefusedError{AgentID: "codex", Detail: fmt.Sprintf("racer %d could not read the answer", i)}
+			waiting.Done()
+			<-start
+			identities[i], failures[i] = f.service.RecordPlanningRefusal(input, cause)
+		}(i)
+	}
+	waiting.Wait()
+	close(start)
+	done.Wait()
+
+	for i, err := range failures {
+		if err != nil {
+			t.Fatalf("racer %d lost its attempt entirely: %v", i, err)
+		}
+	}
+	distinct := map[string]int{}
+	for i, id := range identities {
+		if first, clash := distinct[id]; clash {
+			t.Fatalf("racers %d and %d were filed under one identity %q", first, i, id)
+		}
+		distinct[id] = i
+	}
+
+	// NO LOST EVENT. Two invocations were refused, so two attempts are durable.
+	snapshot, err := f.store.ReplayPlan("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Attempts) != racers {
+		t.Fatalf("attempts = %d, want %d: %#v", len(snapshot.Attempts), racers, snapshot.Attempts)
+	}
+	seen := map[string]bool{}
+	for _, attempt := range snapshot.Attempts {
+		if seen[attempt.AttemptID] {
+			t.Fatalf("duplicate attempt identity %q in the durable record", attempt.AttemptID)
+		}
+		seen[attempt.AttemptID] = true
+		if attempt.Revision != 1 {
+			t.Fatalf("attempt %q names revision %d", attempt.AttemptID, attempt.Revision)
+		}
+	}
+	// The identities the callers were TOLD are the identities on disk. A caller
+	// handed an id that is not the one recorded would send an operator to read
+	// an attempt that does not exist.
+	for i, id := range identities {
+		if !seen[id] {
+			t.Fatalf("racer %d was told identity %q, which is not in the durable record", i, id)
+		}
+	}
+	// And they are the contiguous ordinals the allocator promises, in either
+	// order the race resolved.
+	for ordinal := 1; ordinal <= racers; ordinal++ {
+		if want := PlanAttemptID("plan-attempt", 1, ordinal); !seen[want] {
+			t.Fatalf("the allocated ordinals are not contiguous: %q is missing from %v", want, seen)
+		}
+	}
+
+	// RESTART preserves both, because the identities are in the journal rather
+	// than in anything the process held.
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteOperationStore(f.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after, err := reopened.ReplayPlan("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Attempts) != racers {
+		t.Fatalf("attempts after restart = %d, want %d", len(after.Attempts), racers)
+	}
+	for i, attempt := range after.Attempts {
+		if attempt.AttemptID != snapshot.Attempts[i].AttemptID {
+			t.Fatalf("attempt %d changed identity across a restart: %q -> %q",
+				i, snapshot.Attempts[i].AttemptID, attempt.AttemptID)
+		}
+	}
+	if after.StateSHA256 != snapshot.StateSHA256 {
+		t.Fatalf("the replayed state changed across a restart: %s -> %s",
+			short12(snapshot.StateSHA256), short12(after.StateSHA256))
+	}
+}
+
+// The identity is the JOURNAL's to allocate, and a caller that chooses one is
+// refused rather than silently overwritten.
+func TestACallerMayNotChooseAnAttemptIdentity(t *testing.T) {
+	f := newAttemptFixture(t)
+	if _, err := f.store.ClaimPlanAttempt("plan-attempt", "acme/repo", f.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.store.AppendPlanEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: "e-1", PlanID: "plan-attempt",
+		Type: EventPlanAttemptRefused, OccurredAt: f.clock.Now(),
+		Payload: marshalPayload(t, PlanAttemptRefusedPayload{
+			AttemptID: "attempt-i-picked-this", Revision: 1,
+			Origin: domain.ProposalOriginInitial, Errors: []string{"refused"},
+		}),
+	})
+	if err == nil || !strings.Contains(err.Error(), "allocated by the journal") {
+		t.Fatalf("a caller-chosen attempt identity was accepted: %v", err)
+	}
+}
+
+// The identity is a function of the STREAM, not of the payload handed in.
+//
+// This is the causal core of the race, proven without concurrency: two appends
+// carrying the BYTE-IDENTICAL payload - same placeholder, same revision, the
+// view a caller would have built from a stream it read once - come out as
+// different attempts. A caller's view of what was already there cannot
+// influence the identity, so a stale view cannot mint a duplicate.
+func TestAttemptIdentityIsAFunctionOfTheStreamNotThePayload(t *testing.T) {
+	f := newAttemptFixture(t)
+	if _, err := f.store.ClaimPlanAttempt("plan-attempt", "acme/repo", f.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	payload := PlanAttemptRefusedPayload{
+		AttemptID: PendingAttemptID, Revision: 1,
+		Origin: domain.ProposalOriginInitial, Errors: []string{"refused"},
+	}
+	var allocated []string
+	for i := 0; i < 2; i++ {
+		appended, err := appendPlanEventWithArtifacts(f.store, f.clock.Now(), "plan-attempt",
+			EventPlanAttemptRefused, payload, nil)
+		if err != nil {
+			t.Fatalf("append %d: %v", i+1, err)
+		}
+		var recorded PlanAttemptRefusedPayload
+		if err := json.Unmarshal(appended.Payload, &recorded); err != nil {
+			t.Fatal(err)
+		}
+		allocated = append(allocated, recorded.AttemptID)
+	}
+	for ordinal, id := range allocated {
+		if want := PlanAttemptID("plan-attempt", 1, ordinal+1); id != want {
+			t.Fatalf("append %d allocated %q, want %q", ordinal+1, id, want)
+		}
+	}
+	// The placeholder the caller passed is never what gets stored.
+	snapshot, err := f.store.ReplayPlan("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range snapshot.Attempts {
+		if attempt.AttemptID == PendingAttemptID {
+			t.Fatal("the placeholder reached the durable record")
+		}
+	}
+}
+
+// Model-supplied strings that exceed the journal's field bounds are truncated,
+// not allowed to lose the whole record.
+//
+// The payload validator refuses any field or list element over its bound, so an
+// over-long stage id, role or dependency made the append fail and Propose
+// reported "the refused attempt could not be recorded" - the exact
+// invocation-spent-nothing-durable gap this record exists to close, reachable by
+// ordinary bad model output.
+func TestAnAttemptRecordsStagesWhoseStringsExceedTheFieldBounds(t *testing.T) {
+	f := newAttemptFixture(t)
+	input := refusedProposal(f)
+	huge := strings.Repeat("x", maxPayloadFieldBytes*3)
+	input.Reasoned = append(input.Reasoned, domain.PlanStage{
+		ID: huge, Kind: domain.StageAgent, Role: domain.RoleImplementer,
+		DependsOn: []string{huge, huge},
+		Independence: &domain.IndependenceRequirement{
+			Dimension: domain.IndependenceExecutionAgent, DifferentFrom: []string{huge},
+		},
+	})
+
+	if _, err := f.service.Propose(context.Background(), input); err == nil {
+		t.Fatal("the proposal compiled")
+	} else if strings.Contains(err.Error(), "could not be recorded") {
+		t.Fatalf("an over-long stage id lost the whole attempt: %v", err)
+	}
+	view, err := f.service.AttemptsView("plan-attempt")
+	if err != nil {
+		t.Fatalf("the attempt was not recorded: %v", err)
+	}
+	attempt := view.Attempts[0]
+	for _, stage := range attempt.Stages {
+		if len(stage.ID) > maxPayloadFieldBytes || len(stage.Role) > maxPayloadFieldBytes {
+			t.Fatalf("a recorded stage exceeds the field bound: %#v", stage)
+		}
+		for _, dependency := range stage.DependsOn {
+			if len(dependency) > maxPayloadListItemBytes {
+				t.Fatalf("a recorded dependency exceeds the element bound: %d bytes", len(dependency))
+			}
+		}
+		if stage.Independence != nil {
+			for _, peer := range stage.Independence.DifferentFrom {
+				if len(peer) > maxPayloadListItemBytes {
+					t.Fatalf("a recorded independence peer exceeds the element bound: %d bytes", len(peer))
+				}
+			}
+		}
+	}
+	if !strings.Contains(strings.Join(attempt.Errors, " "), "shortened or filled in") {
+		t.Fatalf("the truncation was not stated as a reason: %#v", attempt.Errors)
+	}
+}
+
+// The truncation notices keep their slots when the validator produced more
+// reasons than the record holds.
+//
+// Appending the notices to a full list and then cutting the result dropped
+// exactly them, so the record understated itself and said nothing about doing
+// so - which is the one thing the notices exist to report. The cause is built
+// directly here because the compiler stops at the first offending stage, so the
+// only way to reach a reason flood is to state one.
+func TestTruncationNoticesSurviveAFloodOfReasons(t *testing.T) {
+	f := newAttemptFixture(t)
+	input := refusedProposal(f)
+	for i := 0; i < maxPayloadListItems+4; i++ {
+		input.Reasoned = append(input.Reasoned, domain.PlanStage{
+			ID: fmt.Sprintf("producer-%d", i), Kind: domain.StageAgent,
+			Role: domain.RoleImplementer, Objective: "work",
+		})
+	}
+	reasons := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		reasons = append(reasons, fmt.Sprintf("deterministic reason %d", i))
+	}
+	cause := &planning.ValidationError{PlanID: input.PlanID, Reasons: reasons}
+
+	if _, err := f.service.RecordPlanningRefusal(input, cause); err != nil {
+		t.Fatalf("the attempt was lost: %v", err)
+	}
+	view, err := f.service.AttemptsView("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := view.Attempts[0].Errors
+	if len(recorded) > maxPayloadListItems {
+		t.Fatalf("the record holds %d reasons, above the %d bound", len(recorded), maxPayloadListItems)
+	}
+	joined := strings.Join(recorded, " | ")
+	for _, want := range []string{
+		"further proposed stages are not recorded",
+		"further deterministic reasons are not recorded",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("the record understates itself with no notice of %q:\n%s", want, joined)
+		}
+	}
+	// And the reasons themselves did not all vanish to make room.
+	if !strings.Contains(joined, "deterministic reason 0") {
+		t.Fatalf("the notices displaced every reason:\n%s", joined)
 	}
 }

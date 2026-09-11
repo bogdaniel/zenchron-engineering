@@ -397,8 +397,19 @@ func strengthenIndependence(existing *domain.IndependenceRequirement, required d
 			from[id] = true
 		}
 	}
+	namedOnlyItself := len(from) == 1 && from[stage.ID]
 	delete(from, stage.ID)
 	if len(from) == 0 {
+		// It named ITSELF and nothing else. That is a different proposal from
+		// one that named nothing, and reporting it as an empty "different_from"
+		// describes something the plan does not say. The record is the product
+		// here.
+		if namedOnlyItself {
+			return nil, &ValidationError{PlanID: planID, Reasons: []string{
+				fmt.Sprintf("stage %q requires independence from itself and from nothing else: a stage is trivially independent of itself, so the requirement names no stage it could differ from",
+					stage.ID),
+			}}
+		}
 		// A non-producing stage reaches here only when the plan contains no
 		// material producer at all, which is a different fact from the
 		// ambiguous shorthand and must not be reported as one: this stage

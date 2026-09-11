@@ -897,6 +897,24 @@ func extractJSONObject(answer string) (string, error) {
 	return "", fmt.Errorf("no JSON object with a stages member was found in the answer")
 }
 
+// startsLine reports whether a fence marker begins its line, allowing the up to
+// three spaces of indentation CommonMark permits.
+func startsLine(text string, at int) bool {
+	for indent := 0; indent <= 3; indent++ {
+		i := at - indent
+		if i == 0 {
+			return true
+		}
+		if text[i-1] == '\n' {
+			return true
+		}
+		if text[i-1] != ' ' {
+			return false
+		}
+	}
+	return false
+}
+
 // maxPlannerFences bounds how many fenced blocks are remembered. A transcript
 // that is nothing but code fences cannot grow this without limit, and the
 // answer ends the output, so the newest fences are the ones that matter.
@@ -909,6 +927,18 @@ const maxPlannerFences = 512
 // final fence the provider never closed is still read: its content is the rest
 // of the output, and an answer cut off mid-fence fails to parse here rather than
 // being mistaken for something else.
+//
+// A fence must START A LINE, as CommonMark requires. Counting every occurrence
+// of three backticks counted the ones a model writes INSIDE a sentence - "I
+// will wrap the answer in ``` fences" - and one of those flips every subsequent
+// open/close assignment: the real answer's opening fence becomes a close,
+// nothing parses, and the whole thing falls back to the brace scan. That is the
+// #119 failure returning, intermittently, decided by the model's prose.
+//
+// One consequence worth stating: a model that answers in a fence and then
+// restates the same answer WITHOUT one gets the fenced version. The fence is
+// the channel the contract asks for, and preferring it over later unfenced
+// prose is the point rather than an accident.
 func lastFencedProposal(answer string) (string, bool) {
 	const fence = "```"
 	var marks []int
@@ -917,8 +947,12 @@ func lastFencedProposal(answer string) (string, bool) {
 		if next < 0 {
 			break
 		}
-		marks = append(marks, offset+next)
-		offset += next + len(fence)
+		at := offset + next
+		offset = at + len(fence)
+		if !startsLine(answer, at) {
+			continue
+		}
+		marks = append(marks, at)
 		// Dropped in PAIRS, so the open/close alternation the pairing below
 		// depends on is preserved whatever is discarded.
 		if len(marks) > maxPlannerFences {

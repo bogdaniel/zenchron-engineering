@@ -863,6 +863,19 @@ one journal event    plan.attempt_refused, in the plan's own append-only stream,
 Because it is a journal projection rather than a stored record, an attempt read
 before a restart and an attempt read after one are the same replayed facts.
 
+Its identity — `attempt-PLAN-rN-K` — is **allocated by the journal**, inside the
+same append transaction that allocates the sequence and links the hash chain,
+and a caller that tries to choose one is refused. That is not tidiness. `K`
+counts what the stream already holds, and a caller that reads the stream,
+derives `K` and appends afterwards has a gap: the supervisor answers control
+connections concurrently and deliberately runs the planning invocation outside
+the plan lock, so two operators planning the same issue reach this record at the
+same time, inside one process, where no file lock separates them. Both would
+derive the same `K` and file two attempts under one identity. Allocating where
+the events are already being read under the write lock closes that for
+goroutines and for separate processes alike, without holding any lock across a
+provider call.
+
 `plan list` names the plan and says it has no plan; `plan show PLAN` answers,
 without a single grep through an artifact directory:
 

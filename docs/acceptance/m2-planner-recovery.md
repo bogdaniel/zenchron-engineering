@@ -166,5 +166,12 @@ to make plannable, and it is the operator's to approve.
 The durable attempt record. Attempt 1 predates it, attempt 2 failed on the path
 that did not yet record one, and attempts 3 and 4 both succeeded — so nothing
 was refused after the code that records it existed. Its behaviour, including
-that it survives a restart unchanged, is proven by regressions rather than by
-the dogfood.
+that it survives a restart unchanged and that concurrent refusals of one
+revision get distinct identities, is proven by regressions rather than by the
+dogfood.
+
+Nor did they exercise concurrency at all: each run was one operator, one
+command. The attempt-identity race is reachable only through the supervisor's
+control endpoint, which answers connections concurrently; it is covered by
+`TestConcurrentRefusalsOfOneRevisionGetDistinctIdentities` under `-race`, which
+fails reliably against the pre-fix derivation.

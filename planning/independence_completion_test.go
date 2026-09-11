@@ -204,3 +204,42 @@ func TestIndependenceInAPlanWithNoProducerIsRefusedOnItsOwnTerms(t *testing.T) {
 		t.Fatalf("the refusal does not name the real condition: %s", joined)
 	}
 }
+
+// A stage told to be independent of ITSELF and nothing else is refused for that
+// reason, not for naming nothing.
+//
+// The self-entry is dropped before the emptiness check, so the refusal used to
+// describe an empty "different_from" the plan never contained. The record is the
+// product here: an operator reading a refusal has to be reading about the
+// proposal they made.
+func TestIndependenceFromOnlyItselfIsRefusedForWhatItSays(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.Proposed = []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "work"},
+	}
+	requirements := domain.PlanRequirements{Roles: []domain.RoleRequirement{{
+		Role: domain.RoleImplementer, Statement: "the producer is independent",
+		Independence: &domain.IndependenceRequirement{
+			Dimension: domain.IndependenceExecutionAgent, DifferentFrom: []string{"implementation"},
+		},
+	}}}
+	contract := input.Contract
+	contract.PlanRequirements = &requirements
+	input.Contract = contract
+
+	_, err := planning.Compile(input)
+	if err == nil {
+		t.Fatal("a stage required to be independent of only itself compiled")
+	}
+	var invalid *planning.ValidationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("the refusal is not typed: %T %v", err, err)
+	}
+	joined := strings.Join(invalid.Reasons, "; ")
+	if !strings.Contains(joined, "independence from itself") {
+		t.Fatalf("the refusal does not say what the plan actually asked for: %s", joined)
+	}
+	if strings.Contains(joined, `whose "different_from" is empty`) {
+		t.Fatalf("the refusal describes an empty different_from the plan never contained: %s", joined)
+	}
+}

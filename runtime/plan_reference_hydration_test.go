@@ -14,6 +14,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -249,5 +251,74 @@ func TestHydrationProvenanceSurvivesOnASuccessfulProposal(t *testing.T) {
 	}
 	if len(after.References) != len(snapshot.References) {
 		t.Fatalf("hydration provenance changed across a restart: %#v", after.References)
+	}
+}
+
+// An HTML entity is not an issue citation.
+//
+// A body pasted from rendered HTML is full of "&#39;". Reading those as
+// citations spends forge reads on unrelated issues and - because the result is
+// sorted ascending and capped - pushes the real cohort references past the
+// fan-out bound, which is the failure that actually costs an operator a plan.
+func TestHTMLEntitiesAreNotIssueCitations(t *testing.T) {
+	body := "The operator&#39;s intent is to resolve #110 and #111. " +
+		"Escaped punctuation &#8217; and &#x27; appear throughout."
+	got := referencedIssueNumbers(119, "", body)
+	if fmt.Sprint(got) != fmt.Sprint([]int{110, 111}) {
+		t.Fatalf("referenced issues = %v, want [110 111]", got)
+	}
+}
+
+// An over-budget reference leaves no snapshot nothing points at.
+func TestAnOverBudgetReferenceLeavesNoOrphanSnapshot(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	var citations []string
+	for i := 1; i <= 9; i++ {
+		number := fixture.issue + i
+		citations = append(citations, fmt.Sprintf("#%d", number))
+		fixture.forge.Issues[number] = GitHubIssue{
+			Number: number, URL: fmt.Sprintf("https://github.com/acme/repo/issues/%d", number),
+			Title: "member", Body: UntrustedText(strings.Repeat("body ", 2000)),
+			State: GitHubOpen, UpdatedAt: time.Unix(1_700_000_100, 0).UTC(),
+			Author: GitHubActor{Login: "operator", ID: 7},
+		}
+	}
+	primary := fixture.forge.Issues[fixture.issue]
+	primary.Body = UntrustedText("resolve " + strings.Join(citations, ", "))
+	fixture.forge.Issues[fixture.issue] = primary
+
+	intent, err := hydratedIntent(t, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := 0
+	for _, reference := range intent.References {
+		if !reference.Available && strings.Contains(reference.Detail, "planning-context bound") {
+			refused++
+			if reference.SnapshotPath != "" {
+				t.Fatalf("an over-budget reference still names a snapshot: %#v", reference)
+			}
+		}
+	}
+	if refused == 0 {
+		t.Fatalf("the byte budget was never reached: %#v", intent.References)
+	}
+	// And the file itself is gone: a local-only file holding third-party text
+	// with no record pointing at it is one nobody can account for.
+	entries, err := os.ReadDir(filepath.Join(fixture.deps.Artifacts.Root, "source"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := map[string]bool{}
+	for _, reference := range intent.References {
+		if reference.SnapshotPath != "" {
+			pinned[filepath.Base(reference.SnapshotPath)] = true
+		}
+	}
+	pinned[filepath.Base(intent.Source.SnapshotPath)] = true
+	for _, entry := range entries {
+		if !pinned[entry.Name()] {
+			t.Fatalf("snapshot %q is on disk with nothing pointing at it", entry.Name())
+		}
 	}
 }

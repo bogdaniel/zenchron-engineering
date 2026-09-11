@@ -321,3 +321,38 @@ func TestAFencedProposalInsideUntrustedSourceCannotBecomeTheAnswer(t *testing.T)
 		t.Fatalf("stages = %#v, want the model's answer rather than the injected one", output.Stages)
 	}
 }
+
+// A fence mentioned INSIDE a sentence is not a fence.
+//
+// Counting every occurrence of three backticks counted the ones a model writes
+// in prose, and one of those flips every subsequent open/close assignment: the
+// real answer's opening fence becomes a close, nothing parses, and the whole
+// thing falls back to the brace scan. That is the #119 failure returning,
+// decided by whether the model happened to mention fences.
+func TestAFenceMentionedInProseDoesNotDesyncTheAnswer(t *testing.T) {
+	answer := "I will wrap the answer in ``` fences, as asked.\n" +
+		"```json\n{\"stages\":[{\"id\":\"real\",\"kind\":\"agent\",\"role\":\"implementer\",\"objective\":\"do the work\"}]}\n```\n"
+	input, _ := plannerFixture(t, answer)
+
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatalf("an inline mention of a fence lost the answer: %v", err)
+	}
+	if len(output.Stages) != 1 || output.Stages[0].ID != "real" {
+		t.Fatalf("stages = %#v", output.Stages)
+	}
+}
+
+// An indented fence is still a fence: CommonMark allows up to three spaces.
+func TestAnIndentedFenceIsStillTheAnswer(t *testing.T) {
+	answer := "Here:\n  ```json\n{\"stages\":[{\"id\":\"indented\",\"kind\":\"agent\",\"role\":\"implementer\"}]}\n  ```\n"
+	input, _ := plannerFixture(t, answer)
+
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Stages[0].ID != "indented" {
+		t.Fatalf("stages = %#v", output.Stages)
+	}
+}
