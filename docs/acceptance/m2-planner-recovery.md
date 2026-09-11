@@ -124,6 +124,36 @@ The planner made no network request. The controller read those issues through
 the same governed forge boundary that reads the primary issue, before the
 invocation started.
 
+## Attempt 4 — repeated at the delivered commit
+
+Candidate `8be8d1d`, carrying the review fixes, including the one that
+neutralizes code fences inside untrusted issue text. That change alters what the
+planner is shown, so the experiment was repeated rather than assumed to hold.
+
+```text
+proposed plan plan-bf8f68e58adc7f91f2a2425922ee2c37 revision 2
+planned by: codex (codex_cli, openai) in non_mutating_planning mode;
+            workspace verified unchanged: true
+stages:
+  harden-planner-runtime    agent           role=implementer
+                                            profile=codex  agent=codex (openai)
+  independent-verification  agent           role=reviewer
+                                            profile=claude agent=claude (anthropic)
+                                            independent-of=harden-planner-runtime
+                                              in execution_agent
+  candidate-assurance       assurance_gate  references claims claim-validation
+nothing executes until it is approved
+```
+
+The same nine referenced issues were pinned and the same one — #106, a pull
+request — was reported unavailable. The decomposition is the planner's own each
+time: attempt 3 asked for `agent_profile` independence and attempt 4 asked for
+`execution_agent`, which is stronger. Both are reviewable; neither was approved.
+
+The plan now carries two pending revisions, r1 from attempt 3 and r2 from
+attempt 4, which is the ordinary result of proposing twice. r2 is the one
+awaiting a decision.
+
 ## What did not happen
 
 Nothing was approved. Nothing executed. No run was created, no child run was
@@ -131,9 +161,10 @@ consumed, and nothing was merged. The plan is left pending on purpose: it is the
 proposal for #110/#111/#112/#113/#118, which is the workload this repair exists
 to make plannable, and it is the operator's to approve.
 
-## What this run did not exercise
+## What these runs did not exercise
 
-The durable attempt record. Attempt 1 predates it and attempt 2 failed on the
-path that did not yet record one; attempt 3 succeeded, so nothing was refused
-after the code existed. Its behaviour — including that it survives a restart
-unchanged — is proven by regressions rather than by this run.
+The durable attempt record. Attempt 1 predates it, attempt 2 failed on the path
+that did not yet record one, and attempts 3 and 4 both succeeded — so nothing
+was refused after the code that records it existed. Its behaviour, including
+that it survives a restart unchanged, is proven by regressions rather than by
+the dogfood.
