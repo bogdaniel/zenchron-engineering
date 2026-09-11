@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 )
 
 // PlanningWorkspaceError is the typed refusal for a planning workspace that
@@ -279,6 +280,13 @@ type PlannerInput struct {
 	// file reads the model's answer back from. There is no second output path:
 	// the answer is evidence, and evidence lives in the artifact store.
 	Artifacts ArtifactStore
+	// References is the pinned same-repository issue context the controller
+	// hydrated through the governed forge boundary before this invocation.
+	//
+	// It reaches the model as UNTRUSTED-SOURCE text and nothing else. The
+	// planner still makes no network request of its own: that boundary is the
+	// reason this member exists rather than the thing it works around.
+	References []ReferencedSource
 }
 
 // PlannerOutput is what one planning invocation produced.
@@ -355,7 +363,7 @@ func InvokePlanner(ctx context.Context, input PlannerInput) (PlannerOutput, erro
 	// trusted instructions, because it describes the ANSWER rather than the
 	// worker's authority. Everything about what the planner may do is already
 	// stated in the trusted text and enforced by the provider's mode.
-	request.Objective = input.Objective + "\n\n" + plannerOutputContract(input)
+	request.Objective = input.Objective + referencedSourceText(input.References) + "\n\n" + plannerOutputContract(input)
 
 	result, execErr := input.Provider.Execute(ctx, request)
 
@@ -466,30 +474,96 @@ stage to make the work smaller.
 		current = fmt.Sprintf("\nThe currently approved plan revision is %d with stages: %s. Propose the revision you believe the evidence now supports.\n",
 			input.Current.Revision, strings.Join(stageIDs(*input.Current), ", "))
 	}
-	return fmt.Sprintf(`%s%s
-Answer with ONE JSON object, in a fenced json code block, with this shape:
+	// The claim vocabulary a gate may reference. It is stated for the same
+	// reason the role and capability vocabularies are: a gate naming a claim
+	// this contract does not define is a deterministic refusal, and the model
+	// had no way to know the closed set. Where the contract defines none, no
+	// gate can reference one and the answer says so.
+	claims := "this work contract defines no claim, so omit \"required_claims\" entirely"
+	if defined := contractClaimIDs(input.Contract); len(defined) > 0 {
+		claims = "subset of: " + strings.Join(defined, ", ")
+	}
+	contract := fmt.Sprintf(`%s%s
+Answer with ONE JSON object, in a fenced json code block, drawn from this shape:
 
 {"stages": [{"id": "kebab-case-id", "kind": "agent|assurance_gate|human_decision_gate",
   "role": "one of: %s", "objective": "what this stage must achieve",
   "depends_on": ["ids of stages that must finish first"],
-  "requires_capabilities": ["subset of: %s"],
+  "requires_capabilities": ["subset of: {{capabilities}}"],
+  "required_claims": ["%s"],
   "independence": {"dimension": "agent_profile|execution_agent|provider_kind|vendor_family", "different_from": ["stage ids"]},
   "rationale": "why this stage exists"}],
  "notes": "one short paragraph an operator will read"}
 
-The object must contain EXACTLY the members shown above and no others, at every
-level: an unrecognized member makes the whole answer invalid and it is refused
-rather than partially read. Put anything you want to say in "notes".
+No member other than the ones shown may appear, at any level: an unrecognized
+member makes the whole answer invalid and it is refused rather than partially
+read. Put anything you want to say in "notes".
+
+The members shown are NOT all required, and the shape above is a menu rather
+than a template. Required: "stages"; and on each stage "id" and "kind", plus
+"role" and "objective" on a stage whose kind is "agent". EVERY OTHER MEMBER IS
+OPTIONAL: OMIT one you have nothing to say about rather than emitting it empty,
+and never copy a member into your answer merely because it appears above.
+
+"independence" is the one that matters most. OMIT IT unless this stage must be
+performed by a worker different from another named stage. It is a scheduling
+and eligibility constraint, not a formality, and the runtime adds every
+independence that policy requires whether you ask for it or not.
+- "different_from" names the exact stages this stage must differ from, and each
+  one becomes a dependency of this stage, because an obligation that could be
+  resolved before the work it judges proves nothing;
+- an EMPTY "different_from" is shorthand for "differ from every stage in this
+  plan that produces material change". It is accepted only on a stage that
+  produces none - a reviewer, an architect, a planner. On a stage whose role is
+  itself a material producer (%s) an empty "different_from" is REFUSED, because
+  there it would name that stage's own peers and make two producers depend on
+  each other. State the exact stages, or omit "independence".
 
 Rules for your answer, all of which the runtime enforces afterwards:
 - only "agent" stages are performed by a worker; the two gate kinds reference
-  evidence and human decisions that already exist and take no role;
+  evidence and human decisions that already exist, take no role, no
+  capabilities and no independence;
+- an "assurance_gate" that names no "required_claims" is completed from this
+  work contract's own claims, so omitting them is safe; a "human_decision_gate"
+  must name at least one claim, because nothing else states what the person is
+  deciding;
 - dependencies must name stages in your own answer and must not form a cycle;
 - propose the SMALLEST decomposition that does the work: a stage nobody needs is
   a run somebody pays for;
 - you may propose additional verification or review; you may not remove an
   obligation, and anything you leave out that policy requires will be added
-  back.`, process, current, strings.Join(roles, ", "), strings.Join(capabilities, ", "))
+  back.`, process, current, strings.Join(roles, ", "), claims, materialProducerRoleList())
+	// The capability list is substituted by REPLACEMENT rather than by a format
+	// verb. The template is already a format string carrying operator-supplied
+	// vocabulary, and one more verb in it is one more thing that shifts if any
+	// interpolated value ever contains a percent sign.
+	return strings.ReplaceAll(contract, "{{capabilities}}", strings.Join(capabilities, ", "))
+}
+
+// contractClaimIDs is the claim vocabulary a gate stage may reference, in
+// canonical order.
+func contractClaimIDs(contract domain.EngineeringWorkContract) []string {
+	ids := make([]string, 0, len(contract.RequiredClaims))
+	for id := range contract.RequiredClaims {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// materialProducerRoleList names the roles whose work changes the candidate.
+//
+// The planner is told which they are because the empty-different_from shorthand
+// means something different on them, and a rule a model cannot evaluate is a
+// rule it cannot follow.
+func materialProducerRoleList() string {
+	var producing []string
+	for _, role := range domain.EngineeringRoles() {
+		if planning.ProducesMaterialChange(role) {
+			producing = append(producing, string(role))
+		}
+	}
+	return strings.Join(producing, ", ")
 }
 
 func stageIDs(plan domain.EngineeringPlan) []string {
@@ -679,6 +753,20 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 		DependsOn: stage.DependsOn, RequiredClaims: stage.RequiredClaims,
 		Rationale: boundedDetail(stage.Rationale),
 	}
+	if kind != domain.StageAgent {
+		// A gate that states worker requirements is REFUSED, not cleaned up.
+		// The translation below copies role and capabilities only for an agent
+		// stage, so a gate carrying them lost them here and reached the graph
+		// laws looking innocent - which is the same laundering the compiler
+		// deliberately refuses to do: a planner that asked for a gate performed
+		// by a worker got a gate, and nobody was told it had asked.
+		if strings.TrimSpace(stage.Role) != "" {
+			return domain.PlanStage{}, fmt.Errorf("proposed stage %q is a %s and names role %q: a gate references existing evidence or a human decision and is not performed by a worker", stage.ID, kind, stage.Role)
+		}
+		if len(stage.RequiresCapabilities) > 0 {
+			return domain.PlanStage{}, fmt.Errorf("proposed stage %q is a %s and requires capabilities: a gate executes nothing", stage.ID, kind)
+		}
+	}
 	if kind == domain.StageAgent {
 		role := domain.EngineeringRole(stage.Role)
 		if !domain.KnownRole(role) {
@@ -717,12 +805,31 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 // located rather than assumed to be the whole output: the LAST balanced JSON
 // object containing a "stages" member wins, because a model that restates its
 // answer ends with the one it means.
+//
+// The FENCE is tried first, and it is not a convenience. The brace scan below
+// treats a whole transcript as brace-and-quote structure, and a coding CLI's
+// transcript is mostly not that: it echoes Go source, test names and prose, so
+// unmatched braces and odd quotes accumulate and the scanner's idea of "inside a
+// string" stops matching reality. On a real #119 planning transcript that left
+// 29 unclosed braces and 16 recorded spans, the model's perfectly good answer
+// never formed a span at all, and the last thing that did parse was the output
+// contract's own example - which the provider had echoed as part of the prompt.
+// The runtime then refused a stage called "kebab-case-id".
+//
+// A fence has none of that ambiguity: the contract asks for the answer in a
+// fenced json block, the provider echoes the contract as plain text rather than
+// as a fence, and the fence delimiters say exactly where the answer starts and
+// stops. The brace scan stays as the fallback for a model that answers without
+// one.
 // It is a SINGLE pass over the transcript, keeping the position of every open
 // brace on a stack. The earlier form restarted the scan at each unclosed brace,
 // which is quadratic in the number of unclosed braces - and a coding CLI that
 // echoes source code produces plenty of those, so an ordinary transcript could
 // stall planning for minutes before the answer was even parsed.
 func extractJSONObject(answer string) (string, error) {
+	if candidate, found := lastFencedProposal(answer); found {
+		return candidate, nil
+	}
 	// ONE pass records where each balanced span begins and ends. Nothing is
 	// parsed here: recording a span costs the two indices, whatever the span
 	// contains.
@@ -788,4 +895,89 @@ func extractJSONObject(answer string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no JSON object with a stages member was found in the answer")
+}
+
+// startsLine reports whether a fence marker begins its line, allowing the up to
+// three spaces of indentation CommonMark permits.
+func startsLine(text string, at int) bool {
+	for indent := 0; indent <= 3; indent++ {
+		i := at - indent
+		if i == 0 {
+			return true
+		}
+		if text[i-1] == '\n' {
+			return true
+		}
+		if text[i-1] != ' ' {
+			return false
+		}
+	}
+	return false
+}
+
+// maxPlannerFences bounds how many fenced blocks are remembered. A transcript
+// that is nothing but code fences cannot grow this without limit, and the
+// answer ends the output, so the newest fences are the ones that matter.
+const maxPlannerFences = 512
+
+// lastFencedProposal is the last fenced block that parses as a proposal.
+//
+// Fences are paired in order - open, close, open, close - and searched from the
+// END, because a model that restates its answer ends with the one it means. A
+// final fence the provider never closed is still read: its content is the rest
+// of the output, and an answer cut off mid-fence fails to parse here rather than
+// being mistaken for something else.
+//
+// A fence must START A LINE, as CommonMark requires. Counting every occurrence
+// of three backticks counted the ones a model writes INSIDE a sentence - "I
+// will wrap the answer in ``` fences" - and one of those flips every subsequent
+// open/close assignment: the real answer's opening fence becomes a close,
+// nothing parses, and the whole thing falls back to the brace scan. That is the
+// #119 failure returning, intermittently, decided by the model's prose.
+//
+// One consequence worth stating: a model that answers in a fence and then
+// restates the same answer WITHOUT one gets the fenced version. The fence is
+// the channel the contract asks for, and preferring it over later unfenced
+// prose is the point rather than an accident.
+func lastFencedProposal(answer string) (string, bool) {
+	const fence = "```"
+	var marks []int
+	for offset := 0; ; {
+		next := strings.Index(answer[offset:], fence)
+		if next < 0 {
+			break
+		}
+		at := offset + next
+		offset = at + len(fence)
+		if !startsLine(answer, at) {
+			continue
+		}
+		marks = append(marks, at)
+		// Dropped in PAIRS, so the open/close alternation the pairing below
+		// depends on is preserved whatever is discarded.
+		if len(marks) > maxPlannerFences {
+			marks = marks[2:]
+		}
+	}
+	type block struct{ open, end int }
+	blocks := make([]block, 0, len(marks)/2+1)
+	for i := 0; i < len(marks); i += 2 {
+		end := len(answer)
+		if i+1 < len(marks) {
+			end = marks[i+1]
+		}
+		blocks = append(blocks, block{open: marks[i], end: end})
+	}
+	for i := len(blocks) - 1; i >= 0; i-- {
+		body := strings.TrimSpace(answer[blocks[i].open+len(fence) : blocks[i].end])
+		// The optional language tag is the remainder of the fence's own line.
+		// A first line carrying a brace is content rather than a tag.
+		if newline := strings.IndexByte(body, '\n'); newline >= 0 && !strings.ContainsAny(body[:newline], "{}") {
+			body = strings.TrimSpace(body[newline+1:])
+		}
+		if json.Valid([]byte(body)) && looksLikeProposal(body) {
+			return body, true
+		}
+	}
+	return "", false
 }

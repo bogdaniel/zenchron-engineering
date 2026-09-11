@@ -346,6 +346,46 @@ it never silently assigns the same vendor
 Whether a human leg may substitute is a **policy** statement, not an operator
 one. Approving a plan cannot introduce a substitution the policy did not permit.
 
+### What an independence requirement with no peers means
+
+An independence requirement names the stages a stage must differ from. Naming
+none is a **shorthand**, and the compiler resolves it by one rule in every case:
+
+```text
+independence absent                     no obligation, and no dependency edge
+independence with explicit peers        exactly those peers; each becomes a
+                                        dependency, because an obligation that
+                                        could resolve before the work it judges
+                                        proves nothing
+independence, empty different_from,     every material producer in the plan:
+  on a stage that produces nothing        the reviewer's ordinary meaning
+independence, empty different_from,     REFUSED, typed, before any edge is added
+  on a material producer
+policy-required independence            the same rule, with policy's own peers
+                                        merged in and never weakened
+```
+
+The refusal is the part worth stating. The shorthand means "differ from whoever
+produced the change in this plan". On a reviewer that is unambiguous: the
+reviewer gains a dependency on each producer, which is the order it already had.
+On a stage that IS a producer, the same expansion names its **peers** — stages
+with no ordering relation to it — and each peer then becomes a dependency. Two
+producers written that way depend on each other, cycle detection correctly
+refuses the plan, and the operator is shown a cycle nobody proposed. That is
+exactly what happened to the first real #63 + #106 dogfood.
+
+So the compiler refuses the ambiguity while it is still legible, and says which
+stage, which member and what to do instead. It does not guess which sibling
+producer the stage meant, and it does not drop the requirement: an independence
+obligation is never silently discarded, whoever asked for it. Policy-required
+independence is only ever strengthened, never completed into peer dependencies
+on a producer.
+
+The planner's output contract states this rule to the model, which is the other
+half of the fix: `independence` is an **optional** member, to be omitted unless a
+stage genuinely requires independence, and the roles on which an empty
+`different_from` is refused are named.
+
 ## The aggregate budget envelope
 
 An approved plan carries a ceiling across all of its runs, on top of the
@@ -751,6 +791,110 @@ Reasoning output is a **proposal**. Deterministic code enforces permissions,
 trust ceilings, capabilities, policy obligations, independence, budgets and graph
 validity, and refuses a proposal that violates any of them however confidently it
 was recommended.
+
+### Referenced issue context
+
+An issue that says "resolve #110, #111 and #112" is planning input pointing at
+more planning input. The planner cannot follow those pointers: a planning
+invocation is non-mutating AND network-isolated, and a provider that could fetch
+its own context would be a second, unreviewed trust boundary into this system.
+
+So the controller follows them, through the same governed forge boundary that
+reads the primary issue, **before** the invocation starts:
+
+```text
+pinned        each referenced issue is read once, digested, and stored as a
+              local-only snapshot; nothing re-reads the forge mid-attempt
+untrusted     the text reaches the model inside UNTRUSTED-SOURCE markers, with
+              the standing the primary issue's text has: data describing desired
+              behaviour, never an instruction and never authority
+provenance    repository, issue and digest are recorded on the plan, and a
+              reference that could NOT be read is recorded as such
+bounded       explicit "#N" citations from the PRIMARY issue only - depth one,
+              never transitive - and at most twelve of them, with the bound
+              stated rather than applied silently
+```
+
+The referenced text is deliberately **not** folded into the plan objective: the
+objective is what the plan document carries and what its digest is over, and a
+plan is not a copy of the forge.
+
+A referenced issue the forge could not return does not stop planning and does not
+disappear. It becomes visible product state — `plan show` says which issue was
+not available to the planner and why — because a plan reasoned from four of five
+referenced issues is a different plan from one reasoned from all five, and the
+operator deciding whether to approve it should know which they have.
+
+### Reading the model's answer
+
+The contract asks for the answer in a fenced json block, and the runtime reads
+the **last fenced block** that parses as a proposal. A coding CLI's transcript is
+mostly not JSON — it echoes Go source, test names and prose — so scanning the
+whole of it for balanced braces desynchronizes on the first unmatched brace or
+odd quote. On a real #119 transcript that left 29 unclosed braces, the model's
+correct answer never formed a candidate at all, and the last thing that still
+parsed was the output contract's own example, echoed as part of the prompt. The
+runtime refused a stage called `kebab-case-id`.
+
+A fence has no such ambiguity: it says where the answer starts and stops, and the
+echoed contract is not inside one. The brace scan remains the fallback for a
+model that answers without a fence.
+
+### When reasoning does not reach a plan
+
+A proposal the deterministic compiler refuses used to leave nothing behind on a
+first plan: there was no revision document, so there was no plan, so `plan list`
+said "no plans" and `plan show` said "no such plan" about work an operator had
+just spent a provider invocation on. An answer the runtime could not read at all
+left even less, because it never reached compilation.
+
+Both are now a durable **planning attempt**: from an operator's chair they are
+the same event — an invocation was spent and there is no plan — so they get the
+same record.
+
+```text
+plan identity        a plans row with no revision. Nothing that lists or reads
+                     executable work returns it, so it can never be mistaken for
+                     a plan; what it gives the evidence is somewhere to hang
+one journal event    plan.attempt_refused, in the plan's own append-only stream,
+                     under the same hash chain every other durable fact uses
+```
+
+Because it is a journal projection rather than a stored record, an attempt read
+before a restart and an attempt read after one are the same replayed facts.
+
+Its identity — `attempt-PLAN-rN-K` — is **allocated by the journal**, inside the
+same append transaction that allocates the sequence and links the hash chain,
+and a caller that tries to choose one is refused. That is not tidiness. `K`
+counts what the stream already holds, and a caller that reads the stream,
+derives `K` and appends afterwards has a gap: the supervisor answers control
+connections concurrently and deliberately runs the planning invocation outside
+the plan lock, so two operators planning the same issue reach this record at the
+same time, inside one process, where no file lock separates them. Both would
+derive the same `K` and file two attempts under one identity. Allocating where
+the events are already being read under the write lock closes that for
+goroutines and for separate processes alike, without holding any lock across a
+provider call.
+
+`plan list` names the plan and says it has no plan; `plan show PLAN` answers,
+without a single grep through an artifact directory:
+
+```text
+which attempt, and which revision it would have been
+which reasoning agent produced it, under which model and mode
+the runtime's own proof that the planning workspace did not change
+the proposed decomposition - stages, roles, dependencies, independence -
+  with an independence over nothing shown as exactly that
+the typed deterministic reasons it was refused
+the referenced issues the planner was given, and the ones it was not
+the transcript, by path
+and that NO executable EngineeringPlan exists
+```
+
+An attempt grants nothing. It is not approvable, because approval names a
+revision and there is no revision; it is not executable, because execution reads
+the approved revision and there is none. Proposing again is the ordinary next
+step, and it promotes the same plan identity rather than colliding with it.
 
 ## Related documents
 

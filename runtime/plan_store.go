@@ -69,14 +69,104 @@ func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan, createdAt 
 		return false, err
 	}
 	claimed, err := result.RowsAffected()
-	if err != nil || claimed != 1 {
+	if err != nil {
 		return false, err
+	}
+	if claimed != 1 {
+		// The row exists. That is a competing proposal ONLY if it carries a
+		// revision; a row at current_revision 0 is an ATTEMPT identity - this
+		// plan's own earlier reasoning proposal, refused before it compiled -
+		// and refusing here would mean a plan whose first attempt failed could
+		// never be planned again. The conditional UPDATE is what makes the
+		// promotion a race the database decides: exactly one writer moves the
+		// row off zero.
+		// The repository moves with the revision. The attempt row recorded the
+		// repository the PROPOSER named; the revision document carries the one
+		// its subject is bound to, and that is the one every later read should
+		// see. Leaving the old value would have PlanIdentities describing a
+		// plan by a repository its own document does not name.
+		promoted, err := tx.Exec(`UPDATE plans SET current_revision = ?, repository = ? WHERE id = ? AND current_revision = 0`,
+			plan.Revision, plan.Subject.Repository, plan.ID)
+		if err != nil {
+			return false, err
+		}
+		moved, err := promoted.RowsAffected()
+		if err != nil || moved != 1 {
+			return false, err
+		}
 	}
 	if _, err := tx.Exec(`INSERT INTO plan_revisions (plan_id, revision, digest, document) VALUES (?, ?, ?, ?)`,
 		plan.ID, plan.Revision, plan.Digest, string(document)); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// ClaimPlanAttempt claims a plan IDENTITY with no revision.
+//
+// It is what a refused first proposal needs and nothing more. A plan identity
+// is derived - repository, issue, operator configuration - so it exists as a
+// fact the moment an operator asks to plan that issue; what does not exist,
+// when compilation refuses the proposal, is a revision. This row carries
+// current_revision 0 and no plan_revisions row, which means:
+//
+//   - Plans() joins on current_revision and therefore never returns it, so
+//     nothing that lists executable work can see it;
+//   - Plan() resolves through PlanRevision() and reports not-found, so nothing
+//     that reads a plan document can mistake it for one;
+//   - the plan's journal stream exists, so the refused attempt recorded in it
+//     is durable, replayable and readable after a restart.
+//
+// In other words the identity is the hook the evidence hangs on, and it grants
+// nothing. It reports whether THIS call created the row; an existing row - of
+// either kind - is not an error, because a second refused attempt at the same
+// plan is an ordinary thing to happen.
+func (s *SQLiteOperationStore) ClaimPlanAttempt(planID, repository string, createdAt time.Time) (bool, error) {
+	if planID == "" || repository == "" {
+		return false, fmt.Errorf("a plan attempt identity needs a plan id and a repository")
+	}
+	result, err := s.db.Exec(`INSERT INTO plans (`+sqlitePlanColumns+`) VALUES (?, ?, 0, ?) ON CONFLICT(id) DO NOTHING`,
+		planID, repository, createdAt.UnixNano())
+	if err != nil {
+		return false, err
+	}
+	claimed, err := result.RowsAffected()
+	return claimed == 1, err
+}
+
+// PlanIdentity is a plan row, whether or not it has a revision. Revision 0
+// means no revision has ever been stored: the identity exists because planning
+// was attempted, and every attempt so far was refused.
+type PlanIdentity struct {
+	PlanID     string `json:"plan_id"`
+	Repository string `json:"repository"`
+	Revision   int    `json:"current_revision"`
+	Issue      int    `json:"source_issue,omitempty"`
+}
+
+// PlanIdentities lists every plan row in creation order, including the ones
+// that have no revision.
+//
+// Plans() deliberately cannot answer this: it joins each plan to its governing
+// revision document, which is exactly what an attempt-only plan does not have.
+// A list that showed only plans with documents is what told an operator "no
+// plans" about work they had just asked for and paid a provider invocation on.
+func (s *SQLiteOperationStore) PlanIdentities() ([]PlanIdentity, error) {
+	rows, err := s.db.Query(`SELECT id, repository, current_revision, source_issue FROM plans
+		ORDER BY created_unix_nano ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var identities []PlanIdentity
+	for rows.Next() {
+		var identity PlanIdentity
+		if err := rows.Scan(&identity.PlanID, &identity.Repository, &identity.Revision, &identity.Issue); err != nil {
+			return nil, err
+		}
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
 }
 
 // PutPlanRevision stores one revision of an already-claimed plan and reports
@@ -208,6 +298,10 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 	}
 	return s.appendToStream(e, journalStream{
 		kind: streamPlan, id: e.PlanID,
+		// A refused planning attempt is the one plan event whose payload
+		// carries an identity derived from what the stream already holds, so it
+		// is the one that allocates inside the transaction.
+		allocate: planAttemptAllocator(e),
 		// The plan row is read inside the transaction, for the same reason the
 		// run row is: an event may not be journalled against a plan that does
 		// not exist.
@@ -295,4 +389,59 @@ func decodePlan(document string) (domain.EngineeringPlan, error) {
 		return domain.EngineeringPlan{}, fmt.Errorf("decode durable plan: %w", err)
 	}
 	return plan, nil
+}
+
+// PendingAttemptID is what a caller writes into a plan.attempt_refused payload
+// where its identity will go.
+//
+// The identity is ALLOCATED BY THE JOURNAL, exactly as the sequence, the chain
+// links and the state digests are, and for exactly the same reason: it counts
+// what the stream already holds, and only the append transaction can count that
+// without a gap. A caller that supplies anything else is refused rather than
+// silently overwritten - being told your identity was replaced is the whole
+// value of not being allowed to choose it.
+const PendingAttemptID = "attempt-pending"
+
+// planAttemptAllocator returns the allocator for a refused-attempt event, or
+// nil for every other plan event.
+func planAttemptAllocator(e EngineeringEvent) func([]EngineeringEvent, EngineeringEvent) (EngineeringEvent, error) {
+	if e.Type != EventPlanAttemptRefused {
+		return nil
+	}
+	return func(existing []EngineeringEvent, event EngineeringEvent) (EngineeringEvent, error) {
+		var payload PlanAttemptRefusedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return EngineeringEvent{}, err
+		}
+		if payload.AttemptID != PendingAttemptID {
+			return EngineeringEvent{}, fmt.Errorf(
+				"a refused planning attempt carries attempt id %q: the identity is allocated by the journal, not the caller, so the payload names %q until it is",
+				payload.AttemptID, PendingAttemptID)
+		}
+		// Counted from the PROJECTION rather than from a second rule about
+		// rows, so what an operator reads and what the journal allocated are
+		// the same derivation.
+		snapshot, err := ReducePlan(event.PlanID, existing)
+		if err != nil {
+			return EngineeringEvent{}, err
+		}
+		ordinal := 1
+		for _, previous := range snapshot.Attempts {
+			if previous.Revision == payload.Revision {
+				ordinal++
+			}
+		}
+		payload.AttemptID = PlanAttemptID(event.PlanID, payload.Revision, ordinal)
+		if event.Payload, err = marshalPayloadJSON(payload); err != nil {
+			return EngineeringEvent{}, err
+		}
+		return event, nil
+	}
+}
+
+// PlanAttemptID is the durable identity of one refused planning attempt: which
+// plan, which revision it would have produced, and which try at that revision
+// it was.
+func PlanAttemptID(planID string, revision, ordinal int) string {
+	return fmt.Sprintf("attempt-%s-r%d-%d", planID, revision, ordinal)
 }

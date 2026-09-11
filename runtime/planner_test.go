@@ -35,6 +35,11 @@ type fakePlanningProvider struct {
 	failure *ProviderFailure
 	// err makes the invocation itself fail.
 	err error
+	// echoPrompt makes the provider write its whole prompt into the transcript
+	// before its answer, which is what a real coding CLI does - and is why
+	// anything fenced inside the prompt is a candidate answer unless the
+	// runtime prevents it.
+	echoPrompt bool
 
 	artifacts ArtifactStore
 	requests  []ExecutionRequest
@@ -51,7 +56,11 @@ func (p *fakePlanningProvider) Execute(_ context.Context, request ExecutionReque
 			return ExecutionResult{}, err
 		}
 	}
-	artifacts, err := p.artifacts.StoreExecutionAttemptTranscript("planner", request.AttemptRef(), []byte(p.answer), nil)
+	transcript := p.answer
+	if p.echoPrompt {
+		transcript = request.Objective + "\n" + request.TrustedInstructions + "\n" + p.answer
+	}
+	artifacts, err := p.artifacts.StoreExecutionAttemptTranscript("planner", request.AttemptRef(), []byte(transcript), nil)
 	if err != nil {
 		return ExecutionResult{}, err
 	}

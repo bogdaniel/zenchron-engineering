@@ -171,8 +171,8 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: no %s of revision %d at digest %s is recorded)",
 			cause, verb, revision, digest)
 	}
-	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, decided.Revision, decided.Status, decided.Operator)
-	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%v); the durable record above is what happened\n", cause)
+	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", terminalSafe(planID), decided.Revision, terminalSafe(string(decided.Status)), terminalSafe(decided.Operator))
+	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%s); the durable record above is what happened\n", terminalSafe(cause.Error()))
 	return runtime.ExitCompleted, nil
 }
 
@@ -218,7 +218,7 @@ func renderDelegatedPlan(flags autonomyFlags, payload []byte, decided bool, stdo
 	if decided && flags.Text {
 		decision := view.Snapshot.Approval
 		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n",
-			view.Plan.ID, decision.Revision, decision.Status, decision.Operator)
+			terminalSafe(view.Plan.ID), decision.Revision, terminalSafe(string(decision.Status)), terminalSafe(decision.Operator))
 		return runtime.ExitCompleted, nil
 	}
 	if decided {
@@ -389,11 +389,46 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	// for an operator who does not want to spend an invocation: it compiles the
 	// same obligations with no model at all, and says so.
 	if !flags.Deterministic {
-		stages, reasoning, err := reasonAboutPlan(ctx, composed, intent, planID, flags.Template)
+		// ELIGIBILITY FIRST, before a single forge read is spent on context for
+		// an invocation that cannot happen. reasonAboutPlan checks this again
+		// before it materializes a workspace; checking it here too costs one
+		// map lookup and saves a dozen forge reads on the path where planning
+		// was never possible.
+		if err := requirePlanningMode(composed, composed.engine.PlanningAgent()); err != nil {
+			return exitFor(err, runtime.ExitFailed), err
+		}
+		// Referenced same-repository issue context, read through the governed
+		// forge boundary HERE rather than during intent compilation: it is
+		// planning input for a MODEL, and a deterministic compilation has no
+		// model to give it to. Recording it on a plan nothing reasoned about
+		// would claim the planner was given context when no planner ran.
+		references, err := composed.engine.HydrateReferences(ctx, intent)
 		if err != nil {
 			return runtime.ExitFailed, err
 		}
-		input.Reasoned, input.Reasoning = stages, reasoning
+		intent.References = references
+		input.References = intent.ReferencePayloads()
+
+		output, err := reasonAboutPlan(ctx, composed, intent, planID, flags.Template)
+		// The transcripts travel WITH the proposal, and they travel with a
+		// REFUSAL too. An answer the runtime could not read is the same product
+		// event as a proposal it could not compile: an invocation was spent and
+		// there is no plan, and the operator needs the same record of it.
+		input.Reasoned, input.Evidence = output.Stages, output.Artifacts
+		if output.Reasoning.AgentID != "" {
+			reasoning := output.Reasoning
+			input.Reasoning = &reasoning
+		}
+		if err != nil {
+			// Recorded only when an invocation actually HAPPENED. A provider
+			// that is ineligible for planning was never run and spent nothing,
+			// so there is no attempt to preserve - and a plan identity created
+			// for it would be a durable record of a configuration mistake.
+			if input.Reasoning == nil && len(input.Evidence) == 0 {
+				return exitFor(err, runtime.ExitFailed), err
+			}
+			return exitFor(err, runtime.ExitFailed), recordPlanningRefusal(composed, input, err)
+		}
 	}
 	var plan domain.EngineeringPlan
 	write := func() (err error) { plan, err = composed.service.Propose(ctx, input); return err }
@@ -412,24 +447,46 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	return planOutput(flags, view, stdout, "proposed")
 }
 
+// recordPlanningRefusal preserves a refused reasoning invocation and returns the
+// refusal to report.
+//
+// The refusal itself is what the operator gets back either way. Recording it is
+// best-effort in one direction only: a record that could not be written is
+// stated alongside the refusal rather than replacing it, because the answer to
+// "why did planning fail" must not become "and also the evidence system failed".
+func recordPlanningRefusal(composed *planComposition, input runtime.ProposeInput, cause error) error {
+	attempt, err := composed.service.RecordPlanningRefusal(input, cause)
+	if err != nil {
+		return fmt.Errorf("%w (and the refused attempt could not be recorded: %v)", cause, err)
+	}
+	// ONE LINE. The diagnostic is escaped at the print site, and a newline the
+	// runtime put there would be escaped with everything else - so a message
+	// that spelled its second half on its own line printed a literal "\x0a"
+	// instead. Splitting the escape per line is not the alternative: an
+	// attacker newline inside an interpolated value would then forge output
+	// lines, which is exactly what the escaping exists to stop.
+	return fmt.Errorf("%w; the invocation and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
+		cause, attempt, input.PlanID)
+}
+
 // reasonAboutPlan performs one bounded planning invocation.
 //
 // The workspace is materialized from the exact trusted base, the invocation
 // runs in the provider's own non-mutating mode, and the runtime verifies the
 // workspace afterwards. A provider that cannot prove the mode is refused here,
 // with the reason, rather than being run permissively.
-func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runtime.PlanIntent, planID, templateID string) ([]domain.PlanStage, *domain.PlanReasoningProvenance, error) {
+func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runtime.PlanIntent, planID, templateID string) (runtime.PlannerOutput, error) {
 	// ELIGIBILITY FIRST, before anything is materialized. A provider with no
 	// provable non-mutating mode is ineligible for planning, and discovering
 	// that after cloning a repository would spend an operator's time and disk
 	// to reach the same refusal.
 	agent := composed.engine.PlanningAgent()
 	if err := requirePlanningMode(composed, agent); err != nil {
-		return nil, nil, err
+		return runtime.PlannerOutput{}, err
 	}
 	workspace, err := composed.engine.MaterializePlanningWorkspace(planID, intent.Base.Revision)
 	if err != nil {
-		return nil, nil, err
+		return runtime.PlannerOutput{}, err
 	}
 	defer workspace.Remove()
 
@@ -440,10 +497,13 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 	if templateID != "" {
 		chosen, err := composed.service.Registry.Template(templateID)
 		if err != nil {
-			return nil, nil, err
+			return runtime.PlannerOutput{}, err
 		}
 		template = &chosen
 	}
+	// InvokePlanner returns its provenance and transcripts even when it
+	// refuses, and they are returned to the caller unchanged: a refused
+	// invocation still happened, and the evidence of it is the point.
 	output, err := runtime.InvokePlanner(ctx, runtime.PlannerInput{
 		PlanID: planID, Revision: 1, Template: template,
 		Agent: composed.engine.PlanningAgent(), Provider: composed.engine.PlanningProvider(),
@@ -453,12 +513,14 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 		AvailableRoles:        domain.EngineeringRoles(),
 		AvailableCapabilities: domain.EngineeringCapabilities(),
 		Artifacts:             composed.engine.PlanningArtifacts(),
+		// The referenced same-repository issues, pinned by the runtime through
+		// the governed forge boundary before this invocation. The provider
+		// makes no network request of its own; it is SHOWN this text, as
+		// untrusted engineering source, exactly as it is shown the primary
+		// issue.
+		References: intent.References,
 	})
-	if err != nil {
-		return nil, nil, err
-	}
-	reasoning := output.Reasoning
-	return output.Stages, &reasoning, nil
+	return output, err
 }
 
 // requirePlanningMode refuses a planner whose adapter cannot enter a provable
@@ -617,9 +679,112 @@ func planShow(flags autonomyFlags, overrides autonomyOverrides, planID string, s
 	// asked.
 	view, err := reader.service.ViewRevision(planID, flags.Revision)
 	if err != nil {
-		return exitFor(err, exitRunNotFound), err
+		// A plan identity with no revision is not "no such plan": it is a plan
+		// whose every reasoning attempt was refused. Reading it is the whole
+		// point of preserving the attempts, so this falls through to them
+		// rather than telling an operator that the work they just paid a
+		// provider invocation for does not exist.
+		//
+		// Only when the identity itself is unknown - or when the plan DOES have
+		// an executable revision and the operator simply named one that does
+		// not exist - does the original refusal stand. An executable plan
+		// rendered through the attempt view would say "executable plan NONE"
+		// about a plan that has one, which is worse than the refusal it
+		// replaced.
+		attempts, attemptErr := reader.service.AttemptsView(planID)
+		if attemptErr != nil || attempts.Executable || len(attempts.Attempts) == 0 {
+			return exitFor(err, exitRunNotFound), err
+		}
+		attempts.RequestedRevisionIgnored = flags.Revision
+		return planAttemptsOutput(flags, attempts, stdout)
 	}
 	return planOutput(flags, view, stdout, "")
+}
+
+// planAttemptsOutput renders a plan that has no executable revision: every
+// refused reasoning attempt, what it proposed and why the machine refused it.
+//
+// It answers, without a single grep through an artifact directory: which
+// attempt, which reasoning agent, what provenance, which stages, which
+// validation status, which typed errors, which evidence, and whether an
+// executable EngineeringPlan exists at all.
+func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdout io.Writer) (int, error) {
+	if !flags.Text {
+		if err := writeJSON(stdout, view); err != nil {
+			return runtime.ExitFailed, err
+		}
+		return runtime.ExitFailed, nil
+	}
+	fmt.Fprintf(stdout, "plan %s (%s)\n", terminalSafe(view.PlanID), terminalSafe(view.Repository))
+	if view.Issue > 0 {
+		fmt.Fprintf(stdout, "  source          issue #%d\n", view.Issue)
+	}
+	fmt.Fprintln(stdout, "  executable plan NONE: every reasoning attempt so far was refused by deterministic validation")
+	fmt.Fprintln(stdout, "  nothing here is approvable, and nothing here has executed")
+	if view.RequestedRevisionIgnored > 0 {
+		// The flag was READ and could not be honoured. Silently rendering
+		// something else would let an operator believe they were shown the
+		// revision they asked for. The view carries it, so the JSON surface
+		// says it too.
+		fmt.Fprintf(stdout, "  --revision %d was ignored: this plan has no revisions at all\n", view.RequestedRevisionIgnored)
+	}
+	for _, attempt := range view.Attempts {
+		fmt.Fprintf(stdout, "\nattempt %s (revision %d, origin %s", terminalSafe(attempt.AttemptID), attempt.Revision, terminalSafe(attempt.Origin))
+		if attempt.RefusedAt != "" {
+			fmt.Fprintf(stdout, ", refused %s", terminalSafe(attempt.RefusedAt))
+		}
+		fmt.Fprintln(stdout, ")")
+		if reasoning := attempt.Reasoning; reasoning != nil {
+			fmt.Fprintf(stdout, "  reasoned by     %s (%s", terminalSafe(reasoning.AgentID), terminalSafe(reasoning.ProviderKind))
+			if reasoning.Model != "" {
+				fmt.Fprintf(stdout, ", model %s", terminalSafe(reasoning.Model))
+			}
+			fmt.Fprintf(stdout, ", %s)\n", terminalSafe(reasoning.InvocationMode))
+			fmt.Fprintf(stdout, "  workspace       %s (%s -> %s)\n",
+				map[bool]string{true: "unchanged", false: "CHANGED"}[reasoning.WorkspaceUnchanged],
+				terminalSafe(short(reasoning.WorkspaceDigestBefore)), terminalSafe(short(reasoning.WorkspaceDigestAfter)))
+		}
+		fmt.Fprintln(stdout, "  validation      refused")
+		for _, reason := range attempt.Errors {
+			fmt.Fprintf(stdout, "    - %s\n", terminalSafe(reason))
+		}
+		for _, stage := range attempt.Stages {
+			line := fmt.Sprintf("    %s (%s", terminalSafe(stage.ID), terminalSafe(stage.Kind))
+			if stage.Role != "" {
+				line += ", role " + terminalSafe(stage.Role)
+			}
+			if len(stage.DependsOn) > 0 {
+				line += ", after " + strings.Join(terminalSafeList(stage.DependsOn), " and ")
+			}
+			if stage.Independence != nil {
+				// An independence over NOTHING is printed as such. It is the
+				// state that explains this whole record, and rendering it as
+				// though no independence had been asked for would hide the
+				// thing an operator is reading this to find.
+				peers := "nothing"
+				if len(stage.Independence.DifferentFrom) > 0 {
+					peers = strings.Join(terminalSafeList(stage.Independence.DifferentFrom), " and ")
+				}
+				line += fmt.Sprintf(", independent of %s in %s", peers, terminalSafe(stage.Independence.Dimension))
+			}
+			fmt.Fprintln(stdout, line+")")
+		}
+		for _, reference := range attempt.References {
+			if reference.Issue == 0 {
+				fmt.Fprintf(stdout, "  context         %s\n", terminalSafe(reference.Detail))
+				continue
+			}
+			status := "pinned " + terminalSafe(short(reference.Digest))
+			if !reference.Available {
+				status = "UNAVAILABLE: " + terminalSafe(reference.Detail)
+			}
+			fmt.Fprintf(stdout, "  context         %s issue #%d (%s)\n", terminalSafe(reference.Repository), reference.Issue, status)
+		}
+		for _, evidence := range attempt.Evidence {
+			fmt.Fprintf(stdout, "  evidence        %s\n", terminalSafe(evidence.Path))
+		}
+	}
+	return runtime.ExitFailed, nil
 }
 
 // planDecide records the operator's approval or rejection of the exact revision
@@ -733,7 +898,7 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 		return exitFor(err, runtime.ExitFailed), err
 	}
 	if flags.Text {
-		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, revision, snapshot.Approval.Status, operator.ID)
+		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", terminalSafe(planID), revision, terminalSafe(string(snapshot.Approval.Status)), terminalSafe(operator.ID))
 		return runtime.ExitCompleted, nil
 	}
 	if err := writeJSON(stdout, snapshot); err != nil {
@@ -749,7 +914,11 @@ func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer
 		return runtime.ExitInvalid, err
 	}
 	defer reader.release()
-	plans, err := reader.store.Plans()
+	// Every plan IDENTITY, not only the ones that reached a revision. A plan
+	// whose reasoning attempts were all refused has no document to join to, and
+	// listing only documents is what answered "no plans" to an operator who had
+	// just run the planner.
+	identities, err := reader.store.PlanIdentities()
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -760,21 +929,36 @@ func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer
 		Approval  string                 `json:"approval"`
 		Stages    map[string]int         `json:"stages"`
 		Consumed  domain.PlanConsumption `json:"consumed"`
+		// Attempts is how many reasoning proposals deterministic validation
+		// refused for this plan, and Executable states whether an approvable
+		// EngineeringPlan exists at all.
+		Attempts   int  `json:"refused_attempts,omitempty"`
+		Executable bool `json:"executable_plan_exists"`
 	}
-	summaries := make([]summary, 0, len(plans))
-	for _, plan := range plans {
-		snapshot, err := reader.store.ReplayPlan(plan.ID)
+	summaries := make([]summary, 0, len(identities))
+	for _, identity := range identities {
+		snapshot, err := reader.store.ReplayPlan(identity.PlanID)
 		if err != nil {
 			return runtime.ExitFailed, err
 		}
-		states := map[string]int{}
-		for _, projection := range snapshot.Stages {
-			states[string(projection.State)]++
+		item := summary{
+			PlanID: identity.PlanID, Approval: string(snapshot.Approval.Status),
+			Stages: map[string]int{}, Consumed: snapshot.Consumed,
+			Attempts: len(snapshot.Attempts), Executable: identity.Revision > 0,
 		}
-		summaries = append(summaries, summary{
-			PlanID: plan.ID, Revision: plan.Revision, Objective: plan.Objective,
-			Approval: string(snapshot.Approval.Status), Stages: states, Consumed: snapshot.Consumed,
-		})
+		for _, projection := range snapshot.Stages {
+			item.Stages[string(projection.State)]++
+		}
+		if identity.Revision > 0 {
+			plan, found, err := reader.store.PlanRevision(identity.PlanID, identity.Revision)
+			if err != nil {
+				return runtime.ExitFailed, err
+			}
+			if found {
+				item.Revision, item.Objective = plan.Revision, plan.Objective
+			}
+		}
+		summaries = append(summaries, item)
 	}
 	if !flags.Text {
 		if err := writeJSON(stdout, summaries); err != nil {
@@ -787,7 +971,16 @@ func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer
 		return runtime.ExitCompleted, nil
 	}
 	for _, item := range summaries {
-		fmt.Fprintf(stdout, "%s  r%d  %-9s  %s\n", item.PlanID, item.Revision, item.Approval, singleLinePlan(item.Objective))
+		if !item.Executable {
+			// There is no revision, so there is no revision number and no
+			// objective to print: naming one would name a document that does
+			// not exist. What IS true is that planning was attempted and
+			// refused, and that is what the row says.
+			fmt.Fprintf(stdout, "%s  --  %-9s  no plan: %d refused reasoning attempt(s), read with `autonomy plan show %s`\n",
+				terminalSafe(item.PlanID), "unplanned", item.Attempts, terminalSafe(item.PlanID))
+			continue
+		}
+		fmt.Fprintf(stdout, "%s  r%d  %-9s  %s\n", terminalSafe(item.PlanID), item.Revision, terminalSafe(item.Approval), singleLinePlan(item.Objective))
 	}
 	return runtime.ExitCompleted, nil
 }
@@ -801,9 +994,9 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		return planExit(view), nil
 	}
 	if action != "" {
-		fmt.Fprintf(stdout, "%s plan %s revision %d\n", action, view.Plan.ID, view.Plan.Revision)
+		fmt.Fprintf(stdout, "%s plan %s revision %d\n", action, terminalSafe(view.Plan.ID), view.Plan.Revision)
 	}
-	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", view.Plan.ID, view.Plan.Revision, revisionStatus(view))
+	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", terminalSafe(view.Plan.ID), view.Plan.Revision, terminalSafe(string(revisionStatus(view))))
 	// A revision that is not governing is shown as a PREVIEW: the state beside
 	// each stage is what approving this revision would leave, not a report of
 	// what is happening. Saying so is the difference between an approval
@@ -821,18 +1014,49 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 				preview.GoverningRevision)
 		}
 		if len(preview.Invalidated) > 0 {
-			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(preview.Invalidated, ", "))
+			// Stage IDS, and the graph laws constrain only that an id is
+			// non-blank - not its character set. This is the approval preview,
+			// which is the worst place in the product to render something a
+			// model chose without escaping it.
+			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(terminalSafeList(preview.Invalidated), ", "))
 		}
 	}
 	fmt.Fprintf(stdout, "objective: %s\n", singleLinePlan(view.Plan.Objective))
 	if reasoning := view.Plan.Provenance.Reasoning; reasoning != nil {
 		fmt.Fprintf(stdout, "planned by: %s (%s, %s) in %s mode; workspace verified unchanged: %v\n",
-			reasoning.AgentID, reasoning.ProviderKind, reasoning.VendorFamily, reasoning.InvocationMode, reasoning.WorkspaceUnchanged)
+			terminalSafe(reasoning.AgentID), terminalSafe(reasoning.ProviderKind), terminalSafe(reasoning.VendorFamily),
+			terminalSafe(string(reasoning.InvocationMode)), reasoning.WorkspaceUnchanged)
 	} else {
 		fmt.Fprintln(stdout, "planned by: the deterministic compiler; no model was invoked")
 	}
 	if template := view.Plan.Provenance.Template; template != nil {
-		fmt.Fprintf(stdout, "template: %s v%d\n", template.ID, template.Version)
+		fmt.Fprintf(stdout, "template: %s v%d\n", terminalSafe(template.ID), template.Version)
+	}
+	// What the planner was actually given. A referenced issue the forge could
+	// not return means this plan was reasoned from less than the engineering
+	// input the primary issue names, and an operator deciding whether to
+	// approve it needs to know that BEFORE they approve it.
+	for _, reference := range view.Snapshot.References {
+		if reference.Issue == 0 {
+			fmt.Fprintf(stdout, "context: %s\n", terminalSafe(reference.Detail))
+			continue
+		}
+		if reference.Available {
+			fmt.Fprintf(stdout, "context: %s issue #%d pinned at %s\n", terminalSafe(reference.Repository), reference.Issue, terminalSafe(short(reference.Digest)))
+			continue
+		}
+		fmt.Fprintf(stdout, "context: %s issue #%d WAS NOT AVAILABLE to the planner: %s\n",
+			terminalSafe(reference.Repository), reference.Issue, terminalSafe(reference.Detail))
+	}
+	// Earlier attempts at this plan, if any. A plan that took two tries is a
+	// different thing to approve than one that took none, and the record is
+	// beside it rather than somewhere else.
+	for _, attempt := range view.Snapshot.Attempts {
+		reason := ""
+		if len(attempt.Errors) > 0 {
+			reason = ": " + terminalSafe(attempt.Errors[0])
+		}
+		fmt.Fprintf(stdout, "earlier attempt %s was refused%s\n", terminalSafe(attempt.AttemptID), reason)
 	}
 	fmt.Fprintln(stdout, "stages:")
 	assignments := map[string]domain.AgentAssignment{}
@@ -844,7 +1068,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		if projection, ok := view.Snapshot.Stages[stage.ID]; ok && projection.State != "" {
 			state = string(projection.State)
 		}
-		line := fmt.Sprintf("  %-18s %-20s %-11s", stage.ID, stage.Kind, state)
+		line := fmt.Sprintf("  %-18s %-20s %-11s", terminalSafe(stage.ID), terminalSafe(string(stage.Kind)), state)
 		// WHICH EXECUTION of this stage this is. A stage performed again
 		// because its input moved is ordinary and automatic, and without this
 		// the only record of that churn was the snapshot JSON.
@@ -853,20 +1077,20 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		}
 		switch {
 		case stage.Kind != domain.StageAgent:
-			line += fmt.Sprintf(" references claims %s", strings.Join(stage.RequiredClaims, ", "))
+			line += fmt.Sprintf(" references claims %s", strings.Join(terminalSafeList(stage.RequiredClaims), ", "))
 		default:
-			line += fmt.Sprintf(" role=%s", stage.Role)
+			line += fmt.Sprintf(" role=%s", terminalSafe(string(stage.Role)))
 			if assignment, ok := assignments[stage.ID]; ok {
-				line += fmt.Sprintf(" profile=%s agent=%s (%s)", assignment.Profile.ID, assignment.Agent.ID, assignment.Agent.VendorFamily)
+				line += fmt.Sprintf(" profile=%s agent=%s (%s)", terminalSafe(assignment.Profile.ID), terminalSafe(assignment.Agent.ID), terminalSafe(assignment.Agent.VendorFamily))
 			}
 			if stage.Independence != nil {
-				line += fmt.Sprintf(" independent-of=%s in %s", strings.Join(stage.Independence.DifferentFrom, ","), stage.Independence.Dimension)
+				line += fmt.Sprintf(" independent-of=%s in %s", strings.Join(terminalSafeList(stage.Independence.DifferentFrom), ","), terminalSafe(string(stage.Independence.Dimension)))
 			}
 		}
 		fmt.Fprintln(stdout, line)
 	}
 	for _, blocked := range view.Blocked {
-		fmt.Fprintf(stdout, "blocked: %s (%s) %s\n", blocked.StageID, blocked.Kind, blocked.Reason)
+		fmt.Fprintf(stdout, "blocked: %s (%s) %s\n", terminalSafe(blocked.StageID), terminalSafe(string(blocked.Kind)), terminalSafe(blocked.Reason))
 		if blocked.HumanSubstitutionPermitted {
 			fmt.Fprintln(stdout, "         policy permits an independent human review in place of this worker; approving that is an operator decision through `plan revise`")
 		}
@@ -879,7 +1103,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 	// the command with both is what lets an operator approve what they read.
 	if awaiting := view.Snapshot.Approval; awaiting.Status == domain.ApprovalPending && awaiting.Revision > 0 {
 		if awaiting.Revision != view.Plan.Revision {
-			fmt.Fprintf(stdout, "awaiting a decision: revision %d (digest %s)\n", awaiting.Revision, awaiting.Digest)
+			fmt.Fprintf(stdout, "awaiting a decision: revision %d (digest %s)\n", awaiting.Revision, terminalSafe(awaiting.Digest))
 		}
 		// The assignments digest is only printed where the view rendered IS
 		// the revision awaiting the decision. Naming the set from a different
@@ -889,7 +1113,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			assignments = " --assignments " + view.AssignmentsDigest
 		}
 		fmt.Fprintf(stdout, "nothing executes until it is approved: `autonomy plan approve %s --revision %d --digest %s%s`\n",
-			view.Plan.ID, awaiting.Revision, awaiting.Digest, assignments)
+			terminalSafe(view.Plan.ID), awaiting.Revision, terminalSafe(awaiting.Digest), terminalSafe(assignments))
 	}
 	return planExit(view), nil
 }
@@ -973,8 +1197,18 @@ func planExit(view runtime.PlanView) int {
 // singleLinePlan is one line of an objective, truncated by RUNES. The objective
 // carries issue text, so cutting bytes can split a multi-byte character and
 // print a broken rune into the operator's terminal.
+// singleLinePlan collapses an objective onto one line.
+//
+// The objective is derived from an issue title and body, so it is third-party
+// text on a terminal. The ORDER of the two passes is the whole of it: the
+// collapse runs first, because every real objective is multi-line - the runtime
+// builds it with the UNTRUSTED-SOURCE markers on their own lines - and escaping
+// before the collapse turns those legitimate newlines into literal "\x0a" that
+// strings.Fields can no longer remove, so every ordinary row prints litter.
+// Escaping last is still correct for the case the wrap exists for: ESC survives
+// Fields, and by then the legitimate CR, LF and tabs are already gone.
 func singleLinePlan(text string) string {
-	line := strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " ")
+	line := terminalSafe(strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " "))
 	if runes := []rune(line); len(runes) > 120 {
 		return string(runes[:117]) + "..."
 	}
