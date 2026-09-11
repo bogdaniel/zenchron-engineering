@@ -743,6 +743,20 @@ type PlanAttemptRefusedPayload struct {
 	Revision int    `json:"revision"`
 	Origin   string `json:"origin"`
 	Issue    int    `json:"issue,omitempty"`
+	// Subject is the exact repository revision the refused proposal would have
+	// been bound to, and PreviousSubject the one the revision it would have
+	// replaced is bound to.
+	//
+	// Both are recorded unconditionally, for every refusal, rather than only for
+	// the refusals that happen to be ABOUT the subject. A refused attempt is the
+	// operator's whole record of a proposal that produced no document, and "what
+	// was this proposal bound to" is not answerable from anywhere else once
+	// compilation declined to produce the plan. The subject/base refusals are
+	// the ones that proved it: their reason named a mismatch and the record held
+	// neither side of it, so the only way to learn what moved was to read the
+	// validator's source and query the database.
+	Subject         *domain.Subject `json:"subject,omitempty"`
+	PreviousSubject *domain.Subject `json:"previous_subject,omitempty"`
 	// Reasoning is the provenance of the invocation that produced the proposal,
 	// including the runtime's own proof that the planning workspace did not
 	// change. It is absent for a deterministic compilation, which no model
@@ -1020,6 +1034,26 @@ var planPayloads = map[string]payloadValidator{
 			nonNegative("issue", p.Issue),
 		); err != nil {
 			return err
+		}
+		// A recorded subject is bounded and complete or it is not recorded. A
+		// half-filled one - a repository with no revision - would read as an
+		// exact binding and name no tree.
+		// In a FIXED order: a validator whose message depends on map iteration
+		// gives two different answers to one defective payload.
+		for _, named := range []struct {
+			name    string
+			subject *domain.Subject
+		}{{"subject", p.Subject}, {"previous_subject", p.PreviousSubject}} {
+			name, subject := named.name, named.subject
+			if subject == nil {
+				continue
+			}
+			if err := errors.Join(
+				required(name+".repository", subject.Repository),
+				required(name+".revision", subject.Revision),
+			); err != nil {
+				return err
+			}
 		}
 		if len(p.Stages) > maxPayloadListItems {
 			return fmt.Errorf("payload list %q has %d elements, above the %d element bound", "stages", len(p.Stages), maxPayloadListItems)

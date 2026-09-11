@@ -383,6 +383,11 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject,
 		Repository: composed.target.Identity, Contract: intent.Contract,
 		Model: intent.Model, Facts: intent.Facts, Template: flags.Template, Issue: issue,
+		// The OBSERVED trusted base, from the same intent compilation that read
+		// it through the governed remote. This is the only path in the product
+		// that can authorize a plan moving onto a newer base, and it can do so
+		// because it is the path that looked.
+		ObservedBase: intent.Base.Revision,
 	}
 	// REASONING is the default, and it runs through a registered agent in a
 	// verified non-mutating mode. `--deterministic` is the honest alternative
@@ -744,6 +749,18 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 				map[bool]string{true: "unchanged", false: "CHANGED"}[reasoning.WorkspaceUnchanged],
 				terminalSafe(short(reasoning.WorkspaceDigestBefore)), terminalSafe(short(reasoning.WorkspaceDigestAfter)))
 		}
+		// WHAT IT WAS BOUND TO, on both sides, whenever the record holds them.
+		// A refusal about a subject relationship whose record shows neither
+		// subject is a refusal that costs a source-reading session to diagnose,
+		// which is exactly what the first base-rebinding refusal cost.
+		if attempt.Subject != nil {
+			fmt.Fprintf(stdout, "  base            %s %s\n",
+				terminalSafe(attempt.Subject.Repository), terminalSafe(short(attempt.Subject.Revision)))
+		}
+		if attempt.PreviousSubject != nil {
+			fmt.Fprintf(stdout, "  compared with   %s %s (the revision it would have replaced)\n",
+				terminalSafe(attempt.PreviousSubject.Repository), terminalSafe(short(attempt.PreviousSubject.Revision)))
+		}
 		fmt.Fprintln(stdout, "  validation      refused")
 		for _, reason := range attempt.Errors {
 			fmt.Fprintf(stdout, "    - %s\n", terminalSafe(reason))
@@ -1021,6 +1038,19 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(terminalSafeList(preview.Invalidated), ", "))
 		}
 	}
+	// WHAT THIS REVISION IS BOUND TO. Every candidate, test result, review
+	// verdict and assurance observation under this plan is a statement about
+	// this exact tree, and until now no operator surface said which tree that
+	// was - so a refusal about it could only be diagnosed from the source and
+	// the database.
+	if change := view.BaseChange; change != nil {
+		fmt.Fprintf(stdout, "base: %s %s -> %s (this revision moves the plan onto a newly observed trusted base)\n",
+			terminalSafe(change.Repository), terminalSafe(short(change.From)), terminalSafe(short(change.To)))
+		fmt.Fprintln(stdout, "base: work performed against the old base is not evidence for the new one and is redone")
+	} else {
+		fmt.Fprintf(stdout, "base: %s %s\n",
+			terminalSafe(view.Plan.Subject.Repository), terminalSafe(short(view.Plan.Subject.Revision)))
+	}
 	fmt.Fprintf(stdout, "objective: %s\n", singleLinePlan(view.Plan.Objective))
 	if reasoning := view.Plan.Provenance.Reasoning; reasoning != nil {
 		fmt.Fprintf(stdout, "planned by: %s (%s, %s) in %s mode; workspace verified unchanged: %v\n",
@@ -1057,6 +1087,20 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			reason = ": " + terminalSafe(attempt.Errors[0])
 		}
 		fmt.Fprintf(stdout, "earlier attempt %s was refused%s\n", terminalSafe(attempt.AttemptID), reason)
+		// The two subjects, when the attempt recorded them and they DIFFER. A
+		// refusal about a subject relationship whose record holds neither side
+		// of it is a refusal an operator cannot act on, which is how the first
+		// base-rebinding refusal cost a source-reading session to diagnose.
+		if attempt.Subject == nil || attempt.PreviousSubject == nil {
+			continue
+		}
+		if attempt.Subject.Revision == attempt.PreviousSubject.Revision &&
+			attempt.Subject.Repository == attempt.PreviousSubject.Repository {
+			continue
+		}
+		fmt.Fprintf(stdout, "  it was bound to %s %s and the revision it would have replaced is bound to %s %s\n",
+			terminalSafe(attempt.Subject.Repository), terminalSafe(short(attempt.Subject.Revision)),
+			terminalSafe(attempt.PreviousSubject.Repository), terminalSafe(short(attempt.PreviousSubject.Revision)))
 	}
 	fmt.Fprintln(stdout, "stages:")
 	assignments := map[string]domain.AgentAssignment{}

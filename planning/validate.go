@@ -302,8 +302,30 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 	if plan.Provenance.PreviousRevision == nil || *plan.Provenance.PreviousRevision != previous.Revision {
 		reasons = append(reasons, "a revision records the exact revision it replaces")
 	}
-	if plan.Subject != previous.Subject {
-		reasons = append(reasons, "a revision cannot move the plan onto a different subject")
+	// SOURCE IDENTITY, which is the repository, and not the base commit.
+	//
+	// These are two different facts that used to be compared as one. A plan's
+	// durable identity is its repository and its source issue, and it lives
+	// across a lifecycle during which the repository's trusted base MOVES -
+	// every merge to the default branch moves it. Comparing the whole Subject
+	// made an ordinary base update indistinguishable from retargeting the plan
+	// at different work, so a plan that was not approved before the next merge
+	// could never be revised again, and PlanID is derived from the source
+	// rather than allocated - so there was no second identity to escape to.
+	//
+	// Retargeting the REPOSITORY stays refused here: it is a different
+	// governed repository, different credentials and different policy, and no
+	// base observation makes it the same plan.
+	//
+	// A base REVISION change is permitted by this document law and authorized
+	// elsewhere. This is a pure document validator: it cannot observe a remote,
+	// so it cannot know whether the new base is the trusted base the governed
+	// intent path observed or a commit a model named. That check belongs to the
+	// layer holding that fact, and runtime.PlanService.Propose performs it
+	// before this plan is ever compiled. Machines authorize.
+	if plan.Subject.Repository != previous.Subject.Repository {
+		reasons = append(reasons, fmt.Sprintf("a revision cannot move the plan from repository %q to repository %q",
+			previous.Subject.Repository, plan.Subject.Repository))
 	}
 	// PRIVILEGE. A revision may tighten trust and independence; widening either
 	// is new privilege and goes through policy, not through a plan edit.
