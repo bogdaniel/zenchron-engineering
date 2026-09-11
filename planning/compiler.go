@@ -90,9 +90,15 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 	if err != nil {
 		return domain.EngineeringPlan{}, err
 	}
-	stages = applyPolicyObligations(stages, requirements, input.Contract)
+	stages, err = applyPolicyObligations(stages, requirements, input.Contract, input.PlanID)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	stages = ensureAssuranceGate(stages, input.Contract)
-	stages = fillStageDefaults(stages, input)
+	stages, err = fillStageDefaults(stages, input)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	stages = canonicalOrder(stages)
 
 	envelope, err := resolveEnvelope(input, stages)
@@ -296,18 +302,21 @@ func SubstituteHumanReview(plan domain.EngineeringPlan, stageID string, claims [
 // template that named none gets the stage added. Nothing here can remove a
 // stage or weaken a requirement, which is the mechanism behind "policy wins or
 // the plan fails closed".
-func applyPolicyObligations(stages []domain.PlanStage, requirements domain.PlanRequirements, contract domain.EngineeringWorkContract) []domain.PlanStage {
+func applyPolicyObligations(stages []domain.PlanStage, requirements domain.PlanRequirements, contract domain.EngineeringWorkContract, planID string) ([]domain.PlanStage, error) {
 	for _, role := range requirements.Roles {
-		stages = applyRoleObligation(stages, role)
+		var err error
+		if stages, err = applyRoleObligation(stages, role, planID); err != nil {
+			return nil, err
+		}
 	}
 	stages = applyCapabilityObligations(stages, requirements.Capabilities)
 	for _, gate := range requirements.Gates {
 		stages = applyGateObligation(stages, gate, contract)
 	}
-	return stages
+	return stages, nil
 }
 
-func applyRoleObligation(stages []domain.PlanStage, requirement domain.RoleRequirement) []domain.PlanStage {
+func applyRoleObligation(stages []domain.PlanStage, requirement domain.RoleRequirement, planID string) ([]domain.PlanStage, error) {
 	producers := materialProducerStages(stages)
 	index := -1
 	for i, stage := range stages {
@@ -337,20 +346,32 @@ func applyRoleObligation(stages []domain.PlanStage, requirement domain.RoleRequi
 		stage.TrustRequirement = requirement.TrustRequirement
 	}
 	if requirement.Independence != nil {
-		stage.Independence = strengthenIndependence(stage.Independence, *requirement.Independence, producers, stage.ID)
+		strengthened, err := strengthenIndependence(stage.Independence, *requirement.Independence, producers, stage, planID)
+		if err != nil {
+			return nil, err
+		}
+		stage.Independence = strengthened
 	}
 	if stage.Rationale == "" {
 		stage.Rationale = "required by EngineeringPolicy: " + requirement.Statement
 	}
 	stages[index] = stage
-	return stages
+	return stages, nil
 }
 
 // strengthenIndependence takes the stronger dimension and the union of the
 // stages a producer must differ from. A weaker existing requirement is never
 // kept: silently degrading a required independence class is the exact failure
 // #64 names.
-func strengthenIndependence(existing *domain.IndependenceRequirement, required domain.IndependenceRequirement, producers []string, self string) *domain.IndependenceRequirement {
+//
+// The producer binding is the one thing it will REFUSE rather than perform.
+// Binding "independent of whoever produced the change" to the material
+// producers is what makes a policy obligation checkable - but only for a stage
+// that produces nothing itself. On a material producer the same completion
+// names its PEERS, which are neither upstream nor downstream of it, and the
+// dependency edge that makes independence checkable would then be an edge
+// between two producers in both directions. See unboundProducerIndependence.
+func strengthenIndependence(existing *domain.IndependenceRequirement, required domain.IndependenceRequirement, producers []string, stage domain.PlanStage, planID string) (*domain.IndependenceRequirement, error) {
 	result := required
 	if existing != nil && dimensionStrength(existing.Dimension) > dimensionStrength(required.Dimension) {
 		result.Dimension = existing.Dimension
@@ -367,15 +388,55 @@ func strengthenIndependence(existing *domain.IndependenceRequirement, required d
 	// Policy names a RELATIONSHIP - independent of the material producer - and
 	// the compiler binds it to the exact stages that produce material change in
 	// this plan. That binding is what makes the obligation checkable.
-	for _, id := range producers {
-		from[id] = true
+	if ProducesMaterialChange(stage.Role) {
+		if len(from) == 0 {
+			return nil, unboundProducerIndependence(planID, stage, "required by EngineeringPolicy")
+		}
+	} else {
+		for _, id := range producers {
+			from[id] = true
+		}
 	}
-	delete(from, self)
+	delete(from, stage.ID)
+	if len(from) == 0 {
+		return nil, unboundProducerIndependence(planID, stage, "required by EngineeringPolicy")
+	}
 	result.DifferentFrom = sortedKeysOf(from)
 	// The substitution PERMISSION comes from policy alone. An existing stage
 	// requirement cannot introduce one, so the merge takes policy's value.
 	result.HumanSubstitutionPermitted = required.HumanSubstitutionPermitted
-	return &result
+	return &result, nil
+}
+
+// unboundProducerIndependence is the typed refusal for an independence
+// requirement on a material-producing stage that names no peer.
+//
+// It is refused BEFORE the graph is completed, which is the whole point. The
+// empty different_from is a shorthand meaning "independent of whoever produced
+// the change in this plan". On a reviewing stage that is unambiguous and safe:
+// the reviewer gains a dependency on each producer, which is the order it
+// already had. On a stage that IS a producer the same expansion names its
+// sibling producers - stages with no ordering relation to it - and
+// withIndependencePeers then turns each one into a dependency. Two producers
+// written that way depend on each other, the cycle law refuses the plan, and
+// the operator is shown a cycle nobody proposed.
+//
+// So the ambiguity is refused where it is still legible, with the two things
+// that resolve it. The compiler does not guess which sibling producer the
+// stage meant, and it does not drop the requirement: an independence
+// obligation is never silently discarded, whoever asked for it.
+func unboundProducerIndependence(planID string, stage domain.PlanStage, source string) error {
+	// THREE reasons rather than one paragraph. A journal payload bounds each
+	// list element, and a single sentence long enough to say all of this was
+	// truncated in the durable record - so the operator reading a refused
+	// attempt got the accusation without the remedy. Each reason below stands
+	// on its own and fits.
+	return &ValidationError{PlanID: planID, Reasons: []string{
+		fmt.Sprintf("stage %q performs role %q, which produces material change, and states an independence requirement (%s) whose \"different_from\" is empty",
+			stage.ID, stage.Role, source),
+		"an empty \"different_from\" means \"differ from every material producer\", and on a producer that names its own peers, which would make two producers depend on each other",
+		fmt.Sprintf("name the exact stages %q must differ from, or omit its independence requirement if it needs none", stage.ID),
+	}}
 }
 
 func applyCapabilityObligations(stages []domain.PlanStage, capabilities []domain.EngineeringCapability) []domain.PlanStage {
@@ -459,7 +520,7 @@ func ensureAssuranceGate(stages []domain.PlanStage, contract domain.EngineeringW
 // fillStageDefaults completes what the plan states from what the role means.
 // Every default is derived from stated data - the role catalogue, the contract,
 // the plan objective - so two compilations agree.
-func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.PlanStage {
+func fillStageDefaults(stages []domain.PlanStage, input CompileInput) ([]domain.PlanStage, error) {
 	for i, stage := range stages {
 		if stage.Kind != domain.StageAgent {
 			// A gate carries no worker requirement at all, and one that states
@@ -488,7 +549,16 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.P
 		// does a proposal that asks for independence without knowing which stage
 		// will produce; binding it is what makes the obligation checkable, and
 		// it can only ever add constraints.
+		//
+		// On a stage that itself produces material change the same shorthand is
+		// AMBIGUOUS rather than safe, and it is refused here - before a single
+		// edge is added - rather than completed into peer dependencies that
+		// manufacture a cycle. unboundProducerIndependence is the whole
+		// argument.
 		if stage.Independence != nil && len(stage.Independence.DifferentFrom) == 0 {
+			if ProducesMaterialChange(stage.Role) {
+				return nil, unboundProducerIndependence(input.PlanID, stage, "proposed for this stage")
+			}
 			independence := *stage.Independence
 			independence.DifferentFrom = producersExcept(stages, stage.ID)
 			stage.Independence = &independence
@@ -512,7 +582,7 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) []domain.P
 		}
 		stages[i] = stage
 	}
-	return stages
+	return stages, nil
 }
 
 // withIndependencePeers adds every independence peer that is not already a

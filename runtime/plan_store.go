@@ -69,14 +69,99 @@ func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan, createdAt 
 		return false, err
 	}
 	claimed, err := result.RowsAffected()
-	if err != nil || claimed != 1 {
+	if err != nil {
 		return false, err
+	}
+	if claimed != 1 {
+		// The row exists. That is a competing proposal ONLY if it carries a
+		// revision; a row at current_revision 0 is an ATTEMPT identity - this
+		// plan's own earlier reasoning proposal, refused before it compiled -
+		// and refusing here would mean a plan whose first attempt failed could
+		// never be planned again. The conditional UPDATE is what makes the
+		// promotion a race the database decides: exactly one writer moves the
+		// row off zero.
+		promoted, err := tx.Exec(`UPDATE plans SET current_revision = ? WHERE id = ? AND current_revision = 0`,
+			plan.Revision, plan.ID)
+		if err != nil {
+			return false, err
+		}
+		moved, err := promoted.RowsAffected()
+		if err != nil || moved != 1 {
+			return false, err
+		}
 	}
 	if _, err := tx.Exec(`INSERT INTO plan_revisions (plan_id, revision, digest, document) VALUES (?, ?, ?, ?)`,
 		plan.ID, plan.Revision, plan.Digest, string(document)); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// ClaimPlanAttempt claims a plan IDENTITY with no revision.
+//
+// It is what a refused first proposal needs and nothing more. A plan identity
+// is derived - repository, issue, operator configuration - so it exists as a
+// fact the moment an operator asks to plan that issue; what does not exist,
+// when compilation refuses the proposal, is a revision. This row carries
+// current_revision 0 and no plan_revisions row, which means:
+//
+//   - Plans() joins on current_revision and therefore never returns it, so
+//     nothing that lists executable work can see it;
+//   - Plan() resolves through PlanRevision() and reports not-found, so nothing
+//     that reads a plan document can mistake it for one;
+//   - the plan's journal stream exists, so the refused attempt recorded in it
+//     is durable, replayable and readable after a restart.
+//
+// In other words the identity is the hook the evidence hangs on, and it grants
+// nothing. It reports whether THIS call created the row; an existing row - of
+// either kind - is not an error, because a second refused attempt at the same
+// plan is an ordinary thing to happen.
+func (s *SQLiteOperationStore) ClaimPlanAttempt(planID, repository string, createdAt time.Time) (bool, error) {
+	if planID == "" || repository == "" {
+		return false, fmt.Errorf("a plan attempt identity needs a plan id and a repository")
+	}
+	result, err := s.db.Exec(`INSERT INTO plans (`+sqlitePlanColumns+`) VALUES (?, ?, 0, ?) ON CONFLICT(id) DO NOTHING`,
+		planID, repository, createdAt.UnixNano())
+	if err != nil {
+		return false, err
+	}
+	claimed, err := result.RowsAffected()
+	return claimed == 1, err
+}
+
+// PlanIdentity is a plan row, whether or not it has a revision. Revision 0
+// means no revision has ever been stored: the identity exists because planning
+// was attempted, and every attempt so far was refused.
+type PlanIdentity struct {
+	PlanID     string `json:"plan_id"`
+	Repository string `json:"repository"`
+	Revision   int    `json:"current_revision"`
+	Issue      int    `json:"source_issue,omitempty"`
+}
+
+// PlanIdentities lists every plan row in creation order, including the ones
+// that have no revision.
+//
+// Plans() deliberately cannot answer this: it joins each plan to its governing
+// revision document, which is exactly what an attempt-only plan does not have.
+// A list that showed only plans with documents is what told an operator "no
+// plans" about work they had just asked for and paid a provider invocation on.
+func (s *SQLiteOperationStore) PlanIdentities() ([]PlanIdentity, error) {
+	rows, err := s.db.Query(`SELECT id, repository, current_revision, source_issue FROM plans
+		ORDER BY created_unix_nano ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var identities []PlanIdentity
+	for rows.Next() {
+		var identity PlanIdentity
+		if err := rows.Scan(&identity.PlanID, &identity.Repository, &identity.Revision, &identity.Issue); err != nil {
+			return nil, err
+		}
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
 }
 
 // PutPlanRevision stores one revision of an already-claimed plan and reports

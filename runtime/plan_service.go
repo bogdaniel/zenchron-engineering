@@ -84,9 +84,38 @@ type ProposeInput struct {
 	// exists so policy and validation are testable without a live model.
 	Reasoned  []domain.PlanStage
 	Reasoning *domain.PlanReasoningProvenance
+	// Evidence is the durable transcripts of the reasoning invocation. It is
+	// carried here so a REFUSED proposal can reference the same evidence a
+	// successful one is explained by: a refusal whose transcript an operator has
+	// to find by guessing an artifact path is a refusal nobody diagnoses.
+	Evidence []Artifact
+	// References is what referenced-issue hydration produced for this proposal.
+	// It is recorded on a refused attempt so "the planner was working from an
+	// abbreviated cohort description" is a durable fact rather than something
+	// the model happens to mention in prose.
+	References []PlanSourceReferencePayload
 	// Origin states where the proposal came from, for the durable record.
 	Origin string
 }
+
+// PlanAttemptRefusedError is the typed refusal for a proposal that deterministic
+// compilation turned down.
+//
+// It names the durable attempt so the operator's next step is a command rather
+// than a search. The underlying error is preserved, so every caller that was
+// matching on planning.ValidationError still matches.
+type PlanAttemptRefusedError struct {
+	PlanID    string
+	AttemptID string
+	cause     error
+}
+
+func (e *PlanAttemptRefusedError) Error() string {
+	return fmt.Sprintf("%s\nthe proposal and its evidence are preserved as plan attempt %s: read it with `autonomy plan show %s --text`",
+		e.cause.Error(), e.AttemptID, e.PlanID)
+}
+
+func (e *PlanAttemptRefusedError) Unwrap() error { return e.cause }
 
 // Propose compiles, validates and records a plan revision awaiting approval.
 //
@@ -141,15 +170,32 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
 	})
 	if compileErr != nil {
-		// The refusal is durable when a plan already exists to record it
-		// against. For a first proposal there is no plan row yet, and creating
-		// one to hold a refusal would create a plan that never existed.
+		// The refusal is durable in BOTH shapes it can take.
+		//
+		// When a plan already exists, the verdict is recorded against the
+		// revision the proposal would have replaced, exactly as before. When
+		// this is a FIRST proposal there is no revision to be about - nothing
+		// compiled, so no document exists to digest - and the attempt itself
+		// becomes the durable record instead. The earlier code wrote nothing at
+		// all in that case, on the reasoning that a plan row would be a plan
+		// that never existed. That reasoning holds for a plan DOCUMENT and not
+		// for the attempt: the operator asked for this work, a registered agent
+		// reasoned about it, and an invocation was spent. Leaving them with "no
+		// such plan" described none of that.
 		if found {
 			if err := s.recordValidation(input.PlanID, revision, "", domain.ProposalRefused, compileErr); err != nil {
 				return domain.EngineeringPlan{}, err
 			}
 		}
-		return domain.EngineeringPlan{}, compileErr
+		attemptID, err := s.recordRefusedAttempt(input, revision, origin, compileErr)
+		if err != nil {
+			// Recording the evidence failed, which is a worse thing to hide
+			// than the refusal it was about. Both are reported: the compile
+			// refusal is the answer, and the write failure is why it was not
+			// preserved.
+			return domain.EngineeringPlan{}, fmt.Errorf("%w (and the refused attempt could not be recorded: %v)", compileErr, err)
+		}
+		return domain.EngineeringPlan{}, &PlanAttemptRefusedError{PlanID: input.PlanID, AttemptID: attemptID, cause: compileErr}
 	}
 
 	claimedNow := false
@@ -187,7 +233,7 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		Revision: plan.Revision, Digest: plan.Digest, ObjectiveDigest: objectiveDigest,
 		StageCount: len(plan.Stages), AgentStageCount: agentStageCount(plan),
 		Budget: budgetPayload(plan.BudgetEnvelope), Origin: origin,
-		ProposalID: plan.Provenance.ProposalID,
+		ProposalID: plan.Provenance.ProposalID, References: input.References,
 	}
 	if plan.Provenance.Template != nil {
 		payload.Template = &PlanTemplateRef{
@@ -1087,6 +1133,14 @@ func (s PlanService) appendPlanEvent(planID, eventType string, payload any) erro
 // path: the journal allocates the sequence and links the chain, and no caller
 // chooses either.
 func appendPlanEvent(store *SQLiteOperationStore, at time.Time, planID, eventType string, payload any) error {
+	return appendPlanEventWithArtifacts(store, at, planID, eventType, payload, nil)
+}
+
+// appendPlanEventWithArtifacts is the same append with durable evidence
+// attached. The artifacts go through the journal's own ValidateArtifact
+// discipline, so a plan event cannot reference evidence that would not be
+// accepted anywhere else in this runtime.
+func appendPlanEventWithArtifacts(store *SQLiteOperationStore, at time.Time, planID, eventType string, payload any, artifacts []Artifact) error {
 	encoded, err := marshalPayloadJSON(payload)
 	if err != nil {
 		return err
@@ -1098,6 +1152,7 @@ func appendPlanEvent(store *SQLiteOperationStore, at time.Time, planID, eventTyp
 		Type:          eventType,
 		OccurredAt:    at,
 		Payload:       encoded,
+		Artifacts:     artifacts,
 	})
 	return err
 }
@@ -1155,4 +1210,148 @@ func boundedReasons(values []string) []string {
 		bounded = append(bounded, boundedDetail(value))
 	}
 	return bounded
+}
+
+// ---------------------------------------------------------------------------
+// Refused planning attempts
+// ---------------------------------------------------------------------------
+
+// recordRefusedAttempt preserves one refused proposal as durable, inspectable,
+// non-executable planning evidence, and returns its identity.
+//
+// What it deliberately does NOT do is persist an invalid EngineeringPlan. There
+// is no revision document, no digest and no assignment set, because none of
+// those exist: compilation is what produces them and compilation refused. What
+// is written is a plan IDENTITY with no revision - which Plans() and Plan()
+// both decline to return, so nothing executable can see it - and one
+// plan.attempt_refused event in the plan's own journal stream.
+//
+// The journal is the durability mechanism on purpose. An attempt read before a
+// restart and an attempt read after one are the same replayed events, so the
+// record cannot mean one thing in a live process and another thing in a fresh
+// one.
+func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, origin string, cause error) (string, error) {
+	repository := strings.TrimSpace(input.Repository)
+	if repository == "" {
+		repository = input.Subject.Repository
+	}
+	if repository == "" {
+		return "", &PlanRefusedError{PlanID: input.PlanID, Detail: "a plan attempt is bound to a repository"}
+	}
+	if _, err := s.Store.ClaimPlanAttempt(input.PlanID, repository, s.now()); err != nil {
+		return "", err
+	}
+	// The identity answers the SOURCE, whether or not it ever reached a plan.
+	// Binding it here is what lets `plan show` say which issue the operator was
+	// planning; without it the record described an attempt at nothing in
+	// particular.
+	if input.Issue > 0 {
+		if err := s.Store.BindPlanSource(input.PlanID, input.Issue); err != nil {
+			return "", err
+		}
+	}
+	// WHICH try this is, counted from the durable journal rather than from a
+	// field somebody increments. Two refusals at the same revision are two
+	// attempts, and a restart between them does not restart the count.
+	snapshot, err := s.Store.ReplayPlan(input.PlanID)
+	if err != nil {
+		return "", err
+	}
+	attempt := 1
+	for _, previous := range snapshot.Attempts {
+		if previous.Revision == revision {
+			attempt++
+		}
+	}
+	attemptID := fmt.Sprintf("attempt-%s-r%d-%d", input.PlanID, revision, attempt)
+	payload := PlanAttemptRefusedPayload{
+		AttemptID: attemptID, Revision: revision, Origin: origin, Issue: input.Issue,
+		Stages: attemptStages(input.Reasoned), Errors: boundedReasons(refusalReasons(cause)),
+		Evidence: attemptEvidence(input.Evidence), References: input.References,
+	}
+	if input.Reasoning != nil {
+		payload.Reasoning = reasoningPayload(*input.Reasoning)
+	}
+	// The transcripts are attached as event ARTIFACTS as well as referenced in
+	// the payload, so they pass the same ValidateArtifact discipline every other
+	// piece of durable evidence passes on the way in and on every replay.
+	return attemptID, appendPlanEventWithArtifacts(s.Store, s.now(), input.PlanID,
+		EventPlanAttemptRefused, payload, input.Evidence)
+}
+
+// attemptStages reduces the proposal to the members that decide whether it is
+// executable. Objectives and rationales are provider prose and stay in the
+// transcript; the journal carries no provider text.
+func attemptStages(stages []domain.PlanStage) []PlanAttemptStagePayload {
+	proposed := make([]PlanAttemptStagePayload, 0, len(stages))
+	for _, stage := range stages {
+		item := PlanAttemptStagePayload{
+			ID: stage.ID, Kind: string(stage.Kind), Role: string(stage.Role),
+			DependsOn: stage.DependsOn,
+		}
+		if stage.Independence != nil {
+			// DifferentFrom is copied EXACTLY, empty included. An empty list is
+			// the fact that explains the refusal in the case this record was
+			// built for, and normalizing it to absent would erase the
+			// difference between "asked for no independence" and "asked for
+			// independence over nothing".
+			item.Independence = &PlanAttemptIndependencePayload{
+				Dimension:     string(stage.Independence.Dimension),
+				DifferentFrom: append([]string{}, stage.Independence.DifferentFrom...),
+			}
+		}
+		proposed = append(proposed, item)
+	}
+	return proposed
+}
+
+func attemptEvidence(artifacts []Artifact) []PlanAttemptEvidenceRef {
+	refs := make([]PlanAttemptEvidenceRef, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		refs = append(refs, PlanAttemptEvidenceRef{
+			Path: artifact.Path, SHA256: artifact.SHA256,
+			MediaType: artifact.MediaType, LocalOnly: artifact.LocalOnly,
+		})
+	}
+	return refs
+}
+
+// PlanAttemptsView is what `plan show` renders for a plan identity that has no
+// executable revision: every refused attempt, oldest first.
+//
+// Executable is stated rather than implied. "This plan has no EngineeringPlan"
+// is the single most important thing the view says, and an operator should not
+// have to infer it from an absent field.
+type PlanAttemptsView struct {
+	PlanID     string        `json:"plan_id"`
+	Repository string        `json:"repository"`
+	Issue      int           `json:"source_issue,omitempty"`
+	Executable bool          `json:"executable_plan_exists"`
+	Attempts   []PlanAttempt `json:"attempts"`
+}
+
+// AttemptsView reads the refused planning attempts of one plan identity.
+//
+// It refuses an identity that does not exist at all, and it is readable whether
+// or not the plan later reached a revision: an attempt that failed before a
+// successful retry is still a fact about what happened.
+func (s PlanService) AttemptsView(planID string) (PlanAttemptsView, error) {
+	identities, err := s.Store.PlanIdentities()
+	if err != nil {
+		return PlanAttemptsView{}, err
+	}
+	for _, identity := range identities {
+		if identity.PlanID != planID {
+			continue
+		}
+		snapshot, err := s.Store.ReplayPlan(planID)
+		if err != nil {
+			return PlanAttemptsView{}, err
+		}
+		return PlanAttemptsView{
+			PlanID: planID, Repository: identity.Repository, Issue: identity.Issue,
+			Executable: identity.Revision > 0, Attempts: snapshot.Attempts,
+		}, nil
+	}
+	return PlanAttemptsView{}, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
 }

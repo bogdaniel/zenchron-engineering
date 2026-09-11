@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
@@ -129,6 +130,27 @@ type PlanValidation struct {
 	Errors   []string                        `json:"errors,omitempty"`
 }
 
+// PlanAttempt is one refused reasoning proposal, as an operator reads it.
+//
+// It is deliberately not a plan and not a proposal document: there is no
+// revision to approve, no digest to name and no assignments to bind. What it
+// answers is the set of questions an operator has when planning did not reach a
+// reviewable plan - who reasoned, what they proposed, what the machine refused
+// and where the evidence is - and it answers them from the durable journal
+// rather than from an artifact directory.
+type PlanAttempt struct {
+	AttemptID  string                       `json:"attempt_id"`
+	Revision   int                          `json:"revision"`
+	Origin     string                       `json:"origin"`
+	Issue      int                          `json:"issue,omitempty"`
+	Reasoning  *PlanReasoningPayload        `json:"reasoning,omitempty"`
+	Stages     []PlanAttemptStagePayload    `json:"stages,omitempty"`
+	Errors     []string                     `json:"errors"`
+	Evidence   []PlanAttemptEvidenceRef     `json:"evidence,omitempty"`
+	References []PlanSourceReferencePayload `json:"references,omitempty"`
+	RefusedAt  string                       `json:"refused_at,omitempty"`
+}
+
 // PlanSupersession records one revision replacing another.
 type PlanSupersession struct {
 	FromRevision      int      `json:"from_revision"`
@@ -179,10 +201,26 @@ type PlanSnapshot struct {
 	// verdict BY REVISION, because a single slot meant a later revision's
 	// verdict replaced an earlier refusal - and a decision that consults only
 	// the latest record cannot see that the revision it is about was refused.
-	Validation  PlanValidation                 `json:"validation,omitzero"`
-	Validations map[int]PlanValidation         `json:"validations,omitempty"`
-	Stages      map[string]PlanStageProjection `json:"stages"`
-	Superseded  []PlanSupersession             `json:"superseded,omitempty"`
+	Validation  PlanValidation         `json:"validation,omitzero"`
+	Validations map[int]PlanValidation `json:"validations,omitempty"`
+	// References is the referenced-issue context the invocation that proposed
+	// the current revision was given: which same-repository issues were pinned
+	// and which could not be read. A plan reasoned from part of a cohort is a
+	// different plan from one reasoned from all of it, and an operator
+	// approving it should be able to see which they have.
+	References []PlanSourceReferencePayload `json:"references,omitempty"`
+	// Attempts is every reasoning proposal deterministic validation refused
+	// before it could become a revision, oldest first.
+	//
+	// It is a PROJECTION of plan.attempt_refused events, which is what makes it
+	// survive a restart with the same meaning: nothing here is a counter, a
+	// cache or process-local state, so an operator reading a refused attempt
+	// before and after a restart reads the same replayed facts. An attempt is
+	// never executable and never approvable; it is the durable answer to "what
+	// did the planner ask for, and why can it not happen".
+	Attempts   []PlanAttempt                  `json:"attempts,omitempty"`
+	Stages     map[string]PlanStageProjection `json:"stages"`
+	Superseded []PlanSupersession             `json:"superseded,omitempty"`
 	// Consumed is summed from plan.budget_consumed events. It is a SUM over
 	// immutable records, so nothing - not a revision, not a restart, not a
 	// reassignment - can lower it.
@@ -308,7 +346,7 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			return err
 		}
 		s.Revision, s.Digest, s.ObjectiveDigest = payload.Revision, payload.Digest, payload.ObjectiveDigest
-		s.Reasoning = payload.Reasoning
+		s.Reasoning, s.References = payload.Reasoning, payload.References
 		// A NEW revision is not approved. Carrying the previous revision's
 		// approval forward is exactly the silent plan replacement the approval
 		// boundary exists to prevent.
@@ -328,6 +366,21 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			s.Validations = map[int]PlanValidation{}
 		}
 		s.Validations[payload.Revision] = verdict
+	case EventPlanAttemptRefused:
+		var payload PlanAttemptRefusedPayload
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			return err
+		}
+		// APPENDED, never replaced. Every attempt at a plan is a separate thing
+		// that happened, and a later one does not unmake an earlier one: two
+		// refusals in a row are two facts, and collapsing them would hide that
+		// the same defect recurred.
+		s.Attempts = append(s.Attempts, PlanAttempt{
+			AttemptID: payload.AttemptID, Revision: payload.Revision, Origin: payload.Origin,
+			Issue: payload.Issue, Reasoning: payload.Reasoning, Stages: payload.Stages,
+			Errors: payload.Errors, Evidence: payload.Evidence, References: payload.References,
+			RefusedAt: e.OccurredAt.UTC().Format(time.RFC3339),
+		})
 	case EventPlanApproved, EventPlanRejected:
 		var payload PlanDecisionPayload
 		if err := json.Unmarshal(e.Payload, &payload); err != nil {

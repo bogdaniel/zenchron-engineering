@@ -674,6 +674,15 @@ type PlanProposedPayload struct {
 	// for an initial plan.
 	ProposalID string `json:"proposal_id,omitempty"`
 	Origin     string `json:"origin"`
+	// References is what referenced-issue hydration produced for the invocation
+	// that proposed this revision: which same-repository issues the planner was
+	// given, pinned by digest, and which ones could not be read.
+	//
+	// It is recorded on a SUCCESSFUL proposal as well as a refused attempt,
+	// because "this plan was reasoned from four of the five referenced issues"
+	// is a fact about the plan an operator approves, not a detail of an
+	// invocation that happened to fail.
+	References []PlanSourceReferencePayload `json:"references,omitempty"`
 }
 
 // PlanTemplateRef pins a template revision by digest.
@@ -711,6 +720,88 @@ type PlanReasoningPayload struct {
 	WorkspaceDigestBefore string `json:"workspace_digest_before"`
 	WorkspaceDigestAfter  string `json:"workspace_digest_after"`
 	WorkspaceUnchanged    bool   `json:"workspace_unchanged"`
+}
+
+// PlanAttemptRefusedPayload records one reasoning proposal the deterministic
+// compiler refused before it became a revision.
+//
+// It carries the SHAPE of what the model proposed and nothing it wrote in
+// prose. Stage objectives, rationales and notes are provider text, and the
+// journal holds no provider text anywhere - the transcript referenced by
+// Evidence is where that lives, sanitized, in the artifact store. What is here
+// is what an operator needs to understand the refusal: which stages were
+// proposed, how they were ordered, which independence they asked for, and the
+// typed reasons the machine gave.
+type PlanAttemptRefusedPayload struct {
+	// AttemptID is this attempt's durable identity, stable across restarts
+	// because it is derived from the plan, the revision it was for and which
+	// attempt at that revision it is.
+	AttemptID string `json:"attempt_id"`
+	// Revision is the revision this attempt WOULD have produced. No revision
+	// document exists for it, and none is ever written: an attempt is evidence,
+	// not a plan.
+	Revision int    `json:"revision"`
+	Origin   string `json:"origin"`
+	Issue    int    `json:"issue,omitempty"`
+	// Reasoning is the provenance of the invocation that produced the proposal,
+	// including the runtime's own proof that the planning workspace did not
+	// change. It is absent for a deterministic compilation, which no model
+	// contributed to.
+	Reasoning *PlanReasoningPayload `json:"reasoning,omitempty"`
+	// Stages is the proposed decomposition, in the order the model gave it.
+	Stages []PlanAttemptStagePayload `json:"stages,omitempty"`
+	// Errors are the typed deterministic reasons the proposal was refused.
+	Errors []string `json:"errors"`
+	// Evidence references the durable transcripts of the invocation, so an
+	// operator reaches them from the plan rather than by guessing an artifact
+	// path. The full artifact records are attached to the event itself; these
+	// are the readable references the projection keeps.
+	Evidence []PlanAttemptEvidenceRef `json:"evidence,omitempty"`
+	// References is what referenced-issue hydration produced for this attempt:
+	// which same-repository issues the planner was given, pinned by digest, and
+	// which ones could not be read. An impoverished plan proposal is a fact
+	// about the attempt, and it is recorded here rather than inferred.
+	References []PlanSourceReferencePayload `json:"references,omitempty"`
+}
+
+// PlanAttemptStagePayload is one proposed stage, reduced to the members that
+// decide whether the decomposition is executable.
+type PlanAttemptStagePayload struct {
+	ID           string                          `json:"id"`
+	Kind         string                          `json:"kind"`
+	Role         string                          `json:"role,omitempty"`
+	DependsOn    []string                        `json:"depends_on,omitempty"`
+	Independence *PlanAttemptIndependencePayload `json:"independence,omitempty"`
+}
+
+// PlanAttemptIndependencePayload is a proposed independence requirement.
+//
+// DifferentFrom is NOT omitempty: an independence requirement that names no
+// peer is precisely the state that has to stay visible, because the difference
+// between "no independence requirement" and "an independence requirement over
+// nothing" is the difference this record exists to preserve.
+type PlanAttemptIndependencePayload struct {
+	Dimension     string   `json:"dimension"`
+	DifferentFrom []string `json:"different_from"`
+}
+
+// PlanAttemptEvidenceRef points at one durable transcript of the invocation.
+type PlanAttemptEvidenceRef struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	MediaType string `json:"media_type,omitempty"`
+	LocalOnly bool   `json:"local_only,omitempty"`
+}
+
+// PlanSourceReferencePayload is one referenced issue the planner was - or was
+// not - given. Digest pins the exact text; Available is false when the forge
+// read failed, and Detail says why in the runtime's own words.
+type PlanSourceReferencePayload struct {
+	Repository string `json:"repository"`
+	Issue      int    `json:"issue"`
+	Digest     string `json:"digest,omitempty"`
+	Available  bool   `json:"available"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 // PlanValidatedPayload records the deterministic validator's verdict. Errors
@@ -889,6 +980,9 @@ var planPayloads = map[string]payloadValidator{
 				return err
 			}
 		}
+		if err := validateSourceReferences(p.References); err != nil {
+			return err
+		}
 		return validatePlanReasoning(p.Reasoning)
 	}),
 	EventPlanValidated: payloadSchema(func(p PlanValidatedPayload) error {
@@ -908,6 +1002,68 @@ var planPayloads = map[string]payloadValidator{
 	}),
 	EventPlanApproved: planDecisionPayload,
 	EventPlanRejected: planDecisionPayload,
+	// A refused attempt is the one plan payload that records a proposal with no
+	// document behind it, so what it must carry is the OPPOSITE of the usual
+	// list: no digest, because nothing compiled, and at least one reason,
+	// because the whole point of the record is why.
+	EventPlanAttemptRefused: payloadSchema(func(p PlanAttemptRefusedPayload) error {
+		if p.Revision < 1 {
+			return fmt.Errorf("plan revision %d must be positive", p.Revision)
+		}
+		if len(p.Errors) == 0 {
+			return errors.New("a refused planning attempt records no reason")
+		}
+		if err := errors.Join(
+			required("attempt_id", p.AttemptID),
+			knownOrigin(p.Origin),
+			boundedList("errors", p.Errors),
+			nonNegative("issue", p.Issue),
+		); err != nil {
+			return err
+		}
+		if len(p.Stages) > maxPayloadListItems {
+			return fmt.Errorf("payload list %q has %d elements, above the %d element bound", "stages", len(p.Stages), maxPayloadListItems)
+		}
+		for _, stage := range p.Stages {
+			if err := errors.Join(
+				required("stages[].id", stage.ID),
+				required("stages[].kind", stage.Kind),
+				bounded("stages[].role", stage.Role),
+				boundedList("stages[].depends_on", stage.DependsOn),
+			); err != nil {
+				return err
+			}
+			if stage.Independence == nil {
+				continue
+			}
+			// different_from is deliberately NOT required to be non-empty. An
+			// independence requirement naming nothing is exactly the proposal
+			// shape this event exists to preserve, and refusing to record it
+			// would destroy the evidence for the defect it describes.
+			if err := errors.Join(
+				required("stages[].independence.dimension", stage.Independence.Dimension),
+				boundedList("stages[].independence.different_from", stage.Independence.DifferentFrom),
+			); err != nil {
+				return err
+			}
+		}
+		if len(p.Evidence) > maxPayloadListItems {
+			return errors.New("a refused planning attempt records more evidence than the payload list bound allows")
+		}
+		for _, evidence := range p.Evidence {
+			if err := errors.Join(
+				required("evidence[].path", evidence.Path),
+				required("evidence[].sha256", evidence.SHA256),
+				bounded("evidence[].media_type", evidence.MediaType),
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateSourceReferences(p.References); err != nil {
+			return err
+		}
+		return validatePlanReasoning(p.Reasoning)
+	}),
 	EventPlanStageAssigned: payloadSchema(func(p PlanStageAssignedPayload) error {
 		if p.ProfileVersion < 1 {
 			return fmt.Errorf("profile version %d must be positive", p.ProfileVersion)
@@ -1010,6 +1166,32 @@ const planStageInvalidated = "invalidated"
 // knownOrigin holds a proposal's origin to the catalogue rather than merely to
 // non-emptiness: the origin is copied from the caller into a durable event, and
 // a value nothing defines describes a provenance no reader can interpret.
+// validateSourceReferences holds hydrated referenced-issue provenance to the
+// same shape wherever it is recorded: pinned means digested, and unavailable
+// means a stated reason.
+func validateSourceReferences(references []PlanSourceReferencePayload) error {
+	if len(references) > maxPayloadListItems {
+		return fmt.Errorf("payload list %q has %d elements, above the %d element bound", "references", len(references), maxPayloadListItems)
+	}
+	for _, reference := range references {
+		if err := errors.Join(
+			bounded("references[].repository", reference.Repository),
+			nonNegative("references[].issue", reference.Issue),
+			bounded("references[].digest", reference.Digest),
+			bounded("references[].detail", reference.Detail),
+		); err != nil {
+			return err
+		}
+		if reference.Available && reference.Digest == "" {
+			return errors.New("an available referenced source records no digest: pinned means digested")
+		}
+		if !reference.Available && reference.Detail == "" {
+			return errors.New("an unavailable referenced source records no reason")
+		}
+	}
+	return nil
+}
+
 func knownOrigin(origin string) error {
 	if err := required("origin", origin); err != nil {
 		return err

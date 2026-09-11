@@ -177,9 +177,25 @@ const (
 	// EventPlanRevisionSuperseded records one approved revision replacing
 	// another, and exactly which downstream stages that invalidated.
 	EventPlanRevisionSuperseded = "plan.revision_superseded"
+	// EventPlanAttemptRefused is a reasoning proposal that deterministic
+	// validation turned down before any revision existed to record a verdict
+	// against.
+	//
+	// It is the difference between "this plan attempt was refused, here is what
+	// was proposed and why it cannot happen" and "no such plan". A first
+	// proposal that fails to compile writes no plan_revisions row - there is no
+	// document, because compilation is what would have produced one - so
+	// plan.validated has no revision to be about and the whole attempt used to
+	// survive only as a provider transcript in the artifact store. This event
+	// is the durable, replayable record of it: which agent reasoned, what it
+	// proposed, which typed refusal the machine returned, and where the
+	// evidence is. It grants nothing. An attempt is never executable and never
+	// approvable, because neither path can reach a revision that does not
+	// exist.
+	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -189,7 +205,7 @@ var planEventTypes = map[string]bool{
 	EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true,
 	EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true,
 	EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true,
-	EventPlanRevisionSuperseded: true,
+	EventPlanRevisionSuperseded: true, EventPlanAttemptRefused: true,
 }
 
 type Ref struct {

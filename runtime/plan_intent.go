@@ -36,6 +36,16 @@ type PlanIntent struct {
 	// Source is the durable snapshot record, kept so a planning invocation can
 	// show the same untrusted text a run's worker would see.
 	Source sourceRecord
+	// References is the explicitly referenced same-repository issue context,
+	// pinned through the governed forge boundary BEFORE the reasoning
+	// invocation.
+	//
+	// It is not part of the plan objective and never becomes one: the objective
+	// is what the plan document carries and what its digest is over, and
+	// folding a cohort's worth of third-party text into it would make the
+	// approved document a copy of the forge. These are shown to the planner as
+	// untrusted engineering source and recorded as provenance.
+	References []ReferencedSource
 }
 
 // CompilePlanIntent observes the issue, pins it, and compiles the predicted
@@ -101,6 +111,10 @@ func (r *EngineeringRuntime) CompilePlanIntent(ctx context.Context, issue int) (
 		return PlanIntent{}, err
 	}
 	return PlanIntent{
+		// The references are hydrated from the PINNED primary text, not from a
+		// second forge read of the issue: the citation set is a fact about the
+		// snapshot this attempt is bound to.
+		References:     r.hydrateReferencedSources(ctx, issue, text.Title, text.Body),
 		Objective:      source.Objective,
 		Subject:        subject,
 		Contract:       kernel.Contract,
