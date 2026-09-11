@@ -83,7 +83,13 @@ const exitUsage = 1
 func main() {
 	code, err := run(os.Args[1:], osCommands{}, os.Stdout)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "zenchron-engineering:", err)
+		// The diagnostic goes through the same terminal-safety boundary the
+		// rendered views do. A refusal interpolates the material that caused it
+		// - a stage id a model proposed, a message a forge returned - and this
+		// is the FIRST place an operator sees it, before anyone runs a read
+		// command. `planning/graph.go` joins proposed stage ids into the cycle
+		// message unquoted, so the vector is real rather than hypothetical.
+		fmt.Fprintln(os.Stderr, "zenchron-engineering:", terminalSafe(err.Error()))
 	}
 	os.Exit(code)
 }

@@ -709,7 +709,7 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 		}
 		return runtime.ExitFailed, nil
 	}
-	fmt.Fprintf(stdout, "plan %s (%s)\n", view.PlanID, view.Repository)
+	fmt.Fprintf(stdout, "plan %s (%s)\n", terminalSafe(view.PlanID), terminalSafe(view.Repository))
 	if view.Issue > 0 {
 		fmt.Fprintf(stdout, "  source          issue #%d\n", view.Issue)
 	}
@@ -723,32 +723,32 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 		fmt.Fprintf(stdout, "  --revision %d was ignored: this plan has no revisions at all\n", view.RequestedRevisionIgnored)
 	}
 	for _, attempt := range view.Attempts {
-		fmt.Fprintf(stdout, "\nattempt %s (revision %d, origin %s", attempt.AttemptID, attempt.Revision, attempt.Origin)
+		fmt.Fprintf(stdout, "\nattempt %s (revision %d, origin %s", terminalSafe(attempt.AttemptID), attempt.Revision, terminalSafe(attempt.Origin))
 		if attempt.RefusedAt != "" {
-			fmt.Fprintf(stdout, ", refused %s", attempt.RefusedAt)
+			fmt.Fprintf(stdout, ", refused %s", terminalSafe(attempt.RefusedAt))
 		}
 		fmt.Fprintln(stdout, ")")
 		if reasoning := attempt.Reasoning; reasoning != nil {
-			fmt.Fprintf(stdout, "  reasoned by     %s (%s", reasoning.AgentID, reasoning.ProviderKind)
+			fmt.Fprintf(stdout, "  reasoned by     %s (%s", terminalSafe(reasoning.AgentID), terminalSafe(reasoning.ProviderKind))
 			if reasoning.Model != "" {
-				fmt.Fprintf(stdout, ", model %s", reasoning.Model)
+				fmt.Fprintf(stdout, ", model %s", terminalSafe(reasoning.Model))
 			}
-			fmt.Fprintf(stdout, ", %s)\n", reasoning.InvocationMode)
+			fmt.Fprintf(stdout, ", %s)\n", terminalSafe(reasoning.InvocationMode))
 			fmt.Fprintf(stdout, "  workspace       %s (%s -> %s)\n",
 				map[bool]string{true: "unchanged", false: "CHANGED"}[reasoning.WorkspaceUnchanged],
-				short(reasoning.WorkspaceDigestBefore), short(reasoning.WorkspaceDigestAfter))
+				terminalSafe(short(reasoning.WorkspaceDigestBefore)), terminalSafe(short(reasoning.WorkspaceDigestAfter)))
 		}
 		fmt.Fprintln(stdout, "  validation      refused")
 		for _, reason := range attempt.Errors {
-			fmt.Fprintf(stdout, "    - %s\n", reason)
+			fmt.Fprintf(stdout, "    - %s\n", terminalSafe(reason))
 		}
 		for _, stage := range attempt.Stages {
-			line := fmt.Sprintf("    %s (%s", stage.ID, stage.Kind)
+			line := fmt.Sprintf("    %s (%s", terminalSafe(stage.ID), terminalSafe(stage.Kind))
 			if stage.Role != "" {
-				line += ", role " + stage.Role
+				line += ", role " + terminalSafe(stage.Role)
 			}
 			if len(stage.DependsOn) > 0 {
-				line += ", after " + strings.Join(stage.DependsOn, " and ")
+				line += ", after " + strings.Join(terminalSafeList(stage.DependsOn), " and ")
 			}
 			if stage.Independence != nil {
 				// An independence over NOTHING is printed as such. It is the
@@ -757,25 +757,25 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 				// thing an operator is reading this to find.
 				peers := "nothing"
 				if len(stage.Independence.DifferentFrom) > 0 {
-					peers = strings.Join(stage.Independence.DifferentFrom, " and ")
+					peers = strings.Join(terminalSafeList(stage.Independence.DifferentFrom), " and ")
 				}
-				line += fmt.Sprintf(", independent of %s in %s", peers, stage.Independence.Dimension)
+				line += fmt.Sprintf(", independent of %s in %s", peers, terminalSafe(stage.Independence.Dimension))
 			}
 			fmt.Fprintln(stdout, line+")")
 		}
 		for _, reference := range attempt.References {
 			if reference.Issue == 0 {
-				fmt.Fprintf(stdout, "  context         %s\n", reference.Detail)
+				fmt.Fprintf(stdout, "  context         %s\n", terminalSafe(reference.Detail))
 				continue
 			}
-			status := "pinned " + short(reference.Digest)
+			status := "pinned " + terminalSafe(short(reference.Digest))
 			if !reference.Available {
-				status = "UNAVAILABLE: " + reference.Detail
+				status = "UNAVAILABLE: " + terminalSafe(reference.Detail)
 			}
-			fmt.Fprintf(stdout, "  context         %s issue #%d (%s)\n", reference.Repository, reference.Issue, status)
+			fmt.Fprintf(stdout, "  context         %s issue #%d (%s)\n", terminalSafe(reference.Repository), reference.Issue, status)
 		}
 		for _, evidence := range attempt.Evidence {
-			fmt.Fprintf(stdout, "  evidence        %s\n", evidence.Path)
+			fmt.Fprintf(stdout, "  evidence        %s\n", terminalSafe(evidence.Path))
 		}
 	}
 	return runtime.ExitFailed, nil
@@ -974,7 +974,7 @@ func planList(flags autonomyFlags, overrides autonomyOverrides, stdout io.Writer
 				item.PlanID, "unplanned", item.Attempts, item.PlanID)
 			continue
 		}
-		fmt.Fprintf(stdout, "%s  r%d  %-9s  %s\n", item.PlanID, item.Revision, item.Approval, singleLinePlan(item.Objective))
+		fmt.Fprintf(stdout, "%s  r%d  %-9s  %s\n", terminalSafe(item.PlanID), item.Revision, terminalSafe(item.Approval), singleLinePlan(item.Objective))
 	}
 	return runtime.ExitCompleted, nil
 }
@@ -1027,15 +1027,15 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 	// approve it needs to know that BEFORE they approve it.
 	for _, reference := range view.Snapshot.References {
 		if reference.Issue == 0 {
-			fmt.Fprintf(stdout, "context: %s\n", reference.Detail)
+			fmt.Fprintf(stdout, "context: %s\n", terminalSafe(reference.Detail))
 			continue
 		}
 		if reference.Available {
-			fmt.Fprintf(stdout, "context: %s issue #%d pinned at %s\n", reference.Repository, reference.Issue, short(reference.Digest))
+			fmt.Fprintf(stdout, "context: %s issue #%d pinned at %s\n", terminalSafe(reference.Repository), reference.Issue, terminalSafe(short(reference.Digest)))
 			continue
 		}
 		fmt.Fprintf(stdout, "context: %s issue #%d WAS NOT AVAILABLE to the planner: %s\n",
-			reference.Repository, reference.Issue, reference.Detail)
+			terminalSafe(reference.Repository), reference.Issue, terminalSafe(reference.Detail))
 	}
 	// Earlier attempts at this plan, if any. A plan that took two tries is a
 	// different thing to approve than one that took none, and the record is
@@ -1043,9 +1043,9 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 	for _, attempt := range view.Snapshot.Attempts {
 		reason := ""
 		if len(attempt.Errors) > 0 {
-			reason = ": " + attempt.Errors[0]
+			reason = ": " + terminalSafe(attempt.Errors[0])
 		}
-		fmt.Fprintf(stdout, "earlier attempt %s was refused%s\n", attempt.AttemptID, reason)
+		fmt.Fprintf(stdout, "earlier attempt %s was refused%s\n", terminalSafe(attempt.AttemptID), reason)
 	}
 	fmt.Fprintln(stdout, "stages:")
 	assignments := map[string]domain.AgentAssignment{}
@@ -1057,7 +1057,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		if projection, ok := view.Snapshot.Stages[stage.ID]; ok && projection.State != "" {
 			state = string(projection.State)
 		}
-		line := fmt.Sprintf("  %-18s %-20s %-11s", stage.ID, stage.Kind, state)
+		line := fmt.Sprintf("  %-18s %-20s %-11s", terminalSafe(stage.ID), terminalSafe(string(stage.Kind)), state)
 		// WHICH EXECUTION of this stage this is. A stage performed again
 		// because its input moved is ordinary and automatic, and without this
 		// the only record of that churn was the snapshot JSON.
@@ -1066,20 +1066,20 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		}
 		switch {
 		case stage.Kind != domain.StageAgent:
-			line += fmt.Sprintf(" references claims %s", strings.Join(stage.RequiredClaims, ", "))
+			line += fmt.Sprintf(" references claims %s", strings.Join(terminalSafeList(stage.RequiredClaims), ", "))
 		default:
-			line += fmt.Sprintf(" role=%s", stage.Role)
+			line += fmt.Sprintf(" role=%s", terminalSafe(string(stage.Role)))
 			if assignment, ok := assignments[stage.ID]; ok {
-				line += fmt.Sprintf(" profile=%s agent=%s (%s)", assignment.Profile.ID, assignment.Agent.ID, assignment.Agent.VendorFamily)
+				line += fmt.Sprintf(" profile=%s agent=%s (%s)", terminalSafe(assignment.Profile.ID), terminalSafe(assignment.Agent.ID), terminalSafe(assignment.Agent.VendorFamily))
 			}
 			if stage.Independence != nil {
-				line += fmt.Sprintf(" independent-of=%s in %s", strings.Join(stage.Independence.DifferentFrom, ","), stage.Independence.Dimension)
+				line += fmt.Sprintf(" independent-of=%s in %s", strings.Join(terminalSafeList(stage.Independence.DifferentFrom), ","), terminalSafe(string(stage.Independence.Dimension)))
 			}
 		}
 		fmt.Fprintln(stdout, line)
 	}
 	for _, blocked := range view.Blocked {
-		fmt.Fprintf(stdout, "blocked: %s (%s) %s\n", blocked.StageID, blocked.Kind, blocked.Reason)
+		fmt.Fprintf(stdout, "blocked: %s (%s) %s\n", terminalSafe(blocked.StageID), terminalSafe(string(blocked.Kind)), terminalSafe(blocked.Reason))
 		if blocked.HumanSubstitutionPermitted {
 			fmt.Fprintln(stdout, "         policy permits an independent human review in place of this worker; approving that is an operator decision through `plan revise`")
 		}
@@ -1186,8 +1186,13 @@ func planExit(view runtime.PlanView) int {
 // singleLinePlan is one line of an objective, truncated by RUNES. The objective
 // carries issue text, so cutting bytes can split a multi-byte character and
 // print a broken rune into the operator's terminal.
+// singleLinePlan collapses an objective onto one line.
+//
+// The objective is derived from an issue title and body, so it is third-party
+// text on a terminal: strings.Fields drops CR and LF, which is what the
+// collapsing is for, and leaves ESC exactly where it was.
 func singleLinePlan(text string) string {
-	line := strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " ")
+	line := strings.Join(strings.Fields(strings.ReplaceAll(terminalSafe(text), "\n", " ")), " ")
 	if runes := []rune(line); len(runes) > 120 {
 		return string(runes[:117]) + "..."
 	}
