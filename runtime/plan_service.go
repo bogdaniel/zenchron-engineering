@@ -1362,6 +1362,11 @@ func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int, i
 			// independence over nothing".
 			item.Independence = &PlanAttemptIndependencePayload{
 				Dimension: note(string(stage.Independence.Dimension), boundedField(string(stage.Independence.Dimension))),
+				// Copied into a NON-NIL slice first, so a requirement that
+				// stated no peer - however it stated it - is recorded as the
+				// empty list it was rather than as an absent one. "Independence
+				// present over nothing" is the exact state #120 was opened
+				// about, and the record has to be able to show it.
 				DifferentFrom: boundedPayloadElements(
 					append([]string{}, stage.Independence.DifferentFrom...), &changed),
 			}
@@ -1391,9 +1396,11 @@ func boundedPayloadElements(values []string, changed *bool) []string {
 		}
 		bounded = append(bounded, cut)
 	}
-	if len(bounded) == 0 {
-		return nil
-	}
+	// An empty result stays an empty LIST rather than becoming nil. A list the
+	// payload does not mark omitempty encodes nil as `null`, and for
+	// different_from that is the one shape this record must not produce: the
+	// proposal said "independent of nothing", and `null` says something else
+	// about a member whose exact stated shape is the evidence.
 	return bounded
 }
 
@@ -1431,6 +1438,14 @@ type PlanAttemptsView struct {
 	Issue      int           `json:"source_issue,omitempty"`
 	Executable bool          `json:"executable_plan_exists"`
 	Attempts   []PlanAttempt `json:"attempts"`
+	// RequestedRevisionIgnored is the revision an operator named that this view
+	// could not honour, because the plan has no revisions at all.
+	//
+	// It is on the VIEW rather than only in the rendered text so both surfaces
+	// say the same thing. A JSON reader that was silently given something other
+	// than what it asked for has no way to know, which is the same defect the
+	// text notice exists to prevent.
+	RequestedRevisionIgnored int `json:"requested_revision_ignored,omitempty"`
 }
 
 // RecordPlanningRefusal preserves a reasoning invocation that never reached

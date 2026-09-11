@@ -695,3 +695,67 @@ func TestTruncationNoticesSurviveAFloodOfReasons(t *testing.T) {
 		t.Fatalf("the notices displaced every reason:\n%s", joined)
 	}
 }
+
+// An independence requirement over NOTHING is recorded as the empty list it
+// was, in the durable bytes and after replay.
+//
+// different_from is deliberately not omitempty, so a nil slice encodes as
+// `null` - and `null` is the one shape this record must not produce. The exact
+// proposal was "independent of nothing in execution_agent", which is the state
+// #120 was opened about; a record that renders it as an absent member has lost
+// the evidence it exists to hold.
+func TestAnEmptyDifferentFromIsRecordedAsAnEmptyList(t *testing.T) {
+	f := newAttemptFixture(t)
+	if _, err := f.service.Propose(context.Background(), refusedProposal(f)); err == nil {
+		t.Fatal("the dogfood proposal compiled")
+	}
+
+	// The DURABLE BYTES, not just the decoded value.
+	events, err := f.store.PlanEvents("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != EventPlanAttemptRefused {
+			continue
+		}
+		found = true
+		canonical, err := CanonicalJSON(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(canonical), `"different_from":null`) {
+			t.Fatalf("an explicitly empty different_from was stored as null:\n%s", canonical)
+		}
+		if !strings.Contains(string(canonical), `"different_from":[]`) {
+			t.Fatalf("the stored payload does not record an empty different_from:\n%s", canonical)
+		}
+	}
+	if !found {
+		t.Fatal("no refused-attempt event was recorded")
+	}
+
+	// And REPLAY returns a non-nil zero-length slice, so a reader sees the same
+	// thing the bytes say.
+	snapshot, err := f.store.ReplayPlan("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, stage := range snapshot.Attempts[0].Stages {
+		if stage.Independence == nil {
+			continue
+		}
+		checked++
+		if stage.Independence.DifferentFrom == nil {
+			t.Fatalf("stage %q replayed different_from as nil rather than as the empty list it stated", stage.ID)
+		}
+		if len(stage.Independence.DifferentFrom) != 0 {
+			t.Fatalf("stage %q replayed different_from = %#v", stage.ID, stage.Independence.DifferentFrom)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no proposed stage carried an independence requirement")
+	}
+}

@@ -322,3 +322,70 @@ func TestAnOverBudgetReferenceLeavesNoOrphanSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// An over-budget reference never writes a snapshot, so it cannot delete one
+// another record owns.
+//
+// Snapshots are content-addressed by the INTENT digest, which excludes the base
+// revision and the open/closed state - so a reference pin and a PRIMARY pin of
+// the same unedited issue are the same file. Writing first and removing after
+// would have deleted durable evidence a different plan's source record still
+// points at, and that plan's next read of its own pinned source would hard-fail.
+func TestAnOverBudgetReferenceDoesNotDeleteASharedSnapshot(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	// Numbered HIGH, because citations are hydrated in ascending order: the
+	// shared issue has to be the one the budget runs out on.
+	shared := fixture.issue + 90
+	fixture.forge.Issues[shared] = GitHubIssue{
+		Number: shared, URL: fmt.Sprintf("https://github.com/acme/repo/issues/%d", shared),
+		Title: "shared", Body: UntrustedText(strings.Repeat("body ", 2000)),
+		State: GitHubOpen, UpdatedAt: time.Unix(1_700_000_100, 0).UTC(),
+		Author: GitHubActor{Login: "operator", ID: 7},
+	}
+	// Another plan pins the SAME issue as its own primary source. This is the
+	// record the removal used to break.
+	primary, err := newSourceRecord("acme/repo", fixture.forge.Issues[shared], "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary.SnapshotPath, err = fixture.runtime.storeUntrustedSource(fixture.forge.Issues[shared], primary); err != nil {
+		t.Fatal(err)
+	}
+
+	// A cohort large enough that the shared issue falls past the byte budget:
+	// it is cited last, so every earlier reference consumes the allowance.
+	var citations []string
+	for i := 1; i <= 9; i++ {
+		number := fixture.issue + i
+		citations = append(citations, fmt.Sprintf("#%d", number))
+		fixture.forge.Issues[number] = GitHubIssue{
+			Number: number, URL: fmt.Sprintf("https://github.com/acme/repo/issues/%d", number),
+			Title: "member", Body: UntrustedText(strings.Repeat("body ", 2000)),
+			State: GitHubOpen, UpdatedAt: time.Unix(1_700_000_100, 0).UTC(),
+			Author: GitHubActor{Login: "operator", ID: 7},
+		}
+	}
+	citations = append(citations, fmt.Sprintf("#%d", shared))
+	head := fixture.forge.Issues[fixture.issue]
+	head.Body = UntrustedText("resolve " + strings.Join(citations, ", "))
+	fixture.forge.Issues[fixture.issue] = head
+
+	intent, err := hydratedIntent(t, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := false
+	for _, reference := range intent.References {
+		if reference.Issue == shared && !reference.Available &&
+			strings.Contains(reference.Detail, "planning-context bound") {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatalf("the shared issue was not the one pushed past the budget: %#v", intent.References)
+	}
+	// The other plan's pinned source is still readable.
+	if _, err := fixture.runtime.untrustedSource(primary); err != nil {
+		t.Fatalf("hydration deleted a snapshot another durable record owns: %v", err)
+	}
+}

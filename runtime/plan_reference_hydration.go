@@ -28,7 +28,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -171,6 +170,25 @@ func (r *EngineeringRuntime) hydrateReferencedSources(ctx context.Context, self 
 			references = append(references, reference)
 			continue
 		}
+		// The budget is checked BEFORE the snapshot is written, from the same
+		// bounding storeUntrustedSource would apply, so an over-budget
+		// reference never creates a file at all.
+		//
+		// Writing first and deleting after looked equivalent and was not.
+		// Snapshots are content-addressed by the INTENT digest, which
+		// deliberately excludes the base revision and the open/closed state -
+		// so a reference pin and a PRIMARY pin of the same unedited issue are
+		// the same digest and the same file. Deleting it here would delete
+		// durable evidence another plan's source record still points at, and
+		// that plan's next read of its own pinned source would hard-fail.
+		// Nothing removes a snapshot it did not create.
+		cost := len(boundUntrusted(string(observed.Title), maxUntrustedTitleBytes)) +
+			len(boundUntrusted(string(observed.Body), maxUntrustedBodyBytes))
+		if cost > budget {
+			reference.Detail = fmt.Sprintf("the pinned referenced issues reached the %d byte planning-context bound before this one", maxHydratedReferenceBytes)
+			references = append(references, reference)
+			continue
+		}
 		if record.SnapshotPath, err = r.storeUntrustedSource(observed, record); err != nil {
 			reference.Detail = boundedDetail(err.Error())
 			references = append(references, reference)
@@ -179,16 +197,6 @@ func (r *EngineeringRuntime) hydrateReferencedSources(ctx context.Context, self 
 		text, err := r.untrustedSource(record)
 		if err != nil {
 			reference.Detail = boundedDetail(err.Error())
-			references = append(references, reference)
-			continue
-		}
-		cost := len(text.Title) + len(text.Body)
-		if cost > budget {
-			reference.Detail = fmt.Sprintf("the pinned referenced issues reached the %d byte planning-context bound before this one", maxHydratedReferenceBytes)
-			// Nothing will point at this snapshot, so it does not stay on disk.
-			// It is third-party text in an owner-only file, and a file no
-			// record references is one nobody can account for.
-			_ = os.Remove(record.SnapshotPath)
 			references = append(references, reference)
 			continue
 		}

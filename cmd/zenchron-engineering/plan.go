@@ -689,6 +689,7 @@ func planShow(flags autonomyFlags, overrides autonomyOverrides, planID string, s
 		if attemptErr != nil || attempts.Executable || len(attempts.Attempts) == 0 {
 			return exitFor(err, exitRunNotFound), err
 		}
+		attempts.RequestedRevisionIgnored = flags.Revision
 		return planAttemptsOutput(flags, attempts, stdout)
 	}
 	return planOutput(flags, view, stdout, "")
@@ -714,11 +715,12 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 	}
 	fmt.Fprintln(stdout, "  executable plan NONE: every reasoning attempt so far was refused by deterministic validation")
 	fmt.Fprintln(stdout, "  nothing here is approvable, and nothing here has executed")
-	if flags.Revision > 0 {
+	if view.RequestedRevisionIgnored > 0 {
 		// The flag was READ and could not be honoured. Silently rendering
 		// something else would let an operator believe they were shown the
-		// revision they asked for.
-		fmt.Fprintf(stdout, "  --revision %d was ignored: this plan has no revisions at all\n", flags.Revision)
+		// revision they asked for. The view carries it, so the JSON surface
+		// says it too.
+		fmt.Fprintf(stdout, "  --revision %d was ignored: this plan has no revisions at all\n", view.RequestedRevisionIgnored)
 	}
 	for _, attempt := range view.Attempts {
 		fmt.Fprintf(stdout, "\nattempt %s (revision %d, origin %s", attempt.AttemptID, attempt.Revision, attempt.Origin)

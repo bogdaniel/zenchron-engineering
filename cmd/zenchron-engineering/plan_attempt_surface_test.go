@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -269,5 +270,48 @@ func TestAMissingRevisionOfAnExecutablePlanIsStillMissing(t *testing.T) {
 	}
 	if code == runtime.ExitCompleted {
 		t.Fatalf("exit = %d", code)
+	}
+}
+
+// The JSON surface says the same thing the text surface says about a revision
+// flag it could not honour.
+//
+// A JSON reader that was silently given something other than what it asked for
+// has no way to know, which is the same defect the text notice exists to
+// prevent.
+func TestBothSurfacesReportAnIgnoredRevisionFlag(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	seedRefusedAttempt(t, configPath, dir, "plan-refused")
+
+	var text bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", "plan-refused", "--revision", "7", "--text", "--config", configPath},
+		planOverrides(t, 41), &text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "--revision 7 was ignored") {
+		t.Fatalf("the text surface does not report the ignored flag:\n%s", text.String())
+	}
+
+	var encoded bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", "plan-refused", "--revision", "7", "--config", configPath},
+		planOverrides(t, 41), &encoded); err != nil {
+		t.Fatal(err)
+	}
+	var view runtime.PlanAttemptsView
+	if err := json.Unmarshal(encoded.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v\n%s", err, encoded.String())
+	}
+	if view.RequestedRevisionIgnored != 7 {
+		t.Fatalf("the JSON surface reports requested_revision_ignored = %d, want 7", view.RequestedRevisionIgnored)
+	}
+	// And an ordinary read says nothing about a flag nobody passed.
+	var plain bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", "plan-refused", "--config", configPath},
+		planOverrides(t, 41), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "requested_revision_ignored") {
+		t.Fatalf("a read with no --revision reported one:\n%s", plain.String())
 	}
 }
