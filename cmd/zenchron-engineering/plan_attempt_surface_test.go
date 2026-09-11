@@ -179,3 +179,50 @@ func TestAPlanNobodyAttemptedIsStillMissing(t *testing.T) {
 		t.Fatalf("exit = %d, want %d", code, exitRunNotFound)
 	}
 }
+
+// A provider that is ineligible for planning spent nothing, so it leaves no
+// attempt. The attempt record is evidence of an invocation, not a log of every
+// configuration mistake.
+func TestAnIneligiblePlannerLeavesNoAttempt(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+
+	var refused bytes.Buffer
+	if _, err := autonomy([]string{"plan", "issue", "41", "--text", "--config", configPath},
+		planOverrides(t, 41), &refused); err == nil {
+		t.Fatalf("a provider with no non-mutating mode produced a plan: %s", refused.String())
+	}
+
+	var listed bytes.Buffer
+	if _, err := autonomy([]string{"plan", "list", "--text", "--config", configPath},
+		planOverrides(t, 41), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed.String(), "no plans") {
+		t.Fatalf("an ineligible planner created durable plan state:\n%s", listed.String())
+	}
+}
+
+// A plan that DID reach a revision still shows what it took to get there.
+func TestAnApprovableRevisionStillNamesTheAttemptsBeforeIt(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	seedRefusedAttempt(t, configPath, dir, "plan-recovered")
+
+	// The same plan identity, proposed again deterministically and successfully.
+	var proposed bytes.Buffer
+	if _, err := autonomy([]string{"plan", "issue", "41", "--deterministic", "--text", "--config", configPath},
+		planOverrides(t, 41), &proposed); err != nil {
+		t.Fatalf("propose: %v\n%s", err, proposed.String())
+	}
+
+	// And the refused attempt is still readable beside the plan that followed.
+	var shown bytes.Buffer
+	if _, err := autonomy([]string{"plan", "show", "plan-recovered", "--text", "--config", configPath},
+		planOverrides(t, 41), &shown); err != nil {
+		t.Fatalf("show: %v\n%s", err, shown.String())
+	}
+	if !strings.Contains(shown.String(), "attempt-plan-recovered-r1-1") {
+		t.Fatalf("the refused attempt is not visible from the plan surface:\n%s", shown.String())
+	}
+}

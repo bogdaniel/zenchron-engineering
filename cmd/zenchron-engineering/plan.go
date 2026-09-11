@@ -412,6 +412,13 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 			input.Reasoning = &reasoning
 		}
 		if err != nil {
+			// Recorded only when an invocation actually HAPPENED. A provider
+			// that is ineligible for planning was never run and spent nothing,
+			// so there is no attempt to preserve - and a plan identity created
+			// for it would be a durable record of a configuration mistake.
+			if input.Reasoning == nil && len(input.Evidence) == 0 {
+				return exitFor(err, runtime.ExitFailed), err
+			}
 			return exitFor(err, runtime.ExitFailed), recordPlanningRefusal(composed, input, err)
 		}
 	}
@@ -1009,6 +1016,16 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		}
 		fmt.Fprintf(stdout, "context: %s issue #%d WAS NOT AVAILABLE to the planner: %s\n",
 			reference.Repository, reference.Issue, reference.Detail)
+	}
+	// Earlier attempts at this plan, if any. A plan that took two tries is a
+	// different thing to approve than one that took none, and the record is
+	// beside it rather than somewhere else.
+	for _, attempt := range view.Snapshot.Attempts {
+		reason := ""
+		if len(attempt.Errors) > 0 {
+			reason = ": " + attempt.Errors[0]
+		}
+		fmt.Fprintf(stdout, "earlier attempt %s was refused%s\n", attempt.AttemptID, reason)
 	}
 	fmt.Fprintln(stdout, "stages:")
 	assignments := map[string]domain.AgentAssignment{}
