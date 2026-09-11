@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
@@ -80,5 +82,85 @@ func TestThePlanTextSaysWhatTheSnapshotOnlyHeld(t *testing.T) {
 	}
 	if !strings.Contains(text, "what approving this revision would leave") {
 		t.Fatalf("an undecided revision is not offered for approval:\n%s", text)
+	}
+}
+
+// The approval preview cannot drive the terminal either.
+//
+// preview.Invalidated holds STAGE IDS, and the graph laws constrain only that
+// an id is non-blank - never its character set - so a model-chosen id carrying
+// ESC or a bare CSI reaches "approving would redo" unescaped. That is the worst
+// line in the product to render unsafely: it is what an operator reads while
+// deciding whether to approve.
+//
+// The sweep that found this one also wrapped every other dynamic string in the
+// plan view, which is the lesson of having missed this perimeter three times:
+// the boundary is "every value that did not originate here", not "the ones we
+// thought of".
+func TestThePlanViewCannotDriveTheTerminal(t *testing.T) {
+	hostile := "redo-me\x1b[2J\rnow\u009b31m"
+	plan := domain.EngineeringPlan{
+		ID: "plan-text\x1b[1m", Revision: 2, Objective: "Make the widget idempotent.",
+		Stages: []domain.PlanStage{
+			{ID: hostile, Kind: domain.StageAgent, Role: domain.RoleImplementer},
+		},
+		Provenance: domain.PlanProvenance{
+			Reasoning: &domain.PlanReasoningProvenance{
+				AgentID: "codex\x1b[7m", ProviderKind: "codex_cli", VendorFamily: "openai",
+				InvocationMode: domain.InvocationModeNonMutatingPlanning, WorkspaceUnchanged: true,
+			},
+		},
+	}
+	view := runtime.PlanView{
+		Plan: plan,
+		Snapshot: runtime.PlanSnapshot{
+			PlanID: plan.ID, Revision: 2,
+			Approval: runtime.PlanApproval{Status: domain.ApprovalPending, Revision: 2, Digest: "d\x1b[0m"},
+			Stages:   map[string]runtime.PlanStageProjection{hostile: {StageID: hostile}},
+			References: []runtime.PlanSourceReferencePayload{
+				{Repository: "acme/repo", Issue: 110, Available: false, Detail: "forge said\x1b[2Jthings"},
+			},
+		},
+		Preview:  &runtime.PlanPreview{GoverningRevision: 1, Invalidated: []string{hostile}},
+		Blocked:  []planning.Blocked{{StageID: hostile, Kind: "independence", Reason: "no eligible\x1bworker"}},
+		Envelope: domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 2, MaxProviderInvocations: 8},
+	}
+
+	var out bytes.Buffer
+	if _, err := planOutput(autonomyFlags{Text: true}, view, &out, "proposed"); err != nil {
+		t.Fatal(err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "approving would redo") {
+		t.Fatalf("the preview line is missing entirely:\n%s", printed)
+	}
+	for _, raw := range []string{"\x1b", "\r", "\u009b", "\x7f"} {
+		if strings.Contains(printed, raw) {
+			t.Fatalf("the plan view emitted raw control %q:\n%q", raw, printed)
+		}
+	}
+	// Escaped VISIBLY, and the readable part still readable.
+	for _, want := range []string{`\x1b`, `\x0d`, `\x9b`, "redo-me", "approving would redo"} {
+		if !strings.Contains(printed, want) {
+			t.Fatalf("the plan view does not show %q:\n%s", want, printed)
+		}
+	}
+
+	// The JSON surface is untouched: it escapes on its own and carries the
+	// exact evidence.
+	var encoded bytes.Buffer
+	if _, err := planOutput(autonomyFlags{}, view, &encoded, ""); err != nil {
+		t.Fatal(err)
+	}
+	var decoded runtime.PlanView
+	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
+		t.Fatalf("the JSON surface is not valid JSON: %v", err)
+	}
+	if decoded.Preview == nil || len(decoded.Preview.Invalidated) != 1 ||
+		decoded.Preview.Invalidated[0] != hostile {
+		t.Fatalf("the JSON surface lost the exact invalidated stage id: %#v", decoded.Preview)
+	}
+	if strings.Contains(encoded.String(), "\x1b") {
+		t.Fatalf("the JSON surface emitted a raw escape:\n%q", encoded.String())
 	}
 }

@@ -171,8 +171,8 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: no %s of revision %d at digest %s is recorded)",
 			cause, verb, revision, digest)
 	}
-	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, decided.Revision, decided.Status, decided.Operator)
-	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%v); the durable record above is what happened\n", cause)
+	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", terminalSafe(planID), decided.Revision, terminalSafe(string(decided.Status)), terminalSafe(decided.Operator))
+	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%s); the durable record above is what happened\n", terminalSafe(cause.Error()))
 	return runtime.ExitCompleted, nil
 }
 
@@ -218,7 +218,7 @@ func renderDelegatedPlan(flags autonomyFlags, payload []byte, decided bool, stdo
 	if decided && flags.Text {
 		decision := view.Snapshot.Approval
 		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n",
-			view.Plan.ID, decision.Revision, decision.Status, decision.Operator)
+			terminalSafe(view.Plan.ID), decision.Revision, terminalSafe(string(decision.Status)), terminalSafe(decision.Operator))
 		return runtime.ExitCompleted, nil
 	}
 	if decided {
@@ -898,7 +898,7 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 		return exitFor(err, runtime.ExitFailed), err
 	}
 	if flags.Text {
-		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", planID, revision, snapshot.Approval.Status, operator.ID)
+		fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", terminalSafe(planID), revision, terminalSafe(string(snapshot.Approval.Status)), terminalSafe(operator.ID))
 		return runtime.ExitCompleted, nil
 	}
 	if err := writeJSON(stdout, snapshot); err != nil {
@@ -994,9 +994,9 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 		return planExit(view), nil
 	}
 	if action != "" {
-		fmt.Fprintf(stdout, "%s plan %s revision %d\n", action, view.Plan.ID, view.Plan.Revision)
+		fmt.Fprintf(stdout, "%s plan %s revision %d\n", action, terminalSafe(view.Plan.ID), view.Plan.Revision)
 	}
-	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", view.Plan.ID, view.Plan.Revision, revisionStatus(view))
+	fmt.Fprintf(stdout, "plan %s revision %d (%s)\n", terminalSafe(view.Plan.ID), view.Plan.Revision, terminalSafe(string(revisionStatus(view))))
 	// A revision that is not governing is shown as a PREVIEW: the state beside
 	// each stage is what approving this revision would leave, not a report of
 	// what is happening. Saying so is the difference between an approval
@@ -1014,18 +1014,23 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 				preview.GoverningRevision)
 		}
 		if len(preview.Invalidated) > 0 {
-			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(preview.Invalidated, ", "))
+			// Stage IDS, and the graph laws constrain only that an id is
+			// non-blank - not its character set. This is the approval preview,
+			// which is the worst place in the product to render something a
+			// model chose without escaping it.
+			fmt.Fprintf(stdout, "approving would redo: %s\n", strings.Join(terminalSafeList(preview.Invalidated), ", "))
 		}
 	}
 	fmt.Fprintf(stdout, "objective: %s\n", singleLinePlan(view.Plan.Objective))
 	if reasoning := view.Plan.Provenance.Reasoning; reasoning != nil {
 		fmt.Fprintf(stdout, "planned by: %s (%s, %s) in %s mode; workspace verified unchanged: %v\n",
-			reasoning.AgentID, reasoning.ProviderKind, reasoning.VendorFamily, reasoning.InvocationMode, reasoning.WorkspaceUnchanged)
+			terminalSafe(reasoning.AgentID), terminalSafe(reasoning.ProviderKind), terminalSafe(reasoning.VendorFamily),
+			terminalSafe(string(reasoning.InvocationMode)), reasoning.WorkspaceUnchanged)
 	} else {
 		fmt.Fprintln(stdout, "planned by: the deterministic compiler; no model was invoked")
 	}
 	if template := view.Plan.Provenance.Template; template != nil {
-		fmt.Fprintf(stdout, "template: %s v%d\n", template.ID, template.Version)
+		fmt.Fprintf(stdout, "template: %s v%d\n", terminalSafe(template.ID), template.Version)
 	}
 	// What the planner was actually given. A referenced issue the forge could
 	// not return means this plan was reasoned from less than the engineering
@@ -1098,7 +1103,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 	// the command with both is what lets an operator approve what they read.
 	if awaiting := view.Snapshot.Approval; awaiting.Status == domain.ApprovalPending && awaiting.Revision > 0 {
 		if awaiting.Revision != view.Plan.Revision {
-			fmt.Fprintf(stdout, "awaiting a decision: revision %d (digest %s)\n", awaiting.Revision, awaiting.Digest)
+			fmt.Fprintf(stdout, "awaiting a decision: revision %d (digest %s)\n", awaiting.Revision, terminalSafe(awaiting.Digest))
 		}
 		// The assignments digest is only printed where the view rendered IS
 		// the revision awaiting the decision. Naming the set from a different
@@ -1108,7 +1113,7 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			assignments = " --assignments " + view.AssignmentsDigest
 		}
 		fmt.Fprintf(stdout, "nothing executes until it is approved: `autonomy plan approve %s --revision %d --digest %s%s`\n",
-			view.Plan.ID, awaiting.Revision, awaiting.Digest, assignments)
+			terminalSafe(view.Plan.ID), awaiting.Revision, terminalSafe(awaiting.Digest), terminalSafe(assignments))
 	}
 	return planExit(view), nil
 }
