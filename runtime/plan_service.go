@@ -1241,6 +1241,12 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 	if _, err := s.Store.ClaimPlanAttempt(input.PlanID, repository, s.now()); err != nil {
 		return "", err
 	}
+	// The attempt NUMBER is counted from the durable journal, which is ordered
+	// by the same append this record goes through. Two refusals racing at one
+	// revision would compute the same number; what prevents that is the
+	// ownership boundary that already prevents two proposers - the exclusive
+	// lock on the state directory, or the supervisor that owns it - rather than
+	// anything here. It is an OS advisory lock, not process-local state.
 	// The identity answers the SOURCE, whether or not it ever reached a plan.
 	// Binding it here is what lets `plan show` say which issue the operator was
 	// planning; without it the record described an attempt at nothing in
@@ -1270,11 +1276,14 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 	// too long would lose the whole record of the thing it describes. So the
 	// bounds are applied by TRUNCATING and saying so, never by failing to
 	// write.
-	stages, droppedStages := attemptStages(input.Reasoned)
+	stages, droppedStages, substituted := attemptStages(input.Reasoned)
 	reasons := boundedReasons(refusalReasons(cause))
 	if droppedStages > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d further proposed stages are not recorded on this attempt: the durable record holds at most %d",
 			droppedStages, maxPayloadListItems))
+	}
+	if substituted > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d proposed stages named no id or no kind, and are recorded under a placeholder", substituted))
 	}
 	payload := PlanAttemptRefusedPayload{
 		AttemptID: attemptID, Revision: revision, Origin: origin, Issue: input.Issue,
@@ -1295,14 +1304,28 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 // attemptStages reduces the proposal to the members that decide whether it is
 // executable. Objectives and rationales are provider prose and stay in the
 // transcript; the journal carries no provider text.
-func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int) {
-	dropped := 0
+func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int, int) {
+	dropped, substituted := 0, 0
 	if len(stages) > maxPayloadListItems {
 		dropped = len(stages) - maxPayloadListItems
 		stages = stages[:maxPayloadListItems]
 	}
 	proposed := make([]PlanAttemptStagePayload, 0, len(stages))
-	for _, stage := range stages {
+	for position, stage := range stages {
+		// An id or kind the proposal never stated is recorded as a stated
+		// PLACEHOLDER. The payload requires both, so copying the empty value
+		// through would make the journal refuse the record - and the record
+		// would be lost for exactly the proposal that was most broken. The
+		// substitution is counted and stated as a reason, so nothing is
+		// silently invented.
+		if strings.TrimSpace(stage.ID) == "" {
+			stage.ID = fmt.Sprintf("(unnamed stage %d)", position+1)
+			substituted++
+		}
+		if strings.TrimSpace(string(stage.Kind)) == "" {
+			stage.Kind = "(unstated)"
+			substituted++
+		}
 		item := PlanAttemptStagePayload{
 			ID: stage.ID, Kind: string(stage.Kind), Role: string(stage.Role),
 			DependsOn: boundedPayloadList(stage.DependsOn),
@@ -1320,7 +1343,7 @@ func attemptStages(stages []domain.PlanStage) ([]PlanAttemptStagePayload, int) {
 		}
 		proposed = append(proposed, item)
 	}
-	return proposed, dropped
+	return proposed, dropped, substituted
 }
 
 // boundedPayloadList truncates a list to the journal's element bound. It is a

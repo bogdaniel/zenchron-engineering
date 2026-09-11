@@ -248,10 +248,31 @@ func (r *EngineeringRuntime) untrustedSource(record sourceRecord) (untrustedSour
 	return text, nil
 }
 
+// boundUntrusted sanitizes third-party text before it is stored and, through
+// the snapshot, before it reaches any model.
+//
+// The code FENCE is neutralized here, and that is a security boundary rather
+// than tidiness. A worker's answer is located in its transcript, and a coding
+// CLI echoes its own prompt into that transcript - so a fenced block inside an
+// issue body is a fenced block in the provider's output. For the planner, whose
+// answer IS a fenced JSON object, an issue could otherwise carry a
+// proposal-shaped fence and have it read as the model's proposal: third-party
+// text becoming the decomposition an operator is asked to approve, attributed
+// to the planner. Untrusted text describes desired behaviour; it never supplies
+// the answer.
+//
+// It is neutralized rather than removed, so the text still reads as what it is.
 func boundUntrusted(text string, limit int) string {
 	text = strings.ToValidUTF8(strings.ReplaceAll(text, "\x00", ""), "")
+	text = strings.ReplaceAll(text, untrustedFence, neutralizedFence)
 	return boundedTo(text, limit)
 }
+
+// The fence untrusted text may not carry, and what it becomes.
+const (
+	untrustedFence   = "\x60\x60\x60"
+	neutralizedFence = "\x27\x27\x27"
+)
 
 func textDigest(text string) string {
 	sum := sha256.Sum256([]byte(text))

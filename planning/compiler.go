@@ -399,6 +399,17 @@ func strengthenIndependence(existing *domain.IndependenceRequirement, required d
 	}
 	delete(from, stage.ID)
 	if len(from) == 0 {
+		// A non-producing stage reaches here only when the plan contains no
+		// material producer at all, which is a different fact from the
+		// ambiguous shorthand and must not be reported as one: this stage
+		// produces nothing, and saying it does would send an operator looking
+		// for a defect that is not there.
+		if !ProducesMaterialChange(stage.Role) {
+			return nil, &ValidationError{PlanID: planID, Reasons: []string{
+				fmt.Sprintf("policy requires stage %q to be independent in dimension %q and this plan has no stage for it to differ from: no stage in it produces material change",
+					stage.ID, result.Dimension),
+			}}
+		}
 		return nil, unboundProducerIndependence(planID, stage, "required by EngineeringPolicy")
 	}
 	result.DifferentFrom = sortedKeysOf(from)

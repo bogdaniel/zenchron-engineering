@@ -345,3 +345,62 @@ func TestAPlannerRefusalBeforeCompilationIsDurableToo(t *testing.T) {
 		t.Fatalf("an unreadable answer produced a plan document (found=%v, err=%v)", found, err)
 	}
 }
+
+// A proposal whose stages named no id or no kind is still recorded.
+//
+// The payload requires both, so copying an empty value through would make the
+// journal refuse the record - losing it for exactly the proposal that was most
+// broken. The substitution is stated as a reason rather than silently invented.
+func TestAnAttemptRecordsStagesThatNamedNoIdentity(t *testing.T) {
+	f := newAttemptFixture(t)
+	input := refusedProposal(f)
+	input.Reasoned = append(input.Reasoned, domain.PlanStage{Objective: "nameless"})
+
+	if _, err := f.service.Propose(context.Background(), input); err == nil {
+		t.Fatal("a stage with no id compiled")
+	}
+	view, err := f.service.AttemptsView("plan-attempt")
+	if err != nil {
+		t.Fatalf("the attempt was not recorded at all: %v", err)
+	}
+	if len(view.Attempts) != 1 {
+		t.Fatalf("attempts = %#v", view.Attempts)
+	}
+	attempt := view.Attempts[0]
+	found := false
+	for _, stage := range attempt.Stages {
+		if strings.Contains(stage.ID, "unnamed stage") && stage.Kind == "(unstated)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the nameless stage is not in the record: %#v", attempt.Stages)
+	}
+	if !strings.Contains(strings.Join(attempt.Errors, " "), "named no id or no kind") {
+		t.Fatalf("the substitution was not stated as a reason: %#v", attempt.Errors)
+	}
+}
+
+// Promoting an attempt to a real plan carries the revision's own repository.
+func TestPromotingAnAttemptCarriesTheRevisionRepository(t *testing.T) {
+	f := newAttemptFixture(t)
+	attempt := refusedProposal(f)
+	attempt.Repository = "acme/named-by-the-proposer"
+	if _, err := f.service.Propose(context.Background(), attempt); err == nil {
+		t.Fatal("the proposal compiled")
+	}
+
+	good := refusedProposal(f)
+	good.Reasoned[0].Independence = nil
+	good.Reasoned[1].Independence = nil
+	if _, err := f.service.Propose(context.Background(), good); err != nil {
+		t.Fatalf("the corrected proposal was refused: %v", err)
+	}
+	identities, err := f.store.PlanIdentities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identities) != 1 || identities[0].Repository != good.Subject.Repository {
+		t.Fatalf("the promoted plan reports repository %#v, want %q", identities, good.Subject.Repository)
+	}
+}

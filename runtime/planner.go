@@ -753,6 +753,20 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 		DependsOn: stage.DependsOn, RequiredClaims: stage.RequiredClaims,
 		Rationale: boundedDetail(stage.Rationale),
 	}
+	if kind != domain.StageAgent {
+		// A gate that states worker requirements is REFUSED, not cleaned up.
+		// The translation below copies role and capabilities only for an agent
+		// stage, so a gate carrying them lost them here and reached the graph
+		// laws looking innocent - which is the same laundering the compiler
+		// deliberately refuses to do: a planner that asked for a gate performed
+		// by a worker got a gate, and nobody was told it had asked.
+		if strings.TrimSpace(stage.Role) != "" {
+			return domain.PlanStage{}, fmt.Errorf("proposed stage %q is a %s and names role %q: a gate references existing evidence or a human decision and is not performed by a worker", stage.ID, kind, stage.Role)
+		}
+		if len(stage.RequiresCapabilities) > 0 {
+			return domain.PlanStage{}, fmt.Errorf("proposed stage %q is a %s and requires capabilities: a gate executes nothing", stage.ID, kind)
+		}
+	}
 	if kind == domain.StageAgent {
 		role := domain.EngineeringRole(stage.Role)
 		if !domain.KnownRole(role) {

@@ -169,3 +169,38 @@ func planStageIDs(plan domain.EngineeringPlan) []string {
 	}
 	return ids
 }
+
+// A plan with NO material producer refuses a policy independence obligation for
+// its own reason. A reviewing stage does not produce material change, and
+// telling an operator that it does would send them looking for a defect that is
+// not there.
+func TestIndependenceInAPlanWithNoProducerIsRefusedOnItsOwnTerms(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	// Only non-producing stages, and a policy obligation on the reviewer.
+	input.Proposed = []domain.PlanStage{
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "review"},
+	}
+	requirements := domain.PlanRequirements{Roles: []domain.RoleRequirement{{
+		Role: domain.RoleReviewer, Statement: "an independent reviewer is required",
+		Independence: &domain.IndependenceRequirement{Dimension: domain.IndependenceVendorFamily},
+	}}}
+	contract := input.Contract
+	contract.PlanRequirements = &requirements
+	input.Contract = contract
+
+	_, err := planning.Compile(input)
+	if err == nil {
+		t.Fatal("an independence obligation over nothing compiled")
+	}
+	var invalid *planning.ValidationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("the refusal is not typed: %T %v", err, err)
+	}
+	joined := strings.Join(invalid.Reasons, "; ")
+	if strings.Contains(joined, `stage "review" performs role`) {
+		t.Fatalf("a reviewer was described as producing material change: %s", joined)
+	}
+	if !strings.Contains(joined, "no stage in it produces material change") {
+		t.Fatalf("the refusal does not name the real condition: %s", joined)
+	}
+}

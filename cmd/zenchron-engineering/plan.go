@@ -389,6 +389,14 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	// for an operator who does not want to spend an invocation: it compiles the
 	// same obligations with no model at all, and says so.
 	if !flags.Deterministic {
+		// ELIGIBILITY FIRST, before a single forge read is spent on context for
+		// an invocation that cannot happen. reasonAboutPlan checks this again
+		// before it materializes a workspace; checking it here too costs one
+		// map lookup and saves a dozen forge reads on the path where planning
+		// was never possible.
+		if err := requirePlanningMode(composed, composed.engine.PlanningAgent()); err != nil {
+			return exitFor(err, runtime.ExitFailed), err
+		}
 		// Referenced same-repository issue context, read through the governed
 		// forge boundary HERE rather than during intent compilation: it is
 		// planning input for a MODEL, and a deterministic compilation has no
@@ -671,10 +679,14 @@ func planShow(flags autonomyFlags, overrides autonomyOverrides, planID string, s
 		// rather than telling an operator that the work they just paid a
 		// provider invocation for does not exist.
 		//
-		// Only when the identity itself is unknown does the original refusal
-		// stand.
+		// Only when the identity itself is unknown - or when the plan DOES have
+		// an executable revision and the operator simply named one that does
+		// not exist - does the original refusal stand. An executable plan
+		// rendered through the attempt view would say "executable plan NONE"
+		// about a plan that has one, which is worse than the refusal it
+		// replaced.
 		attempts, attemptErr := reader.service.AttemptsView(planID)
-		if attemptErr != nil || len(attempts.Attempts) == 0 {
+		if attemptErr != nil || attempts.Executable || len(attempts.Attempts) == 0 {
 			return exitFor(err, exitRunNotFound), err
 		}
 		return planAttemptsOutput(flags, attempts, stdout)

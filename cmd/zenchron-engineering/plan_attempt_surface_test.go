@@ -23,6 +23,18 @@ import (
 // own state directory, exactly as a refused `plan issue N` would.
 func seedRefusedAttempt(t *testing.T, configPath, dir, planID string) {
 	t.Helper()
+	seedProposal(t, configPath, dir, planID, true)
+}
+
+// seedRecoveredPlan proposes a COMPILABLE revision for the same plan identity,
+// which is what an operator does after reading a refused attempt.
+func seedRecoveredPlan(t *testing.T, configPath, dir, planID string) {
+	t.Helper()
+	seedProposal(t, configPath, dir, planID, false)
+}
+
+func seedProposal(t *testing.T, configPath, dir, planID string, defective bool) {
+	t.Helper()
 	config, err := runtime.LoadConfig(configPath, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -59,15 +71,19 @@ func seedRefusedAttempt(t *testing.T, configPath, dir, planID string) {
 	empty := func() *domain.IndependenceRequirement {
 		return &domain.IndependenceRequirement{Dimension: domain.IndependenceExecutionAgent, DifferentFrom: []string{}}
 	}
+	independence := empty
+	if !defective {
+		independence = func() *domain.IndependenceRequirement { return nil }
+	}
 	_, err = service.Propose(context.Background(), runtime.ProposeInput{
 		PlanID: planID, Objective: contract.Objective, Subject: subject,
 		Repository: "zenchron/seeded", Contract: contract, Issue: 119,
 		Model: domain.ProjectModel{SchemaVersion: domain.SchemaVersion, ID: "project", Revision: "1", Subject: subject},
 		Reasoned: []domain.PlanStage{
 			{ID: "harden-runtime-transitions", Kind: domain.StageAgent, Role: domain.RoleImplementer,
-				Objective: "harden", Independence: empty()},
+				Objective: "harden", Independence: independence()},
 			{ID: "correct-operator-views", Kind: domain.StageAgent, Role: domain.RoleImplementer,
-				Objective: "correct", DependsOn: []string{"harden-runtime-transitions"}, Independence: empty()},
+				Objective: "correct", DependsOn: []string{"harden-runtime-transitions"}, Independence: independence()},
 		},
 		Reasoning: &domain.PlanReasoningProvenance{
 			AgentID: "codex", ProviderKind: "codex_cli", VendorFamily: "openai",
@@ -84,6 +100,12 @@ func seedRefusedAttempt(t *testing.T, configPath, dir, planID string) {
 			{Repository: "zenchron/seeded", Issue: 112, Detail: "no issue 112 in zenchron/seeded"},
 		},
 	})
+	if !defective {
+		if err != nil {
+			t.Fatalf("the corrected proposal was refused: %v", err)
+		}
+		return
+	}
 	if err == nil {
 		t.Fatal("the dogfood proposal compiled")
 	}
@@ -209,12 +231,8 @@ func TestAnApprovableRevisionStillNamesTheAttemptsBeforeIt(t *testing.T) {
 	t.Chdir(dir)
 	seedRefusedAttempt(t, configPath, dir, "plan-recovered")
 
-	// The same plan identity, proposed again deterministically and successfully.
-	var proposed bytes.Buffer
-	if _, err := autonomy([]string{"plan", "issue", "41", "--deterministic", "--text", "--config", configPath},
-		planOverrides(t, 41), &proposed); err != nil {
-		t.Fatalf("propose: %v\n%s", err, proposed.String())
-	}
+	// The SAME plan identity, proposed again and compiling this time.
+	seedRecoveredPlan(t, configPath, dir, "plan-recovered")
 
 	// And the refused attempt is still readable beside the plan that followed.
 	var shown bytes.Buffer
@@ -224,5 +242,32 @@ func TestAnApprovableRevisionStillNamesTheAttemptsBeforeIt(t *testing.T) {
 	}
 	if !strings.Contains(shown.String(), "attempt-plan-recovered-r1-1") {
 		t.Fatalf("the refused attempt is not visible from the plan surface:\n%s", shown.String())
+	}
+}
+
+// A plan that HAS an executable revision reports a missing revision as missing.
+//
+// Falling through to the attempt view would print "executable plan NONE" about
+// a plan that has one, which is a worse answer than the refusal it replaced.
+func TestAMissingRevisionOfAnExecutablePlanIsStillMissing(t *testing.T) {
+	dir, configPath := planWorkspace(t)
+	t.Chdir(dir)
+	seedRefusedAttempt(t, configPath, dir, "plan-recovered")
+	seedRecoveredPlan(t, configPath, dir, "plan-recovered")
+
+	var out bytes.Buffer
+	code, err := autonomy([]string{"plan", "show", "plan-recovered", "--revision", "9", "--text", "--config", configPath},
+		planOverrides(t, 41), &out)
+	if err == nil {
+		t.Fatalf("a revision that does not exist was shown:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "revision 9 does not exist") {
+		t.Fatalf("refusal = %v", err)
+	}
+	if strings.Contains(out.String(), "executable plan NONE") {
+		t.Fatalf("a plan with an executable revision was rendered as having none:\n%s", out.String())
+	}
+	if code == runtime.ExitCompleted {
+		t.Fatalf("exit = %d", code)
 	}
 }

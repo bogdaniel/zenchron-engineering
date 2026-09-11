@@ -80,8 +80,13 @@ func (s *SQLiteOperationStore) ClaimPlan(plan domain.EngineeringPlan, createdAt 
 		// never be planned again. The conditional UPDATE is what makes the
 		// promotion a race the database decides: exactly one writer moves the
 		// row off zero.
-		promoted, err := tx.Exec(`UPDATE plans SET current_revision = ? WHERE id = ? AND current_revision = 0`,
-			plan.Revision, plan.ID)
+		// The repository moves with the revision. The attempt row recorded the
+		// repository the PROPOSER named; the revision document carries the one
+		// its subject is bound to, and that is the one every later read should
+		// see. Leaving the old value would have PlanIdentities describing a
+		// plan by a repository its own document does not name.
+		promoted, err := tx.Exec(`UPDATE plans SET current_revision = ?, repository = ? WHERE id = ? AND current_revision = 0`,
+			plan.Revision, plan.Subject.Repository, plan.ID)
 		if err != nil {
 			return false, err
 		}
