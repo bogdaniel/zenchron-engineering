@@ -24,6 +24,17 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
+// subjectLabel renders one exact binding as `repository@revision`, so a refusal
+// about two of them names both in full rather than leaving the reader to work out
+// which half differs. The revision is NOT abbreviated: this is the deterministic
+// refusal, and an exact binding reported approximately is not evidence.
+func subjectLabel(subject domain.Subject) string {
+	if subject.Repository == "" && subject.Revision == "" {
+		return "nothing"
+	}
+	return subject.Repository + "@" + subject.Revision
+}
+
 // ValidationError is the typed refusal. It carries every reason rather than the
 // first, because an operator fixing a plan should see the whole answer.
 type ValidationError struct {
@@ -64,6 +75,27 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 		if plan.Provenance.Contract.ID != input.Contract.ID || plan.Provenance.Contract.Revision != input.Contract.Revision {
 			add("plan provenance names contract %s/%s and it is compiled against %s/%s",
 				plan.Provenance.Contract.ID, plan.Provenance.Contract.Revision, input.Contract.ID, input.Contract.Revision)
+		}
+		// ONE EXACT SUBJECT, shared by the plan and the obligations it is judged
+		// against.
+		//
+		// A plan revision binds an exact base, and its contract binds an exact
+		// base, and until now only their repositories were compared. So a
+		// revision bound to base B could compile against obligations compiled
+		// from base A: the paths in scope, the predicted facts, the required
+		// claims and the acceptance criteria would all be answers about a tree
+		// the plan is not going to execute against. Base rebinding is what made
+		// that reachable rather than theoretical - before it, a plan's base
+		// could not move at all.
+		//
+		// It is checked HERE, at the deterministic validation boundary, because
+		// every path that produces an executable revision passes through it.
+		// Leaving it to the caller that compiles the intent would be an
+		// invariant that holds while one function keeps behaving, which is the
+		// same shape of assumption this check exists to remove.
+		if input.Contract.Subject != plan.Subject {
+			add("plan is bound to %s and its work contract is bound to %s: a plan cannot execute under obligations compiled against a different exact base",
+				subjectLabel(plan.Subject), subjectLabel(input.Contract.Subject))
 		}
 	}
 	if err := validateStageGraph(planStageViews(plan)); err != nil {
@@ -302,8 +334,30 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 	if plan.Provenance.PreviousRevision == nil || *plan.Provenance.PreviousRevision != previous.Revision {
 		reasons = append(reasons, "a revision records the exact revision it replaces")
 	}
-	if plan.Subject != previous.Subject {
-		reasons = append(reasons, "a revision cannot move the plan onto a different subject")
+	// SOURCE IDENTITY, which is the repository, and not the base commit.
+	//
+	// These are two different facts that used to be compared as one. A plan's
+	// durable identity is its repository and its source issue, and it lives
+	// across a lifecycle during which the repository's trusted base MOVES -
+	// every merge to the default branch moves it. Comparing the whole Subject
+	// made an ordinary base update indistinguishable from retargeting the plan
+	// at different work, so a plan that was not approved before the next merge
+	// could never be revised again, and PlanID is derived from the source
+	// rather than allocated - so there was no second identity to escape to.
+	//
+	// Retargeting the REPOSITORY stays refused here: it is a different
+	// governed repository, different credentials and different policy, and no
+	// base observation makes it the same plan.
+	//
+	// A base REVISION change is permitted by this document law and authorized
+	// elsewhere. This is a pure document validator: it cannot observe a remote,
+	// so it cannot know whether the new base is the trusted base the governed
+	// intent path observed or a commit a model named. That check belongs to the
+	// layer holding that fact, and runtime.PlanService.Propose performs it
+	// before this plan is ever compiled. Machines authorize.
+	if plan.Subject.Repository != previous.Subject.Repository {
+		reasons = append(reasons, fmt.Sprintf("a revision cannot move the plan from repository %q to repository %q",
+			previous.Subject.Repository, plan.Subject.Repository))
 	}
 	// PRIVILEGE. A revision may tighten trust and independence; widening either
 	// is new privilege and goes through policy, not through a plan edit.

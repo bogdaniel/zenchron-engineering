@@ -67,13 +67,25 @@ func (s PlanService) now() time.Time {
 
 // ProposeInput is one plan proposal.
 type ProposeInput struct {
-	PlanID     string
-	Objective  string
-	Subject    domain.Subject
-	Repository string
-	Contract   domain.EngineeringWorkContract
-	Model      domain.ProjectModel
-	Facts      []domain.EngineeringFact
+	PlanID    string
+	Objective string
+	Subject   domain.Subject
+	// ObservedBase is the trusted base revision the governed intent path
+	// OBSERVED for this proposal, through the governed remote and this
+	// runtime's own credential.
+	//
+	// It is the authorization for a base rebinding, and it exists as a separate
+	// field precisely so the authority cannot come from the thing being
+	// authorized. Subject.Revision is part of the document under review: a
+	// reasoning agent's output, a template, an operator edit and repository
+	// text all reach it. This does not - only a caller that performed the
+	// observation can fill it, and a caller that did not leave it empty, which
+	// refuses the rebind rather than permitting it.
+	ObservedBase string
+	Repository   string
+	Contract     domain.EngineeringWorkContract
+	Model        domain.ProjectModel
+	Facts        []domain.EngineeringFact
 	// Issue is the source the plan answers. Every stage run it creates answers
 	// the same source; the stage objective is what differs.
 	Issue int
@@ -121,6 +133,50 @@ func (e *PlanAttemptRefusedError) Error() string {
 
 func (e *PlanAttemptRefusedError) Unwrap() error { return e.cause }
 
+// unauthorizedRebind refuses a revision that binds a base nobody observed.
+//
+// It is the authority half of base rebinding. planning.Validate owns the
+// document half - the repository may not change - and deliberately permits the
+// exact base revision to, because a plan's lifecycle outlives merges to the
+// default branch. Permitting it there without this here would mean any caller
+// that can reach Propose could move a plan onto any commit it can name,
+// including one a reasoning agent wrote into its output.
+//
+// The rule is narrow: a base rebind is the proposal's observed trusted base or
+// it is refused. An absent observation is a refusal, not a waiver - a caller
+// that did not observe the base has not established what the base is, and "the
+// field was empty so the subject must be fine" is precisely the inversion this
+// exists to prevent.
+//
+// A repository change is NOT judged here. It falls through to planning.Validate,
+// whose refusal names both repositories and is the clearer answer; saying
+// "unobserved base" about a retarget would describe the wrong defect.
+func unauthorizedRebind(input ProposeInput, previous *domain.EngineeringPlan) error {
+	if previous == nil {
+		// A first revision rebinds nothing: there is no earlier base for it to
+		// move away from, and its subject is checked like any other document.
+		return nil
+	}
+	if input.Subject.Repository != previous.Subject.Repository {
+		return nil
+	}
+	if input.Subject.Revision == previous.Subject.Revision {
+		return nil
+	}
+	observed := strings.TrimSpace(input.ObservedBase)
+	if observed == "" {
+		return &planning.ValidationError{PlanID: input.PlanID, Reasons: []string{fmt.Sprintf(
+			"revision %d would bind base %s and revision %d binds %s, and this proposal carries no observed trusted base: a plan's base moves only through the governed repository observation, never through a proposed document",
+			previous.Revision+1, short12(input.Subject.Revision), previous.Revision, short12(previous.Subject.Revision))}}
+	}
+	if observed != input.Subject.Revision {
+		return &planning.ValidationError{PlanID: input.PlanID, Reasons: []string{fmt.Sprintf(
+			"revision %d would bind base %s and the governed observation of %s is %s: a revision binds the base that was observed for it",
+			previous.Revision+1, short12(input.Subject.Revision), input.Subject.Repository, short12(observed))}}
+	}
+	return nil
+}
+
 // Propose compiles, validates and records a plan revision awaiting approval.
 //
 // A REFUSED plan is recorded too. Refusing quietly would lose the reason a
@@ -167,12 +223,29 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		}
 		consumed = snapshot.Consumed
 	}
-	plan, compileErr := planning.Compile(planning.CompileInput{
-		PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
-		Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
-		Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
-		Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
-	})
+	// WHETHER A BASE REBINDING IS AUTHORIZED, before anything is compiled.
+	//
+	// planning.Validate permits a revision to bind a new exact base, because a
+	// plan outlives merges to the default branch and a pure document validator
+	// cannot observe a remote. The authorization lives here, where the
+	// observation does: the new base must be the one the governed intent path
+	// observed for THIS proposal. Nothing else can move a plan's base - not a
+	// model's output, not a template, not repository text, not an operator
+	// naming a commit.
+	//
+	// It is folded into the same refusal recording below rather than returned
+	// early, so a refused rebind is preserved as durable, inspectable planning
+	// evidence exactly like a refused decomposition.
+	var plan domain.EngineeringPlan
+	compileErr := unauthorizedRebind(input, previous)
+	if compileErr == nil {
+		plan, compileErr = planning.Compile(planning.CompileInput{
+			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
+			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
+			Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
+			Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
+		})
+	}
 	if compileErr != nil {
 		// The refusal is durable in BOTH shapes it can take.
 		//
@@ -191,7 +264,7 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 				return domain.EngineeringPlan{}, err
 			}
 		}
-		attemptID, err := s.recordRefusedAttempt(input, revision, origin, compileErr)
+		attemptID, err := s.recordRefusedAttempt(input, previous, revision, origin, compileErr)
 		if err != nil {
 			// Recording the evidence failed, which is a worse thing to hide
 			// than the refusal it was about. Both are reported: the compile
@@ -490,6 +563,34 @@ func (s PlanService) decide(planID string, revision int, digest, assignments, op
 // throw away work an operator paid for.
 func InvalidatedStages(previous, next domain.EngineeringPlan, snapshot PlanSnapshot) []string {
 	changed := map[string]bool{}
+	// A BASE REBIND invalidates every performance, and it does so for a reason
+	// stage comparison cannot see.
+	//
+	// Everything below this compares stage CONTENT: a stage whose document did
+	// not change keeps its work. That is right while the two revisions share a
+	// base, and wrong the moment they do not. A candidate is a tree derived from
+	// an exact base; a test result, a review verdict, an assurance observation
+	// and a satisfied gate are all statements about THAT tree. None of them is a
+	// statement about a different base, and every one of them would otherwise
+	// survive a rebind untouched, because the stage that produced it is
+	// byte-identical in both revisions.
+	//
+	// So the whole performed graph is invalidated, deterministically, with no
+	// attempt to prove any individual output base-independent. Some output
+	// probably is. Nothing in the type system proves which, and a heuristic that
+	// guessed would be accepting old-base evidence for new-base work - the exact
+	// substitution the independence and evidence laws exist to prevent. The
+	// existing retirement path then stops the child runs and attributes their
+	// spend, because an invalidated stage's run does not stop costing money just
+	// because the plan stopped reading it.
+	if previous.Subject.Revision != next.Subject.Revision {
+		for _, stage := range previous.Stages {
+			changed[stage.ID] = true
+		}
+		for _, stage := range next.Stages {
+			changed[stage.ID] = true
+		}
+	}
 	for _, stage := range next.Stages {
 		before, existed := previous.Stage(stage.ID)
 		if !existed {
@@ -561,6 +662,10 @@ type PlanView struct {
 	// work. The state beside it is then prospective - what approving this
 	// revision would leave - rather than a report of what is happening.
 	Preview *PlanPreview `json:"preview,omitempty"`
+	// BaseChange is present when this revision binds a different exact base than
+	// the revision it replaces. Approving it authorizes work against a different
+	// tree, and everything performed against the old base is redone.
+	BaseChange *PlanBaseChange `json:"base_change,omitempty"`
 	// AssignmentsDigest is the digest of the assignments approving THIS view
 	// would bind: who performs each stage that has not started, under which
 	// profile, packs, context and worker.
@@ -576,6 +681,54 @@ type PlanView struct {
 	// was no identity to hold execution to and they resolve live when they
 	// become performable.
 	Unbound []string `json:"unbound,omitempty"`
+}
+
+// PlanBaseChange states that this revision moved the plan onto a different
+// exact base of the SAME repository.
+//
+// It exists because the base was invisible on every operator surface. A plan is
+// bound to an exact repository revision, that binding decides what every
+// candidate, test result and verdict under it is a statement ABOUT, and nothing
+// in `plan show` said what it was - so a refusal about it could only be
+// diagnosed by reading the source and the database. An operator approving a
+// rebound revision authorizes work against a different tree than the revision
+// before it, and that is not a thing to infer.
+type PlanBaseChange struct {
+	Repository string `json:"repository"`
+	// FromRevision is the plan revision the base moved away from, so the two
+	// bases are attributable rather than floating.
+	FromRevision int    `json:"from_revision"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+}
+
+// baseChange reports the base transition between this revision and the one it
+// replaces, or nil when the base did not move.
+//
+// The comparison is against Provenance.PreviousRevision - the revision this
+// document says it replaces - because that is a fact of the document being shown
+// and is available whether or not anything was ever approved. The #119 case is
+// exactly that: nothing approved, nothing executed, and a base that moved under
+// a pending proposal. What approving would INVALIDATE is a different question,
+// answered against the governing revision by PlanPreview.
+func (s PlanService) baseChange(plan domain.EngineeringPlan) (*PlanBaseChange, error) {
+	if plan.Provenance.PreviousRevision == nil {
+		return nil, nil
+	}
+	previous, found, err := s.Store.PlanRevision(plan.ID, *plan.Provenance.PreviousRevision)
+	if err != nil {
+		return nil, err
+	}
+	// A predecessor that is not stored is not an error here. It means the
+	// document names a revision this store does not hold, and a view that
+	// refused to render because of it would hide the plan rather than the gap.
+	if !found || previous.Subject.Revision == plan.Subject.Revision {
+		return nil, nil
+	}
+	return &PlanBaseChange{
+		Repository: plan.Subject.Repository, FromRevision: previous.Revision,
+		From: previous.Subject.Revision, To: plan.Subject.Revision,
+	}, nil
 }
 
 // PlanPreview says that a view is an answer to "what would approving this do",
@@ -703,6 +856,11 @@ func (s PlanService) previewSnapshot(plan domain.EngineeringPlan, snapshot PlanS
 
 func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
 	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
+	baseChange, err := s.baseChange(plan)
+	if err != nil {
+		return PlanView{}, err
+	}
+	view.BaseChange = baseChange
 	resolution, err := s.Resolve(plan, snapshot)
 	if err != nil {
 		return PlanView{}, err
@@ -1234,7 +1392,7 @@ func boundedReasons(values []string) []string {
 // restart and an attempt read after one are the same replayed events, so the
 // record cannot mean one thing in a live process and another thing in a fresh
 // one.
-func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, origin string, cause error) (string, error) {
+func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.EngineeringPlan, revision int, origin string, cause error) (string, error) {
 	repository := strings.TrimSpace(input.Repository)
 	if repository == "" {
 		repository = input.Subject.Repository
@@ -1294,6 +1452,18 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, revision int, orig
 		Stages: stages, Errors: boundedPayloadList(reasons),
 		Evidence:   boundedPayloadList(attemptEvidence(input.Evidence)),
 		References: boundedPayloadList(input.References),
+	}
+	// WHAT IT WAS BOUND TO, on both sides. An attempt refused for a subject
+	// relationship has to be able to answer which subject it attempted and which
+	// one it was compared against; recording it only in that case would mean the
+	// next subject refusal nobody predicted is undiagnosable again.
+	if input.Subject.Repository != "" && input.Subject.Revision != "" {
+		subject := input.Subject
+		payload.Subject = &subject
+	}
+	if previous != nil && previous.Subject.Repository != "" && previous.Subject.Revision != "" {
+		previousSubject := previous.Subject
+		payload.PreviousSubject = &previousSubject
 	}
 	if input.Reasoning != nil {
 		payload.Reasoning = reasoningPayload(*input.Reasoning)
@@ -1473,8 +1643,10 @@ func (s PlanService) RecordPlanningRefusal(input ProposeInput, cause error) (str
 		return "", err
 	}
 	revision := 1
+	var previous *domain.EngineeringPlan
 	if found {
 		revision = existing.Revision + 1
+		previous = &existing
 	}
 	origin := input.Origin
 	if origin == "" {
@@ -1483,7 +1655,7 @@ func (s PlanService) RecordPlanningRefusal(input ProposeInput, cause error) (str
 			origin = domain.ProposalOriginOperatorEdit
 		}
 	}
-	return s.recordRefusedAttempt(input, revision, origin, cause)
+	return s.recordRefusedAttempt(input, previous, revision, origin, cause)
 }
 
 // AttemptsView reads the refused planning attempts of one plan identity.
