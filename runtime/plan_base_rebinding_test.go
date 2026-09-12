@@ -548,3 +548,110 @@ func seedPerformedStage(t *testing.T, fixture *planRunFixture, stageID, runID st
 		t.Fatal(err)
 	}
 }
+
+// ONE EXACT SUBJECT: a plan and the obligations it is judged against.
+//
+// Base rebinding is what made this reachable. The compiler proved the contract's
+// REPOSITORY matched the plan's, and the ordinary intent path recompiles the
+// contract against the new base - so the invariant held because one caller
+// behaved, not because anything enforced it. A revision bound to base B
+// compiling against obligations compiled from base A would execute against one
+// tree under the scope, facts, claims and acceptance criteria of another.
+func TestARebindWithAStaleContractIsRefused(t *testing.T) {
+	f := newAttemptFixture(t)
+	if _, err := f.service.Propose(context.Background(), rebindProposal("plan-stale-contract", "acme/repo", baseA, baseA)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The plan moves to base B, the observation agrees, and the contract is left
+	// behind at base A.
+	stale := rebindProposal("plan-stale-contract", "acme/repo", baseB, baseB)
+	stale.Contract = planFixtureContract(&phase8Fixture{base: baseA})
+	stale.Contract.Subject = domain.Subject{Repository: "acme/repo", Revision: baseA}
+
+	_, err := f.service.Propose(context.Background(), stale)
+	if err == nil {
+		t.Fatal("a revision compiled against obligations from a different exact base")
+	}
+	// The diagnostic names BOTH bindings, in full.
+	for _, want := range []string{"acme/repo@" + baseB, "acme/repo@" + baseA, "different exact base"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not state %q: %v", want, err)
+		}
+	}
+
+	// NO executable revision was persisted: the plan is still the one revision
+	// that compiled.
+	stored, found, err := f.store.Plan("plan-stale-contract")
+	if err != nil || !found {
+		t.Fatalf("the plan is gone (found=%v): %v", found, err)
+	}
+	if stored.Revision != 1 {
+		t.Fatalf("a refused revision was persisted as executable: revision %d", stored.Revision)
+	}
+	if _, found, err := f.store.PlanRevision("plan-stale-contract", 2); err != nil || found {
+		t.Fatalf("revision 2 exists after a refusal (found=%v): %v", found, err)
+	}
+	// And the refusal is durable evidence, with both subjects on it.
+	snapshot, err := f.store.ReplayPlan("plan-stale-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Attempts) != 1 {
+		t.Fatalf("the refusal was not preserved as an attempt: %d attempts", len(snapshot.Attempts))
+	}
+	attempt := snapshot.Attempts[0]
+	if attempt.Subject == nil || attempt.Subject.Revision != baseB {
+		t.Fatalf("the attempt does not record the subject it attempted: %#v", attempt.Subject)
+	}
+	if attempt.PreviousSubject == nil || attempt.PreviousSubject.Revision != baseA {
+		t.Fatalf("the attempt does not record what it was compared against: %#v", attempt.PreviousSubject)
+	}
+}
+
+// The positive path: the contract moves with the plan, and the contract STORED
+// for that revision is the one bound to the new base.
+func TestARebindWithAFreshContractStoresTheNewExactSubject(t *testing.T) {
+	f := newAttemptFixture(t)
+	if _, err := f.service.Propose(context.Background(), rebindProposal("plan-fresh-contract", "acme/repo", baseA, baseA)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.service.Propose(context.Background(), rebindProposal("plan-fresh-contract", "acme/repo", baseB, baseB))
+	if err != nil {
+		t.Fatalf("a rebind whose contract moved with it was refused: %v", err)
+	}
+	if second.Subject.Revision != baseB {
+		t.Fatalf("the revision is not bound to the new base: %q", second.Subject.Revision)
+	}
+	contract, found, err := f.store.PlanContract(second.ID, second.Revision)
+	if err != nil || !found {
+		t.Fatalf("no contract is stored for the rebound revision (found=%v): %v", found, err)
+	}
+	if contract.Subject != second.Subject {
+		t.Fatalf("the stored contract is bound to %#v and the revision to %#v", contract.Subject, second.Subject)
+	}
+	// The revision it replaced keeps ITS contract, at its own base: a rebind adds
+	// a binding and rewrites none.
+	previous, found, err := f.store.PlanContract(second.ID, second.Revision-1)
+	if err != nil || !found {
+		t.Fatalf("the replaced revision lost its contract (found=%v): %v", found, err)
+	}
+	if previous.Subject.Revision != baseA {
+		t.Fatalf("the replaced revision's contract moved: %#v", previous.Subject)
+	}
+}
+
+// And a contract whose REPOSITORY differs is still refused by the earlier, more
+// specific diagnostic. The exact-subject law must not swallow it.
+func TestAContractForADifferentRepositoryKeepsItsOwnDiagnostic(t *testing.T) {
+	f := newAttemptFixture(t)
+	wrong := rebindProposal("plan-wrong-repo-contract", "acme/repo", baseA, baseA)
+	wrong.Contract.Subject = domain.Subject{Repository: "acme/other", Revision: baseA}
+	_, err := f.service.Propose(context.Background(), wrong)
+	if err == nil {
+		t.Fatal("a plan compiled against a contract governing another repository")
+	}
+	if !strings.Contains(err.Error(), "the work contract governs") {
+		t.Fatalf("the repository diagnostic was replaced: %v", err)
+	}
+}
