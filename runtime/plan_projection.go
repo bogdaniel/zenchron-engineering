@@ -139,16 +139,21 @@ type PlanValidation struct {
 // and where the evidence is - and it answers them from the durable journal
 // rather than from an artifact directory.
 type PlanAttempt struct {
-	AttemptID  string                       `json:"attempt_id"`
-	Revision   int                          `json:"revision"`
-	Origin     string                       `json:"origin"`
-	Issue      int                          `json:"issue,omitempty"`
-	Reasoning  *PlanReasoningPayload        `json:"reasoning,omitempty"`
-	Stages     []PlanAttemptStagePayload    `json:"stages,omitempty"`
-	Errors     []string                     `json:"errors"`
-	Evidence   []PlanAttemptEvidenceRef     `json:"evidence,omitempty"`
-	References []PlanSourceReferencePayload `json:"references,omitempty"`
-	RefusedAt  string                       `json:"refused_at,omitempty"`
+	AttemptID string `json:"attempt_id"`
+	Revision  int    `json:"revision"`
+	Origin    string `json:"origin"`
+	Issue     int    `json:"issue,omitempty"`
+	// Subject is what the refused proposal would have been bound to, and
+	// PreviousSubject what the revision it would have replaced is bound to. A
+	// refusal about a subject relationship is only diagnosable with both.
+	Subject         *domain.Subject              `json:"subject,omitempty"`
+	PreviousSubject *domain.Subject              `json:"previous_subject,omitempty"`
+	Reasoning       *PlanReasoningPayload        `json:"reasoning,omitempty"`
+	Stages          []PlanAttemptStagePayload    `json:"stages,omitempty"`
+	Errors          []string                     `json:"errors"`
+	Evidence        []PlanAttemptEvidenceRef     `json:"evidence,omitempty"`
+	References      []PlanSourceReferencePayload `json:"references,omitempty"`
+	RefusedAt       string                       `json:"refused_at,omitempty"`
 }
 
 // PlanSupersession records one revision replacing another.
@@ -377,7 +382,8 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		// the same defect recurred.
 		s.Attempts = append(s.Attempts, PlanAttempt{
 			AttemptID: payload.AttemptID, Revision: payload.Revision, Origin: payload.Origin,
-			Issue: payload.Issue, Reasoning: payload.Reasoning, Stages: payload.Stages,
+			Issue: payload.Issue, Subject: payload.Subject, PreviousSubject: payload.PreviousSubject,
+			Reasoning: payload.Reasoning, Stages: payload.Stages,
 			Errors: payload.Errors, Evidence: payload.Evidence, References: payload.References,
 			RefusedAt: e.OccurredAt.UTC().Format(time.RFC3339),
 		})
