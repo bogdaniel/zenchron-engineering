@@ -564,7 +564,24 @@ func independenceBindings(stage domain.PlanStage, assigned map[string]domain.Age
 			binding.OtherClasses = append(binding.OtherClasses, assignedIndependenceClass(stage.Independence.Dimension, assignment))
 		}
 	}
-	sort.Strings(binding.OtherClasses)
+	// DifferentFrom and OtherClasses answer different questions, and only the
+	// second one is a set.
+	//
+	// DifferentFrom is WHICH producer stages this stage had to be independent
+	// of, exactly as the plan named them, and it is left alone: two stages are
+	// two obligations, and eligibility above checked each peer separately.
+	// OtherClasses is WHICH comparison classes those producers actually
+	// occupied, and two producers can legitimately occupy one - two codex
+	// implementers under one claude reviewer is the ordinary shape of a
+	// decomposed plan. Listing that class twice claimed a set had a duplicate
+	// member, which agent-assignment.schema.json refuses as non-unique, so the
+	// first plan with two same-class producers could be stored and then not
+	// rendered: `plan show` failed on a revision that was otherwise valid.
+	//
+	// Canonicalized through the same helper every other set in this package uses,
+	// so the result is sorted, deduplicated and dimension-independent - the
+	// dimension decides what a class IS, never how a set of them is written down.
+	binding.OtherClasses = sortedUniqueStrings(binding.OtherClasses)
 	return []domain.IndependenceBinding{binding}
 }
 
