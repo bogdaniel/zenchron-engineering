@@ -90,7 +90,12 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 	if err != nil || first.Passed {
 		return first, first.FailureClass, err
 	}
-	second, secondErr := provider.Assure(ctx, request)
+	// The confirmation pass is a DIFFERENT verification and writes its own
+	// immutable transcript. Reusing the first pass's identity would make the
+	// flake check overwrite the very evidence it exists to compare against.
+	confirmation := request
+	confirmation.Confirmation = true
+	second, secondErr := provider.Assure(ctx, confirmation)
 	if secondErr != nil {
 		return second, FailureUnknown, secondErr
 	}

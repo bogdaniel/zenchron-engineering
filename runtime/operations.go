@@ -638,8 +638,22 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			}}
 		}
 	}
+	// THE BUILD SCRATCH, owned by the runtime and scoped to this attempt. An
+	// invocation whose contract obliges `go test` has to be able to EXECUTE the
+	// binary that command links, and the default temporary location is noexec
+	// inside this runtime's own sandbox.
+	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, ExecutionAttemptRef{
+		RunID: state.run.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+	})
+	if err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
 	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
 		ReviewerResultPath: reviewerResultPath,
+		ScratchDir:         scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -1004,7 +1018,7 @@ func (r *EngineeringRuntime) restoreCandidate(workspace *CandidateWorkspace, cau
 func (s *runState) findings() []Finding {
 	var findings []Finding
 	if a := s.projection.Assurance; a != nil && !a.Stale && !a.Passed {
-		findings = append(findings, Finding{Classification: a.FailureClass, Signature: "assurance:" + a.VerifierDefinition})
+		findings = append(findings, s.assuranceFinding(*a))
 	}
 	if ci := s.projection.CI; ci != nil && !ci.Stale && ci.Conclusion == string(GitHubCheckFailure) {
 		for _, name := range ci.FailingChecks {
@@ -1029,6 +1043,51 @@ func (s *runState) findings() []Finding {
 		}
 	}
 	return findings
+}
+
+// assuranceFinding renders ONE failed verification for the producer that has to
+// fix it, in two halves that are kept apart on purpose.
+//
+// The TRUSTED half is identity: which class of failure, which verifier observed
+// it, which failure it was, and which immutable transcript says so. Every part
+// of it is a runtime-composed token, and the failure signature is a digest
+// precisely so that attacker-writable bytes can distinguish two failures
+// without being able to spell a sentence.
+//
+// The UNTRUSTED half is the excerpt, carried in its own field so that no
+// formatter prints it into the trusted envelope; see findingSummary and
+// verifierEvidenceEnvelope.
+//
+// Before this existed the whole finding was "assurance:" plus the verifier
+// definition - a value identical for every failure that verifier could ever
+// report. Five consecutive remediation attempts read byte-identical input,
+// edited blindly, and the run died on its wall budget without ever touching the
+// test that was failing.
+func (s *runState) assuranceFinding(observed AssuranceObservation) Finding {
+	finding := Finding{
+		Classification: observed.FailureClass,
+		Verifier:       "assurance:" + observed.VerifierDefinition,
+		Signature:      observed.FailureSignature,
+		ArtifactRef:    observed.ArtifactRef,
+	}
+	if finding.Signature == "" {
+		// An observation journalled before this runtime learned to sign
+		// failures, or one whose verifier produced no readable evidence at all.
+		// The verifier identity is still true, and naming it is better than
+		// naming nothing.
+		finding.Signature = "assurance:" + observed.VerifierDefinition
+	}
+	if s.rt == nil || finding.ArtifactRef == "" {
+		return finding
+	}
+	// A transcript that cannot be read degrades this finding to the identity it
+	// would have had anyway. It is not a reason to fail the run: the verdict is
+	// already durable, and refusing to remediate because the EXPLANATION is
+	// unreadable would turn a diagnostic gap into a lifecycle failure.
+	if diagnostic, err := s.rt.deps.Artifacts.AssuranceDiagnostic(finding.ArtifactRef); err == nil {
+		finding.Diagnostic = diagnostic
+	}
+	return finding
 }
 
 func sourceSnapshotID(state *runState) string {
@@ -1251,9 +1310,12 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Commit:      commit,
 		Tree:        tree,
 		CheckoutDir: checkout,
-		Contract:    Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
-		Policy:      Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
-		Producer:    Ref{ID: r.deps.ControllerID, Revision: r.controller},
+		// The scheduler's attempt, so the verifier writes evidence under an
+		// identity a replay reaches from the journal alone.
+		Attempt:  op.Attempt,
+		Contract: Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
+		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
+		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
 	})
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
@@ -1265,6 +1327,10 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		FailureClass:       class,
 		Commit:             commit,
 		Tree:               tree,
+		// What a later remediation reads to learn WHICH failure this was. Both
+		// are runtime-composed machine tokens; neither is candidate text.
+		ArtifactRef:      result.ArtifactRef,
+		FailureSignature: result.FailureSignature,
 	}
 	if result.Passed {
 		payload.FailureClass = ""
@@ -1385,6 +1451,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	}
 	result, assureErr := r.deps.SemanticAssurance.Assure(ctx, AssuranceRequest{
 		RunID: state.run.ID, Commit: commit, Tree: tree, CheckoutDir: checkout,
+		Attempt:    op.Attempt,
 		Contract:   Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
 		Policy:     Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer:   Ref{ID: r.deps.ControllerID, Revision: r.controller},
@@ -1403,6 +1470,8 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 		Commit:             commit,
 		Tree:               tree,
 		Semantic:           true,
+		ArtifactRef:        result.ArtifactRef,
+		FailureSignature:   result.FailureSignature,
 	}
 	if len(result.SemanticClaims) > 0 {
 		payload.ClaimResults = map[string]string{}

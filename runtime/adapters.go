@@ -115,7 +115,17 @@ type ExecutionRequest struct {
 	// give every stage every command family the operator ever declared.
 	// Customization may narrow privilege; it may never silently widen it.
 	RequiredTools []string
-	Budgets       ProviderBudget
+	// ScratchDir is the runtime-owned, EXEC-CAPABLE build scratch brokered to
+	// this invocation as GOTMPDIR and GOCACHE.
+	//
+	// A Go toolchain does not only compile: `go test` links a binary and then
+	// EXECUTES it. Brokering a module cache while leaving the build directory
+	// to the process default meant that binary landed wherever the surrounding
+	// environment put temporary files, and the runtime's own verifier sandbox
+	// mounts that location noexec. The candidate then failed a check no
+	// candidate could pass.
+	ScratchDir string
+	Budgets    ProviderBudget
 }
 
 // InvocationPurpose is deliberately operational rather than a provider role.
@@ -153,8 +163,30 @@ type UpstreamContext struct {
 }
 
 type Finding struct {
-	Classification         FailureClass
-	Signature, ArtifactRef string
+	Classification FailureClass
+	// Verifier is the identity of what OBSERVED the failure, kept separate
+	// from what the failure IS. Collapsing the two into one signature made
+	// every failure a verifier could ever report indistinguishable from every
+	// other, which is what left five consecutive remediation attempts reading
+	// byte-identical input and editing blindly.
+	Verifier string
+	// Signature identifies THE FAILURE. It is a digest of normalized failure
+	// evidence, not the evidence itself: a candidate's own tests write that
+	// evidence, and a digest is the one form of it that cannot carry a
+	// sentence. Two different failures differ here; the same failure twice
+	// does not.
+	Signature string
+	// ArtifactRef is the immutable, attempt-scoped transcript this finding was
+	// derived from. It is composed from runtime identity, never from a path a
+	// provider or candidate supplied.
+	ArtifactRef string
+	// Diagnostic is a bounded, sanitized excerpt of that transcript, and it is
+	// UNTRUSTED DATA. A candidate's tests print into the verifier's own stdout,
+	// so this text is quoted to a model inside untrusted markers and is never
+	// rendered into the trusted half of an envelope. Holding it in the same
+	// struct as the trusted fields is safe only because no formatter prints a
+	// Finding whole; see findingSummary.
+	Diagnostic string
 }
 type ProviderBudget struct {
 	MaxTokens     *int64
@@ -208,6 +240,22 @@ type ExecutionAttemptRef struct {
 // AttemptRef is the identity of the invocation this request authorizes.
 func (r ExecutionRequest) AttemptRef() ExecutionAttemptRef {
 	return ExecutionAttemptRef{RunID: r.RunID, OperationID: r.OperationID, Attempt: r.Attempt}
+}
+
+// AttemptRef is the immutable identity of ONE verification of ONE candidate.
+//
+// The CANDIDATE is part of the operation id, so two candidates of the same run
+// never share a namespace and a later verification cannot land on an earlier
+// one's evidence. The scheduler attempt separates a retry of the same
+// candidate, and the confirmation pass is named rather than folded into the
+// attempt, because a flake verdict is a comparison of two transcripts and
+// needs both to survive.
+func (r AssuranceRequest) AttemptRef() ExecutionAttemptRef {
+	operation := "assurance-" + r.Commit
+	if r.Confirmation {
+		operation += "-confirmation"
+	}
+	return ExecutionAttemptRef{RunID: r.RunID, OperationID: operation, Attempt: r.Attempt}
 }
 
 // Validate refuses an identity a provider cannot honestly write evidence
@@ -341,10 +389,21 @@ type SemanticClaimRequest struct {
 
 type AssuranceRequest struct {
 	RunID, Commit, Tree, CheckoutDir string
-	Contract                         Ref
-	Policy                           Ref
-	Producer                         Ref
-	VerifierDefinition               string
+	// Attempt is the SCHEDULER's attempt number for the assurance operation.
+	// It exists so a verification writes evidence under an identity a replay
+	// arrives at from the journal alone, exactly as #55 requires of a provider
+	// invocation.
+	Attempt int
+	// Confirmation marks the SECOND verification of one candidate that
+	// AssuranceRerun performs to tell a flake from a real failure. Both
+	// verifications are evidence - the flake verdict is derived by comparing
+	// them - so each writes its own immutable transcript instead of one
+	// replacing the other.
+	Confirmation       bool
+	Contract           Ref
+	Policy             Ref
+	Producer           Ref
+	VerifierDefinition string
 	// The fields below are used by the semantic verifier. They are bounded,
 	// read-only context: identity, the exact base the diff is taken against, the
 	// changed-path inventory, a summary of the automated result, and the exact
@@ -362,6 +421,13 @@ type AssuranceResult struct {
 	FailureClass                   FailureClass
 	Artifacts                      []Artifact
 	Evidence                       *EvidenceBinding
+	// ArtifactRef is the immutable, attempt-scoped reference to the transcript
+	// this verdict was read from, and FailureSignature identifies the failure
+	// itself rather than the verifier that found it. Together they are what
+	// lets a remediation agent tell this failure from the previous one; see
+	// runtime/assurance_evidence.go.
+	ArtifactRef      string
+	FailureSignature string
 	// Model and Tokens are recorded only when the producer actually reports
 	// them. Nothing here is invented when a provider does not expose usage.
 	Model  string
