@@ -70,6 +70,98 @@ type CandidateWorkspace struct {
 	Credentials                                CredentialProvider
 }
 
+// CandidateRef is one exact candidate produced by one run, named well enough
+// that another run can be given THAT tree and prove it got it.
+//
+// It exists because a candidate is an INTERNAL artifact before it is ever a
+// pull request. The runtime could previously only materialize a workspace by
+// cloning the governed remote, so a downstream stage could only receive an
+// upstream candidate that had been PUBLISHED - and a candidate whose
+// verification failed is never published, which is exactly when a reviewer is
+// most needed. The fallback was to leave the consumer on the trusted base,
+// which handed an independent reviewer an empty tree and called it a review.
+//
+// Publication is an authority-controlled external side effect. Internal
+// transfer between two runtime-owned workspaces is execution plumbing. This
+// type is the boundary between them: it carries no credential, names no remote,
+// and authorizes nothing.
+type CandidateRef struct {
+	// RunID is the producer whose runtime-owned workspace holds the commit.
+	RunID string `json:"run_id"`
+	// StageID is the plan stage that produced it, for diagnostics that have to
+	// name the work rather than the run.
+	StageID string `json:"stage_id,omitempty"`
+	// Revision and Tree are the EXACT subject. Both are carried because both
+	// are checked: a commit id alone would let a rewritten commit answer for
+	// the tree a reviewer was asked about.
+	Revision string `json:"revision"`
+	Tree     string `json:"tree"`
+}
+
+// Materializable reports whether this reference names a complete subject. A
+// half-filled reference is refused rather than partially trusted: "some of the
+// identity matched" is not the question a downstream stage is asking.
+func (c CandidateRef) Materializable() bool {
+	return c.RunID != "" && c.Revision != "" && c.Tree != ""
+}
+
+// MaterializeCandidate fetches one exact upstream candidate into this workspace
+// and PROVES the workspace now holds it.
+//
+// The transfer is a local object fetch between two runtime-owned directories.
+// It touches no remote and uses no credential: the producer's workspace is a
+// real Git repository that this runtime created, wrote and owns, and the commit
+// is already in it.
+//
+// The proof is the point. Fetching and checking out can fail in ways that leave
+// a workspace looking plausible - a ref that resolved to something else, a
+// checkout that silently kept the previous head - so HEAD and the tree are both
+// read back and compared to the reference. A workspace that cannot be proven to
+// be the exact candidate is an error, never a workspace the caller may use:
+// the alternative is executing against a subject nobody asked for, which is the
+// defect this function exists to close.
+func MaterializeCandidate(dir string, ref CandidateRef, sourceDir string) error {
+	if !ref.Materializable() {
+		return fmt.Errorf("upstream candidate reference is incomplete: run=%q revision=%q tree=%q", ref.RunID, ref.Revision, ref.Tree)
+	}
+	if _, err := os.Stat(filepath.Join(sourceDir, ".git")); err != nil {
+		return fmt.Errorf("upstream run %s has no workspace to take candidate %s from: %w", ref.RunID, short12(ref.Revision), err)
+	}
+	// --no-tags and an explicit revision: this takes exactly the object asked
+	// for and nothing else the producer's workspace happens to carry.
+	if _, err := runGit(dir, "fetch", "--no-tags", sourceDir, ref.Revision); err != nil {
+		return fmt.Errorf("upstream candidate %s could not be taken from run %s: %w", short12(ref.Revision), ref.RunID, err)
+	}
+	if _, err := runGit(dir, "checkout", "--detach", ref.Revision); err != nil {
+		return fmt.Errorf("upstream candidate %s could not be checked out: %w", short12(ref.Revision), err)
+	}
+	return AssertCandidateSubject(dir, ref)
+}
+
+// AssertCandidateSubject proves a workspace holds the exact candidate named.
+//
+// It is separate from materialization because it is also asked LATER, before a
+// provider executes: materializing at clone time and executing minutes after it
+// are different moments, and the question "is this still the tree the
+// assignment froze" has to be answerable at the second one.
+func AssertCandidateSubject(dir string, ref CandidateRef) error {
+	head, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if head = strings.TrimSpace(head); head != ref.Revision {
+		return fmt.Errorf("workspace is at %s and the assigned upstream candidate is %s", short12(head), short12(ref.Revision))
+	}
+	tree, err := gitOutput(dir, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return err
+	}
+	if tree = strings.TrimSpace(tree); tree != ref.Tree {
+		return fmt.Errorf("workspace tree is %s and the assigned upstream candidate's tree is %s", short12(tree), short12(ref.Tree))
+	}
+	return nil
+}
+
 // CreateCandidateClone makes a full clone with independent .git metadata; it
 // never uses git worktree, whose metadata is shared with its controller.
 func CreateCandidateClone(stateDir, runID, remote, base string, credentials CredentialProvider) (CandidateWorkspace, error) {

@@ -230,6 +230,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 		Clock:             runtime.RealClock{},
 		Owner:             c.owner,
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
+		StateDir:          c.config.StateDir,
 		Repositories:      repositories,
 		MaxConcurrentRuns: settings.MaxConcurrentRuns,
 		PollInterval:      settings.PollInterval,

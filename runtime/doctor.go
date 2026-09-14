@@ -90,6 +90,10 @@ type DoctorInput struct {
 	// Provider is the configured execution provider. Its Isolation report, not
 	// its configuration string, decides protected eligibility.
 	Provider ExecutionProvider
+	// Toolchain is the operator's brokered worker execution environment. Its
+	// zero value inherits the supervisor's, which is what every configuration
+	// did before it existed.
+	Toolchain ToolchainConfig
 	// ProviderCredentialPath is a PATH, never a secret. It is stat'd and never
 	// read.
 	ProviderCredentialPath string
@@ -1181,7 +1185,43 @@ func doctorAgents(in DoctorInput) []DoctorCheck {
 		checks = append(checks, pass(doctorGroupAgents, "agents.usable",
 			fmt.Sprintf("%d of %d configured agents can be invoked", usable, len(in.Agents))))
 	}
-	return checks
+	return append(checks, doctorWorkerToolchain(in))
+}
+
+// doctorWorkerToolchain answers whether a WORKER can attempt the toolchain
+// obligations its contract will carry.
+//
+// The assurance container has always had this check - assurance.toolchain
+// proves the pinned image resolves go and gofmt on its own pinned path - and
+// the workers that produce the candidates it verifies had none. So the
+// verifier's environment was reproducible and the producer's was whatever shell
+// started `serve`, and the gap was invisible until a worker had already spent
+// an invocation reporting it could not verify its own work.
+//
+// An undeclared toolchain is a WARN rather than a pass: nothing is broken, the
+// inherited environment may well be fine, and the runtime genuinely cannot
+// promise that it is.
+func doctorWorkerToolchain(in DoctorInput) DoctorCheck {
+	const id = "provider.toolchain"
+	if !in.Toolchain.Declared() {
+		return warn(doctorGroupAgents, id,
+			"no worker toolchain is configured, so an execution worker inherits this supervisor's PATH and the runtime cannot establish that it can run the tools its acceptance obligations require. "+
+				"Set toolchain.path and toolchain.required_tools to broker a reproducible environment and get a refusal before an invocation is spent rather than a worker that reports it could not verify its own work")
+	}
+	probe := CLIAgentProvider{Toolchain: in.Toolchain}
+	if missing := probe.missingTools(); len(missing) > 0 {
+		return fail(doctorGroupAgents, id, fmt.Sprintf(
+			"the brokered worker execution environment cannot resolve %s on %s, so a mutating stage is refused before it is dispatched rather than after it fails to verify its own work",
+			strings.Join(missing, ", "), in.Toolchain.SearchPath()))
+	}
+	if len(in.Toolchain.RequiredTools) == 0 {
+		return pass(doctorGroupAgents, id, fmt.Sprintf(
+			"the brokered worker execution environment is %s; no required tools are declared, so nothing is refused before dispatch",
+			in.Toolchain.SearchPath()))
+	}
+	return pass(doctorGroupAgents, id, fmt.Sprintf(
+		"the brokered worker execution environment resolves %s on %s, so a worker can attempt the toolchain obligations its contract carries",
+		strings.Join(in.Toolchain.RequiredTools, ", "), in.Toolchain.SearchPath()))
 }
 
 // doctorControlEndpoint reports the supervisor's authority boundary.

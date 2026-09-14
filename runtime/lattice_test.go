@@ -118,6 +118,15 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
 		"watch.repositories",
+		// The brokered worker execution environment. Both members are
+		// CAPABILITY statements and neither is an unsafe override: the path
+		// says which directories a worker's executables are resolved from, the
+		// required tools say which of them must resolve before a mutating stage
+		// is dispatched. Neither authorizes running anything - the runtime
+		// decides what a worker is asked to do - and neither is addressable by
+		// the repository layer, so a repository cannot grant itself a tool.
+		"toolchain.path",
+		"toolchain.required_tools",
 		"watch.label",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",

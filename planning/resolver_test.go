@@ -19,7 +19,7 @@ func claudeAgent() domain.ExecutionAgentDescriptor {
 		TrustMode: domain.TrustRequirementOperatorTrusted, Model: "sonnet",
 		Capabilities:    domain.EngineeringCapabilities(),
 		InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating, domain.InvocationModeNonMutatingPlanning},
-		Available:       true, Unattended: true,
+		Available:       true, Unattended: true, StructuredVerdicts: true,
 	}
 }
 
@@ -29,7 +29,7 @@ func codexAgent() domain.ExecutionAgentDescriptor {
 		TrustMode:       domain.TrustRequirementOperatorTrusted,
 		Capabilities:    domain.EngineeringCapabilities(),
 		InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating, domain.InvocationModeNonMutatingPlanning},
-		Available:       true, Unattended: true,
+		Available:       true, Unattended: true, StructuredVerdicts: true,
 	}
 }
 
@@ -40,7 +40,7 @@ func geminiAgent() domain.ExecutionAgentDescriptor {
 		TrustMode:       domain.TrustRequirementOperatorTrusted,
 		Capabilities:    domain.EngineeringCapabilities(),
 		InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating},
-		Available:       true, Unattended: true,
+		Available:       true, Unattended: true, StructuredVerdicts: true,
 	}
 }
 

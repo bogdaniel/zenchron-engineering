@@ -69,16 +69,17 @@ func DescribeExecutionAgents(ctx context.Context, registry AgentRegistry, prober
 	descriptors := make([]domain.ExecutionAgentDescriptor, 0, len(statuses))
 	for _, status := range statuses {
 		descriptors = append(descriptors, domain.ExecutionAgentDescriptor{
-			ID:              status.ID,
-			ProviderKind:    status.Kind,
-			VendorFamily:    VendorFamilyFor(status.Kind),
-			TrustMode:       domain.TrustRequirement(status.TrustMode),
-			Model:           status.Model,
-			Capabilities:    generalCodingCapabilities(),
-			InvocationModes: invocationModesFor(status.Kind),
-			Available:       status.Eligible,
-			Detail:          status.Detail,
-			Unattended:      status.Unattended,
+			ID:                 status.ID,
+			ProviderKind:       status.Kind,
+			VendorFamily:       VendorFamilyFor(status.Kind),
+			TrustMode:          domain.TrustRequirement(status.TrustMode),
+			Model:              status.Model,
+			Capabilities:       generalCodingCapabilities(),
+			InvocationModes:    invocationModesFor(status.Kind),
+			Available:          status.Eligible,
+			Detail:             status.Detail,
+			Unattended:         status.Unattended,
+			StructuredVerdicts: producesStructuredVerdicts(status.Kind),
 		})
 	}
 	sort.SliceStable(descriptors, func(i, j int) bool { return descriptors[i].ID < descriptors[j].ID })
@@ -92,6 +93,22 @@ func DescribeExecutionAgents(ctx context.Context, registry AgentRegistry, prober
 // difference is the point - a provider without an enforceable read-only mode is
 // ineligible for a planner-role stage rather than being run in a permissive
 // mode and trusted to behave.
+// producesStructuredVerdicts states which adapters can carry a reviewer result.
+//
+// Every native CLI adapter can: the runtime hands the invocation a private path
+// and CLIAgentProvider reads whatever was written there, so the capability is a
+// property of the adapter rather than of the CLI behind it - a worker that
+// declines to write the file produces no verdict, which is an outcome the
+// lifecycle already handles.
+//
+// A kind with no CLI spec cannot, and says so. That is what makes a reviewer
+// stage assigned to such a worker BLOCK at resolution instead of running an
+// invocation that could never settle its stage.
+func producesStructuredVerdicts(kind string) bool {
+	_, err := specForKind(kind)
+	return err == nil
+}
+
 func invocationModesFor(kind string) []domain.InvocationMode {
 	modes := []domain.InvocationMode{domain.InvocationModeMutating}
 	if spec, err := specForKind(kind); err == nil && spec.ReadOnly != nil {

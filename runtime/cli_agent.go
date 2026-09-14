@@ -269,6 +269,10 @@ type CLIAgentProvider struct {
 	// CODEX_HOME. It exists so migrating an existing configuration changes
 	// nothing about how that operator's runs actually execute.
 	LegacyEnvironment bool
+	// Toolchain is the operator's brokered execution environment. When it
+	// declares a search path, that path is what the worker gets; when it
+	// declares none, the supervisor's is inherited exactly as before.
+	Toolchain ToolchainConfig
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -377,10 +381,21 @@ func (p CLIAgentProvider) home() (string, error) {
 
 // env is an explicit allowlist constructed from scratch. os.Environ() is never
 // used: ambient GitHub, SSH, signing and cloud credentials must not reach the
-// worker, nor the candidate commands it spawns. PATH is forwarded because tool
-// execution needs it and it is not a credential.
+// worker, nor the candidate commands it spawns.
+//
+// PATH is the BROKERED one when the operator declared a toolchain, and the
+// inherited one otherwise. Inheriting was the only behaviour, and it made the
+// worker's ability to do its job a property of whichever shell started the
+// supervisor - reproducible for nobody, and silently different from the pinned
+// path the assurance container has always used. A declared path is a
+// capability grant and nothing more: it says which executables the worker may
+// RESOLVE, never which commands anyone may run.
 func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
-	env := []string{"PATH=" + os.Getenv("PATH")}
+	searchPath := p.Toolchain.SearchPath()
+	if searchPath == "" {
+		searchPath = os.Getenv("PATH")
+	}
+	env := []string{"PATH=" + searchPath}
 	if home == "" {
 		return env
 	}
@@ -628,9 +643,68 @@ func (p CLIAgentProvider) Probe(ctx context.Context) AgentReadiness {
 		readiness.Detail = "the installed " + p.command() + " does not advertise the sandbox, permission and working-directory capabilities this runtime requires, so it is refused rather than run with weaker constraints"
 		return readiness
 	}
+	// THE TOOLS ITS WORK WILL REQUIRE, in the environment it will actually get.
+	//
+	// A CLI that runs perfectly and cannot resolve `go` cannot attempt a
+	// contract obligating `go test`, and the previous readiness answer -
+	// "executable found and every required capability is advertised" - was true
+	// and useless in exactly that case. The probe is run against the brokered
+	// PATH rather than the operator's interactive one, because the brokered one
+	// is what the worker gets.
+	if missing := p.missingTools(); len(missing) > 0 {
+		readiness.MissingTools = missing
+		readiness.Detail = "executable found, but the brokered execution environment cannot resolve " +
+			strings.Join(missing, ", ") + ", which this repository's acceptance obligations require a worker to run"
+		return readiness
+	}
 	readiness.Available = true
 	readiness.Detail = "executable found and every required capability is advertised"
+	if len(p.Toolchain.RequiredTools) > 0 {
+		readiness.Detail += ", and the brokered execution environment resolves " + strings.Join(p.Toolchain.RequiredTools, ", ")
+	}
 	return readiness
+}
+
+// missingTools is the declared required tools this worker's environment cannot
+// resolve, in declaration order.
+//
+// Resolution happens against the BROKERED path when one is declared. An
+// operator who declares required tools without a path is asking about the
+// inherited environment, which is answered honestly rather than refused: the
+// two halves of the toolchain are independently useful.
+func (p CLIAgentProvider) missingTools() []string {
+	var missing []string
+	for _, tool := range p.Toolchain.RequiredTools {
+		if tool = strings.TrimSpace(tool); tool == "" {
+			continue
+		}
+		if !p.resolvesTool(tool) {
+			missing = append(missing, tool)
+		}
+	}
+	return missing
+}
+
+func (p CLIAgentProvider) resolvesTool(tool string) bool {
+	if search := p.Toolchain.SearchPath(); search != "" {
+		for _, dir := range p.Toolchain.Path {
+			if dir = strings.TrimSpace(dir); dir == "" {
+				continue
+			}
+			info, err := os.Stat(filepath.Join(dir, tool))
+			if err != nil || info.IsDir() {
+				continue
+			}
+			// Executable by somebody. The runtime runs as the operator, so a
+			// file present and marked executable is resolvable; a finer check
+			// would be guessing at the OS's own answer.
+			if info.Mode()&0o111 != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	return p.executor().LookPath(tool) == nil
 }
 
 // InvocationProvenance is the durable, non-secret record of HOW one attempt was
@@ -850,6 +924,34 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			result.Outcome = OperationCancelled
 			result.Failure.Classification = FailureControllerShutdown
 		}
+		// The PRIMARY failure is returned untouched, and the structured result
+		// is not read at all. A verdict written by an invocation that then died
+		// is not this invocation's answer, and a malformed one would otherwise
+		// overwrite the real reason it died - a timeout reported as a broken
+		// protocol is a worse diagnosis than either fact alone.
+		return result, runErr
+	}
+	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.
+	//
+	// It comes from the runtime-owned path and nowhere else: the transcript is
+	// evidence and is never consulted for a verdict, so a worker that talked
+	// about accepting has not accepted, and a transcript that happens to
+	// contain verdict-shaped JSON is still just a transcript.
+	//
+	// A malformed result on a SUCCESSFUL invocation still fails it. A reviewer
+	// that tried to answer and produced something unreadable has not silently
+	// declined to answer, and treating the two the same would hide a broken
+	// protocol behind a stage that merely never settles.
+	if request.ReviewerResultPath != "" {
+		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
+		if reviewErr != nil {
+			result.Outcome = OperationFailed
+			result.Failure = &ProviderFailure{
+				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
+			}
+			return result, nil
+		}
+		result.Review = review
 	}
 	return result, runErr
 }

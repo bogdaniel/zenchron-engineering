@@ -42,6 +42,22 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// no evidence class is satisfied by it, and a worker that reported a
 		// perfect posture still cannot authorize its own change.
 		"Invocation",
+		// Review is the structured verdict a reviewer stage emitted, and it is
+		// admitted here for a reason worth stating precisely: at THIS boundary
+		// it is a CLAIM, not authority.
+		//
+		// The adapter read a file and returned what it found. Nothing has yet
+		// established that the worker was the approved reviewer, that the stage
+		// produces verdicts at all, that the result is about the candidate the
+		// runtime materialized, or that it says one thing rather than two -
+		// AdmitReviewerResult does all of that in the runtime, against the
+		// frozen assignment, and a claim that fails any of it becomes a typed
+		// refusal instead of lifecycle state.
+		//
+		// So the invariant this test protects still holds: a provider cannot
+		// authorize its own work. It can now say "I accept", and that sentence
+		// is checked by machines before it means anything.
+		"Review",
 	}
 	typ := reflect.TypeOf(ExecutionResult{})
 	var got []string

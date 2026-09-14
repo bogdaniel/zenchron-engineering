@@ -41,6 +41,12 @@ type SupervisorDependencies struct {
 	Clock    Clock
 	Owner    string
 	Liveness OwnerLiveness
+	// StateDir is the runtime state directory holding each run's workspace. The
+	// plan reconciler reads it ONLY to prove whether one upstream candidate
+	// contains another, in the producer's own clone. Absent, that relationship
+	// cannot be proven and a stage consuming several candidates blocks - which
+	// is the safe direction.
+	StateDir string
 	// Runtime builds the engine for one repository worked by one agent.
 	//
 	// It takes BOTH because a supervisor is not single-agent. The whole point
@@ -643,7 +649,7 @@ func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
 		}
 		reconciler := PlanReconciler{
 			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.deps.Plans,
-			Repository: repository, Issue: issue,
+			Repository: repository, Issue: issue, StateDir: s.deps.StateDir,
 			Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
 				return s.engine(repository, agentID)
 			},

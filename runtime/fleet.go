@@ -14,6 +14,7 @@ package runtime
 // supervisor owns them.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -148,18 +149,55 @@ func summarizePlans(store *SQLiteOperationStore) []PlanSummary {
 		for _, projection := range snapshot.Stages {
 			summary.Stages[string(projection.State)]++
 		}
-		summary.State = planState(snapshot)
+		// The GOVERNING document, which is the approved revision when there is
+		// one. Judging completion against the latest proposal would answer about
+		// obligations nobody authorized; judging it against the stored head
+		// revision would do the same whenever a newer proposal exists.
+		//
+		// An APPROVED revision that cannot be read leaves the required graph
+		// UNKNOWN, and unknown governance state fails closed. Falling back to
+		// the head revision was a fail-open: a store error or a missing row
+		// would have completion judged against a document nobody approved -
+		// possibly a newer proposal with fewer obligations - which is the same
+		// silence-as-success this function exists to remove, reached through a
+		// different door.
+		governing := plan
 		if approved, ok := snapshot.ApprovedRevision(); ok {
 			summary.ApprovedRevision = approved
+			exact, found, err := store.PlanRevision(plan.ID, approved)
+			if err != nil || !found {
+				summary.State = PlanStateBlocked
+				summary.Error = boundedDetail(fmt.Sprintf(
+					"approved revision %d could not be read, so this plan's required obligations are unknown and its completion cannot be judged", approved))
+				summaries = append(summaries, summary)
+				continue
+			}
+			governing = exact
 		}
+		summary.State = planState(governing.Stages, snapshot)
 		summaries = append(summaries, summary)
 	}
 	return summaries
 }
 
-// planState is the plan-level answer, derived from the same replayed state
-// everything else reads.
-func planState(snapshot PlanSnapshot) string {
+// planState is the plan-level answer, derived from the APPROVED DOCUMENT's
+// required graph and the replayed state of it.
+//
+// The document is what is authoritative about which obligations exist. This
+// function used to iterate snapshot.Stages - the projection - and a stage that
+// had never started has no projection entry at all, so it counted as neither
+// pending nor failed and simply disappeared from the arithmetic. A plan whose
+// two agent stages had settled and whose REQUIRED ASSURANCE GATE had never been
+// evaluated therefore fell through to "completed", while the scheduler
+// simultaneously reported that same gate blocked and `plan show` listed it
+// pending. That is #126's D1: the enforcement boundary held and the summary
+// line - the one a human reads before signing off - said the work was done.
+//
+// So absence of projection is OUTSTANDING, never success. Every required stage
+// and gate in the approved document has to be positively accounted for, and an
+// unrecognized state is outstanding too: a status this function does not know
+// how to read is not evidence that an obligation was met.
+func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 	approved, ok := snapshot.ApprovedRevision()
 	switch {
 	case !ok && snapshot.Approval.Status == domain.ApprovalRejected:
@@ -171,23 +209,41 @@ func planState(snapshot PlanSnapshot) string {
 		// what was approved AND waiting on a person for what was proposed.
 		return PlanStateAwaitingApproval
 	}
-	running, pending, failed := 0, 0, 0
-	for _, projection := range snapshot.Stages {
+	// A plan with no required graph to judge is not complete. It is a plan
+	// nobody can answer for, and answering "completed" for it would be the same
+	// silence-as-success this function exists to remove.
+	if len(required) == 0 {
+		return PlanStateExecuting
+	}
+	running, outstanding, failed := 0, 0, 0
+	for _, stage := range required {
+		projection, projected := snapshot.Stages[stage.ID]
+		if !projected {
+			outstanding++
+			continue
+		}
 		switch projection.State {
 		case PlanStageRunning:
 			running++
-		case PlanStagePending:
-			pending++
+		case PlanStageCompleted, PlanStageSatisfied:
 		case PlanStageFailed:
 			failed++
+		default:
+			// Pending, invalidated, and anything this build does not recognize.
+			// An invalidated stage is work that has to happen again, which is
+			// outstanding; an unknown state is not proof of anything.
+			outstanding++
 		}
 	}
 	switch {
 	case running > 0:
 		return PlanStateExecuting
-	case failed > 0 && pending == 0:
+	case failed > 0:
+		// A required obligation that FAILED cannot become satisfied by waiting.
+		// The plan needs an operator: a revision, or work the runtime has
+		// already exhausted its budget on.
 		return PlanStateBlocked
-	case pending > 0:
+	case outstanding > 0:
 		return PlanStateExecuting
 	default:
 		return PlanStateCompleted

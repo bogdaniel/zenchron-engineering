@@ -96,6 +96,40 @@ type PlanStageProjection struct {
 	// generation is its own #63 run.
 	Generation int                   `json:"generation,omitempty"`
 	Gate       *PlanGateSatisfaction `json:"gate,omitempty"`
+	// Review is the latest verdict THIS stage recorded, when it is a reviewer.
+	// It is what settles a reviewer stage, because a reviewer's work is the
+	// verdict rather than a tree: a reviewer that changed nothing has still
+	// done its job, and one that merely finished has not.
+	Review *PlanStageReview `json:"review,omitempty"`
+}
+
+// PlanStageReview is one reviewer stage's replayed verdict about one exact
+// candidate.
+//
+// Staleness is not stored. It is asked at read time against the upstream head
+// the question is about, exactly as RunProjection does for assurance, because a
+// stored flag would have to be rewritten every time a producer moved and would
+// be wrong in every window where it had not been.
+type PlanStageReview struct {
+	RunID           string   `json:"run_id"`
+	UpstreamStageID string   `json:"upstream_stage_id"`
+	UpstreamRunID   string   `json:"upstream_run_id"`
+	Candidate       string   `json:"candidate"`
+	Tree            string   `json:"tree"`
+	Verdict         string   `json:"verdict"`
+	Reason          string   `json:"reason,omitempty"`
+	Findings        []string `json:"findings,omitempty"`
+}
+
+// Accepted reports whether this verdict accepts the exact candidate named.
+// A verdict about any other candidate answers nothing about this one.
+func (r *PlanStageReview) Accepted(candidate, tree string) bool {
+	return r != nil && r.Verdict == StageReviewAccepted && r.Candidate == candidate && r.Tree == tree
+}
+
+// Blocks reports whether this verdict blocks the exact candidate named.
+func (r *PlanStageReview) Blocks(candidate, tree string) bool {
+	return r != nil && r.Verdict == StageReviewBlocked && r.Candidate == candidate && r.Tree == tree
 }
 
 // PlanApproval is the operator decision on one exact revision. Both the number
@@ -495,6 +529,23 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			}
 		}
 		stage.Reason = payload.Reason
+		s.Stages[payload.StageID] = stage
+	case EventPlanStageReviewed:
+		var payload PlanStageReviewedPayload
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			return err
+		}
+		// The LATEST verdict wins, and an earlier one is not kept. A reviewer
+		// that re-reviewed after the producer moved has answered a different
+		// question, and two answers in the projection would leave every reader
+		// deciding which is current - which is the decision this replaces.
+		stage := s.stage(payload.StageID)
+		stage.Review = &PlanStageReview{
+			RunID: payload.RunID, UpstreamStageID: payload.UpstreamStageID,
+			UpstreamRunID: payload.UpstreamRunID, Candidate: payload.Candidate,
+			Tree: payload.Tree, Verdict: payload.Verdict, Reason: payload.Reason,
+			Findings: payload.Findings,
+		}
 		s.Stages[payload.StageID] = stage
 	case EventPlanGateSatisfied:
 		var payload PlanGateSatisfiedPayload

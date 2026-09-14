@@ -896,6 +896,66 @@ type PlanStageSettledPayload struct {
 	Revision int `json:"revision,omitempty"`
 }
 
+// StageReviewBlockedPayload is an internal plan reviewer's blocking verdict as
+// the PRODUCER's run records it.
+//
+// It is the same verdict PlanStageReviewedPayload records on the plan stream,
+// delivered to the run that has to act on it. Both exist because they answer
+// different questions: the plan's copy settles the reviewer's stage, and this
+// one is what makes the producer's next invocation a remediation bound to a
+// review rather than an unexplained retry.
+type StageReviewBlockedPayload struct {
+	// StageID is the REVIEWER's stage, and ReviewerRunID its run, so the
+	// producer's journal names who judged it.
+	StageID       string `json:"stage_id"`
+	ReviewerRunID string `json:"reviewer_run_id"`
+	// Candidate and Tree are what was judged. A verdict about a superseded
+	// candidate is stale, and staleness is computed against the run's head at
+	// read time rather than stored.
+	Candidate string   `json:"candidate"`
+	Tree      string   `json:"tree"`
+	Findings  []string `json:"findings"`
+}
+
+// Stage review verdicts. A reviewer either ACCEPTS one exact candidate or
+// BLOCKS it; there is no third answer, and "no answer" is not one of these -
+// it is the absence of the event.
+const (
+	StageReviewAccepted = "accepted"
+	StageReviewBlocked  = "blocked"
+)
+
+// PlanStageReviewedPayload is an independent reviewer stage's verdict about one
+// exact candidate.
+//
+// It names the commit AND the tree it judged. The commit alone would let a
+// verdict about one tree be read as a verdict about a rewritten commit with the
+// same id in a different workspace; the tree alone would lose which run
+// produced it. Together with RunID they are the exact subject, and a verdict
+// whose subject is not the current upstream head is stale rather than wrong -
+// the reviewer answered honestly about work that has since moved.
+//
+// Findings are bounded CLASSIFICATIONS and signatures, never reviewer prose.
+// They become the findings a producer's remediation invocation is bound to, and
+// the runtime's own record of why an invocation is happening must not be
+// writable by the party being reviewed - the same rule feedbackFindings applies
+// to admitted forge feedback.
+type PlanStageReviewedPayload struct {
+	StageID string `json:"stage_id"`
+	// RunID is the REVIEWER's run, the one that produced this verdict.
+	RunID string `json:"run_id"`
+	// UpstreamStageID and UpstreamRunID name the producer whose work was
+	// judged, so a blocking verdict can be routed back to it without the plan
+	// re-deriving who that was.
+	UpstreamStageID string   `json:"upstream_stage_id"`
+	UpstreamRunID   string   `json:"upstream_run_id"`
+	Candidate       string   `json:"candidate"`
+	Tree            string   `json:"tree"`
+	Verdict         string   `json:"verdict"`
+	Reason          string   `json:"reason,omitempty"`
+	Findings        []string `json:"findings,omitempty"`
+}
+
 // PlanGateSatisfiedPayload records that a typed gate's EXISTING durable
 // references now prove it. The references are the evidence, authority and human
 // decision records the kernel already owns; the plan stores no second copy of
@@ -1140,6 +1200,48 @@ var planPayloads = map[string]payloadValidator{
 			return fmt.Errorf("stage outcome %q carries revision %d: only an %s outcome is scoped to a revision", p.Outcome, p.Revision, planStageInvalidated)
 		}
 		return errors.Join(required("stage_id", p.StageID), bounded("reason", p.Reason))
+	}),
+	EventStageReviewBlocked: payloadSchema(func(p StageReviewBlockedPayload) error {
+		// A blocking verdict with no finding gives remediation nothing to be
+		// bound to, so the same invocation would be planned forever.
+		if len(p.Findings) == 0 {
+			return errors.New("a blocking review names no finding: remediation would have nothing to be bound to")
+		}
+		return errors.Join(
+			required("stage_id", p.StageID), required("reviewer_run_id", p.ReviewerRunID),
+			required("candidate", p.Candidate), required("tree", p.Tree),
+			boundedList("findings", p.Findings))
+	}),
+	EventPlanStageReviewed: payloadSchema(func(p PlanStageReviewedPayload) error {
+		switch p.Verdict {
+		case StageReviewAccepted, StageReviewBlocked:
+		default:
+			return fmt.Errorf("review verdict %q must be %q or %q", p.Verdict, StageReviewAccepted, StageReviewBlocked)
+		}
+		// A verdict names the EXACT subject it judged. One without a commit and
+		// a tree could be read as a verdict about whatever the producer's head
+		// happens to be later, which is the silent evidence reuse the exact
+		// bindings exist to prevent.
+		if err := errors.Join(
+			required("stage_id", p.StageID), required("run_id", p.RunID),
+			required("upstream_stage_id", p.UpstreamStageID), required("upstream_run_id", p.UpstreamRunID),
+			required("candidate", p.Candidate), required("tree", p.Tree),
+		); err != nil {
+			return err
+		}
+		// An ACCEPTANCE carries no findings. Accepting while naming defects is
+		// two answers at once, and a downstream gate reading only the verdict
+		// would act on the more permissive one.
+		if p.Verdict == StageReviewAccepted && len(p.Findings) > 0 {
+			return fmt.Errorf("an accepted review names %d findings: acceptance and outstanding findings are different answers", len(p.Findings))
+		}
+		// A BLOCK must say what it blocks on. A blocking verdict with nothing
+		// to act on gives the producer's remediation no binding, so the same
+		// invocation would be planned forever.
+		if p.Verdict == StageReviewBlocked && len(p.Findings) == 0 {
+			return errors.New("a blocking review names no finding: remediation would have nothing to be bound to")
+		}
+		return errors.Join(bounded("reason", p.Reason), boundedList("findings", p.Findings))
 	}),
 	EventPlanGateSatisfied: payloadSchema(func(p PlanGateSatisfiedPayload) error {
 		if p.Kind != string(domain.StageAssuranceGate) && p.Kind != string(domain.StageHumanDecisionGate) {

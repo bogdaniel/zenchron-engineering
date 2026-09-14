@@ -1068,6 +1068,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 	in.ProviderCredentialPath = config.Provider.CredentialPath
 	in.ControlEndpoint = runtime.ControlSocketPath(config.StateDir)
 	in.Storage = runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes}
+	in.Toolchain = config.Toolchain
 	// Agent readiness is the SAME answer `autonomy agents` gives, produced by
 	// the same probe. Two independent answers to "is this worker usable" would
 	// eventually disagree, and an operator would have no way to know which one

@@ -31,11 +31,16 @@ func TestARevisionPreviewShowsWhatApprovingItWouldLeave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Distinct heads per stage: two runs verified at the same head collide in
+	// the fixture's event ids, and a shared head would also make "which stage
+	// produced this" unanswerable in the assertions below.
+	heads := map[string]string{"implementation": "aaaaaaaaaaaa", "documentation": "dddddddddddd"}
 	for _, id := range []string{"implementation", "documentation"} {
 		if governing.Stages[id].RunID == "" {
 			t.Fatalf("stage %s did not run under the governing revision", id)
 		}
-		settleRunAtGoalState(t, fixture, governing.Stages[id].RunID, "aaaaaaaaaaaa")
+		recordCandidateAndAssurance(t, fixture, governing.Stages[id].RunID, heads[id])
+		settleRunAtGoalState(t, fixture, governing.Stages[id].RunID, heads[id])
 	}
 	fixture.reconcile(t)
 	governing, err = fixture.store.ReplayPlan(fixture.plan.ID)

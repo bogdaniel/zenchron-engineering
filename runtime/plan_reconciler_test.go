@@ -23,9 +23,13 @@ import (
 // planRunFixture is a phase8 fixture plus an approved plan over it.
 type planRunFixture struct {
 	*phase8Fixture
-	service     PlanService
-	reconciler  PlanReconciler
-	plan        domain.EngineeringPlan
+	service    PlanService
+	reconciler PlanReconciler
+	plan       domain.EngineeringPlan
+	// engines are per-agent runtimes. A scenario that needs a reviewer stage
+	// to run through a different provider than its producer registers one
+	// here, and the ordinary engine factory is used for every other agent.
+	engines     map[string]*EngineeringRuntime
 	engineCalls []string
 }
 
@@ -35,13 +39,13 @@ func planAgents() []domain.ExecutionAgentDescriptor {
 			ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
 			TrustMode: domain.TrustRequirementOperatorTrusted, Capabilities: domain.EngineeringCapabilities(),
 			InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating, domain.InvocationModeNonMutatingPlanning},
-			Available:       true, Unattended: true,
+			Available:       true, Unattended: true, StructuredVerdicts: true,
 		},
 		{
 			ID: "codex", ProviderKind: "codex_cli", VendorFamily: "openai",
 			TrustMode: domain.TrustRequirementOperatorTrusted, Capabilities: domain.EngineeringCapabilities(),
 			InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating, domain.InvocationModeNonMutatingPlanning},
-			Available:       true, Unattended: true,
+			Available:       true, Unattended: true, StructuredVerdicts: true,
 		},
 	}
 }
@@ -92,11 +96,22 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 		t.Fatal(err)
 	}
 	fixture.plan = plan
+	if fixture.engines == nil {
+		fixture.engines = map[string]*EngineeringRuntime{}
+	}
 	fixture.reconciler = PlanReconciler{
 		Store: base.store, Clock: base.clock, Service: fixture.service,
-		Repository: "acme/repo", Issue: base.issue,
+		Repository: "acme/repo", Issue: base.issue, StateDir: base.stateDir,
 		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
 			fixture.engineCalls = append(fixture.engineCalls, agentID)
+			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan
+			// reconciler already builds the engine from the agent id, so a
+			// reviewer stage and a producer stage genuinely run through
+			// different providers - which is what lets a test drive the real
+			// reviewer-result path instead of injecting its outcome.
+			if runtime, ok := fixture.engines[agentID]; ok {
+				return runtime, nil
+			}
 			return base.runtime, nil
 		},
 	}
@@ -751,11 +766,12 @@ func TestServeReconcilesAPlanAndDrivesItsRunsInOneTick(t *testing.T) {
 	}
 }
 
-// A stage is done when its WORK is done. A run that produced its candidate,
-// passed assurance and is waiting for a person in the forge has produced the
-// output the next stage reviews; treating that as unfinished would mean a plan
-// whose review stage never starts.
-func TestAStageCompletesWhenItsRunReachesItsGoalState(t *testing.T) {
+// runSettled answers whether a run has STOPPED MOVING, which is what an
+// upstream check asks before a downstream stage freezes itself against a head.
+// It is deliberately not the question "was this stage accepted" - that is
+// stageAcceptance, which reads the run's durable evidence rather than its wait
+// reason. See TestAProducerWhoseVerificationFailedDoesNotCompleteItsStage.
+func TestARunIsSettledWhenItStopsMoving(t *testing.T) {
 	cases := []struct {
 		name    string
 		run     EngineeringRun
@@ -764,7 +780,9 @@ func TestAStageCompletesWhenItsRunReachesItsGoalState(t *testing.T) {
 	}{
 		{name: "completed", run: EngineeringRun{Disposition: Completed}, outcome: "completed", done: true},
 		{
-			name:    "published and waiting for a person",
+			// A run at goal state has stopped moving. Whether its STAGE is
+			// accepted is a separate question with a separate answer.
+			name:    "waiting for a person after reaching its goal state",
 			run:     EngineeringRun{Disposition: Waiting, Reason: ReasonGoalStateReached},
 			outcome: "completed", done: true,
 		},
@@ -782,9 +800,9 @@ func TestAStageCompletesWhenItsRunReachesItsGoalState(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			outcome, done := stageOutcome(tc.run)
+			outcome, done := runSettled(tc.run)
 			if done != tc.done || (done && outcome != tc.outcome) {
-				t.Fatalf("stageOutcome = %q/%v, want %q/%v", outcome, done, tc.outcome, tc.done)
+				t.Fatalf("runSettled = %q/%v, want %q/%v", outcome, done, tc.outcome, tc.done)
 			}
 		})
 	}
@@ -835,15 +853,20 @@ func TestADownstreamStageIsBasedOnPublishedUpstreamWork(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
 	assignment := domain.AgentAssignment{
 		Context: domain.ContextPack{UpstreamOutputs: []domain.UpstreamOutput{
-			{StageID: "implementation", RunID: "run-upstream", Candidate: "c0ffee"},
+			{StageID: "implementation", RunID: "run-upstream", Candidate: "c0ffee", Tree: "t0ffee"},
 		}},
 	}
 
-	// An UNPUBLISHED upstream candidate is not a base: it exists only in
-	// another run's workspace, and a candidate is cloned from the governed
-	// remote.
-	if base, err := fixture.reconciler.upstreamBase(assignment); err != nil || base != "" {
-		t.Fatalf("an unpublished upstream candidate was used as a base: %q (err=%v)", base, err)
+	// An UNPUBLISHED upstream candidate is not a CLONE base - the governed
+	// remote does not have it - but it is still delivered: the runtime takes
+	// the exact commit from the producer's own workspace. It is named as a
+	// local reference rather than a base, and the stage receives the work.
+	base, local, err := fixture.reconciler.upstreamBase(assignment)
+	if err != nil || base != "" {
+		t.Fatalf("an unpublished upstream candidate was used as a clone base: %q (err=%v)", base, err)
+	}
+	if local == nil || local.RunID != "run-upstream" || local.Revision != "c0ffee" || local.Tree != "t0ffee" {
+		t.Fatalf("the unpublished upstream candidate was not offered for local transfer: %#v", local)
 	}
 
 	// Publish it, and it becomes the base.
@@ -864,8 +887,13 @@ func TestADownstreamStageIsBasedOnPublishedUpstreamWork(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if base, err := fixture.reconciler.upstreamBase(assignment); err != nil || base != "c0ffee" {
-		t.Fatalf("a published upstream candidate produced base %q", base)
+	base, local, err = fixture.reconciler.upstreamBase(assignment)
+	if err != nil || base != "c0ffee" {
+		t.Fatalf("a published upstream candidate produced base %q (err=%v)", base, err)
+	}
+	// Published work needs no transfer: the clone reaches it directly.
+	if local != nil {
+		t.Fatalf("a published upstream candidate was also queued for local transfer: %#v", local)
 	}
 
 	// And the run created for such a stage pins that base rather than the
@@ -1514,17 +1542,12 @@ func TestSpendAfterSettlementStillReachesThePlan(t *testing.T) {
 		t.Fatal("the stage created no run")
 	}
 
-	// It reaches goal state having spent one invocation, and settles.
+	// It reaches goal state having spent one invocation, with a PASSING verdict
+	// on the candidate it produced, and settles. The verdict is what settles it:
+	// reaching goal state only means the run stopped.
 	recordExecutionAttempts(t, fixture, runID, 1)
-	run, _, err := fixture.store.Run(runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run.Disposition = Waiting
-	run.Reason = "goal_state_reached"
-	if err := fixture.store.PutRun(run); err != nil {
-		t.Fatal(err)
-	}
+	recordCandidateAndAssurance(t, fixture, runID, "aaaaaaaaaaaa")
+	settleRunAtGoalState(t, fixture, runID, "aaaaaaaaaaaa")
 	fixture.reconcile(t)
 	settled, err := fixture.store.ReplayPlan(fixture.plan.ID)
 	if err != nil {
@@ -1921,7 +1944,7 @@ func TestAnUnreadableUpstreamRunBlocksRatherThanRebasing(t *testing.T) {
 		`UPDATE events SET document = replace(document, '"payload"', '"payl0ad"') WHERE run_id = ?`, "run-upstream"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.reconciler.upstreamBase(assignment); err == nil {
+	if _, _, err := fixture.reconciler.upstreamBase(assignment); err == nil {
 		t.Fatal("an unreadable upstream run was treated as unpublished, which bases the stage on the trusted tree")
 	}
 }

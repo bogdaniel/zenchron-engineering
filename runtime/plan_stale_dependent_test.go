@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -70,6 +71,7 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 
 	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
 	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	acceptReview(t, fixture, "review", review)
 	fixture.reconcile(t)
 	fixture.reconcile(t)
 
@@ -244,6 +246,58 @@ func settleRunAtGoalState(t *testing.T, fixture *planRunFixture, runID, head str
 	}
 }
 
+// acceptReview records a reviewer stage's ACCEPTING verdict about the exact
+// upstream candidate its frozen assignment names.
+//
+// A reviewer stage no longer settles by reaching its goal state: reaching goal
+// state means its run stopped, and a review's output is the verdict rather than
+// a tree. Every fixture that drives a reviewer to completion therefore has to
+// say what the reviewer concluded, which is the point - a fixture that could
+// complete a review without one would be reproducing the defect.
+func acceptReview(t *testing.T, fixture *planRunFixture, stageID, runID string) {
+	t.Helper()
+	reviewStage(t, fixture, stageID, runID, StageReviewAccepted, nil)
+}
+
+// blockReview is the same for a reviewer that refuses the candidate.
+func blockReview(t *testing.T, fixture *planRunFixture, stageID, runID string, findings []string) {
+	t.Helper()
+	if len(findings) == 0 {
+		findings = []string{"review:blocking"}
+	}
+	reviewStage(t, fixture, stageID, runID, StageReviewBlocked, findings)
+}
+
+func reviewStage(t *testing.T, fixture *planRunFixture, stageID, runID, verdict string, findings []string) {
+	t.Helper()
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, found, err := fixture.store.PlanAssignment(
+		fixture.plan.ID, fixture.plan.Revision, snapshot.Stages[stageID].Generation, stageID)
+	if err != nil || !found {
+		t.Fatalf("no frozen assignment for reviewer stage %q: found=%v err=%v", stageID, found, err)
+	}
+	subject, ok := fixture.reconciler.reviewSubject(assignment)
+	if !ok {
+		t.Fatalf("reviewer stage %q froze no upstream candidate to judge: %#v", stageID, assignment.Context.UpstreamOutputs)
+	}
+	if _, err := fixture.store.AppendPlanEvent(EngineeringEvent{
+		SchemaVersion: SchemaVersion,
+		ID:            fmt.Sprintf("review-%s-%s-%s", stageID, verdict, subject.Candidate),
+		PlanID:        fixture.plan.ID, Type: EventPlanStageReviewed, OccurredAt: fixture.clock.Now(),
+		Payload: mustPayload(t, PlanStageReviewedPayload{
+			StageID: stageID, RunID: runID,
+			UpstreamStageID: subject.StageID, UpstreamRunID: subject.RunID,
+			Candidate: subject.Candidate, Tree: subject.Tree,
+			Verdict: verdict, Findings: findings,
+		}),
+	}); err != nil {
+		t.Fatalf("append review verdict: %v", err)
+	}
+}
+
 // The invalidation reason is a JOURNAL FIELD, and production ids overflow it.
 //
 // Two full 40-hex candidate heads plus a stage id is 186 bytes before the id.
@@ -289,6 +343,7 @@ func TestTheInvalidationReasonFitsTheJournal(t *testing.T) {
 	}
 	recordCandidateAndAssurance(t, fixture, review, strings.Repeat("r", 40))
 	settleRunAtGoalState(t, fixture, review, strings.Repeat("r", 40))
+	acceptReview(t, fixture, "independent-review", review)
 	fixture.reconcile(t)
 	fixture.reconcile(t)
 
@@ -372,6 +427,7 @@ func TestPropagationIsRederivedAfterACrashBetweenAppends(t *testing.T) {
 	review := snapshot.Stages["review"].RunID
 	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
 	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	acceptReview(t, fixture, "review", review)
 	fixture.reconcile(t)
 
 	// The crash: the ROOT's invalidation landed and the dependent's did not.
@@ -541,6 +597,7 @@ func TestTheSweepIgnoresAProducersInterimHeads(t *testing.T) {
 	}
 	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
 	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	acceptReview(t, fixture, "review", review)
 	fixture.reconcile(t)
 	fixture.reconcile(t)
 

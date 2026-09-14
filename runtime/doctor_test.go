@@ -190,6 +190,7 @@ type doctorFixture struct {
 	repoRoot   string
 	configPath string
 	credential string
+	toolDir    string
 	input      DoctorInput
 }
 
@@ -206,14 +207,22 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		repoRoot:   filepath.Join(root, "repo"),
 		configPath: filepath.Join(root, "config.json"),
 		credential: filepath.Join(root, "provider-credential"),
+		toolDir:    filepath.Join(root, "toolchain"),
 	}
-	for _, dir := range []string{f.stateDir, f.cacheDir, f.repoRoot} {
+	for _, dir := range []string{f.stateDir, f.cacheDir, f.repoRoot, f.toolDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := os.WriteFile(f.credential, []byte("not-read-by-the-doctor\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	// The brokered toolchain's executables. Present and executable is the whole
+	// question the readiness probe asks; nothing here runs them.
+	for _, tool := range []string{"go", "gofmt"} {
+		if err := os.WriteFile(filepath.Join(f.toolDir, tool), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// A healthy environment has a PROVISIONED cache. An empty directory is the
 	// fifth dogfood's exact condition and is deliberately not healthy.
@@ -248,6 +257,11 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			},
 			Eligible: true, Unattended: true,
 		}},
+		// A healthy environment BROKERS its worker toolchain rather than
+		// inheriting whichever shell started the supervisor. The fixture writes
+		// its own binaries, so the check is about the configuration rather than
+		// about what the test machine happens to have installed.
+		Toolchain:          ToolchainConfig{Path: []string{f.toolDir}, RequiredTools: []string{"go", "gofmt"}},
 		Codex:              NativeCodexProvider{Executor: executor},
 		Sandbox:            DockerSandbox{Image: doctorImage, Executor: executor},
 		DependencyCacheDir: f.cacheDir,
@@ -375,7 +389,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",
-		"agent.openai", "agents.usable",
+		"agent.openai", "agents.usable", "provider.toolchain",
 		"supervisor.endpoint", "state.storage",
 	}
 	if len(report.Checks) != len(want) {
