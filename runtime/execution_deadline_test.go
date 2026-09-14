@@ -15,6 +15,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -540,5 +541,90 @@ func TestTheDurableRecordExposesTheExecutionAuthority(t *testing.T) {
 	}
 	if record.TerminationCause != "provider_returned" {
 		t.Fatalf("termination cause %q, want the provider's own return", record.TerminationCause)
+	}
+}
+
+// countingDoer proves the absence of inference rather than inferring it, and
+// counts what does get through so a bound that fires late is distinguishable
+// from one that never fires at all.
+type countingDoer struct {
+	inner    Doer
+	requests int
+}
+
+func (c *countingDoer) Do(request *http.Request) (*http.Response, error) {
+	c.requests++
+	return c.inner.Do(request)
+}
+
+// TestTheAPIProviderRefusesToSpendAuthorityItNoLongerHas is the hole the rest
+// of this repair left open. The CLI adapters were taught that the durable
+// instant wins; the API adapter still read only the duration, and the duration
+// is ambiguous in exactly the case that matters.
+//
+// `executionWallBound` returns the operation's REMAINING authority, and
+// remaining clamps to zero once it is spent. `WallLimit == 0` therefore says
+// both "no wall budget was stated" and "no authority is left", and the `> 0`
+// guard read the second as the first: an operation that had already run out of
+// time fell through to the provider's own ten-minute default and spent it on
+// inference and brokered tool calls. The admission gate still refused the
+// result, so nothing ungoverned was committed - but the invocation had already
+// happened, which is the invariant, not the consequence.
+func TestTheAPIProviderRefusesToSpendAuthorityItNoLongerHas(t *testing.T) {
+	api := &fakeResponsesAPI{repeat: scriptedToolCalls(t, "expired", 5, [2]string{openaiToolRepoRead, `{"path":"hello.txt"}`})}
+	counted := &countingDoer{inner: api}
+	provider, request, _, _ := openaiFixture(t, api)
+	provider.HTTP = counted
+	// The exact pair a scheduler hands over on an operation whose authority is
+	// gone: nothing remaining, so nothing to state as a duration, and a durable
+	// deadline that has already passed.
+	expired := time.Now().Add(-time.Second)
+	request.Deadline = &expired
+	request.Budgets.WallLimit = 0
+
+	result, err := provider.Execute(context.Background(), request)
+	if got := stopReason(t, err); got != StopDeadlineExceeded {
+		t.Fatalf("an operation with no authority left was not refused as out of time: %s", got)
+	}
+	if counted.requests != 0 {
+		t.Fatalf("the provider bought %d inference request(s) with authority it did not have", counted.requests)
+	}
+	if result.Outcome == Succeeded {
+		t.Fatalf("an invocation refused for want of authority must not report success: %#v", result)
+	}
+}
+
+// TestTheAPIProviderIsBoundedByTheOperationDeadlineNotItsOwnDefault is the
+// other half: authority that still exists but ends sooner than the provider's
+// default. Without the repair the loop runs to its own iteration ceiling,
+// because a deadline it never reads cannot stop it.
+func TestTheAPIProviderIsBoundedByTheOperationDeadlineNotItsOwnDefault(t *testing.T) {
+	api := &fakeResponsesAPI{repeat: scriptedToolCalls(t, "bounded", 5, [2]string{openaiToolRepoRead, `{"path":"hello.txt"}`})}
+	provider, request, _, _ := openaiFixture(t, api)
+	provider.Timeout = 10 * time.Minute
+	// Every other ceiling is lifted, so the deadline is the only thing that can
+	// end this loop: if it ends for any other reason the bound is not the one
+	// under test.
+	provider.MaxIterations = 1_000_000
+	provider.MaxToolCalls = 1_000_000
+	tokens := int64(1) << 60
+	request.Budgets.MaxTokens = &tokens
+	// Stated the way an operation with authority left states it: a remaining
+	// duration of zero is the exhausted case above, so this one carries only
+	// the instant.
+	soon := time.Now().Add(50 * time.Millisecond)
+	request.Deadline = &soon
+	request.Budgets.WallLimit = 0
+
+	started := time.Now()
+	result, err := provider.Execute(context.Background(), request)
+	if got := stopReason(t, err); got != StopDeadlineExceeded {
+		t.Fatalf("the durable deadline did not bound the loop: %s", got)
+	}
+	if elapsed := time.Since(started); elapsed > time.Minute {
+		t.Fatalf("the loop ran %s, far past the deadline it was given", elapsed)
+	}
+	if result.Outcome != OperationCancelled {
+		t.Fatalf("a loop stopped by its deadline is not reported as cancelled: %#v", result)
 	}
 }
