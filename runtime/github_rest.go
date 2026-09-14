@@ -128,7 +128,7 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 	}
 	response, err := a.HTTP.Do(request)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("github request failed")
+		return 0, nil, nil, fmt.Errorf("github request failed: %w", err)
 	}
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
