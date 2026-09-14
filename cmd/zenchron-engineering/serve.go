@@ -232,7 +232,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
 		StateDir:          c.config.StateDir,
 		Repositories:      repositories,
-		MaxConcurrentRuns: settings.MaxConcurrentRuns,
+		MaxConcurrentRuns: c.maxConcurrentRuns(),
 		PollInterval:      settings.PollInterval,
 		Discovery:         discovery,
 		Agents:            c.agents,
@@ -525,6 +525,11 @@ func controlError(err error) runtime.ControlResponse {
 	return runtime.ControlResponse{Error: err.Error()}
 }
 
+// maxConcurrentRuns is the operator's effective run ceiling, resolved in ONE
+// place. The supervisor bounds its goroutines by it, the fleet view advertises
+// it, and every engine the composition builds enforces it durably through its
+// scheduler; reading it from three different derivations is how the advertised
+// number and the enforced number came to disagree.
 func (c *composition) maxConcurrentRuns() int {
 	settings, err := c.config.WatchSettings()
 	if err != nil {

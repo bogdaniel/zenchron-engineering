@@ -8,10 +8,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -369,5 +371,131 @@ func TestSelectingACLIAgentNeverBuildsTheAPIAdapter(t *testing.T) {
 	}
 	if _, ok := executionProvider(config, protected, artifacts, runtime.DockerSandbox{}, false).(runtime.CLIAgentProvider); ok {
 		t.Fatal("the protected agent built a native CLI adapter")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The configured ceiling is enforced, not only advertised
+// ---------------------------------------------------------------------------
+
+// concurrencyWorkspace is one operator installation whose ceiling is `ceiling`,
+// holding `held` OTHER runs that each already own a leased operation, plus one
+// run of its own waiting to be driven. It returns the outcome of driving that
+// run through the SAME composition `serve` drives it through, and whether the
+// run actually acquired an operation.
+//
+// The held leases are the point. A run that acquires while `held` others are
+// leased is a run executing AT THE SAME TIME as they are, which is the claim;
+// counting a number passed between structs would not have been.
+func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, bool) {
+	t.Helper()
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git", func(config map[string]any) {
+		config["supervisor"] = map[string]any{"max_concurrent_runs": ceiling}
+	})
+	t.Chdir(dir)
+	built, err := newComposition(autonomyFlags{Config: configPath, Repo: "zenchron/seeded"}, offlineOverrides())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer built.release()
+	// What `status` prints and what the supervisor admits against. The
+	// enforcement below is measured against THIS number rather than against the
+	// literal, so a future change that moves one of them alone fails here.
+	if advertised := built.maxConcurrentRuns(); advertised != ceiling {
+		t.Fatalf("the operator ceiling was advertised as %d, want %d", advertised, ceiling)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < held; i++ {
+		id := fmt.Sprintf("op-elsewhere-%d", i)
+		if _, created, err := built.store.PutOperation(runtime.RunOperation{
+			SchemaVersion: runtime.SchemaVersion, ID: id, RunID: fmt.Sprintf("run-elsewhere-%d", i),
+			Kind: "external.work", IdempotencyKey: id, State: runtime.Leased,
+			Attempt: 1, MaxAttempts: 1, CreatedAt: now,
+			Lease: &runtime.Lease{Owner: "another-owner", HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)},
+		}, 0); err != nil || !created {
+			t.Fatalf("seeding a held slot: created=%v err=%v", created, err)
+		}
+	}
+	const runID = "run-under-test"
+	if err := built.store.PutRun(runtime.EngineeringRun{
+		SchemaVersion: runtime.SchemaVersion, ID: runID, Repository: "zenchron/seeded",
+		Goal: "work waiting for a slot", Phase: runtime.Execute, Disposition: runtime.Active,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := built.store.AppendEvent(runtime.EngineeringEvent{
+		SchemaVersion: runtime.SchemaVersion, ID: runID + "-created", RunID: runID,
+		Type: runtime.EventRunCreated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := built.engine(runtime.RepositoryTarget{
+		Identity: "zenchron/seeded", Remote: "https://github.com/zenchron/seeded.git",
+		DefaultBranch: watchedDefaultBranch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := engine.Reconcile(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := built.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An operation left at attempt zero was never leased: the run planned its
+	// work and was refused the slot. Anything past that means it held one.
+	for _, operation := range operations {
+		if operation.Attempt > 0 {
+			return outcome, true
+		}
+	}
+	return outcome, false
+}
+
+// TestTheConfiguredCeilingIsWhatTheSchedulerEnforces is #167.
+//
+// The supervisor received `supervisor.max_concurrent_runs` and the engines it
+// drives runs with did not, so the scheduler fell back to the M0 default of
+// one. Two issues submitted together were admitted, given distinct runs,
+// distinct workspaces and distinct branches, and then executed strictly one
+// after the other: the second observed its own issue two seconds after the
+// first reached goal_state_reached.
+//
+// The assertion is deliberately not "the ceiling reached the scheduler". A test
+// comparing a configured number to a stored one passes on a runtime that still
+// serialises everything, which is exactly the state this defect left behind.
+// What is asserted is occupancy: under a ceiling of two, a run acquires an
+// operation while another run already holds one, and under a ceiling of one the
+// same run is refused.
+func TestTheConfiguredCeilingIsWhatTheSchedulerEnforces(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		ceiling  int
+		held     int
+		acquires bool
+	}{
+		{name: "two runs work at once under a ceiling of two", ceiling: 2, held: 1, acquires: true},
+		{name: "a third is refused under a ceiling of two", ceiling: 2, held: 2, acquires: false},
+		{name: "a ceiling of one still admits the first", ceiling: 1, held: 0, acquires: true},
+		{name: "a ceiling of one serialises the second", ceiling: 1, held: 1, acquires: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			outcome, acquired := concurrencyWorkspace(t, testCase.ceiling, testCase.held)
+			if acquired != testCase.acquires {
+				t.Fatalf("with %d of %d slots already held the run acquired=%v, want %v (settled %s/%s)",
+					testCase.held, testCase.ceiling, acquired, testCase.acquires, outcome.Disposition, outcome.Reason)
+			}
+			// The refusal an operator actually sees. A run that was not
+			// admitted must say so as a wait, not as a failure of its own.
+			if !testCase.acquires && (outcome.Disposition != runtime.Waiting || outcome.Reason != "operation_unavailable") {
+				t.Fatalf("a run refused the slot settled %s/%s", outcome.Disposition, outcome.Reason)
+			}
+			if testCase.acquires && outcome.Reason == "operation_unavailable" {
+				t.Fatalf("a run inside the ceiling was told no operation was available")
+			}
+		})
 	}
 }

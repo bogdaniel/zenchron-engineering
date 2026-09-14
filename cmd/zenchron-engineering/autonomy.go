@@ -750,6 +750,22 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
+		// The scheduler is the one place the ceiling is ENFORCED: its
+		// acquisition counts every run holding an operation across the whole
+		// durable store, which is what makes the bound hold between processes
+		// as well as inside one. Everything else that knows the number - the
+		// supervisor's goroutine bound, the watch capacity probe, the fleet
+		// view - is a cheap early exit in front of it.
+		//
+		// Which is why leaving this unset was not a missing second enforcer but
+		// a missing number: the supervisor admitted two runs against the
+		// configured ceiling while the scheduler refused the second against the
+		// default of one, and the operator saw "Workers: 2 / 2 active" over
+		// work that was serialising. It comes from maxConcurrentRuns() for the
+		// same reason the supervisor and the fleet view do - one resolution of
+		// the operator's configuration, so advertised and enforced cannot be
+		// different numbers.
+		OperatorMaxConcurrentRuns: c.maxConcurrentRuns(),
 	})
 }
 
