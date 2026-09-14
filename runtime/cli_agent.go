@@ -953,7 +953,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// a supervisor shutdown through ctx.Err() alone, and the two mean opposite
 	// things to the run.
 	parent := ctx
-	if limit := request.Budgets.WallLimit; limit > 0 {
+	// THE INSTANT WINS. When the runtime carried an absolute deadline, the
+	// process is bounded by exactly that, so what stops it and what is recorded
+	// as its authority are the same fact. Re-deriving "now plus a duration"
+	// here is what let a retry run under one deadline while the operation's
+	// authority had ended at another.
+	if request.Deadline != nil {
+		bounded, cancel := context.WithDeadline(ctx, *request.Deadline)
+		defer cancel()
+		ctx = bounded
+	} else if limit := request.Budgets.WallLimit; limit > 0 {
 		bounded, cancel := context.WithTimeout(ctx, limit)
 		defer cancel()
 		ctx = bounded

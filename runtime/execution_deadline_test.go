@@ -51,27 +51,25 @@ func plannedExecution(t *testing.T, s Scheduler, budget time.Duration) RunOperat
 	return started
 }
 
-// THE PRIMITIVE. One operation, one instant, derived once.
-func TestAnExecutionOperationCarriesOneDurableDeadline(t *testing.T) {
+// THE PRIMITIVE. One cumulative active-execution budget per operation.
+func TestAnExecutionOperationSpendsOneCumulativeBudget(t *testing.T) {
 	scheduler, clock := deadlineScheduler(t)
 	op := plannedExecution(t, scheduler, 30*time.Minute)
-	if op.Deadline == nil {
-		t.Fatal("a wall-budgeted operation was planned with no deadline")
+	if op.ActiveSince == nil || op.Deadline == nil {
+		t.Fatal("a started operation is not active and carries no attempt deadline")
 	}
-	want := op.StartedAt.Add(30 * time.Minute)
-	if !op.Deadline.Equal(want) {
-		t.Fatalf("deadline %s, want execution start plus the budget %s", op.Deadline, want)
+	if want := op.ActiveSince.Add(30 * time.Minute); !op.Deadline.Equal(want) {
+		t.Fatalf("attempt deadline %s, want the whole budget from execution start %s", op.Deadline, want)
 	}
-	// An operation with no budget has no deadline to invent.
+	// An unbudgeted operation has no authority to run out of.
 	none, _, err := scheduler.Plan(RunOperation{RunID: "run-2", Kind: OpExecutionInvoke, IdempotencyKey: "unbudgeted"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if none.Deadline != nil {
-		t.Fatalf("an unbudgeted operation invented a deadline: %s", none.Deadline)
+	if OperationExpired(none, clock.Now()) || OperationRemaining(none, clock.Now()) != 0 {
+		t.Fatal("an unbudgeted operation invented a limit")
 	}
-	// WAITING IS NOT EXECUTING. An operation that has been planned but has not
-	// begun burns nothing, however long the run is parked.
+	// WAITING IS NOT EXECUTING: an operation that never started burns nothing.
 	parked, _, err := scheduler.Plan(RunOperation{
 		RunID: "run-3", Kind: OpExecutionInvoke, IdempotencyKey: "parked",
 		MaxAttempts: 3, WallBudget: 30 * time.Minute,
@@ -80,95 +78,191 @@ func TestAnExecutionOperationCarriesOneDurableDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.advance(4 * time.Hour)
-	if parked.Deadline != nil {
-		t.Fatalf("an operation that never executed was given a deadline: %s", parked.Deadline)
-	}
-	// And a later attempt of the operation that DID start inherits the instant
-	// rather than minting another envelope.
-	retried, err := scheduler.Finish(op.ID, OperationFailed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retried.Deadline == nil || !retried.Deadline.Equal(want) {
-		t.Fatalf("finishing moved the deadline to %v, want %s", retried.Deadline, want)
+	if OperationExpired(parked, clock.Now()) {
+		t.Fatal("an operation that never executed ran out of execution authority")
 	}
 }
 
-// RECOVERY IS THE CASE THAT MATTERS. A controller that restarts mid-execution
-// must not hand the same work another full envelope.
-func TestRecoveryPreservesTheOriginalDeadline(t *testing.T) {
+// PARTIAL EXECUTION THEN RETRY. The second attempt inherits the remainder.
+func TestARetryInheritsTheRemainderRatherThanAFreshBudget(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	clock.advance(20 * time.Minute)
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := OperationRemaining(second, clock.Now()); got != 10*time.Minute {
+		t.Fatalf("the second attempt received %s, want the 10m the first did not spend", got)
+	}
+	if want := clock.Now().Add(10 * time.Minute); !second.Deadline.Equal(want) {
+		t.Fatalf("attempt deadline %s, want %s", second.Deadline, want)
+	}
+}
+
+// PARTIAL EXECUTION, A FOUR-HOUR EXTERNAL WAIT, THEN RESUME.
+//
+// This is the case an immutable wall-clock instant cannot express. Wall-clock
+// time from the first start to the resume is 4h5m against a 30m budget; active
+// execution is 5m. The operation must resume with 25m.
+func TestAnExternalWaitDoesNotConsumeExecutionAuthority(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	clock.advance(5 * time.Minute)
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	// The provider declined at its account boundary: no work happened, so the
+	// attempt and its budget are given back.
+	if _, err := scheduler.RestoreAttempt(op.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(4 * time.Hour)
+
+	waiting, _, ok, err := scheduler.Store.Operation(op.ID)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if OperationExpired(waiting, clock.Now()) {
+		t.Fatal("a four-hour external wait consumed the execution budget")
+	}
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := OperationRemaining(resumed, clock.Now()); got != 30*time.Minute {
+		t.Fatalf("the resumed attempt received %s; a refusal that ran no work costs nothing", got)
+	}
+}
+
+// The same, without the attempt being restored: work DID happen, so its 5m is
+// charged and only that.
+func TestOnlyExecutedTimeIsCharged(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	clock.advance(5 * time.Minute)
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(4 * time.Hour)
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := OperationRemaining(resumed, clock.Now()); got != 25*time.Minute {
+		t.Fatalf("the resumed attempt received %s, want 25m: 5m executed, 4h waited", got)
+	}
+}
+
+// CONTROLLER RESTART MID-ATTEMPT. Same remaining authority, same instant.
+func TestRecoveryPreservesTheAttemptDeadline(t *testing.T) {
 	store := NewMemoryOperationStore()
 	clock := &steppingClock{at: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
 	first := Scheduler{Store: store, Clock: clock, Owner: "owner-a", LeaseDuration: time.Minute}
 	op := plannedExecution(t, first, 30*time.Minute)
 	if op.Deadline == nil {
-		t.Fatal("a started operation carries no deadline")
+		t.Fatal("a started operation carries no attempt deadline")
 	}
 	original := *op.Deadline
 
-	// 25 of the 30 minutes are spent, then the controller is replaced: a new
-	// scheduler, a new owner, the same durable store.
 	clock.advance(25 * time.Minute)
+	before := OperationRemaining(op, clock.Now())
+
+	// A different controller, a different owner, the same durable store.
 	recovered := Scheduler{Store: store, Clock: clock, Owner: "owner-b", LeaseDuration: time.Minute}
-	rehydrated, _, err := recovered.Plan(RunOperation{
-		RunID: "run-1", Kind: OpExecutionInvoke, IdempotencyKey: "invoke-1",
-		MaxAttempts: 3, WallBudget: 30 * time.Minute,
-	})
-	if err != nil {
+	rehydrated, _, ok, err := recovered.Store.Operation(op.ID)
+	if err != nil || !ok {
 		t.Fatal(err)
 	}
 	if rehydrated.Deadline == nil || !rehydrated.Deadline.Equal(original) {
 		t.Fatalf("recovery minted a fresh deadline %v, want the original %s", rehydrated.Deadline, original)
 	}
-	if remaining := OperationRemaining(rehydrated, clock.Now()); remaining != 5*time.Minute {
-		t.Fatalf("a recovered operation has %s of authority left, want the 5m it had not spent", remaining)
+	if after := OperationRemaining(rehydrated, clock.Now()); after != before || after != 5*time.Minute {
+		t.Fatalf("remaining authority moved across recovery: %s before, %s after", before, after)
 	}
-	// Past the instant, nothing remains and the operation is out of time.
 	clock.advance(6 * time.Minute)
-	if remaining := OperationRemaining(rehydrated, clock.Now()); remaining != 0 {
-		t.Fatalf("an expired operation reports %s remaining", remaining)
-	}
 	if !OperationExpired(rehydrated, clock.Now()) {
-		t.Fatal("an operation past its deadline is not expired")
+		t.Fatal("an attempt past its authority is not expired")
 	}
 }
 
-// THE BOUNDARY, both directions.
-func TestAProviderIsBoundedByWhatRemainsOfItsDeadline(t *testing.T) {
-	for name, tc := range map[string]struct {
-		wall   time.Duration
-		finish time.Duration
-		bound  bool
-	}{
-		"finishes before the deadline": {wall: 2 * time.Second, finish: 100 * time.Millisecond, bound: false},
-		"crosses the deadline":         {wall: 300 * time.Millisecond, finish: 30 * time.Second, bound: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			provider, request, fake := agentFixture(t, AgentKindCodexCLI)
-			fake.block = tc.bound
-			request.Budgets = ProviderBudget{WallLimit: tc.wall}
-			start := time.Now()
-			result, err := provider.Execute(context.Background(), request)
-			elapsed := time.Since(start)
-			if elapsed > tc.wall+5*time.Second {
-				t.Fatalf("the invocation ran %s against a %s bound", elapsed, tc.wall)
-			}
-			if !tc.bound {
-				if err != nil || result.Outcome != Succeeded {
-					t.Fatalf("a provider that finished in time did not succeed: %v %v", result.Outcome, err)
-				}
-				return
-			}
-			if result.Outcome == Succeeded {
-				t.Fatal("a provider stopped at its bound reported success")
-			}
-			if result.Invocation == nil || result.Invocation.TerminationCause != "deadline_reached" {
-				t.Fatalf("the termination cause was not recorded as the deadline: %+v", result.Invocation)
-			}
-			if result.Invocation.Deadline == nil || result.Invocation.Elapsed <= 0 {
-				t.Fatalf("the durable record does not expose the deadline and elapsed time: %+v", result.Invocation)
-			}
-		})
+// THE BOUNDARY, both directions, and the identity that matters: what bounds
+// the process is the operation's remaining authority, and what is RECORDED as
+// its authority is that same instant.
+func TestAProviderIsBoundedByTheOperationsRemainingAuthority(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 2*time.Second)
+	// Most of the budget is already spent by an earlier attempt.
+	clock.advance(1700 * time.Millisecond)
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := OperationRemaining(second, clock.Now()); got != 300*time.Millisecond {
+		t.Fatalf("the second attempt has %s of authority, want 300ms", got)
+	}
+
+	// The invocation is handed that instant, not a fresh full duration.
+	provider, request, fake := agentFixture(t, AgentKindCodexCLI)
+	fake.block = true
+	request.Budgets = ProviderBudget{WallLimit: OperationRemaining(second, clock.Now())}
+	request.Deadline = second.Deadline
+
+	start := time.Now()
+	// An invocation stopped at its bound reports the stop; the error is the
+	// bound being reached, not a harness failure.
+	result, _ := provider.Execute(context.Background(), request)
+	elapsed := time.Since(start)
+	if elapsed > 3*time.Second {
+		t.Fatalf("the invocation ran %s against 300ms of remaining authority", elapsed)
+	}
+	if result.Outcome == Succeeded {
+		t.Fatal("a provider stopped at its bound reported success")
+	}
+	if result.Invocation == nil {
+		t.Fatal("no provenance was recorded")
+	}
+	// PROVENANCE EQUALS LIFECYCLE AUTHORITY. Not approximately, and not
+	// recomputed: the same instant the operation carries.
+	if result.Invocation.Deadline == nil || !result.Invocation.Deadline.Equal(*second.Deadline) {
+		t.Fatalf("recorded deadline %v is not the operation's authority %s",
+			result.Invocation.Deadline, second.Deadline)
+	}
+	if result.Invocation.TerminationCause != "deadline_reached" {
+		t.Fatalf("termination cause %q, want deadline_reached", result.Invocation.TerminationCause)
+	}
+}
+
+// A provider that finishes inside its authority succeeds.
+func TestAProviderFinishingWithinItsAuthoritySucceeds(t *testing.T) {
+	provider, request, _ := agentFixture(t, AgentKindCodexCLI)
+	deadline := time.Now().Add(5 * time.Second)
+	request.Budgets = ProviderBudget{WallLimit: 5 * time.Second}
+	request.Deadline = &deadline
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil || result.Outcome != Succeeded {
+		t.Fatalf("a provider that finished in time did not succeed: %v %v", result.Outcome, err)
+	}
+	if result.Invocation == nil || result.Invocation.OverranDeadline {
+		t.Fatalf("an invocation that finished in time was recorded as overrunning: %+v", result.Invocation)
 	}
 }
 

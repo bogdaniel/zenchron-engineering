@@ -125,7 +125,16 @@ type ExecutionRequest struct {
 	// mounts that location noexec. The candidate then failed a check no
 	// candidate could pass.
 	ScratchDir string
-	Budgets    ProviderBudget
+	// Deadline is the ABSOLUTE instant this invocation's authority ends, taken
+	// from the operation's durable remaining execution budget.
+	//
+	// It is carried as an instant rather than left to be re-derived from a
+	// duration so that what bounds the process and what is recorded as its
+	// authority are ONE fact. Two arithmetic results computed at different
+	// moments can disagree, and a provenance record that disagrees with the
+	// bound is worse than none: it reads as forensic truth.
+	Deadline *time.Time
+	Budgets  ProviderBudget
 }
 
 // InvocationPurpose is deliberately operational rather than a provider role.

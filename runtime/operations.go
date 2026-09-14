@@ -691,6 +691,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// envelope again. An operation with no deadline falls back to the run
 		// budget, which is what it had before deadlines existed.
 		Budgets: ProviderBudget{WallLimit: executionWallBound(state, operation)},
+		// The same authority as an instant, so the process bound and the
+		// provenance record cannot describe different realities.
+		Deadline: operation.Deadline,
 	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
@@ -1082,28 +1085,19 @@ func (s *runState) findings() []Finding {
 	return findings
 }
 
-// executionWallBound is how long THIS invocation may run.
+// executionWallBound is how long THIS invocation may run: the operation's
+// REMAINING active-execution authority.
 //
-// It is the run's effective wall budget, NOT the time remaining to the
-// operation's deadline, and that is a deliberate limit on this repair.
-//
-// Deriving the bound from the remaining deadline is the obviously right shape -
-// a provider handed the full duration on every attempt has total authority of
-// attempts x budget rather than budget. It is not done here because a deadline
-// is an instant and this runtime's wall accounting deliberately EXCLUDES
-// external wait: a run parked on an unavailable provider account, an operator
-// decision or a review is not executing, and its budget does not shrink while
-// it waits. Subtracting wall-clock time from an instant reintroduces exactly
-// the confusion that made a pull request awaiting review look like a runaway
-// run - proven here by the provider-account wait, which this returned to a
-// terminal failure on its second tick.
-//
-// Making remaining authority wait-aware is a real change to that accounting and
-// belongs in its own repair. What the deadline governs today is ADMISSION - a
-// result produced after it is not governed output - and the durable record of
-// what authority an invocation actually had.
-func executionWallBound(state *runState, _ RunOperation) time.Duration {
-	return state.budgets().WallLimit
+// An earlier attempt at this subtracted wall-clock time from a fixed instant,
+// which charged external waiting to the execution budget and turned the
+// provider-account wait into a terminal failure on its second tick. Remaining
+// authority is wait-aware because the counter it comes from only advances while
+// an attempt is actually executing.
+func executionWallBound(state *runState, operation RunOperation) time.Duration {
+	if operation.WallBudget <= 0 {
+		return state.budgets().WallLimit
+	}
+	return OperationRemaining(operation, state.rt.deps.Clock.Now())
 }
 
 // assuranceFinding renders ONE failed verification for the producer that has to
