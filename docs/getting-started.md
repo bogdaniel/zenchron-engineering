@@ -63,6 +63,11 @@ mkdir -p ~/.zenchron/state ~/.zenchron/modcache
 chmod 700 ~/.zenchron/state
 ```
 
+That leaves the module cache created but empty, which doctor reports as a `FAIL`
+rather than a warning: verification is offline and downloads nothing, so it is
+operator-provisioned material. [troubleshooting.md](troubleshooting.md#provisioning-the-dependency-cache)
+has the one command that fills it with the pinned image.
+
 ## A minimal working configuration
 
 Write this to `<user config dir>/zenchron/config.json`. It configures one
