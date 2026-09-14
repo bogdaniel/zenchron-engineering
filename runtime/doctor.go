@@ -992,7 +992,9 @@ func doctorSeparatedIdentities(ctx context.Context, in DoctorInput, id string) D
 	case permission == PermissionUnresolved:
 		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
 			" - the two accounts are distinct, so the runtime's own comments are refused by identity, but your permission on %s could not be resolved and "+
-				"an unresolved permission is never an admission. Your reviews will not reach a worker until it answers", in.Repository.Identity))
+				"an unresolved permission is never an admission. Your reviews will not reach a worker until it answers. If the runtime publishes as a "+
+				"GitHub App, the likely cause is that the App's repository permissions do not cover the collaborator-permission lookup: widen them, "+
+				"approve the change on the installation, and run this again", in.Repository.Identity))
 	case !permission.AtLeast(threshold):
 		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
 			" - the two accounts are distinct, so the runtime's own comments are refused by identity, but your login holds %q where feedback admission "+

@@ -259,7 +259,18 @@ it is an authority grant, and the runtime is the thing being granted.
    admission, so a review is refused rather than admitted, and `autonomy doctor`
    reports `github.publication_identity` as WARN saying your permission could
    not be resolved. If you hit that, widen the App's permissions until doctor
-   names your permission.
+   names your permission. **Administration (read-only)** is the grant to try
+   first: the endpoint is a collaborator endpoint, and administration read is
+   what covers collaborator access on a fine-grained token. Add it, then read
+   the next paragraph before you re-run doctor.
+
+   Widening an **already installed** App is not a one-step change. Editing the
+   permissions raises a request that the installation owner has to approve —
+   GitHub mails you, and the new grant does nothing until you accept it on the
+   installation's own settings page. An operator who widens, re-runs doctor,
+   sees the same WARN and does not know that will conclude the advice failed
+   when the only thing missing is the approval. Approve first, then re-run
+   doctor.
 
 3. **Install it on the repository.** The App's *Install App* tab → your account
    → *Only select repositories* → the repository you run against. The
