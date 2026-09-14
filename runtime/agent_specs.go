@@ -1,5 +1,7 @@
 package runtime
 
+import "strings"
+
 // The native-CLI catalogue: one spec per supported coding CLI.
 //
 // This file is where provider-specific knowledge is allowed to live, and it is
@@ -165,6 +167,27 @@ var claudeSpec = cliAgentSpec{
 		if i.Model() != "" {
 			args = append(args, "--model", i.Model())
 		}
+		// THE TWO NARROW GRANTS, and nothing else.
+		//
+		// Claude Code's sandbox confines tool access to the directories it was
+		// given and gates command execution behind approval. Both defaults are
+		// correct and stay on: `--safe-mode` is unchanged and the permission
+		// mode is unchanged. What the first live dogfood proved is that a
+		// reviewer under those defaults can neither write the typed result the
+		// runtime demands - the slot is deliberately outside the candidate
+		// workspace - nor run the `go` commands its contract obliges it to run,
+		// not even `go version`.
+		//
+		// --add-dir names exactly the one runtime-owned directory the result
+		// goes in. --allowedTools names exactly the executables the contract
+		// already requires. Neither is a bypass, neither is arbitrary shell
+		// authority, and a stage that needs neither is given neither.
+		if i.ResultDir != "" {
+			args = append(args, "--add-dir", i.ResultDir)
+		}
+		if allowed := claudeAllowedTools(i); len(allowed) > 0 {
+			args = append(args, "--allowedTools", strings.Join(allowed, " "))
+		}
 		return append(args, i.Prompt)
 	},
 	// Claude Code's `plan` permission mode. It is the session mode in which the
@@ -302,4 +325,29 @@ var qwenSpec = cliAgentSpec{
 			return append(args, i.Prompt)
 		},
 	},
+}
+
+// claudeAllowedTools is the least-privilege tool grant for one invocation.
+//
+// It is built from facts the RUNTIME owns - whether this stage emits a typed
+// result, and which executables its contract obliges it to run - never from
+// anything a repository or a model can influence. An invocation that needs
+// nothing gets no grant at all, which leaves Claude Code's defaults exactly as
+// they were.
+//
+// Bash grants are per-executable rather than a blanket `Bash`, so allowing the
+// worker to run `go test` does not also allow it to run anything else.
+func claudeAllowedTools(i cliInvocation) []string {
+	var allowed []string
+	if i.ResultDir != "" {
+		// The typed result is WRITTEN, which needs the Write tool; --add-dir
+		// above is what bounds where it may be written to.
+		allowed = append(allowed, "Write")
+	}
+	for _, tool := range i.RequiredTools {
+		if tool = strings.TrimSpace(tool); tool != "" {
+			allowed = append(allowed, "Bash("+tool+" *)")
+		}
+	}
+	return allowed
 }

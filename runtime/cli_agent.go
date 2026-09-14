@@ -123,6 +123,23 @@ type cliInvocation struct {
 	// Bypass reports that the unsafe permission mode was explicitly authorized
 	// AND explicitly requested for this invocation.
 	Bypass bool
+	// ResultDir is the runtime-owned directory holding this invocation's typed
+	// result slot, or empty when the stage emits no typed result.
+	//
+	// It exists because the slot is deliberately OUTSIDE the candidate
+	// workspace - that placement is what stops repository content pre-seeding
+	// or predicting it - and a sandboxed CLI confines writes to the directories
+	// it was given. The first live reviewer completed its review, reached a
+	// BLOCK verdict, and could not write it: "requested permissions … but you
+	// haven't granted it yet". The runtime therefore names that ONE directory
+	// to the provider, and nothing else about the sandbox changes.
+	ResultDir string
+	// RequiredTools are the executables this invocation's contract obliges the
+	// worker to run. A provider whose sandbox gates command execution is given
+	// exactly these and no more: resolving a binary on PATH is not permission
+	// to execute it, which is what "requires approval - even `go version`"
+	// meant in the first live dogfood.
+	RequiredTools []string
 }
 
 // Model is the model this invocation asks for: the profile's preference where
@@ -273,6 +290,13 @@ type CLIAgentProvider struct {
 	// declares a search path, that path is what the worker gets; when it
 	// declares none, the supervisor's is inherited exactly as before.
 	Toolchain ToolchainConfig
+	// DependencyCacheDir is the operator's warmed module cache - the same one
+	// the pinned assurance image mounts read-only. It is brokered to the worker
+	// so a worker obliged to run `go test` can actually resolve dependencies
+	// offline, which is what the first live dogfood could not do: the verifier
+	// had the cache and the producer did not, so `go test` stopped during
+	// dependency loading with the network correctly denied.
+	DependencyCacheDir string
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -396,6 +420,7 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 		searchPath = os.Getenv("PATH")
 	}
 	env := []string{"PATH=" + searchPath}
+	env = append(env, p.toolchainEnv()...)
 	if home == "" {
 		return env
 	}
@@ -836,6 +861,12 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Agent: p.Agent, Home: home, CandidateDir: request.CandidateDir,
 		Prompt: agentPrompt(request), Bypass: p.PermissionBypass,
 		ModelPreference: request.ModelPreference,
+		// The two NARROW GRANTS this invocation needs to do its job: the one
+		// directory its typed result goes in, and the executables its contract
+		// obliges it to run. Both are runtime-owned facts; neither widens the
+		// sandbox beyond them.
+		ResultDir:     resultDirFor(request.ReviewerResultPath),
+		RequiredTools: p.Toolchain.RequiredTools,
 	}
 	// The invocation MODE decides which argument vector is built, and a
 	// non-mutating request is refused outright when this adapter has no
@@ -1013,4 +1044,45 @@ func classifyAgentFailure(spec cliAgentSpec, stdout, stderr []byte) FailureClass
 		}
 	}
 	return ClassifyProviderFailure(stdout, stderr)
+}
+
+// resultDirFor is the directory a typed result slot lives in, or empty when the
+// invocation emits no typed result.
+//
+// The DIRECTORY is granted rather than the file, because a sandbox grants
+// access to directories and because the runtime creates the slot inside it. It
+// is still outside the candidate workspace, still named by the exact attempt,
+// and still emptied before the invocation - so widening access to it grants the
+// worker exactly one place to answer in, and no way to reach anything else.
+func resultDirFor(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return filepath.Dir(path)
+}
+
+// toolchainEnv is the deliberate, reproducible execution environment a brokered
+// worker is given, mirroring the posture the pinned assurance image already
+// uses rather than inheriting an ambient developer shell.
+//
+// It is emitted only when the operator declared `go` among the required tools,
+// so a repository with no Go obligations gets nothing, and only when a
+// dependency cache is configured, because pointing a worker at a cache that
+// does not exist would replace one unattemptable obligation with another.
+//
+// The values are the container's own: an offline proxy, a pinned toolchain and
+// a read-only module mode. A worker therefore resolves exactly what the
+// verifier resolves, and cannot reach the network to acquire anything else.
+func (p CLIAgentProvider) toolchainEnv() []string {
+	cache := strings.TrimSpace(p.DependencyCacheDir)
+	if cache == "" || !p.Toolchain.requires("go") {
+		return nil
+	}
+	return []string{
+		"GOMODCACHE=" + cache,
+		"GOTOOLCHAIN=local",
+		"GOPROXY=off",
+		"GOSUMDB=off",
+		"GOFLAGS=-mod=readonly",
+	}
 }

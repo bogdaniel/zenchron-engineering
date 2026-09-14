@@ -123,6 +123,16 @@ type ToolchainConfig struct {
 	RequiredTools []string `json:"required_tools,omitempty"`
 }
 
+// requires reports whether one executable is among the declared required tools.
+func (t ToolchainConfig) requires(tool string) bool {
+	for _, declared := range t.RequiredTools {
+		if strings.TrimSpace(declared) == tool {
+			return true
+		}
+	}
+	return false
+}
+
 // Declared reports whether the operator stated a toolchain at all.
 func (t ToolchainConfig) Declared() bool { return len(t.Path) > 0 || len(t.RequiredTools) > 0 }
 

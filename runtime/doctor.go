@@ -1219,8 +1219,14 @@ func doctorWorkerToolchain(in DoctorInput) DoctorCheck {
 			"the brokered worker execution environment is %s; no required tools are declared, so nothing is refused before dispatch",
 			in.Toolchain.SearchPath()))
 	}
+	// WHAT THIS PROVES, stated exactly. Resolution on the brokered path is not
+	// permission to execute: the first live dogfood had this check PASS while
+	// Claude Code refused every `go` command through its own permission layer,
+	// `go version` included. A PASS that implied readiness was asserting more
+	// than it had tested, so it now names resolution and points at the
+	// per-agent grant that turns resolution into attemptability.
 	return pass(doctorGroupAgents, id, fmt.Sprintf(
-		"the brokered worker execution environment resolves %s on %s, so a worker can attempt the toolchain obligations its contract carries",
+		"the brokered worker execution environment RESOLVES %s on %s. Resolution is not permission: a provider that gates command execution is additionally granted exactly these executables for the invocation, which each agent check above reports",
 		strings.Join(in.Toolchain.RequiredTools, ", "), in.Toolchain.SearchPath()))
 }
 
