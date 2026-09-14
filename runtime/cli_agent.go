@@ -772,6 +772,22 @@ type InvocationProvenance struct {
 	WorkspaceInstructionsSuppressed bool     `json:"workspace_instructions_suppressed"`
 	Argv                            []string `json:"argv,omitempty"`
 	PromptSHA256                    string   `json:"prompt_sha256,omitempty"`
+
+	// THE AUTHORITY THIS INVOCATION ACTUALLY RAN UNDER, and what it did with
+	// it. None of these authorize anything; they exist so that an invocation
+	// which outlives its bound explains itself from the journal instead of
+	// costing a forensic reconstruction of timestamps and transcripts.
+	Deadline        *time.Time    `json:"execution_deadline,omitempty"`
+	StartedAt       *time.Time    `json:"execution_started_at,omitempty"`
+	CompletedAt     *time.Time    `json:"execution_completed_at,omitempty"`
+	Elapsed         time.Duration `json:"observed_wall_elapsed,omitempty"`
+	OverranDeadline bool          `json:"overran_deadline,omitempty"`
+	// TerminationCause is why the process stopped: it returned on its own, or
+	// the runtime ended it at the deadline.
+	TerminationCause string `json:"termination_cause,omitempty"`
+	// ProcessID is the pid - and, because every bounded process is started with
+	// Setpgid, the process-GROUP id - the runtime owned.
+	ProcessID int `json:"process_id,omitempty"`
 }
 
 // maxProvenanceArgs bounds the recorded vector. Every native CLI the runtime
@@ -942,7 +958,23 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	startedAt := time.Now()
 	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, p.env(spec, home), p.grace())
+	completedAt := time.Now()
+	// WHAT THIS INVOCATION ACTUALLY DID WITH ITS AUTHORITY. Recorded whether it
+	// respected the bound or not: the case worth explaining later is precisely
+	// the one where nothing looked wrong.
+	provenance.StartedAt, provenance.CompletedAt = &startedAt, &completedAt
+	provenance.Elapsed = completedAt.Sub(startedAt)
+	provenance.ProcessID = output.ProcessID
+	provenance.TerminationCause = "provider_returned"
+	if deadline, bounded := ctx.Deadline(); bounded {
+		provenance.Deadline = &deadline
+		provenance.OverranDeadline = completedAt.After(deadline)
+	}
+	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		provenance.TerminationCause = "deadline_reached"
+	}
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(p.Agent.ID, request.AttemptRef(), output.Stdout, output.Stderr)
 	if artifactErr != nil {
 		return ExecutionResult{}, artifactErr

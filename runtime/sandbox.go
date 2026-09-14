@@ -33,6 +33,12 @@ var ErrSandboxUnavailable = fmt.Errorf("required sandbox capability is unavailab
 type CommandOutput struct {
 	Stdout, Stderr []byte
 	ExitCode       int
+	// ProcessID is the pid of the process this runtime started, which is also
+	// its process-GROUP id: runBoundedProcess starts every bounded process with
+	// Setpgid, so the child leads the group the runtime later signals. It is
+	// recorded so an overrun can be traced to the process that caused it rather
+	// than reconstructed from wall-clock guesses.
+	ProcessID int
 }
 type CommandExecutor interface {
 	LookPath(string) error
@@ -127,6 +133,11 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	cmd.Stdout, cmd.Stderr = out, errOut
 	err := runBoundedProcess(ctx, cmd, grace)
 	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
+	// Read after the run: Start happens inside, and a process that never
+	// started truthfully reports no pid.
+	if cmd.Process != nil {
+		result.ProcessID = cmd.Process.Pid
+	}
 	if exit, ok := err.(*exec.ExitError); ok {
 		result.ExitCode = exit.ExitCode()
 	}

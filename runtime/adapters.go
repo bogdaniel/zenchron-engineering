@@ -600,6 +600,16 @@ const (
 	// under the ordinary execution attempt budget instead of a counter of their
 	// own.
 	FailureExecutionIncomplete FailureClass = "execution_incomplete"
+
+	// FailureExecutionDeadlineExceeded is a provider that returned AFTER its
+	// durable execution deadline, whatever the adapter reported.
+	//
+	// It is terminal rather than retryable on purpose: the deadline has passed,
+	// so a retry has no remaining authority to spend and would be an immediate
+	// second expiry. It is also not a statement about the work - the candidate
+	// may be perfect - it is a statement that the authority to produce it had
+	// already ended.
+	FailureExecutionDeadlineExceeded FailureClass = "execution_deadline_exceeded"
 	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
 	// being there: the configured image resolves no toolchain, the
 	// operator-provisioned dependency cache is missing or empty, or the exact
@@ -709,6 +719,9 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
+	// Stopping is the point: there is no time left to route anywhere.
+	case FailureExecutionDeadlineExceeded:
+		return RouteStop
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown:

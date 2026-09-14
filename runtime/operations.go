@@ -685,7 +685,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Purpose:             purpose,
 		Findings:            findings,
 		Feedback:            feedback,
-		Budgets:             ProviderBudget{WallLimit: state.budgets().WallLimit},
+		// WHAT IS LEFT, not what was configured. The bound comes from the
+		// operation's durable deadline, so a second attempt inherits the time
+		// the first one did not spend instead of being handed the whole
+		// envelope again. An operation with no deadline falls back to the run
+		// budget, which is what it had before deadlines existed.
+		Budgets: ProviderBudget{WallLimit: executionWallBound(state, operation)},
 	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
@@ -726,7 +731,22 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// by the lifecycle. Its stage stays unsettled, the run retries or
 	// terminalizes under its existing bounds, and the next successful invocation
 	// writes into a freshly emptied slot.
-	if execErr == nil && result.Failure == nil {
+	// AUTHORITY ENDS AT THE DEADLINE, WHATEVER THE ADAPTER REPORTS.
+	//
+	// A provider that ignored cancellation, outlived its bound and then
+	// returned success is an unfinished invocation contributing a finished
+	// answer - the same law the gate below already enforces for a cancelled or
+	// failed one. It is checked separately because it is the case where nothing
+	// went wrong as far as the adapter can see, which is exactly why a timing
+	// defect would otherwise become an authority defect: a result produced
+	// without authority would be admitted as governed candidate output.
+	//
+	// The candidate.changed observation above is still journalled. It is true,
+	// and an operator reading the run should see that a producer mutated the
+	// workspace. What does not happen is execution.completed, which is what
+	// makes a subject eligible to become a committed candidate.
+	expired := OperationExpired(operation, r.deps.Clock.Now())
+	if execErr == nil && result.Failure == nil && !expired {
 		// Admission happens in the RUNTIME, against the frozen assignment -
 		// never in the adapter, which only read a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
@@ -792,6 +812,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 	}
 	produced := effect{result: executionRecord{mutationResult: record, PriorContext: result.PriorContext}, state: Succeeded, events: events}
+	// An invocation that outlived its deadline FAILS the operation, even though
+	// the adapter reported success and the workspace may hold good work. The
+	// events assembled above are carried: what the producer did is true and is
+	// journalled. What is refused is calling it a completed execution.
+	if expired && execErr == nil && result.Failure == nil {
+		record.FailureClass = FailureExecutionDeadlineExceeded
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic: r.executionDiagnostic(execStageProviderResult, FailureExecutionDeadlineExceeded, result,
+					fmt.Errorf("the provider returned after its execution deadline %s", operation.Deadline.UTC().Format(time.RFC3339))),
+			},
+		}
+	}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
 		if result.Failure != nil {
@@ -1043,6 +1080,30 @@ func (s *runState) findings() []Finding {
 		}
 	}
 	return findings
+}
+
+// executionWallBound is how long THIS invocation may run.
+//
+// It is the run's effective wall budget, NOT the time remaining to the
+// operation's deadline, and that is a deliberate limit on this repair.
+//
+// Deriving the bound from the remaining deadline is the obviously right shape -
+// a provider handed the full duration on every attempt has total authority of
+// attempts x budget rather than budget. It is not done here because a deadline
+// is an instant and this runtime's wall accounting deliberately EXCLUDES
+// external wait: a run parked on an unavailable provider account, an operator
+// decision or a review is not executing, and its budget does not shrink while
+// it waits. Subtracting wall-clock time from an instant reintroduces exactly
+// the confusion that made a pull request awaiting review look like a runaway
+// run - proven here by the provider-account wait, which this returned to a
+// terminal failure on its second tick.
+//
+// Making remaining authority wait-aware is a real change to that accounting and
+// belongs in its own repair. What the deadline governs today is ADMISSION - a
+// result produced after it is not governed output - and the durable record of
+// what authority an invocation actually had.
+func executionWallBound(state *runState, _ RunOperation) time.Duration {
+	return state.budgets().WallLimit
 }
 
 // assuranceFinding renders ONE failed verification for the producer that has to

@@ -1518,7 +1518,11 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		IdempotencyKey:   operationKey(desired.kind, desired.key),
 		MaxAttempts:      desired.maxAttempts,
 		InputStateSHA256: state.snapshot.StateSHA256,
-		WallBudget:       r.deps.Budgets.WallLimit,
+		// The RUN's effective budget, not the raw operator default. A plan
+		// stage that tightened its run's wall budget was previously ignored
+		// here, so the operation was planned against a ceiling the run itself
+		// had already narrowed.
+		WallBudget: state.budgets().WallLimit,
 	})
 	if err != nil {
 		return false, Outcome{}, err

@@ -358,6 +358,24 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		op.Attempt++
 		op.StartedAt = &now
 		op.LastProgressAt = &now
+		// THE DEADLINE IS DERIVED ONCE, HERE, AND NEVER AGAIN.
+		//
+		// Here rather than at plan time because this is where EXECUTION begins,
+		// and the budget bounds execution. A run parked waiting on an operator,
+		// an unavailable provider account or a review is not executing, and an
+		// instant stamped before it started would burn while nothing ran - the
+		// exact confusion that made a pull request awaiting review look like a
+		// runaway run.
+		//
+		// And once only: StartedAt is reset on every transition to Running, so
+		// anything derived from it measures THIS attempt while claiming to
+		// bound the operation. A second attempt inherits what the first did not
+		// spend, because the instant is already in durable state and this
+		// branch does not run again.
+		if op.Deadline == nil && op.WallBudget > 0 {
+			deadline := now.Add(op.WallBudget)
+			op.Deadline = &deadline
+		}
 		return nil
 	})
 }

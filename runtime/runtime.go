@@ -380,9 +380,19 @@ type RunOperation struct {
 	StartedAt        *time.Time      `json:"started_at,omitempty"`
 	LastProgressAt   *time.Time      `json:"last_progress_at,omitempty"`
 	WallBudget       time.Duration   `json:"wall_budget,omitempty"`
-	NoProgressBudget time.Duration   `json:"no_progress_budget,omitempty"`
-	NoProgressKey    string          `json:"no_progress_key,omitempty"`
-	CancelRequested  bool            `json:"cancel_requested,omitempty"`
+	// Deadline is the ABSOLUTE instant this operation's execution authority
+	// ends. It is derived from WallBudget exactly once, when the operation is
+	// planned, and is never recomputed.
+	//
+	// WallBudget is policy - an input, a duration an operator configured. The
+	// deadline is LIFECYCLE STATE. The difference is the whole point: a
+	// duration re-evaluated against whenever the current attempt happened to
+	// start gives a retry, a rehydration or a re-lease a fresh envelope, and
+	// nothing in the journal says it did. An instant cannot be minted twice.
+	Deadline         *time.Time    `json:"deadline,omitempty"`
+	NoProgressBudget time.Duration `json:"no_progress_budget,omitempty"`
+	NoProgressKey    string        `json:"no_progress_key,omitempty"`
+	CancelRequested  bool          `json:"cancel_requested,omitempty"`
 }
 type Lease struct {
 	Owner       string    `json:"owner"`
@@ -523,6 +533,29 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 }
 
 // OperationElapsed reports elapsed time only for an actively started operation.
+// OperationExpired answers whether this operation's execution authority has
+// ended, from the durable absolute deadline alone.
+//
+// An operation planned before deadlines existed, or one with no wall budget at
+// all, has no deadline and never expires by this test; the elapsed-versus-budget
+// check remains for it.
+func OperationExpired(op RunOperation, now time.Time) bool {
+	return op.Deadline != nil && now.After(*op.Deadline)
+}
+
+// OperationRemaining is how much execution authority is LEFT. It is what a
+// provider invocation is bounded by, so a second attempt of an operation
+// inherits what the first one did not spend rather than starting again.
+func OperationRemaining(op RunOperation, now time.Time) time.Duration {
+	if op.Deadline == nil {
+		return 0
+	}
+	if remaining := op.Deadline.Sub(now); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
 func OperationElapsed(op RunOperation, now time.Time) time.Duration {
 	if op.StartedAt == nil || now.Before(*op.StartedAt) {
 		return 0
