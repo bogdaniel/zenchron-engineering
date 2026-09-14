@@ -227,6 +227,10 @@ const (
 func claimState(input Input, claimID string, claim domain.RequiredClaim) evidenceClaimState {
 	var hasStale, hasPassing, hasFailed bool
 	for _, bundle := range input.EvidenceBundles {
+		// Evidence bound to another subject, contract, or policy is absent.
+		if !matchesContractBinding(bundle, input.Contract) {
+			continue
+		}
 		for _, item := range bundle.Evidence {
 			if item.ClaimID != claimID || item.EvidenceClass != claim.EvidenceClass {
 				continue
@@ -237,7 +241,7 @@ func claimState(input Input, claimID string, claim domain.RequiredClaim) evidenc
 			if claim.EvidenceClass == "human_approval" && item.Producer.Type != domain.ProducerHuman {
 				continue
 			}
-			if !matchesContractBinding(bundle, input.Contract) || item.Lifecycle.Status == domain.EvidenceStale {
+			if item.Lifecycle.Status == domain.EvidenceStale {
 				hasStale = true
 				continue
 			}

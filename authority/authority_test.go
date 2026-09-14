@@ -38,7 +38,12 @@ func TestEvaluateDecisionStates(t *testing.T) {
 		{
 			name: "stale evidence", contract: "security-sensitive.engineering-work-contract.json",
 			action: domain.Action{Type: "git.merge", Target: "main"}, capability: domain.CapabilityAvailable,
-			bundles: []string{"stale-evidence.evidence-bundle.json"}, want: domain.AuthorityStale,
+			bundles: []string{"matching-stale-evidence.evidence-bundle.json"}, want: domain.AuthorityStale,
+		},
+		{
+			name: "inapplicable stale evidence is missing", contract: "security-sensitive.engineering-work-contract.json",
+			action: domain.Action{Type: "git.merge", Target: "main"}, capability: domain.CapabilityAvailable,
+			bundles: []string{"stale-evidence.evidence-bundle.json"}, want: domain.AuthorityIncomplete,
 		},
 		{
 			name: "awaiting human approval", contract: "security-sensitive.engineering-work-contract.json",
@@ -358,4 +363,35 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestEvaluateNonMatchingEvidenceIsMissing(t *testing.T) {
+	for _, binding := range []string{"subject", "contract", "policy"} {
+		for _, lifecycle := range []domain.EvidenceLifecycleStatus{domain.EvidenceValid, domain.EvidenceStale, domain.EvidenceInvalid, domain.EvidenceIncomplete} {
+			t.Run(binding+"/"+string(lifecycle), func(t *testing.T) {
+				input := inputFor(t, "security-sensitive.engineering-work-contract.json", domain.Action{Type: "git.merge", Target: "main"}, domain.CapabilityAvailable, "security-sensitive.evidence-bundle.json")
+				for id, bundle := range input.EvidenceBundles {
+					switch binding {
+					case "subject":
+						bundle.Subject.Revision = "other"
+					case "contract":
+						bundle.Contract.Revision = "other"
+					case "policy":
+						bundle.Policy.Revision = "other"
+					}
+					for itemID, item := range bundle.Evidence {
+						item.Lifecycle.Status = lifecycle
+						reason := "Regression test lifecycle"
+						item.Lifecycle.Reason = &reason
+						bundle.Evidence[itemID] = item
+					}
+					input.EvidenceBundles[id] = bundle
+				}
+				decision := evaluate(t, input)
+				if decision.Status != domain.AuthorityIncomplete || len(decision.Stale) != 0 || !contains(decision.Missing, "claim-auth-regression-tests") || !contains(decision.Missing, "claim-security-review") {
+					t.Fatalf("decision = %#v, want missing technical evidence without stale claims", decision)
+				}
+			})
+		}
+	}
 }
