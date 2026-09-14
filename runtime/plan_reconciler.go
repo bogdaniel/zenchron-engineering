@@ -719,7 +719,7 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		if outcome, settled := runSettled(run); !settled || outcome != string(Completed) {
 			continue
 		}
 		head := run.Candidate.Revision
@@ -1168,9 +1168,13 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 			return nil, nil, err
 		}
 		if !found {
-			continue
+			return nil, &PlanStageBlock{StageID: stage.ID, Kind: "upstream",
+				Reason: boundedDetail(fmt.Sprintf("upstream stage %s frozen run %s is unavailable", upstream.StageID, upstream.RunID))}, nil
 		}
-		if _, settled := runSettled(run); !settled {
+		if outcome, settled := runSettled(run); settled && outcome == string(Failed) {
+			return nil, &PlanStageBlock{StageID: stage.ID, Kind: "upstream",
+				Reason: boundedDetail(fmt.Sprintf("upstream stage %s run %s failed", upstream.StageID, upstream.RunID))}, nil
+		} else if !settled {
 			return nil, &PlanStageBlock{
 				StageID: stage.ID, Kind: "upstream",
 				Reason: boundedDetail(fmt.Sprintf("stage %s is producing a different candidate; this stage starts against the head it settles on", upstream.StageID)),
@@ -1545,7 +1549,7 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 	var settled []string
 	for _, stage := range plan.Stages {
 		projection, ok := snapshot.Stages[stage.ID]
-		if !ok || projection.State != PlanStageRunning || projection.RunID == "" {
+		if !ok || (projection.State != PlanStageRunning && projection.State != PlanStageCompleted) || projection.RunID == "" {
 			continue
 		}
 		run, found, err := r.Store.Run(projection.RunID)
@@ -1554,6 +1558,13 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		}
 		if !found {
 			continue
+		}
+		// Feedback can reactivate a completed producer. A terminal failure of
+		// that run must surface without discarding its dependents' verdicts.
+		if projection.State == PlanStageCompleted {
+			if outcome, done := runSettled(run); !done || outcome != string(Failed) {
+				continue
+			}
 		}
 		// A stage is done when its WORK IS ACCEPTED, which is neither "the run
 		// is terminal" nor "the run has stopped moving". A published run waits
