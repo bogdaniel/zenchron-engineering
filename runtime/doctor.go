@@ -117,6 +117,24 @@ type DoctorInput struct {
 	DiscoveryLabel string
 	// GitHubCredentialMode is the operator's declared mode.
 	GitHubCredentialMode string
+	// OperatorGitHub resolves the HUMAN operator's own GitHub identity through
+	// their local `gh` login, which is a DIFFERENT credential from the one the
+	// runtime publishes with.
+	//
+	// It exists because the publication-identity check could previously only
+	// name the account the runtime publishes as and ask the operator to compare
+	// it themselves. #82's stated operator UX is the comparison, not the half
+	// of it the runtime already knew: the two logins have to be resolved to say
+	// whether the review loop actually works.
+	//
+	// Nil is a truthful answer - the comparison is reported as unmade - and it
+	// is never a publication credential: doctor asks this adapter who the
+	// OPERATOR is and nothing else.
+	OperatorGitHub ForgeViewer
+	// Feedback is the operator's admission rule. It is read for its permission
+	// threshold, so doctor judges the human's permission against the bar
+	// admission will actually apply rather than against a default.
+	Feedback FeedbackPolicy
 
 	// OperatorConfigPath and RepositoryRoot are re-read from disk: whether the
 	// two layers still load, still tighten, and still validate IS the check.
@@ -866,7 +884,44 @@ const doctorGroupGitHub = "github"
 func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 	credential := doctorGitHubCredential(in)
 	identity, rate := doctorGitHubRead(ctx, in, credential)
-	return []DoctorCheck{credential, doctorPublicationIdentity(in), identity, rate}
+	return []DoctorCheck{credential, doctorPublicationIdentity(ctx, in), identity, rate}
+}
+
+// doctorViewer resolves the account the runtime publishes as, when the adapter
+// can answer. It is a read; doctor makes no write.
+func doctorViewer(adapter any, identity string) (GitHubActor, bool) {
+	viewer, ok := adapter.(ForgeViewer)
+	if !ok || viewer == nil || strings.TrimSpace(identity) == "" {
+		return GitHubActor{}, false
+	}
+	repo, err := ParseGitHubRepo(identity)
+	if err != nil {
+		return GitHubActor{}, false
+	}
+	actor, err := viewer.Viewer(context.Background(), repo)
+	if err != nil || strings.TrimSpace(actor.Login) == "" {
+		return GitHubActor{}, false
+	}
+	return actor, true
+}
+
+// doctorPermission resolves one login's current repository permission.
+// PermissionUnresolved is the answer whenever the question could not be asked,
+// and it is never read as an admission.
+func doctorPermission(ctx context.Context, in DoctorInput, login string) GitHubPermission {
+	permissions, ok := in.GitHub.(ForgeActorPermissions)
+	if !ok {
+		return PermissionUnresolved
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return PermissionUnresolved
+	}
+	permission, err := permissions.RepositoryPermission(ctx, repo, login)
+	if err != nil {
+		return PermissionUnresolved
+	}
+	return permission
 }
 
 // doctorPublicationIdentity answers whether the operator can give their own
@@ -883,54 +938,70 @@ func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 // it to the exact head, and recorded "authored by this runtime, so admitting it
 // would let the system feed itself" about a human being. This states it up
 // front, before an operator spends a subscription discovering it.
-//
-// It is a WARN rather than a FAIL because runs still execute, publish and
-// verify; what is unavailable is the remediation loop. The fix is a separate
-// publication identity, not a weaker guard.
-// doctorViewer resolves the account the runtime publishes as, when the adapter
-// can answer. It is a read; doctor makes no write.
-func doctorViewer(in DoctorInput) (GitHubActor, bool) {
-	viewer, ok := in.GitHub.(ForgeViewer)
-	if !ok || strings.TrimSpace(in.Repository.Identity) == "" {
-		return GitHubActor{}, false
-	}
-	repo, err := ParseGitHubRepo(in.Repository.Identity)
-	if err != nil {
-		return GitHubActor{}, false
-	}
-	actor, err := viewer.Viewer(context.Background(), repo)
-	if err != nil || strings.TrimSpace(actor.Login) == "" {
-		return GitHubActor{}, false
-	}
-	return actor, true
-}
-
-func doctorPublicationIdentity(in DoctorInput) DoctorCheck {
+func doctorPublicationIdentity(ctx context.Context, in DoctorInput) DoctorCheck {
 	const id = "github.publication_identity"
 	switch in.GitHubCredentialMode {
 	case GitHubCredentialNone:
 		return warn(doctorGroupGitHub, id, "github.credential_mode is \"none\", so the runtime publishes nothing and no publication identity exists")
-	case GitHubCredentialToken:
-		// The mode proves a SEPARATE CREDENTIAL, not a separate account: a
-		// personal access token for the operator's own login sits in that file
-		// just as happily as a dedicated runtime account's. Claiming
-		// distinctness from the mode alone would be the same kind of untrue
-		// statement this check exists to make.
-		if actor, ok := doctorViewer(in); ok {
-			return pass(doctorGroupGitHub, id, fmt.Sprintf(
-				"the runtime publishes as %q from its own operator-provisioned token. Compare that with your own GitHub login: where they differ, your "+
-					"reviews are admissible feedback and the runtime's own are refused by identity; where they are the SAME account, the runtime is still "+
-					"acting as you and your reviews will not reach a worker", actor.Login))
-		}
-		return warn(doctorGroupGitHub, id,
-			"the runtime is configured with its own publication token, but the account it authenticates as could not be resolved, so this check cannot "+
-				"say whether it is a different actor from you - and feedback admission fails closed until that identity resolves")
+	case GitHubCredentialToken, GitHubCredentialApp:
+		return doctorSeparatedIdentities(ctx, in, id)
 	}
 	return warn(doctorGroupGitHub, id,
 		"the runtime publishes with your own `gh` credential, so it acts as YOU on GitHub. Feedback authored by the publishing identity is refused so the "+
 			"system cannot feed itself - which means your own reviews and comments will not reach a worker, and the review loop is unavailable. Give the "+
-			"runtime an identity of its own with github.credential_mode \"token\" and github.token_path (a GitHub App installation token or a dedicated "+
-			"runtime account); nothing here weakens the self-loop guard")
+			"runtime an identity of its own with github.credential_mode \""+GitHubCredentialApp+"\" (a GitHub App installation, which is a machine account "+
+			"rather than a second person) or \""+GitHubCredentialToken+"\" with github.token_path (a dedicated runtime account's token); nothing here "+
+			"weakens the self-loop guard")
+}
+
+// doctorSeparatedIdentities answers #82's operator question - can this operator
+// give their own workers feedback - by resolving BOTH halves and comparing them.
+//
+// The mode proves a separate CREDENTIAL, not a separate ACCOUNT: a personal
+// access token for the operator's own login sits in that file just as happily
+// as a dedicated runtime account's. Claiming distinctness from the mode alone
+// would be the same kind of untrue statement this check exists to make, and
+// naming only the publishing account - which is what this check used to do -
+// left the comparison to an operator who has no way to know it matters.
+//
+// It is a WARN rather than a FAIL because runs still execute, publish and
+// verify; what is unavailable is the remediation loop.
+func doctorSeparatedIdentities(ctx context.Context, in DoctorInput, id string) DoctorCheck {
+	publication, resolved := doctorViewer(in.GitHub, in.Repository.Identity)
+	if !resolved {
+		return warn(doctorGroupGitHub, id,
+			"the runtime is configured with a publication identity of its own, but the account it authenticates as could not be resolved, so this check "+
+				"cannot say whether it is a different actor from you - and feedback admission fails closed until that identity resolves")
+	}
+	operator, operatorResolved := doctorViewer(in.OperatorGitHub, in.Repository.Identity)
+	if !operatorResolved {
+		return warn(doctorGroupGitHub, id, fmt.Sprintf(
+			"publication identity %q; human feedback actor UNRESOLVED - your own GitHub login could not be read from your local `gh` session, so the two "+
+				"halves cannot be compared. Run `gh auth login`; the self-loop guard stays active either way", publication.Login))
+	}
+	permission := doctorPermission(ctx, in, operator.Login)
+	facts := fmt.Sprintf("publication identity %q; human feedback actor %q (permission: %s); self-loop guard active",
+		publication.Login, operator.Login, permission)
+	threshold := in.Feedback.threshold()
+	switch {
+	case strings.EqualFold(publication.Login, operator.Login):
+		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
+			" - but those are the SAME account. The runtime is still acting as you, so your own reviews are refused as self-authored and will not reach a "+
+				"worker. The credential is separate; the identity is not. Point github.credential_mode %q at a GitHub App installation, or %q at a "+
+				"dedicated runtime account's token", GitHubCredentialApp, GitHubCredentialToken))
+	case permission == PermissionUnresolved:
+		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
+			" - the two accounts are distinct, so the runtime's own comments are refused by identity, but your permission on %s could not be resolved and "+
+				"an unresolved permission is never an admission. Your reviews will not reach a worker until it answers", in.Repository.Identity))
+	case !permission.AtLeast(threshold):
+		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
+			" - the two accounts are distinct, so the runtime's own comments are refused by identity, but your login holds %q where feedback admission "+
+				"requires %q. Grant your account that permission on %s, or lower feedback.min_permission deliberately",
+			permission, threshold, in.Repository.Identity))
+	}
+	return pass(doctorGroupGitHub, id, facts+
+		" - the two are distinct accounts and you clear the feedback permission threshold, so the runtime's own comments are refused by identity while "+
+		"your reviews are admitted as engineering feedback")
 }
 
 // doctorGitHubCredential reports the typed github_auth_required outcome rather
