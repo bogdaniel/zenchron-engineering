@@ -167,7 +167,7 @@ credential proves.
 That guard has a consequence worth stating before you meet it:
 
 ```text
-credential_mode "github-cli"          credential_mode "token"
+credential_mode "github-cli"          credential_mode "github-app" / "token"
 
 runtime publishes as YOU              runtime publishes as ITSELF
         |                                     |
@@ -186,17 +186,98 @@ for cannot happen. It was found by a live run: the runtime observed a real
 review, bound it to the exact head, and recorded *"authored by this runtime, so
 admitting it would let the system feed itself"* about a person.
 
-The answer is a separate identity, not an exception for your login:
+The answer is a separate identity, not an exception for your login. There are
+two, and they differ in what the identity IS:
+
+```json
+{"github": {
+  "credential_mode": "github-app",
+  "app_id": 1234567,
+  "installation_id": 87654321,
+  "private_key_path": "/Users/you/.zenchron/zenchron-engineering.private-key.pem"
+}}
+```
 
 ```json
 {"github": {"credential_mode": "token", "token_path": "/Users/you/.zenchron/publication.token"}}
 ```
 
-A GitHub App installation token or a dedicated runtime account. The file must be
-owner-only — a token another local account can read is a publication identity
-that account also has. `autonomy doctor` reports `github.publication_identity`:
-PASS when the runtime is a distinct actor, WARN naming exactly what you lose
-when it is not.
+`github-app` is a MACHINE identity: the App publishes as `<app-slug>[bot]`, which
+is nobody's personal account and needs no second GitHub login, no second email
+address and no second subscription. `token` is a dedicated runtime ACCOUNT — a
+second human-shaped GitHub user whose personal access token you hold.
+
+Either way the file named must be owner-only. A key or token another local
+account can read is a publication identity that account also has — and for the
+App key that is worse than for a token: a key is the App itself, on every
+repository it is installed on, until you revoke it.
+
+`autonomy doctor` reports `github.publication_identity` as the three facts that
+decide whether the loop works:
+
+```text
+publication identity "zenchron-engineering[bot]"; human feedback actor
+"bogdaniel" (permission: admin); self-loop guard active
+```
+
+PASS when the two logins are DIFFERENT accounts and your own login clears the
+feedback permission threshold; WARN naming which of those two halves failed. It
+resolves both halves itself — the publication identity through the publication
+credential, your own login through your local `gh` session — rather than naming
+one and asking you to compare.
+
+### Provisioning the GitHub App
+
+The App is created by hand in the GitHub UI. Nothing here can create it for you:
+it is an authority grant, and the runtime is the thing being granted.
+
+1. **Create the App.** GitHub → Settings → Developer settings → GitHub Apps →
+   *New GitHub App*. Name it something recognizable as the runtime rather than
+   as you — the name becomes the slug, and the slug becomes the login that
+   appears on every pull request it opens (`zenchron-engineering` →
+   `zenchron-engineering[bot]`). Homepage URL is required by the form and is not
+   used; your repository URL is fine. Uncheck *Active* under Webhook: the
+   runtime polls and does not receive callbacks.
+2. **Grant exactly four repository permissions.** Nothing else is needed, and
+   anything else is authority the runtime did not ask for:
+
+   | Permission | Level | Why |
+   | --- | --- | --- |
+   | Contents | Read and write | push the candidate branch |
+   | Pull requests | Read and write | open the pull request, read reviews and comments |
+   | Issues | Read and write | read the source issue and its comments, comment back |
+   | Metadata | Read-only | mandatory, and what resolves a reviewer's repository permission |
+
+3. **Install it on the repository.** The App's *Install App* tab → your account
+   → *Only select repositories* → the repository you run against. The
+   installation URL ends in the installation id
+   (`.../settings/installations/87654321`) — that number is
+   `github.installation_id`. The App id is on the App's own *General* page.
+4. **Generate and place the private key.** The App's *General* page →
+   *Private keys* → *Generate a private key*. A `.pem` downloads. Move it
+   somewhere only you can read and lock it down:
+
+   ```sh
+   mv ~/Downloads/*.private-key.pem ~/.zenchron/zenchron-engineering.private-key.pem
+   chmod 600 ~/.zenchron/zenchron-engineering.private-key.pem
+   ```
+
+   The runtime refuses a key file any other local account can read, and refuses
+   it where you can still fix it rather than as an opaque 401 later.
+5. **Point the operator configuration at the three values** — `app_id`,
+   `installation_id` and `private_key_path`, as in the block above. All three
+   live in the OPERATOR layer; the in-repo `.zenchron.json` names no credential
+   member, so a repository can never point the runtime at a different identity.
+6. **Run `autonomy doctor`** and read `github.publication_identity`. It should
+   name `<your-app-slug>[bot]` as the publication identity and your own login as
+   the human feedback actor.
+
+The runtime mints the installation token itself from the key and re-mints it
+before it expires — installation tokens live one hour, so nothing long-lived
+sits on disk except the key, which you can revoke in one click. This is also why
+a GitHub App is NOT something you can put in `token_path`: an App issues no
+token that can live in a file, and an installation token cannot even answer
+"who am I" the way a user's token can.
 
 Admitting your own login as an exception would be the other fix, and it is the
 wrong one. Admission is decided by identity precisely so it does not depend on
