@@ -499,6 +499,17 @@ const (
 	// It is deliberately NOT FailureAuthorityWait. Nothing about human authority
 	// is involved.
 	FailureAssurancePrerequisite FailureClass = "assurance_prerequisite_unavailable"
+	// FailureToolchainUnavailable is the WORKER's environment lacking a tool its
+	// contract obligates it to run.
+	//
+	// It is the producer-side twin of FailureAssurancePrerequisite and routes
+	// the same way, for the same reason: nothing about the work is wrong, an
+	// operator has to change the environment, and retrying or asking a model to
+	// fix it would spend budget on a condition no reasoning can clear. It is
+	// deliberately not a verification failure - no candidate was judged - and
+	// not a transient one, because a missing toolchain does not come back on
+	// its own.
+	FailureToolchainUnavailable FailureClass = "toolchain_unavailable"
 	// FailureGovernedRemoteMismatch is a deterministic trust refusal: the
 	// remote a workspace is bound to is not this run's governed remote.
 	//
@@ -557,7 +568,23 @@ func RouteFailure(c FailureClass) FailureRoute {
 	switch c {
 	case FailureFormat:
 		return RouteGofmt
-	case FailureCompileTest, FailureBaseIntegrationConflict:
+	// A VERDICT ABOUT THE CANDIDATE routes to the producer that made it.
+	//
+	// FailureVerification is the class the Go verifier, the semantic verifier,
+	// an internal reviewer's blocking verdict and admitted forge feedback all
+	// produce: the candidate was judged and not accepted. It was absent from
+	// every arm here and fell to RouteStop, which meant the primary
+	// verification failure class in the system planned no operation at all -
+	// not remediation, and not a terminal failure either. The run then took the
+	// `!wanted` branch in Reconcile and settled waiting/goal_state_reached, a
+	// stage built on it settled "completed", and its dependents were released
+	// against work that had failed. That is the #126 chain, and it starts here.
+	//
+	// It sits beside FailureCompileTest deliberately: both are statements that
+	// the work is wrong, both are answerable by the worker that produced it,
+	// and both are bounded by the same remediation budget. Exhausting that
+	// budget is what makes it terminal; being unrouted never should have.
+	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete:
 		return RouteRetry
@@ -566,8 +593,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
-		FailureProviderQuota, FailureProviderRateLimited, FailureStateStorageExhausted,
-		FailureControllerShutdown:
+		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
+		FailureStateStorageExhausted, FailureControllerShutdown:
 		return RouteWait
 	default:
 		return RouteStop

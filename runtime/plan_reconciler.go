@@ -133,6 +133,13 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		return report, err
 	}
 
+	// A BLOCKING REVIEW REACHES ITS PRODUCER. Delivered here, before anything
+	// is started or settled, so the producer's next tick plans a remediation
+	// bound to the review rather than settling on a verdict nobody acted on.
+	if err := r.deliverBlockingReviews(plan, snapshot); err != nil {
+		return report, err
+	}
+
 	resolution, err := r.Service.Resolve(plan, snapshot)
 	if err != nil {
 		return report, err
@@ -531,7 +538,24 @@ func (r PlanReconciler) invalidateStaleCompletedStages(plan domain.EngineeringPl
 	stale := map[string]string{}
 	for _, stage := range plan.Stages {
 		projection, ok := snapshot.Stages[stage.ID]
-		if !ok || projection.State != PlanStageCompleted {
+		if !ok {
+			continue
+		}
+		// A stage is stale-able once its own work has STOPPED MOVING, which is
+		// not the same as having completed.
+		//
+		// The filter was PlanStageCompleted alone, and a reviewer that BLOCKED
+		// its subject is not completed - it settles nothing, deliberately,
+		// because a block exists to cause more work. Its run is finished all the
+		// same, and when the producer answers the block the reviewer is holding
+		// a verdict about a candidate that no longer exists. Left out of this
+		// sweep it would hold it forever: the stage never re-performs, the gate
+		// below it never satisfies, and the plan stops without failing.
+		settled, err := r.stageWorkStopped(projection)
+		if err != nil {
+			return false, err
+		}
+		if !settled {
 			continue
 		}
 		assignment, found, err := r.Service.frozenAssignment(plan, projection, stage.ID)
@@ -685,7 +709,7 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		if !found {
 			continue
 		}
-		if _, settled := stageOutcome(run); !settled {
+		if _, settled := runSettled(run); !settled {
 			continue
 		}
 		head := run.Candidate.Revision
@@ -1136,7 +1160,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		if !found {
 			continue
 		}
-		if _, settled := stageOutcome(run); !settled {
+		if _, settled := runSettled(run); !settled {
 			return nil, &PlanStageBlock{
 				StageID: stage.ID, Kind: "upstream",
 				Reason: boundedDetail(fmt.Sprintf("stage %s is producing a different candidate; this stage starts against the head it settles on", upstream.StageID)),
@@ -1203,14 +1227,23 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
 	}
-	upstreamBaseRevision, err := r.upstreamBase(assignment)
+	upstreamBaseRevision, upstreamCandidate, err := r.upstreamBase(assignment)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "upstream", Reason: boundedDetail(err.Error())}, nil
+	}
+	// A stage that CONSUMES upstream work must receive it. If the assignment
+	// froze an upstream candidate and neither route to it resolved - not
+	// published, and not materializable from the producer's workspace - the
+	// stage BLOCKS. It does not start against the trusted base: a reviewer
+	// given the base reviews nothing and reports that the work is absent, which
+	// is a verdict about the runtime rather than about the change.
+	if block := unreachableUpstream(stage, assignment, upstreamBaseRevision, upstreamCandidate); block != nil {
+		return nil, block, nil
 	}
 	binding := RunPlanBinding{
 		PlanID: plan.ID, Revision: plan.Revision, PlanDigest: plan.Digest,
 		StageID: stage.ID, AssignmentID: assignment.ID, Generation: generation,
-		BaseRevision: upstreamBaseRevision,
+		BaseRevision: upstreamBaseRevision, UpstreamCandidate: upstreamCandidate,
 		// The assignment's budget is the stage's, already narrowed by the
 		// assigned profile's constraints, and narrowed AGAIN by what the plan
 		// has left. A ceiling that only refuses the NEXT stage after an
@@ -1324,29 +1357,53 @@ func modelAppearedSince(assignment domain.AgentAssignment, agent domain.Executio
 // which is the exact blocking finding the first live dogfood review reported
 // about its own workspace, reached through a different door. The error is
 // returned and the stage waits.
-func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) (string, error) {
+func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) (string, *CandidateRef, error) {
 	base := ""
+	var local *CandidateRef
 	for _, upstream := range assignment.Context.UpstreamOutputs {
 		if upstream.RunID == "" || upstream.Candidate == "" {
 			continue
 		}
 		events, err := r.Store.Events(upstream.RunID)
 		if err != nil {
-			return "", fmt.Errorf("upstream stage %q run %s could not be read: %w", upstream.StageID, upstream.RunID, err)
+			return "", nil, fmt.Errorf("upstream stage %q run %s could not be read: %w", upstream.StageID, upstream.RunID, err)
 		}
 		projection, err := Project(events)
 		if err != nil {
-			return "", fmt.Errorf("upstream stage %q run %s could not be projected: %w", upstream.StageID, upstream.RunID, err)
+			return "", nil, fmt.Errorf("upstream stage %q run %s could not be projected: %w", upstream.StageID, upstream.RunID, err)
 		}
-		if projection.PullRequest == nil {
-			// Not published. Its commit is not on the remote, so it cannot be
-			// cloned; the stage stays based on the trusted base and receives
-			// the diff as context.
+		if projection.PullRequest != nil {
+			// Published: the governed remote already has this commit, so the
+			// ordinary clone reaches it and nothing needs transferring.
+			base, local = upstream.Candidate, nil
 			continue
 		}
-		base = upstream.Candidate
+		// NOT PUBLISHED, which is not the same as not available.
+		//
+		// This branch used to `continue`, leaving the downstream stage on the
+		// trusted base with a comment claiming the diff arrived as context. It
+		// does not: ContextCandidateDiff is delivered BY the workspace, so the
+		// consumer received nothing and reviewed the base. The commit exists in
+		// the producer's runtime-owned workspace, and the runtime can hand it
+		// over without publishing anything.
+		//
+		// The tree comes from the upstream output the assignment FROZE, so the
+		// subject being materialized is the subject that was approved rather
+		// than whatever the producer's workspace currently holds.
+		tree := upstream.Tree
+		if tree == "" {
+			// A frozen output that names no tree cannot be proven on arrival.
+			// Leaving the stage with no reference makes startAgentStage block
+			// it, which is the fail-closed direction.
+			continue
+		}
+		base = ""
+		local = &CandidateRef{
+			RunID: upstream.RunID, StageID: upstream.StageID,
+			Revision: upstream.Candidate, Tree: tree,
+		}
 	}
-	return base, nil
+	return base, local, nil
 }
 
 // attributeRunSpend records what one child run has spent SO FAR, as the delta
@@ -1412,20 +1469,29 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		if !found {
 			continue
 		}
-		// A stage is done when its WORK is done, which is not the same as its
-		// run being terminal. A published run waits for a person in the forge
-		// and stays non-terminal for as long as that takes; a plan that treated
-		// that as "not finished" would never start the review of the change
-		// that run just produced.
-		outcome, done := stageOutcome(run)
+		// A stage is done when its WORK IS ACCEPTED, which is neither "the run
+		// is terminal" nor "the run has stopped moving". A published run waits
+		// for a person in the forge and stays non-terminal for as long as that
+		// takes, so terminality is too strong; a run whose verification failed
+		// has also stopped moving, so stopping is too weak. Acceptance is the
+		// question, and stageAcceptance answers it from the stage's obligations
+		// and the run's durable evidence.
+		outcome, done, err := r.stageAcceptance(plan, stage, projection, run)
+		if err != nil {
+			return settled, err
+		}
 		if !done {
 			continue
 		}
+		// Spend is attributed even for a FAILED stage. A run that produced a
+		// rejected candidate still cost invocations and wall time, and a plan
+		// whose ceilings only counted accepted work would fund an unbounded
+		// number of rejected attempts.
 		if _, err := r.attributeRunSpend(plan, snapshot, stage.ID, projection.RunID); err != nil {
 			return settled, err
 		}
 		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
-			StageID: stage.ID, Outcome: outcome, Reason: boundedDetail(run.Reason),
+			StageID: stage.ID, Outcome: outcome, Reason: boundedDetail(stageSettlementReason(outcome, run)),
 		}); err != nil {
 			return settled, err
 		}
@@ -1434,14 +1500,14 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 	return settled, nil
 }
 
-// stageOutcome maps a child run's state onto what it means for the plan stage.
+// runSettled answers whether a child run has STOPPED MOVING, which is the
+// question an upstream check asks: may a downstream stage start against this
+// run's head, or is that head still being rewritten?
 //
-// Completed and goal-state-reached are both COMPLETE: the first is a run that
-// finished, the second is a run that produced its candidate, passed assurance
-// and is waiting for a person - which is exactly the point at which the next
-// stage has something to work with. Every other non-terminal state is still in
-// progress, and cancellation or failure is a failed stage.
-func stageOutcome(run EngineeringRun) (string, bool) {
+// It is deliberately NOT the question "did the stage succeed". Those were one
+// function, and collapsing them is what let a producer whose verification
+// failed satisfy its dependents - see stageAcceptance below.
+func runSettled(run EngineeringRun) (string, bool) {
 	switch {
 	case run.Disposition == Completed:
 		return "completed", true
@@ -1452,6 +1518,264 @@ func stageOutcome(run EngineeringRun) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// stageAcceptance answers what a child run's state means for the PLAN STAGE
+// built on it.
+//
+// PRODUCING A CANDIDATE IS NOT COMPLETING A STAGE, and "assurance judged the
+// candidate" is not "assurance accepted the candidate". Both conflations lived
+// in the single disposition mapping this replaces, whose comment claimed
+// goal_state_reached meant a run that "produced its candidate, passed assurance
+// and is waiting for a person". It never meant that. ReasonGoalStateReached is
+// emitted by Reconcile's `!wanted` branch and means only that the operation
+// planner wanted nothing - which, while FailureVerification was unrouted, was
+// exactly what a FAILED verification produced. The #119 dogfood settled a
+// producer "completed" over `assurance passed:false` and released its reviewer
+// on that basis.
+//
+// So acceptance is derived from the stage's own obligations and the run's
+// DURABLE evidence, never from the wait reason:
+//
+//   - a run the forge merged is accepted, and there is nothing left to verify;
+//   - a terminally failed or cancelled run is a failed stage;
+//   - a run still moving is not settled at all;
+//   - a run at goal state is accepted only if the evidence its role requires
+//     exists, is about its CURRENT head, and passed.
+//
+// Absence of evidence is not acceptance: a goal-state run with no assurance
+// observation stays unsettled rather than settling either way, because "nobody
+// judged this" is not a verdict and must not become one by default.
+func (r PlanReconciler) stageAcceptance(plan domain.EngineeringPlan, stage domain.PlanStage, projection PlanStageProjection, run EngineeringRun) (string, bool, error) {
+	switch {
+	case run.Disposition == Completed:
+		return "completed", true, nil
+	case terminalDisposition(run.Disposition):
+		return "failed", true, nil
+	case run.Disposition == Waiting && run.Reason == ReasonGoalStateReached:
+	default:
+		return "", false, nil
+	}
+	// A stage that never mutates anything produces no candidate for assurance
+	// to be about. Requiring a verdict from it would be requiring evidence that
+	// cannot exist, which blocks forever rather than failing closed.
+	if stage.Kind != domain.StageAgent || stage.InvocationMode != domain.InvocationModeMutating {
+		return "completed", true, nil
+	}
+	// A REVIEWER is accepted by its VERDICT, not by assurance over its own
+	// workspace. Assurance answers "does this tree build and pass"; a review
+	// answers "is this change acceptable". A reviewer that changed nothing has
+	// still done its job, and re-running the producer's own tests over the
+	// producer's own tree is not an independent answer to the review question.
+	if stage.Role == domain.RoleReviewer {
+		return r.reviewAcceptance(plan, stage, projection)
+	}
+	events, err := r.Store.Events(run.ID)
+	if err != nil {
+		return "", false, err
+	}
+	projected, err := Project(events)
+	if err != nil {
+		return "", false, err
+	}
+	assurance := projected.Assurance
+	switch {
+	case assurance == nil, assurance.Stale:
+		// No verdict about THIS head: unjudged, which is neither finished nor
+		// failed. The stage waits.
+		return "", false, nil
+	case !assurance.Passed:
+		// JUDGED AND NOT ACCEPTED. The stage is not settled either way.
+		//
+		// Not accepted, obviously - that is the whole point. But not failed
+		// either, because a verification failure now routes to the producer and
+		// the run has remediation budget to spend on it. Settling failed here
+		// would terminalize a stage the runtime is about to fix, and a failed
+		// stage is not re-performed by any sweep.
+		//
+		// When that budget IS exhausted the run terminalizes itself, and the
+		// terminalDisposition arm above settles the stage failed on the run's
+		// own verdict rather than on a guess made here.
+		return "", false, nil
+	}
+	return "completed", true, nil
+}
+
+// reviewAcceptance settles a reviewer stage from its recorded verdict about the
+// EXACT candidate its frozen assignment named.
+//
+// The subject is taken from the assignment, never from the verdict, so a
+// verdict that answers about some other tree cannot select the question it is
+// answering. A verdict about a superseded candidate leaves the stage unsettled:
+// the reviewer answered honestly about work that has since moved, and the
+// existing staleness sweep is what re-performs it.
+//
+// No verdict at all is NOT acceptance and not failure. It is the state the #119
+// dogfood had - a reviewer whose conclusion the machine could not read - and it
+// now holds the stage open instead of releasing a gate below it.
+func (r PlanReconciler) reviewAcceptance(plan domain.EngineeringPlan, stage domain.PlanStage, projection PlanStageProjection) (string, bool, error) {
+	assignment, found, err := r.Service.frozenAssignment(plan, projection, stage.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if !found {
+		return "", false, nil
+	}
+	subject, ok := reviewSubject(assignment)
+	if !ok {
+		// A reviewer with no frozen upstream has nothing it was asked to judge.
+		// Settling it either way would be inventing a subject for a verdict.
+		return "", false, nil
+	}
+	switch {
+	case projection.Review.Accepted(subject.Candidate, subject.Tree):
+		return "completed", true, nil
+	case projection.Review.Blocks(subject.Candidate, subject.Tree):
+		// A BLOCK settles nothing. The reviewer did its job and the work was
+		// refused, so the producer is sent back; when it produces a replacement
+		// this stage's subject moves and the review is performed again against
+		// it. Settling failed would end the plan on a verdict whose whole
+		// purpose is to cause more work.
+		return "", false, nil
+	default:
+		return "", false, nil
+	}
+}
+
+// stageWorkStopped reports whether a stage's own performance is over, whatever
+// the plan concluded about it.
+//
+// A COMPLETED stage is obviously over. A RUNNING stage whose run has settled is
+// over too: the run produced what it is going to produce, and the stage is
+// simply not accepted - a blocked review, or a producer waiting on remediation
+// that its budget no longer allows.
+func (r PlanReconciler) stageWorkStopped(projection PlanStageProjection) (bool, error) {
+	if projection.State == PlanStageCompleted {
+		return true, nil
+	}
+	if projection.State != PlanStageRunning || projection.RunID == "" {
+		return false, nil
+	}
+	run, found, err := r.Store.Run(projection.RunID)
+	if err != nil || !found {
+		return false, err
+	}
+	_, stopped := runSettled(run)
+	return stopped, nil
+}
+
+// deliverBlockingReviews hands each blocking reviewer verdict to the run that
+// produced the work it blocked.
+//
+// It is idempotent by the producer run's own projection: a verdict already
+// recorded against the producer's current head is not recorded again, so a tick
+// that runs a thousand times delivers once. Delivery is skipped entirely once
+// the producer has moved on - a verdict about a candidate that no longer exists
+// is not a reason to redo anything.
+func (r PlanReconciler) deliverBlockingReviews(plan domain.EngineeringPlan, snapshot PlanSnapshot) error {
+	for _, stage := range plan.Stages {
+		projection, ok := snapshot.Stages[stage.ID]
+		if !ok || projection.Review == nil || projection.Review.Verdict != StageReviewBlocked {
+			continue
+		}
+		review := projection.Review
+		if review.UpstreamRunID == "" || review.Candidate == "" {
+			continue
+		}
+		producer, found, err := r.Store.Run(review.UpstreamRunID)
+		if err != nil {
+			return err
+		}
+		// The producer has to still BE at the candidate that was judged. A
+		// verdict about superseded work is stale, and delivering it would send
+		// a producer back over a candidate it has already replaced.
+		if !found || producer.Candidate.Revision != review.Candidate {
+			continue
+		}
+		events, err := r.Store.Events(review.UpstreamRunID)
+		if err != nil {
+			return err
+		}
+		projected, err := Project(events)
+		if err != nil {
+			return err
+		}
+		if existing := projected.StageReview; existing != nil && existing.Candidate == review.Candidate {
+			continue
+		}
+		payload, err := json.Marshal(StageReviewBlockedPayload{
+			StageID: stage.ID, ReviewerRunID: review.RunID,
+			Candidate: review.Candidate, Tree: review.Tree, Findings: review.Findings,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := r.Store.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion,
+			ID:            fmt.Sprintf("stage-review-blocked-%s-%s", stage.ID, short12(review.Candidate)),
+			RunID:         review.UpstreamRunID, Type: EventStageReviewBlocked,
+			OccurredAt: r.Clock.Now(), Payload: payload,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// unreachableUpstream blocks a stage whose frozen upstream work cannot be put
+// in front of it.
+//
+// The rule is narrow and deliberately one-directional: a stage that froze an
+// upstream candidate either gets that candidate or does not run. Substituting
+// the trusted base is what made an independent review meaningless without
+// anything failing, so the substitution is not available - not as a fallback,
+// not as a degraded mode, not with a warning.
+func unreachableUpstream(stage domain.PlanStage, assignment domain.AgentAssignment, base string, local *CandidateRef) *PlanStageBlock {
+	if base != "" || local != nil {
+		return nil
+	}
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		if upstream.RunID == "" || upstream.Candidate == "" {
+			continue
+		}
+		return &PlanStageBlock{
+			StageID: stage.ID, Kind: "upstream",
+			Reason: boundedDetail(fmt.Sprintf(
+				"stage %s produced candidate %s and it can be neither cloned nor taken from that run's workspace; this stage will not run against the trusted base instead",
+				upstream.StageID, short12(upstream.Candidate))),
+		}
+	}
+	return nil
+}
+
+// reviewSubject is the exact upstream candidate a reviewer stage was assigned
+// to judge. A reviewer bound to several producers judges the combined work, and
+// the LAST frozen upstream is the head that combination settles on - the same
+// one upstreamBase materializes the workspace from, so the verdict and the
+// workspace are answers about one tree by construction.
+func reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool) {
+	var subject domain.UpstreamOutput
+	found := false
+	for _, upstream := range assignment.Context.UpstreamOutputs {
+		if upstream.RunID == "" || upstream.Candidate == "" {
+			continue
+		}
+		subject, found = upstream, true
+	}
+	return subject, found
+}
+
+// stageSettlementReason is what an operator reads beside a settled stage.
+//
+// A FAILED stage reports why it was not accepted, not the run's wait reason.
+// The run's reason for a rejected candidate is "goal_state_reached", which read
+// beside outcome "failed" is the same confusion that produced #126: the run did
+// stop, and what stopped it was a verdict, not a goal.
+func stageSettlementReason(outcome string, run EngineeringRun) string {
+	if outcome == string(Failed) && run.Reason == ReasonGoalStateReached {
+		return "the work this stage produced was not accepted by its required verification"
+	}
+	return run.Reason
 }
 
 // providerInvocations counts the execution attempts one run actually made.

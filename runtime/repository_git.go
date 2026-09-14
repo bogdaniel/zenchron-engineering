@@ -414,16 +414,24 @@ func (r RepositoryGitRunner) transportFor(args []string) (gitTransport, error) {
 		}
 		return r.Remote.Identity.transport, nil
 	}
-	// Local profile. fetch and push always need a bound remote identity; clone
-	// is allowed only from a filesystem repository, and only when the explicit
-	// local-transport capability is enabled.
-	if sub == "fetch" || sub == "push" {
+	// Local profile. PUSH always needs a bound remote identity: it is the one
+	// operation that publishes, and publication is authority.
+	//
+	// CLONE and FETCH are allowed from a filesystem repository, and only under
+	// the explicit local-transport capability. Fetch was refused outright, and
+	// that refusal had a cost: a downstream stage could only receive an
+	// upstream candidate that had been PUSHED, so the runtime could not hand
+	// one of its own workspaces to another without publishing it first. A
+	// filesystem fetch reaches no network - the transport is `file`, every
+	// protocol stays off - and the object being taken was written by this
+	// runtime moments earlier.
+	if sub == "push" {
 		return transportNone, fmt.Errorf("trusted git: %s requires a governed remote identity", sub)
 	}
 	if !r.Local.AllowFileTransport {
 		return transportNone, fmt.Errorf("trusted git: local transport capability not granted")
 	}
-	source, err := cloneSource(args)
+	source, err := localTransportSource(args, sub)
 	if err != nil {
 		return transportNone, err
 	}
@@ -435,6 +443,23 @@ func (r RepositoryGitRunner) transportFor(args []string) (gitTransport, error) {
 		return transportNone, fmt.Errorf("trusted git: %q needs a governed remote identity", source)
 	}
 	return transportFile, nil
+}
+
+// localTransportSource is the filesystem repository a local clone or fetch
+// reads from. A fetch names its source as the first positional argument after
+// the subcommand, which is the same shape a clone uses; both are then checked
+// against the same governed-identity rule, so neither can name a URL.
+func localTransportSource(args []string, sub string) (string, error) {
+	if sub == "clone" {
+		return cloneSource(args)
+	}
+	for _, a := range args[1:] {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a, nil
+	}
+	return "", fmt.Errorf("trusted git: fetch names no source to take objects from")
 }
 
 // cloneSource returns the source argument of a clone, and requires the

@@ -93,6 +93,7 @@ func performUnderRevisionOne(t *testing.T, fixture *planRunFixture) string {
 	}
 	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
 	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	acceptReview(t, fixture, "review", review)
 	fixture.reconcile(t)
 	fixture.reconcile(t)
 

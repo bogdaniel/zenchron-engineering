@@ -45,9 +45,15 @@ type RunProjection struct {
 	// different questions and are produced by different producers; collapsing
 	// them would let one stand in for the other.
 	SemanticAssurance *AssuranceObservation `json:"semantic_assurance,omitempty"`
-	CI                *CIObservation        `json:"ci,omitempty"`
-	Review            *ReviewObservation    `json:"review,omitempty"`
-	Attempts          map[string]int        `json:"attempts,omitempty"`
+	// StageReview is an INTERNAL plan reviewer's blocking verdict about this
+	// run's work. It is separate from Review, which is the forge's: they are two
+	// producers answering the same question through different channels, and a
+	// reader that means "a person on GitHub requested changes" keeps meaning
+	// exactly that.
+	StageReview *StageReviewObservation `json:"stage_review,omitempty"`
+	CI          *CIObservation          `json:"ci,omitempty"`
+	Review      *ReviewObservation      `json:"review,omitempty"`
+	Attempts    map[string]int          `json:"attempts,omitempty"`
 	// ExecutionDiagnostic is the LATEST sanitized execution failure the journal
 	// holds. It is projected from operation.after, exactly like the metadata
 	// baseline is, so a restarted process reports the same root cause without
@@ -89,6 +95,14 @@ type PullRequestObservation struct {
 	GitHubPRObservedPayload
 	Observation
 }
+
+// StageReviewObservation is one internal reviewer's blocking verdict, with the
+// staleness every other head-bound observation carries.
+type StageReviewObservation struct {
+	StageReviewBlockedPayload
+	Observation
+}
+
 type AssuranceObservation struct {
 	AssuranceObservedPayload
 	Observation
@@ -145,6 +159,9 @@ func Project(events []EngineeringEvent) (RunProjection, error) {
 	}
 	if p.SemanticAssurance != nil {
 		p.SemanticAssurance.Stale = p.SemanticAssurance.Commit != head
+	}
+	if p.StageReview != nil {
+		p.StageReview.Stale = p.StageReview.Candidate != head
 	}
 	if p.CI != nil {
 		p.CI.Stale = p.CI.HeadRevision != head
@@ -239,6 +256,17 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 		}
 		if p.Assurance == nil || supersedes(p.Assurance.Commit, payload.Commit, p.Head()) {
 			p.Assurance = &AssuranceObservation{payload, Observation{Sequence: e.Sequence}}
+		}
+	case EventStageReviewBlocked:
+		payload, err := decodePayload[StageReviewBlockedPayload](e.Payload)
+		if err != nil {
+			return err
+		}
+		// The LATEST verdict about the newest candidate wins, on the same
+		// supersession rule assurance uses: a reviewer that judged an older
+		// head has not answered about this one.
+		if p.StageReview == nil || supersedes(p.StageReview.Candidate, payload.Candidate, p.Head()) {
+			p.StageReview = &StageReviewObservation{payload, Observation{Sequence: e.Sequence}}
 		}
 	case EventSemanticAssuranceObserved:
 		payload, err := decodePayload[AssuranceObservedPayload](e.Payload)

@@ -731,6 +731,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Planning:          c.planning,
 		Feedback:          feedback,
 		Storage:           c.storage,
+		Toolchain:         c.config.Toolchain,
 		Clock:             runtime.RealClock{},
 		Owner:             c.owner,
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
@@ -924,6 +925,10 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			OperatorHome:      operatorHome(),
 			PermissionBypass:  bypass,
 			LegacyEnvironment: agent.Legacy && agent.Kind == runtime.AgentKindCodexCLI,
+			// The brokered execution environment, so the worker's PATH is the
+			// one the operator declared rather than the one that happened to
+			// start the supervisor.
+			Toolchain: config.Toolchain,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{

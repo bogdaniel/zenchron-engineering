@@ -128,6 +128,18 @@ const (
 	EventGitHubReviewObserved      = "github.review_observed"
 	EventGitHubPRObserved          = "github.pr_observed"
 	EventHumanAuthorityRecorded    = "human.authority_recorded"
+	// EventStageReviewBlocked is an INTERNAL plan reviewer's blocking verdict,
+	// delivered to the run that produced the work.
+	//
+	// It is the return path a plan review had no way to take. A reviewer's
+	// conclusion reached the producer only through the forge - a published pull
+	// request, an observed review, admitted feedback - and a candidate that
+	// failed verification is never published, so the one review that most needed
+	// to reach a producer was the one that structurally could not. This is that
+	// verdict as a durable run fact: bound to the exact candidate it judged, so
+	// it goes stale when the producer moves, and carrying bounded findings
+	// rather than reviewer prose.
+	EventStageReviewBlocked = "stage.review_blocked"
 
 	// The plan lifecycle. These events belong to a PLAN stream rather than a
 	// run stream, and they live in the same append-only journal, in the same
@@ -168,6 +180,24 @@ const (
 	// references - evidence, authority decision, human decision - now prove it.
 	// A gate is never satisfied by a worker run, because it never creates one.
 	EventPlanGateSatisfied = "plan.gate_satisfied"
+	// EventPlanStageReviewed is an independent reviewer stage's VERDICT about
+	// one exact candidate.
+	//
+	// It exists because the runtime had no representation of one. A reviewer
+	// stage was an ordinary mutating agent run whose conclusion lived only in a
+	// provider transcript, so "the reviewer blocked this change" was a fact no
+	// machine could read: it could not settle the reviewer's own stage, could
+	// not stop a gate below it, and could not reach the producer's remediation
+	// path. The only verdict channel that existed ran through the forge - a
+	// published pull request, an observed review, admitted feedback - which is
+	// unavailable exactly when verification has failed, because a failed
+	// candidate is never published.
+	//
+	// The verdict names the exact commit and tree it is about, so it goes stale
+	// the moment the producer moves, and its findings are bounded
+	// classifications rather than reviewer prose: the runtime's own record of
+	// why an invocation is happening must not be writable by a reviewer.
+	EventPlanStageReviewed = "plan.stage_reviewed"
 	// EventPlanBudgetConsumed is a DELTA against the plan's aggregate envelope.
 	// Consumption is a projection summed from these events rather than a stored
 	// counter, which is what makes "a revision, restart or reassignment cannot
@@ -195,7 +225,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true}
+var eventTypes = map[string]bool{EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -205,7 +235,7 @@ var planEventTypes = map[string]bool{
 	EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true,
 	EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true,
 	EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanBudgetConsumed: true,
-	EventPlanRevisionSuperseded: true, EventPlanAttemptRefused: true,
+	EventPlanRevisionSuperseded: true, EventPlanAttemptRefused: true, EventPlanStageReviewed: true,
 }
 
 type Ref struct {
@@ -294,11 +324,25 @@ type RunPlanBinding struct {
 	// based on the trusted branch would have nothing to review or integrate;
 	// this is what makes its workspace contain the work.
 	//
-	// It is only ever set to a published commit, because the governed remote is
-	// the only thing a candidate is cloned from. Where the upstream work is not
-	// published, the field is empty and the stage is based on the trusted base
-	// with the upstream diff supplied as context instead.
+	// It is set to a PUBLISHED upstream commit, which the governed remote can
+	// be cloned at directly. An unpublished upstream candidate is carried by
+	// UpstreamCandidate instead and materialized locally.
 	BaseRevision string `json:"base_revision,omitempty"`
+	// UpstreamCandidate is the exact upstream candidate this stage consumes
+	// when that candidate is NOT on the remote.
+	//
+	// It exists because publication is an authority-controlled external side
+	// effect and internal consumption is not, and conflating them meant a
+	// downstream stage could only see upstream work that had already been
+	// pushed. A candidate whose verification failed is never pushed, so a
+	// reviewer asked to judge it was silently based on the trusted base and
+	// reviewed an empty tree. The runtime now transfers the exact commit
+	// between its own workspaces and proves the result.
+	//
+	// omitempty and nil for every stage with no upstream, and for every stage
+	// whose upstream IS published - that one still uses BaseRevision, because
+	// cloning the remote at a commit it already has is simpler than copying it.
+	UpstreamCandidate *CandidateRef `json:"upstream_candidate,omitempty"`
 	// Generation is which EXECUTION of this stage the run performs. It advances
 	// when an already-approved stage is performed again because the upstream
 	// candidate it consumed was replaced - an execution fact, not a change to

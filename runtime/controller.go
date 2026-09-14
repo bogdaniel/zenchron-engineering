@@ -210,7 +210,12 @@ type Dependencies struct {
 	// Storage is the operator's bound on local runtime state. Its zero value
 	// is unbounded, which is the behaviour every configuration had before the
 	// bound existed.
-	Storage   StateStorage
+	Storage StateStorage
+	// Toolchain is the brokered execution environment a worker is given, and
+	// the tools it must be able to resolve before it is dispatched. Its zero
+	// value inherits the supervisor environment and requires nothing, which is
+	// how every configuration behaved before it existed.
+	Toolchain ToolchainConfig
 	Assurance AssuranceProvider
 	// SemanticAssurance is the INDEPENDENT semantic acceptance producer. It is
 	// optional: without it a contract requiring semantic_acceptance is refused

@@ -524,10 +524,27 @@ func (s *runState) pinnedBase() string {
 	if s.run.Plan != nil && s.run.Plan.BaseRevision != "" {
 		return s.run.Plan.BaseRevision
 	}
+	// An UNPUBLISHED upstream candidate is not reachable by cloning, so the
+	// clone starts at the trusted base and the exact commit is transferred into
+	// the workspace afterwards. The pinned base stays the trusted one here on
+	// purpose: it is what the remote is cloned at, and claiming a base the
+	// remote does not have would fail the clone rather than the transfer.
 	if len(s.sources) == 0 {
 		return ""
 	}
 	return s.sources[0].BaseRevision
+}
+
+// upstreamCandidate is the exact upstream candidate this run must be moved onto
+// after cloning, when its plan stage consumes work that was never published.
+func (s *runState) upstreamCandidate() *CandidateRef {
+	if s.run.Plan == nil || s.run.Plan.UpstreamCandidate == nil {
+		return nil
+	}
+	if !s.run.Plan.UpstreamCandidate.Materializable() {
+		return nil
+	}
+	return s.run.Plan.UpstreamCandidate
 }
 
 // baseRevision is the base the candidate currently sits on.
@@ -607,6 +624,13 @@ func (s *runState) currentHeadFailure() (FailureClass, bool) {
 	}
 	if review := s.projection.Review; review != nil && !review.Stale && review.State == string(GitHubReviewChangesRequested) {
 		return FailureCompileTest, true
+	}
+	// An INTERNAL plan reviewer's block is a verdict about the candidate, so it
+	// routes exactly like the verifier's: to the producer, bounded by the same
+	// remediation budget. Without this the one review a failed candidate can
+	// actually receive would be the one that could not reach its producer.
+	if blocked := s.projection.StageReview; blocked != nil && !blocked.Stale {
+		return FailureVerification, true
 	}
 	return "", false
 }

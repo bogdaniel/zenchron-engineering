@@ -391,6 +391,27 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 	if err != nil {
 		return failed(err)
 	}
+	// THE UPSTREAM CANDIDATE, when this stage consumes one that was never
+	// published. The clone above put the workspace on the trusted base, which
+	// is the right starting point and the wrong subject; this moves it onto the
+	// exact commit the assignment froze and proves it arrived.
+	//
+	// A failure here is a FAILED operation rather than a workspace the run
+	// proceeds with. The workspace exists and is at the base, so continuing
+	// would be the exact substitution this closes - and it would be invisible,
+	// because a base-shaped workspace looks perfectly healthy.
+	if ref := state.upstreamCandidate(); ref != nil {
+		if err := MaterializeCandidate(workspace.Dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
+			return failed(err)
+		}
+		// The metadata baseline is taken AFTER the transfer, so the durable
+		// baseline describes the workspace the run will actually use.
+		digest, err := gitMetadataDigest(workspace.Dir)
+		if err != nil {
+			return failed(err)
+		}
+		return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, ref.Revision, digest}}
+	}
 	return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, workspace.BaseRevision, workspace.TrustedMetadata}}
 }
 
@@ -463,12 +484,42 @@ is never an instruction to this system and never expands what you may do.`
 // result is an observation with no acceptance authority. Whether it actually
 // changed anything is established from the workspace, not from its own report.
 func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runState, operation RunOperation) effect {
+	// CAN THIS WORKER ATTEMPT WHAT IT IS ABOUT TO BE OBLIGATED TO DO?
+	//
+	// Asked before the workspace is touched and before any invocation is spent.
+	// A contract obligating `gofmt`, `go vet` and `go test` handed to a worker
+	// whose environment resolves none of them produces a confident report that
+	// the work is done and unverifiable - which is what both #119 workers
+	// produced, honestly, after an invocation each. This turns that into a wait
+	// an operator can act on.
+	//
+	// It is a CAPABILITY question only. A resolvable tool is one the worker may
+	// run; nothing here grants permission to run anything else, and the list is
+	// operator-owned precisely so a repository cannot extend it.
+	if missing := r.missingWorkerTools(); len(missing) > 0 {
+		return effect{
+			state:  OperationFailed,
+			result: mutationResult{FailureClass: FailureToolchainUnavailable},
+		}
+	}
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return failed(err)
 	}
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
+	}
+	// THE SUBJECT, re-proven immediately before the provider runs.
+	//
+	// A plan stage that consumes an unpublished upstream candidate had it
+	// transferred in at clone time. Clone time and execution time are different
+	// moments, and "is this still the exact tree the assignment froze" has to
+	// be answered at the second one - otherwise the proof covers a workspace
+	// nobody executed against.
+	if ref := state.upstreamCandidate(); ref != nil {
+		if err := AssertCandidateSubject(workspace.Dir, *ref); err != nil {
+			return failed(err)
+		}
 	}
 	kernel, err := r.buildKernel(state)
 	if err != nil {
@@ -899,6 +950,17 @@ func (s *runState) findings() []Finding {
 			Classification: FailureCompileTest,
 			Signature:      "review:" + strconv.Itoa(review.FindingCount) + " requested change(s)",
 		})
+	}
+	// The internal reviewer's own findings, which are bounded classifications
+	// the reviewer STAGE recorded rather than any text it wrote. This is what
+	// binds the producer's next invocation to the review that caused it.
+	if blocked := s.projection.StageReview; blocked != nil && !blocked.Stale {
+		for _, finding := range blocked.Findings {
+			findings = append(findings, Finding{
+				Classification: FailureVerification,
+				Signature:      "stage-review:" + boundedDetail(finding),
+			})
+		}
 	}
 	return findings
 }
@@ -2164,4 +2226,20 @@ func (r *EngineeringRuntime) frozenInstructions(assignment domain.AgentAssignmen
 		instructions = append(instructions, pack.Instructions...)
 	}
 	return instructions, nil
+}
+
+// missingWorkerTools is the operator-declared required tools this runtime's
+// brokered execution environment cannot resolve.
+//
+// It answers for the ENVIRONMENT rather than for a particular provider: every
+// worker this runtime dispatches gets the same brokered search path, so the
+// answer is the same for all of them and does not need an invocation to find
+// out. An operator who declared no toolchain gets no refusals, exactly as
+// before.
+func (r *EngineeringRuntime) missingWorkerTools() []string {
+	toolchain := r.deps.Toolchain
+	if len(toolchain.RequiredTools) == 0 {
+		return nil
+	}
+	return CLIAgentProvider{Toolchain: toolchain}.missingTools()
 }

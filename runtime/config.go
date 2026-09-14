@@ -102,6 +102,36 @@ type AssuranceConfig struct {
 	DependencyCacheDir string `json:"dependency_cache_dir,omitempty"`
 }
 
+// ToolchainConfig is the brokered execution environment for a worker.
+//
+// Path replaces the supervisor's ambient search path when it is set. It is a
+// list of DIRECTORIES rather than a rendered PATH string so the value is
+// checkable: each entry can be tested for existence, and an operator reading
+// the configuration can see the whole search order rather than parse it.
+//
+// RequiredTools are executables a MUTATING worker must be able to resolve
+// before it is dispatched. They are the machine-checkable half of the
+// contract's acceptance obligations: a contract that says `go test` must pass
+// is unattemptable by a worker that cannot resolve `go`, and discovering that
+// after spending an invocation is what this turns into a refusal before one.
+//
+// Both are empty by default, which preserves the behaviour of every existing
+// configuration: an operator who declares no toolchain gets the inherited
+// environment and no new refusals. Declaring one is what buys the guarantee.
+type ToolchainConfig struct {
+	Path          []string `json:"path,omitempty"`
+	RequiredTools []string `json:"required_tools,omitempty"`
+}
+
+// Declared reports whether the operator stated a toolchain at all.
+func (t ToolchainConfig) Declared() bool { return len(t.Path) > 0 || len(t.RequiredTools) > 0 }
+
+// SearchPath renders the brokered PATH, or empty when the operator declared no
+// directories and the inherited environment stands.
+func (t ToolchainConfig) SearchPath() string {
+	return strings.Join(t.Path, string(os.PathListSeparator))
+}
+
 // ProviderConfig selects the AI provider and points at its credential.
 // CredentialPath is deliberately a PATH and never a token value: a path is not
 // a usable secret, so configuration that is read, digested, and logged cannot
@@ -404,6 +434,25 @@ type OperatorConfig struct {
 	// being worked on.
 	PlanningDir string          `json:"planning_dir,omitempty"`
 	Assurance   AssuranceConfig `json:"assurance"`
+	// Toolchain is the EXECUTION ENVIRONMENT the runtime brokers to a worker.
+	//
+	// It exists because the worker environment was the supervisor's ambient
+	// PATH. The assurance container has had a pinned, reproducible search path
+	// since it was built - sandboxPATH, deliberately never inherited - and the
+	// workers that produce the candidates it verifies had whatever shell
+	// happened to start `serve`. In the first #119 dogfood that meant the Go
+	// toolchain was absent from both workers while present in the verifier, so
+	// a contract obligating `gofmt`, `go vet` and `go test` was handed to
+	// workers that could not attempt any of them, and nothing refused until an
+	// invocation had already been spent discovering it.
+	//
+	// It is OPERATOR authority and deliberately not addressable by the
+	// repository layer. A declared tool is a CAPABILITY - the worker may
+	// resolve and run this executable - and never an authorization to run
+	// whatever a repository names: capability, permission and authority stay
+	// three things, and a repository that could add to this list would be
+	// granting itself the first one.
+	Toolchain ToolchainConfig `json:"toolchain,omitzero"`
 	// Provider is the pre-#63 SINGLE execution provider. It remains supported
 	// so an existing operator configuration keeps working unchanged, and it is
 	// migrated into a one-agent registry by AgentRegistry. It is mutually

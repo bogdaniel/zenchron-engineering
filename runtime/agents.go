@@ -227,6 +227,11 @@ type AgentReadiness struct {
 	// judge how much the claim is worth.
 	AuthMode       string `json:"auth_mode,omitempty"`
 	AuthModeSource string `json:"auth_mode_source,omitempty"`
+	// MissingTools are declared required tools the brokered execution
+	// environment cannot resolve. A worker with any of these is not available:
+	// it can be invoked, and it cannot attempt the obligations it would be
+	// given, which is a refusal worth making before an invocation is spent.
+	MissingTools []string `json:"missing_tools,omitempty"`
 }
 
 // Authentication-mode observations. These are OBSERVATIONS with stated

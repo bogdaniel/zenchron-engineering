@@ -241,8 +241,11 @@ func TestAFreezeWhoseRunSurvivedIsAssociatedRatherThanDiscarded(t *testing.T) {
 		t.Fatalf("this test needs the association to be MISSING, and it is present: %#v", lost.Stages["review"])
 	}
 
-	// And the producer settles a replacement in that window.
-	recordCandidate(t, fixture, implementation, "bbbbbbbbbbbb")
+	// And the producer settles a VERIFIED replacement in that window. The
+	// verdict matters to the fixture now: an unverified replacement leaves the
+	// producer stage unsettled, and this test is about what happens to the
+	// review's orphaned freeze, not about verification.
+	recordCandidateAndAssurance(t, fixture, implementation, "bbbbbbbbbbbb")
 	settleRunAtGoalState(t, fixture, implementation, "bbbbbbbbbbbb")
 
 	fixture.reconcile(t)
@@ -376,7 +379,7 @@ func moveRunHeadWithoutSettling(t *testing.T, fixture *planRunFixture, runID, he
 	if err != nil || !found {
 		t.Fatalf("read run %s: found=%v err=%v", runID, found, err)
 	}
-	if _, settled := stageOutcome(run); settled {
+	if _, settled := runSettled(run); settled {
 		t.Fatalf("run %s is already settled, so this helper proves nothing", runID)
 	}
 	run.Candidate.Revision, run.Candidate.Tree = head, head
