@@ -507,6 +507,13 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 		case string(Failed):
 			stage.State = PlanStageFailed
 		default:
+			if stage.Gate != nil || stage.State == PlanStageSatisfied {
+				s.Stages[payload.StageID] = PlanStageProjection{
+					StageID: payload.StageID, State: PlanStageInvalidated,
+					Reason: payload.Reason, InvalidatedUnder: payload.Revision, Generation: stage.Generation,
+				}
+				return nil
+			}
 			stage.State = PlanStageInvalidated
 			if payload.Revision > 0 {
 				// Invalidated UNDER the revision it was performed under. The
@@ -557,6 +564,8 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			return fmt.Errorf("stage %q owns EngineeringRun %q and cannot be satisfied as a gate", payload.StageID, stage.RunID)
 		}
 		stage.State = PlanStageSatisfied
+		stage.Reason = ""
+		stage.InvalidatedUnder = 0
 		stage.Gate = &PlanGateSatisfaction{
 			Kind: domain.StageKind(payload.Kind), Claims: payload.Claims,
 			Evidence: payload.Evidence, Decision: payload.Decision, HumanEvidenceID: payload.HumanEvidenceID,

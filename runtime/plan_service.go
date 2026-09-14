@@ -878,6 +878,16 @@ func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) 
 	for _, assignment := range bindable {
 		assigned[assignment.StageID] = true
 	}
+	if snapshot.Approved.Status == domain.ApprovalApproved && snapshot.Approved.Revision == plan.Revision {
+		rows, err := s.authorizedAssignments(plan, snapshot)
+		if err != nil {
+			return PlanView{}, err
+		}
+		assigned = make(map[string]bool, len(rows))
+		for id := range rows {
+			assigned[id] = true
+		}
+	}
 	for _, stage := range plan.Stages {
 		if stage.Kind != domain.StageAgent {
 			continue

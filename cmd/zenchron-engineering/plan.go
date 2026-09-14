@@ -1131,6 +1131,12 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 				line += fmt.Sprintf(" independent-of=%s in %s", strings.Join(terminalSafeList(stage.Independence.DifferentFrom), ","), terminalSafe(string(stage.Independence.Dimension)))
 			}
 		}
+		for _, id := range view.Unbound {
+			if id == stage.ID {
+				line += " unbound (approval bound no assignment)"
+				break
+			}
+		}
 		fmt.Fprintln(stdout, line)
 	}
 	for _, blocked := range view.Blocked {
@@ -1209,7 +1215,7 @@ func writePlanBudget(stdout io.Writer, view runtime.PlanView) {
 	// numbers alone.
 	agentStages := 0
 	for _, stage := range view.Plan.Stages {
-		if stage.Kind == domain.StageAgent {
+		if stage.Kind == domain.StageAgent && stage.InvocationMode != domain.InvocationModeNonMutatingPlanning {
 			agentStages++
 		}
 	}

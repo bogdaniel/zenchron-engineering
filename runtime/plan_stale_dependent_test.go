@@ -107,6 +107,10 @@ func TestACompletedReviewIsInvalidatedWhenTheWorkItReviewedMoves(t *testing.T) {
 		t.Fatal("the gate stayed satisfied over a review that was never performed on the current work")
 	}
 
+	if after.Stages["assurance"].Generation != 0 || after.Stages["assurance"].Gate != nil {
+		t.Fatalf("invalidated gate retained proof or advanced execution: %#v", after.Stages["assurance"])
+	}
+
 	// It is PERFORMED AGAIN under the same approved plan: a new execution
 	// generation, its own assignment and its own run. The approved obligation -
 	// this role, this profile version and digest, this worker, this trust
