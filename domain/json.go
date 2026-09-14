@@ -51,11 +51,21 @@ func Decode[T Contract](data []byte) (T, error) {
 	if err := schemas.Validate(name, instance); err != nil {
 		return zero, fmt.Errorf("validate %s: %w", name, err)
 	}
+	if model, ok := any(value).(ProjectModel); ok {
+		if err := ValidateBoundaryPatterns(model); err != nil {
+			return zero, err
+		}
+	}
 	return value, nil
 }
 
 // Encode serializes and validates one v0.1 contract without added whitespace.
 func Encode[T Contract](value T) ([]byte, error) {
+	if model, ok := any(value).(ProjectModel); ok {
+		if err := ValidateBoundaryPatterns(model); err != nil {
+			return nil, err
+		}
+	}
 	name := schemaName[T]()
 	data, err := json.Marshal(value)
 	if err != nil {

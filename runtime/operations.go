@@ -2027,7 +2027,6 @@ func (r *EngineeringRuntime) buildKernelAt(state *runState, workspaceDir, commit
 		ID:               sourceSnapshotID(state),
 		Objective:        untrustedObjective(*state.source, text),
 		AcceptanceIntent: runtimeAcceptanceIntent,
-		PredictedPaths:   []string{predictedScopePlaceholder},
 		PathsKnown:       false,
 	}, model, r.deps.Policy, "contract-"+state.run.ID, revision)
 	if err != nil {
