@@ -436,7 +436,13 @@ func (s FeedbackState) Seen(key string) bool {
 }
 
 // feedbackState replays the run's feedback position from the journal.
+// feedbackState folds once per loaded event slice. Appending invalidates the
+// cached fold by changing its length; each load creates a fresh runState.
+// Callers treat the returned map and slice as read-only.
 func (s *runState) feedbackState() FeedbackState {
+	if s.feedbackCached != nil && s.feedbackEventCount == len(s.events) {
+		return *s.feedbackCached
+	}
 	state := FeedbackState{Consumed: map[string]bool{}}
 	for _, event := range s.events {
 		switch event.Type {
@@ -465,6 +471,8 @@ func (s *runState) feedbackState() FeedbackState {
 			}
 		}
 	}
+	s.feedbackCached = &state
+	s.feedbackEventCount = len(s.events)
 	return state
 }
 

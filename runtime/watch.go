@@ -238,7 +238,7 @@ func (w *WatchController) Tick(ctx context.Context) (TickReport, error) {
 // of those belong to another live owner. A lease whose owner cannot be proved
 // dead counts as alive, exactly as the scheduler treats it.
 func (w *WatchController) drivenRuns() (active int, elsewhere int, err error) {
-	operations, err := w.deps.Store.AllOperations()
+	operations, err := w.deps.Store.ActiveOperations("")
 	if err != nil {
 		return 0, 0, err
 	}
