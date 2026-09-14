@@ -1065,17 +1065,9 @@ func findingSummary(findings []Finding) string {
 	}
 	rendered := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		fields := []string{"class=" + string(finding.Classification)}
-		if finding.Verifier != "" {
-			fields = append(fields, "verifier="+finding.Verifier)
-		}
-		if finding.Signature != "" {
-			fields = append(fields, "signature="+finding.Signature)
-		}
-		if finding.ArtifactRef != "" {
-			fields = append(fields, "evidence="+finding.ArtifactRef)
-		}
-		rendered = append(rendered, "["+strings.Join(fields, " ")+"]")
+		// Finding.String omits the diagnostic by construction, so this cannot
+		// drift away from the boundary even if someone edits only one of them.
+		rendered = append(rendered, finding.String())
 	}
 	return strings.Join(rendered, " ")
 }

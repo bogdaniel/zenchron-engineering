@@ -185,9 +185,34 @@ type Finding struct {
 	// so this text is quoted to a model inside untrusted markers and is never
 	// rendered into the trusted half of an envelope. Holding it in the same
 	// struct as the trusted fields is safe only because no formatter prints a
-	// Finding whole; see findingSummary.
-	Diagnostic string
+	// Finding whole; see findingSummary and String.
+	Diagnostic string `json:"-"`
 }
+
+// String renders a finding WITHOUT its diagnostic, and exists so that the
+// safety of this type does not depend on every future caller remembering to.
+//
+// The trusted half of a worker envelope is built with a format verb. A later
+// %v or %s on a Finding - in a log line, an error, a debug print, a rendering
+// of a slice of them - would otherwise splice attacker-writable verifier bytes
+// into whatever it was building. With this method that is structurally
+// impossible: the excerpt has exactly one way out, verifierEvidenceEnvelope,
+// which quotes it inside untrusted markers. The json tag above closes the
+// serialization route for the same reason.
+func (f Finding) String() string {
+	fields := []string{"class=" + string(f.Classification)}
+	if f.Verifier != "" {
+		fields = append(fields, "verifier="+f.Verifier)
+	}
+	if f.Signature != "" {
+		fields = append(fields, "signature="+f.Signature)
+	}
+	if f.ArtifactRef != "" {
+		fields = append(fields, "evidence="+f.ArtifactRef)
+	}
+	return "[" + strings.Join(fields, " ") + "]"
+}
+
 type ProviderBudget struct {
 	MaxTokens     *int64
 	MaxCostMicros *int64

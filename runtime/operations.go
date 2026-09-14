@@ -1084,7 +1084,7 @@ func (s *runState) assuranceFinding(observed AssuranceObservation) Finding {
 	// would have had anyway. It is not a reason to fail the run: the verdict is
 	// already durable, and refusing to remediate because the EXPLANATION is
 	// unreadable would turn a diagnostic gap into a lifecycle failure.
-	if diagnostic, err := s.rt.deps.Artifacts.AssuranceDiagnostic(finding.ArtifactRef); err == nil {
+	if diagnostic, err := s.rt.deps.Artifacts.AssuranceDiagnostic(finding.ArtifactRef, s.run.ID); err == nil {
 		finding.Diagnostic = diagnostic
 	}
 	return finding

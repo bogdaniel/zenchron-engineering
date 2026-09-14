@@ -57,11 +57,27 @@ var volatileEvidence = []struct {
 	pattern     *regexp.Regexp
 	replacement string
 }{
+	// The randomized build directory `go test` links through.
 	{regexp.MustCompile(`go-build\d+`), "go-build"},
-	{regexp.MustCompile(`\b\d+(\.\d+)?s\b`), "Ns"},
-	{regexp.MustCompile(`0x[0-9a-fA-F]+`), "0xADDR"},
+	// ONLY `go test`'s OWN timings: the parenthesised per-test duration and the
+	// tab-delimited per-package one. A bare duration is NOT normalized, because
+	// a duration is frequently the thing under assertion - "want 30s, got 45s"
+	// and "want 60s, got 45s" are different failures, and an earlier version of
+	// this list collapsed them into the same signature.
+	{regexp.MustCompile(`\(\d+(\.\d+)?s\)`), "(Ns)"},
+	{regexp.MustCompile(`\t\d+(\.\d+)?s$`), "\tNs"},
+	// Stack-frame artifacts: the frame offset, and heap pointers, which on this
+	// runtime are long and lowercase. Short hex is left alone on purpose -
+	// "want 0xdeadbeef, got 0xcafebabe" is an assertion, not an address.
+	//
+	// ponytail: length is a heuristic for "this is a pointer". A test asserting
+	// on a nine-digit lowercase hex literal would have it normalized away.
+	// Narrow it by requiring stack-frame context if that ever bites.
+	{regexp.MustCompile(`\+0x[0-9a-f]+`), "+0xOFF"},
+	{regexp.MustCompile(`0x[0-9a-f]{9,}`), "0xADDR"},
+	// Temporary directories a test created for itself.
 	{regexp.MustCompile(`/tmp/[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*`), "/tmp/PATH"},
-	{regexp.MustCompile(`TestMain\(m\)|\bgoroutine \d+\b`), "goroutine N"},
+	{regexp.MustCompile(`\bgoroutine \d+\b`), "goroutine N"},
 }
 
 // normalizeFailureEvidence keeps the lines of a transcript that say something
@@ -122,8 +138,8 @@ func AssuranceFailureSignature(transcript []byte) (string, error) {
 // candidate cannot address a file outside it. The sanitized candidate is read
 // rather than the raw forensic transcript, which is the same choice
 // PriorExecutionAttemptContext makes for the same reason.
-func (s ArtifactStore) AssuranceDiagnostic(ref string) (string, error) {
-	if s.Root == "" || strings.TrimSpace(ref) == "" {
+func (s ArtifactStore) AssuranceDiagnostic(ref, runID string) (string, error) {
+	if s.Root == "" || !validAssuranceEvidenceRef(ref, runID) {
 		return "", nil
 	}
 	path := filepath.Join(s.Root, filepath.Clean("/"+ref)+".sanitized-candidate.log")
@@ -140,6 +156,47 @@ func (s ArtifactStore) AssuranceDiagnostic(ref string) (string, error) {
 		return "", err
 	}
 	return boundDiagnostic(normalizeFailureEvidence(raw)), nil
+}
+
+// validAssuranceEvidenceRef refuses anything that is not an evidence identity
+// this runtime itself composed for THIS run.
+//
+// ArtifactRef must be an opaque evidence identifier, never a file-read
+// primitive. It reaches here from a durable payload written from an
+// AssuranceProvider's result, and a provider is an interface: a hostile or
+// merely broken implementation could put any string there. Containment under
+// the artifact root is necessary and not sufficient, because it would still
+// permit reading another RUN's evidence.
+//
+// So the shape is checked rather than trusted: the exact five segments
+// attemptTranscriptPrefix produces, and a run component equal to the run being
+// remediated. Anything else yields no diagnostic at all, which is the same
+// degradation as unreadable evidence.
+func validAssuranceEvidenceRef(ref, runID string) bool {
+	if strings.TrimSpace(ref) == "" || strings.TrimSpace(runID) == "" {
+		return false
+	}
+	segments := strings.Split(ref, "/")
+	if len(segments) != 5 || segments[0] != "provider" {
+		return false
+	}
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	if segments[2] != encodePathComponent(runID) {
+		return false
+	}
+	if !strings.HasPrefix(segments[4], "attempt-") {
+		return false
+	}
+	for _, digit := range segments[4][len("attempt-"):] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return len(segments[4]) > len("attempt-")
 }
 
 // boundDiagnostic renders the excerpt under a byte ceiling, and says so when it
