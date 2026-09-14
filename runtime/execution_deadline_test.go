@@ -178,7 +178,12 @@ func TestAStubbornProcessGroupIsTerminatedAtTheDeadline(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "stubborn.sh")
 	marker := filepath.Join(dir, "survived")
-	body := "#!/bin/sh\ntrap '' TERM INT\n( sleep 30; echo child > " + marker + ".child ) &\nsleep 30\necho parent > " + marker + "\n"
+	// GENUINELY stubborn. Trapping TERM and then sleeping once is not: the
+	// sleep is a separate process, killing it lets the trapping shell resume
+	// and exit zero, and the fixture reports a clean completion it never had.
+	// Looping means only SIGKILL ends either process.
+	loop := "i=0; while [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done"
+	body := "#!/bin/sh\ntrap '' TERM INT\n( trap '' TERM INT; " + loop + "; echo child > " + marker + ".child ) &\n" + loop + "\necho parent > " + marker + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +222,16 @@ func TestADetachedDescendantDoesNotBlockTheDeadline(t *testing.T) {
 	script := filepath.Join(dir, "escape.sh")
 	marker := filepath.Join(dir, "escapee")
 	// The child leaves the process group if the platform offers a way to.
-	body := "#!/bin/sh\ntrap '' TERM INT\nif command -v setsid >/dev/null 2>&1; then\n  setsid sh -c 'sleep 20; echo out > " + marker + "' &\nelse\n  sh -c 'sleep 20; echo out > " + marker + "' &\nfi\nsleep 20\n"
+	// The escapee is its OWN script. Passing it as `sh -c "...$i..."` let the
+	// writing shell expand the loop variable, the loop collapsed, and its final
+	// echo ran immediately - which read exactly like an escape that had not
+	// happened.
+	child := filepath.Join(dir, "escapee.sh")
+	loop := "i=0; while [ $i -lt 40 ]; do sleep 1; i=$((i+1)); done"
+	if err := os.WriteFile(child, []byte("#!/bin/sh\ntrap '' TERM INT\n"+loop+"\necho out > "+marker+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "#!/bin/sh\ntrap '' TERM INT\nif command -v setsid >/dev/null 2>&1; then\n  setsid /bin/sh " + child + " &\nelse\n  /bin/sh " + child + " &\nfi\n" + loop + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
