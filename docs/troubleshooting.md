@@ -249,10 +249,39 @@ fragment.
 | --- | --- |
 | `no assurance.dependency_cache_dir is configured; offline verification has no trusted module material to read and never downloads any` | configure it |
 | `the dependency cache <path> cannot be inspected` | create it |
-| `the dependency cache <path> is EMPTY` | provision it from the trusted base module graph using the pinned image |
+| `the dependency cache <path> is EMPTY` | run the provisioning command below against the trusted base module graph using the pinned assurance image |
 
-Verification is offline by contract. An empty cache is a false readiness claim,
-not a warning: containers will start and then fail on missing modules.
+Set these values to the operator's `assurance.image` (a `sha256:` digest, not a
+tag), `assurance.dependency_cache_dir`, and an absolute path to a trusted base
+checkout, not the candidate. The cache host path must be absolute and outside
+the candidate workspace, including after resolving symlinks.
+
+```bash
+ASSURANCE_IMAGE='sha256:REPLACE_WITH_YOUR_CONFIGURED_DIGEST'
+OPERATOR_CACHE='/absolute/path/to/operator/modcache'
+TRUSTED_BASE='/absolute/path/to/trusted/base/checkout'
+mkdir -p "$OPERATOR_CACHE"
+docker run --rm --network bridge \
+  --user "$(id -u):$(id -g)" \
+  --mount "type=bind,src=$TRUSTED_BASE,dst=/workspace" \
+  --mount "type=bind,src=$OPERATOR_CACHE,dst=/cache" \
+  --workdir /workspace \
+  --env HOME=/tmp --env GOTOOLCHAIN=local \
+  --env GOMODCACHE=/cache \
+  "$ASSURANCE_IMAGE" go mod download all
+```
+
+Provisioning needs network and write access: this command warms the trusted
+base module graph into the operator cache mounted at `/cache`. The resulting
+host directory must be readable, non-empty, and populated under
+`cache/download`. Re-run `zenchron-engineering autonomy doctor --text` afterwards.
+
+Assurance runs with no network by contract and mounts that same cache read-only
+at `/cache` with `GOMODCACHE=/cache`, so verification cannot fill it itself.
+The cache is operator-provisioned material; letting a candidate populate it
+would let that candidate change dependencies other runs trust. An empty cache
+is a false readiness claim, not a warning: containers will start and then fail
+on missing modules.
 
 **A run waits at `assurance_dependency_unavailable`.** The same environment
 condition, met at run time. Re-running the identical command against the
