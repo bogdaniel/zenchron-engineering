@@ -14,6 +14,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,7 +121,7 @@ func TestAnExternalWaitDoesNotConsumeExecutionAuthority(t *testing.T) {
 	}
 	// The provider declined at its account boundary: no work happened, so the
 	// attempt and its budget are given back.
-	if _, err := scheduler.RestoreAttempt(op.ID); err != nil {
+	if _, err := scheduler.RestoreAttempt(op.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	clock.advance(4 * time.Hour)
@@ -263,6 +264,119 @@ func TestAProviderFinishingWithinItsAuthoritySucceeds(t *testing.T) {
 	}
 	if result.Invocation == nil || result.Invocation.OverranDeadline {
 		t.Fatalf("an invocation that finished in time was recorded as overrunning: %+v", result.Invocation)
+	}
+}
+
+// REAL RECOVERY, not a re-read of the row. A controller that dies mid-attempt
+// never reaches Finish, so nothing folded that attempt's elapsed execution into
+// the counter. Resuming must not hand the work a fresh envelope.
+func TestAResumedAttemptDoesNotRegainTheTimeACrashedAttemptSpent(t *testing.T) {
+	store := NewMemoryOperationStore()
+	clock := &steppingClock{at: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	dead := OwnerLivenessFunc(func(string) bool { return false })
+	first := Scheduler{Store: store, Clock: clock, Owner: "owner-a", LeaseDuration: time.Minute, Liveness: dead}
+	op := plannedExecution(t, first, 30*time.Minute)
+
+	// 25 minutes of real execution, then the controller dies: no Finish, no
+	// RestoreAttempt, the lease simply stops being renewed.
+	clock.advance(25 * time.Minute)
+
+	// A new controller takes the abandoned operation through the REAL
+	// acquisition path and resumes it.
+	second := Scheduler{Store: store, Clock: clock, Owner: "owner-b", LeaseDuration: time.Minute, Liveness: dead}
+	next, err := second.Next(op.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == nil {
+		t.Fatal("the abandoned operation was never reacquired")
+	}
+	resumed, err := second.Start(next.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := OperationRemaining(resumed, clock.Now())
+	if remaining > 5*time.Minute {
+		t.Fatalf("the resumed attempt has %s of authority; the crashed attempt spent 25m of a 30m budget", remaining)
+	}
+	if want := clock.Now().Add(remaining); !resumed.Deadline.Equal(want) {
+		t.Fatalf("attempt deadline %s does not match the %s remaining", resumed.Deadline, remaining)
+	}
+}
+
+// A LATE EXTERNAL REFUSAL DOES NOT MAKE THE WORK BEFORE IT FREE.
+func TestWorkPerformedBeforeAWaitStaysConsumed(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	// The provider reasons, edits and calls tools for twenty minutes and only
+	// then meets a rate limit that routes to a wait.
+	clock.advance(20 * time.Minute)
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.RestoreAttempt(op.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(4 * time.Hour)
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := OperationRemaining(resumed, clock.Now()); got != 10*time.Minute {
+		t.Fatalf("the resumed attempt received %s; twenty minutes of real provider work must stay consumed", got)
+	}
+}
+
+// AND THE LEGITIMATE ZERO-COST CASE IS PRESERVED: refused before execution
+// began, so nothing was spent.
+func TestARefusalBeforeExecutionCostsNothing(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	clock.advance(2 * time.Second)
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.RestoreAttempt(op.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(4 * time.Hour)
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := OperationRemaining(resumed, clock.Now()); got != 30*time.Minute {
+		t.Fatalf("the resumed attempt received %s; a refusal that ran no work costs nothing", got)
+	}
+}
+
+// The runtime decides which of those two it was from EVIDENCE, not from the
+// route: an attempt that reached a worker is charged even when the failure it
+// reported routes to a wait.
+func TestTheRefundDecisionComesFromWhetherAWorkerRan(t *testing.T) {
+	executed, err := json.Marshal(mutationResult{FailureClass: FailureProviderRateLimited, ProviderExecuted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused, err := json.Marshal(mutationResult{FailureClass: FailureProviderAccountUnavailable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerExecuted(executed) != true {
+		t.Fatal("an attempt that reached a worker was treated as having run nothing")
+	}
+	if providerExecuted(refused) != false {
+		t.Fatal("a pre-execution refusal was treated as having run work")
+	}
+	// An unreadable result is charged rather than refunded: guessing generously
+	// about an unknown is how a bounded budget stops being one.
+	if providerExecuted(nil) != true {
+		t.Fatal("an unreadable result was refunded")
 	}
 }
 

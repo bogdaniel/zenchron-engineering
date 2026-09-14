@@ -379,6 +379,21 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// on an unavailable provider account, an operator decision or a review
 		// is not executing, and an instant stamped before it started would burn
 		// while nothing ran.
+		// A PREVIOUS ATTEMPT THAT NEVER FINISHED still spent what it spent.
+		//
+		// Finish is what normally folds an attempt's elapsed execution into the
+		// counter. A controller that died mid-attempt never reached it, so its
+		// ActiveSince is still set here - and starting the next attempt without
+		// folding it would silently return the whole budget, which is the
+		// original defect in a narrower place. Charging it is the fail-safe
+		// direction: an attempt that was active and cannot say how much of its
+		// time was useful is charged for all of it.
+		if op.ActiveSince != nil {
+			if orphaned := now.Sub(*op.ActiveSince); orphaned > 0 {
+				op.ConsumedExecution += orphaned
+				op.LastAttemptExecution = orphaned
+			}
+		}
 		op.ActiveSince = &now
 		if op.WallBudget > 0 {
 			remaining := op.WallBudget - op.ConsumedExecution
@@ -449,7 +464,7 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 // and the elapsed-time origin are given back, so the wall budget measures the
 // next real attempt rather than however long a human took to restore an
 // account.
-func (s Scheduler) RestoreAttempt(id string) (RunOperation, error) {
+func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, _ time.Time) error {
 		if op.State != OperationFailed {
 			return fmt.Errorf("only a failed operation can have an attempt restored")
@@ -459,13 +474,22 @@ func (s Scheduler) RestoreAttempt(id string) (RunOperation, error) {
 		}
 		op.Lease = nil
 		op.StartedAt = nil
-		// The execution budget that attempt spent is given back with it. The
-		// external world refused before any work happened, so charging it would
-		// mean an operator who corrects the condition finds the budget already
-		// spent by passes that only ever waited.
-		op.ConsumedExecution -= op.LastAttemptExecution
-		if op.ConsumedExecution < 0 {
-			op.ConsumedExecution = 0
+		// The execution budget is given back ONLY when no execution happened.
+		//
+		// Elapsed time is not proof that a provider did nothing. A worker can
+		// reason, call tools and edit for twenty minutes and only then meet a
+		// rate limit, a quota or an account condition that routes to a wait.
+		// Refunding that would make real work free every time it ends in the
+		// same wall, and a cumulative budget that can be replenished by hitting
+		// an external limit is not a budget.
+		//
+		// What is always given back is the ATTEMPT: observing an external
+		// refusal is not work the run's attempt ceiling should pay for.
+		if refundExecution {
+			op.ConsumedExecution -= op.LastAttemptExecution
+			if op.ConsumedExecution < 0 {
+				op.ConsumedExecution = 0
+			}
 		}
 		op.LastAttemptExecution = 0
 		op.ActiveSince = nil

@@ -136,6 +136,12 @@ type mutationResult struct {
 	PathCount    int          `json:"path_count"`
 	FailureClass FailureClass `json:"failure_class,omitempty"`
 	ProviderID   string       `json:"provider_id,omitempty"`
+	// ProviderExecuted records that this attempt actually reached a worker, as
+	// opposed to being refused before any execution began. It is the difference
+	// between an external condition that cost nothing and one that cost twenty
+	// minutes of provider work before it appeared, and only the first may be
+	// refunded to the run's execution budget.
+	ProviderExecuted bool `json:"provider_executed,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -1642,7 +1648,12 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
-		if _, err := r.scheduler.RestoreAttempt(started.ID); err != nil {
+		// The ATTEMPT is always given back - observing an external refusal is
+		// not work. The execution TIME is given back only when no execution
+		// happened: a provider that reasoned for twenty minutes and only then
+		// met a rate limit did that work, and refunding it would let a run
+		// exceed a budget the operator set by repeatedly hitting the same wall.
+		if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
 			return false, Outcome{}, err
 		}
 		outcome, err := r.settle(state, Waiting, waitReason(class))
@@ -1673,6 +1684,18 @@ func reattemptable(route FailureRoute) bool {
 // only when it routes to a wait. It reads the same one shared field lastFailure
 // does, so this is not an execution.invoke special case: any handler that
 // records a wait-routed class settles the run into that wait.
+// providerExecuted reports whether the attempt recorded in this result actually
+// reached a worker. An unreadable or absent result is treated as HAVING
+// executed: refunding budget is the generous direction, and guessing generously
+// about an unknown is how a bounded budget stops being one.
+func providerExecuted(raw json.RawMessage) bool {
+	var result mutationResult
+	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
+		return true
+	}
+	return result.ProviderExecuted
+}
+
 func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
 	var result mutationResult
 	if len(raw) == 0 || decodeJSON(raw, &result) != nil || result.FailureClass == "" {

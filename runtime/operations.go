@@ -702,7 +702,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if pathErr != nil {
 		return failed(pathErr)
 	}
-	record := mutationResult{Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID}
+	record := mutationResult{
+		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
+		// Invocation provenance is written only after the process returns, so
+		// it is the honest signal for "this attempt reached a worker" - the
+		// same signal the feedback-delivery record below relies on.
+		ProviderExecuted: execErr == nil || result.Invocation != nil,
+	}
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := []journalEntry{{
 		Type: EventCandidateChanged,
