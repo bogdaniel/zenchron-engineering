@@ -72,3 +72,36 @@ func runtimeGovernance() (domain.ProjectModel, domain.EngineeringPolicy) {
 	claims["acceptance"] = domain.RequiredClaim{EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true}
 	return model, domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "policy", Revision: "1", Rules: map[string]domain.PolicyRule{"auth": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}, "auth-observed": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue, Stage: &stage}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}}}
 }
+
+func TestKernelCompileCanonicalizesScopePreservingSource(t *testing.T) {
+	model, policy := runtimeGovernance()
+	source := SourceSnapshot{ID: "issue", Objective: "change", AcceptanceIntent: []string{"works"}, PredictedPaths: []string{"./internal//auth/./session.go"}, PathsKnown: true}
+	state, err := (KernelFlow{}).Compile(source, model, policy, "contract", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Contract.Scope.AllowedPaths; len(got) != 1 || got[0] != "internal/auth/session.go" {
+		t.Fatalf("scope: %v", got)
+	}
+	if state.Source.PredictedPaths[0] != source.PredictedPaths[0] || source.PredictedPaths[0] != "./internal//auth/./session.go" {
+		t.Fatal("source mutated")
+	}
+	source.PredictedPaths = []string{"../escape"}
+	if _, err := (KernelFlow{}).Compile(source, model, policy, "contract", "1"); err == nil {
+		t.Fatal("accepted traversal")
+	}
+}
+
+func TestKernelCompileUnknownPathsUseScopeOnlyPlaceholder(t *testing.T) {
+	model, policy := runtimeGovernance()
+	state, err := (KernelFlow{}).Compile(SourceSnapshot{ID: "issue", Objective: "change", AcceptanceIntent: []string{"works"}}, model, policy, "contract", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Source.PredictedPaths) != 0 {
+		t.Fatal("fabricated predicted paths")
+	}
+	if got := state.Contract.Scope.AllowedPaths; len(got) != 1 || got[0] != predictedScopePlaceholder {
+		t.Fatalf("scope: %v", got)
+	}
+}

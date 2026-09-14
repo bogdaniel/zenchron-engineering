@@ -1102,7 +1102,6 @@ func doctorGovernance(in DoctorInput) DoctorCheck {
 		ID:               "doctor-preflight",
 		Objective:        "preflight: the objective of a real run is not known in advance",
 		AcceptanceIntent: runtimeAcceptanceIntent,
-		PredictedPaths:   []string{predictedScopePlaceholder},
 		PathsKnown:       false,
 	}, in.ProjectModel, in.Policy, "contract-doctor-preflight", "1")
 	if err != nil {

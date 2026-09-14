@@ -90,7 +90,6 @@ func (r *EngineeringRuntime) CompilePlanIntent(ctx context.Context, issue int) (
 		ID:               fmt.Sprintf("issue-%s-%d", r.deps.Repository.Identity, issue),
 		Objective:        untrustedObjective(record, text),
 		AcceptanceIntent: runtimeAcceptanceIntent,
-		PredictedPaths:   []string{predictedScopePlaceholder},
 	}
 	kernel, err := r.flow.Compile(source, model, r.deps.Policy, planContractID(r.deps.Repository.Identity, issue), "1")
 	if err != nil {
