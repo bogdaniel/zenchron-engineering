@@ -1149,15 +1149,25 @@ func ExecCapableScratchBase(preferred string) string {
 }
 
 // ExecutionScratchDir composes the per-attempt scratch path for one invocation.
+//
 // It is built from scheduler identity exactly as the attempt transcript and the
 // reviewer result are, so two attempts never share a build directory and a
 // replay arrives at the same path from the journal alone.
-func ExecutionScratchDir(base string, attempt ExecutionAttemptRef) (string, error) {
-	prefix, err := attemptTranscriptPrefix("scratch", attempt)
-	if err != nil {
+//
+// It lives under the RUN, beside the candidate workspace and the assurance
+// checkouts, because that is where the collector already looks. Scratch is not
+// evidence and nothing reads it after the invocation ends, but it holds a Go
+// build cache that a remediation attempt re-uses - deleting it per invocation
+// would make every retry recompile the world, and this workload is bounded by
+// wall time. It is retired with the run instead.
+func ExecutionScratchDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
+	if err := attempt.Validate(); err != nil {
 		return "", err
 	}
-	return filepath.Join(ExecCapableScratchBase(base), prefix), nil
+	return filepath.Join(ExecCapableScratchBase(stateDir), "runs",
+		encodePathComponent(attempt.RunID), executionScratchDir,
+		encodePathComponent(attempt.OperationID),
+		fmt.Sprintf("attempt-%d", attempt.Attempt)), nil
 }
 
 // ToolchainObligationError is the typed refusal for an invocation whose contract

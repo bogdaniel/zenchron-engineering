@@ -59,12 +59,18 @@ import (
 // needs to change it without a flag.
 const DefaultGCRetention = 7 * 24 * time.Hour
 
+// executionScratchDir is the per-run directory holding the build scratch the
+// runtime brokers to workers. Named once so the collector and the broker cannot
+// disagree about where it is.
+const executionScratchDir = "scratch"
+
 // GCKind names what a target is, so an operator print explains itself.
 type GCKind string
 
 const (
 	GCCandidateWorkspace GCKind = "candidate_workspace"
 	GCAssuranceCheckout  GCKind = "assurance_checkout"
+	GCExecutionScratch   GCKind = "execution_scratch"
 	GCRawTranscript      GCKind = "raw_transcript"
 	GCRuntimeLock        GCKind = "runtime_lock"
 )
@@ -212,6 +218,18 @@ func (c Collector) discover(root string) ([]GCTarget, error) {
 		for _, entry := range entries {
 			if entry.IsDir() {
 				targets = append(targets, GCTarget{Kind: GCAssuranceCheckout, RunID: id, Path: filepath.Join(runDir, "assurance", entry.Name())})
+			}
+		}
+		// Build scratch brokered to a worker as GOTMPDIR/GOCACHE. It is not
+		// evidence and nothing explains a lifecycle decision with it, so it is
+		// reclaimed on exactly the terms the candidate workspace is.
+		scratch, err := os.ReadDir(filepath.Join(runDir, executionScratchDir))
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		for _, entry := range scratch {
+			if entry.IsDir() {
+				targets = append(targets, GCTarget{Kind: GCExecutionScratch, RunID: id, Path: filepath.Join(runDir, executionScratchDir, entry.Name())})
 			}
 		}
 		for _, path := range c.rawArtifacts(id) {
