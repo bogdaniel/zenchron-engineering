@@ -123,6 +123,23 @@ type cliInvocation struct {
 	// Bypass reports that the unsafe permission mode was explicitly authorized
 	// AND explicitly requested for this invocation.
 	Bypass bool
+	// ResultDir is the runtime-owned directory holding this invocation's typed
+	// result slot, or empty when the stage emits no typed result.
+	//
+	// It exists because the slot is deliberately OUTSIDE the candidate
+	// workspace - that placement is what stops repository content pre-seeding
+	// or predicting it - and a sandboxed CLI confines writes to the directories
+	// it was given. The first live reviewer completed its review, reached a
+	// BLOCK verdict, and could not write it: "requested permissions … but you
+	// haven't granted it yet". The runtime therefore names that ONE directory
+	// to the provider, and nothing else about the sandbox changes.
+	ResultDir string
+	// RequiredTools are the executables this invocation's contract obliges the
+	// worker to run. A provider whose sandbox gates command execution is given
+	// exactly these and no more: resolving a binary on PATH is not permission
+	// to execute it, which is what "requires approval - even `go version`"
+	// meant in the first live dogfood.
+	RequiredTools []string
 }
 
 // Model is the model this invocation asks for: the profile's preference where
@@ -273,6 +290,13 @@ type CLIAgentProvider struct {
 	// declares a search path, that path is what the worker gets; when it
 	// declares none, the supervisor's is inherited exactly as before.
 	Toolchain ToolchainConfig
+	// DependencyCacheDir is the operator's warmed module cache - the same one
+	// the pinned assurance image mounts read-only. It is brokered to the worker
+	// so a worker obliged to run `go test` can actually resolve dependencies
+	// offline, which is what the first live dogfood could not do: the verifier
+	// had the cache and the producer did not, so `go test` stopped during
+	// dependency loading with the network correctly denied.
+	DependencyCacheDir string
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -396,6 +420,7 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 		searchPath = os.Getenv("PATH")
 	}
 	env := []string{"PATH=" + searchPath}
+	env = append(env, p.toolchainEnv()...)
 	if home == "" {
 		return env
 	}
@@ -826,6 +851,15 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			Detail: "the agent profile this stage was assigned under denies the bypass",
 		}
 	}
+	// THE CEILING IS CHECKED BEFORE ANYTHING RUNS. The operator's declared
+	// toolchain says which executables the brokered environment must be able to
+	// resolve; an invocation obliged to run something outside it cannot attempt
+	// its own contract, and dispatching anyway would spend a provider
+	// invocation discovering that. Capability is a ceiling, the assignment
+	// decides what this invocation may use, and neither may widen the other.
+	if err := p.refuseUnsupportedObligations(request); err != nil {
+		return ExecutionResult{}, err
+	}
 	if err := os.MkdirAll(p.ArtifactStore.Root, 0700); err != nil {
 		return ExecutionResult{}, err
 	}
@@ -836,6 +870,12 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Agent: p.Agent, Home: home, CandidateDir: request.CandidateDir,
 		Prompt: agentPrompt(request), Bypass: p.PermissionBypass,
 		ModelPreference: request.ModelPreference,
+		// The two NARROW GRANTS this invocation needs to do its job: the one
+		// directory its typed result goes in, and the executables its contract
+		// obliges it to run. Both are runtime-owned facts; neither widens the
+		// sandbox beyond them.
+		ResultDir:     resultDirFor(request.ReviewerResultPath),
+		RequiredTools: request.RequiredTools,
 	}
 	// The invocation MODE decides which argument vector is built, and a
 	// non-mutating request is refused outright when this adapter has no
@@ -1013,4 +1053,93 @@ func classifyAgentFailure(spec cliAgentSpec, stdout, stderr []byte) FailureClass
 		}
 	}
 	return ClassifyProviderFailure(stdout, stderr)
+}
+
+// resultDirFor is the directory a typed result slot lives in, or empty when the
+// invocation emits no typed result.
+//
+// The DIRECTORY is granted rather than the file, because a sandbox grants
+// access to directories and because the runtime creates the slot inside it. It
+// is still outside the candidate workspace, still named by the exact attempt,
+// and still emptied before the invocation - so widening access to it grants the
+// worker exactly one place to answer in, and no way to reach anything else.
+func resultDirFor(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return filepath.Dir(path)
+}
+
+// toolchainEnv is the deliberate, reproducible execution environment a brokered
+// worker is given, mirroring the posture the pinned assurance image already
+// uses rather than inheriting an ambient developer shell.
+//
+// It is emitted only when the operator declared `go` among the required tools,
+// so a repository with no Go obligations gets nothing, and only when a
+// dependency cache is configured, because pointing a worker at a cache that
+// does not exist would replace one unattemptable obligation with another.
+//
+// The values are the container's own: an offline proxy, a pinned toolchain and
+// a read-only module mode. A worker therefore resolves exactly what the
+// verifier resolves, and cannot reach the network to acquire anything else.
+func (p CLIAgentProvider) toolchainEnv() []string {
+	cache := strings.TrimSpace(p.DependencyCacheDir)
+	if cache == "" || !p.Toolchain.requires("go") {
+		return nil
+	}
+	return []string{
+		"GOMODCACHE=" + cache,
+		"GOTOOLCHAIN=local",
+		"GOPROXY=off",
+		"GOSUMDB=off",
+		"GOFLAGS=-mod=readonly",
+	}
+}
+
+// ToolchainObligationError is the typed refusal for an invocation whose contract
+// obliges an executable the operator's declared toolchain does not cover.
+//
+// It is raised BEFORE a process starts, so nothing is executed under obligations
+// the environment cannot attempt, and it names both sides so an operator can see
+// which declaration is short.
+type ToolchainObligationError struct {
+	AgentID  string
+	Missing  []string
+	Declared []string
+}
+
+func (e *ToolchainObligationError) Error() string {
+	declared := "nothing"
+	if len(e.Declared) > 0 {
+		declared = strings.Join(e.Declared, ", ")
+	}
+	return "agent " + e.AgentID + " cannot attempt this contract: it obliges " +
+		strings.Join(e.Missing, ", ") + " and the operator toolchain declares " + declared
+}
+
+// refuseUnsupportedObligations refuses an invocation whose contract requires an
+// executable outside the operator's declared toolchain.
+//
+// An operator who declared NO toolchain is not refused: that configuration
+// inherits the supervisor environment and makes no claim about what resolves, so
+// there is no ceiling to be outside of. Declaring one is what turns the list
+// into a bound, and the bound then applies in both directions - it is a ceiling
+// for grants and a requirement for dispatch.
+func (p CLIAgentProvider) refuseUnsupportedObligations(request ExecutionRequest) error {
+	if !p.Toolchain.Declared() || len(request.RequiredTools) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, tool := range request.RequiredTools {
+		if tool = strings.TrimSpace(tool); tool != "" && !p.Toolchain.requires(tool) {
+			missing = append(missing, tool)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return &ToolchainObligationError{
+		AgentID: p.Agent.ID, Missing: missing,
+		Declared: append([]string(nil), p.Toolchain.RequiredTools...),
+	}
 }

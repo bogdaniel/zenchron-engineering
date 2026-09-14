@@ -660,14 +660,18 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Contract:              Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
 		Objective:             kernel.Contract.Objective,
 		AcceptanceObligations: kernel.Contract.AcceptanceIntent,
-		Constraints:           requirementStatements(kernel.Contract.Obligations),
-		Prohibitions:          actionStatements(kernel.Contract.Prohibitions),
-		Permissions:           actionStatements(kernel.Contract.Permissions),
-		TrustedInstructions:   trustedProviderInstructions,
-		Purpose:               purpose,
-		Findings:              findings,
-		Feedback:              feedback,
-		Budgets:               ProviderBudget{WallLimit: state.budgets().WallLimit},
+		// The executables THIS contract obliges, derived from its own frozen
+		// acceptance obligations. The operator's toolchain declaration is a
+		// ceiling checked against this, never a source of grants.
+		RequiredTools:       contractRequiredTools(kernel.Contract.AcceptanceIntent),
+		Constraints:         requirementStatements(kernel.Contract.Obligations),
+		Prohibitions:        actionStatements(kernel.Contract.Prohibitions),
+		Permissions:         actionStatements(kernel.Contract.Permissions),
+		TrustedInstructions: trustedProviderInstructions,
+		Purpose:             purpose,
+		Findings:            findings,
+		Feedback:            feedback,
+		Budgets:             ProviderBudget{WallLimit: state.budgets().WallLimit},
 	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
@@ -1995,7 +1999,40 @@ const predictedScopePlaceholder = "."
 // the untrusted source text.
 var runtimeAcceptanceIntent = []string{
 	"the candidate change addresses the pinned source issue",
-	"gofmt, go vet and go test pass on the exact candidate tree",
+	goAcceptanceObligation,
+}
+
+// goAcceptanceObligation is the ONE acceptance obligation that names executables
+// a worker has to run. It is written here, by the runtime, and it is compared by
+// identity rather than parsed - the string is never read out of a repository, a
+// model's output or an operator's file.
+const goAcceptanceObligation = "gofmt, go vet and go test pass on the exact candidate tree"
+
+// goAcceptanceTools are the executables goAcceptanceObligation obliges. They sit
+// beside the obligation they belong to so the two cannot drift apart.
+var goAcceptanceTools = []string{"go", "gofmt"}
+
+// contractRequiredTools is the executables THIS contract's acceptance
+// obligations actually require.
+//
+// It exists because a per-invocation grant must come from the invocation's own
+// obligations, not from the operator's global toolchain declaration. Those are
+// different statements: the operator list is a readiness CEILING - which
+// executables the brokered environment must resolve at all - and a grant built
+// from it would hand every stage every command family the operator ever
+// declared. A reviewer obliged to run `go` would be granted `npm` the day an
+// unrelated stage needed it, which is a silent widening no assignment asked for.
+//
+// Obligations are matched by IDENTITY against the runtime's own constant. That
+// is deliberately not prose parsing: a contract compiled from some other intent
+// contributes no tools, and nothing a repository writes can add one.
+func contractRequiredTools(obligations []string) []string {
+	for _, obligation := range obligations {
+		if obligation == goAcceptanceObligation {
+			return append([]string(nil), goAcceptanceTools...)
+		}
+	}
+	return nil
 }
 
 // untrustedObjective frames the source text as data. The delimiters are part

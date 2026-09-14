@@ -927,8 +927,11 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			LegacyEnvironment: agent.Legacy && agent.Kind == runtime.AgentKindCodexCLI,
 			// The brokered execution environment, so the worker's PATH is the
 			// one the operator declared rather than the one that happened to
-			// start the supervisor.
-			Toolchain: config.Toolchain,
+			// start the supervisor, and the same warmed module cache the pinned
+			// assurance image mounts - so a worker obliged to run `go test` can
+			// resolve offline exactly what the verifier resolves.
+			Toolchain:          config.Toolchain,
+			DependencyCacheDir: config.Assurance.DependencyCacheDir,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{
