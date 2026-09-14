@@ -51,9 +51,21 @@ func githubAPIRoot(endpoint string) string {
 	return strings.TrimSuffix(endpoint, "/")
 }
 
-// token resolves the credential for exactly this repository. Every failure is a
-// typed GitHubAuthError; none of them is a panic and none of them is an empty
-// token that would silently become an unauthenticated request.
+// token resolves the credential for exactly this repository. Every failure is
+// typed; none of them is a panic and none of them is an empty token that would
+// silently become an unauthenticated request.
+//
+// A provider's OWN typed failure is preserved rather than flattened. While
+// every provider failed only for local, permanent reasons - an unauthenticated
+// `gh`, a file with the wrong mode - collapsing everything into
+// GitHubAuthError cost nothing. GitHubAppCredential performs network I/O to
+// mint its installation token, so it can fail for a reason that clears on its
+// own, and relabelling that as a rejected credential is expensive: watch maps
+// the auth class to WatchErrorAuth and parks every run in the repository as
+// waiting on GitHub authentication, and feedback observation takes the
+// hard-error branch instead of deferring to the next tick. The repair is here
+// rather than at the call site so every future provider that can fail
+// transiently is covered by construction.
 func (a GitHubRESTAdapter) token(repo GitHubRepo) (string, error) {
 	identity, err := repo.identity()
 	if err != nil {
@@ -67,6 +79,10 @@ func (a GitHubRESTAdapter) token(repo GitHubRepo) (string, error) {
 		var authErr *GitHubAuthError
 		if errors.As(err, &authErr) {
 			return "", authErr
+		}
+		var transient *GitHubTransientError
+		if errors.As(err, &transient) {
+			return "", transient
 		}
 		return "", &GitHubAuthError{Detail: "credential resolution failed"}
 	}

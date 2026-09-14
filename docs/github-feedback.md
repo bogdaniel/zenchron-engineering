@@ -246,7 +246,20 @@ it is an authority grant, and the runtime is the thing being granted.
    | Contents | Read and write | push the candidate branch |
    | Pull requests | Read and write | open the pull request, read reviews and comments |
    | Issues | Read and write | read the source issue and its comments, comment back |
-   | Metadata | Read-only | mandatory, and what resolves a reviewer's repository permission |
+   | Metadata | Read-only | mandatory for every App |
+
+   One thing here is **unverified**: which of those four grants lets the runtime
+   resolve a reviewer's repository permission
+   (`GET /repos/{owner}/{repo}/collaborators/{username}/permission`). GitHub's
+   REST reference states no permission set for that endpoint, and the
+   neighbouring collaborator-list endpoint requires write-or-better access
+   rather than metadata read, so do not read the table above as a claim that
+   metadata read is sufficient for it. If the lookup is refused, the failure is
+   safe and visible rather than silent: an unresolved permission is never an
+   admission, so a review is refused rather than admitted, and `autonomy doctor`
+   reports `github.publication_identity` as WARN saying your permission could
+   not be resolved. If you hit that, widen the App's permissions until doctor
+   names your permission.
 
 3. **Install it on the repository.** The App's *Install App* tab → your account
    → *Only select repositories* → the repository you run against. The

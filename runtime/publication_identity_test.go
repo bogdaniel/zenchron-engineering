@@ -932,3 +932,67 @@ func TestDoctorComparesThePublicationAndHumanIdentities(t *testing.T) {
 		t.Fatalf("doctor claimed a comparison it could not make: %s %s", unknown.Status, unknown.Reason)
 	}
 }
+
+// mintFailureDoer fails the token exchange the two ways a real one fails
+// transiently: the forge is unreachable, and the forge says "not now".
+type mintFailureDoer struct {
+	err    error
+	status int
+	header http.Header
+}
+
+func (d *mintFailureDoer) Do(*http.Request) (*http.Response, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	header := d.header
+	if header == nil {
+		header = http.Header{}
+	}
+	return &http.Response{StatusCode: d.status, Body: io.NopCloser(strings.NewReader("{}")), Header: header}, nil
+}
+
+// TestATransientMintFailureIsNotACredentialRejection.
+//
+// GitHubAppCredential is the first credential provider that performs network
+// I/O, so it is the first that can fail for a reason that clears on its own.
+// The adapter's token() collapsed every non-GitHubAuthError into "credential
+// resolution failed", which was harmless while every provider failed only for
+// local, permanent reasons and is not harmless now: watch maps the auth class
+// to WatchErrorAuth and parks every run in that repository as waiting on
+// GitHub authentication, and feedback observation takes the hard-error branch
+// instead of deferring. A network blip then reads as a credential the operator
+// must go and fix.
+//
+// Viewer does not catch this, because an App credential answers it through
+// AppIdentity and never reaches token().
+func TestATransientMintFailureIsNotACredentialRejection(t *testing.T) {
+	path, _ := appKeyFile(t, 0o600)
+	for name, doer := range map[string]*mintFailureDoer{
+		"the forge is unreachable": {err: errors.New("dial tcp 140.82.121.6:443: connect: connection refused")},
+		"the forge says not now": {
+			status: http.StatusForbidden,
+			header: http.Header{"Retry-After": []string{"60"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			credential := &GitHubAppCredential{AppID: 11, InstallationID: 22, PrivateKeyPath: path, HTTP: doer}
+			if _, _, err := credential.Credential(governedRemoteIdentity(t)); !transientForgeFailure(err) {
+				t.Fatalf("the credential itself did not classify the failure as transient: %#v", err)
+			}
+			// Through the adapter, which is where the classification was lost.
+			adapter := GitHubRESTAdapter{HTTP: doer, Credentials: credential}
+			_, err := adapter.RepositoryPermission(context.Background(), GitHubRepo{Owner: "acme", Name: "repo"}, "bogdaniel")
+			if err == nil {
+				t.Fatal("a failed mint produced no error")
+			}
+			if !transientForgeFailure(err) {
+				t.Fatalf("a transient mint failure reached the caller as a permanent one, so watch parks every run on GitHub auth: %#v", err)
+			}
+			var auth *GitHubAuthError
+			if errors.As(err, &auth) {
+				t.Fatalf("a transient mint failure was relabelled as a rejected credential: %v", auth)
+			}
+		})
+	}
+}
