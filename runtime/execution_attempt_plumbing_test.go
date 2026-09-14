@@ -177,10 +177,17 @@ func operationByID(state *runState, id string) (RunOperation, bool) {
 	return RunOperation{}, false
 }
 
-// TestLegacyTranscriptNamingIsUnchanged is acceptance I. Assurance, semantic
-// assurance and every historical artifact keep the naming and the overwrite
-// behaviour they had, because renaming durable history is not a migration -
-// it is a rewrite of evidence.
+// TestLegacyTranscriptNamingIsUnchanged is acceptance I. The last-write-wins
+// transcript API keeps the naming and the overwrite behaviour it had, because
+// renaming durable history is not a migration - it is a rewrite of evidence.
+//
+// Assurance and semantic assurance no longer USE it. #55 reasoned that a
+// per-run assurance transcript is not an execution attempt and needs no
+// identity of its own; the third #119 dogfood disproved that by running five
+// verifications and keeping one transcript, which left four lifecycle
+// decisions unexplainable. Both verifiers now write attempt-scoped,
+// create-once evidence like any other provider. What this test still pins is
+// the generic API and the historical artifacts already written under it.
 func TestLegacyTranscriptNamingIsUnchanged(t *testing.T) {
 	store := ArtifactStore{Root: t.TempDir()}
 	first, err := store.StoreTranscript("assurance-run-legacy", []byte("first\n"), nil)
@@ -191,9 +198,9 @@ func TestLegacyTranscriptNamingIsUnchanged(t *testing.T) {
 	if got := rawPath(t, first); got != want {
 		t.Fatalf("legacy transcript path changed: got %s want %s", got, want)
 	}
-	// The legacy path is deliberately still last-write-wins: a per-run
-	// assurance transcript is not an execution attempt and nothing in #55 gives
-	// it a new identity.
+	// The legacy path is deliberately still last-write-wins. Nothing the
+	// runtime writes today depends on that - it is retained for artifacts
+	// already on disk under the old naming.
 	second, err := store.StoreTranscript("assurance-run-legacy", []byte("second\n"), nil)
 	if err != nil {
 		t.Fatalf("the legacy path became create-once: %v", err)

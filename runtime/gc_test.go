@@ -67,17 +67,20 @@ func (f *gcFixture) createRun(id string) {
 }
 
 // gcMaterial is the heavyweight material one run leaves on disk.
-type gcMaterial struct{ candidate, assurance, raw, sanitized string }
+type gcMaterial struct{ candidate, assurance, scratch, raw, sanitized string }
 
 func (f *gcFixture) material(id string) gcMaterial {
 	f.t.Helper()
 	m := gcMaterial{
 		candidate: filepath.Join(f.root, "runs", id, "candidate"),
 		assurance: filepath.Join(f.root, "runs", id, "assurance", "commit-1"),
+		// Build scratch brokered to a worker as GOTMPDIR/GOCACHE. It holds no
+		// evidence, so it is reclaimed on the same terms as the workspace.
+		scratch:   filepath.Join(f.root, "runs", id, executionScratchDir, "op-1"),
 		raw:       filepath.Join(f.root, "artifacts", "assurance-"+id+".raw.log"),
 		sanitized: filepath.Join(f.root, "artifacts", "assurance-"+id+".sanitized-candidate.log"),
 	}
-	for _, dir := range []string{m.candidate, m.assurance} {
+	for _, dir := range []string{m.candidate, m.assurance, m.scratch} {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o700); err != nil {
 			f.t.Fatal(err)
 		}
@@ -180,7 +183,10 @@ func TestGCPreservesActiveRunMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{m.candidate, m.assurance, m.raw} {
+	// Scratch is included deliberately: it is a live build cache while the run
+	// is being driven, and reclaiming it mid-run would delete a directory the
+	// worker is compiling into.
+	for _, path := range []string{m.candidate, m.assurance, m.scratch, m.raw} {
 		if planned(plan.Eligible, path) {
 			t.Fatalf("an active run's material was planned for deletion: %s", path)
 		}
@@ -197,6 +203,7 @@ func TestGCPreservesActiveRunMaterial(t *testing.T) {
 	}
 	mustExist(t, "the active run's workspace", m.candidate)
 	mustExist(t, "the active run's assurance checkout", m.assurance)
+	mustExist(t, "the active run's build scratch", m.scratch)
 	mustExist(t, "the active run's transcript", m.raw)
 	mustExist(t, "the run state directory", filepath.Join(f.root, "runs", "run-active"))
 }
@@ -305,6 +312,7 @@ func TestGCRemovesEligibleTerminalRunMaterial(t *testing.T) {
 			}
 			mustNotExist(t, "the candidate workspace", m.candidate)
 			mustNotExist(t, "the assurance checkout", m.assurance)
+			mustNotExist(t, "the execution scratch", m.scratch)
 			mustNotExist(t, "the raw transcript", m.raw)
 			mustExist(t, "the sanitized derivative", m.sanitized)
 		})

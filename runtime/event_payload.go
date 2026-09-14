@@ -135,6 +135,8 @@ var eventPayloads = map[string]payloadValidator{
 			bounded("failure_class", string(p.FailureClass)),
 			required("commit", p.Commit),
 			required("tree", p.Tree),
+			bounded("artifact_ref", p.ArtifactRef),
+			bounded("failure_signature", p.FailureSignature),
 			optionalRef("bundle", p.Bundle))
 	})),
 	EventAuthorityEvaluated: payloadSchema(func(p AuthorityEvaluatedPayload) error {
@@ -410,6 +412,14 @@ type AssuranceObservedPayload struct {
 	Commit             string       `json:"commit"`
 	Tree               string       `json:"tree"`
 	Bundle             Ref          `json:"bundle,omitzero"`
+	// ArtifactRef is the immutable attempt-scoped transcript this observation
+	// was read from, and FailureSignature identifies the failure rather than
+	// the verifier that observed it. Both are durable because a remediation
+	// planned several operations later has to name the SAME evidence this
+	// observation saw, and both are runtime-composed machine tokens rather
+	// than any text a candidate wrote.
+	ArtifactRef      string `json:"artifact_ref,omitempty"`
+	FailureSignature string `json:"failure_signature,omitempty"`
 	// Semantic marks an observation produced by the independent semantic
 	// acceptance verifier rather than the automated one, and ClaimResults is its
 	// per-claim answer. A semantic verdict is claim-specific: one acceptance

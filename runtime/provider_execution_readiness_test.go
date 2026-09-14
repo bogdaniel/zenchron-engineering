@@ -270,12 +270,27 @@ func TestABrokeredWorkerCanRunTheGoCommandsItsContractRequires(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// THE BUILD SCRATCH IS RESOLVED THROUGH THE RUNTIME, NOT THROUGH t.TempDir.
+	//
+	// This test used t.TempDir() and passed on a developer machine while
+	// failing inside this product's own assurance sandbox, which mounts the
+	// default temporary location noexec. `go test` links a binary there and
+	// executes it, so every candidate on that base failed a check no candidate
+	// could pass. Resolving the base the way the runtime resolves it is the
+	// behaviour under test, not an accommodation of the sandbox.
+	scratch, err := os.MkdirTemp(ExecCapableScratchBase(""), "zenchron-worker-scratch-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(scratch) })
+
 	provider := CLIAgentProvider{
 		Toolchain: ToolchainConfig{
 			Path:          []string{filepath.Dir(goBin)},
 			RequiredTools: []string{"go", "gofmt"},
 		},
 		DependencyCacheDir: t.TempDir(),
+		ExecScratchDir:     scratch,
 	}
 	// HOME is required by the Go toolchain for its own caches; everything else
 	// the worker gets is exactly what the runtime brokered.

@@ -337,7 +337,7 @@ func semanticFixture(t *testing.T, transport *semanticTransport) (OpenAISemantic
 		Endpoint: "https://api.invalid/v1/responses", HTTP: transport,
 	}
 	request := AssuranceRequest{
-		RunID: "run-semantic", Commit: strings.TrimSpace(head), Tree: strings.TrimSpace(tree),
+		RunID: "run-semantic", Attempt: 1, Commit: strings.TrimSpace(head), Tree: strings.TrimSpace(tree),
 		CheckoutDir: checkout, Contract: Ref{ID: "c", Revision: "1"}, Policy: Ref{ID: "p", Revision: "1"},
 		Repository: "acme/repo", Base: strings.TrimSpace(head), Objective: "do the thing",
 		SemanticClaims: []SemanticClaimRequest{{ClaimID: "acceptance", ObligationIDs: []string{"o1"}, Statements: []string{"the change addresses the issue"}}},

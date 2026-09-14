@@ -297,6 +297,12 @@ type CLIAgentProvider struct {
 	// had the cache and the producer did not, so `go test` stopped during
 	// dependency loading with the network correctly denied.
 	DependencyCacheDir string
+	// ExecScratchDir is the runtime-owned, exec-capable build scratch for the
+	// invocation in flight. Execute sets it per invocation from the request; it
+	// is a field rather than a parameter because every environment this
+	// provider builds has to agree about it, including the ones it builds while
+	// probing.
+	ExecScratchDir string
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -863,6 +869,15 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	if err := os.MkdirAll(p.ArtifactStore.Root, 0700); err != nil {
 		return ExecutionResult{}, err
 	}
+	// The runtime CREATES the build scratch it is about to broker. A worker
+	// handed GOTMPDIR pointing at a directory that does not exist fails exactly
+	// as obscurely as one handed no GOTMPDIR at all.
+	if scratch := strings.TrimSpace(request.ScratchDir); scratch != "" {
+		if err := os.MkdirAll(filepath.Join(scratch, "cache"), 0700); err != nil {
+			return ExecutionResult{}, err
+		}
+		p.ExecScratchDir = scratch
+	}
 	if err := p.probe(ctx, spec, home); err != nil {
 		return ExecutionResult{}, err
 	}
@@ -1087,13 +1102,72 @@ func (p CLIAgentProvider) toolchainEnv() []string {
 	if cache == "" || !p.Toolchain.requires("go") {
 		return nil
 	}
-	return []string{
+	env := []string{
 		"GOMODCACHE=" + cache,
 		"GOTOOLCHAIN=local",
 		"GOPROXY=off",
 		"GOSUMDB=off",
 		"GOFLAGS=-mod=readonly",
 	}
+	// THE BUILD DIRECTORY IS PART OF THE TOOLCHAIN GRANT.
+	//
+	// `go test` links a test binary and then executes it. Without a brokered
+	// GOTMPDIR that binary is written wherever the surrounding environment puts
+	// temporary files - and the runtime's own verifier sandbox mounts /tmp
+	// noexec, by design, because nothing should execute out of a scratch area a
+	// candidate can write to. The worker therefore got "permission denied"
+	// executing its own test binary, on a tree with nothing wrong with it.
+	//
+	// The grant is a location, not a permission: the directory is runtime-owned
+	// and runtime-created, the worker is told where it is, and nothing about
+	// what the worker may do changes.
+	if scratch := strings.TrimSpace(p.ExecScratchDir); scratch != "" {
+		env = append(env, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"))
+	}
+	return env
+}
+
+// ExecCapableScratchBase answers where THIS execution boundary allows the
+// runtime to create scratch that Go may execute from.
+//
+// An environment that has already published runtime-owned exec-capable scratch
+// wins: the verifier sandbox mounts one and names it in GOTMPDIR, and a future
+// sandboxed worker would do the same. The variable is read from the runtime's
+// OWN process environment, which is set by the operator or by the sandbox that
+// launched it - never by a candidate, which has no way to reach it.
+//
+// Otherwise the caller's runtime-owned directory is used, and only if there is
+// none does this fall back to the process default.
+func ExecCapableScratchBase(preferred string) string {
+	if published := strings.TrimSpace(os.Getenv("GOTMPDIR")); published != "" {
+		return published
+	}
+	if trimmed := strings.TrimSpace(preferred); trimmed != "" {
+		return trimmed
+	}
+	return os.TempDir()
+}
+
+// ExecutionScratchDir composes the per-attempt scratch path for one invocation.
+//
+// It is built from scheduler identity exactly as the attempt transcript and the
+// reviewer result are, so two attempts never share a build directory and a
+// replay arrives at the same path from the journal alone.
+//
+// It lives under the RUN, beside the candidate workspace and the assurance
+// checkouts, because that is where the collector already looks. Scratch is not
+// evidence and nothing reads it after the invocation ends, but it holds a Go
+// build cache that a remediation attempt re-uses - deleting it per invocation
+// would make every retry recompile the world, and this workload is bounded by
+// wall time. It is retired with the run instead.
+func ExecutionScratchDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
+	if err := attempt.Validate(); err != nil {
+		return "", err
+	}
+	return filepath.Join(ExecCapableScratchBase(stateDir), "runs",
+		encodePathComponent(attempt.RunID), executionScratchDir,
+		encodePathComponent(attempt.OperationID),
+		fmt.Sprintf("attempt-%d", attempt.Attempt)), nil
 }
 
 // ToolchainObligationError is the typed refusal for an invocation whose contract

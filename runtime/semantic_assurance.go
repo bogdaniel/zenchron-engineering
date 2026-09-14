@@ -622,8 +622,12 @@ func (v OpenAISemanticVerifier) Assure(ctx context.Context, request AssuranceReq
 	}, nil
 }
 
+// store writes ONE semantic verification's transcript under the same
+// attempt-scoped, create-once identity the automated verifier uses. Keyed on
+// run and candidate alone, a retry of the same candidate replaced the evidence
+// of the verdict that preceded it.
 func (v OpenAISemanticVerifier) store(request AssuranceRequest, transcript []byte, key string) ([]Artifact, error) {
-	return v.ArtifactStore.StoreTranscript("semantic-assurance-"+request.RunID+"-"+request.Commit,
+	return v.ArtifactStore.StoreExecutionAttemptTranscript(semanticProviderID, request.AttemptRef(),
 		redactCredential(transcript, key), nil)
 }
 
