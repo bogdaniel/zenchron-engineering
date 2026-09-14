@@ -851,6 +851,15 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			Detail: "the agent profile this stage was assigned under denies the bypass",
 		}
 	}
+	// THE CEILING IS CHECKED BEFORE ANYTHING RUNS. The operator's declared
+	// toolchain says which executables the brokered environment must be able to
+	// resolve; an invocation obliged to run something outside it cannot attempt
+	// its own contract, and dispatching anyway would spend a provider
+	// invocation discovering that. Capability is a ceiling, the assignment
+	// decides what this invocation may use, and neither may widen the other.
+	if err := p.refuseUnsupportedObligations(request); err != nil {
+		return ExecutionResult{}, err
+	}
 	if err := os.MkdirAll(p.ArtifactStore.Root, 0700); err != nil {
 		return ExecutionResult{}, err
 	}
@@ -866,7 +875,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// obliges it to run. Both are runtime-owned facts; neither widens the
 		// sandbox beyond them.
 		ResultDir:     resultDirFor(request.ReviewerResultPath),
-		RequiredTools: p.Toolchain.RequiredTools,
+		RequiredTools: request.RequiredTools,
 	}
 	// The invocation MODE decides which argument vector is built, and a
 	// non-mutating request is refused outright when this adapter has no
@@ -1084,5 +1093,53 @@ func (p CLIAgentProvider) toolchainEnv() []string {
 		"GOPROXY=off",
 		"GOSUMDB=off",
 		"GOFLAGS=-mod=readonly",
+	}
+}
+
+// ToolchainObligationError is the typed refusal for an invocation whose contract
+// obliges an executable the operator's declared toolchain does not cover.
+//
+// It is raised BEFORE a process starts, so nothing is executed under obligations
+// the environment cannot attempt, and it names both sides so an operator can see
+// which declaration is short.
+type ToolchainObligationError struct {
+	AgentID  string
+	Missing  []string
+	Declared []string
+}
+
+func (e *ToolchainObligationError) Error() string {
+	declared := "nothing"
+	if len(e.Declared) > 0 {
+		declared = strings.Join(e.Declared, ", ")
+	}
+	return "agent " + e.AgentID + " cannot attempt this contract: it obliges " +
+		strings.Join(e.Missing, ", ") + " and the operator toolchain declares " + declared
+}
+
+// refuseUnsupportedObligations refuses an invocation whose contract requires an
+// executable outside the operator's declared toolchain.
+//
+// An operator who declared NO toolchain is not refused: that configuration
+// inherits the supervisor environment and makes no claim about what resolves, so
+// there is no ceiling to be outside of. Declaring one is what turns the list
+// into a bound, and the bound then applies in both directions - it is a ceiling
+// for grants and a requirement for dispatch.
+func (p CLIAgentProvider) refuseUnsupportedObligations(request ExecutionRequest) error {
+	if !p.Toolchain.Declared() || len(request.RequiredTools) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, tool := range request.RequiredTools {
+		if tool = strings.TrimSpace(tool); tool != "" && !p.Toolchain.requires(tool) {
+			missing = append(missing, tool)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return &ToolchainObligationError{
+		AgentID: p.Agent.ID, Missing: missing,
+		Declared: append([]string(nil), p.Toolchain.RequiredTools...),
 	}
 }

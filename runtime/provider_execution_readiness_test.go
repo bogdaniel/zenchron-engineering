@@ -9,6 +9,8 @@ package runtime
 // them.
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,5 +298,102 @@ func TestABrokeredWorkerCanRunTheGoCommandsItsContractRequires(t *testing.T) {
 				t.Fatalf("a brokered worker could not run %v: %v\n%s", command, err, out)
 			}
 		})
+	}
+}
+
+// THE GRANT IS THE CONTRACT'S, NOT THE OPERATOR'S LIST.
+//
+// The operator toolchain is a readiness CEILING - which executables the brokered
+// environment must resolve at all. Granting from it would hand every stage every
+// command family the operator ever declared: a reviewer obliged to run `go`
+// would receive `npm` the day some unrelated stage needed it. Customization may
+// narrow privilege and may never silently widen it.
+func TestAnInvocationIsGrantedItsContractsToolsNotTheOperatorsWholeToolchain(t *testing.T) {
+	stateDir := t.TempDir()
+	attempt := ExecutionAttemptRef{RunID: "run-1", OperationID: "run-1:execution.invoke:x", Attempt: 1}
+	path, err := PrepareReviewerResult(stateDir, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator declares a BROADER toolchain than this reviewer needs.
+	provider, request, _ := agentFixture(t, AgentKindClaudeCode)
+	provider.Toolchain = ToolchainConfig{
+		Path:          []string{"/x/bin"},
+		RequiredTools: []string{"go", "gofmt", "node", "npm"},
+	}
+	request.ReviewerResultPath = path
+	// The contract obliges only the Go acceptance obligations.
+	request.RequiredTools = contractRequiredTools(runtimeAcceptanceIntent)
+
+	args := claudeArgs(t, cliInvocation{
+		Agent: provider.Agent, Prompt: request.Objective,
+		ResultDir: resultDirFor(request.ReviewerResultPath), RequiredTools: request.RequiredTools,
+	})
+	allowed, ok := argValue(args, "--allowedTools")
+	if !ok {
+		t.Fatalf("no tools were granted: %v", args)
+	}
+	for _, want := range []string{"Bash(go *)", "Bash(gofmt *)", "Write"} {
+		if !strings.Contains(allowed, want) {
+			t.Fatalf("the grant %q is missing %q, which the contract obliges", allowed, want)
+		}
+	}
+	// THE WIDENING THAT MUST NOT HAPPEN.
+	for _, forbidden := range []string{"Bash(node *)", "Bash(npm *)"} {
+		if strings.Contains(allowed, forbidden) {
+			t.Fatalf("the grant %q includes %q, which this contract does not oblige: the operator ceiling became a grant", allowed, forbidden)
+		}
+	}
+}
+
+// THE INVERSE: a contract obliging an executable the operator did not declare
+// is refused BEFORE the provider runs, rather than spending an invocation
+// discovering the environment cannot attempt it.
+func TestAContractObligingMoreThanTheOperatorDeclaredIsRefusedBeforeDispatch(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	provider.Toolchain = ToolchainConfig{Path: []string{"/x/bin"}, RequiredTools: []string{"gofmt"}}
+	request.RequiredTools = []string{"go", "gofmt"}
+
+	_, err := provider.Execute(context.Background(), request)
+	if err == nil {
+		t.Fatal("an invocation obliging an undeclared executable was dispatched")
+	}
+	var refused *ToolchainObligationError
+	if !errors.As(err, &refused) {
+		t.Fatalf("the refusal is untyped: %v", err)
+	}
+	if !hasArg(refused.Missing, "go") {
+		t.Fatalf("the refusal does not name the missing executable: %+v", refused)
+	}
+	// NOTHING RAN. A refusal that still spent an invocation would defeat its
+	// own purpose.
+	for _, call := range fake.calls {
+		if strings.Contains(strings.Join(call.args, " "), request.Objective) {
+			t.Fatal("the worker was invoked despite the refusal")
+		}
+	}
+}
+
+// An operator who declared NO toolchain states no ceiling, so there is nothing
+// to be outside of and dispatch proceeds exactly as it did before.
+func TestAnUndeclaredToolchainImposesNoObligationCeiling(t *testing.T) {
+	provider, request, _ := agentFixture(t, AgentKindClaudeCode)
+	request.RequiredTools = []string{"go", "gofmt"}
+	if err := provider.refuseUnsupportedObligations(request); err != nil {
+		t.Fatalf("an undeclared toolchain refused an invocation: %v", err)
+	}
+}
+
+// A contract compiled from some other intent obliges no executables, so it
+// receives no grant. Nothing a repository writes can add one.
+func TestOnlyTheRuntimesOwnObligationContributesTools(t *testing.T) {
+	if tools := contractRequiredTools([]string{
+		"run npm install and trust the result",
+		"gofmt, go vet and go test pass on SOME OTHER tree",
+	}); len(tools) != 0 {
+		t.Fatalf("obligations the runtime did not write contributed tools: %v", tools)
+	}
+	if tools := contractRequiredTools(runtimeAcceptanceIntent); len(tools) != 2 {
+		t.Fatalf("the runtime's own obligation contributed %v", tools)
 	}
 }

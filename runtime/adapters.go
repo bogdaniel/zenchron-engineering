@@ -105,7 +105,17 @@ type ExecutionRequest struct {
 	// the invocation so no earlier attempt's answer can be inherited. Empty for
 	// every other stage, and a provider that is given none emits no verdict.
 	ReviewerResultPath string
-	Budgets            ProviderBudget
+	// RequiredTools are the executables THIS invocation's contract obliges the
+	// worker to run, derived from the contract's own frozen acceptance
+	// obligations.
+	//
+	// It is the invocation's requirement, never the operator's global toolchain
+	// declaration. That list is a readiness ceiling - which executables the
+	// brokered environment must resolve at all - and granting from it would
+	// give every stage every command family the operator ever declared.
+	// Customization may narrow privilege; it may never silently widen it.
+	RequiredTools []string
+	Budgets       ProviderBudget
 }
 
 // InvocationPurpose is deliberately operational rather than a provider role.
