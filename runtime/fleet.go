@@ -14,6 +14,7 @@ package runtime
 // supervisor owns them.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -149,15 +150,29 @@ func summarizePlans(store *SQLiteOperationStore) []PlanSummary {
 			summary.Stages[string(projection.State)]++
 		}
 		// The GOVERNING document, which is the approved revision when there is
-		// one. Judging completion against the latest proposal would answer
-		// about obligations nobody authorized; judging it against the stored
-		// head revision would do the same whenever a newer proposal exists.
+		// one. Judging completion against the latest proposal would answer about
+		// obligations nobody authorized; judging it against the stored head
+		// revision would do the same whenever a newer proposal exists.
+		//
+		// An APPROVED revision that cannot be read leaves the required graph
+		// UNKNOWN, and unknown governance state fails closed. Falling back to
+		// the head revision was a fail-open: a store error or a missing row
+		// would have completion judged against a document nobody approved -
+		// possibly a newer proposal with fewer obligations - which is the same
+		// silence-as-success this function exists to remove, reached through a
+		// different door.
 		governing := plan
 		if approved, ok := snapshot.ApprovedRevision(); ok {
 			summary.ApprovedRevision = approved
-			if exact, found, err := store.PlanRevision(plan.ID, approved); err == nil && found {
-				governing = exact
+			exact, found, err := store.PlanRevision(plan.ID, approved)
+			if err != nil || !found {
+				summary.State = PlanStateBlocked
+				summary.Error = boundedDetail(fmt.Sprintf(
+					"approved revision %d could not be read, so this plan's required obligations are unknown and its completion cannot be judged", approved))
+				summaries = append(summaries, summary)
+				continue
 			}
+			governing = exact
 		}
 		summary.State = planState(governing.Stages, snapshot)
 		summaries = append(summaries, summary)

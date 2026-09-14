@@ -57,9 +57,16 @@ const reviewerResultFile = "reviewer-result.json"
 // ponytail: a flat ceiling. Per-finding bounds already apply below it.
 const maxReviewerResultBytes = 64 << 10
 
-// maxReviewerFindings bounds how many findings one verdict may carry. It is the
-// same shape of bound boundedPayloadList applies to every durable list.
-const maxReviewerFindings = 32
+// maxReviewerFindings bounds how many findings one verdict may carry.
+//
+// It IS the durable payload list bound, not a second number beside it. Two
+// independently chosen limits drift, and this pair drifted immediately: an
+// admission ceiling of 32 accepted verdicts the durable payload validator then
+// refused at 16, so a reviewer naming 17 real defects had its result admitted,
+// its append rejected, its invocation failed, and its whole remediation budget
+// spent re-producing the same refusal before the stage died with an opaque
+// reason. A result admission accepts must be a result the journal can hold.
+const maxReviewerFindings = maxPayloadListItems
 
 // ReviewerResult is what a reviewer stage emits through the structured channel.
 type ReviewerResult struct {

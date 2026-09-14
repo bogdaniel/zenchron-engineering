@@ -27,6 +27,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -56,6 +58,14 @@ type PlanReconciler struct {
 	// source with a different stage objective, which is what keeps a plan's
 	// runs ordinary runs rather than a second kind of work.
 	Issue int
+	// StateDir is the runtime state directory holding each run's own workspace.
+	//
+	// It is read ONLY to prove a relationship between two upstream candidates -
+	// whether one contains the other - in the producer's own runtime-owned
+	// clone, which is the only place both objects exist. Nothing here writes to
+	// a workspace, and a reconciler constructed without it simply cannot prove
+	// containment, so a multi-candidate stage blocks.
+	StateDir string
 }
 
 // PlanTickReport is one pass over one plan.
@@ -1358,52 +1368,128 @@ func modelAppearedSince(assignment domain.AgentAssignment, agent domain.Executio
 // about its own workspace, reached through a different door. The error is
 // returned and the stage waits.
 func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) (string, *CandidateRef, error) {
-	base := ""
-	var local *CandidateRef
+	subject, err := r.upstreamSubject(assignment)
+	if err != nil || subject == nil {
+		return "", nil, err
+	}
+	events, err := r.Store.Events(subject.RunID)
+	if err != nil {
+		return "", nil, fmt.Errorf("upstream stage %q run %s could not be read: %w", subject.StageID, subject.RunID, err)
+	}
+	projection, err := Project(events)
+	if err != nil {
+		return "", nil, fmt.Errorf("upstream stage %q run %s could not be projected: %w", subject.StageID, subject.RunID, err)
+	}
+	if projection.PullRequest != nil {
+		// Published: the governed remote already has this commit, so the
+		// ordinary clone reaches it and nothing needs transferring.
+		return subject.Candidate, nil, nil
+	}
+	// NOT PUBLISHED, which is not the same as not available. The commit exists
+	// in the producer's runtime-owned workspace and the runtime can hand it
+	// over without publishing anything.
+	//
+	// The tree comes from the upstream output the assignment FROZE, so the
+	// subject being materialized is the subject that was approved rather than
+	// whatever the producer's workspace currently holds. A frozen output that
+	// names no tree cannot be proven on arrival, so it yields no reference and
+	// the caller blocks.
+	if subject.Tree == "" {
+		return "", nil, nil
+	}
+	return "", &CandidateRef{
+		RunID: subject.RunID, StageID: subject.StageID,
+		Revision: subject.Candidate, Tree: subject.Tree,
+	}, nil
+}
+
+// upstreamSubject is the ONE exact candidate that represents all the material
+// upstream work a stage was assigned to consume, or a refusal.
+//
+// A stage with several upstream producers used to take the LAST one the loop
+// happened to visit. That is indefensible for a reviewer: with two independent
+// producers it received one of the two trees, the other producer's work was
+// never in its workspace - the two are siblings from one base, so it is not an
+// ancestor either - and its ACCEPT then satisfied the gate for material it
+// never saw. An independent review covering half the change is worse than no
+// review, because it reports as if it covered all of it.
+//
+// So the rule is: one candidate, or none.
+//
+//   - one distinct upstream candidate is the subject;
+//   - several are permitted only when ONE of them provably CONTAINS every
+//     other, which is the ordinary chained-producer shape and is proven with
+//     the same `merge-base --is-ancestor` the rest of the runtime uses;
+//   - anything else - divergent siblings, an unprovable relationship, a
+//     workspace that no longer exists - is refused, and the caller turns that
+//     into a stage block.
+//
+// This is deliberately a LIMITATION rather than composition. Merging two
+// candidates into a reviewable whole is a capability this runtime does not have,
+// and inventing one here would be building a feature inside a repair. A planner
+// that decomposes into independent producers under one reviewer will block, and
+// that is the honest answer until the composition exists.
+func (r PlanReconciler) upstreamSubject(assignment domain.AgentAssignment) (*domain.UpstreamOutput, error) {
+	var frozen []domain.UpstreamOutput
+	seen := map[string]bool{}
 	for _, upstream := range assignment.Context.UpstreamOutputs {
-		if upstream.RunID == "" || upstream.Candidate == "" {
+		if upstream.RunID == "" || upstream.Candidate == "" || seen[upstream.Candidate] {
 			continue
 		}
-		events, err := r.Store.Events(upstream.RunID)
+		seen[upstream.Candidate] = true
+		frozen = append(frozen, upstream)
+	}
+	switch len(frozen) {
+	case 0:
+		return nil, nil
+	case 1:
+		return &frozen[0], nil
+	}
+	// SEVERAL. Exactly one of them must contain all the others.
+	var subsuming []domain.UpstreamOutput
+	for _, candidate := range frozen {
+		contains, err := r.containsAll(candidate, frozen)
 		if err != nil {
-			return "", nil, fmt.Errorf("upstream stage %q run %s could not be read: %w", upstream.StageID, upstream.RunID, err)
+			return nil, err
 		}
-		projection, err := Project(events)
-		if err != nil {
-			return "", nil, fmt.Errorf("upstream stage %q run %s could not be projected: %w", upstream.StageID, upstream.RunID, err)
-		}
-		if projection.PullRequest != nil {
-			// Published: the governed remote already has this commit, so the
-			// ordinary clone reaches it and nothing needs transferring.
-			base, local = upstream.Candidate, nil
-			continue
-		}
-		// NOT PUBLISHED, which is not the same as not available.
-		//
-		// This branch used to `continue`, leaving the downstream stage on the
-		// trusted base with a comment claiming the diff arrived as context. It
-		// does not: ContextCandidateDiff is delivered BY the workspace, so the
-		// consumer received nothing and reviewed the base. The commit exists in
-		// the producer's runtime-owned workspace, and the runtime can hand it
-		// over without publishing anything.
-		//
-		// The tree comes from the upstream output the assignment FROZE, so the
-		// subject being materialized is the subject that was approved rather
-		// than whatever the producer's workspace currently holds.
-		tree := upstream.Tree
-		if tree == "" {
-			// A frozen output that names no tree cannot be proven on arrival.
-			// Leaving the stage with no reference makes startAgentStage block
-			// it, which is the fail-closed direction.
-			continue
-		}
-		base = ""
-		local = &CandidateRef{
-			RunID: upstream.RunID, StageID: upstream.StageID,
-			Revision: upstream.Candidate, Tree: tree,
+		if contains {
+			subsuming = append(subsuming, candidate)
 		}
 	}
-	return base, local, nil
+	if len(subsuming) != 1 {
+		names := make([]string, 0, len(frozen))
+		for _, upstream := range frozen {
+			names = append(names, fmt.Sprintf("%s@%s", upstream.StageID, short12(upstream.Candidate)))
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf(
+			"this stage consumes %d distinct upstream candidates (%s) and no single one of them contains the others, so there is no one exact candidate that represents all the work it was assigned to review; composing several candidates into one reviewable subject is not something this runtime can do",
+			len(frozen), strings.Join(names, ", "))
+	}
+	return &subsuming[0], nil
+}
+
+// containsAll reports whether one candidate has every other as an ancestor.
+//
+// The proof runs in the CANDIDATE'S OWN runtime-owned workspace, which is the
+// only place both objects are guaranteed to exist: a sibling producer's commit
+// was never fetched anywhere else. A workspace that has been reclaimed, or an
+// object that is genuinely absent, proves nothing and therefore answers false -
+// the caller refuses rather than assuming a relationship it could not check.
+func (r PlanReconciler) containsAll(candidate domain.UpstreamOutput, all []domain.UpstreamOutput) (bool, error) {
+	dir := candidateDir(r.StateDir, candidate.RunID)
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false, nil
+	}
+	for _, other := range all {
+		if other.Candidate == candidate.Candidate {
+			continue
+		}
+		if _, err := runGit(dir, "merge-base", "--is-ancestor", other.Candidate, candidate.Candidate); err != nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // attributeRunSpend records what one child run has spent SO FAR, as the delta
@@ -1621,7 +1707,7 @@ func (r PlanReconciler) reviewAcceptance(plan domain.EngineeringPlan, stage doma
 	if !found {
 		return "", false, nil
 	}
-	subject, ok := reviewSubject(assignment)
+	subject, ok := r.reviewSubject(assignment)
 	if !ok {
 		// A reviewer with no frozen upstream has nothing it was asked to judge.
 		// Settling it either way would be inventing a subject for a verdict.
@@ -1762,16 +1848,12 @@ func unreachableUpstream(stage domain.PlanStage, assignment domain.AgentAssignme
 // the LAST frozen upstream is the head that combination settles on - the same
 // one upstreamBase materializes the workspace from, so the verdict and the
 // workspace are answers about one tree by construction.
-func reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool) {
-	var subject domain.UpstreamOutput
-	found := false
-	for _, upstream := range assignment.Context.UpstreamOutputs {
-		if upstream.RunID == "" || upstream.Candidate == "" {
-			continue
-		}
-		subject, found = upstream, true
+func (r PlanReconciler) reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool) {
+	subject, err := r.upstreamSubject(assignment)
+	if err != nil || subject == nil {
+		return domain.UpstreamOutput{}, false
 	}
-	return subject, found
+	return *subject, true
 }
 
 // stageSettlementReason is what an operator reads beside a settled stage.

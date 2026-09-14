@@ -897,26 +897,6 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
-	// THE STRUCTURED VERDICT, read from the runtime-owned path and nowhere
-	// else. The transcript above is evidence and is never consulted for one: a
-	// worker that talked about accepting has not accepted, and a transcript
-	// that happens to contain verdict-shaped JSON is still just a transcript.
-	//
-	// A malformed result FAILS the invocation rather than being ignored. A
-	// reviewer that tried to answer and produced something unreadable has not
-	// silently declined to answer, and treating the two the same would hide a
-	// broken protocol behind an unsettled stage.
-	if request.ReviewerResultPath != "" {
-		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
-		if reviewErr != nil {
-			result.Outcome = OperationFailed
-			result.Failure = &ProviderFailure{
-				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
-			}
-			return result, nil
-		}
-		result.Review = review
-	}
 	if runErr != nil || ctx.Err() != nil {
 		result.Outcome = OperationFailed
 		result.Failure = &ProviderFailure{
@@ -944,6 +924,34 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			result.Outcome = OperationCancelled
 			result.Failure.Classification = FailureControllerShutdown
 		}
+		// The PRIMARY failure is returned untouched, and the structured result
+		// is not read at all. A verdict written by an invocation that then died
+		// is not this invocation's answer, and a malformed one would otherwise
+		// overwrite the real reason it died - a timeout reported as a broken
+		// protocol is a worse diagnosis than either fact alone.
+		return result, runErr
+	}
+	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.
+	//
+	// It comes from the runtime-owned path and nowhere else: the transcript is
+	// evidence and is never consulted for a verdict, so a worker that talked
+	// about accepting has not accepted, and a transcript that happens to
+	// contain verdict-shaped JSON is still just a transcript.
+	//
+	// A malformed result on a SUCCESSFUL invocation still fails it. A reviewer
+	// that tried to answer and produced something unreadable has not silently
+	// declined to answer, and treating the two the same would hide a broken
+	// protocol behind a stage that merely never settles.
+	if request.ReviewerResultPath != "" {
+		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
+		if reviewErr != nil {
+			result.Outcome = OperationFailed
+			result.Failure = &ProviderFailure{
+				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
+			}
+			return result, nil
+		}
+		result.Review = review
 	}
 	return result, runErr
 }

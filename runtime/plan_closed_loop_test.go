@@ -163,7 +163,7 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("the reviewer froze no assignment: found=%v err=%v", found, err)
 	}
-	subject, ok := reviewSubject(assignment)
+	subject, ok := fixture.reconciler.reviewSubject(assignment)
 	if !ok {
 		t.Fatalf("the reviewer froze no upstream candidate: %#v", assignment.Context.UpstreamOutputs)
 	}
@@ -245,7 +245,7 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("the re-performance froze no assignment: found=%v err=%v", found, err)
 	}
-	nextSubject, ok := reviewSubject(next)
+	nextSubject, ok := fixture.reconciler.reviewSubject(next)
 	if !ok || nextSubject.Candidate != candidateC {
 		t.Fatalf("the re-performed review judges %#v, and the current work is %s", nextSubject, candidateC)
 	}
@@ -747,5 +747,218 @@ func TestAReviewerProviderWithoutTheVerdictProtocolIsRefusedBeforeDispatch(t *te
 	}
 	if !blocked {
 		t.Fatalf("a reviewer stage resolved to a worker that cannot produce a verdict: %+v", resolution.Assignments)
+	}
+}
+
+// AN INVOCATION THAT DID NOT COMPLETE CONTRIBUTES NO VERDICT.
+//
+// A reviewer can write its result and then die: overrun its wall bound, be
+// cancelled, be cut off by a controller shutdown, or simply exit non-zero. The
+// file is on disk either way, and admitting it would let an unfinished
+// invocation produce a finished answer - the exact failure this whole change
+// exists to remove, reproduced inside its own repair.
+//
+// Every class is checked together because the execution model already
+// normalizes them into "the invocation failed"; the point is that NONE of them
+// is a route to durable acceptance.
+func TestAVerdictFromAnIncompleteInvocationIsNeverAdmitted(t *testing.T) {
+	for _, class := range []FailureClass{
+		FailureExecutionIncomplete,
+		FailureTransientProvider,
+		FailureCompileTest,
+	} {
+		t.Run(string(class), func(t *testing.T) {
+			fixture := newPlanRunFixture(t, closedLoopStages())
+			inner := NewFakeReviewerProvider(ReviewerResult{
+				SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted,
+			})
+			deps := fixture.deps
+			deps.Provider = &dyingReviewerProvider{FakeReviewerProvider: inner, class: class}
+			deps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+			fixture.engines["claude"] = fixture.newRuntime(deps)
+
+			fixture.approve(t)
+			fixture.reconcile(t)
+			producer := planStageState(t, fixture, "implementation").RunID
+			produceCandidate(t, fixture, producer, "package b\n", true)
+			fixture.reconcile(t)
+			fixture.reconcile(t)
+
+			review := planStageState(t, fixture, "review")
+			if review.RunID == "" {
+				t.Fatal("the reviewer stage created no run")
+			}
+			engine := fixture.engines["claude"]
+			for i := 0; i < 6; i++ {
+				if _, err := engine.Reconcile(context.Background(), review.RunID); err != nil {
+					t.Fatalf("reconcile: %v", err)
+				}
+			}
+			// The reviewer DID write a result - this test is about what the
+			// lifecycle does with it, not about a reviewer that stayed silent.
+			if len(inner.Reviewed) == 0 {
+				t.Fatal("the reviewer was never given a result path, so this proves nothing")
+			}
+
+			after := planStageState(t, fixture, "review")
+			if after.Review != nil {
+				t.Fatalf("a verdict from a %s invocation was admitted: %+v", class, after.Review)
+			}
+			if after.State == PlanStageCompleted {
+				t.Fatal("the reviewer stage was accepted without an admitted verdict")
+			}
+			if gate := planStageState(t, fixture, "assurance"); gate.State == PlanStageSatisfied {
+				t.Fatal("the assurance gate was satisfied over a verdict nobody admitted")
+			}
+			if status := planStatus(t, fixture); status == PlanStateCompleted {
+				t.Fatal("the plan reported completed over a verdict nobody admitted")
+			}
+		})
+	}
+}
+
+// dyingReviewerProvider writes its verdict and then reports that the invocation
+// failed, which is what a reviewer cut off after answering looks like.
+type dyingReviewerProvider struct {
+	*FakeReviewerProvider
+	class FailureClass
+}
+
+func (p *dyingReviewerProvider) Execute(ctx context.Context, r ExecutionRequest) (ExecutionResult, error) {
+	result, err := p.FakeReviewerProvider.Execute(ctx, r)
+	if r.ReviewerResultPath != "" {
+		result.Outcome = OperationFailed
+		result.Failure = &ProviderFailure{Classification: p.class}
+		// A failed invocation carries no verdict out of the adapter either: the
+		// production adapter returns before reading the file at all.
+		result.Review = nil
+	}
+	return result, err
+}
+
+// DIVERGENT SIBLINGS: two producers, neither containing the other, one reviewer.
+//
+// This is the shape the #119 planner produced at revision 3, and the shape that
+// used to take whichever candidate the loop visited last. The reviewer received
+// one of the two trees, the other producer's work was never in its workspace,
+// and its ACCEPT satisfied the gate for material it never saw. An independent
+// review covering half a change is worse than none, because it reports as if it
+// covered all of it.
+//
+// There is no composition here and deliberately so: the runtime cannot merge
+// two candidates into one reviewable subject, so it refuses.
+func TestAReviewerWithDivergentUpstreamCandidatesIsRefused(t *testing.T) {
+	fixture := newPlanRunFixture(t, twoProducerStages())
+	reviewerEngine(t, fixture,
+		ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	first := planStageState(t, fixture, "producer-a").RunID
+	second := planStageState(t, fixture, "producer-b").RunID
+	if first == "" || second == "" {
+		t.Fatalf("both producers must run: %q %q", first, second)
+	}
+	// Siblings from one base: neither commit is an ancestor of the other.
+	produceCandidate(t, fixture, first, "package a\n", true)
+	produceCandidate(t, fixture, second, "package b\n", true)
+	for i := 0; i < 4; i++ {
+		fixture.reconcile(t)
+	}
+
+	review := planStageState(t, fixture, "review")
+	if review.RunID != "" {
+		t.Fatalf("the reviewer was invoked against one of two divergent candidates: %#v", review)
+	}
+	if review.Review != nil {
+		t.Fatalf("a verdict was admitted for a subject nobody could identify: %+v", review.Review)
+	}
+	if gate := planStageState(t, fixture, "assurance"); gate.State == PlanStageSatisfied {
+		t.Fatal("the gate was satisfied without any review at all")
+	}
+	if status := planStatus(t, fixture); status == PlanStateCompleted {
+		t.Fatal("the plan reported completed with its reviewer never invoked")
+	}
+	// And the refusal is EXPLICIT rather than a silent stall.
+	report := fixture.reconcile(t)
+	blocked := ""
+	for _, block := range report.Blocked {
+		if block.StageID == "review" {
+			blocked = block.Reason
+		}
+	}
+	if !strings.Contains(blocked, "distinct upstream candidates") {
+		t.Fatalf("the reviewer stage did not block with a reason naming the composition it cannot do: %q", blocked)
+	}
+}
+
+// twoProducerStages is the #119 revision-3 shape: two independent implementers
+// under one independent reviewer, and the gate the contract's claim requires.
+func twoProducerStages() []domain.PlanStage {
+	return []domain.PlanStage{
+		{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the first half.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the second half.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"producer-a", "producer-b"}, Objective: "Review the combined work.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification},
+			Independence: &domain.IndependenceRequirement{
+				Dimension: domain.IndependenceExecutionAgent, DifferentFrom: []string{"producer-a", "producer-b"},
+			}},
+		{ID: "assurance", Kind: domain.StageAssuranceGate, DependsOn: []string{"review"},
+			RequiredClaims: []string{"verification"}},
+	}
+}
+
+// UNKNOWN GOVERNANCE STATE FAILS CLOSED.
+//
+// An approved revision that cannot be read leaves the plan's required
+// obligations unknown. Falling back to the stored head revision - which may be
+// a newer proposal nobody approved, with different or fewer obligations - would
+// judge completion against a document nobody authorized, which is the same
+// silence-as-success the approved-graph rule exists to remove.
+func TestAnUnreadableApprovedRevisionNeverReportsCompleted(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	fixture.approve(t)
+
+	// A NEWER revision is stored and unapproved, which is the dangerous shape:
+	// the head document exists and is not the one that governs.
+	next := fixture.plan
+	next.Revision = fixture.plan.Revision + 1
+	next.Stages = next.Stages[:1]
+	previous := fixture.plan.Revision
+	next.Provenance.PreviousRevision = &previous
+	digest, err := next.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Digest = digest
+	if _, err := fixture.store.PutPlanRevision(next); err != nil {
+		t.Fatal(err)
+	}
+	// The approval still stands in the journal, and the revision it named is
+	// gone from the store.
+	if _, err := fixture.store.db.Exec(
+		`DELETE FROM plan_revisions WHERE plan_id = ? AND revision = ?`,
+		fixture.plan.ID, fixture.plan.Revision); err != nil {
+		t.Fatal(err)
+	}
+	summaries := summarizePlans(fixture.store)
+	if len(summaries) != 1 {
+		t.Fatalf("expected one plan summary, got %d", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.State == PlanStateCompleted {
+		t.Fatal("a plan whose approved revision cannot be read reported completed")
+	}
+	if summary.State != PlanStateBlocked {
+		t.Fatalf("state %q, want %q", summary.State, PlanStateBlocked)
+	}
+	if !strings.Contains(summary.Error, "could not be read") {
+		t.Fatalf("the summary does not say why the graph is unknown: %q", summary.Error)
 	}
 }

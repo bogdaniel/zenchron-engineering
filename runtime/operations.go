@@ -687,21 +687,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		},
 		Artifacts: result.Artifacts,
 	}}
-	// THE REVIEWER'S VERDICT BECOMES LIFECYCLE STATE, or is refused.
-	//
-	// Admission happens here, in the runtime, against the frozen assignment -
-	// never in the adapter, which only read a file. A refused result FAILS the
-	// operation: something claimed authority it did not have, and treating that
-	// as "no verdict" would let a malformed or mis-scoped claim look identical
-	// to an honest silence.
-	if result.Review != nil {
-		if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
-				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
-			}}
-		}
-	}
 	// A producer that FINISHED is the only thing that completes an execution.
 	// It is an observation about the producer, not about the work: it makes the
 	// exact subject eligible to be treated as a finished candidate, and it
@@ -709,7 +694,34 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// on every normal completion is what lets a continuation that finds nothing
 	// left to do promote the checkpoint it inherited, without inventing a
 	// commit no mutation produced.
+	//
+	// A REVIEWER'S VERDICT IS ADMITTED IN THE SAME BREATH, and structurally so:
+	// it is inside this condition rather than beside it, because the two ask the
+	// same question and had drifted apart. Admission used to run before this
+	// check, so a reviewer that wrote ACCEPT and then timed out, was cancelled,
+	// hit its wall bound, exited non-zero or was cut off by a controller
+	// shutdown still produced durable acceptance evidence - an unfinished
+	// invocation contributing a finished answer, which is the exact failure this
+	// whole change exists to remove, reproduced inside its own repair.
+	//
+	// An invocation that did not complete leaves the result on disk and unread
+	// by the lifecycle. Its stage stays unsettled, the run retries or
+	// terminalizes under its existing bounds, and the next successful invocation
+	// writes into a freshly emptied slot.
 	if execErr == nil && result.Failure == nil {
+		// Admission happens in the RUNTIME, against the frozen assignment -
+		// never in the adapter, which only read a file. A refused result FAILS
+		// the operation: something claimed authority it did not have, and
+		// treating that as "no verdict" would let a malformed or mis-scoped
+		// claim look identical to an honest silence.
+		if result.Review != nil {
+			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
+				return effect{state: OperationFailed, result: executionRecord{
+					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
+					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
+				}}
+			}
+		}
 		events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
 			ProducerID:    producerID,
 			Purpose:       purpose,
@@ -2338,8 +2350,17 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	if !ok {
 		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the approved revision declares no such stage"}
 	}
-	subject, _ := reviewSubject(*stage.assignment)
-	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, subject, state.run.ID, result.ProviderID, result.Review)
+	// The SAME subject selection the transport used, so the verdict binds to the
+	// candidate the workspace actually held. A stage the selection refuses has
+	// no subject, and therefore no verdict to admit.
+	subject, subjectErr := PlanReconciler{Store: r.deps.Store, StateDir: r.deps.StateDir}.upstreamSubject(*stage.assignment)
+	if subjectErr != nil {
+		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: boundedDetail(subjectErr.Error())}
+	}
+	if subject == nil {
+		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the assignment froze no upstream candidate for this stage to have reviewed"}
+	}
+	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, *subject, state.run.ID, result.ProviderID, result.Review)
 	if err != nil {
 		return err
 	}

@@ -8,9 +8,12 @@ package runtime
 // without having it, and every one of them must fail closed.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -364,4 +367,127 @@ func asReviewerRefusal(err error, target **ReviewerResultRefusedError) bool {
 		*target = refused
 	}
 	return ok
+}
+
+// The ADAPTER's own ordering law, tested where the repair lives.
+//
+// A reviewer can write its verdict and then die. The file is on disk either
+// way, and the adapter must not carry it out of a failed invocation - nor let a
+// malformed one CHANGE the diagnosis of why the invocation died.
+//
+// The second half is tested by comparison rather than by naming a class: the
+// same failure is run twice, once with a well-formed verdict on disk and once
+// with an unreadable one, and the classification must be identical. Asserting a
+// particular class would only restate whatever classifyAgentFailure happens to
+// return for an empty transcript.
+func TestTheAdapterReadsNoVerdictOutOfAFailedInvocation(t *testing.T) {
+	cases := map[string]struct {
+		cancel bool
+		runErr error
+	}{
+		"cancelled":       {cancel: true},
+		"process failure": {runErr: errors.New("exit status 1")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			classify := func(document string) *ProviderFailure {
+				provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+				fake.block, fake.err = tc.cancel, tc.runErr
+				path, err := PrepareReviewerResult(t.TempDir(), request.AttemptRef())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				request.ReviewerResultPath = path
+				ctx := context.Background()
+				if tc.cancel {
+					bounded, cancel := context.WithCancel(ctx)
+					cancel()
+					ctx = bounded
+				}
+				result, _ := provider.Execute(ctx, request)
+				if result.Review != nil {
+					t.Fatalf("a failed invocation carried a verdict out of the adapter: %+v", result.Review)
+				}
+				if result.Outcome == Succeeded || result.Failure == nil {
+					t.Fatalf("the invocation did not report a failure: %+v", result)
+				}
+				return result.Failure
+			}
+			wellFormed := classify(`{"schema_version":"0.1","verdict":"accepted"}`)
+			malformed := classify(`{not json`)
+			if wellFormed.Classification != malformed.Classification {
+				t.Fatalf("an unreadable verdict changed the diagnosis from %q to %q",
+					wellFormed.Classification, malformed.Classification)
+			}
+		})
+	}
+}
+
+// A malformed result on a SUCCESSFUL invocation still fails it: a reviewer that
+// tried to answer and produced something unreadable has not declined to answer.
+func TestAMalformedVerdictFailsAnOtherwiseSuccessfulInvocation(t *testing.T) {
+	provider, request, _ := agentFixture(t, AgentKindClaudeCode)
+	path, err := PrepareReviewerResult(t.TempDir(), request.AttemptRef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.ReviewerResultPath = path
+
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OperationFailed || result.Failure == nil {
+		t.Fatalf("a malformed verdict did not fail the invocation: %+v", result)
+	}
+	if result.Failure.Classification != FailureVerification {
+		t.Fatalf("classification %q, want %q", result.Failure.Classification, FailureVerification)
+	}
+	if result.Review != nil {
+		t.Fatalf("a malformed verdict was carried out anyway: %+v", result.Review)
+	}
+}
+
+// The finding bound admission enforces IS the durable payload bound, so a
+// result admission accepts is a result the journal can hold.
+func TestTheReviewerFindingBoundIsTheDurableBound(t *testing.T) {
+	if maxReviewerFindings != maxPayloadListItems {
+		t.Fatalf("the admission bound is %d and the durable payload bound is %d: two numbers that drift are one bug",
+			maxReviewerFindings, maxPayloadListItems)
+	}
+	for _, count := range []int{maxReviewerFindings - 1, maxReviewerFindings, maxReviewerFindings + 1} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			fixture := newReviewerFixture()
+			result := blocking()
+			result.Findings = make([]ReviewerFinding, count)
+			for i := range result.Findings {
+				result.Findings[i] = ReviewerFinding{Signature: "review:defect"}
+			}
+			payload, admitErr := fixture.admit(result)
+			if count > maxReviewerFindings {
+				if admitErr == nil {
+					t.Fatal("a result above the bound was admitted")
+				}
+				return
+			}
+			if admitErr != nil {
+				t.Fatalf("a result at or below the bound was refused: %v", admitErr)
+			}
+			// AND THE JOURNAL ACCEPTS IT. Admission that the durable validator
+			// then refuses is the mismatch this test exists to prevent.
+			document, err := CanonicalJSON(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := eventPayloads[EventPlanStageReviewed](document); err != nil {
+				t.Fatalf("admission accepted %d findings the durable payload validator refuses: %v", count, err)
+			}
+		})
+	}
 }

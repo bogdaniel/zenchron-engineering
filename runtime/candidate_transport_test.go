@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // producerWorkspace is a runtime-owned workspace holding one real commit, which
@@ -176,5 +178,101 @@ func TestAMissingProducerWorkspaceIsAnError(t *testing.T) {
 	ref := CandidateRef{RunID: "run-gone", Revision: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40)}
 	if err := MaterializeCandidate(consumerDir, ref, filepath.Join(root, "not-a-workspace")); err == nil {
 		t.Fatal("a missing producer workspace was treated as a successful transfer")
+	}
+}
+
+// CONTAINED CANDIDATES. Where one producer built ON another, the later
+// candidate provably contains the earlier one and is the single subject a
+// reviewer may be given.
+//
+// The proof is `merge-base --is-ancestor` in the candidate's own runtime-owned
+// workspace - the only place both objects exist - and it is a PROOF rather than
+// a composition: nothing is merged, and a pair the runtime cannot relate is
+// refused instead of guessed at.
+func TestOneUpstreamCandidateMayContainTheOthers(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	producerA := candidateDir(stateDir, "run-a")
+	earlier := producerWorkspace(t, producerA, "first")
+	earlier.RunID, earlier.StageID = "run-a", "producer-a"
+
+	// The second producer's workspace is a clone of the first, so it genuinely
+	// builds on it - the chained shape.
+	producerB := candidateDir(stateDir, "run-b")
+	if err := os.MkdirAll(filepath.Dir(producerB), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit("", "clone", "--no-tags", producerA, producerB); err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.name", "Producer B"},
+		{"config", "user.email", "b@zenchron.invalid"},
+	} {
+		if _, err := runGit(producerB, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(producerB, "second.txt"), []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "second"}} {
+		if _, err := runGit(producerB, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	head, err := gitOutput(producerB, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := domain.UpstreamOutput{
+		StageID: "producer-b", RunID: "run-b", Candidate: strings.TrimSpace(head),
+	}
+
+	reconciler := PlanReconciler{StateDir: stateDir}
+	assignment := domain.AgentAssignment{Context: domain.ContextPack{UpstreamOutputs: []domain.UpstreamOutput{
+		{StageID: earlier.StageID, RunID: earlier.RunID, Candidate: earlier.Revision, Tree: earlier.Tree},
+		later,
+	}}}
+	subject, err := reconciler.upstreamSubject(assignment)
+	if err != nil {
+		t.Fatalf("a containing candidate was refused: %v", err)
+	}
+	if subject == nil || subject.Candidate != later.Candidate {
+		t.Fatalf("the subject is %#v, and the candidate containing the other is %s", subject, later.Candidate)
+	}
+
+	// DIVERGENT siblings of the same base are refused, with no arbitrary pick.
+	sibling := candidateDir(stateDir, "run-c")
+	if _, err := runGit("", "clone", "--no-tags", producerA, sibling); err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.name", "Producer C"},
+		{"config", "user.email", "c@zenchron.invalid"},
+		{"checkout", "--detach", earlier.Revision},
+	} {
+		if _, err := runGit(sibling, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "third.txt"), []byte("third"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "third"}} {
+		if _, err := runGit(sibling, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	siblingHead, err := gitOutput(sibling, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	divergent := domain.AgentAssignment{Context: domain.ContextPack{UpstreamOutputs: []domain.UpstreamOutput{
+		later,
+		{StageID: "producer-c", RunID: "run-c", Candidate: strings.TrimSpace(siblingHead)},
+	}}}
+	if subject, err := reconciler.upstreamSubject(divergent); err == nil {
+		t.Fatalf("two divergent siblings produced a subject: %#v", subject)
 	}
 }

@@ -101,7 +101,7 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 	}
 	fixture.reconciler = PlanReconciler{
 		Store: base.store, Clock: base.clock, Service: fixture.service,
-		Repository: "acme/repo", Issue: base.issue,
+		Repository: "acme/repo", Issue: base.issue, StateDir: base.stateDir,
 		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
 			fixture.engineCalls = append(fixture.engineCalls, agentID)
 			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan

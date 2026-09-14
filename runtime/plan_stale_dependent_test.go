@@ -279,7 +279,7 @@ func reviewStage(t *testing.T, fixture *planRunFixture, stageID, runID, verdict 
 	if err != nil || !found {
 		t.Fatalf("no frozen assignment for reviewer stage %q: found=%v err=%v", stageID, found, err)
 	}
-	subject, ok := reviewSubject(assignment)
+	subject, ok := fixture.reconciler.reviewSubject(assignment)
 	if !ok {
 		t.Fatalf("reviewer stage %q froze no upstream candidate to judge: %#v", stageID, assignment.Context.UpstreamOutputs)
 	}
