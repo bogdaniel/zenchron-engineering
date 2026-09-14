@@ -86,7 +86,17 @@ func (s *SQLiteOperationStore) Run(id string) (EngineeringRun, bool, error) {
 // row projects; a caller that needs the replayed truth for one run asks for it
 // by id, which is what keeps this a cheap listing rather than a second reducer.
 func (s *SQLiteOperationStore) Runs() ([]EngineeringRun, error) {
-	rows, err := s.db.Query(`SELECT document FROM runs ORDER BY created_unix_nano ASC, id ASC`)
+	return s.queryRuns("")
+}
+
+// ActiveRuns lists non-terminal run rows in durable queue order. As with Runs,
+// the journal remains authoritative when a selected run is loaded.
+func (s *SQLiteOperationStore) ActiveRuns() ([]EngineeringRun, error) {
+	return s.queryRuns(` WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled')`)
+}
+
+func (s *SQLiteOperationStore) queryRuns(where string) ([]EngineeringRun, error) {
+	rows, err := s.db.Query(`SELECT document FROM runs` + where + ` ORDER BY created_unix_nano ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -275,6 +285,12 @@ func (s *SQLiteOperationStore) Events(runID string) ([]EngineeringEvent, error) 
 	return queryEvents(s.db, runID)
 }
 
+// EventsAfter returns only rows newer than the exclusive sequence cursor, with
+// the same document/column validation as Events. It does not replay the stream.
+func (s *SQLiteOperationStore) EventsAfter(runID string, sequence int64) ([]EngineeringEvent, error) {
+	return queryStreamEvents(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, streamRun, runID, sequence)
+}
+
 // Replay rebuilds run state by feeding the persisted events back through the
 // one reducer. There is no second reducer.
 func (s *SQLiteOperationStore) Replay(runID string) (RunSnapshot, error) {
@@ -308,8 +324,8 @@ func queryPlanEvents(q eventQuerier, planID string) ([]EngineeringEvent, error) 
 // must still agree with its canonical document - including the STREAM columns,
 // so a row moved between streams by direct database access is refused rather
 // than replayed into the wrong history.
-func queryStreamEvents(q eventQuerier, where string, kind, id string) ([]EngineeringEvent, error) {
-	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`, kind, id)
+func queryStreamEvents(q eventQuerier, where string, args ...any) ([]EngineeringEvent, error) {
+	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`, args...)
 	if err != nil {
 		return nil, err
 	}

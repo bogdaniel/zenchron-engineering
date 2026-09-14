@@ -149,14 +149,16 @@ type pushResult struct {
 // runState is one replayed view of one run. Everything a planner may read is
 // here, and nothing here comes from wall time, the filesystem, or the network.
 type runState struct {
-	rt                *EngineeringRuntime
-	run               EngineeringRun
-	snapshot          RunSnapshot
-	events            []EngineeringEvent
-	projection        RunProjection
-	sources           []sourceRecord
-	source            *sourceRecord
-	controllerChanged bool
+	feedbackCached     *FeedbackState
+	feedbackEventCount int
+	rt                 *EngineeringRuntime
+	run                EngineeringRun
+	snapshot           RunSnapshot
+	events             []EngineeringEvent
+	projection         RunProjection
+	sources            []sourceRecord
+	source             *sourceRecord
+	controllerChanged  bool
 	// External-wait accounting, folded from the journal once; see externalWait.
 	waitExcluded  time.Duration
 	waitOpenSince time.Time
@@ -1479,18 +1481,13 @@ func waitingReason(conditionReason, fallback string) string {
 // scheduler write did not would stay leased forever and no later pass could
 // acquire anything.
 func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
-	for _, journalled := range state.snapshot.Operations {
-		if journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled {
-			continue
-		}
-		stored, _, ok, err := r.deps.Store.Operation(journalled.ID)
-		if err != nil {
-			return err
-		}
-		if !ok || stored.State == journalled.State {
-			continue
-		}
-		if stored.State != Leased && stored.State != Running {
+	active, err := r.deps.Store.ActiveOperations(state.run.ID)
+	if err != nil {
+		return err
+	}
+	for _, stored := range active {
+		journalled, ok := state.snapshot.Operations[stored.ID]
+		if !ok || (journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled) {
 			continue
 		}
 		if _, err := r.scheduler.Finish(journalled.ID, journalled.State); err != nil {

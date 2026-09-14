@@ -868,7 +868,7 @@ func autonomyEvents(parent context.Context, flags autonomyFlags, runID string, s
 }
 
 // followEvents tails the journal. It mutates nothing: the only call it makes is
-// the same read the one-shot path makes, so a concurrent append by an
+// a cursor-filtered journal read, so a concurrent append by an
 // independent handle is simply the next thing it observes. It exits cleanly on
 // SIGINT or SIGTERM, which is a shutdown of THIS reader and never a
 // cancellation of the run.
@@ -880,7 +880,7 @@ func followEvents(parent context.Context, store *runtime.SQLiteOperationStore, r
 	ticker := time.NewTicker(followInterval)
 	defer ticker.Stop()
 	for {
-		events, err := store.Events(runID)
+		events, err := store.EventsAfter(runID, last)
 		if err != nil {
 			return runtime.ExitFailed, err
 		}
