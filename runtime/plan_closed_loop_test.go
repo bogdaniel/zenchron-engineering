@@ -325,3 +325,50 @@ func TestAPlanWithNoRequiredGraphIsNotComplete(t *testing.T) {
 		t.Fatal("a plan with no readable required graph reported completed")
 	}
 }
+
+// A producer whose remediation budget is EXHAUSTED fails its stage.
+//
+// The failing-verdict arm of stageAcceptance deliberately settles nothing: the
+// runtime is about to remediate, and terminalizing there would end a stage that
+// was going to be fixed. That is only correct because the run terminalizes
+// ITSELF when the budget runs out, and the terminal arm then settles the stage
+// failed on the run's own verdict. Without this test the first half would read
+// as "a failed verification never fails a stage", which is the opposite of what
+// is intended.
+func TestAProducerThatRanOutOfRemediationFailsItsStage(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	producer := planStageState(t, fixture, "implementation").RunID
+	recordFailedAssurance(t, fixture, producer, "aaaaaaaaaaaa")
+
+	// Unsettled while the run can still act on the verdict.
+	settleRunAtGoalState(t, fixture, producer, "aaaaaaaaaaaa")
+	fixture.reconcile(t)
+	if state := planStageState(t, fixture, "implementation").State; state == PlanStageFailed {
+		t.Fatal("the stage failed while its run still had remediation to do")
+	}
+
+	// The run gives up. A terminal run is a terminal stage, and the reviewer
+	// below it stays unreleased.
+	run, found, err := fixture.store.Run(producer)
+	if err != nil || !found {
+		t.Fatalf("read the producer run: found=%v err=%v", found, err)
+	}
+	run.Disposition, run.Reason = Failed, "attempts_exhausted"
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	fixture.reconcile(t)
+
+	if state := planStageState(t, fixture, "implementation").State; state != PlanStageFailed {
+		t.Fatalf("an exhausted producer did not fail its stage: %q", state)
+	}
+	if review := planStageState(t, fixture, "review"); review.RunID != "" {
+		t.Fatalf("the reviewer was released by a failed producer: %#v", review)
+	}
+	if status := planStatus(t, fixture); status != PlanStateBlocked {
+		t.Fatalf("a plan with a failed required stage reports %q, want %q", status, PlanStateBlocked)
+	}
+}
