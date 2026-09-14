@@ -897,6 +897,26 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
+	// THE STRUCTURED VERDICT, read from the runtime-owned path and nowhere
+	// else. The transcript above is evidence and is never consulted for one: a
+	// worker that talked about accepting has not accepted, and a transcript
+	// that happens to contain verdict-shaped JSON is still just a transcript.
+	//
+	// A malformed result FAILS the invocation rather than being ignored. A
+	// reviewer that tried to answer and produced something unreadable has not
+	// silently declined to answer, and treating the two the same would hide a
+	// broken protocol behind an unsettled stage.
+	if request.ReviewerResultPath != "" {
+		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
+		if reviewErr != nil {
+			result.Outcome = OperationFailed
+			result.Failure = &ProviderFailure{
+				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
+			}
+			return result, nil
+		}
+		result.Review = review
+	}
 	if runErr != nil || ctx.Err() != nil {
 		result.Outcome = OperationFailed
 		result.Failure = &ProviderFailure{

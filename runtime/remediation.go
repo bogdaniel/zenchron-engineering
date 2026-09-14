@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -267,4 +269,94 @@ func (f *FakeSemanticAssuranceProvider) Assure(_ context.Context, r AssuranceReq
 		Evidence: &EvidenceBinding{Commit: r.Commit, Tree: r.Tree, Contract: r.Contract, Policy: r.Policy,
 			Producer: Ref{ID: semanticProviderID, Revision: definition}},
 	}, nil
+}
+
+// FakeReviewerProvider is the deterministic stand-in for a reviewer worker: it
+// writes a real ReviewerResult to the runtime-owned path it was given, exactly
+// as an installed CLI would, and the runtime then reads and admits it through
+// the production path.
+//
+// It writes a FILE rather than returning a struct on purpose. A fake that
+// returned ExecutionResult.Review directly would skip the adapter's read, the
+// strict decode, the bound and the slot preparation - which is most of what the
+// protocol is - and would prove a state machine production cannot enter. The
+// #126 regression exists because exactly that gap went unnoticed once already.
+type FakeReviewerProvider struct {
+	*FakeExecutionProvider
+	// Verdicts are consumed in order, one per reviewer invocation, so a
+	// scenario can block once and accept later.
+	Verdicts []ReviewerResult
+	// Raw, when set for an invocation index, is written verbatim instead of the
+	// encoded verdict. It is how a malformed or hostile document is modelled
+	// without the fixture deciding the refusal itself.
+	Raw map[int]string
+	// Reviewed records the result path of every reviewer invocation, so a test
+	// can assert the channel was used at all.
+	Reviewed []string
+	calls    int
+}
+
+func NewFakeReviewerProvider(verdicts ...ReviewerResult) *FakeReviewerProvider {
+	return &FakeReviewerProvider{
+		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "claude", Outcome: Succeeded}},
+		Verdicts:              verdicts,
+	}
+}
+
+func (f *FakeReviewerProvider) Isolation() ProviderIsolation {
+	return ProviderIsolation{
+		FilesystemRead: IsolationProven, FilesystemWrite: IsolationProven,
+		NetworkDenied: IsolationProven, CredentialScope: IsolationProven,
+	}
+}
+
+func (f *FakeReviewerProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	result, err := f.FakeExecutionProvider.Execute(ctx, request)
+	if err != nil || request.ReviewerResultPath == "" {
+		return result, err
+	}
+	// A review note in the workspace, so the reviewer's own run produces a
+	// candidate and is verified like any other. It is NOT the verdict and is
+	// never read as one: the verdict goes to the runtime-owned path below, and
+	// a reviewer that wrote only this would have produced no verdict at all.
+	if note := filepath.Join(request.CandidateDir, "review-notes.md"); request.CandidateDir != "" {
+		if writeErr := os.WriteFile(note, []byte("# review\n"), 0o600); writeErr != nil {
+			return result, writeErr
+		}
+	}
+	index := f.calls
+	f.calls++
+	f.Reviewed = append(f.Reviewed, request.ReviewerResultPath)
+	if raw, ok := f.Raw[index]; ok {
+		if writeErr := os.WriteFile(request.ReviewerResultPath, []byte(raw), 0o600); writeErr != nil {
+			return result, writeErr
+		}
+		return f.read(request, result)
+	}
+	if index >= len(f.Verdicts) {
+		// No verdict for this invocation: the reviewer produced prose and
+		// nothing else, which is a real outcome the lifecycle has to handle.
+		return result, nil
+	}
+	document, marshalErr := json.Marshal(f.Verdicts[index])
+	if marshalErr != nil {
+		return result, marshalErr
+	}
+	if writeErr := os.WriteFile(request.ReviewerResultPath, document, 0o600); writeErr != nil {
+		return result, writeErr
+	}
+	return f.read(request, result)
+}
+
+// read is the adapter half: the same strict decode CLIAgentProvider performs,
+// so the fixture exercises the production reader rather than a second one.
+func (f *FakeReviewerProvider) read(request ExecutionRequest, result ExecutionResult) (ExecutionResult, error) {
+	review, err := ReadReviewerResult(request.ReviewerResultPath)
+	if err != nil {
+		result.Outcome = OperationFailed
+		result.Failure = &ProviderFailure{Classification: FailureVerification}
+		return result, nil
+	}
+	result.Review = review
+	return result, nil
 }

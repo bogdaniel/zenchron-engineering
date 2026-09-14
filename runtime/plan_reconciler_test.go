@@ -23,9 +23,13 @@ import (
 // planRunFixture is a phase8 fixture plus an approved plan over it.
 type planRunFixture struct {
 	*phase8Fixture
-	service     PlanService
-	reconciler  PlanReconciler
-	plan        domain.EngineeringPlan
+	service    PlanService
+	reconciler PlanReconciler
+	plan       domain.EngineeringPlan
+	// engines are per-agent runtimes. A scenario that needs a reviewer stage
+	// to run through a different provider than its producer registers one
+	// here, and the ordinary engine factory is used for every other agent.
+	engines     map[string]*EngineeringRuntime
 	engineCalls []string
 }
 
@@ -35,13 +39,13 @@ func planAgents() []domain.ExecutionAgentDescriptor {
 			ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
 			TrustMode: domain.TrustRequirementOperatorTrusted, Capabilities: domain.EngineeringCapabilities(),
 			InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating, domain.InvocationModeNonMutatingPlanning},
-			Available:       true, Unattended: true,
+			Available:       true, Unattended: true, StructuredVerdicts: true,
 		},
 		{
 			ID: "codex", ProviderKind: "codex_cli", VendorFamily: "openai",
 			TrustMode: domain.TrustRequirementOperatorTrusted, Capabilities: domain.EngineeringCapabilities(),
 			InvocationModes: []domain.InvocationMode{domain.InvocationModeMutating, domain.InvocationModeNonMutatingPlanning},
-			Available:       true, Unattended: true,
+			Available:       true, Unattended: true, StructuredVerdicts: true,
 		},
 	}
 }
@@ -92,11 +96,22 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 		t.Fatal(err)
 	}
 	fixture.plan = plan
+	if fixture.engines == nil {
+		fixture.engines = map[string]*EngineeringRuntime{}
+	}
 	fixture.reconciler = PlanReconciler{
 		Store: base.store, Clock: base.clock, Service: fixture.service,
 		Repository: "acme/repo", Issue: base.issue,
 		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
 			fixture.engineCalls = append(fixture.engineCalls, agentID)
+			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan
+			// reconciler already builds the engine from the agent id, so a
+			// reviewer stage and a producer stage genuinely run through
+			// different providers - which is what lets a test drive the real
+			// reviewer-result path instead of injecting its outcome.
+			if runtime, ok := fixture.engines[agentID]; ok {
+				return runtime, nil
+			}
 			return base.runtime, nil
 		},
 	}

@@ -362,6 +362,24 @@ type candidateCreateResult struct {
 func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState, _ RunOperation) effect {
 	dir := candidateDir(r.deps.StateDir, state.run.ID)
 	if _, err := os.Stat(dir); err == nil {
+		// AN ADOPTED WORKSPACE STILL NEEDS ITS SUBJECT. A clone interrupted
+		// after the directory appeared, or a restart that re-enters this
+		// operation, reaches here with a workspace at the trusted base and an
+		// upstream candidate that was never transferred into it. Skipping the
+		// transfer on this path leaves the run permanently unable to execute:
+		// the pre-invocation subject proof would fail forever against a
+		// workspace nothing was ever going to move.
+		//
+		// The transfer is idempotent - fetching an object already present and
+		// checking out the head already checked out are both no-ops - so doing
+		// it here costs nothing when it has already happened.
+		base := state.pinnedBase()
+		if ref := state.upstreamCandidate(); ref != nil {
+			if err := MaterializeCandidate(dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
+				return failed(err)
+			}
+			base = ref.Revision
+		}
 		adopted, err := gitMetadataDigest(dir)
 		if err != nil {
 			return failed(err)
@@ -370,10 +388,10 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		// baseline yet, so adopting it also bootstraps one. If a baseline is
 		// already durable it stays authoritative: re-running create must never
 		// re-baseline a workspace against whatever .git currently says.
-		if state.projection.CandidateMetadata != "" {
+		if state.projection.CandidateMetadata != "" && state.upstreamCandidate() == nil {
 			adopted = ""
 		}
-		return effect{state: Succeeded, result: candidateCreateResult{dir, state.pinnedBase(), adopted}}
+		return effect{state: Succeeded, result: candidateCreateResult{dir, base, adopted}}
 	}
 	// The storage ceiling is checked HERE, immediately before the clone, and
 	// nowhere else: this is the one place the runtime allocates a workspace,
@@ -604,7 +622,24 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// THE REVIEWER RESULT SLOT, prepared before the invocation and only for a
+	// stage whose role produces a verdict. An implementer is given no path at
+	// all, so it has nowhere to write one: the authority is carried by the
+	// role, not by the ability to produce matching JSON.
+	reviewerResultPath := ""
+	if stage.producesVerdict() {
+		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
+			RunID: state.run.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+		})
+		if err != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureUnknown},
+				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+			}}
+		}
+	}
 	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
+		ReviewerResultPath: reviewerResultPath,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -652,6 +687,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		},
 		Artifacts: result.Artifacts,
 	}}
+	// THE REVIEWER'S VERDICT BECOMES LIFECYCLE STATE, or is refused.
+	//
+	// Admission happens here, in the runtime, against the frozen assignment -
+	// never in the adapter, which only read a file. A refused result FAILS the
+	// operation: something claimed authority it did not have, and treating that
+	// as "no verdict" would let a malformed or mis-scoped claim look identical
+	// to an honest silence.
+	if result.Review != nil {
+		if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
+				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
+			}}
+		}
+	}
 	// A producer that FINISHED is the only thing that completes an execution.
 	// It is an observation about the producer, not about the work: it makes the
 	// exact subject eligible to be treated as a finished candidate, and it
@@ -2085,6 +2135,19 @@ type planStageContext struct {
 	upstream     []UpstreamContext
 }
 
+// producesVerdict reports whether this stage's work product is a REVIEW VERDICT
+// rather than a change.
+//
+// It is the capability gate on the structured result channel. A stage that is
+// not a reviewer is never given a result path, so an implementer cannot acquire
+// reviewer authority by writing a well-formed document - it has nowhere to
+// write it, and AdmitReviewerResult refuses the role again on the way in. Two
+// checks rather than one because they fail differently: this one means the
+// channel was never opened, and that one means something tried to use it.
+func (p planStageContext) producesVerdict() bool {
+	return p.assignment != nil && p.assignment.Role == domain.RoleReviewer
+}
+
 // apply narrows the request to the stage the operator approved.
 //
 // Everything it replaces is a STATEMENT OF WHAT THIS STAGE IS FOR: its
@@ -2242,4 +2305,83 @@ func (r *EngineeringRuntime) missingWorkerTools() []string {
 		return nil
 	}
 	return CLIAgentProvider{Toolchain: toolchain}.missingTools()
+}
+
+// admitReview checks one structured reviewer result and, if it may become
+// lifecycle state, records it durably on the PLAN stream.
+//
+// It writes directly rather than through the operation's journal entries
+// because the verdict belongs to the plan, not to the run: a plan event carries
+// no run id and a run event carries no plan id, and putting one in the other's
+// hash chain would make a plan's state digest depend on work it does not own.
+//
+// The event identity is derived from the plan revision, the stage, the exact
+// candidate AND the attempt, so:
+//
+//   - the same result admitted twice is ONE event, which is what makes a
+//     retried operation idempotent rather than duplicating a verdict;
+//   - a second, CONFLICTING verdict for the same attempt is refused by the
+//     store's own primary key rather than silently replacing the first.
+func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext, result ExecutionResult, operation RunOperation) error {
+	binding := state.run.Plan
+	if binding == nil || stage.assignment == nil {
+		return &ReviewerResultRefusedError{Detail: "a reviewer result was produced by a run that is not bound to a plan stage"}
+	}
+	plan, found, err := r.deps.Store.PlanRevision(binding.PlanID, binding.Revision)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the approved plan revision this run was created under is not stored"}
+	}
+	declared, ok := plan.Stage(binding.StageID)
+	if !ok {
+		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the approved revision declares no such stage"}
+	}
+	subject, _ := reviewSubject(*stage.assignment)
+	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, subject, state.run.ID, result.ProviderID, result.Review)
+	if err != nil {
+		return err
+	}
+	if payload.StageID == "" {
+		return nil
+	}
+	document, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	event := EngineeringEvent{
+		SchemaVersion: SchemaVersion,
+		ID: fmt.Sprintf("plan-stage-reviewed-%s-r%d-%s-%s-%d",
+			binding.PlanID, binding.Revision, binding.StageID, short12(payload.Candidate), operation.Attempt),
+		PlanID: binding.PlanID, Type: EventPlanStageReviewed,
+		OccurredAt: r.deps.Clock.Now(), Payload: document,
+	}
+	// IDEMPOTENT ADMISSION. The identical verdict already recorded for this
+	// exact attempt is this verdict, so re-admitting it is a no-op rather than
+	// a conflict: an operation retried after the append succeeded and before
+	// the run recorded it must not fail on its own earlier success.
+	//
+	// A verdict recorded for this attempt that DIFFERS is refused. One
+	// invocation answers once, and a second answer is not an update.
+	existing, err := r.deps.Store.PlanEvents(binding.PlanID)
+	if err != nil {
+		return err
+	}
+	for _, recorded := range existing {
+		if recorded.ID != event.ID {
+			continue
+		}
+		if string(recorded.Payload) == string(document) {
+			return nil
+		}
+		return &ReviewerResultRefusedError{
+			StageID: binding.StageID,
+			Detail:  "a different verdict is already recorded for this invocation: one invocation answers once",
+		}
+	}
+	if _, err := r.deps.Store.AppendPlanEvent(event); err != nil {
+		return err
+	}
+	return nil
 }

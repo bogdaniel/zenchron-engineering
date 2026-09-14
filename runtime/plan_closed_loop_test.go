@@ -22,6 +22,10 @@ package runtime
 // what the LIFECYCLE does with a verdict, not what a model writes.
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,6 +94,15 @@ func planStatus(t *testing.T, fixture *planRunFixture) string {
 
 func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T) {
 	fixture := newPlanRunFixture(t, closedLoopStages())
+	// The reviewer runs through a provider that emits a real structured result
+	// to the runtime-owned path: BLOCK on the first invocation, ACCEPT on the
+	// second. Everything after that is the production admission path.
+	reviewer := reviewerEngine(t, fixture,
+		ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewBlocked,
+			Findings: []ReviewerFinding{{Signature: "review:needs-changes", Detail: "the change is incomplete"}}},
+		ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted,
+			Reason: "every acceptance obligation was observed satisfied"},
+	)
 	fixture.approve(t)
 	fixture.reconcile(t)
 
@@ -104,8 +117,7 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	// failing verdict about its current head. The stage must not settle
 	// accepted on it, because "the run stopped" and "the work was accepted" are
 	// different facts.
-	recordFailedAssurance(t, fixture, producer, "aaaaaaaaaaaa")
-	settleRunAtGoalState(t, fixture, producer, "aaaaaaaaaaaa")
+	produceCandidate(t, fixture, producer, "package a\n", false)
 	fixture.reconcile(t)
 
 	if state := planStageState(t, fixture, "implementation").State; state == PlanStageCompleted {
@@ -129,8 +141,7 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if route := RouteFailure(FailureVerification); route != RouteProviderRemediation {
 		t.Fatalf("a verification failure routes to %q, so no remediation is ever planned", route)
 	}
-	recordCandidateAndAssurance(t, fixture, producer, "bbbbbbbbbbbb")
-	settleRunAtGoalState(t, fixture, producer, "bbbbbbbbbbbb")
+	candidateB := produceCandidate(t, fixture, producer, "package b\n", true)
 	fixture.reconcile(t)
 
 	// 8. The producer settles ACCEPTED now, on the evidence rather than on the
@@ -156,8 +167,8 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if !ok {
 		t.Fatalf("the reviewer froze no upstream candidate: %#v", assignment.Context.UpstreamOutputs)
 	}
-	if subject.Candidate != "bbbbbbbbbbbb" {
-		t.Fatalf("the reviewer was assigned candidate %q, and the accepted work is bbbbbbbbbbbb", subject.Candidate)
+	if subject.Candidate != candidateB {
+		t.Fatalf("the reviewer was assigned candidate %q, and the accepted work is %s", subject.Candidate, candidateB)
 	}
 	// And the run it was given is bound to that candidate rather than to the
 	// trusted base. This is D3: the #119 reviewer's frozen assignment named the
@@ -169,16 +180,35 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if reviewRun.Plan == nil {
 		t.Fatal("the reviewer run carries no plan binding")
 	}
-	if reviewRun.Plan.BaseRevision != "bbbbbbbbbbbb" &&
-		(reviewRun.Plan.UpstreamCandidate == nil || reviewRun.Plan.UpstreamCandidate.Revision != "bbbbbbbbbbbb") {
+	if reviewRun.Plan.BaseRevision != candidateB &&
+		(reviewRun.Plan.UpstreamCandidate == nil || reviewRun.Plan.UpstreamCandidate.Revision != candidateB) {
 		t.Fatalf("the reviewer run was not bound to the exact candidate: base=%q upstream=%#v",
 			reviewRun.Plan.BaseRevision, reviewRun.Plan.UpstreamCandidate)
 	}
-
-	// 11. THE REVIEWER BLOCKS candidate B.
-	blockReview(t, fixture, "review", reviewProjection.RunID, []string{"review:needs-changes"})
+	// 11. THE REVIEWER BLOCKS candidate B - through the production path. The
+	// reviewer provider wrote a structured result to the runtime-owned path it
+	// was given, the adapter read it, and the runtime admitted it against the
+	// frozen assignment. Nothing is injected here: an injected event would
+	// prove a state machine production cannot enter, which is the exact shape
+	// of the gap this regression exists to close.
+	driveReviewer(t, fixture, reviewProjection.RunID)
+	if len(reviewer.Reviewed) == 0 {
+		t.Fatal("the reviewer invocation was given no structured result path")
+	}
+	// AND ITS WORKSPACE HOLDS THE CANDIDATE IT WAS ASSIGNED. This is the #119
+	// defect measured directly: there, the reviewer's frozen assignment named
+	// the right commit and its workspace was the trusted base.
+	assertReviewerSawCandidate(t, fixture, reviewProjection.RunID, producer, candidateB)
 	settleRunAtGoalState(t, fixture, reviewProjection.RunID, "rrrrrrrrrrrr")
 	fixture.reconcile(t)
+
+	blocked := planStageState(t, fixture, "review")
+	if blocked.Review == nil || blocked.Review.Verdict != StageReviewBlocked {
+		t.Fatalf("the blocking verdict was not admitted through the production path: %#v", blocked.Review)
+	}
+	if blocked.Review.Candidate != candidateB {
+		t.Fatalf("the admitted verdict is bound to %q, and the reviewer was given %s", blocked.Review.Candidate, candidateB)
+	}
 
 	if state := planStageState(t, fixture, "review").State; state == PlanStageCompleted {
 		t.Fatal("a reviewer that BLOCKED the candidate settled completed")
@@ -194,12 +224,11 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	// 13-14. CANDIDATE C, and the stale review does not survive it. The review
 	// that exists is about B; C is different work, and a verdict about B is not
 	// evidence about C.
-	recordCandidateAndAssurance(t, fixture, producer, "cccccccccccc")
-	settleRunAtGoalState(t, fixture, producer, "cccccccccccc")
+	candidateC := produceCandidate(t, fixture, producer, "package c\n", true)
 	fixture.reconcile(t)
 
 	stale := planStageState(t, fixture, "review")
-	if stale.Review.Accepted("cccccccccccc", "cccccccccccc") {
+	if stale.Review.Accepted(candidateC, candidateC) {
 		t.Fatal("a verdict about candidate B was read as a verdict about candidate C")
 	}
 	if state := planStageState(t, fixture, "assurance").State; state == PlanStageSatisfied {
@@ -217,19 +246,34 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 		t.Fatalf("the re-performance froze no assignment: found=%v err=%v", found, err)
 	}
 	nextSubject, ok := reviewSubject(next)
-	if !ok || nextSubject.Candidate != "cccccccccccc" {
-		t.Fatalf("the re-performed review judges %#v, and the current work is cccccccccccc", nextSubject)
+	if !ok || nextSubject.Candidate != candidateC {
+		t.Fatalf("the re-performed review judges %#v, and the current work is %s", nextSubject, candidateC)
 	}
-	acceptReview(t, fixture, "review", redone.RunID)
+	driveReviewer(t, fixture, redone.RunID)
 	settleRunAtGoalState(t, fixture, redone.RunID, "rrrrrrrrrrr2")
 	fixture.reconcile(t)
+
+	accepted := planStageState(t, fixture, "review")
+	if accepted.Review == nil || accepted.Review.Verdict != StageReviewAccepted {
+		t.Fatalf("the accepting verdict was not admitted through the production path: %#v", accepted.Review)
+	}
+	if accepted.Review.Candidate != candidateC {
+		t.Fatalf("the accepting verdict is bound to %q, and the reviewer was given %s", accepted.Review.Candidate, candidateC)
+	}
 
 	if state := planStageState(t, fixture, "review").State; state != PlanStageCompleted {
 		t.Fatalf("an accepting review did not settle the reviewer stage: %q", state)
 	}
 
 	// 18-19. THE GATE BECOMES SATISFIABLE, AND ONLY THEN IS THE PLAN COMPLETE.
-	fixture.reconcile(t)
+	// Ticks, because the gate is evaluated after the stage it depends on has
+	// settled: one pass records the settlement and the next reads it.
+	for i := 0; i < 6; i++ {
+		fixture.reconcile(t)
+		if planStageState(t, fixture, "assurance").State == PlanStageSatisfied {
+			break
+		}
+	}
 	if state := planStageState(t, fixture, "assurance").State; state != PlanStageSatisfied {
 		t.Fatalf("the gate was not satisfied by an accepted review over verified work: %q", state)
 	}
@@ -370,5 +414,338 @@ func TestAProducerThatRanOutOfRemediationFailsItsStage(t *testing.T) {
 	}
 	if status := planStatus(t, fixture); status != PlanStateBlocked {
 		t.Fatalf("a plan with a failed required stage reports %q, want %q", status, PlanStateBlocked)
+	}
+}
+
+// reviewerEngine registers a runtime whose execution provider is a reviewer
+// that writes real structured results, and returns it so a test can assert the
+// channel was used.
+//
+// The plan reconciler builds an engine from the frozen assignment's agent id,
+// so registering one under "claude" is enough to make the reviewer stage - and
+// only the reviewer stage - run through it.
+func reviewerEngine(t *testing.T, fixture *planRunFixture, verdicts ...ReviewerResult) *FakeReviewerProvider {
+	t.Helper()
+	provider := NewFakeReviewerProvider(verdicts...)
+	deps := fixture.deps
+	deps.Provider = provider
+	deps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+	fixture.engines["claude"] = fixture.newRuntime(deps)
+	return provider
+}
+
+// driveReviewer runs the reviewer's own EngineeringRun far enough to perform its
+// invocation, which is what produces and admits the structured result.
+//
+// The plan reconciler starts child runs; it does not drive them - `serve` does
+// that separately - so a plan-level test that never drove the run would never
+// reach the provider at all.
+func driveReviewer(t *testing.T, fixture *planRunFixture, runID string) {
+	t.Helper()
+	engine, ok := fixture.engines["claude"]
+	if !ok {
+		t.Fatal("no reviewer engine is registered")
+	}
+	// Driven to its GOAL STATE rather than merely to its invocation: a reviewer
+	// run also verifies its own workspace, and the assurance gate below the
+	// stage reads that evidence. Stopping at the invocation would leave the
+	// gate with nothing to be satisfied by, which is a fixture artefact rather
+	// than a lifecycle fact.
+	invoked := false
+	for i := 0; i < 12; i++ {
+		if _, err := engine.Reconcile(context.Background(), runID); err != nil {
+			t.Fatalf("drive reviewer run %s: %v", runID, err)
+		}
+		events, err := fixture.store.Events(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Type == EventExecutionCompleted {
+				invoked = true
+			}
+		}
+		run, found, err := fixture.store.Run(runID)
+		if err != nil || !found {
+			t.Fatalf("read reviewer run: found=%v err=%v", found, err)
+		}
+		if _, stopped := runSettled(run); stopped && invoked {
+			return
+		}
+	}
+	if invoked {
+		return
+	}
+	t.Fatalf("the reviewer run %s never performed an invocation", runID)
+}
+
+// produceCandidate commits real content in a producer run's own runtime-owned
+// workspace and records it as that run's verified candidate.
+//
+// The heads are REAL commits rather than twelve-character placeholders because
+// the reviewer's workspace is now materialized from them: a synthetic head
+// cannot be fetched, and a test that used one would be asserting the lifecycle
+// while silently skipping the transfer it depends on.
+func produceCandidate(t *testing.T, fixture *planRunFixture, runID, content string, passes bool) string {
+	t.Helper()
+	// The producer's workspace is cloned by its own run, so the run is driven
+	// far enough to own one before anything is committed into it. A fixture
+	// that wrote into a directory the runtime had not created would be
+	// asserting against a workspace production never makes.
+	dir := candidateDir(fixture.stateDir, runID)
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		if _, err := fixture.runtime.Reconcile(context.Background(), runID); err != nil {
+			t.Fatalf("drive producer run %s: %v", runID, err)
+		}
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the producer run %s never created a workspace: %v", runID, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "candidate.go"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "candidate " + content}} {
+		if _, err := runGit(dir, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	head, headErr := gitOutput(dir, "rev-parse", "HEAD")
+	if headErr != nil {
+		t.Fatal(headErr)
+	}
+	tree, treeErr := gitOutput(dir, "rev-parse", "HEAD^{tree}")
+	if treeErr != nil {
+		t.Fatal(treeErr)
+	}
+	head, tree = strings.TrimSpace(head), strings.TrimSpace(tree)
+	// The commit is made reachable from the fixture's origin as well.
+	//
+	// Which ROUTE delivers a candidate to a downstream stage - a clone of a
+	// published commit, or a local transfer from the producer's workspace - is
+	// the transport's business and is proven directly in
+	// candidate_transport_test.go. This scenario is about the LIFECYCLE, so it
+	// makes both routes available and then asserts the only thing that matters
+	// here: the reviewer's workspace is the exact tree it was assigned.
+	remote, err := GovernedRemote(fixture.origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remoteGit(dir, remote, nil).run(
+		"push", remote.URL, "HEAD:refs/heads/"+plannedCandidateBranch(runID)); err != nil {
+		t.Fatalf("publish the producer candidate: %v", err)
+	}
+	appendRunEventFor(t, fixture, runID, head, EventCandidateCommitted, CandidateCommittedPayload{
+		Commit: head, Tree: tree, PathCount: 1, PathsDigest: strings.Repeat("c", 64),
+	})
+	appendRunEventFor(t, fixture, runID, head, EventAssuranceObserved, AssuranceObservedPayload{
+		ProviderID: "go", VerifierDefinition: strings.Repeat("d", 64), Passed: passes,
+		FailureClass: map[bool]FailureClass{false: FailureVerification, true: ""}[passes],
+		Commit:       head, Tree: tree, Bundle: Ref{ID: "evidence-" + head, Revision: head},
+	})
+	// The INDEPENDENT semantic verdict is refreshed with it. A producer that
+	// moved to a new candidate re-verifies; leaving the old verdict behind
+	// would make it stale, and a gate correctly refuses to be proved by a
+	// verdict about a tree that no longer exists.
+	appendRunEventFor(t, fixture, runID, head, EventSemanticAssuranceObserved, AssuranceObservedPayload{
+		ProviderID: semanticProviderID, VerifierDefinition: SemanticVerifierDefinition(),
+		Passed: passes, Commit: head, Tree: tree, Semantic: true,
+	})
+	run, found, err := fixture.store.Run(runID)
+	if err != nil || !found {
+		t.Fatalf("read producer run: found=%v err=%v", found, err)
+	}
+	run.Disposition, run.Reason = Waiting, ReasonGoalStateReached
+	run.Candidate.Revision, run.Candidate.Tree = head, tree
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	return head
+}
+
+// assertReviewerSawCandidate proves a reviewer's workspace is the exact upstream
+// candidate, by whichever route the runtime delivered it.
+func assertReviewerSawCandidate(t *testing.T, fixture *planRunFixture, reviewRunID, producerRunID, candidate string) {
+	t.Helper()
+	producer, found, err := fixture.store.Run(producerRunID)
+	if err != nil || !found {
+		t.Fatalf("read the producer run: found=%v err=%v", found, err)
+	}
+	if producer.Candidate.Revision != candidate {
+		t.Fatalf("the producer is at %s and the reviewer was assigned %s", producer.Candidate.Revision, candidate)
+	}
+	// The reviewer's workspace CONTAINS the candidate. Exact-head equality is
+	// the right question before the invocation and the wrong one after it: a
+	// reviewer may commit review notes of its own, so its head legitimately
+	// moves past the subject. What must remain true is that the subject is in
+	// its history - a workspace at the trusted base, which is what #119
+	// produced, fails this.
+	dir := candidateDir(fixture.stateDir, reviewRunID)
+	if _, err := runGit(dir, "merge-base", "--is-ancestor", candidate, "HEAD"); err != nil {
+		head, _ := gitOutput(dir, "rev-parse", "HEAD")
+		t.Fatalf("the reviewer workspace does not contain the candidate it was assigned: head=%s candidate=%s",
+			strings.TrimSpace(head), candidate)
+	}
+	// And the run is DURABLY recorded as based on it, so the binding survives a
+	// restart rather than living in a workspace nobody re-checks.
+	reviewRun, found, err := fixture.store.Run(reviewRunID)
+	if err != nil || !found {
+		t.Fatalf("read the reviewer run: found=%v err=%v", found, err)
+	}
+	if reviewRun.Base.Revision != candidate {
+		t.Fatalf("the reviewer run is based on %q and the candidate it was assigned is %s",
+			reviewRun.Base.Revision, candidate)
+	}
+}
+
+// plannedCandidateBranch is the ref a fixture publishes a producer candidate
+// under. It mirrors the runtime's own naming closely enough to be recognizable
+// without coupling the test to it.
+func plannedCandidateBranch(runID string) string { return "zenchron/" + runID }
+
+// A verdict admitted twice is ONE verdict, and a CONFLICTING second verdict for
+// the same invocation is refused.
+//
+// Both halves matter. An operation retried after the append succeeded must not
+// fail on its own earlier success, and one invocation must not be able to answer
+// twice - a second answer is not an update.
+func TestAVerdictIsIdempotentAndAConflictingOneIsRefused(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	reviewerEngine(t, fixture,
+		ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewBlocked,
+			Findings: []ReviewerFinding{{Signature: "review:defect"}}})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	producer := planStageState(t, fixture, "implementation").RunID
+	candidate := produceCandidate(t, fixture, producer, "package b\n", true)
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	review := planStageState(t, fixture, "review")
+	driveReviewer(t, fixture, review.RunID)
+
+	recorded := planStageReviewEvents(t, fixture)
+	if len(recorded) != 1 {
+		t.Fatalf("one invocation produced %d verdicts", len(recorded))
+	}
+
+	// The SAME verdict again is a no-op: same attempt, same content.
+	engine := fixture.engines["claude"]
+	if _, err := engine.Reconcile(context.Background(), review.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if again := planStageReviewEvents(t, fixture); len(again) != 1 {
+		t.Fatalf("re-admitting the identical verdict recorded %d events", len(again))
+	}
+
+	// A DIFFERENT verdict for the same invocation is refused rather than
+	// replacing the first.
+	state, err := engine.load(review.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := engine.planStage(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := fixture.store.Operations(review.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invoke RunOperation
+	for _, operation := range operations {
+		if operation.Kind == OpExecutionInvoke {
+			invoke = operation
+		}
+	}
+	conflicting := ExecutionResult{ProviderID: "claude", Review: &ReviewerResult{
+		SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted,
+	}}
+	if err := engine.admitReview(state, stage, conflicting, invoke); err == nil {
+		t.Fatal("a second, contradicting verdict for one invocation was admitted")
+	}
+	if final := planStageReviewEvents(t, fixture); len(final) != 1 || final[0].Verdict != StageReviewBlocked {
+		t.Fatalf("the conflicting verdict changed the record: %+v", final)
+	}
+
+	// AND IT REPLAYS. The admitted verdict is durable, so a fresh reduction of
+	// the journal reaches the same answer.
+	replayed, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := replayed.Stages["review"].Review; got == nil || got.Verdict != StageReviewBlocked || got.Candidate != candidate {
+		t.Fatalf("the admitted verdict did not replay: %+v", got)
+	}
+}
+
+// planStageReviewEvents is every admitted verdict on this plan's stream.
+func planStageReviewEvents(t *testing.T, fixture *planRunFixture) []PlanStageReviewedPayload {
+	t.Helper()
+	events, err := fixture.store.PlanEvents(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payloads []PlanStageReviewedPayload
+	for _, event := range events {
+		if event.Type != EventPlanStageReviewed {
+			continue
+		}
+		var payload PlanStageReviewedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
+}
+
+// A reviewer stage assigned to a worker that cannot return a structured verdict
+// BLOCKS at resolution, before any invocation is spent.
+//
+// It is the same rule D4 applies to a missing toolchain: do not dispatch an
+// assignment whose mandatory output the selected provider cannot produce. A
+// reviewer that can never emit a verdict would run, succeed, and leave its
+// stage unable ever to settle.
+func TestAReviewerProviderWithoutTheVerdictProtocolIsRefusedBeforeDispatch(t *testing.T) {
+	// No independence requirement on the reviewer, so the verdict protocol is
+	// the ONLY thing that can block it. Independence outranks it in the block
+	// precedence - correctly, it is the more actionable answer - and a fixture
+	// carrying both would assert nothing about this rule.
+	stages := closedLoopStages()
+	for i := range stages {
+		if stages[i].ID == "review" {
+			stages[i].Independence = nil
+		}
+	}
+	fixture := newPlanRunFixture(t, stages)
+	agents := planAgents()
+	for i := range agents {
+		agents[i].StructuredVerdicts = false
+	}
+	fixture.service.Agents = agents
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := fixture.service.Resolve(fixture.plan, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := false
+	for _, block := range resolution.Blocked {
+		if block.StageID == "review" {
+			blocked = true
+			if !strings.Contains(block.Reason, "structured verdict") {
+				t.Fatalf("the reviewer stage blocked for the wrong reason: %q", block.Reason)
+			}
+		}
+	}
+	if !blocked {
+		t.Fatalf("a reviewer stage resolved to a worker that cannot produce a verdict: %+v", resolution.Assignments)
 	}
 }

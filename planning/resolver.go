@@ -33,6 +33,9 @@ const (
 	// invocation mode the stage requires - a planner-role stage with no
 	// provider that can prove a non-mutating boundary, for instance.
 	BlockInvocationMode BlockKind = "invocation_mode_unavailable"
+	// BlockVerdictProtocol means every otherwise-eligible worker for a reviewer
+	// stage lacks the structured-verdict channel its mandatory output needs.
+	BlockVerdictProtocol BlockKind = "verdict_protocol_unavailable"
 	// BlockIndependence means the only eligible workers would violate an
 	// independence obligation. This is the single-vendor case #64 names: never
 	// assign the same vendor silently, never stall without explanation.
@@ -402,6 +405,16 @@ func eligibility(stage domain.PlanStage, profile domain.AgentProfile, agent doma
 		reasons = append(reasons, fmt.Sprintf("agent cannot perform a %q invocation", stage.InvocationMode))
 		kinds = append(kinds, BlockInvocationMode)
 	}
+	// 4b. MANDATORY OUTPUT PROTOCOL. A reviewer stage's work product is a
+	// structured verdict, so an adapter that cannot carry one can never
+	// complete it: the invocation would succeed, the stage would never settle,
+	// and the plan would stop without ever failing. It is refused at resolution
+	// for the same reason an absent invocation mode is - discovering it after
+	// the invocation has been spent is the expensive way to learn it.
+	if stage.Kind == domain.StageAgent && stage.Role == domain.RoleReviewer && !agent.ProducesStructuredVerdicts() {
+		reasons = append(reasons, "agent cannot return the structured reviewer verdict this role must produce")
+		kinds = append(kinds, BlockVerdictProtocol)
+	}
 	// 5. Availability, which is an observation and not a promise: readiness at
 	// planning time is not readiness at execution time, and the runtime checks
 	// again when work actually starts.
@@ -596,6 +609,8 @@ func (input ResolveInput) blocked(stage domain.PlanStage, explanation domain.Res
 		kind = BlockIndependence
 	case kinds[BlockInvocationMode]:
 		kind = BlockInvocationMode
+	case kinds[BlockVerdictProtocol]:
+		kind = BlockVerdictProtocol
 	case kinds[BlockUnavailable]:
 		kind = BlockUnavailable
 	}
@@ -618,6 +633,8 @@ func blockReason(kind BlockKind, stage domain.PlanStage) string {
 			strings.Join(stage.Independence.DifferentFrom, ", "), stage.Independence.Dimension)
 	case BlockInvocationMode:
 		return fmt.Sprintf("no configured agent can perform a %q invocation, and a provider is never degraded into a more permissive mode", stage.InvocationMode)
+	case BlockVerdictProtocol:
+		return "no configured agent can return the structured verdict a reviewer stage must produce, and a review that emits only prose would leave this stage unable ever to settle"
 	case BlockUnavailable:
 		return "every eligible worker is currently unavailable; readiness is an observation, so this clears when the agent does"
 	default:

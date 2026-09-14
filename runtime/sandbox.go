@@ -1011,11 +1011,41 @@ func planningEnvelope(r ExecutionRequest) string {
 		strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "))
 }
 
+// reviewerEnvelope states the REQUIRED OUTPUT of a reviewer stage.
+//
+// A reviewer's work product is a verdict, and prose is not one. This is where
+// the worker is told that: what counts as acceptance, what counts as a block,
+// where the machine-readable answer goes, and - explicitly - that an obligation
+// it could not verify is not an obligation it may treat as passed. The
+// alternative is a model deciding for itself what "done" means for a review,
+// which is the inference this protocol exists to remove.
+//
+// It is generic. Nothing repository-specific is stated here: what to review
+// comes from the stage objective the planner wrote and the operator approved,
+// and how to judge it comes from the contract's acceptance obligations. This
+// text only says how to ANSWER.
+func reviewerEnvelope(r ExecutionRequest) string {
+	if r.ReviewerResultPath == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\n\nREQUIRED RESULT. This is a review stage, and its work product is a verdict rather than a change. "+
+			"Prose alone does not complete it: write a JSON document to %s and nothing else decides this stage. "+
+			"The document is a JSON object with exactly these members: schema_version (%q), verdict (%q or %q), "+
+			"findings (an array of objects with a signature and an optional detail), and an optional reason. "+
+			"Use %q only when every acceptance obligation above is satisfied by evidence you actually observed, and name no findings with it. "+
+			"Use %q when any obligation is unmet, naming at least one finding; each finding's signature is a short stable identifier for one defect. "+
+			"An obligation you could not verify is NOT satisfied - report it as a finding rather than treating it as passed. "+
+			"Do not restate the candidate revision or tree: the runtime binds this result to the exact candidate it gave you.",
+		r.ReviewerResultPath, ReviewerResultSchemaVersion,
+		StageReviewAccepted, StageReviewBlocked, StageReviewAccepted, StageReviewBlocked)
+}
+
 func providerEnvelope(r ExecutionRequest) string {
 	if r.Mode == domain.InvocationModeNonMutatingPlanning {
 		return planningEnvelope(r)
 	}
-	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %v. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), r.Findings)
+	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %v. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), r.Findings) + reviewerEnvelope(r)
 }
 
 // sandboxPATH is the executable search path INSIDE the sandbox container. It is

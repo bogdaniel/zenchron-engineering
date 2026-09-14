@@ -343,7 +343,22 @@ type ExecutionAgentDescriptor struct {
 	// Unattended reports whether the operator allows this worker to be started
 	// without an explicit command.
 	Unattended bool `json:"unattended"`
+	// StructuredVerdicts reports whether this adapter can carry a REVIEWER
+	// RESULT: the runtime gives the invocation a private result path, and the
+	// adapter reads what was written there and returns it.
+	//
+	// It is a capability, not a permission. A reviewer stage's mandatory output
+	// is a verdict, so an adapter that cannot carry one can never complete such
+	// a stage - the run would succeed, the stage would never settle, and the
+	// plan would stop without failing. Resolution therefore refuses the pairing
+	// up front, the same way an absent invocation mode does, rather than
+	// discovering it after a ten-minute review invocation.
+	StructuredVerdicts bool `json:"structured_verdicts"`
 }
+
+// ProducesStructuredVerdicts reports whether this worker can return a reviewer
+// result through the runtime's structured channel.
+func (d ExecutionAgentDescriptor) ProducesStructuredVerdicts() bool { return d.StructuredVerdicts }
 
 // SupportsInvocationMode reports whether this worker can enter one mode.
 func (d ExecutionAgentDescriptor) SupportsInvocationMode(mode InvocationMode) bool {

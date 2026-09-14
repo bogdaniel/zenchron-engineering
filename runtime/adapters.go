@@ -96,7 +96,16 @@ type ExecutionRequest struct {
 	// is not reviewing it: an independent review stage runs in its own
 	// workspace at the trusted base, and this is what makes its work real.
 	Upstream []UpstreamContext
-	Budgets  ProviderBudget
+	// ReviewerResultPath is the runtime-owned file this invocation must write
+	// its structured verdict to, set only for a reviewer stage.
+	//
+	// It is supplied BY the runtime and lives outside the candidate workspace,
+	// which is what makes the channel unspoofable: repository content is not on
+	// this path and cannot predict it, and the runtime empties the slot before
+	// the invocation so no earlier attempt's answer can be inherited. Empty for
+	// every other stage, and a provider that is given none emits no verdict.
+	ReviewerResultPath string
+	Budgets            ProviderBudget
 }
 
 // InvocationPurpose is deliberately operational rather than a provider role.
@@ -164,6 +173,13 @@ type ExecutionResult struct {
 	// value that would read as "no sandbox, no bypass, unknown auth" - three
 	// claims it did not make.
 	Invocation *InvocationProvenance
+	// Review is the structured verdict a reviewer stage emitted, read by the
+	// adapter from the runtime-owned result path. It is nil when none was
+	// written, which is an ordinary outcome rather than a failure: a reviewer
+	// that produced only prose produced no verdict, and the stage stays
+	// unsettled. It is a CLAIM at this point and authorizes nothing until
+	// AdmitReviewerResult has checked it.
+	Review *ReviewerResult
 }
 
 // ExecutionAttemptRef is the runtime-owned identity of one provider

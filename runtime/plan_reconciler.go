@@ -1712,8 +1712,17 @@ func (r PlanReconciler) deliverBlockingReviews(plan domain.EngineeringPlan, snap
 		}
 		if _, err := r.Store.AppendEvent(EngineeringEvent{
 			SchemaVersion: SchemaVersion,
-			ID:            fmt.Sprintf("stage-review-blocked-%s-%s", stage.ID, short12(review.Candidate)),
-			RunID:         review.UpstreamRunID, Type: EventStageReviewBlocked,
+			// PLAN-SCOPED IDENTITY. Event ids are globally unique in one table,
+			// and a plan id is derived from (repository, issue, configuration) -
+			// so two plans in one repository are two different issues that may
+			// legitimately both name a stage "review". Keyed on stage and
+			// candidate alone, two such plans reviewing one commit would
+			// collide, and the second append would fail the whole plan tick
+			// rather than record a verdict. "Effectively impossible" is not a
+			// uniqueness argument when the identity can simply carry the plan.
+			ID: fmt.Sprintf("stage-review-blocked-%s-r%d-%s-g%d-%s",
+				plan.ID, plan.Revision, stage.ID, projection.Generation, short12(review.Candidate)),
+			RunID: review.UpstreamRunID, Type: EventStageReviewBlocked,
 			OccurredAt: r.Clock.Now(), Payload: payload,
 		}); err != nil {
 			return err
