@@ -389,8 +389,17 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // durable acquisition before this write is leased, and the scan below sees it
 // leased and finishes it; one that arrives after this write is refused by the
 // acquisition statement itself, which will not lease an operation whose run is
-// terminal. There is no third case, because the run document and the
-// acquisition are the same database.
+// terminal. There is no third case FOR AN ACQUISITION, because the run document
+// and the acquisition are the same database.
+//
+// That is the boundary, and it is narrower than "stop means stop". What this
+// prevents is work being TAKEN UP after the stop; it does not interrupt an
+// attempt that has already begun. An operation acquired and started before the
+// run document was written executes to completion: Start, the operation.before
+// append and handle re-read nothing, and CancelRequested has no reader on the
+// executing path at all - Next's eligibility filter is its only one.
+// Interrupting a started attempt is cooperative cancellation, which is a
+// different mechanism and is not built here.
 //
 // It is idempotent: cancelling an already cancelled run appends nothing and
 // reports the same answer. It is also REPEATABLE, which is not the same thing:

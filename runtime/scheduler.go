@@ -36,14 +36,19 @@ type OperationStore interface {
 	// is the read-then-act race two watcher processes both win, which is the
 	// whole reason this is not just PutOperation.
 	//
-	// The terminal-run condition is what makes stopping a run mean stopping it.
-	// CancelRun writes the run document BEFORE it scans the operations, so
-	// every acquisition is on one side or the other of that write: one that
-	// reaches this statement first is seen by the scan and finished, and one
-	// that arrives after it is refused here. Without the condition a driver
-	// already inside Next - the supervisor tick and the control endpoint's
-	// stop-all are different goroutines and nothing serializes them - leased
-	// and executed work the operator had already stopped.
+	// The terminal-run condition is what stops a stopped run from TAKING UP
+	// more work. CancelRun writes the run document BEFORE it scans the
+	// operations, so every acquisition is on one side or the other of that
+	// write: one that reaches this statement first is seen by the scan and
+	// finished, and one that arrives after it is refused here. Without the
+	// condition a driver already inside Next - the supervisor tick and the
+	// control endpoint's stop-all are different goroutines and nothing
+	// serializes them - leased and executed work the operator had stopped.
+	//
+	// It does not reach an attempt that has already STARTED. Nothing on the
+	// executing path re-reads the run or the cancellation flag, so an operation
+	// acquired before the stop runs to completion; ending it early would be
+	// cooperative cancellation, which is a different mechanism.
 	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
 }
 

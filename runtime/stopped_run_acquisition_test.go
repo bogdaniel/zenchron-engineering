@@ -41,10 +41,16 @@ func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, ma
 	return s.OperationStore.AcquireOperation(op, expected, maxRuns)
 }
 
-// TestAStopThatLandsMidPassNeverExecutesTheWorkItStopped is the cancel-versus-
+// TestAStopAtAcquisitionNeverExecutesTheWorkItStopped is the cancel-versus-
 // acquire proof. A run is stopped after its driver has read it and before that
 // driver leases the execution operation, and the provider must not be invoked -
 // not on that pass, and not on any pass after it.
+//
+// The name says ACQUISITION deliberately. A stop landing one durable write
+// later - after Start - is a different window and is NOT covered: nothing on
+// the executing path re-reads the run or the cancellation flag, so that attempt
+// finishes. It reproduces identically on main, it is the mid-flight drain case,
+// and closing it needs cooperative cancellation rather than a durable condition.
 //
 // It fails three different ways without the three parts of the repair, which is
 // why all three are asserted here rather than in separate tests:
@@ -56,7 +62,7 @@ func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, ma
 //     waiting, and the provider is invoked on the NEXT pass;
 //   - with only the acquisition guarded and the settle reporting what it was
 //     asked for, the operator is told the run is waiting when it is stopped.
-func TestAStopThatLandsMidPassNeverExecutesTheWorkItStopped(t *testing.T) {
+func TestAStopAtAcquisitionNeverExecutesTheWorkItStopped(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
 	stop := &stopAtAcquisition{OperationStore: f.runtime.scheduler.Store, t: t, fixture: f, runID: runID}
