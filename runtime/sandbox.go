@@ -569,6 +569,10 @@ func DiagnoseSandbox(p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
 // empty temporary directory is the only mount, no cache is attached, nothing is
 // downloaded, and no candidate is touched.
 func (s DockerSandbox) ProbeToolchain(ctx context.Context) (CommandOutput, error) {
+	return s.probeToolchain(ctx, "command -v go; command -v gofmt; go version", nil)
+}
+
+func (s DockerSandbox) probeToolchain(ctx context.Context, script string, tools []string) (CommandOutput, error) {
 	probe, err := os.MkdirTemp("", "zenchron-toolchain-probe-")
 	if err != nil {
 		return CommandOutput{}, err
@@ -594,7 +598,8 @@ func (s DockerSandbox) ProbeToolchain(ctx context.Context) (CommandOutput, error
 	}
 	args := append(dockerBase(probe, true), "--workdir", "/candidate")
 	args = append(args, envArgs("GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly")...)
-	args = append(args, s.Image, "sh", "-ec", "command -v go; command -v gofmt; go version")
+	args = append(args, s.Image, "sh", "-ec", script, "toolchain-probe")
+	args = append(args, tools...)
 	return s.run(ctx, args)
 }
 

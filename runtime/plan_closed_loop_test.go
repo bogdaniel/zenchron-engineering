@@ -680,6 +680,29 @@ func TestAVerdictIsIdempotentAndAConflictingOneIsRefused(t *testing.T) {
 	if got := replayed.Stages["review"].Review; got == nil || got.Verdict != StageReviewBlocked || got.Candidate != candidate {
 		t.Fatalf("the admitted verdict did not replay: %+v", got)
 	}
+	// A new generation and a new authorizing operation each own their answer.
+	state.run.Plan.Generation++
+	if err := engine.admitReview(state, stage, conflicting, invoke); err != nil {
+		t.Fatal(err)
+	}
+	invoke.ID += "-next"
+	if err := engine.admitReview(state, stage, conflicting, invoke); err != nil {
+		t.Fatal(err)
+	}
+	if len(planStageReviewEvents(t, fixture)) != 3 {
+		t.Fatal("distinct invocations collided")
+	}
+	if err := appendPlanEvent(fixture.store, engine.deps.Clock.Now(), fixture.plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+		StageID: "review", Revision: fixture.plan.Revision,
+		Outcome: "invalidated", Reason: "test retirement",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	invoke.ID += "-retired"
+	if err := engine.admitReview(state, stage, conflicting, invoke); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("retired reviewer was not explicitly refused: %v", err)
+	}
+
 }
 
 // planStageReviewEvents is every admitted verdict on this plan's stream.
