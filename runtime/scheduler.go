@@ -147,7 +147,7 @@ func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64,
 	}
 	driven := map[string]bool{}
 	for _, stored := range s.operations {
-		if stored.RunID != op.RunID && (stored.State == Leased || stored.State == Running) {
+		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
 			driven[stored.RunID] = true
 		}
 	}
@@ -301,20 +301,33 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	if err != nil {
 		return nil, err
 	}
+	now := s.Clock.Now()
 	// This scan is a cheap early exit only. On its own it is a read-then-act
 	// race that two watcher processes both win, so the ceiling is re-checked
 	// inside the durable acquisition below; that check, not this one, is what
 	// makes max=1 hold across processes.
+	//
+	// It is also where an ABANDONED operation is given back, because it is the
+	// only place a run ever looks at a sibling's operations at all.
 	activeRuns := map[string]bool{}
 	for _, op := range allOperations {
-		if (op.State == Leased || op.State == Running) && op.RunID != runID {
+		// A lease-less active row is an attempt nobody is holding - either one
+		// this scan already reclaimed, or one a sibling did. It occupies
+		// nothing, exactly as the durable count below reads it.
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.RunID == runID {
+			continue
+		}
+		reclaimed, err := s.reclaimAbandoned(op, now)
+		if err != nil {
+			return nil, err
+		}
+		if !reclaimed {
 			activeRuns[op.RunID] = true
 		}
 	}
 	if len(activeRuns) >= s.MaxConcurrentRuns {
 		return nil, nil
 	}
-	now := s.Clock.Now()
 	for _, candidate := range ops {
 		op, revision, ok, err := s.Store.Operation(candidate.ID)
 		if err != nil {
@@ -359,6 +372,67 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		return &op, nil
 	}
 	return nil, nil
+}
+
+// reclaimAbandoned drops the lease of one leased or running operation that NO
+// DRIVER IS STILL HOLDING, and reports whether it is now released.
+//
+// The run-driving slot IS the durable lease, so it is released by whoever
+// finishes the operation - and a driver that died between leasing and finishing
+// never releases anything. Nothing else heals that: the collector refuses to
+// collect a run holding a leased operation, and the reconciler's store-lag
+// repair only acts when the journal already carries a terminal operation state.
+// The slot was therefore gone until somebody edited the database by hand.
+//
+// The predicate is CanAcquire's, exactly: the lease has expired AND its owner
+// is provably dead. It is deliberately not expiry alone. Nothing renews a lease
+// during an attempt - the operation's execution authority, not its lease, is
+// what bounds the work - so every live driver holds an expired lease within a
+// minute of taking it, and releasing a slot on expiry would put the ceiling
+// back to meaning nothing. Reusing the takeover rule is also what keeps
+// exclusivity: a slot can only be reclaimed from an operation another driver
+// was already permitted to take over, so reclaiming can never contradict a
+// lease a living owner still holds.
+//
+// What is written is the smallest true thing: the lease is gone. Nothing else
+// about the row is touched, because nothing else about it is known to be wrong
+// - what the attempt did is the journal's to say, and the row is a cache of the
+// journal. The lease is the one claim that is now provably false, so the lease
+// is the one claim removed, and every counter that asks who is driving reads
+// the answer from durable state rather than from an opinion held in a process.
+//
+// The write is a compare-and-set, so two schedulers reclaiming the same
+// operation cannot both win, and a lost race simply leaves the operation
+// counted - the conservative answer.
+func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool, error) {
+	if candidate.Lease == nil || !CanAcquire(candidate, now, s.Liveness.Alive(candidate.Lease.Owner)) {
+		return false, nil
+	}
+	op, revision, ok, err := s.Store.Operation(candidate.ID)
+	if err != nil || !ok {
+		return false, err
+	}
+	if op.State != Leased && op.State != Running {
+		return true, nil
+	}
+	if op.Lease == nil || !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+		return false, nil
+	}
+	// ONLY the lease is dropped. The row goes on saying the attempt was leased
+	// or running, because that is what the journal says happened to it and the
+	// row is a cache of the journal, not a second opinion about it.
+	//
+	// Writing a terminal state here would be that second opinion, and it would
+	// silence the one repair that knows better. A crash between the journal
+	// write and the scheduler write is the common shape of this whole defect:
+	// operation.after is already journalled as succeeded and only Finish was
+	// lost. reconcileStoreLag exists to copy that journalled outcome onto the
+	// row, and it looks for exactly a leased or running row. A sibling that got
+	// there first and stamped `unknown` on it would leave the store permanently
+	// disagreeing with the journal about an operation that succeeded.
+	op.Lease = nil
+	_, released, err := s.Store.PutOperation(op, revision)
+	return released, err
 }
 
 func (s Scheduler) Start(id string) (RunOperation, error) {
