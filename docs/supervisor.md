@@ -215,29 +215,47 @@ before. It is not an escape from governance either: publication still requires a
 current authorized `authority.evaluated` decision, and a run that does not have
 one settles into its authority wait rather than publishing.
 
-`base.integrate` is exempt only on its **first** attempt. A first integration is
-the precondition every publication owes its base — a fetch, and either nothing
-to do or a replay onto a base that moved cleanly. A failure means a *conflict*,
-and resolving a conflict is producing a new tree rather than handing over an old
-one, which is the line the exemption is drawn on. Left unqualified, a conflicting
-base spent three fetches and three aborted rebases entirely outside the budget
-and then settled `base.integrate_attempts_exhausted`, so "finite by construction"
-was really "finite by `MaxAttempts`".
+`base.integrate` is in the exempt set only because it is made **passive** once
+the envelope is gone. It fetches, reads the base and answers; the branch that
+rebases or merges is not taken. Being finite was never the argument — that
+confuses boundedness with accounting, and something can be finite and still
+consume work that should count. A base that has moved is reported and left
+alone, the run ends naming its unpublished candidate, and the integration is the
+next run's business.
 
-When the budget ends a run holding something undelivered, it says which:
+When the budget ends a run holding a commit that never became a pull request, it
+says so: `run_wall_budget_exhausted_candidate_unpublished`. The bare reason tells
+an operator nothing about the work sitting on disk.
+
+### Accepted obligations
+
+Admitting a reviewer's comment creates an obligation. The budget may refuse the
+*work* — acting on feedback is provider work, which is exactly what the budget
+bounds — but it may not strand the obligation silently:
 
 ```text
-run_wall_budget_exhausted_candidate_unpublished  a commit that never became a
-                                                 pull request
-run_wall_budget_exhausted_feedback_undelivered   an admitted reviewer comment
-                                                 no worker was ever given
+published PR -> feedback admitted -> remediation obligation exists
+             -> budget ends the run -> provider never invoked
+             -> item pending, PR open, nobody told
 ```
 
-The second is not a corner. An over-budget run that published does not decline
-the review loop, it *enters* it: `ObserveFeedback` admits the comment and the
-next pass ends the run with the provider never invoked. The pending item survives
-a budget raise and a resume, but the bare reason told the reviewer waiting on the
-pull request nothing at all.
+`failed` is terminal, and only a **non-terminal** run is adopted by
+`StartOrResumeIssueRun`. So failing there does not defer the obligation, it
+abandons it: the next `run issue` mints a new generation and the comment stays
+keyed to a dead run while the reviewer watches a pull request nobody is working
+on.
+
+So the run **waits**, on the operator, as
+`feedback_undelivered_budget_exhausted` — a closed-set wait, so the clock stops
+and the run neither spins nor re-fails. The bound is not weakened: it takes an
+accepted external obligation to reach the wait at all, and nothing there lets a
+provider run. A run that owes nobody anything is ended by the budget exactly as
+before.
+
+There is no affordance today to raise a run's wall budget — `budgets()` takes the
+minimum of the live config and what the run persisted at creation, so a raised
+config cannot widen it. That makes the difference between waiting and dying
+larger, not smaller, and the missing affordance is the follow-up this leans on.
 
 ## Concurrency
 

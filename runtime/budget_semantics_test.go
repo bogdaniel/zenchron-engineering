@@ -423,49 +423,64 @@ func TestTheWallBudgetStillEndsARunWithWorkLeftToDo(t *testing.T) {
 	}
 }
 
-// TestAContestedBaseIntegrationIsNotAHandover is the limit of the exemption's
-// weakest member. A base that moved cleanly is a fetch and a replay; a base that
-// CONFLICTS is conflict resolution, which is producing a new tree rather than
-// handing over an old one. Left exempt, it spent three fetches and three aborted
-// rebases entirely outside the budget and settled
-// base.integrate_attempts_exhausted, which says nothing about the verified
-// candidate it was holding.
-func TestAContestedBaseIntegrationIsNotAHandover(t *testing.T) {
+// TestAnOverBudgetBaseIntegrationOnlyEVERReads is the passivity claim, proven
+// rather than asserted. base.integrate is in the exempt set only because it
+// cannot spend anything once the envelope is gone; "MaxAttempts makes it finite"
+// was never an argument, because something can be finite and still consume work
+// that should count.
+//
+// The base here moves CLEANLY, so the rebase would succeed. That is the
+// demanding direction: a conflict test would pass even if the guard were
+// missing, because git would refuse the work anyway.
+func TestAnOverBudgetBaseIntegrationOnlyEVERReads(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	exhaustedAtVerification(t, fixture)
-	// The base grows the same file the candidate adds, at the instant the
-	// candidate becomes publishable and the envelope is already gone.
+	// A base that moved, in a file the candidate never touches, at the instant
+	// the candidate becomes publishable and the envelope is already gone.
 	fixture.deps.SemanticAssurance.(*burningAssurance).then = func() {
-		fixture.moveBase("candidate.go", "package conflicting\n")
+		fixture.moveBase("UNRELATED.md", "the base moved cleanly\n")
 	}
 	runID := fixture.start()
+	before := fixture.state(runID)
 	outcome := fixture.reconcile(runID)
-
-	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_candidate_unpublished" {
-		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_candidate_unpublished", outcome)
-	}
 	state := fixture.state(runID)
+
+	for _, e := range state.events {
+		if e.Type == EventCandidateBaseIntegrated {
+			t.Fatal("an over-budget run rebased the candidate onto a moved base")
+		}
+	}
+	if head := state.projection.CandidateRevision; head != before.projection.CandidateRevision && before.projection.CandidateRevision != "" {
+		t.Fatalf("the candidate head moved past the budget: %s", head)
+	}
 	key := mustBind(t, bindBaseIntegrate, state)
 	op, ok := state.operationByKey(OpBaseIntegrate, key)
 	if !ok {
-		t.Fatal("the run never attempted the base integration at all")
+		t.Fatal("the run never read the base at all, so it would have published blind")
 	}
 	if op.Attempt != 1 {
-		t.Fatalf("base.integrate ran %d attempts past the budget, want 1", op.Attempt)
+		t.Fatalf("base.integrate ran %d attempts past the budget, want exactly the one read", op.Attempt)
+	}
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_candidate_unpublished", outcome)
 	}
 	if state.published() {
-		t.Fatal("a candidate was published over a base it could not integrate")
+		t.Fatal("a candidate was published over a base it had not integrated")
 	}
 }
 
-// TestASpentBudgetNamesUndeliveredFeedback is the neighbour the legibility
-// argument has to cover. An over-budget run that published does not decline the
-// #63 review loop, it ENTERS it: the comment is admitted, and the next pass ends
-// the run with the provider never invoked and the item still pending. Given
-// #203's own 27m46s against thirty minutes that is the common shape, and
-// "run_wall_budget_exhausted" tells the reviewer waiting on the pull request
-// nothing at all.
-func TestASpentBudgetNamesUndeliveredFeedback(t *testing.T) {
+// TestAcceptedFeedbackIsNotStrandedByTheBudget is #210. The shape reproduced:
+// a published pull request, a maintainer's comment admitted, a remediation
+// obligation created - and then the wall budget ending the run with the provider
+// never invoked, the item still pending, and nobody told.
+//
+// The work stays refused, because acting on feedback is provider work and that
+// is exactly what the budget bounds. What changes is that the refusal is no
+// longer terminal. Failed is terminal, and only a NON-terminal run is adopted by
+// StartOrResumeIssueRun, so failing here does not defer the obligation, it
+// abandons it. The run waits on the operator instead, and the pass after the
+// budget is raised discharges what was accepted.
+func TestAcceptedFeedbackIsNotStrandedByTheBudget(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}}
 	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
@@ -478,7 +493,6 @@ func TestASpentBudgetNamesUndeliveredFeedback(t *testing.T) {
 		t.Fatalf("the verified candidate was not delivered: %#v", outcome)
 	}
 	number := fixture.state(runID).projection.PullRequest.Number
-
 	fixture.forge.ConversationComments[number] = []GitHubComment{{
 		ID: 501, Author: GitHubActor{Login: "maintainer", ID: 7},
 		Body: UntrustedText("please add a doc comment to the new helper"), CreatedAt: fixture.clock.Now(),
@@ -488,24 +502,134 @@ func TestASpentBudgetNamesUndeliveredFeedback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if observation.Admitted != 1 {
-		t.Fatalf("the comment was not admitted: %#v", observation)
+		t.Fatalf("the comment was not admitted, so there is no obligation to strand: %#v", observation)
 	}
 
 	before := len(fixture.provider.requests)
 	outcome := fixture.reconcile(runID)
-	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_feedback_undelivered" {
-		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_feedback_undelivered", outcome)
+	if outcome.Disposition != Waiting || outcome.Reason != ReasonFeedbackUndeliveredBudgetExhausted {
+		t.Fatalf("outcome = %#v, want waiting/%s", outcome, ReasonFeedbackUndeliveredBudgetExhausted)
 	}
-	// The exemption does not survive the run wanting to work again, which is
-	// what makes the bound still mean something.
+	// The work is still refused. The obligation is what survives, not the budget.
 	if len(fixture.provider.requests) != before {
 		t.Fatal("an over-budget run invoked the provider on reviewer feedback")
 	}
-	state := fixture.state(runID)
-	if !state.wantsBudgetedWork() {
-		t.Fatal("pending feedback is not being counted as budgeted work")
+	if terminalDisposition(outcome.Disposition) {
+		t.Fatal("the run is terminal, so no resume can ever discharge the obligation")
 	}
+	if !externalWaitReasons[outcome.Reason] {
+		t.Fatalf("%q is not in the closed wait set, so waiting on the operator spends the budget", outcome.Reason)
+	}
+	state := fixture.state(runID)
 	if len(state.pendingFeedbackKeys()) != 1 {
-		t.Fatalf("pending feedback = %v, want the admitted item to survive for a resume", state.pendingFeedbackKeys())
+		t.Fatalf("pending feedback = %v, want the admitted item still owed", state.pendingFeedbackKeys())
+	}
+
+	// What the wait buys, stated exactly. There is no affordance today to raise
+	// a run's wall budget - budgets() takes the MINIMUM of the live config and
+	// what the run persisted at creation, so a raised config cannot widen it -
+	// which makes the difference between waiting and dying larger, not smaller.
+	// An adopted run still owns the obligation; an abandoned one does not.
+	adopted, err := fixture.runtime.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adopted.Adopted || adopted.RunID != runID {
+		t.Fatalf("the run holding the obligation was not adopted: %#v", adopted)
+	}
+	if pending := fixture.state(runID).pendingFeedbackKeys(); len(pending) != 1 {
+		t.Fatalf("pending feedback after adoption = %v, want the item still owed", pending)
+	}
+}
+
+// TestAStrandedObligationIsTheOnlyThingThatSurvivesTheBudget is the contrast
+// that gives the wait its meaning. The same run without an accepted obligation
+// is ended by the budget exactly as before, and an ended run is not adopted: the
+// next `run issue` mints a new generation and whatever the old one was holding
+// belongs to nobody. That is the outcome #210 describes, and it is what the wait
+// above avoids.
+func TestAStrandedObligationIsTheOnlyThingThatSurvivesTheBudget(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	exhaustedAtVerification(t, fixture)
+	fixture.deps.SemanticAssurance.(*burningAssurance).then = func() {
+		fixture.moveBase("UNRELATED.md", "the base moved cleanly\n")
+	}
+	runID := fixture.start()
+
+	// A verified candidate on a base that moved, and nobody is owed anything:
+	// re-integrating is work, so the budget ends the run. The bound is untouched
+	// by #210.
+	outcome := fixture.reconcile(runID)
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("outcome = %#v, want the budget to end a run that owes nobody anything", outcome)
+	}
+	fresh, err := fixture.runtime.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Adopted || fresh.RunID == runID {
+		t.Fatalf("a terminal run was adopted: %#v", fresh)
+	}
+}
+
+// TestWantsBudgetedWorkDecidesTheBudgetOutcome is the predicate's own test, and
+// it is built to fail under mutation rather than to go green.
+//
+// Two states differ in exactly one thing: whether an operation the budget bounds
+// is still wanted. Everything else - the clock, the limit, the journal, the
+// verified candidate - is identical. If the predicate stops being consulted
+// (delete `&& !s.deliveringVerifiedCandidate()`, or make wantsBudgetedWork
+// constant in either direction) the two states stop disagreeing, and the pair
+// assertion below fails. A test that asserts only one of them certifies a claim
+// it cannot observe, which is how the previous version of this file passed with
+// wantsBudgetedWork never called at all.
+func TestWantsBudgetedWorkDecidesTheBudgetOutcome(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	budgets := RunBudgets{WallLimit: 30 * time.Minute}
+	verified := RunProjection{
+		Contract:          Ref{ID: "contract-1", Revision: "1"},
+		CandidateRevision: "b6f2c09",
+		CandidateTree:     "tree-1",
+		CandidateComplete: true,
+		Assurance: &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{
+			Commit: "b6f2c09", Tree: "tree-1", Passed: true,
+		}},
+	}
+	// The ONLY difference: a succeeded assurance operation at exactly this
+	// binding, which is what makes the remaining work delivery rather than
+	// verification.
+	delivering := conditionsFixture(start, &steppingClock{at: start.Add(12 * time.Hour)}, budgets, []EngineeringEvent{
+		progressEvent(start.Add(time.Hour)),
+	})
+	delivering.projection = verified
+	working := conditionsFixture(start, &steppingClock{at: start.Add(12 * time.Hour)}, budgets, []EngineeringEvent{
+		progressEvent(start.Add(time.Hour)),
+	})
+	working.projection = verified
+	key := mustBind(t, bindAssuranceGo, delivering)
+	delivering.snapshot.Operations = map[string]RunOperation{"op-1": {
+		ID: "op-1", Kind: OpAssuranceGo, IdempotencyKey: operationKey(OpAssuranceGo, key), State: Succeeded,
+	}}
+
+	if delivering.wantsBudgetedWork() {
+		t.Fatal("a verified candidate with its assurance satisfied still reports budgeted work")
+	}
+	if !working.wantsBudgetedWork() {
+		t.Fatal("an unsatisfied assurance is not counted as budgeted work")
+	}
+
+	deliveringDisposition, deliveringReason := delivering.conditions()
+	workingDisposition, workingReason := working.conditions()
+	// The pair is the assertion. Neither half alone can tell a consulted
+	// predicate from an ignored one.
+	if deliveringDisposition == workingDisposition {
+		t.Fatalf("the budget answered both states %s/%s and %s/%s the same way, so the predicate changed nothing",
+			deliveringDisposition, deliveringReason, workingDisposition, workingReason)
+	}
+	if deliveringDisposition == Failed {
+		t.Fatalf("delivery was ended by the budget: %s/%s", deliveringDisposition, deliveringReason)
+	}
+	if workingDisposition != Failed || workingReason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("working = %s/%s, want failed/run_wall_budget_exhausted_candidate_unpublished", workingDisposition, workingReason)
 	}
 }

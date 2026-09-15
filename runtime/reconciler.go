@@ -83,8 +83,13 @@ var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreat
 // the budgeted one, so a new operation kind is budgeted until somebody decides
 // otherwise, which is the safe direction for a bound whose job is to end work.
 //
-// base.integrate is the member that earns its place conditionally, and
-// contestedIntegration is where that condition lives.
+// base.integrate is here only because it is made PASSIVE over budget, in
+// integrateBase: it fetches, reads the base and answers, and the branch that
+// rebases or merges is not taken. Being finite was never the argument - that
+// confuses boundedness with accounting, and something can be finite and still
+// consume work that should count. It is exempt because over budget it cannot
+// consume any. A base that has moved is reported and not integrated, and
+// contestedIntegration is what stops the report being retried.
 var deliveryKinds = map[string]bool{
 	OpBaseIntegrate: true, OpAuthorityEvaluate: true,
 	OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true,
@@ -364,6 +369,12 @@ func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epo
 // stages that depend on it can proceed while the run itself waits for review.
 const ReasonGoalStateReached = "goal_state_reached"
 
+// ReasonFeedbackUndeliveredBudgetExhausted is the run holding a human's feedback
+// it accepted and has no budget left to act on. It is the operator's turn: the
+// resource that is missing is theirs to provide, exactly as it is for
+// state_storage_exhausted.
+const ReasonFeedbackUndeliveredBudgetExhausted = "feedback_undelivered_budget_exhausted"
+
 var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
@@ -383,6 +394,10 @@ var externalWaitReasons = map[string]bool{
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
+	// The operator has to raise the execution budget before the feedback this
+	// run accepted can be acted on. Same shape: their resource, their turn, and
+	// the run does nothing at all while it waits.
+	ReasonFeedbackUndeliveredBudgetExhausted: true,
 	// The controller stopped. The run is not working, and it is waiting for a
 	// supervisor to exist again rather than for anything it can do itself.
 	"controller_shutdown":  true,
@@ -770,7 +785,12 @@ func (s *runState) conditions() (Disposition, string) {
 	// It bounds work the run is still CHOOSING to do. It does not reach the
 	// handover of a candidate the run has already verified; see
 	// deliveringVerifiedCandidate.
-	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit && !s.deliveringVerifiedCandidate() {
+	if s.wallBudgetSpent(now) && !s.deliveringVerifiedCandidate() {
+		// An obligation the runtime ACCEPTED from a human is not something a
+		// bound may discard; see strandedObligation.
+		if reason, stranded := s.strandedObligation(); stranded {
+			return Waiting, reason
+		}
 		return Failed, s.wallBudgetReason()
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
@@ -932,6 +952,42 @@ func (s *runState) budgets() RunBudgets {
 // asking for a change - the budget ends the run as before. And the optional
 // lifecycle deadline, which bounds calendar time rather than work, is not
 // affected at all.
+// wallBudgetSpent is the ONE answer to "is the envelope gone", shared by the
+// disposition rule and by the operation that has to stay passive once it is.
+// Two readers deriving it separately is how a bound starts meaning different
+// things in different places.
+func (s *runState) wallBudgetSpent(now time.Time) bool {
+	limit := s.budgets().WallLimit
+	return limit > 0 && s.activeElapsed(now) > limit
+}
+
+// strandedObligation is the answer to #210: the run holds something a HUMAN
+// asked for, which it accepted, recorded and keyed, and which it is now out of
+// budget to do.
+//
+// Acting on feedback is provider work, and provider work is exactly what the
+// budget exists to bound - so the work stays refused. What must not happen is
+// the refusal being silent. A failed run is terminal: only a non-terminal run is
+// adopted by StartOrResumeIssueRun, so raising the budget on a failed run does
+// not discharge the obligation, it abandons it, and the reviewer is left
+// watching an open pull request that nobody is working on and nobody said so.
+//
+// So the run waits, on the operator, and says what for. The wait is in the
+// closed external set, so the clock stops and the run neither spins nor
+// re-fails; the item stays durably pending against the same head; and the pass
+// after the budget is raised delivers it. "Your move" is true, where "this run
+// is over" was not.
+//
+// The bound is not weakened by this. It takes an ACCEPTED external obligation to
+// reach the wait at all - no feedback, and the budget ends the run exactly as
+// before - and nothing here lets a provider run.
+func (s *runState) strandedObligation() (string, bool) {
+	if len(s.pendingFeedbackKeys()) == 0 {
+		return "", false
+	}
+	return ReasonFeedbackUndeliveredBudgetExhausted, true
+}
+
 func (s *runState) deliveringVerifiedCandidate() bool {
 	if s.projection.CandidateRevision == "" {
 		return false
@@ -977,13 +1033,13 @@ func (s *runState) wantsBudgetedWork() bool {
 // already ends the run anyway, because the rebase writes a new head and
 // assurance goes stale at it.
 //
-// A failure means a CONFLICT, and resolving a conflict is producing a new tree
-// rather than handing over an old one - which is exactly the line the exemption
-// is drawn on. Left exempt, a conflicting base spent three fetches and three
-// aborted rebases entirely outside the budget and then settled
-// base.integrate_attempts_exhausted, so "finite by construction" was really
-// "finite by MaxAttempts". One attempt is the handover's share; a second is the
-// run choosing to keep working, and the budget ends it.
+// A failure over budget means the fetch found a base this run may not integrate:
+// integrateBase refuses the rebase and the merge outright once the envelope is
+// gone, so the attempt cost a fetch and two reads and changed nothing. Retrying
+// that report would buy three fetches and settle
+// base.integrate_attempts_exhausted, which says nothing about the verified
+// candidate being held. One report is enough; the budget ends the run on the
+// next pass, naming the candidate.
 func (s *runState) contestedIntegration(kind, binding string) bool {
 	if kind != OpBaseIntegrate {
 		return false
@@ -992,21 +1048,17 @@ func (s *runState) contestedIntegration(kind, binding string) bool {
 	return ok && op.State == OperationFailed
 }
 
-// wallBudgetReason names what the budget actually stopped. A run holding
-// something undelivered is a different fact for an operator than a run that had
-// produced nothing: there is work nobody can see, and reading
-// "run_wall_budget_exhausted" alone tells them nothing about it. That is true of
-// a commit that never became a pull request and equally true of a reviewer's
-// comment that never reached a worker.
+// wallBudgetReason names what the budget actually stopped. A run holding a
+// commit that never became a pull request is a different fact for an operator
+// than a run that had produced nothing: there is work on disk nobody can see,
+// and reading "run_wall_budget_exhausted" alone tells them nothing about it.
+//
+// The other undelivered thing - a reviewer's comment that never reached a
+// worker - does not appear here, because it is no longer a failure at all. See
+// strandedObligation.
 func (s *runState) wallBudgetReason() string {
-	switch {
-	case s.projection.CandidateRevision != "" && !s.published():
+	if s.projection.CandidateRevision != "" && !s.published() {
 		return "run_wall_budget_exhausted_candidate_unpublished"
-	case len(s.pendingFeedbackKeys()) > 0:
-		// A published run stopped holding admitted, applicable feedback nobody
-		// has been given. The pull request is open, a reviewer is waiting on it,
-		// and the bare reason says nothing about either.
-		return "run_wall_budget_exhausted_feedback_undelivered"
 	}
 	return "run_wall_budget_exhausted"
 }
