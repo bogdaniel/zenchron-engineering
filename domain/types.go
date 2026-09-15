@@ -185,7 +185,7 @@ type Requirement struct {
 // across recompilations - never a generated or positional name.
 func AcceptanceObligationID(criterion string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(criterion)))
-	return "acceptance-" + hex.EncodeToString(sum[:])[:16]
+	return "acceptance-" + hex.EncodeToString(sum[:])
 }
 
 // EvidenceClass identifies an extensible, policy-defined class of supporting

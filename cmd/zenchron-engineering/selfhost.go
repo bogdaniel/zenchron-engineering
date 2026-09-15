@@ -126,10 +126,6 @@ var bootstrapChecks = []harnessCheck{
 	{ID: "test", Command: "go test ./..."},
 }
 
-func selfhostIssue(rawNumber string, commands commandRunner, stdout io.Writer) error {
-	return selfhostIssueWithModels(rawNumber, nil, commands, stdout)
-}
-
 func selfhostIssueWithModels(rawNumber string, configuredModels []string, commands commandRunner, stdout io.Writer) error {
 	number, err := strconv.Atoi(rawNumber)
 	if err != nil || number < 1 {
@@ -795,41 +791,65 @@ func temporaryReportFiles() (string, string, func(), error) {
 	return report.Name(), schema.Name(), cleanup, nil
 }
 
-func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, execution *codexExecution, checks []harnessCheck) (string, error) {
+func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, execution *codexExecution, checks []harnessCheck) (path string, err error) {
 	file, err := os.CreateTemp("", "zenchron-handoff-*.md")
 	if err != nil {
 		return "", fmt.Errorf("create handoff comment: %w", err)
 	}
-	defer file.Close()
-	fmt.Fprintf(file, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Harness Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor-reported observations\n\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime)
+	defer func() {
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			path = ""
+			err = fmt.Errorf("close temporary body: %w", closeErr)
+		}
+		if err != nil {
+			os.Remove(file.Name())
+		}
+	}()
+	var body strings.Builder
+	fmt.Fprintf(&body, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Harness Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor-reported observations\n\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime)
 	if execution == nil {
-		fmt.Fprintln(file, "- Codex execution provenance: unavailable (interrupted-run resume)")
+		fmt.Fprintln(&body, "- Codex execution provenance: unavailable (interrupted-run resume)")
 	} else {
-		fmt.Fprintf(file, "- Execution provider: `%s`\n- Codex model: `%s`\n- Codex authentication mode: `%s`\n- Successful attempt: %d/%d\n", execution.Provider, execution.Model, execution.AuthMode, execution.Attempt, execution.MaxAttempts)
+		fmt.Fprintf(&body, "- Execution provider: `%s`\n- Codex model: `%s`\n- Codex authentication mode: `%s`\n- Successful attempt: %d/%d\n", execution.Provider, execution.Model, execution.AuthMode, execution.Attempt, execution.MaxAttempts)
 	}
 	if report == nil {
-		fmt.Fprintln(file, "Unavailable: the interrupted run did not preserve a durable executor report.")
+		fmt.Fprintln(&body, "Unavailable: the interrupted run did not preserve a durable executor report.")
 	} else {
 		reportJSON, err := json.MarshalIndent(report, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("encode executor report: %w", err)
 		}
-		fmt.Fprintf(file, "```json\n%s\n```\n", reportJSON)
+		fmt.Fprintf(&body, "```json\n%s\n```\n", reportJSON)
 	}
-	fmt.Fprint(file, "\n### Harness-verified deterministic checks\n\n")
+	fmt.Fprint(&body, "\n### Harness-verified deterministic checks\n\n")
 	for _, check := range checks {
-		fmt.Fprintf(file, "- `%s` — pass (`%s`)\n", check.ID, check.Command)
+		fmt.Fprintf(&body, "- `%s` — pass (`%s`)\n", check.ID, check.Command)
+	}
+	if _, err := file.WriteString(body.String()); err != nil {
+		return "", fmt.Errorf("write temporary body: %w", err)
 	}
 	return file.Name(), nil
 }
 
-func writePRBody(target issue) (string, error) {
+func writePRBody(target issue) (path string, err error) {
 	file, err := os.CreateTemp("", "zenchron-pr-*.md")
 	if err != nil {
 		return "", fmt.Errorf("create pull request body: %w", err)
 	}
-	defer file.Close()
-	fmt.Fprintf(file, "Closes #%d\n\nCreated by `zenchron-engineering selfhost issue %d`.\n\nThis is an untrusted candidate change requiring external review. Codex completion, validation, and PR creation do not authorize merge. Automatic merge was not performed.\n", target.Number, target.Number)
+	defer func() {
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			path = ""
+			err = fmt.Errorf("close temporary body: %w", closeErr)
+		}
+		if err != nil {
+			os.Remove(file.Name())
+		}
+	}()
+	var body strings.Builder
+	fmt.Fprintf(&body, "Closes #%d\n\nCreated by `zenchron-engineering selfhost issue %d`.\n\nThis is an untrusted candidate change requiring external review. Codex completion, validation, and PR creation do not authorize merge. Automatic merge was not performed.\n", target.Number, target.Number)
+	if _, err := file.WriteString(body.String()); err != nil {
+		return "", fmt.Errorf("write temporary body: %w", err)
+	}
 	return file.Name(), nil
 }
 
