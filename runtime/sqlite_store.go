@@ -428,9 +428,15 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // table. A run holds a slot exactly while one of its operations is leased or
 // running, so a run parked on CI, authority, auth, or opt-in removal holds
 // nothing - there is no slot to forget to release, and a durable run that
-// nobody is driving never occupies one. Reclaiming a crashed driver's slot is
-// therefore the existing lease takeover, which CanAcquire already gates on
-// owner death AND expiry, so an expired heartbeat alone still steals nothing.
+// nobody is driving never occupies one.
+//
+// Reclaiming a crashed driver's slot is the existing lease takeover, which
+// CanAcquire gates on owner death AND expiry, so an expired heartbeat alone
+// still steals nothing. This statement does not perform that reclamation and
+// must not: owner death is a probe of the operating system, not a fact in the
+// database. Scheduler.reclaimAbandoned retires an abandoned operation before
+// this count is taken, so what is counted here is always durable state - and
+// never a durable row plus a live opinion about it.
 func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")

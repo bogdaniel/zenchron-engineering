@@ -293,20 +293,30 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	if err != nil {
 		return nil, err
 	}
+	now := s.Clock.Now()
 	// This scan is a cheap early exit only. On its own it is a read-then-act
 	// race that two watcher processes both win, so the ceiling is re-checked
 	// inside the durable acquisition below; that check, not this one, is what
 	// makes max=1 hold across processes.
+	//
+	// It is also where an ABANDONED operation is given back, because it is the
+	// only place a run ever looks at a sibling's operations at all.
 	activeRuns := map[string]bool{}
 	for _, op := range allOperations {
-		if (op.State == Leased || op.State == Running) && op.RunID != runID {
+		if (op.State != Leased && op.State != Running) || op.RunID == runID {
+			continue
+		}
+		reclaimed, err := s.reclaimAbandoned(op, now)
+		if err != nil {
+			return nil, err
+		}
+		if !reclaimed {
 			activeRuns[op.RunID] = true
 		}
 	}
 	if len(activeRuns) >= s.MaxConcurrentRuns {
 		return nil, nil
 	}
-	now := s.Clock.Now()
 	for _, candidate := range ops {
 		op, revision, ok, err := s.Store.Operation(candidate.ID)
 		if err != nil {
@@ -347,6 +357,56 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		return &op, nil
 	}
 	return nil, nil
+}
+
+// reclaimAbandoned retires one leased or running operation that NO DRIVER CAN
+// STILL FINISH, and reports whether it is now released.
+//
+// The run-driving slot is the durable lease, so it is released by whoever
+// finishes the operation - and a driver that died between leasing and finishing
+// never releases anything. Nothing else heals that: the collector refuses to
+// collect a run holding a leased operation, and the reconciler's store-lag
+// repair only acts when the journal already carries a terminal operation state.
+// The slot was therefore gone until somebody edited the database by hand.
+//
+// The predicate is CanAcquire's, exactly: the lease has expired AND its owner
+// is provably dead. It is deliberately not expiry alone. Nothing renews a lease
+// during an attempt - the operation's execution authority, not its lease, is
+// what bounds the work - so every live driver holds an expired lease within a
+// minute of taking it, and releasing a slot on expiry would put the ceiling
+// back to meaning nothing. Reusing the takeover rule is also what keeps
+// exclusivity: a slot can only be reclaimed from an operation another driver
+// was already permitted to take over, so reclaiming can never contradict a
+// lease a living owner still holds.
+//
+// The operation is retired to UNKNOWN rather than hidden from the count, and
+// with its ActiveSince left exactly as it is. Unknown is what the runtime
+// already records for an attempt that was interrupted and cannot say whether
+// its side effect happened; leaving the row lying would keep the collector,
+// the operator reads and every other counter believing a driver holds it. The
+// orphaned attempt's execution is charged by Start, where it already was.
+//
+// The write is a compare-and-set, so two schedulers reclaiming the same
+// operation cannot both win, and a lost race simply leaves the operation
+// counted - the conservative answer.
+func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool, error) {
+	if candidate.Lease == nil || !CanAcquire(candidate, now, s.Liveness.Alive(candidate.Lease.Owner)) {
+		return false, nil
+	}
+	op, revision, ok, err := s.Store.Operation(candidate.ID)
+	if err != nil || !ok {
+		return false, err
+	}
+	if op.State != Leased && op.State != Running {
+		return true, nil
+	}
+	if op.Lease == nil || !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+		return false, nil
+	}
+	op.State = Unknown
+	op.Lease = nil
+	_, released, err := s.Store.PutOperation(op, revision)
+	return released, err
 }
 
 func (s Scheduler) Start(id string) (RunOperation, error) {

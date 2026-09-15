@@ -618,3 +618,168 @@ func TestSQLiteRunSlotIsNotStolenByExpiryAlone(t *testing.T) {
 		t.Fatalf("owner death plus expiry did not permit reclamation: %v %v", got, err)
 	}
 }
+
+// deadOwner reports every owner alive except the named one, which is what a
+// driver that died looks like to a scheduler running in another process.
+func deadOwner(name string) OwnerLiveness {
+	return OwnerLivenessFunc(func(owner string) bool { return owner != name })
+}
+
+// TestSQLiteADeadDriversRunSlotIsReclaimedByASibling drives the real lifecycle:
+// run-a acquires an operation, its driver disappears without finishing it, and
+// run-b - a different run, whose scheduler never scans run-a's operations - must
+// still be able to acquire under a ceiling of one.
+//
+// The slot was leaked because takeover is the only thing that reclaims it and
+// takeover was reachable only from the owning run's own scan. Nothing else
+// healed it: the collector refuses to collect a run holding a leased operation,
+// and the reconciler's store-lag repair only acts when the journal already
+// carries a terminal operation state.
+func TestSQLiteADeadDriversRunSlotIsReclaimedByASibling(t *testing.T) {
+	c := &fakeClock{now: time.Unix(100, 0)}
+	_, storeA, storeB := openPair(t)
+	one := Scheduler{Store: storeA, Clock: c, Owner: "one", LeaseDuration: time.Minute, Liveness: alwaysAlive(), MaxConcurrentRuns: 1}
+	two := Scheduler{Store: storeB, Clock: c, Owner: "two", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1}
+	planFor(t, one, "run-a", 1)
+	planFor(t, two, "run-b", 1)
+
+	leased, err := one.Next("run-a")
+	if err != nil || leased == nil {
+		t.Fatal(err, leased)
+	}
+	if _, err := one.Start(leased.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The driver is gone: its lease has expired and its owner is provably dead.
+	c.now = c.now.Add(2 * time.Minute)
+
+	got, err := two.Next("run-b")
+	if err != nil || got == nil {
+		t.Fatalf("a dead driver's run slot was never given back: %v %v", got, err)
+	}
+	// The durable row says so too. Hiding an abandoned operation from the count
+	// alone would leave the collector and every operator read still believing a
+	// driver holds it.
+	orphan, _, ok, err := storeB.Operation(leased.ID)
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if orphan.State == Leased || orphan.State == Running {
+		t.Fatalf("the abandoned operation is still %q, so nothing was reclaimed", orphan.State)
+	}
+	if orphan.Lease != nil {
+		t.Fatal("the abandoned operation still records a lease")
+	}
+}
+
+// TestSQLiteStoppingARunReleasesItsRunSlot holds every owner ALIVE, so lease
+// takeover cannot be what frees the slot: only stopping the run can.
+//
+// A stopped run is terminal, and the validator refuses every operation on a
+// terminal run, so nothing will ever drive it again - which is exactly why
+// requesting cancellation and walking away made the loss permanent rather than
+// releasing anything.
+func TestSQLiteStoppingARunReleasesItsRunSlot(t *testing.T) {
+	c := &fakeClock{now: time.Unix(100, 0)}
+	_, storeA, storeB := openPair(t)
+	if err := storeA.PutRun(newJournalRun("run-a")); err != nil {
+		t.Fatal(err)
+	}
+	one := Scheduler{Store: storeA, Clock: c, Owner: "one", LeaseDuration: time.Minute, Liveness: alwaysAlive(), MaxConcurrentRuns: 1}
+	two := Scheduler{Store: storeB, Clock: c, Owner: "two", LeaseDuration: time.Minute, Liveness: alwaysAlive(), MaxConcurrentRuns: 1}
+	planFor(t, one, "run-a", 1)
+	planFor(t, two, "run-b", 1)
+
+	leased, err := one.Next("run-a")
+	if err != nil || leased == nil {
+		t.Fatal(err, leased)
+	}
+	if _, err := one.Start(leased.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := two.Next("run-b"); err != nil || got != nil {
+		t.Fatalf("a driven run did not hold the only slot: %v %v", got, err)
+	}
+	if _, err := CancelRun(storeA, one, c.Now(), "run-a", "operator/stop"); err != nil {
+		t.Fatal(err)
+	}
+	stopped, _, ok, err := storeA.Operation(leased.ID)
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if stopped.State == Leased || stopped.State == Running {
+		t.Fatalf("a stopped run still holds a %q operation", stopped.State)
+	}
+	got, err := two.Next("run-b")
+	if err != nil || got == nil {
+		t.Fatalf("a stopped run kept its slot forever: %v %v", got, err)
+	}
+}
+
+// TestSQLiteReclaimingNeverHandsOneOperationToTwoDrivers is the exclusivity
+// proof. An abandoned operation is contested from two processes at once: the
+// owning run's replacement driver, which wants to TAKE IT OVER, and a sibling
+// run, which only wants the slot it was holding. Reclaiming must not manufacture
+// a second slot, and it must never leave two drivers believing they hold the
+// same operation.
+func TestSQLiteReclaimingNeverHandsOneOperationToTwoDrivers(t *testing.T) {
+	for attempt := 0; attempt < 32; attempt++ {
+		if got := raceForAnAbandonedRunSlot(t); got != 1 {
+			t.Fatalf("attempt %d drove %d runs at once under max=1", attempt, got)
+		}
+	}
+}
+
+// raceForAnAbandonedRunSlot abandons run-a's operation and then releases a
+// replacement driver for run-a and a driver for run-b together, returning how
+// many of them ended up driving.
+func raceForAnAbandonedRunSlot(t *testing.T) int {
+	t.Helper()
+	c := &fakeClock{now: time.Unix(100, 0)}
+	_, storeA, storeB := openPair(t)
+	dead := Scheduler{Store: storeA, Clock: c, Owner: "one", LeaseDuration: time.Minute, Liveness: alwaysAlive(), MaxConcurrentRuns: 1}
+	planFor(t, dead, "run-a", 2)
+	planFor(t, dead, "run-b", 2)
+	leased, err := dead.Next("run-a")
+	if err != nil || leased == nil {
+		t.Fatal(err, leased)
+	}
+	c.now = c.now.Add(2 * time.Minute)
+
+	var driving atomic.Int32
+	var mu sync.Mutex
+	owners := map[string]string{}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, driver := range []struct {
+		scheduler Scheduler
+		run       string
+	}{
+		{Scheduler{Store: storeA, Clock: c, Owner: "three", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1}, "run-a"},
+		{Scheduler{Store: storeB, Clock: c, Owner: "two", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1}, "run-b"},
+	} {
+		wg.Add(1)
+		go func(s Scheduler, run string) {
+			defer wg.Done()
+			<-start
+			got, err := s.Next(run)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if got == nil {
+				return
+			}
+			driving.Add(1)
+			mu.Lock()
+			defer mu.Unlock()
+			if held, ok := owners[got.ID]; ok {
+				t.Errorf("operation %q is held by both %q and %q", got.ID, held, s.Owner)
+			}
+			owners[got.ID] = s.Owner
+		}(driver.scheduler, driver.run)
+	}
+	close(start)
+	wg.Wait()
+	return int(driving.Load())
+}
