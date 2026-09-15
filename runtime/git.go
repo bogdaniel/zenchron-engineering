@@ -423,16 +423,38 @@ func refuseNestedRepository(dir string, paths []string) error {
 		if !strings.HasPrefix(record, "160000 ") {
 			continue
 		}
-		if tab := strings.IndexByte(record, '\t'); tab >= 0 {
-			offending[record[tab+1:]] = true
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
 		}
+		p := record[tab+1:]
+		// A gitlink whose directory is GONE is being removed, and removing one
+		// is the only way out of this state: the removal commits a tree with no
+		// gitlink in it and leaves a clean workspace. Refusing it would make
+		// this guard block its own repair. The exemption closes nothing,
+		// because an index entry whose worktree path does not exist cannot
+		// survive `add -A` - the removal is staged and the entry is gone.
+		//
+		// The narrower-looking test, "refuse only if the path is STILL a Git
+		// repository", is what this must not be: a producer stages a gitlink
+		// and then renames the nested .git away, and every predicate that asks
+		// the worktree what the path is now answers wrongly.
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); os.IsNotExist(err) {
+			continue
+		}
+		offending[p] = true
 	}
 	if len(offending) == 0 {
 		return nil
 	}
 	named := make([]string, 0, len(offending))
 	for p := range offending {
-		named = append(named, p)
+		// Quoted, because neither `status -z` nor `ls-files -z` quotes a path
+		// and this refusal is journalled. A producer that names a directory
+		// with a newline in it would otherwise write its own line into runtime
+		// evidence; no privilege crosses, but forgeable evidence is worth less
+		// than evidence that cannot be forged.
+		named = append(named, fmt.Sprintf("%q", p))
 	}
 	sort.Strings(named)
 	return fmt.Errorf("candidate holds nested Git repositories, whose content a runtime commit cannot carry: %s", strings.Join(named, ", "))

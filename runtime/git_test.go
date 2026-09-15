@@ -231,7 +231,10 @@ func TestCandidateCommitRefusesAKilledAttemptsTestScratchRepository(t *testing.T
 		t.Fatal("the runtime committed a workspace holding a nested repository")
 	}
 	for _, want := range []string{dirty, clean} {
-		if !strings.Contains(err.Error(), want) {
+		// Quoted: neither `status -z` nor `ls-files -z` quotes a path, and this
+		// refusal is journalled, so a producer-chosen directory name holding a
+		// newline would otherwise write its own line into runtime evidence.
+		if !strings.Contains(err.Error(), "\""+want+"\"") {
 			t.Fatalf("the refusal does not name %q, which cannot be committed: %v", want, err)
 		}
 	}
@@ -327,6 +330,100 @@ func TestCandidateCommitRefusesAGitlinkAlreadyRecordedInTheIndex(t *testing.T) {
 		t.Fatal("the runtime published a tree that does not hold the content of a recorded gitlink")
 	} else if !strings.Contains(err.Error(), gitlink) {
 		t.Fatalf("the refusal does not name the recorded gitlink: %v", err)
+	}
+	after, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(after) != strings.TrimSpace(before) {
+		t.Fatal("the runtime wrote a commit it then refused")
+	}
+}
+
+// TestCandidateCommitPermitsRemovingARecordedGitlink pins that the refusal does
+// not block its own repair.
+//
+// Removing the nested directory and committing that removal is the way OUT of a
+// workspace that holds a recorded gitlink: the resulting tree has no gitlink in
+// it and the workspace is clean afterwards. A guard that refuses the removal
+// leaves the workspace permanently uncommittable, which is a worse place than
+// the one it was protecting against.
+//
+// The exemption closes nothing, and the test says which weaker one it is not: a
+// gitlink whose worktree path is gone cannot survive `add -A`, whereas a gitlink
+// whose path is still there is refused however the directory now looks - which
+// is what stops a producer staging a gitlink and renaming the nested .git away.
+func TestCandidateCommitPermitsRemovingARecordedGitlink(t *testing.T) {
+	w := commitGateWorkspace(t)
+	gitlink := workerTestScratchRepository(t, w.Dir, filepath.Join("t", "fixture-origin"), false)
+	if _, err := runGit(w.Dir, "add", "-A", "--"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", "an earlier commit recorded the gitlink"); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	if w.TrustedMetadata, err = gitMetadataDigest(w.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(w.Dir, filepath.FromSlash(gitlink))); err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.Commit("remove the recorded gitlink", 1<<20)
+	if err != nil {
+		t.Fatalf("the guard refused its own repair: %v", err)
+	}
+	if !contains(result.Paths, gitlink) {
+		t.Fatalf("the removal was not reported: %q", result.Paths)
+	}
+	staged, err := gitOutput(w.Dir, "ls-files", "--stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(staged, "160000") {
+		t.Fatalf("the gitlink survived the removal: %q", staged)
+	}
+	status, err := gitOutput(w.Dir, "status", "--porcelain=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(status) != "" {
+		t.Fatalf("the workspace is not clean after the repair: %q", status)
+	}
+}
+
+// TestCandidateCommitRefusesAStagedGitlinkWhoseRepositoryWasHidden is the
+// hostile case, and the one that overturned an earlier certification that a
+// producer could not use a nested repository to hide a change.
+//
+// Two ordinary commands do it. `git add nested` stages a gitlink; renaming
+// nested/.git away then makes every worktree predicate answer wrongly, while
+// `add -A` leaves the staged gitlink alone. The path IS observed - status
+// reports it, so reassessment is told it changed - but the commit carries a
+// gitlink no object store can resolve and none of the producer's files.
+// AssertIntegrity does not see it either, because `git add` touches only the
+// index. Only the index can answer this.
+func TestCandidateCommitRefusesAStagedGitlinkWhoseRepositoryWasHidden(t *testing.T) {
+	w := commitGateWorkspace(t)
+	hidden := workerTestScratchRepository(t, w.Dir, "nested", false)
+	if _, err := runGit(w.Dir, "add", "--", hidden); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(w.Dir, hidden)
+	if err := os.Rename(filepath.Join(nested, ".git"), filepath.Join(nested, "dot-git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.AssertIntegrity(); err != nil {
+		t.Fatalf("the fixture tripped the integrity baseline, so it is not the case under test: %v", err)
+	}
+	before, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("runtime candidate", 1<<20); err == nil {
+		t.Fatal("a producer hid its change behind a staged gitlink")
+	} else if !strings.Contains(err.Error(), hidden) {
+		t.Fatalf("the refusal does not name the staged gitlink: %v", err)
 	}
 	after, err := gitOutput(w.Dir, "rev-parse", "HEAD")
 	if err != nil {
