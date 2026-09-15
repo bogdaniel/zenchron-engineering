@@ -322,6 +322,11 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if err := GuardCandidate(w.Dir, paths, maxBytes); err != nil {
 		return CommitResult{}, err
 	}
+	// After the path gate, so what is joined onto the workspace root here has
+	// already been proven to be a safe relative path.
+	if err := refuseNestedRepository(w.Dir, paths); err != nil {
+		return CommitResult{}, err
+	}
 	// The OUTPUT half of the credential boundary. Admission proved the
 	// workspace was clean before the producer was shown it; this proves the
 	// producer did not introduce a credential value into what is about to
@@ -358,6 +363,101 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	}
 	w.TrustedMetadata = metadata
 	return CommitResult{Commit: strings.TrimSpace(commit), Tree: strings.TrimSpace(tree), Paths: paths}, nil
+}
+
+// refuseNestedRepository refuses a candidate that contains a nested Git
+// repository, BEFORE anything is staged.
+//
+// A commit cannot carry one. `git add -A` does not record the directory's
+// files; it records a 160000 gitlink naming a commit that exists only inside
+// the nested repository, so the content is in no tree this runtime owns.
+//
+// What made that visible was a killed attempt: run
+// run-5fa7aff09147d45bf7c3a05d504033f7 inherited its own `go test` temporary
+// tree on recovery, the runtime wrote commit f0f72ba, and the post-commit
+// cleanliness probe then refused it. The probe was catching a sixth of what
+// happened. f0f72ba carries SIX gitlinks across two in-tree scratch roots -
+// fixture origins, nested candidate workspaces and assurance checkouts - and
+// `git status` reported exactly one, because a parent reports a gitlink as
+// modified only while the nested worktree is dirty. The other five produced a
+// gitlink, a clean probe, and a publishable tree that does not hold the content:
+// `git show HEAD:<path>` answers "exists on disk, but not in HEAD". So the
+// failure this repair is named for is the loud case, and the silent one is the
+// reason it is a refusal.
+//
+// Both ways in are closed. A nested repository the producer created is
+// untracked, so it appears as a changed path and the worktree answers for it. A
+// gitlink ALREADY recorded appears in no changed path at all once its nested
+// worktree is clean, so the index is asked too. A repository that genuinely uses
+// submodules cannot be a candidate here, and that is the honest answer rather
+// than an omission: this runtime cannot show a submodule's content to assurance
+// either.
+//
+// This is a refusal and not a filter. Every path the workspace observed still
+// reaches the guard, the credential scan, the commit and reassessment: a
+// producer cannot use a nested repository to move a change out of sight,
+// because the answer to one is that no commit is made at all. Refusing before
+// staging also means the runtime stops minting a commit it is about to call
+// invalid - which cost the run more than the refusal did, because the abandoned
+// commit moved HEAD without being journalled and every later attempt then died
+// at the recorded-revision check in operations.go, reading the runtime's own
+// commit as tampering.
+//
+// Every offending path is named. Production had six, and an operator shown one
+// example of a workspace-wide condition will go looking for a one-off.
+func refuseNestedRepository(dir string, paths []string) error {
+	offending := map[string]bool{}
+	for _, p := range paths {
+		// Git reports an untracked nested repository as a directory, trailing
+		// separator and all, because it does not descend into one.
+		p = strings.TrimSuffix(p, "/")
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p), ".git")); err == nil {
+			offending[p] = true
+		}
+	}
+	staged, err := gitOutput(dir, "ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	for _, record := range strings.Split(strings.TrimRight(staged, "\x00"), "\x00") {
+		if !strings.HasPrefix(record, "160000 ") {
+			continue
+		}
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		p := record[tab+1:]
+		// A gitlink whose directory is GONE is being removed, and removing one
+		// is the only way out of this state: the removal commits a tree with no
+		// gitlink in it and leaves a clean workspace. Refusing it would make
+		// this guard block its own repair. The exemption closes nothing,
+		// because an index entry whose worktree path does not exist cannot
+		// survive `add -A` - the removal is staged and the entry is gone.
+		//
+		// The narrower-looking test, "refuse only if the path is STILL a Git
+		// repository", is what this must not be: a producer stages a gitlink
+		// and then renames the nested .git away, and every predicate that asks
+		// the worktree what the path is now answers wrongly.
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); os.IsNotExist(err) {
+			continue
+		}
+		offending[p] = true
+	}
+	if len(offending) == 0 {
+		return nil
+	}
+	named := make([]string, 0, len(offending))
+	for p := range offending {
+		// Quoted, because neither `status -z` nor `ls-files -z` quotes a path
+		// and this refusal is journalled. A producer that names a directory
+		// with a newline in it would otherwise write its own line into runtime
+		// evidence; no privilege crosses, but forgeable evidence is worth less
+		// than evidence that cannot be forged.
+		named = append(named, fmt.Sprintf("%q", p))
+	}
+	sort.Strings(named)
+	return fmt.Errorf("candidate holds nested Git repositories, whose content a runtime commit cannot carry: %s", strings.Join(named, ", "))
 }
 func changedPaths(dir string) ([]string, error) {
 	out, err := gitOutput(dir, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
