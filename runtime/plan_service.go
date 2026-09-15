@@ -855,7 +855,7 @@ func (s PlanService) previewSnapshot(plan domain.EngineeringPlan, snapshot PlanS
 }
 
 func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
-	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
+	view := PlanView{Plan: plan, Snapshot: snapshot.withDependencyBlockers(plan), Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
 	baseChange, err := s.baseChange(plan)
 	if err != nil {
 		return PlanView{}, err

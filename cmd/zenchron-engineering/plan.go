@@ -1132,6 +1132,9 @@ func planOutput(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, ac
 			}
 		}
 		fmt.Fprintln(stdout, line)
+		for _, blocker := range view.Snapshot.Stages[stage.ID].BlockedBy {
+			fmt.Fprintf(stdout, "    blocked by %s: %s\n", terminalSafe(blocker.StageID), terminalSafe(blocker.Reason))
+		}
 	}
 	for _, blocked := range view.Blocked {
 		fmt.Fprintf(stdout, "blocked: %s (%s) %s\n", terminalSafe(blocked.StageID), terminalSafe(string(blocked.Kind)), terminalSafe(blocked.Reason))
