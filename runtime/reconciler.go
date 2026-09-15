@@ -71,6 +71,22 @@ var observationKinds = map[string]bool{OpSourceObserve: true, OpGitHubObserve: t
 // Every one of them is gated on a current, authorized #7 decision.
 var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true}
 
+// deliveryKinds are the steps that HAND OVER a candidate the runtime has
+// already verified: the publication itself, plus the base check and the #7
+// decision that must precede it. They produce nothing new. Between them they
+// re-read the base, ask authority about the exact commit, push one branch and
+// open or update one pull request, and every one of them is bound to that exact
+// commit - so the sequence is finite by construction rather than by a clock.
+//
+// The set exists because the run wall budget does not bound it; see
+// deliveringVerifiedCandidate. It is deliberately the EXEMPT set rather than
+// the budgeted one, so a new operation kind is budgeted until somebody decides
+// otherwise, which is the safe direction for a bound whose job is to end work.
+var deliveryKinds = map[string]bool{
+	OpBaseIntegrate: true, OpAuthorityEvaluate: true,
+	OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true,
+}
+
 // PublicationActionType is the protected action the runtime asks #7 about
 // before it pushes or opens a pull request. Push is not a separate authority:
 // pushing the run-owned branch exists only to publish, so one decision gates
@@ -747,8 +763,12 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
-	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
-		return Failed, "run_wall_budget_exhausted"
+	//
+	// It bounds work the run is still CHOOSING to do. It does not reach the
+	// handover of a candidate the run has already verified; see
+	// deliveringVerifiedCandidate.
+	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit && !s.deliveringVerifiedCandidate() {
+		return Failed, s.wallBudgetReason()
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
 		return Failed, "run_lifecycle_deadline_exhausted"
@@ -878,6 +898,78 @@ func (s *runState) budgets() RunBudgets {
 		budgets.MaxExecutionAttempts = attempts
 	}
 	return budgets
+}
+
+// deliveringVerifiedCandidate reports whether the only business this run has
+// left is handing over a candidate it has ALREADY verified. While that is true
+// the run wall budget does not end it.
+//
+// The budget exists to bound work the runtime chooses to keep doing: compiling
+// a contract, invoking a producer, remediating, verifying. Publication is none
+// of those. It is the short, bounded, idempotent step that turns everything the
+// budget already paid for into something a person can act on, and letting the
+// bound consume it means the operator is charged for every expensive stage and
+// handed nothing. Run run-9d2a446bc6071568ce3030503b01bd57 is the proof: it
+// recorded assurance.observed passed=true and run.failed
+// run_wall_budget_exhausted in the same second, and candidate b6f2c09 never
+// became a pull request.
+//
+// This is NOT a second clock and it does not extend anyone's budget. The
+// arithmetic in activeElapsed is untouched and stays the one answer to "how
+// much has this run spent"; what changes is only which operations that answer
+// is allowed to stop. Nor is it an escape from governance: the delivery steps
+// still route through authority.evaluate, and validate still refuses a
+// publication without a current authorized decision, so an exempt run whose
+// decision is not authorized settles into the authority wait it was always
+// going to settle into rather than publishing.
+//
+// Bounded still means something. The exemption holds only while NO budgeted
+// operation is wanted, so the instant the run wants to produce or verify
+// anything again - a base that moved and made assurance stale, a reviewer
+// asking for a change - the budget ends the run as before. And the optional
+// lifecycle deadline, which bounds calendar time rather than work, is not
+// affected at all.
+func (s *runState) deliveringVerifiedCandidate() bool {
+	if s.projection.CandidateRevision == "" {
+		return false
+	}
+	if a := s.projection.Assurance; a == nil || a.Stale || !a.Passed {
+		return false
+	}
+	return !s.wantsBudgetedWork()
+}
+
+// wantsBudgetedWork reports whether replayed state still wants an operation the
+// wall budget is there to bound - anything that is neither pure observation nor
+// the delivery of an already-verified candidate.
+//
+// It asks every spec rather than only the first one the planner would pick,
+// because the planner's first pick is almost always an observation at a fresh
+// epoch, and "what would run next" is not the question here. The question is
+// whether any producing or verifying work remains at all.
+func (s *runState) wantsBudgetedWork() bool {
+	for _, spec := range operationSpecs {
+		if observationKinds[spec.kind] || deliveryKinds[spec.kind] {
+			continue
+		}
+		key, wanted := spec.bind(s)
+		if wanted && key != "" && !s.satisfied(spec.kind, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// wallBudgetReason names what the budget actually stopped. A run holding a
+// commit that never became a pull request is a different fact for an operator
+// than a run that had produced nothing: the first one has work on disk that
+// somebody may want to look at, and reading "run_wall_budget_exhausted" alone
+// tells them nothing about it.
+func (s *runState) wallBudgetReason() string {
+	if s.projection.CandidateRevision != "" && !s.published() {
+		return "run_wall_budget_exhausted_candidate_unpublished"
+	}
+	return "run_wall_budget_exhausted"
 }
 
 func (s *runState) attemptsFor(kind string) int {

@@ -192,6 +192,33 @@ nobody has classified spends the budget. A new wait pauses the clock only when
 somebody decides it should, which is the safe direction for a bound whose whole
 job is to end things.
 
+### What the budget may stop
+
+The wall budget bounds work the run is still *choosing* to do — compiling a
+contract, invoking a producer, remediating, verifying. It does not reach the
+handover of a candidate the run has already verified: the base check, the
+authority decision, the push and the pull request. That sequence produces
+nothing new, every step of it is bound to the exact candidate commit, and it is
+finite by construction rather than by a clock.
+
+A second live run showed why. Candidate `b6f2c09` recorded
+`assurance.observed passed=true` and `run.failed run_wall_budget_exhausted` in
+the same second: the operator paid for every expensive stage and received no
+pull request. Publication is the one step that turns work into something a
+person can act on, and a bound that consumes it makes every earlier stage
+worthless.
+
+The exemption is for *delivery*, not for being over budget. It holds only while
+no producing or verifying operation is wanted, so a base that moved and made
+assurance stale, or a reviewer asking for a change, ends the run exactly as
+before. It is not an escape from governance either: publication still requires a
+current authorized `authority.evaluated` decision, and a run that does not have
+one settles into its authority wait rather than publishing.
+
+When the budget does end a run that holds a commit which never became a pull
+request, it says so — `run_wall_budget_exhausted_candidate_unpublished` — because
+the bare reason tells an operator nothing about the work sitting on disk.
+
 ## Concurrency
 
 The ceiling is operator authority:

@@ -6,10 +6,13 @@ package runtime
 // review loop unusable at any budget that still bounded runaway work.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 func waitEvent(at time.Time, reason string) EngineeringEvent {
@@ -277,5 +280,126 @@ func TestEveryWaitRoutedFailureIsClassified(t *testing.T) {
 		if !externalWaitReasons[reason] {
 			t.Errorf("failure class %q settles into wait reason %q, which spends the execution budget", class, reason)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #203: a spent budget must not discard verified work
+// ---------------------------------------------------------------------------
+
+// burningAssurance charges the injected clock for the time a verifier took, so
+// a scenario can reproduce the shape run run-9d2a446bc6071568ce3030503b01bd57
+// died in: the envelope is gone at the exact moment the candidate becomes
+// publishable, and every expensive stage has already been paid for.
+type burningAssurance struct {
+	inner AssuranceProvider
+	clock *steppingClock
+	burn  time.Duration
+	spent bool
+}
+
+func (b *burningAssurance) ProducedEvidenceClasses() []domain.EvidenceClass {
+	producer, ok := b.inner.(EvidenceProducer)
+	if !ok {
+		return nil
+	}
+	return producer.ProducedEvidenceClasses()
+}
+
+func (b *burningAssurance) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
+	result, err := b.inner.Assure(ctx, request)
+	if !b.spent {
+		b.spent = true
+		b.clock.advance(b.burn)
+	}
+	return result, err
+}
+
+// exhaustedAtVerification builds a run whose wall budget is gone by the time the
+// last verifier has answered.
+func exhaustedAtVerification(t *testing.T, fixture *phase8Fixture) *phase8Fixture {
+	t.Helper()
+	fixture.deps.Budgets = RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 2, MaxRemediationAttempts: 2, MaxAssuranceAttempts: 2}
+	fixture.deps.SemanticAssurance = &burningAssurance{inner: fixture.deps.SemanticAssurance, clock: fixture.clock, burn: 31 * time.Minute}
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	return fixture
+}
+
+// TestASpentBudgetDoesNotDiscardAVerifiedCandidate is #203. A run that produced
+// a candidate, committed it, reassessed it and verified it has spent everything
+// the budget was there to bound; the pull request is the only thing left, and a
+// run that dies holding it has charged the operator for all of it and delivered
+// none of it.
+func TestASpentBudgetDoesNotDiscardAVerifiedCandidate(t *testing.T) {
+	fixture := exhaustedAtVerification(t, newPhase8Fixture(t))
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+
+	state := fixture.state(runID)
+	if state.activeElapsed(fixture.clock.at) <= 30*time.Minute {
+		t.Fatalf("the scenario did not exhaust the envelope: %s", state.activeElapsed(fixture.clock.at))
+	}
+	if a := state.projection.Assurance; a == nil || a.Stale || !a.Passed {
+		t.Fatalf("the scenario did not reach a verified candidate: %#v", a)
+	}
+	pr := state.projection.PullRequest
+	if pr == nil {
+		t.Fatalf("verified candidate %s was discarded unpublished: %s/%s", state.projection.CandidateRevision, outcome.Disposition, outcome.Reason)
+	}
+	if pr.HeadRevision != state.projection.CandidateRevision {
+		t.Fatalf("the pull request carries %s, want the verified candidate %s", pr.HeadRevision, state.projection.CandidateRevision)
+	}
+	if outcome.Disposition == Failed {
+		t.Fatalf("the run failed after delivering: %s/%s", outcome.Disposition, outcome.Reason)
+	}
+}
+
+// TestASpentBudgetStillCannotPublishWithoutAuthority is the boundary the fix is
+// not allowed to move. Delivery is exempt from the budget; it is not exempt
+// from #7. A run whose publication decision is not authorized must reach the
+// same wait it always reached, and must open nothing.
+func TestASpentBudgetStillCannotPublishWithoutAuthority(t *testing.T) {
+	fixture := exhaustedAtVerification(t, newAuthorityFixture(t))
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+
+	if outcome.Disposition != Waiting || outcome.Reason != "awaiting_authority" {
+		t.Fatalf("outcome = %#v, want waiting/awaiting_authority", outcome)
+	}
+	state := fixture.state(runID)
+	if state.published() || countMethod(fixture.forge.Calls, "CreatePullRequest") != 0 {
+		t.Fatal("an unauthorized run published because its budget was spent")
+	}
+	if _, ok := state.publicationDecision(); !ok {
+		t.Fatal("the run published nothing and evaluated no authority either")
+	}
+}
+
+// TestTheWallBudgetStillEndsARunWithWorkLeftToDo is the other half of the
+// policy. The exemption is for HANDING OVER verified work, not for being over
+// budget: a run that still wants to produce or verify anything is ended exactly
+// as before, and the reason says that a commit exists which never became a pull
+// request, because "run_wall_budget_exhausted" alone tells an operator nothing
+// about the work on disk.
+func TestTheWallBudgetStillEndsARunWithWorkLeftToDo(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	clock := &steppingClock{at: start.Add(12 * time.Hour)}
+	state := conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, []EngineeringEvent{
+		progressEvent(start.Add(time.Hour)),
+	})
+	// A committed, execution-complete candidate nobody has verified: assurance
+	// is wanted, so budgeted work remains.
+	state.projection = RunProjection{
+		Contract:          Ref{ID: "contract-1", Revision: "1"},
+		CandidateRevision: "b6f2c09",
+		CandidateTree:     "tree-1",
+		CandidateComplete: true,
+	}
+	disposition, reason := state.conditions()
+	if disposition != Failed {
+		t.Fatalf("a run with verification still to do outlived its budget: %s/%s", disposition, reason)
+	}
+	if reason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("reason = %q, want the unpublished candidate named", reason)
 	}
 }
