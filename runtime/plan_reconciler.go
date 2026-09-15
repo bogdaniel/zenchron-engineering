@@ -701,7 +701,8 @@ func (r PlanReconciler) startedRun(plan domain.EngineeringPlan, stageID string, 
 //   - not on publication or settlement. A producer re-activated by reviewer
 //     feedback moves it on the first checkpoint, long before it has produced
 //     anything a reviewer should consume, and firing there would bind the next
-//     performance to an interim, possibly unpushed head.
+//     performance to an interim, possibly unpushed head. A terminal failure
+//     also stops movement, but supplies no replacement input to consume.
 //
 // The detail is BOUNDED, because it becomes a journal field: two full candidate
 // heads and a stage id exceed the 200-byte field bound with ordinary production
@@ -719,7 +720,7 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		if outcome, settled := runSettled(run); !settled || outcome != "completed" {
 			continue
 		}
 		head := run.Candidate.Revision
