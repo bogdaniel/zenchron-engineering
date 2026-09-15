@@ -295,6 +295,9 @@ type burningAssurance struct {
 	inner AssuranceProvider
 	clock *steppingClock
 	burn  time.Duration
+	// then runs once, after the envelope is gone and before anything can be
+	// handed over, which is where a base moves under a verified candidate.
+	then  func()
 	spent bool
 }
 
@@ -311,6 +314,9 @@ func (b *burningAssurance) Assure(ctx context.Context, request AssuranceRequest)
 	if !b.spent {
 		b.spent = true
 		b.clock.advance(b.burn)
+		if b.then != nil {
+			b.then()
+		}
 	}
 	return result, err
 }
@@ -387,13 +393,26 @@ func TestTheWallBudgetStillEndsARunWithWorkLeftToDo(t *testing.T) {
 	state := conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, []EngineeringEvent{
 		progressEvent(start.Add(time.Hour)),
 	})
-	// A committed, execution-complete candidate nobody has verified: assurance
-	// is wanted, so budgeted work remains.
+	// A VERIFIED candidate, so the cheap guards in deliveringVerifiedCandidate
+	// all pass and the answer has to come from wantsBudgetedWork itself. An
+	// earlier version of this test left Assurance nil, which short-circuits
+	// before the predicate is ever called - it asserted the rule and exercised
+	// none of it.
 	state.projection = RunProjection{
 		Contract:          Ref{ID: "contract-1", Revision: "1"},
 		CandidateRevision: "b6f2c09",
 		CandidateTree:     "tree-1",
 		CandidateComplete: true,
+		Assurance:         &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Commit: "b6f2c09", Tree: "tree-1", Passed: true}},
+	}
+	// Nothing has verified this exact tree yet, so assurance is wanted and
+	// unsatisfied. The projection says a previous head passed; the planner says
+	// there is work to do, and the planner is what the budget answers to.
+	if !state.wantsBudgetedWork() {
+		t.Fatal("unsatisfied assurance is not being counted as budgeted work")
+	}
+	if state.deliveringVerifiedCandidate() {
+		t.Fatal("a run with work left to do claimed to be delivering")
 	}
 	disposition, reason := state.conditions()
 	if disposition != Failed {
@@ -401,5 +420,92 @@ func TestTheWallBudgetStillEndsARunWithWorkLeftToDo(t *testing.T) {
 	}
 	if reason != "run_wall_budget_exhausted_candidate_unpublished" {
 		t.Fatalf("reason = %q, want the unpublished candidate named", reason)
+	}
+}
+
+// TestAContestedBaseIntegrationIsNotAHandover is the limit of the exemption's
+// weakest member. A base that moved cleanly is a fetch and a replay; a base that
+// CONFLICTS is conflict resolution, which is producing a new tree rather than
+// handing over an old one. Left exempt, it spent three fetches and three aborted
+// rebases entirely outside the budget and settled
+// base.integrate_attempts_exhausted, which says nothing about the verified
+// candidate it was holding.
+func TestAContestedBaseIntegrationIsNotAHandover(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	exhaustedAtVerification(t, fixture)
+	// The base grows the same file the candidate adds, at the instant the
+	// candidate becomes publishable and the envelope is already gone.
+	fixture.deps.SemanticAssurance.(*burningAssurance).then = func() {
+		fixture.moveBase("candidate.go", "package conflicting\n")
+	}
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_candidate_unpublished", outcome)
+	}
+	state := fixture.state(runID)
+	key := mustBind(t, bindBaseIntegrate, state)
+	op, ok := state.operationByKey(OpBaseIntegrate, key)
+	if !ok {
+		t.Fatal("the run never attempted the base integration at all")
+	}
+	if op.Attempt != 1 {
+		t.Fatalf("base.integrate ran %d attempts past the budget, want 1", op.Attempt)
+	}
+	if state.published() {
+		t.Fatal("a candidate was published over a base it could not integrate")
+	}
+}
+
+// TestASpentBudgetNamesUndeliveredFeedback is the neighbour the legibility
+// argument has to cover. An over-budget run that published does not decline the
+// #63 review loop, it ENTERS it: the comment is admitted, and the next pass ends
+// the run with the provider never invoked and the item still pending. Given
+// #203's own 27m46s against thirty minutes that is the common shape, and
+// "run_wall_budget_exhausted" tells the reviewer waiting on the pull request
+// nothing at all.
+func TestASpentBudgetNamesUndeliveredFeedback(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}}
+	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	exhaustedAtVerification(t, fixture)
+	fixture.forge.ViewerActor = GitHubActor{Login: "zenchron-runtime", ID: 99}
+	fixture.forge.Permissions["maintainer"] = PermissionWrite
+
+	runID := fixture.start()
+	if outcome := fixture.reconcile(runID); outcome.Disposition == Failed {
+		t.Fatalf("the verified candidate was not delivered: %#v", outcome)
+	}
+	number := fixture.state(runID).projection.PullRequest.Number
+
+	fixture.forge.ConversationComments[number] = []GitHubComment{{
+		ID: 501, Author: GitHubActor{Login: "maintainer", ID: 7},
+		Body: UntrustedText("please add a doc comment to the new helper"), CreatedAt: fixture.clock.Now(),
+	}}
+	observation, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Admitted != 1 {
+		t.Fatalf("the comment was not admitted: %#v", observation)
+	}
+
+	before := len(fixture.provider.requests)
+	outcome := fixture.reconcile(runID)
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_feedback_undelivered" {
+		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_feedback_undelivered", outcome)
+	}
+	// The exemption does not survive the run wanting to work again, which is
+	// what makes the bound still mean something.
+	if len(fixture.provider.requests) != before {
+		t.Fatal("an over-budget run invoked the provider on reviewer feedback")
+	}
+	state := fixture.state(runID)
+	if !state.wantsBudgetedWork() {
+		t.Fatal("pending feedback is not being counted as budgeted work")
+	}
+	if len(state.pendingFeedbackKeys()) != 1 {
+		t.Fatalf("pending feedback = %v, want the admitted item to survive for a resume", state.pendingFeedbackKeys())
 	}
 }

@@ -82,6 +82,9 @@ var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreat
 // deliveringVerifiedCandidate. It is deliberately the EXEMPT set rather than
 // the budgeted one, so a new operation kind is budgeted until somebody decides
 // otherwise, which is the safe direction for a bound whose job is to end work.
+//
+// base.integrate is the member that earns its place conditionally, and
+// contestedIntegration is where that condition lives.
 var deliveryKinds = map[string]bool{
 	OpBaseIntegrate: true, OpAuthorityEvaluate: true,
 	OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true,
@@ -949,25 +952,61 @@ func (s *runState) deliveringVerifiedCandidate() bool {
 // whether any producing or verifying work remains at all.
 func (s *runState) wantsBudgetedWork() bool {
 	for _, spec := range operationSpecs {
-		if observationKinds[spec.kind] || deliveryKinds[spec.kind] {
+		if observationKinds[spec.kind] {
 			continue
 		}
 		key, wanted := spec.bind(s)
-		if wanted && key != "" && !s.satisfied(spec.kind, key) {
-			return true
+		if !wanted || key == "" || s.satisfied(spec.kind, key) {
+			continue
 		}
+		if deliveryKinds[spec.kind] && !s.contestedIntegration(spec.kind, key) {
+			continue
+		}
+		return true
 	}
 	return false
 }
 
-// wallBudgetReason names what the budget actually stopped. A run holding a
-// commit that never became a pull request is a different fact for an operator
-// than a run that had produced nothing: the first one has work on disk that
-// somebody may want to look at, and reading "run_wall_budget_exhausted" alone
-// tells them nothing about it.
+// contestedIntegration reports whether base.integrate has already FAILED at
+// this binding, which is the one way a delivery step stops being a delivery
+// step.
+//
+// A first base.integrate is the precondition every publication owes its base: a
+// fetch, and either nothing to do or a rebase that replays the candidate onto a
+// base that moved cleanly. That is bounded and mechanical, and the clean move
+// already ends the run anyway, because the rebase writes a new head and
+// assurance goes stale at it.
+//
+// A failure means a CONFLICT, and resolving a conflict is producing a new tree
+// rather than handing over an old one - which is exactly the line the exemption
+// is drawn on. Left exempt, a conflicting base spent three fetches and three
+// aborted rebases entirely outside the budget and then settled
+// base.integrate_attempts_exhausted, so "finite by construction" was really
+// "finite by MaxAttempts". One attempt is the handover's share; a second is the
+// run choosing to keep working, and the budget ends it.
+func (s *runState) contestedIntegration(kind, binding string) bool {
+	if kind != OpBaseIntegrate {
+		return false
+	}
+	op, ok := s.operationByKey(kind, binding)
+	return ok && op.State == OperationFailed
+}
+
+// wallBudgetReason names what the budget actually stopped. A run holding
+// something undelivered is a different fact for an operator than a run that had
+// produced nothing: there is work nobody can see, and reading
+// "run_wall_budget_exhausted" alone tells them nothing about it. That is true of
+// a commit that never became a pull request and equally true of a reviewer's
+// comment that never reached a worker.
 func (s *runState) wallBudgetReason() string {
-	if s.projection.CandidateRevision != "" && !s.published() {
+	switch {
+	case s.projection.CandidateRevision != "" && !s.published():
 		return "run_wall_budget_exhausted_candidate_unpublished"
+	case len(s.pendingFeedbackKeys()) > 0:
+		// A published run stopped holding admitted, applicable feedback nobody
+		// has been given. The pull request is open, a reviewer is waiting on it,
+		// and the bare reason says nothing about either.
+		return "run_wall_budget_exhausted_feedback_undelivered"
 	}
 	return "run_wall_budget_exhausted"
 }

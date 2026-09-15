@@ -215,9 +215,29 @@ before. It is not an escape from governance either: publication still requires a
 current authorized `authority.evaluated` decision, and a run that does not have
 one settles into its authority wait rather than publishing.
 
-When the budget does end a run that holds a commit which never became a pull
-request, it says so — `run_wall_budget_exhausted_candidate_unpublished` — because
-the bare reason tells an operator nothing about the work sitting on disk.
+`base.integrate` is exempt only on its **first** attempt. A first integration is
+the precondition every publication owes its base — a fetch, and either nothing
+to do or a replay onto a base that moved cleanly. A failure means a *conflict*,
+and resolving a conflict is producing a new tree rather than handing over an old
+one, which is the line the exemption is drawn on. Left unqualified, a conflicting
+base spent three fetches and three aborted rebases entirely outside the budget
+and then settled `base.integrate_attempts_exhausted`, so "finite by construction"
+was really "finite by `MaxAttempts`".
+
+When the budget ends a run holding something undelivered, it says which:
+
+```text
+run_wall_budget_exhausted_candidate_unpublished  a commit that never became a
+                                                 pull request
+run_wall_budget_exhausted_feedback_undelivered   an admitted reviewer comment
+                                                 no worker was ever given
+```
+
+The second is not a corner. An over-budget run that published does not decline
+the review loop, it *enters* it: `ObserveFeedback` admits the comment and the
+next pass ends the run with the provider never invoked. The pending item survives
+a budget raise and a resume, but the bare reason told the reviewer waiting on the
+pull request nothing at all.
 
 ## Concurrency
 
