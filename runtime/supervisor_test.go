@@ -2120,3 +2120,140 @@ func TestARunSubmittedWhileAnotherIsExecutingStartsWithoutWaitingForIt(t *testin
 		t.Fatalf("shutdown never finished draining run %s", long)
 	}
 }
+
+// TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots is the fairness rule at
+// the one place it is decided, driven directly so it is deterministic and
+// costs nothing.
+//
+// It exists because the rule had no test that could see it. Once driving
+// outlived the pass that started it, the fleet the supervisor chooses from
+// changes size every pass by exactly the in-flight set - and a cursor that
+// indexed that changing subset rather than the active ring is the same mistake
+// as walking a list while deleting from it. The same integer named a different
+// run each pass and settled into a cycle that never landed on one of them:
+// four runs at a ceiling of two, with the durations below, started run-02 zero
+// times in two hundred passes while every pass had room and gave it to a
+// sibling. Nothing here is adversarial - stable per-run durations are what an
+// ordinary mixed fleet of pollers and executors looks like.
+func TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots(t *testing.T) {
+	supervisor := &Supervisor{
+		deps:     SupervisorDependencies{MaxConcurrentRuns: 2},
+		inflight: map[string]struct{}{},
+	}
+	active := []EngineeringRun{{ID: "run-00"}, {ID: "run-01"}, {ID: "run-02"}, {ID: "run-03"}}
+	// How many passes each run stays in flight: two return within the pass that
+	// started them, two execute across several.
+	passesInFlight := map[string]int{"run-00": 1, "run-01": 2, "run-02": 1, "run-03": 3}
+
+	remaining, started := map[string]int{}, map[string]int{}
+	for pass := 0; pass < 200; pass++ {
+		for id := range remaining {
+			if remaining[id]--; remaining[id] <= 0 {
+				delete(remaining, id)
+				delete(supervisor.inflight, id)
+			}
+		}
+		for _, run := range supervisor.admit(active) {
+			remaining[run.ID] = passesInFlight[run.ID]
+			started[run.ID]++
+		}
+		if len(supervisor.inflight) > supervisor.deps.MaxConcurrentRuns {
+			t.Fatalf("pass %d admitted past the ceiling: %d in flight", pass, len(supervisor.inflight))
+		}
+	}
+	for _, run := range active {
+		if started[run.ID] == 0 {
+			t.Fatalf("%s was never started in 200 passes while its siblings started %v: "+
+				"a pass with room handed it to somebody else every time", run.ID, started)
+		}
+	}
+}
+
+// TestEveryActiveRunGetsATurnWhileAnotherIsExecuting is the same rule through
+// the real loop, which is where it now has to hold.
+//
+// TestEveryActiveRunGetsATurnUnderACeiling above still passes and no longer
+// proves this: it drives Tick, which waits, so nothing is ever in flight when
+// the next pass decides. Fairness among runs whose driving OUTLIVES a pass is a
+// different question, and it is the one an operator asks when a long provider
+// is running and everything else is waiting behind it.
+func TestEveryActiveRunGetsATurnWhileAnotherIsExecuting(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	// One long run, and three siblings that must each get their turn while it
+	// holds its slot. A ceiling of two leaves exactly one slot to share.
+	long := fixture.start()
+	var siblings []string
+	for i := 0; i < 3; i++ {
+		issue := phase8Issue + 40 + i
+		fixture.forge.Issues[issue] = GitHubIssue{
+			Number: issue, URL: "https://github.com/acme/repo/issues/3",
+			Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+		}
+		outcome, err := fixture.runtime.StartIssueRun(context.Background(), issue, AdoptCompatibleGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		siblings = append(siblings, outcome.RunID)
+	}
+
+	gate := &heldForge{
+		GitHubAdapter: fixture.forge, issue: phase8Issue,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseLong := func() { releaseOnce.Do(func() { close(gate.release) }) }
+	t.Cleanup(releaseLong)
+	fixture.deps.GitHub = gate
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: RealClock{}, Owner: "owner-1",
+		StateDir: fixture.stateDir, Repositories: []GitHubRepo{repo},
+		MaxConcurrentRuns: 2, PollInterval: time.Second, Agents: supervisorRegistry(t),
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop := make(chan error, 1)
+	go func() { loop <- supervisor.Run(ctx, nil) }()
+
+	select {
+	case <-gate.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("run %s never reached the held call, so no slot is being held", long)
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		waiting := make([]string, 0, len(siblings))
+		for _, runID := range siblings {
+			if operationsForRun(t, fixture.store, runID) == 0 {
+				waiting = append(waiting, runID)
+			}
+		}
+		if len(waiting) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%v never got a turn on the free slot while run %s held the other one: "+
+				"a pass with room gave it to a sibling every time", waiting, long)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	releaseLong()
+	select {
+	case err := <-loop:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatalf("shutdown never finished draining run %s", long)
+	}
+}

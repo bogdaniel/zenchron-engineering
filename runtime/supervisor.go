@@ -152,9 +152,9 @@ type Supervisor struct {
 	// outside it, so a slow run never blocks an operator command.
 	mu       sync.Mutex
 	draining bool
-	// cursor is the rotation offset into the admissible-run list. It exists so a
+	// cursor is the rotation offset into the ACTIVE-run ring. It exists so a
 	// ceiling smaller than the active set is a rate limit rather than a fixed
-	// prefix; see rotateLocked.
+	// prefix; see admit.
 	cursor int
 	// inflight is the runs being driven right now, by run id. A pass does not
 	// start a run that is already in one - driving a run twice would be two
@@ -505,53 +505,51 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	return report, nil
 }
 
-// admit decides which runs this pass starts, and reserves their slots.
+// admit decides which runs this pass starts, and reserves their slots. It is
+// the whole fairness mechanism: no priority, no weighting, no starvation.
 //
 // A run already being driven is neither a candidate nor free capacity: driving
 // it again would put two workers on one journal, and counting its slot as free
 // would admit past the ceiling now that driving outlives a pass. What is left
-// is the room the ceiling still has, and the rotation fills that.
+// is the room the ceiling still has, and this sweep fills it.
+//
+// The cursor indexes the ACTIVE ring - every non-terminal run - and the sweep
+// STEPS OVER the ones already in flight. It is deliberately not an index into
+// the dispatchable subset, which is the same mistake as walking a list while
+// deleting from it: that subset shrinks and grows by the in-flight set every
+// pass, so the same integer names a different run each time and (cursor, size)
+// can settle into a cycle that never lands on one of them. Four runs at a
+// ceiling of two, with stable per-run durations - three polling, two executing,
+// the ordinary mixed fleet - starved one poller forever while every pass had
+// room and handed it to somebody else. The active ring changes only when a run
+// is created or settles, so the windows tile it and every run is reached within
+// one sweep of it.
 //
 // Selecting and reserving happen under one lock because they are one decision.
 func (s *Supervisor) admit(active []EngineeringRun) []EngineeringRun {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	candidates := make([]EngineeringRun, 0, len(active))
-	for _, run := range active {
-		if _, busy := s.inflight[run.ID]; !busy {
-			candidates = append(candidates, run)
-		}
-	}
 	room := s.deps.MaxConcurrentRuns - len(s.inflight)
-	if room > len(candidates) {
-		room = len(candidates)
-	}
-	if room <= 0 {
+	if room <= 0 || len(active) == 0 {
+		// The cursor does NOT advance on a pass that started nothing. Advancing
+		// past runs it never considered is how a sweep skips one.
 		return nil
 	}
-	selected := s.rotateLocked(candidates, room)
-	for _, run := range selected {
+	start := s.cursor % len(active)
+	selected := make([]EngineeringRun, 0, room)
+	considered := 0
+	for i := 0; i < len(active) && len(selected) < room; i++ {
+		considered = i + 1
+		run := active[(start+i)%len(active)]
+		if _, busy := s.inflight[run.ID]; busy {
+			continue
+		}
+		selected = append(selected, run)
 		s.inflight[run.ID] = struct{}{}
 	}
-	return selected
-}
-
-// rotateLocked selects at most room runs, starting from a cursor that advances
-// every pass. It is the whole fairness mechanism: no priority, no weighting, no
-// starvation. The caller holds mu.
-func (s *Supervisor) rotateLocked(candidates []EngineeringRun, room int) []EngineeringRun {
-	if len(candidates) <= room {
-		return candidates
-	}
-	start := s.cursor % len(candidates)
-	// The cursor advances by the number actually started, so the next pass
-	// begins where this one stopped rather than overlapping it.
-	s.cursor = (start + room) % len(candidates)
-
-	selected := make([]EngineeringRun, 0, room)
-	for i := 0; i < room; i++ {
-		selected = append(selected, candidates[(start+i)%len(candidates)])
-	}
+	// The next pass resumes after the last run this one LOOKED AT, whether it
+	// started that run or stepped over it, so the sweep keeps moving forward.
+	s.cursor = (start + considered) % len(active)
 	return selected
 }
 
