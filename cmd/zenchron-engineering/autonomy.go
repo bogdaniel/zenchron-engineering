@@ -640,7 +640,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations"),
 	}
 
-	credentials := githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
+	credentials := githubCredentials(config.GitHub)
 	forge := overrides.GitHub
 	if forge == nil {
 		forge = runtime.GitHubRESTAdapter{
@@ -839,14 +839,25 @@ func operatorHome() string {
 	return os.Getenv("HOME")
 }
 
-func githubCredentials(mode string, tokenPath string) runtime.CredentialProvider {
-	switch mode {
+func githubCredentials(config runtime.GitHubConfig) runtime.CredentialProvider {
+	switch config.CredentialMode {
 	case runtime.GitHubCredentialCLI:
 		return runtime.GitHubCLICredential{}
 	case runtime.GitHubCredentialToken:
 		// A publication identity of the runtime's own, so the operator stays a
 		// distinct actor whose review is admissible feedback.
-		return runtime.GitHubTokenFileCredential{Path: tokenPath}
+		return runtime.GitHubTokenFileCredential{Path: config.TokenPath}
+	case runtime.GitHubCredentialApp:
+		// The same separation, from a machine identity rather than a second
+		// account: the installation token is minted here and re-minted before
+		// it expires, and the private key never leaves this process.
+		return &runtime.GitHubAppCredential{
+			AppID:          config.AppID,
+			InstallationID: config.InstallationID,
+			PrivateKeyPath: config.PrivateKeyPath,
+			HTTP:           &http.Client{Timeout: 30 * time.Second},
+			Endpoint:       config.Endpoint,
+		}
 	}
 	// Nil is the documented "github_auth_required" state, not anonymous access.
 	return nil

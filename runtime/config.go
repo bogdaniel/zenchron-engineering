@@ -61,7 +61,13 @@ const (
 	// file, which is how the runtime is given a publication identity of its own
 	// rather than borrowing the operator's.
 	GitHubCredentialToken = "token"
-	GitHubCredentialNone  = "none"
+	// GitHubCredentialApp mints the publication credential from a GitHub App
+	// installation, which is the only way to get a publication identity that is
+	// a machine rather than a second human account. The token it mints expires
+	// hourly and is re-minted from the App private key, so nothing long-lived
+	// sits on disk except a key the operator can revoke in one click.
+	GitHubCredentialApp  = "github-app"
+	GitHubCredentialNone = "none"
 )
 
 // Watch enrolment. Watch observes ONLY repositories an operator listed in the
@@ -170,15 +176,43 @@ type GitHubConfig struct {
 	// #63 review loop cannot run on a single-account installation: the operator
 	// reviews the pull request and the worker never hears it.
 	//
-	// The answer is a separate identity, not a weaker guard. A GitHub App
-	// installation token or a dedicated runtime account keeps admission decided
-	// by identity - which is what makes it robust against text - while leaving
-	// the human a distinct actor whose feedback is admissible.
+	// The answer is a separate identity, not a weaker guard: a dedicated
+	// runtime account's token keeps admission decided by identity - which is
+	// what makes it robust against text - while leaving the human a distinct
+	// actor whose feedback is admissible.
+	//
+	// It is NOT where a GitHub App goes. An App issues no token that can sit in
+	// a file: its installation token is minted from the App's private key and
+	// expires in an hour. That path is credential_mode "github-app".
 	//
 	// omitempty, so a configuration that does not use it canonicalizes exactly
 	// as it did before this member existed.
 	TokenPath string `json:"token_path,omitempty"`
-	Endpoint  string `json:"endpoint,omitempty"`
+	// AppID, InstallationID and PrivateKeyPath configure credential_mode
+	// "github-app". None of the three is a secret: the App id is on the App's
+	// public page, the installation id is in the installation URL, and the
+	// third is a PATH exactly as token_path and provider.credential_path are.
+	// The KEY is the secret, it stays on disk, and the file must be owner-only.
+	//
+	// The App path exists because "token_path holds a GitHub App installation
+	// token" was never true: an App does not issue a token an operator can put
+	// in a file. It issues one that is minted from the private key, expires in
+	// an hour, and cannot call GET /user - so the runtime has to mint it, and
+	// has to resolve its own identity from the App rather than from the user.
+	//
+	// All three are omitempty, so a configuration that does not use them
+	// canonicalizes exactly as it did before they existed.
+	AppID          int64  `json:"app_id,omitempty"`
+	InstallationID int64  `json:"installation_id,omitempty"`
+	PrivateKeyPath string `json:"private_key_path,omitempty"`
+	Endpoint       string `json:"endpoint,omitempty"`
+}
+
+// appMembersStated reports whether any github-app member was named. They are
+// refused as a group under the other modes, for token_path's reason: a member
+// that is silently ignored reads as a configuration that is in effect.
+func (c GitHubConfig) appMembersStated() bool {
+	return c.AppID != 0 || c.InstallationID != 0 || strings.TrimSpace(c.PrivateKeyPath) != ""
 }
 
 // SupervisorConfig is the persistent supervisor's own bounds.
@@ -926,6 +960,9 @@ func (c OperatorConfig) validate(path string) error {
 		if strings.TrimSpace(c.GitHub.TokenPath) != "" {
 			return refuse(fmt.Sprintf("github.token_path is only used with credential_mode %q", GitHubCredentialToken))
 		}
+		if c.GitHub.appMembersStated() {
+			return refuse(fmt.Sprintf("github.app_id, github.installation_id and github.private_key_path are only used with credential_mode %q", GitHubCredentialApp))
+		}
 	case GitHubCredentialToken:
 		if strings.TrimSpace(c.GitHub.TokenPath) == "" {
 			return refuse(fmt.Sprintf("github.credential_mode %q requires github.token_path", GitHubCredentialToken))
@@ -933,8 +970,27 @@ func (c OperatorConfig) validate(path string) error {
 		if !filepath.IsAbs(c.GitHub.TokenPath) {
 			return refuse("github.token_path must be an absolute path")
 		}
+		if c.GitHub.appMembersStated() {
+			return refuse(fmt.Sprintf("github.app_id, github.installation_id and github.private_key_path are only used with credential_mode %q", GitHubCredentialApp))
+		}
+	case GitHubCredentialApp:
+		if strings.TrimSpace(c.GitHub.TokenPath) != "" {
+			return refuse(fmt.Sprintf("github.token_path is only used with credential_mode %q", GitHubCredentialToken))
+		}
+		if c.GitHub.AppID <= 0 {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.app_id, the App's numeric id", GitHubCredentialApp))
+		}
+		if c.GitHub.InstallationID <= 0 {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.installation_id, the numeric id of the App's installation on this repository", GitHubCredentialApp))
+		}
+		if strings.TrimSpace(c.GitHub.PrivateKeyPath) == "" {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.private_key_path", GitHubCredentialApp))
+		}
+		if !filepath.IsAbs(c.GitHub.PrivateKeyPath) {
+			return refuse("github.private_key_path must be an absolute path")
+		}
 	default:
-		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialNone))
+		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialApp, GitHubCredentialNone))
 	}
 	for _, bound := range []struct {
 		name  string

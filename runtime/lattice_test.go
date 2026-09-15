@@ -107,6 +107,14 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// the in-repo layer names no credential member, so a repository cannot
 		// point the runtime at a different identity to publish as.
 		"github.token_path",
+		// The GitHub App publication identity. The App id and the installation
+		// id are public identifiers and the third member is a PATH; the key
+		// itself never appears in configuration. All three are operator
+		// authority for token_path's reason: a repository that could name them
+		// would be choosing the identity the runtime publishes as.
+		"github.app_id",
+		"github.installation_id",
+		"github.private_key_path",
 		"github.endpoint",
 		"budgets.wall_limit_seconds",
 		// A total-elapsed bound, separate from the execution budget. Operator

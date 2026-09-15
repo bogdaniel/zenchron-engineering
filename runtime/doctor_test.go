@@ -122,6 +122,18 @@ type doctorForge struct {
 	// than inferring distinctness from the credential mode, so a fixture that
 	// leaves it empty models an environment that cannot answer the question.
 	viewer GitHubActor
+	// permission is what every actor holds on the repository. Doctor asks for
+	// the OPERATOR's, because a publication identity distinct from the human is
+	// only half of a working review loop; the other half is that the human
+	// clears the admission threshold.
+	permission GitHubPermission
+}
+
+func (f doctorForge) RepositoryPermission(context.Context, GitHubRepo, string) (GitHubPermission, error) {
+	if f.permission == "" {
+		return PermissionUnresolved, &GitHubAuthError{Detail: "no permission configured"}
+	}
+	return f.permission, nil
 }
 
 func (f doctorForge) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
@@ -275,7 +287,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// A healthy environment can also say WHO it publishes as: doctor reports
 		// the resolved account rather than inferring distinctness from the
 		// credential mode, so the fixture has to supply one.
-		GitHub: doctorForge{viewer: GitHubActor{Login: "zenchron-runtime", ID: 4242}, result: DiscoveryResult{
+		GitHub: doctorForge{viewer: GitHubActor{Login: "zenchron-runtime", ID: 4242}, permission: PermissionAdmin, result: DiscoveryResult{
 			Repo:      GitHubRepo{Owner: "acme", Name: "widgets"},
 			Label:     DefaultDiscoveryLabel,
 			Pages:     1,
@@ -289,10 +301,15 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// fixture detail to paper over, which is why the healthy fixture is the
 		// configuration that does not have it.
 		GitHubCredentialMode: GitHubCredentialToken,
-		OperatorConfigPath:   f.configPath,
-		RepositoryRoot:       f.repoRoot,
-		ProjectModel:         model,
-		Policy:               policy,
+		// ...and it can also say who the HUMAN is, through the operator's own
+		// `gh` login. Doctor compares the two accounts: a separate credential
+		// that turns out to be the same account is the collision it exists to
+		// report, and it cannot see that from one half.
+		OperatorGitHub:     doctorForge{viewer: GitHubActor{Login: "bogdaniel", ID: 7}},
+		OperatorConfigPath: f.configPath,
+		RepositoryRoot:     f.repoRoot,
+		ProjectModel:       model,
+		Policy:             policy,
 	}
 	return f
 }
