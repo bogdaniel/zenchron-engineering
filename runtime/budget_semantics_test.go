@@ -6,10 +6,13 @@ package runtime
 // review loop unusable at any budget that still bounded runaway work.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 func waitEvent(at time.Time, reason string) EngineeringEvent {
@@ -277,5 +280,305 @@ func TestEveryWaitRoutedFailureIsClassified(t *testing.T) {
 		if !externalWaitReasons[reason] {
 			t.Errorf("failure class %q settles into wait reason %q, which spends the execution budget", class, reason)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #203: a spent budget must not discard verified work
+// ---------------------------------------------------------------------------
+
+// burningAssurance charges the injected clock for the time a verifier took, so
+// a scenario can reproduce the shape run run-9d2a446bc6071568ce3030503b01bd57
+// died in: the envelope is gone at the exact moment the candidate becomes
+// publishable, and every expensive stage has already been paid for.
+type burningAssurance struct {
+	inner AssuranceProvider
+	clock *steppingClock
+	burn  time.Duration
+	// then runs once, after the envelope is gone and before anything can be
+	// handed over, which is where a base moves under a verified candidate.
+	then  func()
+	spent bool
+}
+
+func (b *burningAssurance) ProducedEvidenceClasses() []domain.EvidenceClass {
+	producer, ok := b.inner.(EvidenceProducer)
+	if !ok {
+		return nil
+	}
+	return producer.ProducedEvidenceClasses()
+}
+
+func (b *burningAssurance) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
+	result, err := b.inner.Assure(ctx, request)
+	if !b.spent {
+		b.spent = true
+		b.clock.advance(b.burn)
+		if b.then != nil {
+			b.then()
+		}
+	}
+	return result, err
+}
+
+// exhaustedAtVerification builds a run whose wall budget is gone by the time the
+// last verifier has answered.
+func exhaustedAtVerification(t *testing.T, fixture *phase8Fixture) *phase8Fixture {
+	t.Helper()
+	fixture.deps.Budgets = RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 2, MaxRemediationAttempts: 2, MaxAssuranceAttempts: 2}
+	fixture.deps.SemanticAssurance = &burningAssurance{inner: fixture.deps.SemanticAssurance, clock: fixture.clock, burn: 31 * time.Minute}
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	return fixture
+}
+
+// TestASpentBudgetDoesNotDiscardAVerifiedCandidate is #203. A run that produced
+// a candidate, committed it, reassessed it and verified it has spent everything
+// the budget was there to bound; the pull request is the only thing left, and a
+// run that dies holding it has charged the operator for all of it and delivered
+// none of it.
+func TestASpentBudgetDoesNotDiscardAVerifiedCandidate(t *testing.T) {
+	fixture := exhaustedAtVerification(t, newPhase8Fixture(t))
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+
+	state := fixture.state(runID)
+	if state.activeElapsed(fixture.clock.at) <= 30*time.Minute {
+		t.Fatalf("the scenario did not exhaust the envelope: %s", state.activeElapsed(fixture.clock.at))
+	}
+	if a := state.projection.Assurance; a == nil || a.Stale || !a.Passed {
+		t.Fatalf("the scenario did not reach a verified candidate: %#v", a)
+	}
+	pr := state.projection.PullRequest
+	if pr == nil {
+		t.Fatalf("verified candidate %s was discarded unpublished: %s/%s", state.projection.CandidateRevision, outcome.Disposition, outcome.Reason)
+	}
+	if pr.HeadRevision != state.projection.CandidateRevision {
+		t.Fatalf("the pull request carries %s, want the verified candidate %s", pr.HeadRevision, state.projection.CandidateRevision)
+	}
+	if outcome.Disposition == Failed {
+		t.Fatalf("the run failed after delivering: %s/%s", outcome.Disposition, outcome.Reason)
+	}
+}
+
+// TestASpentBudgetStillCannotPublishWithoutAuthority is the boundary the fix is
+// not allowed to move. Delivery is exempt from the budget; it is not exempt
+// from #7. A run whose publication decision is not authorized must reach the
+// same wait it always reached, and must open nothing.
+func TestASpentBudgetStillCannotPublishWithoutAuthority(t *testing.T) {
+	fixture := exhaustedAtVerification(t, newAuthorityFixture(t))
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+
+	if outcome.Disposition != Waiting || outcome.Reason != "awaiting_authority" {
+		t.Fatalf("outcome = %#v, want waiting/awaiting_authority", outcome)
+	}
+	state := fixture.state(runID)
+	if state.published() || countMethod(fixture.forge.Calls, "CreatePullRequest") != 0 {
+		t.Fatal("an unauthorized run published because its budget was spent")
+	}
+	if _, ok := state.publicationDecision(); !ok {
+		t.Fatal("the run published nothing and evaluated no authority either")
+	}
+}
+
+// TestTheWallBudgetStillEndsARunWithWorkLeftToDo is the other half of the
+// policy. The exemption is for HANDING OVER verified work, not for being over
+// budget: a run that still wants to produce or verify anything is ended exactly
+// as before, and the reason says that a commit exists which never became a pull
+// request, because "run_wall_budget_exhausted" alone tells an operator nothing
+// about the work on disk.
+func TestTheWallBudgetStillEndsARunWithWorkLeftToDo(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	clock := &steppingClock{at: start.Add(12 * time.Hour)}
+	state := conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, []EngineeringEvent{
+		progressEvent(start.Add(time.Hour)),
+	})
+	// A VERIFIED candidate, so the cheap guards in deliveringVerifiedCandidate
+	// all pass and the answer has to come from wantsBudgetedWork itself. An
+	// earlier version of this test left Assurance nil, which short-circuits
+	// before the predicate is ever called - it asserted the rule and exercised
+	// none of it.
+	state.projection = RunProjection{
+		Contract:          Ref{ID: "contract-1", Revision: "1"},
+		CandidateRevision: "b6f2c09",
+		CandidateTree:     "tree-1",
+		CandidateComplete: true,
+		Assurance:         &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Commit: "b6f2c09", Tree: "tree-1", Passed: true}},
+	}
+	// Nothing has verified this exact tree yet, so assurance is wanted and
+	// unsatisfied. The projection says a previous head passed; the planner says
+	// there is work to do, and the planner is what the budget answers to.
+	if !state.wantsBudgetedWork() {
+		t.Fatal("unsatisfied assurance is not being counted as budgeted work")
+	}
+	if state.deliveringVerifiedCandidate() {
+		t.Fatal("a run with work left to do claimed to be delivering")
+	}
+	disposition, reason := state.conditions()
+	if disposition != Failed {
+		t.Fatalf("a run with verification still to do outlived its budget: %s/%s", disposition, reason)
+	}
+	if reason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("reason = %q, want the unpublished candidate named", reason)
+	}
+}
+
+// TestAnOverBudgetBaseIntegrationOnlyEVERReads is the passivity claim, proven
+// rather than asserted. base.integrate is in the exempt set only because it
+// cannot spend anything once the envelope is gone; "MaxAttempts makes it finite"
+// was never an argument, because something can be finite and still consume work
+// that should count.
+//
+// The base here moves CLEANLY, so the rebase would succeed. That is the
+// demanding direction: a conflict test would pass even if the guard were
+// missing, because git would refuse the work anyway.
+func TestAnOverBudgetBaseIntegrationOnlyEVERReads(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	exhaustedAtVerification(t, fixture)
+	// A base that moved, in a file the candidate never touches, at the instant
+	// the candidate becomes publishable and the envelope is already gone.
+	fixture.deps.SemanticAssurance.(*burningAssurance).then = func() {
+		fixture.moveBase("UNRELATED.md", "the base moved cleanly\n")
+	}
+	runID := fixture.start()
+	before := fixture.state(runID)
+	outcome := fixture.reconcile(runID)
+	state := fixture.state(runID)
+
+	for _, e := range state.events {
+		if e.Type == EventCandidateBaseIntegrated {
+			t.Fatal("an over-budget run rebased the candidate onto a moved base")
+		}
+	}
+	if head := state.projection.CandidateRevision; head != before.projection.CandidateRevision && before.projection.CandidateRevision != "" {
+		t.Fatalf("the candidate head moved past the budget: %s", head)
+	}
+	key := mustBind(t, bindBaseIntegrate, state)
+	op, ok := state.operationByKey(OpBaseIntegrate, key)
+	if !ok {
+		t.Fatal("the run never read the base at all, so it would have published blind")
+	}
+	if op.Attempt != 1 {
+		t.Fatalf("base.integrate ran %d attempts past the budget, want exactly the one read", op.Attempt)
+	}
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_candidate_unpublished", outcome)
+	}
+	if state.published() {
+		t.Fatal("a candidate was published over a base it had not integrated")
+	}
+}
+
+// TestASpentBudgetNamesUndeliveredFeedback is the neighbour the legibility
+// argument has to cover. An over-budget run that published does not decline the
+// #63 review loop, it ENTERS it: the comment is admitted, and the next pass ends
+// the run with the provider never invoked and the item still pending. Given
+// #203's own 27m46s against thirty minutes that is the common shape, and
+// "run_wall_budget_exhausted" tells the reviewer waiting on the pull request
+// nothing at all.
+func TestASpentBudgetNamesUndeliveredFeedback(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}}
+	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	exhaustedAtVerification(t, fixture)
+	fixture.forge.ViewerActor = GitHubActor{Login: "zenchron-runtime", ID: 99}
+	fixture.forge.Permissions["maintainer"] = PermissionWrite
+
+	runID := fixture.start()
+	if outcome := fixture.reconcile(runID); outcome.Disposition == Failed {
+		t.Fatalf("the verified candidate was not delivered: %#v", outcome)
+	}
+	number := fixture.state(runID).projection.PullRequest.Number
+
+	fixture.forge.ConversationComments[number] = []GitHubComment{{
+		ID: 501, Author: GitHubActor{Login: "maintainer", ID: 7},
+		Body: UntrustedText("please add a doc comment to the new helper"), CreatedAt: fixture.clock.Now(),
+	}}
+	observation, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Admitted != 1 {
+		t.Fatalf("the comment was not admitted: %#v", observation)
+	}
+
+	before := len(fixture.provider.requests)
+	outcome := fixture.reconcile(runID)
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_feedback_undelivered" {
+		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_feedback_undelivered", outcome)
+	}
+	// The exemption does not survive the run wanting to work again, which is
+	// what makes the bound still mean something.
+	if len(fixture.provider.requests) != before {
+		t.Fatal("an over-budget run invoked the provider on reviewer feedback")
+	}
+	state := fixture.state(runID)
+	if !state.wantsBudgetedWork() {
+		t.Fatal("pending feedback is not being counted as budgeted work")
+	}
+	if len(state.pendingFeedbackKeys()) != 1 {
+		t.Fatalf("pending feedback = %v, want the admitted item to survive for a resume", state.pendingFeedbackKeys())
+	}
+}
+
+// TestWantsBudgetedWorkDecidesTheBudgetOutcome is the predicate's own test, and
+// it is built to fail under mutation rather than to go green.
+//
+// Two states differ in exactly one thing: whether an operation the budget bounds
+// is still wanted. Everything else - the clock, the limit, the journal, the
+// verified candidate - is identical. If the predicate stops being consulted
+// (delete `&& !s.deliveringVerifiedCandidate()`, or make wantsBudgetedWork
+// constant in either direction) the two states stop disagreeing, and the pair
+// assertion below fails. A test that asserts only one of them certifies a claim
+// it cannot observe, which is how the previous version of this file passed with
+// wantsBudgetedWork never called at all.
+func TestWantsBudgetedWorkDecidesTheBudgetOutcome(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	budgets := RunBudgets{WallLimit: 30 * time.Minute}
+	verified := RunProjection{
+		Contract:          Ref{ID: "contract-1", Revision: "1"},
+		CandidateRevision: "b6f2c09",
+		CandidateTree:     "tree-1",
+		CandidateComplete: true,
+		Assurance: &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{
+			Commit: "b6f2c09", Tree: "tree-1", Passed: true,
+		}},
+	}
+	// The ONLY difference: a succeeded assurance operation at exactly this
+	// binding, which is what makes the remaining work delivery rather than
+	// verification.
+	delivering := conditionsFixture(start, &steppingClock{at: start.Add(12 * time.Hour)}, budgets, []EngineeringEvent{
+		progressEvent(start.Add(time.Hour)),
+	})
+	delivering.projection = verified
+	working := conditionsFixture(start, &steppingClock{at: start.Add(12 * time.Hour)}, budgets, []EngineeringEvent{
+		progressEvent(start.Add(time.Hour)),
+	})
+	working.projection = verified
+	key := mustBind(t, bindAssuranceGo, delivering)
+	delivering.snapshot.Operations = map[string]RunOperation{"op-1": {
+		ID: "op-1", Kind: OpAssuranceGo, IdempotencyKey: operationKey(OpAssuranceGo, key), State: Succeeded,
+	}}
+
+	if delivering.wantsBudgetedWork() {
+		t.Fatal("a verified candidate with its assurance satisfied still reports budgeted work")
+	}
+	if !working.wantsBudgetedWork() {
+		t.Fatal("an unsatisfied assurance is not counted as budgeted work")
+	}
+
+	deliveringDisposition, deliveringReason := delivering.conditions()
+	workingDisposition, workingReason := working.conditions()
+	// The pair is the assertion. Neither half alone can tell a consulted
+	// predicate from an ignored one.
+	if deliveringDisposition == workingDisposition {
+		t.Fatalf("the budget answered both states %s/%s and %s/%s the same way, so the predicate changed nothing",
+			deliveringDisposition, deliveringReason, workingDisposition, workingReason)
+	}
+	if deliveringDisposition == Failed {
+		t.Fatalf("delivery was ended by the budget: %s/%s", deliveringDisposition, deliveringReason)
+	}
+	if workingDisposition != Failed || workingReason != "run_wall_budget_exhausted_candidate_unpublished" {
+		t.Fatalf("working = %s/%s, want failed/run_wall_budget_exhausted_candidate_unpublished", workingDisposition, workingReason)
 	}
 }

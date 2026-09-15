@@ -192,6 +192,49 @@ nobody has classified spends the budget. A new wait pauses the clock only when
 somebody decides it should, which is the safe direction for a bound whose whole
 job is to end things.
 
+### What the budget may stop
+
+The wall budget bounds work the run is still *choosing* to do — compiling a
+contract, invoking a producer, remediating, verifying. It does not reach the
+handover of a candidate the run has already verified: the base check, the
+authority decision, the push and the pull request. That sequence produces
+nothing new, every step of it is bound to the exact candidate commit, and it is
+finite by construction rather than by a clock.
+
+A second live run showed why. Candidate `b6f2c09` recorded
+`assurance.observed passed=true` and `run.failed run_wall_budget_exhausted` in
+the same second: the operator paid for every expensive stage and received no
+pull request. Publication is the one step that turns work into something a
+person can act on, and a bound that consumes it makes every earlier stage
+worthless.
+
+The exemption is for *delivery*, not for being over budget. It holds only while
+no producing or verifying operation is wanted, so a base that moved and made
+assurance stale, or a reviewer asking for a change, ends the run exactly as
+before. It is not an escape from governance either: publication still requires a
+current authorized `authority.evaluated` decision, and a run that does not have
+one settles into its authority wait rather than publishing.
+
+`base.integrate` is in the exempt set only because it is made **passive** once
+the envelope is gone. It fetches, reads the base and answers; the branch that
+rebases or merges is not taken. Being finite was never the argument — that
+confuses boundedness with accounting, and something can be finite and still
+consume work that should count. A base that has moved is reported and left
+alone, the run ends naming its unpublished candidate, and the integration is the
+next run's business.
+
+When the budget ends a run holding a commit that never became a pull request, it
+says so: `run_wall_budget_exhausted_candidate_unpublished`. The bare reason tells
+an operator nothing about the work sitting on disk.
+
+When the budget ends a run that holds an admitted reviewer comment nobody was
+ever given, it says `run_wall_budget_exhausted_feedback_undelivered`. Naming it
+is all that happens today, and naming it is not enough: the run is *terminal*,
+and only a non-terminal run is adopted by `StartOrResumeIssueRun`, so the
+obligation is abandoned rather than deferred while the reviewer watches an open
+pull request nobody is working on. That is #210, and it is deliberately left
+open here.
+
 ## Concurrency
 
 The ceiling is operator authority:

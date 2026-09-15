@@ -1625,6 +1625,24 @@ func (r *EngineeringRuntime) integrateBase(_ context.Context, state *runState, _
 	if published {
 		strategy = "merge"
 	}
+	// THE BASE MOVED, AND THE ENVELOPE IS GONE.
+	//
+	// Everything above this line is a read: a fetch, a rev-parse and an
+	// ancestry test. Everything below it rewrites the candidate - a rebase or a
+	// merge, which produces a new tree that assurance has never seen and which
+	// may conflict and need resolving. That is work, and being bounded by
+	// MaxAttempts does not make it free: something can be finite and still spend
+	// an envelope that is already spent.
+	//
+	// So the exemption that lets an over-budget run reach this operation at all
+	// buys the READ and nothing else. A base that moved is reported and left
+	// alone, the run is ended by the budget on the next pass with its
+	// unpublished candidate named, and the integration is the next run's
+	// business. Without this the exemption would be a hole exactly the size of
+	// a rebase.
+	if state.wallBudgetSpent(state.rt.deps.Clock.Now()) {
+		return effect{state: OperationFailed, result: baseIntegrateResult{Strategy: strategy, BaseRevision: base, Moved: true}}
+	}
 	result, err := workspace.IntegrateBase(ref, published)
 	if err != nil {
 		if _, ok := err.(*ConflictError); ok {
