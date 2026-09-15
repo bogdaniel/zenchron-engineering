@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -401,14 +402,24 @@ func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, boo
 	// What `status` prints and what the supervisor admits against. The
 	// enforcement below is measured against THIS number rather than against the
 	// literal, so a future change that moves one of them alone fails here.
-	if advertised := built.maxConcurrentRuns(); advertised != ceiling {
+	advertised, err := built.maxConcurrentRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advertised != ceiling {
 		t.Fatalf("the operator ceiling was advertised as %d, want %d", advertised, ceiling)
 	}
 	now := time.Now().UTC()
 	for i := 0; i < held; i++ {
+		// A held slot belongs to a REAL non-terminal run. The ceiling counts
+		// run ids holding an operation and would have been satisfied by an
+		// orphan operation with no run behind it, but leaning on that would
+		// have rested this proof on the very blind spot #171 repairs.
 		id := fmt.Sprintf("op-elsewhere-%d", i)
+		elsewhere := fmt.Sprintf("run-elsewhere-%d", i)
+		seedRun(t, built.store, elsewhere, "zenchron/seeded#99", now)
 		if _, created, err := built.store.PutOperation(runtime.RunOperation{
-			SchemaVersion: runtime.SchemaVersion, ID: id, RunID: fmt.Sprintf("run-elsewhere-%d", i),
+			SchemaVersion: runtime.SchemaVersion, ID: id, RunID: elsewhere,
 			Kind: "external.work", IdempotencyKey: id, State: runtime.Leased,
 			Attempt: 1, MaxAttempts: 1, CreatedAt: now,
 			Lease: &runtime.Lease{Owner: "another-owner", HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)},
@@ -417,19 +428,7 @@ func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, boo
 		}
 	}
 	const runID = "run-under-test"
-	if err := built.store.PutRun(runtime.EngineeringRun{
-		SchemaVersion: runtime.SchemaVersion, ID: runID, Repository: "zenchron/seeded",
-		Goal: "work waiting for a slot", Phase: runtime.Execute, Disposition: runtime.Active,
-		CreatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := built.store.AppendEvent(runtime.EngineeringEvent{
-		SchemaVersion: runtime.SchemaVersion, ID: runID + "-created", RunID: runID,
-		Type: runtime.EventRunCreated,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRun(t, built.store, runID, "zenchron/seeded#41", now)
 	engine, err := built.engine(runtime.RepositoryTarget{
 		Identity: "zenchron/seeded", Remote: "https://github.com/zenchron/seeded.git",
 		DefaultBranch: watchedDefaultBranch,
@@ -497,5 +496,174 @@ func TestTheConfiguredCeilingIsWhatTheSchedulerEnforces(t *testing.T) {
 				t.Fatalf("a run inside the ceiling was told no operation was available")
 			}
 		})
+	}
+}
+
+// seedRun writes one non-terminal run and the run.created event that makes it
+// readable, which is the smallest durable state the supervisor will drive.
+func seedRun(t *testing.T, store *runtime.SQLiteOperationStore, runID, goal string, at time.Time) {
+	t.Helper()
+	if err := store.PutRun(runtime.EngineeringRun{
+		SchemaVersion: runtime.SchemaVersion, ID: runID, Repository: "zenchron/seeded",
+		Goal: goal, Phase: runtime.Execute, Disposition: runtime.Active, CreatedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(runtime.EngineeringEvent{
+		SchemaVersion: runtime.SchemaVersion, ID: runID + "-created", RunID: runID,
+		Type: runtime.EventRunCreated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// overlapGate holds every run that reaches it until `want` runs are inside at
+// the same time, and then has each of them count how many runs the DURABLE
+// store says are holding an operation at that instant.
+//
+// The holding is what makes the answer an observation rather than an inference.
+// Sampling without it would report whatever the scheduler happened to be doing
+// when the sample was taken, and a fleet that runs its work strictly one run at
+// a time would still produce a one occasionally followed by another one.
+type overlapGate struct {
+	mu     sync.Mutex
+	inside int
+	peak   int
+	want   int
+	open   chan struct{}
+	// after bounds the wait so a serialised fleet FAILS rather than hangs. It
+	// is paid only when the runs do not overlap, which is the defect.
+	after time.Duration
+	count func() int
+}
+
+func (g *overlapGate) arrive() {
+	g.mu.Lock()
+	g.inside++
+	if g.inside == g.want {
+		close(g.open)
+	}
+	g.mu.Unlock()
+	select {
+	case <-g.open:
+	case <-time.After(g.after):
+	}
+	observed := g.count()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if observed > g.peak {
+		g.peak = observed
+	}
+}
+
+// gatedForge is the ordinary forge double with one call held open.
+//
+// source.observe is the only thing on this path that asks for an issue, and it
+// asks from inside its own leased operation, so a run parked here is a run that
+// holds a slot. The wait is deliberately OUTSIDE the double's own mutex: the
+// double serializes its methods, and holding one inside that lock would have
+// been a test that could only ever observe one run.
+type gatedForge struct {
+	*runtime.FakeGitHubAdapter
+	gate *overlapGate
+}
+
+var _ runtime.GitHubAdapter = gatedForge{}
+
+func (f gatedForge) Issue(ctx context.Context, repo runtime.GitHubRepo, number int) (runtime.GitHubIssue, error) {
+	issue, err := f.FakeGitHubAdapter.Issue(ctx, repo, number)
+	f.gate.arrive()
+	return issue, err
+}
+
+// TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant is the #63 claim
+// itself: one operator starts several real tasks and different agents work on
+// them independently.
+//
+// It is separate from the ceiling test above because the two prove different
+// things and each passes while the other fails. That one proves the configured
+// number reaches the durable enforcer; it is satisfied by a fleet that plumbs
+// the number correctly and then still executes one run at a time, which is a
+// product with the defect #167 describes and a green suite. This one proves the
+// work overlaps: two runs are held inside their own leased operations at the
+// same instant, and the count comes from the store rather than from what the
+// supervisor reported about itself.
+func TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant(t *testing.T) {
+	dir, configPath, seeded := seededWorkspace(t, "https://github.com/zenchron/seeded.git", func(config map[string]any) {
+		config["supervisor"] = map[string]any{"max_concurrent_runs": 2}
+	})
+	t.Chdir(dir)
+
+	inner := runtime.NewFakeGitHubAdapter()
+	gate := &overlapGate{want: 2, open: make(chan struct{}), after: 10 * time.Second}
+	overrides := offlineOverrides()
+	overrides.GitHub = gatedForge{FakeGitHubAdapter: inner, gate: gate}
+	built, err := newComposition(autonomyFlags{Config: configPath, Repo: "zenchron/seeded"}, overrides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer built.release()
+	gate.count = func() int {
+		operations, err := built.store.AllOperations()
+		if err != nil {
+			return 0
+		}
+		holding := map[string]bool{}
+		for _, operation := range operations {
+			if operation.State == runtime.Leased || operation.State == runtime.Running {
+				holding[operation.RunID] = true
+			}
+		}
+		return len(holding)
+	}
+
+	// The workspace's own leftover run is retired first. It is non-terminal,
+	// older than both runs under test, and a ceiling of two would have spent
+	// the whole fleet on it plus one - which is a fair scheduling answer and a
+	// useless experiment.
+	retire(t, built.store, seeded)
+
+	// Two runs answering two DIFFERENT issues. The supervisor's forge shares
+	// one observation stream per repository, so two runs asking the same
+	// question would legitimately become one call and one arrival - a real
+	// optimisation that would have made this test unable to see anything.
+	now := time.Now().UTC()
+	for _, issue := range []int{41, 42} {
+		inner.Issues[issue] = runtime.GitHubIssue{
+			Number: issue, URL: fmt.Sprintf("https://github.com/zenchron/seeded/issues/%d", issue),
+			Title: runtime.UntrustedText(fmt.Sprintf("task %d", issue)), Body: "body",
+			State: runtime.GitHubOpen, UpdatedAt: now,
+		}
+		seedRun(t, built.store, fmt.Sprintf("run-issue-%d", issue), fmt.Sprintf("zenchron/seeded#%d", issue), now)
+	}
+
+	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := driver.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Capacity != 2 || len(report.Driven) != 2 {
+		t.Fatalf("the tick drove %d runs at a capacity of %d, want both at two", len(report.Driven), report.Capacity)
+	}
+	if gate.peak < 2 {
+		t.Fatalf("at most %d run held an operation at any one instant: the fleet is serialised, "+
+			"whatever ceiling it reports (drove %d runs at capacity %d)", gate.peak, len(report.Driven), report.Capacity)
+	}
+}
+
+// retire settles a run terminally so the fleet under test is exactly the runs
+// the test seeded.
+func retire(t *testing.T, store *runtime.SQLiteOperationStore, runID string) {
+	t.Helper()
+	run, ok, err := store.Run(runID)
+	if err != nil || !ok {
+		t.Fatalf("reading %s: ok=%v err=%v", runID, ok, err)
+	}
+	run.Disposition = runtime.Failed
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,6 +234,49 @@ func TestRepositoryConfigCannotRaiseACeiling(t *testing.T) {
 	}
 	if configErr.Path == "" {
 		t.Fatal("the refusal must name the repository file")
+	}
+}
+
+// TestTheSupervisorBoundClampsARepositoryWatchProposal closes the one
+// combination the tighten lattice does not reach.
+//
+// TestTightenLatticePerDimension and
+// TestRepositoryConfigCannotRaiseWatchFrequencyOrConcurrency already prove that
+// a repository may only tighten watch.max_concurrent_runs, but both state the
+// operator bound as watch.max_concurrent_runs too. supervisor.max_concurrent_runs
+// is the member the documentation tells an operator to set, WatchSettings takes
+// the stricter of the two, and the resolved answer is now what every engine's
+// scheduler enforces durably - so an operator who states only the supervisor
+// bound must still bound the repository.
+func TestTheSupervisorBoundClampsARepositoryWatchProposal(t *testing.T) {
+	operatorAt := func(t *testing.T, ceiling int) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "config.json"), strings.Replace(operatorConfigJSON(dir), "{\n",
+			fmt.Sprintf("{\n\t\"supervisor\": {\"max_concurrent_runs\": %d},\n", ceiling), 1))
+		return dir
+	}
+
+	dir := operatorAt(t, 2)
+	writeFile(t, filepath.Join(dir, RepositoryConfigFile), `{"watch": {"max_concurrent_runs": 3}}`)
+	configErr := requireConfigError(t, second2(LoadConfig(filepath.Join(dir, "config.json"), dir)))
+	if !strings.Contains(configErr.Detail, "only tighten watch.max_concurrent_runs") ||
+		!strings.Contains(configErr.Detail, "operator bound 2") {
+		t.Fatalf("expected a refusal naming the supervisor bound it exceeded, got %q", configErr.Detail)
+	}
+
+	dir = operatorAt(t, 2)
+	writeFile(t, filepath.Join(dir, RepositoryConfigFile), `{"watch": {"max_concurrent_runs": 1}}`)
+	config, err := LoadConfig(filepath.Join(dir, "config.json"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.WatchSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.MaxConcurrentRuns != 1 {
+		t.Fatalf("the repository tightened to 1 and the effective ceiling is %d", settings.MaxConcurrentRuns)
 	}
 }
 

@@ -724,6 +724,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 	if !c.providerInjected {
 		provider = executionProvider(c.config, agent, c.artifacts, c.sandbox, c.permissionBypass)
 	}
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
 		Agent:             agent,
@@ -765,7 +769,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		// same reason the supervisor and the fleet view do - one resolution of
 		// the operator's configuration, so advertised and enforced cannot be
 		// different numbers.
-		OperatorMaxConcurrentRuns: c.maxConcurrentRuns(),
+		OperatorMaxConcurrentRuns: ceiling,
 	})
 }
 
