@@ -1083,7 +1083,22 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 	}
 	in.GitHubCredentialMode = config.GitHub.CredentialMode
 	in.DiscoveryLabel = config.Watch.Label
-	in.Credentials = githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
+	in.Credentials = githubCredentials(config.GitHub)
+	if policy, err := config.FeedbackPolicy(); err == nil {
+		in.Feedback = policy
+	}
+	// The OPERATOR's own identity, resolved through the operator's own `gh`
+	// login rather than through the publication credential. Doctor compares the
+	// two: a publication identity is only a fix for the review loop when it is
+	// a DIFFERENT account from the person writing the reviews, and the runtime
+	// cannot say that from the mode alone.
+	if config.GitHub.CredentialMode == runtime.GitHubCredentialToken || config.GitHub.CredentialMode == runtime.GitHubCredentialApp {
+		in.OperatorGitHub = runtime.GitHubRESTAdapter{
+			HTTP:        &http.Client{Timeout: 30 * time.Second},
+			Endpoint:    config.GitHub.Endpoint,
+			Credentials: runtime.GitHubCLICredential{},
+		}
+	}
 	if in.Provider == nil {
 		if registry, err := config.AgentRegistry(); err == nil {
 			if agent, err := registry.Agent(""); err == nil {

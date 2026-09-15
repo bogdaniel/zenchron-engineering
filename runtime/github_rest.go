@@ -39,16 +39,33 @@ type GitHubRESTAdapter struct {
 
 var _ GitHubAdapter = GitHubRESTAdapter{}
 
-func (a GitHubRESTAdapter) root() string {
-	if a.Endpoint == "" {
+func (a GitHubRESTAdapter) root() string { return githubAPIRoot(a.Endpoint) }
+
+// githubAPIRoot resolves the API root from a configured endpoint. It is shared
+// with the GitHub App credential, which talks to the same host for the two
+// endpoints that mint an installation token and name the App.
+func githubAPIRoot(endpoint string) string {
+	if endpoint == "" {
 		return "https://api.github.com"
 	}
-	return strings.TrimSuffix(a.Endpoint, "/")
+	return strings.TrimSuffix(endpoint, "/")
 }
 
-// token resolves the credential for exactly this repository. Every failure is a
-// typed GitHubAuthError; none of them is a panic and none of them is an empty
-// token that would silently become an unauthenticated request.
+// token resolves the credential for exactly this repository. Every failure is
+// typed; none of them is a panic and none of them is an empty token that would
+// silently become an unauthenticated request.
+//
+// A provider's OWN typed failure is preserved rather than flattened. While
+// every provider failed only for local, permanent reasons - an unauthenticated
+// `gh`, a file with the wrong mode - collapsing everything into
+// GitHubAuthError cost nothing. GitHubAppCredential performs network I/O to
+// mint its installation token, so it can fail for a reason that clears on its
+// own, and relabelling that as a rejected credential is expensive: watch maps
+// the auth class to WatchErrorAuth and parks every run in the repository as
+// waiting on GitHub authentication, and feedback observation takes the
+// hard-error branch instead of deferring to the next tick. The repair is here
+// rather than at the call site so every future provider that can fail
+// transiently is covered by construction.
 func (a GitHubRESTAdapter) token(repo GitHubRepo) (string, error) {
 	identity, err := repo.identity()
 	if err != nil {
@@ -62,6 +79,10 @@ func (a GitHubRESTAdapter) token(repo GitHubRepo) (string, error) {
 		var authErr *GitHubAuthError
 		if errors.As(err, &authErr) {
 			return "", authErr
+		}
+		var transient *GitHubTransientError
+		if errors.As(err, &transient) {
+			return "", transient
 		}
 		return "", &GitHubAuthError{Detail: "credential resolution failed"}
 	}
@@ -131,11 +152,17 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 		return 0, nil, nil, fmt.Errorf("github request failed")
 	}
 	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	raw, err := readBoundedBody(response)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("github response unreadable")
 	}
 	return response.StatusCode, response.Header, raw, nil
+}
+
+// readBoundedBody reads a forge response under a fixed ceiling, so a hostile or
+// broken endpoint cannot make the runtime allocate without bound.
+func readBoundedBody(response *http.Response) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(response.Body, 8<<20))
 }
 
 // call performs one REST request and decodes into out (nil to discard).
@@ -280,6 +307,16 @@ func (a GitHubRESTAdapter) Viewer(ctx context.Context, repo GitHubRepo) (GitHubA
 	// throttle - shared backoff and a later retry - rather than as a rejected
 	// credential, and a genuinely rejected credential has to stay
 	// distinguishable from both.
+	//
+	// An App installation token never reaches that call at all. GitHub refuses
+	// GET /user for an installation with 403 "Resource not accessible by
+	// integration" - a 403 with no rate-limit headers, which classifies as a
+	// permanently rejected credential and makes feedback admission permanently
+	// unavailable. A credential that authenticates as an App knows its own
+	// identity and answers it from the App endpoints instead.
+	if app, ok := a.Credentials.(ForgeAppIdentity); ok {
+		return app.AppIdentity(ctx)
+	}
 	status, header, raw, err := a.doRaw(ctx, repo, http.MethodGet, "/user", nil, nil, nil)
 	if err != nil {
 		return GitHubActor{}, err
