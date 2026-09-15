@@ -206,6 +206,34 @@ type GitHubConfig struct {
 	InstallationID int64  `json:"installation_id,omitempty"`
 	PrivateKeyPath string `json:"private_key_path,omitempty"`
 	Endpoint       string `json:"endpoint,omitempty"`
+	// GovernanceCredentialMode selects the identity that READS governance
+	// facts - today, the adoption trust root's disclosed bypass actors. It is
+	// a second member rather than a second meaning for credential_mode because
+	// the two roles are genuinely different authorities and are meant to be
+	// held by different identities: the publication credential publishes and
+	// cannot observe the trust root, and the governance credential observes
+	// and cannot publish.
+	//
+	// The reason it exists is measured, not theoretical. GitHub does not
+	// disclose a ruleset's bypass_actors to a GitHub App installation token
+	// even when the token carries administration:read; it substitutes
+	// current_user_can_bypass, which answers a different question. So the
+	// publication identity #82 requires is precisely the identity that cannot
+	// verify the trust root, and an adopted build needs a second one.
+	//
+	// The only mode is "github-cli", the operator's own already-
+	// authenticated local session, borrowed read-only. Empty is the
+	// fail-closed default: no
+	// governance credential is authorized, and an adopted build refuses rather
+	// than falling back to the publication credential, whose silence about
+	// bypass actors is not evidence that there are none. A non-interactive
+	// governance identity will want a mode of its own; it can have one when an
+	// operator needs it, and inventing it now would be inventing a second
+	// unproven path.
+	//
+	// omitempty, so a configuration that does not use it canonicalizes exactly
+	// as it did before this member existed.
+	GovernanceCredentialMode string `json:"governance_credential_mode,omitempty"`
 }
 
 // appMembersStated reports whether any github-app member was named. They are
@@ -991,6 +1019,11 @@ func (c OperatorConfig) validate(path string) error {
 		}
 	default:
 		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialApp, GitHubCredentialNone))
+	}
+	switch strings.TrimSpace(c.GitHub.GovernanceCredentialMode) {
+	case "", GitHubCredentialCLI:
+	default:
+		return refuse(fmt.Sprintf("github.governance_credential_mode must be %q, or absent to authorize no governance observation at all", GitHubCredentialCLI))
 	}
 	for _, bound := range []struct {
 		name  string

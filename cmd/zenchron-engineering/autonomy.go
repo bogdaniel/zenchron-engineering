@@ -131,9 +131,14 @@ type watchController interface {
 // every field nil and the real components are built from configuration; a nil
 // field is never a silent fallback to something weaker.
 type autonomyOverrides struct {
-	GitHub    runtime.GitHubAdapter
-	Provider  runtime.ExecutionProvider
-	Assurance runtime.AssuranceProvider
+	GitHub runtime.GitHubAdapter
+	// Governance is the read-only governance observer. It is its own field
+	// rather than a capability discovered on GitHub, because the whole point
+	// of the seam is that the publication adapter is not the thing that
+	// answers governance questions.
+	Governance runtime.ForgeGovernance
+	Provider   runtime.ExecutionProvider
+	Assurance  runtime.AssuranceProvider
 	// SemanticAssurance replaces the independent semantic producer, so a test
 	// can model a configuration with or without one.
 	SemanticAssurance runtime.AssuranceProvider
@@ -881,6 +886,30 @@ func githubCredentials(config runtime.GitHubConfig) runtime.CredentialProvider {
 	}
 	// Nil is the documented "github_auth_required" state, not anonymous access.
 	return nil
+}
+
+// githubGovernanceCredential selects the identity that READS governance facts.
+//
+// It is a separate selector from githubCredentials, reading a separate
+// configuration member, and its return type is not a CredentialProvider. That
+// is what makes the two roles unmixable here rather than merely unmixed: the
+// publication path cannot be handed what this returns, and the governance path
+// cannot be handed what githubCredentials returns, and neither mistake compiles.
+//
+// An unconfigured governance mode is a refusal, not a fallback to the
+// publication credential. The publication credential's silence about a
+// ruleset's bypass actors is the absence of an observation, and treating it as
+// the observation "there are none" is exactly the failure #219 exists to
+// prevent.
+func githubGovernanceCredential(config runtime.GitHubConfig) (runtime.GovernanceCredential, error) {
+	switch strings.TrimSpace(config.GovernanceCredentialMode) {
+	case runtime.GitHubCredentialCLI:
+		return runtime.GitHubCLIGovernanceCredential(), nil
+	}
+	return nil, fmt.Errorf("no governance credential is authorized, so the adoption trust root cannot be observed: "+
+		"set github.governance_credential_mode to %q. The publication credential is not used for this: "+
+		"GitHub does not disclose a ruleset's bypass actors to a GitHub App installation token, and an undisclosed "+
+		"bypass is not the same as no bypass", runtime.GitHubCredentialCLI)
 }
 
 // semanticAssuranceProvider builds the INDEPENDENT semantic acceptance

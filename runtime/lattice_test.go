@@ -115,6 +115,13 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"github.app_id",
 		"github.installation_id",
 		"github.private_key_path",
+		// The identity that READS governance facts, which is deliberately not
+		// the one that publishes: GitHub does not disclose a ruleset's bypass
+		// actors to a GitHub App installation token. Operator authority for
+		// exactly the reason the publication members are - a repository that
+		// could name the governance identity would be choosing who is allowed
+		// to tell the runtime whether its own trust root has a bypass.
+		"github.governance_credential_mode",
 		"github.endpoint",
 		"budgets.wall_limit_seconds",
 		// A total-elapsed bound, separate from the execution budget. Operator
