@@ -134,3 +134,33 @@ func candidateBytes(t *testing.T, dir string) int64 {
 	}
 	return total
 }
+
+// TestAGuardThatCannotBeArmedRefusesBeforeTheWorkloadStarts pins the ORDERING,
+// which is the whole property: refusing to run uncontained is only honest if it
+// costs nothing that was already working.
+//
+// Arming can fail transiently - a fork returns EAGAIN on a machine out of
+// process slots, and guards are one per bounded process, eight of them for a
+// single brokered tool call. Armed after the workload, that transient failure
+// destroyed a healthy provider to honour the refusal, and force-killed it
+// without even the graceful period an ordinary stop gives. Armed first, there
+// is nothing running to destroy.
+func TestAGuardThatCannotBeArmedRefusesBeforeTheWorkloadStarts(t *testing.T) {
+	requireBoundedProcess(t)
+	restore := ownerDeathGuardShell
+	ownerDeathGuardShell = filepath.Join(t.TempDir(), "no-such-shell")
+	t.Cleanup(func() { ownerDeathGuardShell = restore })
+
+	marker := filepath.Join(t.TempDir(), "workload-ran")
+	cmd := exec.Command("sh", "-c", ": > "+marker)
+	err := runBoundedProcess(context.Background(), cmd, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("a workload was run with containment that could not be armed")
+	}
+	if cmd.Process != nil {
+		t.Fatalf("the workload was started and then killed rather than refused before it started: pid %d", cmd.Process.Pid)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("the refused workload ran far enough to touch the filesystem")
+	}
+}
