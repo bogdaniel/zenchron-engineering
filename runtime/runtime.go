@@ -504,7 +504,16 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			}
 			s.Operations[operation.ID] = operation
 		}
-		if e.Type == EventRunWaiting {
+		// A WAIT NEVER UN-CANCELS A RUN. Replay is otherwise last-wins, which
+		// is right for every automatic disposition - they are all re-derived
+		// from the same state on the next pass - but cancellation is not
+		// derived from anything. It is an operator's instruction, and the only
+		// way a run.waiting lands after one is a driver that read this run
+		// BEFORE the stop and settled its pass afterwards, which is a stale
+		// opinion by construction. Letting it win put the run back in the
+		// supervisor's active set and let the work the operator stopped be
+		// acquired and executed on the next tick.
+		if e.Type == EventRunWaiting && s.Disposition != Cancelled {
 			s.Disposition = Waiting
 			s.Reason = payloadReason(e.Payload)
 		}
@@ -512,7 +521,18 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			s.Disposition = Completed
 			s.Reason = payloadReason(e.Payload)
 		}
-		if e.Type == EventRunFailed {
+		// A FAILURE DOES NOT UN-CANCEL A RUN EITHER, for the same reason a
+		// wait does not. run.failed is appended by a pass that decided the run
+		// failed from a snapshot read before the stop existed - an exhausted
+		// budget, a refused invariant, an attempt ceiling - and none of those
+		// is a later fact about the run, only an earlier opinion about it.
+		// Letting it win reported an operator's stop as a failure.
+		//
+		// run.completed is deliberately NOT guarded. A cancelled run whose
+		// candidate merged IS completed, and conditions() already says so by
+		// consulting MergePrecedence before it consults cancellation; guarding
+		// it here would contradict that rule rather than protect anything.
+		if e.Type == EventRunFailed && s.Disposition != Cancelled {
 			s.Disposition = Failed
 			s.Reason = payloadReason(e.Payload)
 		}

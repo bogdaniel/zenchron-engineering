@@ -425,12 +425,32 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // already sees the winner's row.
 //
 // The run-driving slot is the durable operation lease itself, not a second
-// table. A run holds a slot exactly while one of its operations is leased or
-// running, so a run parked on CI, authority, auth, or opt-in removal holds
+// table. A run holds a slot exactly while one of its operations CARRIES A
+// LEASE, so a run parked on CI, authority, auth, or opt-in removal holds
 // nothing - there is no slot to forget to release, and a durable run that
-// nobody is driving never occupies one. Reclaiming a crashed driver's slot is
-// therefore the existing lease takeover, which CanAcquire already gates on
-// owner death AND expiry, so an expired heartbeat alone still steals nothing.
+// nobody is driving never occupies one.
+//
+// The lease, and not the leased/running state, is what the count is taken over.
+// The state records what the last attempt was doing and belongs to the journal;
+// the lease records who is doing it now. Separating them is what lets an
+// abandoned attempt give its slot back while the row still says what the
+// journal says about it.
+//
+// A TERMINAL RUN's operation is refused outright, and that condition belongs in
+// this statement rather than anywhere cheaper. A stop writes the run document
+// and then finishes the run's active operations, so this check is what decides
+// which side of the stop a concurrent acquisition fell on; a driver that read
+// the run before the stop and checked it in Go would be asking a question whose
+// answer had already changed. The count is deliberately left alone: it still
+// counts leases, and a terminal run holds none once its stop has finished them.
+//
+// Reclaiming a crashed driver's slot is the existing lease takeover, which
+// CanAcquire gates on owner death AND expiry, so an expired heartbeat alone
+// still steals nothing. This statement does not perform that reclamation and
+// must not: owner death is a probe of the operating system, not a fact in the
+// database. Scheduler.reclaimAbandoned retires an abandoned operation before
+// this count is taken, so what is counted here is always durable state - and
+// never a durable row plus a live opinion about it.
 func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
@@ -441,9 +461,12 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	}
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
+		       AND json_extract(runs.document, '$.disposition') IN ('completed', 'failed', 'cancelled'))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
-		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')) < ?`,
-		string(document), op.ID, expected, op.RunID, maxRuns)
+		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
+		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
+		string(document), op.ID, expected, op.RunID, op.RunID, maxRuns)
 	if err != nil {
 		return 0, false, err
 	}

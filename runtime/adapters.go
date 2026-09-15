@@ -619,6 +619,20 @@ const (
 	// may be perfect - it is a statement that the authority to produce it had
 	// already ended.
 	FailureExecutionDeadlineExceeded FailureClass = "execution_deadline_exceeded"
+
+	// FailureRunCancelled is the SAME revocation arriving from the other
+	// direction: a provider that returned after the operator stopped the run.
+	//
+	// It sits beside the deadline class deliberately, and routes the same way,
+	// because it is the same statement - the authority to turn this result into
+	// a candidate had already ended - and not a statement about the work, which
+	// may be perfect. What differs is only the cause and when it is knowable: a
+	// deadline can be recognised only once the attempt ends, while cancellation
+	// exists before it begins and is therefore ALSO refused at acquisition,
+	// where it prevents the invocation rather than discarding its result. This
+	// class is what remains for an attempt that was legitimately acquired and
+	// then outlived the stop.
+	FailureRunCancelled FailureClass = "run_cancelled"
 	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
 	// being there: the configured image resolves no toolchain, the
 	// operator-provisioned dependency cache is missing or empty, or the exact
@@ -728,8 +742,10 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
-	// Stopping is the point: there is no time left to route anywhere.
-	case FailureExecutionDeadlineExceeded:
+	// Stopping is the point: there is no authority left to route anywhere. The
+	// deadline has passed or the operator has stopped the run, and in both
+	// cases a retry would inherit exactly the revocation that ended this one.
+	case FailureExecutionDeadlineExceeded, FailureRunCancelled:
 		return RouteStop
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
