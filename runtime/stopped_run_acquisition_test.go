@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -422,4 +424,163 @@ func TestReplayNeverUnCancelsARun(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestALateResultFromAStoppedRunGainsNoAuthority is the in-flight half, and it
+// is the one the acquisition condition deliberately does NOT cover.
+//
+// The stop lands while the producer is inside Provider.Execute. That attempt is
+// not interrupted - #213 is cooperative process cancellation and reproduces on
+// main - and it is allowed to finish and to journal what it did. What is
+// asserted is the corollary: finishing must not GIVE IT BACK anything. A late
+// result may not become a commit, a push or a pull request merely because the
+// external process managed to return.
+//
+// The mechanism is deliberately NOT a cancellation check in the effect path,
+// and that distinction is the point. execution.completed confers authority
+// through exactly one route - RunProjection.CandidateComplete, read only by
+// this run's own planner and binder - and every stage it makes eligible needs a
+// FRESH LEASE. Cross-run consumption goes through the plan reconciler, which
+// reads the run's disposition directly. So authority loss has consequences
+// rather than deputies, and adding a fifth place that remembers `cancelled`
+// would be the mistake this test exists to make unnecessary.
+//
+// TWO DIFFERENT THINGS REFUSE THAT LEASE, and the test asserts both rather than
+// letting the weaker one stand in for the stronger. A later pass reloads, sees
+// the stop in replay, and is refused by validate on `run is terminal` - that is
+// ordinary and predates this PR. A pass that loaded BEFORE the stop has no such
+// knowledge and is refused by the acquisition statement instead. Only the
+// second arm is sensitive to this PR's conditions; asserting only the first
+// would be a test that passes for a reason it does not name.
+func TestALateResultFromAStoppedRunGainsNoAuthority(t *testing.T) {
+	f := newPhase8Fixture(t)
+	var runID string
+	stopped := false
+	f.provider.mutate = func(dir string) error {
+		if err := os.WriteFile(filepath.Join(dir, "produced.txt"), []byte("work\n"), 0600); err != nil {
+			return err
+		}
+		if !stopped {
+			stopped = true
+			if _, err := CancelRun(f.store, f.runtime.scheduler, f.clock.Now(), runID, "operator/stop"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	runID = f.start()
+	for pass := 0; pass < 8 && !stopped; pass++ {
+		if _, err := f.runtime.Reconcile(context.Background(), runID); err != nil {
+			break
+		}
+	}
+	if !stopped {
+		t.Fatal("the producer never ran, so no in-flight stop was contested")
+	}
+	// The attempt was NOT interrupted. That is #213 and is stated, not hidden.
+	if len(f.provider.requests) == 0 {
+		t.Fatal("the fixture did not actually invoke the producer")
+	}
+	// TRUTH IS KEPT, AUTHORITY IS NOT - the #140 split, applied to the other
+	// revocation cause. The producer mutated the workspace and the journal says
+	// so; what it must not say is that an execution COMPLETED, because that is
+	// the fact a subject becomes eligible to be committed, pushed and published
+	// on.
+	after, err := f.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	truth, authority := false, false
+	for _, e := range after.events {
+		switch e.Type {
+		case EventCandidateChanged:
+			truth = true
+		case EventExecutionCompleted:
+			authority = true
+		}
+	}
+	if !truth {
+		t.Fatal("the producer's mutation was not journalled; a stop must not make the record less honest")
+	}
+	if authority {
+		t.Fatal("a run stopped mid-flight journalled execution.completed, admitting a result produced without authority")
+	}
+	if after.projection.CandidateComplete {
+		t.Fatal("the stopped run's candidate is marked complete, which is what makes it eligible to be committed")
+	}
+	// Whatever that attempt journalled, no further pass may turn it into a
+	// material effect. Several passes are driven precisely to give it the
+	// chance: each one reloads, and each one must refuse.
+	for pass := 0; pass < 3; pass++ {
+		outcome, err := f.runtime.Reconcile(context.Background(), runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if outcome.Disposition != Cancelled {
+			t.Fatalf("a pass after the stop reported %q %q", outcome.Disposition, outcome.Reason)
+		}
+	}
+	state, err := f.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range state.events {
+		switch e.Type {
+		case EventCandidateCommitted, EventCandidateBaseIntegrated:
+			if committedAfterStop(state.events, e) {
+				t.Fatalf("a stopped run produced %q after the operator stopped it", e.Type)
+			}
+		}
+	}
+	if len(f.forge.PullRequests) != 0 {
+		t.Fatalf("a stopped run opened %d pull request(s)", len(f.forge.PullRequests))
+	}
+	// THE STALE ARM. A driver that read this run before the stop has none of
+	// the knowledge the passes above used, so nothing it consults in memory can
+	// refuse it. It must still be unable to obtain the one capability that
+	// leads to a material effect.
+	if _, _, err := f.runtime.scheduler.Plan(RunOperation{
+		RunID: runID, Kind: OpCandidateCommit, IdempotencyKey: "late-authority-probe", MaxAttempts: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	leased, err := f.runtime.scheduler.Next(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leased != nil {
+		t.Fatalf("a stale driver leased %q on a stopped run whose producer had just finished", leased.ID)
+	}
+	// And it is holding nothing, which is what #171 was about in the first
+	// place: the slot came back even though the attempt outlived the stop.
+	operations, err := f.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range operations {
+		if op.Lease != nil {
+			t.Fatalf("operation %q still holds a lease on a stopped run", op.ID)
+		}
+	}
+}
+
+// committedAfterStop reports whether one event was journalled after the run was
+// cancelled, by position in the chain rather than by wall clock.
+func committedAfterStop(events []EngineeringEvent, subject EngineeringEvent) bool {
+	stop := -1
+	for i, e := range events {
+		if e.Type == EventRunCancelled {
+			stop = i
+			break
+		}
+	}
+	if stop < 0 {
+		return false
+	}
+	for i, e := range events {
+		if e.ID == subject.ID {
+			return i > stop
+		}
+	}
+	return false
 }

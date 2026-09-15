@@ -754,8 +754,16 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// and an operator reading the run should see that a producer mutated the
 	// workspace. What does not happen is execution.completed, which is what
 	// makes a subject eligible to become a committed candidate.
-	expired := OperationExpired(operation, r.deps.Clock.Now())
-	if execErr == nil && result.Failure == nil && !expired {
+	//
+	// ONE GATE, SEVERAL REVOCATION CAUSES. An operator's stop revokes exactly
+	// what a passed deadline revokes - the authority to turn this result into a
+	// candidate - so it is asked here, in the same predicate, rather than in a
+	// cancellation check of its own. See executionAuthorityRevoked.
+	revoked, revokeErr := r.executionAuthorityRevoked(operation)
+	if revokeErr != nil {
+		return failed(revokeErr)
+	}
+	if execErr == nil && result.Failure == nil && revoked == "" {
 		// Admission happens in the RUNTIME, against the frozen assignment -
 		// never in the adapter, which only read a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
@@ -825,16 +833,19 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the adapter reported success and the workspace may hold good work. The
 	// events assembled above are carried: what the producer did is true and is
 	// journalled. What is refused is calling it a completed execution.
-	if expired && execErr == nil && result.Failure == nil {
-		record.FailureClass = FailureExecutionDeadlineExceeded
+	if revoked != "" && execErr == nil && result.Failure == nil {
+		detail := fmt.Errorf("the provider returned after its execution deadline %s", operation.Deadline.UTC().Format(time.RFC3339))
+		if revoked == FailureRunCancelled {
+			detail = fmt.Errorf("the provider returned after the run was stopped")
+		}
+		record.FailureClass = revoked
 		return effect{
 			state:  OperationFailed,
 			events: events,
 			result: executionRecord{
 				mutationResult: record,
 				PriorContext:   result.PriorContext,
-				Diagnostic: r.executionDiagnostic(execStageProviderResult, FailureExecutionDeadlineExceeded, result,
-					fmt.Errorf("the provider returned after its execution deadline %s", operation.Deadline.UTC().Format(time.RFC3339))),
+				Diagnostic:     r.executionDiagnostic(execStageProviderResult, revoked, result, detail),
 			},
 		}
 	}
@@ -2572,4 +2583,46 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 		return err
 	}
 	return nil
+}
+
+// executionAuthorityRevoked reports WHY this attempt's result may not be
+// admitted, or "" when it may be. It is the single admission gate, and it has
+// several causes rather than one check per cause.
+//
+// #140 established the distinction it protects: TRUTH is not AUTHORITY. A
+// producer that mutated the workspace did mutate it, and hiding that would make
+// the journal less honest - so the mutation events are written whatever this
+// returns, and what is withheld is only execution.completed, the fact that
+// makes a subject eligible to be committed, pushed and published.
+//
+// An operator's stop revokes exactly that, so it is asked here and not in a
+// cancellation check of its own. The two causes are NOT interchangeable
+// underneath, and only one of them could ever live here alone:
+//
+//   - A DEADLINE is a fact about the attempt, knowable only once the attempt
+//     ends. There is nowhere earlier it could be enforced, because until the
+//     provider returns nobody knows it overran.
+//   - CANCELLATION is a fact about the RUN, and it exists before the attempt
+//     begins. So it is primarily enforced at ACQUISITION, inside the durable
+//     count-and-lease statement, where it prevents the invocation instead of
+//     discarding its result - which is strictly stronger than anything this
+//     gate can do. What reaches here is only the attempt that was legitimately
+//     leased and then outlived the stop.
+//
+// The run is re-read DURABLY rather than taken from the pass's snapshot. That
+// is the whole point of the gate: a pass that began before the stop holds
+// exactly the stale authority this must not trust, and the boundary at which a
+// material effect becomes admissible is where durable authority is consulted.
+func (r *EngineeringRuntime) executionAuthorityRevoked(operation RunOperation) (FailureClass, error) {
+	if OperationExpired(operation, r.deps.Clock.Now()) {
+		return FailureExecutionDeadlineExceeded, nil
+	}
+	run, found, err := r.deps.Store.Run(operation.RunID)
+	if err != nil {
+		return "", err
+	}
+	if found && run.Disposition == Cancelled {
+		return FailureRunCancelled, nil
+	}
+	return "", nil
 }
