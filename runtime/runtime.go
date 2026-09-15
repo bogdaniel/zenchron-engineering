@@ -380,9 +380,32 @@ type RunOperation struct {
 	StartedAt        *time.Time      `json:"started_at,omitempty"`
 	LastProgressAt   *time.Time      `json:"last_progress_at,omitempty"`
 	WallBudget       time.Duration   `json:"wall_budget,omitempty"`
-	NoProgressBudget time.Duration   `json:"no_progress_budget,omitempty"`
-	NoProgressKey    string          `json:"no_progress_key,omitempty"`
-	CancelRequested  bool            `json:"cancel_requested,omitempty"`
+	// ConsumedExecution is how much ACTIVE execution this operation has already
+	// spent, accumulated across attempts. It is the durable budget counter, and
+	// the one clock that matters: external waiting adds nothing to it.
+	ConsumedExecution time.Duration `json:"consumed_execution,omitempty"`
+	// LastAttemptExecution is what the most recent attempt added, so
+	// RestoreAttempt can give it back. A wait-routed refusal exercised no work,
+	// and charging it would let a watch loop polling a waiting run exhaust the
+	// budget without anything ever running.
+	LastAttemptExecution time.Duration `json:"last_attempt_execution,omitempty"`
+	// ActiveSince is when the attempt currently executing began, and nil
+	// whenever nothing is executing. An operation parked in an external wait is
+	// not active, which is precisely why waiting costs nothing.
+	ActiveSince *time.Time `json:"active_since,omitempty"`
+	// Deadline is the absolute instant THIS attempt's authority ends, derived
+	// when execution begins from the budget remaining at that moment, and
+	// cleared when the attempt ends.
+	//
+	// It is durable so a rehydrated controller resumes the same instant rather
+	// than minting a fresh envelope, and so the provider bound and the recorded
+	// provenance are one fact rather than two arithmetic results that can
+	// disagree. It is NOT the lifetime identity of the operation: that is
+	// ConsumedExecution against WallBudget.
+	Deadline         *time.Time    `json:"deadline,omitempty"`
+	NoProgressBudget time.Duration `json:"no_progress_budget,omitempty"`
+	NoProgressKey    string        `json:"no_progress_key,omitempty"`
+	CancelRequested  bool          `json:"cancel_requested,omitempty"`
 }
 type Lease struct {
 	Owner       string    `json:"owner"`
@@ -523,6 +546,33 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 }
 
 // OperationElapsed reports elapsed time only for an actively started operation.
+// OperationRemaining is how much ACTIVE execution authority is left.
+//
+// It is what a provider invocation is bounded by, so a second attempt inherits
+// what the first did not spend rather than starting again - and an operation
+// parked in an external wait keeps all of it, however long the wait, because
+// waiting is not executing. A budget of zero means unbounded and reports zero
+// remaining rather than pretending to a limit it does not have.
+func OperationRemaining(op RunOperation, now time.Time) time.Duration {
+	if op.WallBudget <= 0 {
+		return 0
+	}
+	spent := op.ConsumedExecution
+	if op.ActiveSince != nil && now.After(*op.ActiveSince) {
+		spent += now.Sub(*op.ActiveSince)
+	}
+	if remaining := op.WallBudget - spent; remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// OperationExpired answers whether this operation has run out of EXECUTION
+// authority - never whether wall-clock time has passed since it started.
+func OperationExpired(op RunOperation, now time.Time) bool {
+	return op.WallBudget > 0 && OperationRemaining(op, now) <= 0
+}
+
 func OperationElapsed(op RunOperation, now time.Time) time.Duration {
 	if op.StartedAt == nil || now.Before(*op.StartedAt) {
 		return 0
