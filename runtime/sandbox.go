@@ -1294,9 +1294,10 @@ func (e *DependencyUnavailableError) Transient() bool { return e.Kind == Prerequ
 func classifyPreparationOutput(out CommandOutput) (PrerequisiteKind, string) {
 	combined := strings.ToLower(string(out.Stdout) + "\n" + string(out.Stderr))
 	switch {
-	case out.ExitCode == 127, strings.Contains(combined, "not found"), strings.Contains(combined, "no such file or directory"):
+	case out.ExitCode == 127, strings.Contains(combined, "go: not found"), strings.Contains(combined, "go: command not found"):
 		return PrerequisiteToolchain, "the configured image did not resolve the Go toolchain on the runtime sandbox path"
-	case strings.Contains(combined, "missing go.sum entry"), strings.Contains(combined, "module lookup disabled"),
+	case strings.Contains(combined, "module ") && strings.Contains(combined, "not found"),
+		strings.Contains(combined, "missing go.sum entry"), strings.Contains(combined, "module lookup disabled"),
 		strings.Contains(combined, "cannot find module"), strings.Contains(combined, "no required module provides"),
 		strings.Contains(combined, "proxy.golang.org"), strings.Contains(combined, "goproxy=off"):
 		return PrerequisiteModule, "the trusted offline cache does not contain a module the exact tree requires"
