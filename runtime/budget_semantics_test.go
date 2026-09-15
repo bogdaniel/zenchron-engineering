@@ -469,18 +469,14 @@ func TestAnOverBudgetBaseIntegrationOnlyEVERReads(t *testing.T) {
 	}
 }
 
-// TestAcceptedFeedbackIsNotStrandedByTheBudget is #210. The shape reproduced:
-// a published pull request, a maintainer's comment admitted, a remediation
-// obligation created - and then the wall budget ending the run with the provider
-// never invoked, the item still pending, and nobody told.
-//
-// The work stays refused, because acting on feedback is provider work and that
-// is exactly what the budget bounds. What changes is that the refusal is no
-// longer terminal. Failed is terminal, and only a NON-terminal run is adopted by
-// StartOrResumeIssueRun, so failing here does not defer the obligation, it
-// abandons it. The run waits on the operator instead, and the pass after the
-// budget is raised discharges what was accepted.
-func TestAcceptedFeedbackIsNotStrandedByTheBudget(t *testing.T) {
+// TestASpentBudgetNamesUndeliveredFeedback is the neighbour the legibility
+// argument has to cover. An over-budget run that published does not decline the
+// #63 review loop, it ENTERS it: the comment is admitted, and the next pass ends
+// the run with the provider never invoked and the item still pending. Given
+// #203's own 27m46s against thirty minutes that is the common shape, and
+// "run_wall_budget_exhausted" tells the reviewer waiting on the pull request
+// nothing at all.
+func TestASpentBudgetNamesUndeliveredFeedback(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}}
 	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
@@ -493,6 +489,7 @@ func TestAcceptedFeedbackIsNotStrandedByTheBudget(t *testing.T) {
 		t.Fatalf("the verified candidate was not delivered: %#v", outcome)
 	}
 	number := fixture.state(runID).projection.PullRequest.Number
+
 	fixture.forge.ConversationComments[number] = []GitHubComment{{
 		ID: 501, Author: GitHubActor{Login: "maintainer", ID: 7},
 		Body: UntrustedText("please add a doc comment to the new helper"), CreatedAt: fixture.clock.Now(),
@@ -502,73 +499,25 @@ func TestAcceptedFeedbackIsNotStrandedByTheBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	if observation.Admitted != 1 {
-		t.Fatalf("the comment was not admitted, so there is no obligation to strand: %#v", observation)
+		t.Fatalf("the comment was not admitted: %#v", observation)
 	}
 
 	before := len(fixture.provider.requests)
 	outcome := fixture.reconcile(runID)
-	if outcome.Disposition != Waiting || outcome.Reason != ReasonFeedbackUndeliveredBudgetExhausted {
-		t.Fatalf("outcome = %#v, want waiting/%s", outcome, ReasonFeedbackUndeliveredBudgetExhausted)
+	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_feedback_undelivered" {
+		t.Fatalf("outcome = %#v, want failed/run_wall_budget_exhausted_feedback_undelivered", outcome)
 	}
-	// The work is still refused. The obligation is what survives, not the budget.
+	// The exemption does not survive the run wanting to work again, which is
+	// what makes the bound still mean something.
 	if len(fixture.provider.requests) != before {
 		t.Fatal("an over-budget run invoked the provider on reviewer feedback")
 	}
-	if terminalDisposition(outcome.Disposition) {
-		t.Fatal("the run is terminal, so no resume can ever discharge the obligation")
-	}
-	if !externalWaitReasons[outcome.Reason] {
-		t.Fatalf("%q is not in the closed wait set, so waiting on the operator spends the budget", outcome.Reason)
-	}
 	state := fixture.state(runID)
+	if !state.wantsBudgetedWork() {
+		t.Fatal("pending feedback is not being counted as budgeted work")
+	}
 	if len(state.pendingFeedbackKeys()) != 1 {
-		t.Fatalf("pending feedback = %v, want the admitted item still owed", state.pendingFeedbackKeys())
-	}
-
-	// What the wait buys, stated exactly. There is no affordance today to raise
-	// a run's wall budget - budgets() takes the MINIMUM of the live config and
-	// what the run persisted at creation, so a raised config cannot widen it -
-	// which makes the difference between waiting and dying larger, not smaller.
-	// An adopted run still owns the obligation; an abandoned one does not.
-	adopted, err := fixture.runtime.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !adopted.Adopted || adopted.RunID != runID {
-		t.Fatalf("the run holding the obligation was not adopted: %#v", adopted)
-	}
-	if pending := fixture.state(runID).pendingFeedbackKeys(); len(pending) != 1 {
-		t.Fatalf("pending feedback after adoption = %v, want the item still owed", pending)
-	}
-}
-
-// TestAStrandedObligationIsTheOnlyThingThatSurvivesTheBudget is the contrast
-// that gives the wait its meaning. The same run without an accepted obligation
-// is ended by the budget exactly as before, and an ended run is not adopted: the
-// next `run issue` mints a new generation and whatever the old one was holding
-// belongs to nobody. That is the outcome #210 describes, and it is what the wait
-// above avoids.
-func TestAStrandedObligationIsTheOnlyThingThatSurvivesTheBudget(t *testing.T) {
-	fixture := newPhase8Fixture(t)
-	exhaustedAtVerification(t, fixture)
-	fixture.deps.SemanticAssurance.(*burningAssurance).then = func() {
-		fixture.moveBase("UNRELATED.md", "the base moved cleanly\n")
-	}
-	runID := fixture.start()
-
-	// A verified candidate on a base that moved, and nobody is owed anything:
-	// re-integrating is work, so the budget ends the run. The bound is untouched
-	// by #210.
-	outcome := fixture.reconcile(runID)
-	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted_candidate_unpublished" {
-		t.Fatalf("outcome = %#v, want the budget to end a run that owes nobody anything", outcome)
-	}
-	fresh, err := fixture.runtime.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.Adopted || fresh.RunID == runID {
-		t.Fatalf("a terminal run was adopted: %#v", fresh)
+		t.Fatalf("pending feedback = %v, want the admitted item to survive for a resume", state.pendingFeedbackKeys())
 	}
 }
 

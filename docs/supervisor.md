@@ -227,35 +227,13 @@ When the budget ends a run holding a commit that never became a pull request, it
 says so: `run_wall_budget_exhausted_candidate_unpublished`. The bare reason tells
 an operator nothing about the work sitting on disk.
 
-### Accepted obligations
-
-Admitting a reviewer's comment creates an obligation. The budget may refuse the
-*work* — acting on feedback is provider work, which is exactly what the budget
-bounds — but it may not strand the obligation silently:
-
-```text
-published PR -> feedback admitted -> remediation obligation exists
-             -> budget ends the run -> provider never invoked
-             -> item pending, PR open, nobody told
-```
-
-`failed` is terminal, and only a **non-terminal** run is adopted by
-`StartOrResumeIssueRun`. So failing there does not defer the obligation, it
-abandons it: the next `run issue` mints a new generation and the comment stays
-keyed to a dead run while the reviewer watches a pull request nobody is working
-on.
-
-So the run **waits**, on the operator, as
-`feedback_undelivered_budget_exhausted` — a closed-set wait, so the clock stops
-and the run neither spins nor re-fails. The bound is not weakened: it takes an
-accepted external obligation to reach the wait at all, and nothing there lets a
-provider run. A run that owes nobody anything is ended by the budget exactly as
-before.
-
-There is no affordance today to raise a run's wall budget — `budgets()` takes the
-minimum of the live config and what the run persisted at creation, so a raised
-config cannot widen it. That makes the difference between waiting and dying
-larger, not smaller, and the missing affordance is the follow-up this leans on.
+When the budget ends a run that holds an admitted reviewer comment nobody was
+ever given, it says `run_wall_budget_exhausted_feedback_undelivered`. Naming it
+is all that happens today, and naming it is not enough: the run is *terminal*,
+and only a non-terminal run is adopted by `StartOrResumeIssueRun`, so the
+obligation is abandoned rather than deferred while the reviewer watches an open
+pull request nobody is working on. That is #210, and it is deliberately left
+open here.
 
 ## Concurrency
 
