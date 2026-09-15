@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.1",
+  "id": "policy-material-obligation",
+  "revision": "1",
+  "rules": {
+    "RULE-REVIEW": {
+      "when": {
+        "fact": "authentication.boundary_modified",
+        "equals": true
+      },
+      "effect": {
+        "required_claims": {
+          "claim-review": {
+            "evidence_class": "security_review",
+            "independent_from_change_producer": true
+          }
+        },
+        "obligations": {
+          "review": {
+            "statement": "An independent security review must pass.",
+            "material": "true",
+            "required_claims": [
+              "claim-review"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
