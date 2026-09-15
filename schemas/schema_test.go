@@ -38,6 +38,7 @@ type invalidExpectation struct {
 }
 
 var invalidExpectations = map[string]invalidExpectation{
+	"string-material.engineering-policy.json":                   {"/rules/RULE-REVIEW/effect/obligations/review/material", "type"},
 	"ambiguous-unknown.engineering-fact.json":                   {"/value", "oneOf"},
 	"array-evidence-basis.authority-decision.json":              {"/basis/evidence_bundles", "type"},
 	"array-identities.engineering-policy.json":                  {"/rules", "type"},
