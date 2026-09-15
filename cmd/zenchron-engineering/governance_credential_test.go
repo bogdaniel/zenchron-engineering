@@ -6,6 +6,7 @@ package main
 // selectors stay independent, and that the governance selector fails closed.
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -58,5 +59,47 @@ func TestGovernanceCredentialIsNotThePublicationCredential(t *testing.T) {
 	}
 	if _, ok := any(publication).(runtime.GovernanceCredential); ok {
 		t.Fatal("the publication credential satisfies GovernanceCredential and could be selected as the governance observer")
+	}
+}
+
+// TestGovernanceObserverIsBuiltWithARedirectSafeTransport asserts the wiring,
+// not just the component. net/http strips Authorization only when a redirect
+// leaves the host, so a bare client would carry the operator's governance
+// credential across a same-host https -> http redirect. The composition root
+// must pick the transport that refuses that, and "must" here means tested.
+func TestGovernanceObserverIsBuiltWithARedirectSafeTransport(t *testing.T) {
+	built, err := governanceObserver(runtime.GitHubConfig{
+		CredentialMode:           runtime.GitHubCredentialApp,
+		GovernanceCredentialMode: runtime.GitHubCredentialCLI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, ok := built.(runtime.GitHubGovernanceObserver)
+	if !ok {
+		t.Fatalf("the composition root built %T", built)
+	}
+	client, ok := observer.HTTP.(*http.Client)
+	if !ok {
+		t.Fatalf("the governance transport is %T, not an *http.Client whose redirect policy can be inspected", observer.HTTP)
+	}
+	if client.CheckRedirect == nil {
+		t.Fatal("the governance transport uses net/http's default redirect policy, which forwards Authorization across a same-host scheme downgrade")
+	}
+	// Exercised rather than merely present: a policy that is non-nil and
+	// permissive would pass a nil check and fail the operator.
+	downgrade, err := http.NewRequest(http.MethodGet, "http://api.github.com/landed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	via, err := http.NewRequest(http.MethodGet, "https://api.github.com/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.CheckRedirect(downgrade, []*http.Request{via}) == nil {
+		t.Fatal("the governance transport would follow a redirect out of TLS")
+	}
+	if client.CheckRedirect(via, []*http.Request{via}) != nil {
+		t.Fatal("the governance transport refuses a legitimate https redirect")
 	}
 }

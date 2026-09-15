@@ -57,7 +57,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // CredentialRoleGovernance is the only role a governance observation may be
@@ -138,8 +141,20 @@ var _ GovernanceCredential = governanceCredential{}
 // The operator's own identity is the one GitHub discloses bypass_actors to, and
 // reading a ruleset is a control-plane observation rather than an act performed
 // in anybody's name, so borrowing it to READ costs the identity separation #82
-// established nothing: the runtime still publishes as the App, and the value
-// returned here cannot publish at all.
+// established nothing: the runtime still publishes as the App.
+//
+// Be exact about what is guaranteed, because the whole PR this came from is
+// about a credential boundary and an overclaim here would be the same kind of
+// error it exists to prevent. The VALUE returned here cannot publish: it is a
+// GovernanceCredential, the type system refuses it everywhere publication
+// authority is expected, and no code path in this process can route it to a
+// forge write. The TOKEN it resolves is a different matter - a `gh` session
+// carries whatever scopes the operator granted it, typically including repo
+// and workflow, so it is not read-restricted at GitHub and would be able to
+// write if it ever left this process. The boundary proven here is in-process
+// and structural. A governance credential scoped to reads at the forge would
+// make it true on the other side of the wire as well, and would be the
+// strictly better answer whenever one can be provisioned.
 func GitHubCLIGovernanceCredential() GovernanceCredential {
 	return governanceCredential{
 		method: GitHubCredentialCLI,
@@ -168,6 +183,72 @@ type GitHubGovernanceObserver struct {
 
 var _ ForgeGovernance = GitHubGovernanceObserver{}
 
+// governanceAPIRoot resolves the API root and refuses to carry a credential
+// over anything but TLS.
+//
+// githubAPIRoot, which it wraps, accepts whatever github.endpoint says,
+// including an http:// URL. That was survivable while the only thing sent
+// there was a GitHub App installation token scoped to one installation. It is
+// not survivable now: the governance credential is the OPERATOR's, it is
+// broader than the App's by construction, and this change is what causes it to
+// reach that endpoint at all. The blast radius is new even though the
+// unvalidated endpoint is not, so the governance path validates its own root
+// here rather than waiting for the general repair. #223 holds the rest.
+func governanceAPIRoot(endpoint string) (string, error) {
+	root := githubAPIRoot(endpoint)
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return "", &GitHubAuthError{Detail: "the configured governance endpoint is not a usable URL"}
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		// The scheme is named because an operator has to be able to fix it;
+		// nothing else about the endpoint is quoted back.
+		return "", &GitHubAuthError{Detail: "the governance endpoint uses scheme " + strconv.Quote(parsed.Scheme) +
+			"; a governance credential is only ever carried over https"}
+	}
+	if parsed.Host == "" {
+		return "", &GitHubAuthError{Detail: "the configured governance endpoint names no host"}
+	}
+	return root, nil
+}
+
+// maxGovernanceRedirects is the hop ceiling this package re-imposes. Setting
+// CheckRedirect REPLACES net/http's default policy, which is where the
+// standard ten-hop limit lives, so a policy that only checked the scheme would
+// have silently traded one problem for an unbounded redirect chain.
+const maxGovernanceRedirects = 10
+
+// GovernanceHTTPClient is the transport a governance observer is meant to be
+// given, and it exists because net/http's own protection does not cover the
+// case that matters here.
+//
+// net/http strips Authorization when a redirect leaves the original HOST, and
+// that is the whole of its rule - the scheme is not consulted. A redirect from
+// https://host/a to http://host/b keeps the same URL.Host, so the default
+// client forwards the bearer token over plaintext. Measured, not assumed: with
+// a synthesized same-host scheme downgrade the header arrives on the second
+// request, while the cross-host control has it stripped.
+//
+// So the destination scheme is checked on every hop. A redirect that would
+// carry the credential out of TLS is refused, and the refusal reaches the
+// caller as a failed observation - which, as everywhere else here, is not the
+// same as an observation that found nothing.
+func GovernanceHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if !strings.EqualFold(request.URL.Scheme, "https") {
+				return fmt.Errorf("refused a governance redirect to scheme %s: it would carry the credential outside TLS",
+					strconv.Quote(request.URL.Scheme))
+			}
+			if len(via) >= maxGovernanceRedirects {
+				return fmt.Errorf("refused a governance redirect chain longer than %d hops", maxGovernanceRedirects)
+			}
+			return nil
+		},
+	}
+}
+
 func (o GitHubGovernanceObserver) GovernanceProvenance() CredentialProvenance {
 	if o.Credential == nil {
 		return CredentialProvenance{}
@@ -185,6 +266,16 @@ func (o GitHubGovernanceObserver) get(ctx context.Context, repo GitHubRepo, path
 	if err != nil {
 		return &GitHubAuthError{Detail: "repository is not a governed GitHub remote"}
 	}
+	// The endpoint is checked BEFORE the credential is resolved, not merely
+	// before the Authorization header is set. The governance credential is the
+	// operator's own, and it is broader than the installation token that used
+	// to be the only thing sent to a configured endpoint - so the right
+	// refusal is one where the secret was never even asked for, let alone
+	// held in a local variable next to a plaintext URL.
+	root, err := governanceAPIRoot(o.Endpoint)
+	if err != nil {
+		return err
+	}
 	if o.Credential == nil {
 		return &GitHubAuthError{Detail: "no operator-authorized governance credential is configured"}
 	}
@@ -195,7 +286,7 @@ func (o GitHubGovernanceObserver) get(ctx context.Context, repo GitHubRepo, path
 	if secret == "" {
 		return &GitHubAuthError{Detail: "governance credential resolution produced an empty token"}
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIRoot(o.Endpoint)+path, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, root+path, nil)
 	if err != nil {
 		return err
 	}

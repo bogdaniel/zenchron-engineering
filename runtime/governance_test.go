@@ -11,10 +11,13 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func governedRepo() GitHubRepo { return GitHubRepo{Owner: "bogdaniel", Name: "zenchron-engineering"} }
@@ -440,4 +443,180 @@ func TestAdoptedProvenanceStatesWhichBypassFactWasEstablished(t *testing.T) {
 	if unobserved == empty || unobserved.Detail == empty.Detail {
 		t.Fatal("an undisclosed bypass set and an observed empty one produce the same record")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The credential never leaves TLS
+// ---------------------------------------------------------------------------
+
+// recordingTransport synthesizes responses so the redirect behaviour under
+// test is net/http's own, with no network and no TLS involved. It records what
+// each hop actually carried, which is the only way to assert that a header was
+// not forwarded rather than that a request was not made.
+type recordingTransport struct {
+	// redirect, when non-empty, is the Location the FIRST hop answers with.
+	redirect string
+	// chain, when positive, answers every hop with a redirect to a fresh
+	// https path, so the hop ceiling is reachable.
+	chain int
+	hops  []string
+}
+
+func (r *recordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	r.hops = append(r.hops, request.URL.String()+" auth="+request.Header.Get("Authorization"))
+	respond := func(status int, location string) (*http.Response, error) {
+		header := http.Header{}
+		if location != "" {
+			header.Set("Location", location)
+		}
+		return &http.Response{
+			StatusCode: status, Header: header,
+			Body: io.NopCloser(strings.NewReader("[]")), Request: request,
+		}, nil
+	}
+	if r.chain > 0 {
+		return respond(http.StatusFound, "https://api.example.com/hop"+strconv.Itoa(len(r.hops)))
+	}
+	if r.redirect != "" && len(r.hops) == 1 {
+		return respond(http.StatusFound, r.redirect)
+	}
+	return respond(http.StatusOK, "")
+}
+
+// refusingCredential fails the test if it is ever asked for a secret. It is how
+// "the endpoint was refused before the credential was resolved" is asserted as
+// a fact rather than as an ordering somebody has to read the code to confirm.
+func refusingCredential(t *testing.T) GovernanceCredential {
+	t.Helper()
+	return governanceCredential{method: "test", resolve: func(RemoteIdentity) (string, error) {
+		t.Fatal("the governance credential was resolved for an endpoint that should have been refused first")
+		return "", nil
+	}}
+}
+
+// TestGovernanceObserverRefusesANonHTTPSEndpoint: github.endpoint is operator
+// configuration and was never scheme-checked, which was survivable while only
+// an App installation token went there. The governance credential is the
+// operator's own and broader, so the governance path checks its own root.
+func TestGovernanceObserverRefusesANonHTTPSEndpoint(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plaintext http":       "http://api.example.com",
+		"plaintext http upper": "HTTP://api.example.com",
+		"a non-web scheme":     "ftp://api.example.com",
+		"no scheme at all":     "api.example.com",
+		"a bare path":          "/api/v3",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			doer := &fakeGitHubDoer{}
+			observer := GitHubGovernanceObserver{HTTP: doer, Endpoint: endpoint, Credential: refusingCredential(t)}
+			_, err := observer.Rulesets(context.Background(), governedRepo())
+			var authErr *GitHubAuthError
+			if !errors.As(err, &authErr) {
+				t.Fatalf("expected a typed refusal, got %v", err)
+			}
+			if len(doer.requests) != 0 {
+				t.Fatalf("a refused endpoint was still contacted: %v", doer.requests)
+			}
+		})
+	}
+
+	t.Run("an https endpoint is accepted", func(t *testing.T) {
+		doer := &fakeGitHubDoer{responses: map[string]string{
+			"GET /api/v3/repos/bogdaniel/zenchron-engineering/rulesets": `[]`,
+		}}
+		observer := GitHubGovernanceObserver{
+			HTTP: doer, Endpoint: "https://ghe.example.com/api/v3", Credential: testGovernanceCredential("s"),
+		}
+		if _, err := observer.Rulesets(context.Background(), governedRepo()); err != nil {
+			t.Fatal(err)
+		}
+		if len(doer.requests) != 1 {
+			t.Fatalf("expected exactly the listing request, got %v", doer.requests)
+		}
+	})
+}
+
+// TestGovernanceRedirectsCannotLeaveTLS pins the behaviour the guard exists
+// for. net/http strips Authorization when a redirect leaves the HOST and does
+// not consult the scheme, so a same-host https -> http redirect forwards the
+// bearer token in plaintext. The first subtest records that baseline against
+// the default client, so the reason for GovernanceHTTPClient stays visible if
+// net/http ever changes; the rest assert the guard.
+func TestGovernanceRedirectsCannotLeaveTLS(t *testing.T) {
+	newRequest := func(t *testing.T) *http.Request {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, "https://api.example.com/start", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer governance-secret")
+		return request
+	}
+	carried := func(hop string) bool { return strings.Contains(hop, "Bearer governance-secret") }
+
+	t.Run("the default client forwards the credential across a same-host scheme downgrade", func(t *testing.T) {
+		transport := &recordingTransport{redirect: "http://api.example.com/landed"}
+		response, err := (&http.Client{Transport: transport}).Do(newRequest(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if len(transport.hops) != 2 {
+			t.Fatalf("expected the redirect to be followed, got %v", transport.hops)
+		}
+		if !strings.HasPrefix(transport.hops[1], "http://") || !carried(transport.hops[1]) {
+			t.Fatalf("net/http no longer forwards the credential on a same-host downgrade: %v", transport.hops)
+		}
+	})
+
+	t.Run("the governance client refuses the same-host scheme downgrade", func(t *testing.T) {
+		transport := &recordingTransport{redirect: "http://api.example.com/landed"}
+		client := GovernanceHTTPClient(30 * time.Second)
+		client.Transport = transport
+		response, err := client.Do(newRequest(t))
+		if response != nil {
+			response.Body.Close()
+		}
+		if err == nil {
+			t.Fatal("a scheme downgrade was followed")
+		}
+		if !strings.Contains(err.Error(), "outside TLS") {
+			t.Fatalf("the refusal does not name the reason: %v", err)
+		}
+		for _, hop := range transport.hops {
+			if strings.HasPrefix(hop, "http://") {
+				t.Fatalf("the credential-bearing request reached a plaintext hop: %v", transport.hops)
+			}
+		}
+	})
+
+	t.Run("an https redirect is still followed", func(t *testing.T) {
+		transport := &recordingTransport{redirect: "https://api.example.com/landed"}
+		client := GovernanceHTTPClient(30 * time.Second)
+		client.Transport = transport
+		response, err := client.Do(newRequest(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if len(transport.hops) != 2 {
+			t.Fatalf("a legitimate https redirect was not followed: %v", transport.hops)
+		}
+	})
+
+	t.Run("the hop ceiling net/http would have applied is re-imposed", func(t *testing.T) {
+		transport := &recordingTransport{chain: 1}
+		client := GovernanceHTTPClient(30 * time.Second)
+		client.Transport = transport
+		response, err := client.Do(newRequest(t))
+		if response != nil {
+			response.Body.Close()
+		}
+		if err == nil {
+			t.Fatal("an unbounded redirect chain was followed")
+		}
+		if len(transport.hops) > maxGovernanceRedirects+1 {
+			t.Fatalf("the chain ran past the ceiling: %d hops", len(transport.hops))
+		}
+	})
 }

@@ -65,15 +65,11 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	// credential refuses the build; it never falls back to the publication one.
 	governance := overrides.Governance
 	if governance == nil {
-		credential, credErr := githubGovernanceCredential(config.GitHub)
-		if credErr != nil {
-			return runtime.ExitInvalid, credErr
+		built, govErr := governanceObserver(config.GitHub)
+		if govErr != nil {
+			return runtime.ExitInvalid, govErr
 		}
-		governance = runtime.GitHubGovernanceObserver{
-			HTTP:       &http.Client{Timeout: 30 * time.Second},
-			Endpoint:   config.GitHub.Endpoint,
-			Credential: credential,
-		}
+		governance = built
 	}
 	deps := runtime.AdoptedBuildDeps{Governance: governance, RefSHA: forge.RefSHA}
 
@@ -131,6 +127,27 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	fmt.Fprintf(stdout, "self probe:        %s %s matched=%t\n", provenance.SelfProbe.Kind, provenance.SelfProbe.Version, provenance.SelfProbe.Matched)
 	fmt.Fprintf(stdout, "builder:           kind=%s version=%s\n", provenance.Builder.Kind, provenance.Builder.Version)
 	return runtime.ExitCompleted, nil
+}
+
+// governanceObserver builds the real governance observer from configuration.
+//
+// It is its own function rather than four lines inline because the transport it
+// chooses is load-bearing and a test has to be able to assert that choice. A
+// bare http.Client would carry the operator's governance credential across a
+// same-host https -> http redirect, since net/http's header stripping is keyed
+// on the host and never consults the scheme; GovernanceHTTPClient refuses that
+// hop. Inline, that decision was correct and unasserted, which is the same
+// shape of "true by convention" the rest of this change exists to remove.
+func governanceObserver(config runtime.GitHubConfig) (runtime.ForgeGovernance, error) {
+	credential, err := githubGovernanceCredential(config)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.GitHubGovernanceObserver{
+		HTTP:       runtime.GovernanceHTTPClient(30 * time.Second),
+		Endpoint:   config.Endpoint,
+		Credential: credential,
+	}, nil
 }
 
 // controllerInspectSelf reports this binary's own build provenance and nothing
