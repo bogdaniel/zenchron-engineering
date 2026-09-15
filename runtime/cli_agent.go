@@ -39,7 +39,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -717,25 +719,37 @@ func (p CLIAgentProvider) missingTools() []string {
 }
 
 func (p CLIAgentProvider) resolvesTool(tool string) bool {
-	if search := p.Toolchain.SearchPath(); search != "" {
+	if len(p.Toolchain.Path) > 0 {
 		for _, dir := range p.Toolchain.Path {
-			if dir = strings.TrimSpace(dir); dir == "" {
+			if strings.TrimSpace(dir) == "" {
 				continue
 			}
-			info, err := os.Stat(filepath.Join(dir, tool))
-			if err != nil || info.IsDir() {
+			// An absolute candidate confines lookup to the declared directory.
+			candidate, err := filepath.Abs(filepath.Join(dir, tool))
+			if err != nil {
 				continue
 			}
-			// Executable by somebody. The runtime runs as the operator, so a
-			// file present and marked executable is resolvable; a finer check
-			// would be guessing at the OS's own answer.
-			if info.Mode()&0o111 != 0 {
+			if resolvesDeclaredExecutable(candidate) {
 				return true
 			}
 		}
 		return false
 	}
 	return p.executor().LookPath(tool) == nil
+}
+
+// resolvesDeclaredExecutable checks the declared toolchain's executable files.
+// On Unix, retain the file-mode readiness check: LookPath additionally uses
+// access syscalls on some platforms, which can be denied by the supervisor's
+// sandbox even when the worker's execution environment permits the tool.
+// Windows requires native extension lookup (PATHEXT), not Unix mode bits.
+func resolvesDeclaredExecutable(candidate string) bool {
+	if runtime.GOOS == "windows" {
+		_, err := exec.LookPath(candidate)
+		return err == nil
+	}
+	info, err := os.Stat(candidate)
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
 // InvocationProvenance is the durable, non-secret record of HOW one attempt was

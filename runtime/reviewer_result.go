@@ -173,8 +173,8 @@ func ReadReviewerResult(path string) (*ReviewerResult, error) {
 	if err := decoder.Decode(&result); err != nil {
 		return nil, fmt.Errorf("reviewer result is not a valid %s document: %w", reviewerResultFile, err)
 	}
-	if decoder.More() {
-		return nil, fmt.Errorf("reviewer result carries more than one JSON value")
+	if strings.Trim(string(document[decoder.InputOffset():]), " \t\r\n") != "" {
+		return nil, fmt.Errorf("reviewer result carries trailing data after its JSON value")
 	}
 	return &result, nil
 }
