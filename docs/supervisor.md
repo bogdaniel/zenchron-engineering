@@ -209,9 +209,13 @@ raise it; where both `supervisor.max_concurrent_runs` and the older
 What the ceiling bounds is **whole-run reconciliation**, not specifically the
 expensive part of it. A run being reconciled holds a slot whether it is invoking
 a coding agent or performing a cheap forge observation, so the bound is coarser
-than "N concurrent provider invocations". In practice a tick's cost is dominated
-by execution and assurance, and the rotation above means a slot is never held
-across ticks. If a deployment ever needs the finer bound - N expensive
+than "N concurrent provider invocations". A slot is held for as long as the run
+is being driven, which is usually several polling intervals: a tick is a
+scheduling PASS that starts work and returns, so a run whose provider takes half
+an hour keeps its slot across every pass in that half hour, and the remaining
+slots stay available to anything an operator submits meanwhile. The alternative
+- a pass that waits for everything it started - made admission as slow as the
+slowest run and is what #202 records. If a deployment ever needs the finer bound - N expensive
 operations rather than N runs - that is a per-operation-kind concurrency class
 in the scheduler, and it is deliberately not built on speculation about which
 kinds would need one.
