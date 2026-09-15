@@ -664,11 +664,14 @@ func TestSQLiteADeadDriversRunSlotIsReclaimedByASibling(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatal(err, ok)
 	}
-	if orphan.State == Leased || orphan.State == Running {
-		t.Fatalf("the abandoned operation is still %q, so nothing was reclaimed", orphan.State)
-	}
 	if orphan.Lease != nil {
-		t.Fatal("the abandoned operation still records a lease")
+		t.Fatal("the abandoned operation still records a lease, so nothing was reclaimed")
+	}
+	// And ONLY the lease was taken. The row still says what the attempt was
+	// doing, because that is the journal's to say and this row is a cache of
+	// it - see TestAReclaimedOperationIsStillRepairedFromItsJournal.
+	if orphan.State != Running {
+		t.Fatalf("reclaiming rewrote the attempt's state to %q", orphan.State)
 	}
 }
 
@@ -717,23 +720,53 @@ func TestSQLiteStoppingARunReleasesItsRunSlot(t *testing.T) {
 }
 
 // TestSQLiteReclaimingNeverHandsOneOperationToTwoDrivers is the exclusivity
-// proof. An abandoned operation is contested from two processes at once: the
-// owning run's replacement driver, which wants to TAKE IT OVER, and a sibling
-// run, which only wants the slot it was holding. Reclaiming must not manufacture
-// a second slot, and it must never leave two drivers believing they hold the
-// same operation.
+// proof. An abandoned operation is contested by two processes: the owning run's
+// replacement driver, which wants to TAKE IT OVER, and a sibling run, which only
+// wants the slot it was holding. Reclaiming must not manufacture a second slot,
+// and it must never leave two drivers believing they hold the same operation.
+//
+// BOTH orderings are exercised deliberately, because the contested one is not
+// evenly weighted: released from a barrier the sibling wins the great majority
+// of the time, so a concurrent arm alone would test the replacement driver's
+// ordering only occasionally. The concurrent arm is what proves the two are
+// mutually exclusive when they genuinely overlap.
 func TestSQLiteReclaimingNeverHandsOneOperationToTwoDrivers(t *testing.T) {
-	for attempt := 0; attempt < 32; attempt++ {
+	for _, order := range []struct {
+		name  string
+		first string
+	}{{"the replacement driver looks first", "run-a"}, {"the sibling looks first", "run-b"}} {
+		t.Run(order.name, func(t *testing.T) {
+			replacement, sibling, _ := abandonedRunSlot(t)
+			drivers := map[string]Scheduler{"run-a": replacement, "run-b": sibling}
+			second := "run-b"
+			if order.first == "run-b" {
+				second = "run-a"
+			}
+			won, err := drivers[order.first].Next(order.first)
+			if err != nil || won == nil {
+				t.Fatalf("%s found no work at all: %v %v", order.first, won, err)
+			}
+			lost, err := drivers[second].Next(second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lost != nil {
+				t.Fatalf("%s drove %q while %s already held the only slot with %q",
+					second, lost.ID, order.first, won.ID)
+			}
+		})
+	}
+	for attempt := 0; attempt < 256; attempt++ {
 		if got := raceForAnAbandonedRunSlot(t); got != 1 {
 			t.Fatalf("attempt %d drove %d runs at once under max=1", attempt, got)
 		}
 	}
 }
 
-// raceForAnAbandonedRunSlot abandons run-a's operation and then releases a
-// replacement driver for run-a and a driver for run-b together, returning how
-// many of them ended up driving.
-func raceForAnAbandonedRunSlot(t *testing.T) int {
+// abandonedRunSlot leaves run-a's operation leased by a driver that is provably
+// gone, and returns a replacement driver for run-a and a driver for the sibling
+// run-b, on independent database handles under a ceiling of one.
+func abandonedRunSlot(t *testing.T) (replacement, sibling Scheduler, abandoned string) {
 	t.Helper()
 	c := &fakeClock{now: time.Unix(100, 0)}
 	_, storeA, storeB := openPair(t)
@@ -745,7 +778,16 @@ func raceForAnAbandonedRunSlot(t *testing.T) int {
 		t.Fatal(err, leased)
 	}
 	c.now = c.now.Add(2 * time.Minute)
+	return Scheduler{Store: storeA, Clock: c, Owner: "three", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1},
+		Scheduler{Store: storeB, Clock: c, Owner: "two", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1},
+		leased.ID
+}
 
+// raceForAnAbandonedRunSlot releases both contestants together and returns how
+// many of them ended up driving.
+func raceForAnAbandonedRunSlot(t *testing.T) int {
+	t.Helper()
+	replacement, sibling, _ := abandonedRunSlot(t)
 	var driving atomic.Int32
 	var mu sync.Mutex
 	owners := map[string]string{}
@@ -754,10 +796,7 @@ func raceForAnAbandonedRunSlot(t *testing.T) int {
 	for _, driver := range []struct {
 		scheduler Scheduler
 		run       string
-	}{
-		{Scheduler{Store: storeA, Clock: c, Owner: "three", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1}, "run-a"},
-		{Scheduler{Store: storeB, Clock: c, Owner: "two", LeaseDuration: time.Minute, Liveness: deadOwner("one"), MaxConcurrentRuns: 1}, "run-b"},
-	} {
+	}{{replacement, "run-a"}, {sibling, "run-b"}} {
 		wg.Add(1)
 		go func(s Scheduler, run string) {
 			defer wg.Done()
@@ -782,4 +821,129 @@ func raceForAnAbandonedRunSlot(t *testing.T) int {
 	close(start)
 	wg.Wait()
 	return int(driving.Load())
+}
+
+// TestSQLiteStoppingARunAgainFinishesWhatTheFirstStopLeft is the retry case.
+// Every write CancelRun makes can fail on its own, and one that got as far as
+// the run document and no further leaves a cancelled run still holding a leased
+// operation - which is also the state every database already carrying this
+// defect is in. Stopping it again has to repair that, not short-circuit on the
+// disposition the failed attempt already wrote.
+func TestSQLiteStoppingARunAgainFinishesWhatTheFirstStopLeft(t *testing.T) {
+	c := &fakeClock{now: time.Unix(100, 0)}
+	_, storeA, storeB := openPair(t)
+	if err := storeA.PutRun(newJournalRun("run-a")); err != nil {
+		t.Fatal(err)
+	}
+	one := Scheduler{Store: storeA, Clock: c, Owner: "one", LeaseDuration: time.Minute, Liveness: alwaysAlive(), MaxConcurrentRuns: 1}
+	two := Scheduler{Store: storeB, Clock: c, Owner: "two", LeaseDuration: time.Minute, Liveness: alwaysAlive(), MaxConcurrentRuns: 1}
+	planFor(t, one, "run-a", 1)
+	planFor(t, two, "run-b", 1)
+
+	leased, err := one.Next("run-a")
+	if err != nil || leased == nil {
+		t.Fatal(err, leased)
+	}
+	if _, err := one.Start(leased.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The first stop reached the run document and stopped there.
+	run, found, err := storeA.Run("run-a")
+	if err != nil || !found {
+		t.Fatal(err, found)
+	}
+	run.Disposition, run.Reason = Cancelled, "operator/stop"
+	if err := storeA.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := CancelRun(storeA, one, c.Now(), "run-a", "operator/stop again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Reason != "operator/stop" {
+		t.Fatalf("a repeated stop rewrote why the run was cancelled: %q", outcome.Reason)
+	}
+	stopped, _, ok, err := storeA.Operation(leased.ID)
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if stopped.State == Leased || stopped.State == Running {
+		t.Fatalf("stopping an already stopped run left it holding a %q operation", stopped.State)
+	}
+	if got, err := two.Next("run-b"); err != nil || got == nil {
+		t.Fatalf("the slot the first stop leaked was never given back: %v %v", got, err)
+	}
+}
+
+// TestAReclaimedOperationIsStillRepairedFromItsJournal pins the interaction
+// between reclaiming a slot and the repair that owns the same crash window.
+//
+// operation.after is journalled BEFORE Finish is called, so the common way to
+// die mid-operation leaves the journal already recording the outcome and only
+// the scheduler row behind. reconcileStoreLag copies that journalled outcome
+// onto the row, and it recognises a row that is leased or running. A reclaim
+// that stamped its own terminal state on the row instead would take the row out
+// of that repair's sight permanently, and the store would go on disagreeing
+// with the journal about an operation that succeeded. So the end state is
+// asserted against the JOURNAL, which is the authority, and not merely against
+// the store.
+func TestAReclaimedOperationIsStillRepairedFromItsJournal(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	state := fixture.state(runID)
+
+	op, created, err := fixture.runtime.scheduler.Plan(RunOperation{
+		RunID: runID, Kind: OpContractCompile, IdempotencyKey: "store-lag", MaxAttempts: 2,
+	})
+	if err != nil || !created {
+		t.Fatal(err, created)
+	}
+	if err := fixture.runtime.append(state, EventOperationPlanned, op.ID, op, nil); err != nil {
+		t.Fatal(err)
+	}
+	leased, err := fixture.runtime.scheduler.Next(runID)
+	if err != nil || leased == nil {
+		t.Fatal(err, leased)
+	}
+	started, err := fixture.runtime.scheduler.Start(leased.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.runtime.append(state, EventOperationBefore, started.ID, started, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The journal records the outcome, and then the process dies: Finish, the
+	// write that would have released the lease, never happens.
+	finished := started
+	finished.State, finished.Lease = Succeeded, nil
+	if err := fixture.runtime.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling in another process reclaims the slot that attempt was holding.
+	fixture.clock.advance(2 * time.Minute)
+	sibling := Scheduler{
+		Store: fixture.store, Clock: fixture.clock, Owner: "sibling",
+		LeaseDuration: time.Minute, Liveness: deadOwner(fixture.deps.Owner), MaxConcurrentRuns: 1,
+	}
+	planFor(t, sibling, "sibling-run", 1)
+	if got, err := sibling.Next("sibling-run"); err != nil || got == nil {
+		t.Fatalf("the dead driver's slot was not reclaimed: %v %v", got, err)
+	}
+	// The owning run's next pass must still discover what the journal knows.
+	state = fixture.state(runID)
+	if err := fixture.runtime.reconcileStoreLag(state); err != nil {
+		t.Fatal(err)
+	}
+	journalled, ok := state.snapshot.Operations[started.ID]
+	if !ok || journalled.State != Succeeded {
+		t.Fatalf("the journal no longer records the operation as succeeded: %+v", journalled)
+	}
+	stored, _, ok, err := fixture.store.Operation(started.ID)
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if stored.State != journalled.State {
+		t.Fatalf("the store says %q and the journal says %q; the row was taken out of the lag repair's sight",
+			stored.State, journalled.State)
+	}
 }

@@ -139,7 +139,7 @@ func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64,
 	}
 	driven := map[string]bool{}
 	for _, stored := range s.operations {
-		if stored.RunID != op.RunID && (stored.State == Leased || stored.State == Running) {
+		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
 			driven[stored.RunID] = true
 		}
 	}
@@ -303,7 +303,10 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	// only place a run ever looks at a sibling's operations at all.
 	activeRuns := map[string]bool{}
 	for _, op := range allOperations {
-		if (op.State != Leased && op.State != Running) || op.RunID == runID {
+		// A lease-less active row is an attempt nobody is holding - either one
+		// this scan already reclaimed, or one a sibling did. It occupies
+		// nothing, exactly as the durable count below reads it.
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.RunID == runID {
 			continue
 		}
 		reclaimed, err := s.reclaimAbandoned(op, now)
@@ -359,10 +362,10 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	return nil, nil
 }
 
-// reclaimAbandoned retires one leased or running operation that NO DRIVER CAN
-// STILL FINISH, and reports whether it is now released.
+// reclaimAbandoned drops the lease of one leased or running operation that NO
+// DRIVER IS STILL HOLDING, and reports whether it is now released.
 //
-// The run-driving slot is the durable lease, so it is released by whoever
+// The run-driving slot IS the durable lease, so it is released by whoever
 // finishes the operation - and a driver that died between leasing and finishing
 // never releases anything. Nothing else heals that: the collector refuses to
 // collect a run holding a leased operation, and the reconciler's store-lag
@@ -379,12 +382,12 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 // was already permitted to take over, so reclaiming can never contradict a
 // lease a living owner still holds.
 //
-// The operation is retired to UNKNOWN rather than hidden from the count, and
-// with its ActiveSince left exactly as it is. Unknown is what the runtime
-// already records for an attempt that was interrupted and cannot say whether
-// its side effect happened; leaving the row lying would keep the collector,
-// the operator reads and every other counter believing a driver holds it. The
-// orphaned attempt's execution is charged by Start, where it already was.
+// What is written is the smallest true thing: the lease is gone. Nothing else
+// about the row is touched, because nothing else about it is known to be wrong
+// - what the attempt did is the journal's to say, and the row is a cache of the
+// journal. The lease is the one claim that is now provably false, so the lease
+// is the one claim removed, and every counter that asks who is driving reads
+// the answer from durable state rather than from an opinion held in a process.
 //
 // The write is a compare-and-set, so two schedulers reclaiming the same
 // operation cannot both win, and a lost race simply leaves the operation
@@ -403,7 +406,18 @@ func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool
 	if op.Lease == nil || !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
 		return false, nil
 	}
-	op.State = Unknown
+	// ONLY the lease is dropped. The row goes on saying the attempt was leased
+	// or running, because that is what the journal says happened to it and the
+	// row is a cache of the journal, not a second opinion about it.
+	//
+	// Writing a terminal state here would be that second opinion, and it would
+	// silence the one repair that knows better. A crash between the journal
+	// write and the scheduler write is the common shape of this whole defect:
+	// operation.after is already journalled as succeeded and only Finish was
+	// lost. reconcileStoreLag exists to copy that journalled outcome onto the
+	// row, and it looks for exactly a leased or running row. A sibling that got
+	// there first and stamped `unknown` on it would leave the store permanently
+	// disagreeing with the journal about an operation that succeeded.
 	op.Lease = nil
 	_, released, err := s.Store.PutOperation(op, revision)
 	return released, err
