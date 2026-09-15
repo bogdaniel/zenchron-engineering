@@ -40,9 +40,17 @@ package runtime
 //     publication path can get wrong, because the publication path never
 //     observes the fact.
 //
-// The seam consumers depend on is ForgeGovernance, not a GitHub token type, so
-// a second forge provider supplies its own observer and its own credential
-// without any of the above changing.
+// What generalises beyond GitHub is the PROPERTY, not the signature, and the
+// difference is worth stating precisely because it is easy to claim too much.
+// The property generalises: an observation carries whether the bypass set was
+// disclosed, BypassActorsKnown is false unless a forge actually disclosed it,
+// and the refusal is therefore inherited by any provider that cannot answer -
+// silence is never read as a favourable answer, whoever is silent. The
+// signature does not: Rulesets names GitHubRepo and TrustedMainRuleset, so a
+// genuinely different forge needs those widened before it can implement this
+// interface at all. That widening is deliberately not done here. There is one
+// forge, and an abstraction built for a second one that does not exist would
+// be shaped by guesses rather than by the second forge's actual facts.
 
 import (
 	"context"
@@ -85,9 +93,13 @@ type GovernanceCredential interface {
 }
 
 // ForgeGovernance is the read-only governance-observation seam. It is the only
-// way anything in the runtime learns a governance fact, and it is an interface
-// rather than a GitHub type so a second forge answers the same question with
-// its own implementation.
+// way anything in the runtime learns a governance fact.
+//
+// It is an interface rather than a concrete adapter so that the BUILDER depends
+// on the capability instead of on the credential behind it, which is what keeps
+// the publication adapter out of the governance path. It is not yet a
+// forge-neutral interface: the method below names GitHub types, and a second
+// forge would require widening them.
 type ForgeGovernance interface {
 	// Rulesets reads the repository's branch rulesets. A ruleset whose
 	// bypass disclosure the forge omitted is reported as undisclosed, never as
