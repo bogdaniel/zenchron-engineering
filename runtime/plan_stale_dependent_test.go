@@ -645,6 +645,117 @@ func TestTheSweepIgnoresAProducersInterimHeads(t *testing.T) {
 	}
 }
 
+// A failed producer has no settled replacement input for a completed review.
+func TestTheSweepDoesNotInvalidateAReviewWhenItsProducerFails(t *testing.T) {
+	fixture := newPlanRunFixture(t, []domain.PlanStage{
+		{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "Do the work.", InvocationMode: domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			DependsOn: []string{"implementation"}, Objective: "Review it.",
+			InvocationMode:       domain.InvocationModeMutating,
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityVerification}},
+	})
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := snapshot.Stages["implementation"].RunID
+	recordCandidateAndAssurance(t, fixture, implementation, "aaaaaaaaaaaa")
+	settleRunAtGoalState(t, fixture, implementation, "aaaaaaaaaaaa")
+	fixture.reconcile(t)
+
+	snapshot, err = fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := snapshot.Stages["review"].RunID
+	if review == "" {
+		t.Fatal("the review stage created no run against candidate A")
+	}
+	recordCandidateAndAssurance(t, fixture, review, "rrrrrrrrrrrr")
+	settleRunAtGoalState(t, fixture, review, "rrrrrrrrrrrr")
+	acceptReview(t, fixture, "review", review)
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	// Feedback re-activates the producer, and it checkpoints. This head is
+	// WORK IN PROGRESS: the run is active, and nobody has said it is done.
+	reactivateRunAtHead(t, fixture, implementation, "interim111111")
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	during, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if during.Stages["review"].State != PlanStageCompleted {
+		t.Fatalf("the review was invalidated against an interim head: %#v", during.Stages["review"])
+	}
+	if during.Stages["review"].Generation != 0 {
+		t.Fatalf("a generation was spent on an interim head: %#v", during.Stages["review"])
+	}
+
+	// The producer gives up at its moved head; it has no replacement input.
+	run, found, err := fixture.store.Run(implementation)
+	if err != nil || !found {
+		t.Fatalf("read producer: found=%v err=%v", found, err)
+	}
+	run.Disposition, run.Reason = Failed, "attempts_exhausted"
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		fixture.reconcile(t)
+	}
+	after := planStageState(t, fixture, "review")
+	if after.State != PlanStageCompleted || after.Generation != 0 || after.RunID != review || after.InvalidatedUnder != 0 {
+		t.Fatalf("the failed producer discarded completed review work: %#v", after)
+	}
+	if after.Review == nil || after.Review.Verdict != StageReviewAccepted || after.Review.Candidate != "aaaaaaaaaaaa" {
+		t.Fatalf("the completed verdict was lost: %#v", after.Review)
+	}
+	events, err := fixture.store.PlanEvents(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type != EventPlanStageSettled {
+			continue
+		}
+		var payload PlanStageSettledPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Outcome == "invalidated" && payload.Revision == fixture.plan.Revision {
+			t.Fatalf("failure was recorded as moved input: %#v", payload)
+		}
+	}
+
+	// Once the producer's failure is recorded in the plan, dependency gating
+	// must report that failure while preserving the review's historical verdict.
+	if err := appendPlanEvent(fixture.store, fixture.clock.Now(), fixture.plan.ID,
+		EventPlanStageSettled, PlanStageSettledPayload{
+			StageID: "implementation", Outcome: "failed", Reason: run.Reason,
+		}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.reconcile(t)
+	snapshot, err = fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready, reason := planDependenciesSatisfied(fixture.plan.Stages[1], snapshot); ready || reason != "stage implementation failed" {
+		t.Fatalf("failed dependency did not block review: ready=%v reason=%q", ready, reason)
+	}
+	if planStatus(t, fixture) != PlanStateBlocked || snapshot.Stages["review"].State != PlanStageCompleted {
+		t.Fatalf("plan did not preserve the verdict under a failed dependency: %#v", snapshot.Stages)
+	}
+}
+
 // The same rule where it matters most: at the moment a performance is FROZEN.
 //
 // Deciding that work is stale and binding its replacement are two separate
