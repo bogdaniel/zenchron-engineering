@@ -558,11 +558,18 @@ func (g *overlapGate) arrive() {
 
 // gatedForge is the ordinary forge double with one call held open.
 //
-// source.observe is the only thing on this path that asks for an issue, and it
-// asks from inside its own leased operation, so a run parked here is a run that
-// holds a slot. The wait is deliberately OUTSIDE the double's own mutex: the
-// double serializes its methods, and holding one inside that lock would have
-// been a test that could only ever observe one run.
+// source.observe asks for the issue from inside its own leased operation, so a
+// run parked here is a run that holds a slot. The wait is deliberately OUTSIDE
+// the double's own mutex: the double serializes its methods, and holding one
+// inside that lock would have been a test that could only ever observe one run.
+//
+// source.observe is not the only caller of GitHub.Issue in the runtime - the
+// plan path reaches it too, and a tick reconciles plans before it reads runs -
+// so this gate is not structurally guaranteed to see only observing runs. There
+// is no plan in this fixture, and the safety does not depend on that anyway:
+// the count below is DURABLE, so an arrival by something holding no operation
+// lowers the observed number. A stray arrival can only produce a false failure,
+// never a false pass.
 type gatedForge struct {
 	*runtime.FakeGitHubAdapter
 	gate *overlapGate
@@ -576,18 +583,28 @@ func (f gatedForge) Issue(ctx context.Context, repo runtime.GitHubRepo, number i
 	return issue, err
 }
 
-// TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant is the #63 claim
-// itself: one operator starts several real tasks and different agents work on
-// them independently.
+// TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant proves exactly one
+// thing: under a configured ceiling of two, two runs hold a leased operation at
+// the same instant, counted from the durable store rather than from what the
+// supervisor reported about itself.
 //
 // It is separate from the ceiling test above because the two prove different
 // things and each passes while the other fails. That one proves the configured
 // number reaches the durable enforcer; it is satisfied by a fleet that plumbs
 // the number correctly and then still executes one run at a time, which is a
-// product with the defect #167 describes and a green suite. This one proves the
-// work overlaps: two runs are held inside their own leased operations at the
-// same instant, and the count comes from the store rather than from what the
-// supervisor reported about itself.
+// product with the defect #167 describes and a green suite. This one is what
+// fails when the fleet is serialised.
+//
+// What it does NOT prove is the #63 product claim that different agents work on
+// several tasks independently. The overlap it measures is one forge read wide.
+// Both runs settle at source.observe in this fixture - no candidate, no
+// provider, no agent runs at all - so a lock taken immediately after the issue
+// read, serialising everything that follows it, would leave this test green.
+// len(report.Driven) == 2 is likewise satisfied by two runs that both failed
+// their first operation, and is asserted only to catch a tick that drove the
+// wrong fleet. Overlap of real provider work is proven by live validation
+// against real agents, which is where it belongs; this is the deterministic
+// floor beneath it.
 func TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant(t *testing.T) {
 	dir, configPath, seeded := seededWorkspace(t, "https://github.com/zenchron/seeded.git", func(config map[string]any) {
 		config["supervisor"] = map[string]any{"max_concurrent_runs": 2}
