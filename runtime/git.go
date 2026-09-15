@@ -322,6 +322,13 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if err := GuardCandidate(w.Dir, paths, maxBytes); err != nil {
 		return CommitResult{}, err
 	}
+	// After the path gate, so what is joined onto the workspace root here has
+	// already been proven to be a safe relative path, and before the credential
+	// scan, which would otherwise read every file of a repository that is not
+	// going to be committed.
+	if err := refuseNestedRepository(w.Dir, paths); err != nil {
+		return CommitResult{}, err
+	}
 	// The OUTPUT half of the credential boundary. Admission proved the
 	// workspace was clean before the producer was shown it; this proves the
 	// producer did not introduce a credential value into what is about to
@@ -358,6 +365,39 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	}
 	w.TrustedMetadata = metadata
 	return CommitResult{Commit: strings.TrimSpace(commit), Tree: strings.TrimSpace(tree), Paths: paths}, nil
+}
+
+// refuseNestedRepository refuses a candidate whose changed paths include a
+// nested Git repository, BEFORE anything is staged.
+//
+// A commit cannot carry one. `git add -A` does not record the directory's
+// files; it records a 160000 gitlink naming a commit that exists only inside
+// the nested repository, so the content is in no tree this runtime owns. The
+// nested worktree then keeps its own state, and `git status` in the candidate
+// reports that gitlink as modified from the moment the commit is made and
+// forever after - which is the post-commit refusal seen in run
+// run-5fa7aff09147d45bf7c3a05d504033f7. A killed attempt left its own `go test`
+// temporary tree in the workspace, that tree held assurance CHECKOUTS - real
+// repositories - recovery inherited the workspace, and the runtime wrote commit
+// f0f72ba and then declared its own commit unclean.
+//
+// This is a refusal and not a filter. Every path the workspace observed still
+// reaches the guard, the credential scan, the commit and reassessment: a
+// producer cannot use a nested repository to move a change out of sight,
+// because the answer to one is that no commit is made at all. Refusing before
+// staging also means the runtime stops minting a commit it is about to call
+// invalid, and says which path is unrepresentable instead of reporting an
+// unclean workspace and leaving the operator to find out why.
+func refuseNestedRepository(dir string, paths []string) error {
+	for _, p := range paths {
+		// Git reports an untracked nested repository as a directory, trailing
+		// separator and all, because it does not descend into one.
+		p = strings.TrimSuffix(p, "/")
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p), ".git")); err == nil {
+			return fmt.Errorf("candidate path %q is a nested Git repository, which a runtime commit cannot carry", p)
+		}
+	}
+	return nil
 }
 func changedPaths(dir string) ([]string, error) {
 	out, err := gitOutput(dir, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
