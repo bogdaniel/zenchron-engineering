@@ -453,11 +453,38 @@ func localTransportSource(args []string, sub string) (string, error) {
 	if sub == "clone" {
 		return cloneSource(args)
 	}
-	for _, a := range args[1:] {
-		if strings.HasPrefix(a, "-") {
-			continue
+	if sub != "fetch" || len(args) == 0 {
+		return "", fmt.Errorf("trusted git: unsupported local transport command %q", sub)
+	}
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			if i+1 < len(args) {
+				return args[i+1], nil
+			}
+			break
 		}
-		return a, nil
+		if !strings.HasPrefix(a, "-") {
+			return a, nil
+		}
+		option, _, inline := strings.Cut(a, "=")
+		switch option {
+		case "--depth", "--deepen", "--shallow-since", "--shallow-exclude", "--filter", "--negotiation-tip", "--refmap", "--jobs", "-j":
+			if !inline {
+				i++
+				if i >= len(args) {
+					return "", fmt.Errorf("trusted git: fetch option %s needs a value", option)
+				}
+			}
+		case "--no-tags", "--tags", "-t", "--no-recurse-submodules", "--prune", "--no-prune", "--quiet", "-q", "--verbose", "-v", "--force", "-f", "--unshallow", "--update-shallow":
+			if inline {
+				return "", fmt.Errorf("trusted git: fetch option %s takes no value", option)
+			}
+		default:
+			// Unknown options might consume a value or select additional remotes.
+			// Refuse them rather than guess at this capability boundary.
+			return "", fmt.Errorf("trusted git: unsupported local fetch option %q", a)
+		}
 	}
 	return "", fmt.Errorf("trusted git: fetch names no source to take objects from")
 }

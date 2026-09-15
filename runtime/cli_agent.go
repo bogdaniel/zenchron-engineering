@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -717,19 +718,19 @@ func (p CLIAgentProvider) missingTools() []string {
 }
 
 func (p CLIAgentProvider) resolvesTool(tool string) bool {
-	if search := p.Toolchain.SearchPath(); search != "" {
+	if len(p.Toolchain.Path) > 0 {
 		for _, dir := range p.Toolchain.Path {
-			if dir = strings.TrimSpace(dir); dir == "" {
+			if strings.TrimSpace(dir) == "" {
 				continue
 			}
-			info, err := os.Stat(filepath.Join(dir, tool))
-			if err != nil || info.IsDir() {
+			// An absolute candidate keeps LookPath on this declared directory,
+			// without consulting ambient PATH or Windows' current-directory search.
+			// LookPath applies native executable rules, including PATHEXT.
+			candidate, err := filepath.Abs(filepath.Join(dir, tool))
+			if err != nil {
 				continue
 			}
-			// Executable by somebody. The runtime runs as the operator, so a
-			// file present and marked executable is resolvable; a finer check
-			// would be guessing at the OS's own answer.
-			if info.Mode()&0o111 != 0 {
+			if _, err := exec.LookPath(candidate); err == nil {
 				return true
 			}
 		}
