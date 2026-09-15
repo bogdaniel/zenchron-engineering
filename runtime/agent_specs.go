@@ -188,7 +188,7 @@ var claudeSpec = cliAgentSpec{
 		if allowed := claudeAllowedTools(i); len(allowed) > 0 {
 			args = append(args, "--allowedTools", strings.Join(allowed, " "))
 		}
-		return append(args, i.Prompt)
+		return claudePromptArg(args, i.Prompt)
 	},
 	// Claude Code's `plan` permission mode. It is the session mode in which the
 	// model may read and reason and may not edit, which is exactly what a
@@ -210,7 +210,7 @@ var claudeSpec = cliAgentSpec{
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}
-			return append(args, i.Prompt)
+			return claudePromptArg(args, i.Prompt)
 		},
 	},
 }
@@ -325,6 +325,38 @@ var qwenSpec = cliAgentSpec{
 			return append(args, i.Prompt)
 		},
 	},
+}
+
+// claudePromptArg appends the positional prompt, ENDING OPTION PARSING first.
+//
+// Claude Code declares --add-dir <directories...> and --allowedTools <tools...>
+// as VARIADIC, so its option parser keeps consuming arguments until something
+// stops it. A prompt appended after either flag was absorbed into that flag's
+// value list and never reached the model at all: a live run of
+// `autonomy run issue 77 --agent claude` failed two seconds in with "Input must
+// be provided either through stdin or as a prompt argument when using --print".
+// Because the shipped operator configuration always declares required_tools,
+// the tool grant was always built and so that was EVERY claude_code invocation,
+// not an unlucky one.
+//
+// `--` is the smallest repair that is actually robust. Reordering the vector to
+// put the prompt ahead of the variadic flags would fix today's two flags and
+// reopen the defect the day a third grant is added after it; the terminator
+// does not care what precedes it, and it additionally makes a prompt that
+// itself begins with a dash unparseable as a flag. Stdin would also have
+// worked and costs far more: sandbox.go leaves cmd.Stdin nil on purpose, so
+// that no bounded process can ever block waiting for input.
+//
+// The terminator is not PROBED the way the flags around it are, because it is
+// not a flag any CLI advertises. It does not need to be: a Claude Code that
+// stopped honouring it would fail the invocation loudly, exactly as the defect
+// above did, rather than leave the session unconstrained - which is the only
+// outcome the probe mechanism exists to prevent.
+//
+// The prompt stays the LAST element, so cliAgentSpec.PromptArgFromEnd remains
+// zero and provenance still redacts precisely this argument.
+func claudePromptArg(args []string, prompt string) []string {
+	return append(args, "--", prompt)
 }
 
 // claudeAllowedTools is the least-privilege tool grant for one invocation.
