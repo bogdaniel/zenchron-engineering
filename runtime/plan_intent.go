@@ -132,11 +132,12 @@ func planContractID(repository string, issue int) string {
 
 // PlanID is the durable identity of the plan for one source.
 //
-// It is derived, like a run identity, from facts that do not move: the
-// repository, the issue and the operator configuration. Two processes that
-// decide to plan the same source therefore compute the same id before either
-// touches the database, so "two plans for one source" is unrepresentable rather
-// than a race to lose.
+// It is derived from the repository, the issue and the operator configuration.
+// Two processes planning the same source under the same configuration compute
+// the same id before either touches the database. Configuration changes can
+// therefore fork identity for one source: the new plan has its own budget
+// ledger and does not enter the old plan's base-rebinding path. This is the
+// known lifecycle limitation recorded in #131, not an issue-wide budget cap.
 func (r *EngineeringRuntime) PlanID(issue int) (string, error) {
 	digest, err := Digest(struct {
 		Repository string       `json:"repository"`
