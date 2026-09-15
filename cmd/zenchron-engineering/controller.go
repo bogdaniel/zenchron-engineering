@@ -56,13 +56,26 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 			Credentials: githubCredentials(config.GitHub),
 		}
 	}
-	rulesetReader, ok := forge.(interface {
-		Rulesets(context.Context, runtime.GitHubRepo) ([]runtime.TrustedMainRuleset, error)
-	})
-	if !ok {
-		return runtime.ExitFailed, fmt.Errorf("the configured forge adapter cannot observe repository rulesets, so no trust root can be established")
+	// The trust root is observed through a DIFFERENT credential from the one
+	// that publishes, and the adapter above is never asked for it. GitHub does
+	// not disclose a ruleset's bypass actors to a GitHub App installation
+	// token - it answers current_user_can_bypass instead, which is a different
+	// question - so the identity #82 requires for publication is the one
+	// identity that cannot verify adoption. An unconfigured governance
+	// credential refuses the build; it never falls back to the publication one.
+	governance := overrides.Governance
+	if governance == nil {
+		credential, credErr := githubGovernanceCredential(config.GitHub)
+		if credErr != nil {
+			return runtime.ExitInvalid, credErr
+		}
+		governance = runtime.GitHubGovernanceObserver{
+			HTTP:       &http.Client{Timeout: 30 * time.Second},
+			Endpoint:   config.GitHub.Endpoint,
+			Credential: credential,
+		}
 	}
-	deps := runtime.AdoptedBuildDeps{Rulesets: rulesetReader.Rulesets, RefSHA: forge.RefSHA}
+	deps := runtime.AdoptedBuildDeps{Governance: governance, RefSHA: forge.RefSHA}
 
 	output := strings.TrimSpace(flags.Output)
 	if output == "" {
@@ -107,6 +120,8 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	fmt.Fprintf(stdout, "tree:              %s\n", provenance.Source.Tree)
 	fmt.Fprintf(stdout, "trusted main:      %s (tree %s)\n", provenance.TrustedMain.Revision, provenance.TrustedMain.Tree)
 	fmt.Fprintf(stdout, "trust root:        ruleset %d %q %s\n", provenance.TrustRoot.RulesetID, provenance.TrustRoot.Name, provenance.TrustRoot.Digest)
+	fmt.Fprintf(stdout, "observed by:       %s via %s\n", provenance.TrustRoot.ObservedBy.Role, provenance.TrustRoot.ObservedBy.Method)
+	fmt.Fprintf(stdout, "bypass:            observed=%t, %d actor(s)\n", provenance.TrustRoot.Bypass.Observed, provenance.TrustRoot.Bypass.Count)
 	fmt.Fprintf(stdout, "build environment: %s %s (%s), network %s, source %s, cache %s\n",
 		provenance.BuildEnv.Kind, provenance.BuildEnv.Image, provenance.BuildEnv.Toolchain,
 		provenance.BuildEnv.Network, provenance.BuildEnv.SourceMount, provenance.BuildEnv.CacheMount)

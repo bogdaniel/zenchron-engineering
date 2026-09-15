@@ -204,6 +204,7 @@ default `zenchron:auto`.
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
 | `operator.id` | The identity a run is recorded as having been authorized by. It is provenance, not authentication: nothing here is signed and no challenge was issued. | the local account name |
 | `operator.require_configured_id` | Refuse the local account name as a substitute for a configured identity. | `false` |
+| `github.governance_credential_mode` | The identity that READS governance facts - today, the adoption trust root's disclosed bypass actors. It is separate from `credential_mode` because GitHub does not disclose a ruleset's `bypass_actors` to a GitHub App installation token even with `administration: read`, so the identity that publishes is precisely the one that cannot verify the trust root. The only mode is `github-cli`, your own `gh` login used read-only; the credential it produces cannot publish. Absent means no governance credential is authorized and `controller build-adopted` refuses rather than falling back to the publication credential. | none |
 | `github.endpoint` | Alternate API endpoint. | github.com |
 
 ## The in-repo layer

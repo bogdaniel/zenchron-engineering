@@ -29,13 +29,29 @@ func adoptedGit(t *testing.T, dir string, args ...string) string {
 }
 
 type adoptedFixture struct {
-	dir      string
-	head     string
-	headTree string
-	orphan   string
-	deps     AdoptedBuildDeps
-	built    []AdoptedBuildSpec
+	dir        string
+	head       string
+	headTree   string
+	orphan     string
+	deps       AdoptedBuildDeps
+	governance *stubGovernance
+	built      []AdoptedBuildSpec
 }
+
+// stubGovernance is the governance-observation seam a test drives directly. It
+// reports the provenance a real governance credential would, because a builder
+// that cannot tell which identity class saw the trust root refuses the build -
+// which is its own test, further down.
+type stubGovernance struct {
+	rulesets   func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error)
+	provenance CredentialProvenance
+}
+
+func (s *stubGovernance) Rulesets(ctx context.Context, repo GitHubRepo) ([]TrustedMainRuleset, error) {
+	return s.rulesets(ctx, repo)
+}
+
+func (s *stubGovernance) GovernanceProvenance() CredentialProvenance { return s.provenance }
 
 func newAdoptedFixture(t *testing.T) *adoptedFixture {
 	t.Helper()
@@ -72,10 +88,14 @@ func newAdoptedFixture(t *testing.T) *adoptedFixture {
 	}
 
 	f := &adoptedFixture{dir: dir, head: head, headTree: tree, orphan: orphan}
-	f.deps = AdoptedBuildDeps{
-		Rulesets: func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+	f.governance = &stubGovernance{
+		rulesets: func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 			return []TrustedMainRuleset{goodRuleset()}, nil
 		},
+		provenance: CredentialProvenance{Role: CredentialRoleGovernance, Method: "test"},
+	}
+	f.deps = AdoptedBuildDeps{
+		Governance: f.governance,
 		RefSHA: func(context.Context, GitHubRepo, string) (RefObservation, error) {
 			return RefObservation{Exists: true, SHA: f.head}, nil
 		},
@@ -197,21 +217,21 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 	}{
 		"github unavailable": {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
-				f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+				f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 					return nil, fmt.Errorf("dial tcp: i/o timeout")
 				}
 			}, "trust root could not be observed",
 		},
 		"no ruleset at all": {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
-				f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) { return nil, nil }
+				f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) { return nil, nil }
 			}, "no ruleset governing the trusted branch",
 		},
 		"ruleset governs another branch": {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
 				r := goodRuleset()
 				r.Targets = []string{"refs/heads/develop"}
-				f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+				f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 					return []TrustedMainRuleset{r}, nil
 				}
 			}, "no ruleset governing the trusted branch",
@@ -220,7 +240,7 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
 				r := goodRuleset()
 				r.Enforcement = "evaluate"
-				f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+				f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 					return []TrustedMainRuleset{r}, nil
 				}
 			}, "not active",
@@ -229,7 +249,7 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
 				r := goodRuleset()
 				r.PullRequest.AllowedMergeMethods = []string{"merge", "squash"}
-				f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+				f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 					return []TrustedMainRuleset{r}, nil
 				}
 			}, `"squash" is allowed`,
@@ -238,7 +258,7 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
 				r := goodRuleset()
 				r.BypassActors = 1
-				f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+				f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 					return []TrustedMainRuleset{r}, nil
 				}
 			}, "gates nothing",
@@ -372,7 +392,7 @@ func TestAdoptedBuildRevalidatesTrustBeforePublishing(t *testing.T) {
 		f := newAdoptedFixture(t)
 		request := f.request(t)
 		calls := 0
-		f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+		f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 			calls++
 			r := goodRuleset()
 			if calls > 1 {
@@ -562,8 +582,8 @@ func snapshotDir(t *testing.T, dir string) string {
 func TestAdoptedBuildRefusesMissingProductionDependencies(t *testing.T) {
 	f := newAdoptedFixture(t)
 	for name, mutate := range map[string]func(*AdoptedBuildDeps){
-		"no ruleset reader": func(d *AdoptedBuildDeps) { d.Rulesets = nil },
-		"no ref observer":   func(d *AdoptedBuildDeps) { d.RefSHA = nil },
+		"no governance observer": func(d *AdoptedBuildDeps) { d.Governance = nil },
+		"no ref observer":        func(d *AdoptedBuildDeps) { d.RefSHA = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			deps := f.deps
@@ -659,7 +679,7 @@ func TestFrozenAdoptionPolicyIsNotCallerWeakenable(t *testing.T) {
 			f := newAdoptedFixture(t)
 			weakened := goodRuleset()
 			weaken(&weakened)
-			f.deps.Rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
+			f.governance.rulesets = func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 				return []TrustedMainRuleset{weakened}, nil
 			}
 			request := f.request(t)
