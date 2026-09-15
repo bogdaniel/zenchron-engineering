@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -723,20 +724,32 @@ func (p CLIAgentProvider) resolvesTool(tool string) bool {
 			if strings.TrimSpace(dir) == "" {
 				continue
 			}
-			// An absolute candidate keeps LookPath on this declared directory,
-			// without consulting ambient PATH or Windows' current-directory search.
-			// LookPath applies native executable rules, including PATHEXT.
+			// An absolute candidate confines lookup to the declared directory.
 			candidate, err := filepath.Abs(filepath.Join(dir, tool))
 			if err != nil {
 				continue
 			}
-			if _, err := exec.LookPath(candidate); err == nil {
+			if resolvesDeclaredExecutable(candidate) {
 				return true
 			}
 		}
 		return false
 	}
 	return p.executor().LookPath(tool) == nil
+}
+
+// resolvesDeclaredExecutable checks the declared toolchain's executable files.
+// On Unix, retain the file-mode readiness check: LookPath additionally uses
+// access syscalls on some platforms, which can be denied by the supervisor's
+// sandbox even when the worker's execution environment permits the tool.
+// Windows requires native extension lookup (PATHEXT), not Unix mode bits.
+func resolvesDeclaredExecutable(candidate string) bool {
+	if runtime.GOOS == "windows" {
+		_, err := exec.LookPath(candidate)
+		return err == nil
+	}
+	info, err := os.Stat(candidate)
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
 // InvocationProvenance is the durable, non-secret record of HOW one attempt was

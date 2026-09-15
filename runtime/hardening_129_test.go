@@ -137,3 +137,38 @@ func TestLocalFetchDepthDoesNotHideNetworkSource(t *testing.T) {
 		t.Fatalf("local source refused: %v, %v", transport, err)
 	}
 }
+
+func TestBrokeredToolRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "tool"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := CLIAgentProvider{Toolchain: ToolchainConfig{Path: []string{dir}}}
+	if p.resolvesTool("tool") {
+		t.Fatal("directory resolved as executable")
+	}
+}
+
+func TestBrokeredUnixToolFollowsExecutableSymlink(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Unix executable mode semantics")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("tool"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "tool")); err != nil {
+		t.Fatal(err)
+	}
+	p := CLIAgentProvider{Toolchain: ToolchainConfig{Path: []string{dir}}}
+	if !p.resolvesTool("tool") {
+		t.Fatal("executable symlink did not resolve")
+	}
+	if err := os.Chmod(target, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if p.resolvesTool("tool") {
+		t.Fatal("symlink to non-executable file resolved")
+	}
+}
