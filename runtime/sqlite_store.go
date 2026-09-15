@@ -436,6 +436,14 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // abandoned attempt give its slot back while the row still says what the
 // journal says about it.
 //
+// A TERMINAL RUN's operation is refused outright, and that condition belongs in
+// this statement rather than anywhere cheaper. A stop writes the run document
+// and then finishes the run's active operations, so this check is what decides
+// which side of the stop a concurrent acquisition fell on; a driver that read
+// the run before the stop and checked it in Go would be asking a question whose
+// answer had already changed. The count is deliberately left alone: it still
+// counts leases, and a terminal run holds none once its stop has finished them.
+//
 // Reclaiming a crashed driver's slot is the existing lease takeover, which
 // CanAcquire gates on owner death AND expiry, so an expired heartbeat alone
 // still steals nothing. This statement does not perform that reclamation and
@@ -453,10 +461,12 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	}
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
+		       AND json_extract(runs.document, '$.disposition') IN ('completed', 'failed', 'cancelled'))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
-		string(document), op.ID, expected, op.RunID, maxRuns)
+		string(document), op.ID, expected, op.RunID, op.RunID, maxRuns)
 	if err != nil {
 		return 0, false, err
 	}

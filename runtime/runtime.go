@@ -504,7 +504,16 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			}
 			s.Operations[operation.ID] = operation
 		}
-		if e.Type == EventRunWaiting {
+		// A WAIT NEVER UN-CANCELS A RUN. Replay is otherwise last-wins, which
+		// is right for every automatic disposition - they are all re-derived
+		// from the same state on the next pass - but cancellation is not
+		// derived from anything. It is an operator's instruction, and the only
+		// way a run.waiting lands after one is a driver that read this run
+		// BEFORE the stop and settled its pass afterwards, which is a stale
+		// opinion by construction. Letting it win put the run back in the
+		// supervisor's active set and let the work the operator stopped be
+		// acquired and executed on the next tick.
+		if e.Type == EventRunWaiting && s.Disposition != Cancelled {
 			s.Disposition = Waiting
 			s.Reason = payloadReason(e.Payload)
 		}

@@ -29,11 +29,21 @@ type OperationStore interface {
 	// when another writer won the race, without modifying stored state.
 	PutOperation(op RunOperation, expected int64) (int64, bool, error)
 	// AcquireOperation is PutOperation guarded by the global run ceiling: it
-	// writes op only when the stored revision still equals expected AND fewer
-	// than maxRuns OTHER runs currently hold a leased or running operation.
-	// The count and the write must be one durable statement - counting first
-	// and writing second is the read-then-act race two watcher processes both
-	// win, which is the whole reason this is not just PutOperation.
+	// writes op only when the stored revision still equals expected, the
+	// operation's own run is not already terminal, AND fewer than maxRuns OTHER
+	// runs currently hold a leased or running operation. All three and the
+	// write must be one durable statement - checking first and writing second
+	// is the read-then-act race two watcher processes both win, which is the
+	// whole reason this is not just PutOperation.
+	//
+	// The terminal-run condition is what makes stopping a run mean stopping it.
+	// CancelRun writes the run document BEFORE it scans the operations, so
+	// every acquisition is on one side or the other of that write: one that
+	// reaches this statement first is seen by the scan and finished, and one
+	// that arrives after it is refused here. Without the condition a driver
+	// already inside Next - the supervisor tick and the control endpoint's
+	// stop-all are different goroutines and nothing serializes them - leased
+	// and executed work the operator had already stopped.
 	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
 }
 
@@ -136,6 +146,13 @@ func (s *MemoryOperationStore) PutOperation(op RunOperation, expected int64) (in
 // AcquireOperation mirrors the durable guard so the double keeps the same
 // contract. Its atomicity comes from a process-local mutex, which is exactly
 // why it is a test double and never the proof of anything cross-process.
+//
+// The terminal-run condition is NOT mirrored, and cannot be: this double holds
+// operations and nothing else, so it has no run to ask. Inventing a second
+// runs table here would be a second answer to "is this run stopped" living only
+// in test code, which is worth less than the rule it would imitate. The rule is
+// stated against SQLite, where the run document and the acquisition are one
+// statement, by TestSQLiteAStoppedRunsOperationIsNeverAcquired.
 func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")

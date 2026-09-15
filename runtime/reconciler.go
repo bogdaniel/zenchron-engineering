@@ -1776,6 +1776,30 @@ func newEventID(runID string) string { return runID + "-" + rand.Text() }
 // not grow the journal; the run document is always refreshed, so a later
 // resume sees the current identity bindings without replaying.
 func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disposition, reason string) error {
+	// A run the operator has already STOPPED is never settled onto anything
+	// else. Every disposition this pass could record was derived from a
+	// snapshot read at the start of the pass, and CancelRun writes from another
+	// goroutine entirely - the control endpoint's stop-all runs concurrently
+	// with the tick that is driving this run. Recording the stale answer
+	// appended run.waiting after run.cancelled and wrote the run document back
+	// to waiting, which returned the run to the supervisor's active set and
+	// handed the work the operator stopped straight back to the next tick.
+	//
+	// The re-read is deliberately not the whole guarantee, and does not have to
+	// be: a stop that lands between this read and the write below is caught by
+	// replay, where cancellation is sticky, so the next pass refuses on
+	// `run is terminal` before it plans anything and settles the document back.
+	if disposition != Cancelled {
+		live, found, err := r.deps.Store.Run(state.run.ID)
+		if err != nil {
+			return err
+		}
+		if found && live.Disposition == Cancelled {
+			state.run = live
+			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
+			return nil
+		}
+	}
 	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason {
 		eventType, ok := dispositionEvents[disposition]
 		if !ok {
@@ -1812,5 +1836,8 @@ func (r *EngineeringRuntime) settle(state *runState, disposition Disposition, re
 	if err := r.recordDisposition(state, disposition, reason); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{RunID: state.run.ID, Disposition: disposition, Reason: reason}, nil
+	// Reported from what was RECORDED, not from what was asked for: a pass
+	// settling on stale state over a stopped run records the stop instead, and
+	// the operator's caller has to be told the run is cancelled.
+	return Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
 }

@@ -380,6 +380,18 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 //     leaving the lease standing is what kept a stopped run's concurrency slot
 //     for the rest of the database's life.
 //
+// The ORDER of 2 and 3 is load-bearing and not merely tidy. A driver that is
+// already inside Reconcile decided everything about this pass from a snapshot
+// read before any of this, and nothing serializes it against a stop: the
+// supervisor's tick drives runs on their own goroutines while the control
+// endpoint answers stop-all on another. Writing the run document first is what
+// splits every concurrent acquisition cleanly in two. One that reached the
+// durable acquisition before this write is leased, and the scan below sees it
+// leased and finishes it; one that arrives after this write is refused by the
+// acquisition statement itself, which will not lease an operation whose run is
+// terminal. There is no third case, because the run document and the
+// acquisition are the same database.
+//
 // It is idempotent: cancelling an already cancelled run appends nothing and
 // reports the same answer. It is also REPEATABLE, which is not the same thing:
 // a second stop still finishes whatever operations the first one left active,
