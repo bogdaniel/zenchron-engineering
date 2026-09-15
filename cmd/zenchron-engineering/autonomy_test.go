@@ -2093,7 +2093,7 @@ func TestStatusSurfacesTheSanitizedExecutionDiagnostic(t *testing.T) {
 		HTTPStatus:         400,
 		ProviderErrorCode:  "invalid_value",
 		ProviderErrorParam: "tools[0].name",
-		ArtifactRef:        "artifacts/provider-openai-responses-run-1.txt",
+		ArtifactRef:        "artifacts/" + strings.Repeat("candidate-sha/", 30) + "provider-openai-responses-run-1.txt",
 	}
 	engine := &scriptedRuntime{
 		runID: "run-1",

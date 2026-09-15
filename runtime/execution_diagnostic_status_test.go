@@ -15,8 +15,12 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // observedToolNameRejection is the exact response body the real run received.
@@ -130,5 +134,102 @@ func TestExecutionDiagnosticIsProjectedFromTheJournalAlone(t *testing.T) {
 	}
 	if empty.ExecutionDiagnostic != nil {
 		t.Fatalf("an empty journal projected a diagnostic: %#v", empty.ExecutionDiagnostic)
+	}
+}
+
+// Artifact locators must survive journal append and projection intact.
+func TestExecutionDiagnosticPreservesLongArtifactPaths(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("a", 100), strings.Repeat("b", 100))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "transcript.json")
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if len(path) <= maxPayloadFieldBytes {
+		t.Fatal("fixture path must exceed detail bound")
+	}
+	for _, tc := range []struct {
+		name   string
+		result ExecutionResult
+	}{
+		{"failure reference", ExecutionResult{Failure: &ProviderFailure{RawDiagnosticRef: path}, Artifacts: []Artifact{{Path: "fallback"}}}},
+		{"artifact fallback", ExecutionResult{Artifacts: []Artifact{{Path: path}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &EngineeringRuntime{}
+			diagnostic := r.executionDiagnostic(execStageProviderResult, FailureUnknown, tc.result, errors.New(strings.Repeat("detail", 100)))
+			restored := appendAndProjectDiagnostic(t, diagnostic)
+			if restored.ArtifactRef != path {
+				t.Fatalf("artifact path = %q, want %q", restored.ArtifactRef, path)
+			}
+			if _, err := os.Stat(restored.ArtifactRef); err != nil {
+				t.Fatalf("artifact locator does not resolve: %v", err)
+			}
+			if len(restored.Message) > maxPayloadFieldBytes {
+				t.Fatal("detail exceeds field bound")
+			}
+		})
+	}
+}
+
+func appendAndProjectDiagnostic(t *testing.T, diagnostic *ExecutionDiagnostic) *ExecutionDiagnostic {
+	t.Helper()
+	_, store := openJournal(t)
+	result, err := json.Marshal(executionRecord{Diagnostic: diagnostic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(RunOperation{SchemaVersion: SchemaVersion, ID: "op-1", RunID: "r", Kind: OpExecutionInvoke, State: OperationFailed, Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "e-1", RunID: "r", OperationID: "op-1", Type: EventOperationAfter, OccurredAt: time.Unix(101, 0).UTC(), Payload: payload})
+	if err != nil {
+		t.Fatalf("append diagnostic: %v", err)
+	}
+	events, err := store.Events("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := Project(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.ExecutionDiagnostic == nil {
+		t.Fatal("diagnostic missing from projection")
+	}
+	return projection.ExecutionDiagnostic
+}
+
+func TestExecutionDiagnosticArtifactBoundThroughJournal(t *testing.T) {
+	for _, tc := range []struct{ name, ref, want string }{
+		{"at bound", strings.Repeat("a", maxArtifactRefBytes), strings.Repeat("a", maxArtifactRefBytes)},
+		{"over bound", strings.Repeat("a", maxArtifactRefBytes+1), ""},
+		{"over payload ceiling", strings.Repeat("a", maxCanonicalPayloadBytes+1), ""},
+		{"invalid UTF8", "path/\xfftranscript", "path/transcript"},
+		{"UTF8 cleanup at bound", strings.Repeat("a", maxArtifactRefBytes) + "\xff", strings.Repeat("a", maxArtifactRefBytes)},
+		{"escaped oversized", strings.Repeat("\x01", maxArtifactRefBytes), ""},
+	} {
+		for _, fallback := range []bool{false, true} {
+			name := tc.name + "/failure"
+			result := ExecutionResult{Failure: &ProviderFailure{RawDiagnosticRef: tc.ref}}
+			if fallback {
+				name = tc.name + "/fallback"
+				result = ExecutionResult{Artifacts: []Artifact{{Path: tc.ref}}}
+			}
+			t.Run(name, func(t *testing.T) {
+				r := &EngineeringRuntime{}
+				diagnostic := r.executionDiagnostic(execStageProviderResult, FailureUnknown, result, errors.New(strings.Repeat("detail", 100)))
+				restored := appendAndProjectDiagnostic(t, diagnostic)
+				if restored.ArtifactRef != tc.want {
+					t.Fatalf("artifact ref = %q, want %q", restored.ArtifactRef, tc.want)
+				}
+				if restored.Message == "" || len(restored.Message) > maxPayloadFieldBytes {
+					t.Fatal("bounded diagnostic message lost")
+				}
+			})
+		}
 	}
 }

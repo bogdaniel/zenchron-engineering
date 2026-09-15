@@ -969,12 +969,13 @@ type executionRecord struct {
 	Checkpoint bool `json:"checkpoint,omitempty"`
 }
 
-// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
-// bounded to one payload field, and the message is redacted with the same
+// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Descriptive fields
+// are bounded to one payload field, and the message is redacted with the same
 // redactor that guards transcript artifacts, so no API key, Authorization
 // header, forge token, or raw provider body can become a durable row. Bulk
 // material stays in the artifact store; ArtifactRef names it when one exists,
-// and is absent when no provider interaction produced one.
+// and is absent when no provider interaction produced one. Artifact references
+// remain complete so operators can resolve them, or are omitted if oversized.
 type ExecutionDiagnostic struct {
 	Stage              string       `json:"stage"`
 	FailureClass       FailureClass `json:"failure_class,omitempty"`
@@ -1023,11 +1024,29 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		diagnostic.ProviderErrorParam = boundedDetail(stop.Param)
 	}
 	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
-		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
+		diagnostic.ArtifactRef = boundedArtifactRef(result.Failure.RawDiagnosticRef)
 	} else if len(result.Artifacts) > 0 {
-		diagnostic.ArtifactRef = boundedDetail(result.Artifacts[0].Path)
+		diagnostic.ArtifactRef = boundedArtifactRef(result.Artifacts[0].Path)
 	}
 	return diagnostic
+}
+
+// maxArtifactRefBytes allows filesystem-sized locators while leaving room for
+// the diagnostic and operation envelope under the journal's 8 KiB ceiling.
+const maxArtifactRefBytes = 4 << 10
+
+func boundedArtifactRef(ref string) string {
+	ref = strings.ToValidUTF8(ref, "")
+	if len(ref) > maxArtifactRefBytes {
+		return ""
+	}
+	// Escaped control characters can cost six bytes each in JSON. Bound that
+	// representation too; never truncate a locator to make it fit.
+	encoded, err := json.Marshal(ref)
+	if err != nil || len(encoded)-2 > maxArtifactRefBytes {
+		return ""
+	}
+	return ref
 }
 
 // sanitizedDetail is the only way error text becomes durable here: secrets are
