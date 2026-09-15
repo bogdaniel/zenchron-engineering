@@ -61,6 +61,14 @@ func copyOperation(op RunOperation) RunOperation {
 		started := *op.StartedAt
 		op.StartedAt = &started
 	}
+	if op.ActiveSince != nil {
+		active := *op.ActiveSince
+		op.ActiveSince = &active
+	}
+	if op.Deadline != nil {
+		deadline := *op.Deadline
+		op.Deadline = &deadline
+	}
 	if op.LastProgressAt != nil {
 		progress := *op.LastProgressAt
 		op.LastProgressAt = &progress
@@ -322,7 +330,11 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		if !CanAcquire(op, now, alive) {
 			continue
 		}
-		if op.WallBudget > 0 && OperationElapsed(op, now) > op.WallBudget {
+		// Retired on EXECUTION AUTHORITY, not on wall-clock elapsed. The
+		// elapsed test charged an operation for however long the world took
+		// between its attempts, so a run parked on an unavailable account could
+		// be retired without ever having executed for its budget.
+		if OperationExpired(op, now) {
 			op.State = OperationFailed
 			op.Lease = nil
 			// A lost CAS here means another scheduler already retired it.
@@ -358,6 +370,39 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		op.Attempt++
 		op.StartedAt = &now
 		op.LastProgressAt = &now
+		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
+		//
+		// The attempt's deadline is derived from what the operation has NOT yet
+		// spent, not from the whole budget: a second attempt inherits the
+		// remainder rather than a fresh envelope. And it is derived here rather
+		// than at plan time because the budget bounds execution - a run parked
+		// on an unavailable provider account, an operator decision or a review
+		// is not executing, and an instant stamped before it started would burn
+		// while nothing ran.
+		// A PREVIOUS ATTEMPT THAT NEVER FINISHED still spent what it spent.
+		//
+		// Finish is what normally folds an attempt's elapsed execution into the
+		// counter. A controller that died mid-attempt never reached it, so its
+		// ActiveSince is still set here - and starting the next attempt without
+		// folding it would silently return the whole budget, which is the
+		// original defect in a narrower place. Charging it is the fail-safe
+		// direction: an attempt that was active and cannot say how much of its
+		// time was useful is charged for all of it.
+		if op.ActiveSince != nil {
+			if orphaned := now.Sub(*op.ActiveSince); orphaned > 0 {
+				op.ConsumedExecution += orphaned
+				op.LastAttemptExecution = orphaned
+			}
+		}
+		op.ActiveSince = &now
+		if op.WallBudget > 0 {
+			remaining := op.WallBudget - op.ConsumedExecution
+			if remaining < 0 {
+				remaining = 0
+			}
+			deadline := now.Add(remaining)
+			op.Deadline = &deadline
+		}
 		return nil
 	})
 }
@@ -379,12 +424,26 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")
 	}
-	return s.transition(id, func(op *RunOperation, _ time.Time) error {
+	return s.transition(id, func(op *RunOperation, now time.Time) error {
 		if op.State != Leased && op.State != Running {
 			return fmt.Errorf("operation is not active")
 		}
 		op.State = state
 		op.Lease = nil
+		// What this attempt ACTUALLY executed joins the durable counter, and
+		// the operation stops being active. Anything that happens between now
+		// and the next attempt - an operator decision, a funded account, a
+		// human review - costs nothing, because nothing is executing.
+		if op.ActiveSince != nil {
+			spent := now.Sub(*op.ActiveSince)
+			if spent < 0 {
+				spent = 0
+			}
+			op.ConsumedExecution += spent
+			op.LastAttemptExecution = spent
+			op.ActiveSince = nil
+		}
+		op.Deadline = nil
 		return nil
 	})
 }
@@ -405,7 +464,7 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 // and the elapsed-time origin are given back, so the wall budget measures the
 // next real attempt rather than however long a human took to restore an
 // account.
-func (s Scheduler) RestoreAttempt(id string) (RunOperation, error) {
+func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, _ time.Time) error {
 		if op.State != OperationFailed {
 			return fmt.Errorf("only a failed operation can have an attempt restored")
@@ -415,6 +474,26 @@ func (s Scheduler) RestoreAttempt(id string) (RunOperation, error) {
 		}
 		op.Lease = nil
 		op.StartedAt = nil
+		// The execution budget is given back ONLY when no execution happened.
+		//
+		// Elapsed time is not proof that a provider did nothing. A worker can
+		// reason, call tools and edit for twenty minutes and only then meet a
+		// rate limit, a quota or an account condition that routes to a wait.
+		// Refunding that would make real work free every time it ends in the
+		// same wall, and a cumulative budget that can be replenished by hitting
+		// an external limit is not a budget.
+		//
+		// What is always given back is the ATTEMPT: observing an external
+		// refusal is not work the run's attempt ceiling should pay for.
+		if refundExecution {
+			op.ConsumedExecution -= op.LastAttemptExecution
+			if op.ConsumedExecution < 0 {
+				op.ConsumedExecution = 0
+			}
+		}
+		op.LastAttemptExecution = 0
+		op.ActiveSince = nil
+		op.Deadline = nil
 		return nil
 	})
 }
@@ -427,7 +506,7 @@ func (s Scheduler) RequestCancel(id string) (RunOperation, error) {
 // caller should remediate it. The reconciler records the chosen outcome.
 func (s Scheduler) BudgetState(op RunOperation) OperationState {
 	now := s.defaults().Clock.Now()
-	if (op.WallBudget > 0 && OperationElapsed(op, now) > op.WallBudget) || NoProgressExceeded(op, now) {
+	if OperationExpired(op, now) || NoProgressExceeded(op, now) {
 		return Unknown
 	}
 	return op.State
