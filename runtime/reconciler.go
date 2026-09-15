@@ -1776,6 +1776,33 @@ func newEventID(runID string) string { return runID + "-" + rand.Text() }
 // not grow the journal; the run document is always refreshed, so a later
 // resume sees the current identity bindings without replaying.
 func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disposition, reason string) error {
+	// A run the operator has already STOPPED is never settled onto anything
+	// else. Every disposition this pass could record was derived from a
+	// snapshot read at the start of the pass, and CancelRun writes from another
+	// goroutine entirely - the control endpoint's stop-all runs concurrently
+	// with the tick that is driving this run. Recording the stale answer
+	// appended run.waiting after run.cancelled and wrote the run document back
+	// to waiting, which returned the run to the supervisor's active set and
+	// handed the work the operator stopped straight back to the next tick.
+	//
+	// The re-read is not the guarantee - PutRun's own condition is, and it
+	// refuses to replace a cancelled row whatever this pass decided. What the
+	// re-read buys is the COMMON case: a stop that has already landed stops
+	// this pass from appending a junk run.waiting or run.failed to the hash
+	// chain at all, which the write below cannot do anything about because the
+	// append comes first. A stop that lands between this read and that write
+	// is caught by the condition, and adopted straight afterwards.
+	if disposition != Cancelled {
+		live, found, err := r.deps.Store.Run(state.run.ID)
+		if err != nil {
+			return err
+		}
+		if found && live.Disposition == Cancelled {
+			state.run = live
+			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
+			return nil
+		}
+	}
 	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason {
 		eventType, ok := dispositionEvents[disposition]
 		if !ok {
@@ -1798,7 +1825,28 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 	run.Contract = state.projection.Contract
 	run.UpdatedAt = r.deps.Clock.Now()
 	state.run = run
-	return r.deps.Store.PutRun(run)
+	if err := r.deps.Store.PutRun(run); err != nil {
+		return err
+	}
+	// ADOPT WHAT THE ROW ACTUALLY SAYS. The write above is conditional and
+	// refuses silently, so a stop that won the race leaves this pass holding a
+	// disposition the database never accepted. Nothing durable is wrong at that
+	// point - the row and replay both say cancelled, and the acquisition
+	// statement reads the row - but the pass would go on to REPORT `waiting`
+	// for a run the operator stopped, which is the one thing its caller acts
+	// on. One read is cheaper than an operator who believes their stop is still
+	// pending.
+	if disposition != Cancelled {
+		live, found, err := r.deps.Store.Run(run.ID)
+		if err != nil {
+			return err
+		}
+		if found && live.Disposition == Cancelled {
+			state.run = live
+			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
+		}
+	}
+	return nil
 }
 
 var dispositionEvents = map[Disposition]string{
@@ -1812,5 +1860,8 @@ func (r *EngineeringRuntime) settle(state *runState, disposition Disposition, re
 	if err := r.recordDisposition(state, disposition, reason); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{RunID: state.run.ID, Disposition: disposition, Reason: reason}, nil
+	// Reported from what was RECORDED, not from what was asked for: a pass
+	// settling on stale state over a stopped run records the stop instead, and
+	// the operator's caller has to be told the run is cancelled.
+	return Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
 }
