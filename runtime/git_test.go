@@ -162,13 +162,11 @@ func TestPrePublicationRebaseReturnsTypedConflict(t *testing.T) {
 // holding an assurance checkout - which is a real repository with a real commit
 // and a worktree of its own that keeps changing.
 //
-// The path is the one run run-5fa7aff09147d45bf7c3a05d504033f7 actually left,
-// because the shape is the point: a directory Git will not descend into and
-// cannot commit the contents of.
-func workerTestScratchRepository(t *testing.T, workspace string) string {
+// The caller names the path, because production had two such roots and six such
+// repositories; the shape is what matters either way, a directory Git will not
+// descend into and cannot commit the contents of.
+func workerTestScratchRepository(t *testing.T, workspace, rel string, dirty bool) string {
 	t.Helper()
-	rel := filepath.Join(".validation-tmp", "TestM_RestartPreservesTheExactEvidenceAndItsReason266398414",
-		"001", "state", "runs", "run-63ca61c8e818d9c361958e04afdcee8a", "assurance", "0077b658-1")
 	nested := filepath.Join(workspace, rel)
 	if err := os.MkdirAll(nested, 0700); err != nil {
 		t.Fatal(err)
@@ -190,10 +188,13 @@ func workerTestScratchRepository(t *testing.T, workspace string) string {
 	if _, err := runGit(nested, "commit", "--no-gpg-sign", "-m", "assurance checkout"); err != nil {
 		t.Fatal(err)
 	}
-	// The killed attempt's tree is half-finished, which is why the parent's
-	// gitlink reads as modified the instant it is committed.
-	if err := os.WriteFile(filepath.Join(nested, "checked-out.txt"), []byte("assurance half-written\n"), 0600); err != nil {
-		t.Fatal(err)
+	// A killed attempt leaves SOME of its nested trees half-finished. Only
+	// those make the parent report the gitlink as modified; a clean one is
+	// reported nowhere, which is the silent half of the same defect.
+	if dirty {
+		if err := os.WriteFile(filepath.Join(nested, "checked-out.txt"), []byte("assurance half-written\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return filepath.ToSlash(rel)
 }
@@ -213,7 +214,14 @@ func TestCandidateCommitRefusesAKilledAttemptsTestScratchRepository(t *testing.T
 	if err := os.WriteFile(filepath.Join(w.Dir, "safe.txt"), []byte("candidate\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	scratch := workerTestScratchRepository(t, w.Dir)
+	// Production had six of these, across two in-tree scratch roots, and only
+	// one of them was dirty enough for the probe to see. An operator shown a
+	// single example of a workspace-wide condition goes looking for a one-off,
+	// so every offending path has to be named.
+	dirty := workerTestScratchRepository(t, w.Dir, filepath.Join(".validation-tmp",
+		"TestM_RestartPreservesTheExactEvidenceAndItsReason266398414", "001", "state",
+		"runs", "run-63ca61c8e818d9c361958e04afdcee8a", "assurance", "0077b658-1"), true)
+	clean := workerTestScratchRepository(t, w.Dir, filepath.Join("t", "fixture-origin"), false)
 	before, err := gitOutput(w.Dir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -222,8 +230,10 @@ func TestCandidateCommitRefusesAKilledAttemptsTestScratchRepository(t *testing.T
 	if err == nil {
 		t.Fatal("the runtime committed a workspace holding a nested repository")
 	}
-	if !strings.Contains(err.Error(), scratch) {
-		t.Fatalf("the refusal does not name the path that cannot be committed: %v", err)
+	for _, want := range []string{dirty, clean} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not name %q, which cannot be committed: %v", want, err)
+		}
 	}
 	after, err := gitOutput(w.Dir, "rev-parse", "HEAD")
 	if err != nil {
@@ -274,5 +284,55 @@ func TestCandidateCommitStillCarriesAGenuineChange(t *testing.T) {
 		if err != nil || strings.TrimSpace(content) == "" {
 			t.Fatalf("%q is not in the commit: %v", want, err)
 		}
+	}
+}
+
+// TestCandidateCommitRefusesAGitlinkAlreadyRecordedInTheIndex is the silent half
+// of issue #189, and the half nothing was catching.
+//
+// Five of the six gitlinks in commit f0f72ba had clean nested worktrees. A clean
+// one is in no changed path, so the workspace reports nothing, the cleanliness
+// probe passes, and the runtime publishes a tree whose recorded paths hold no
+// content - `git show HEAD:<path>` answers "exists on disk, but not in HEAD".
+// Refusing only what the worktree reports would leave that latent.
+func TestCandidateCommitRefusesAGitlinkAlreadyRecordedInTheIndex(t *testing.T) {
+	w := commitGateWorkspace(t)
+	gitlink := workerTestScratchRepository(t, w.Dir, filepath.Join("t", "fixture-origin"), false)
+	if _, err := runGit(w.Dir, "add", "-A", "--"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", "an earlier commit recorded the gitlink"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := gitOutput(w.Dir, "status", "--porcelain=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(status) != "" {
+		t.Fatalf("the fixture is not the silent case: %q", status)
+	}
+	// The fixture commit is the runtime's own history, not a producer touching
+	// Git behind its back, so the integrity baseline is taken after it.
+	if w.TrustedMetadata, err = gitMetadataDigest(w.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "safe.txt"), []byte("candidate\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("runtime candidate", 1<<20); err == nil {
+		t.Fatal("the runtime published a tree that does not hold the content of a recorded gitlink")
+	} else if !strings.Contains(err.Error(), gitlink) {
+		t.Fatalf("the refusal does not name the recorded gitlink: %v", err)
+	}
+	after, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(after) != strings.TrimSpace(before) {
+		t.Fatal("the runtime wrote a commit it then refused")
 	}
 }
