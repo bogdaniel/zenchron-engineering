@@ -358,6 +358,34 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 	return record, &AgentHandoffRefusedError{Record: record}
 }
 
+// CANCELLATION IS MONOTONIC, AND THAT IS THE WHOLE RULE.
+//
+// A run's disposition has exactly TWO durable representations: the journal,
+// which is the authority, and the run row, which is a cache of it. Cancellation
+// is the one disposition no pass can re-derive - every other one is recomputed
+// from state on the next load, so a stale write of it is self-correcting, while
+// a stale write over a stop is not. So each representation refuses to leave
+// `cancelled`, and that is two conditions rather than a growing pile: Reduce
+// ignores a later run.waiting or run.failed, and PutRun's statement refuses to
+// replace a cancelled row. They are the same rule counted once per
+// representation, and the count is bounded by the representations.
+//
+// Everything downstream READS one of those two and needs no rule of its own.
+// AcquireOperation consults the run row inside its own compare-and-set, which
+// is where cancellation and reconciliation become one order; Supervisor.Tick
+// consults the row to build its active set; validate consults replay. The lease
+// that statement grants is the single capability every material action is
+// behind - handle has exactly one call site, immediately after Start, and Start
+// accepts only what AcquireOperation leased - so refusing the lease is refusing
+// the provider, the candidate mutation, the commit, the push and the
+// publication in one place rather than in five.
+//
+// What this does NOT do is interrupt an attempt already under way. An operation
+// leased and started before the stop runs to completion: nothing on the
+// executing path re-reads the run, and ending it early is cooperative
+// cancellation, a different mechanism from a durable condition. That boundary
+// is stated again where each condition lives.
+//
 // CancelRun records durable operator cancellation intent for one run and stops
 // its scheduling. It lives here, in the runtime, because two callers need
 // exactly one cancellation path: the `stop RUN` command and the supervisor's

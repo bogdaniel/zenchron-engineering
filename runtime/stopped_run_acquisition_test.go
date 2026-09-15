@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -211,5 +212,214 @@ func TestAStaleWaitNeverUnStopsARun(t *testing.T) {
 	}
 	if repaired.Disposition != Cancelled {
 		t.Fatalf("the run document was left %q, so the supervisor keeps driving a stopped run", repaired.Disposition)
+	}
+}
+
+// firingClock fires once, on the Nth Now() call. It is how a stop is landed in
+// the middle of another goroutine's durable sequence without a sleep: the write
+// under test is bracketed by Clock.Now() calls, so choosing N chooses the gap.
+type firingClock struct {
+	inner *steppingClock
+	at, n int
+	fire  func()
+}
+
+func (c *firingClock) Now() time.Time {
+	c.n++
+	if c.n == c.at && c.fire != nil {
+		fire := c.fire
+		c.fire = nil
+		fire()
+	}
+	return c.inner.Now()
+}
+
+// TestAStaleSettleNeverOverwritesAStopInFlight lands the stop in the ONE gap a
+// re-read cannot cover: after recordDisposition has read the run and found it
+// live, and before it writes its own answer back.
+//
+// Durably this is the whole race. The run document is what Supervisor.Tick
+// reads to build its active set and what the acquisition statement consults, so
+// a pass that writes `waiting` over the operator's stop puts the run back in
+// the fleet and re-opens acquisition, and replay - which knows better - is not
+// consulted again until something loads the run.
+func TestAStaleSettleNeverOverwritesAStopInFlight(t *testing.T) {
+	for _, disposition := range []Disposition{Waiting, Failed} {
+		t.Run(string(disposition), func(t *testing.T) {
+			f := newPhase8Fixture(t)
+			runID := f.start()
+			if _, err := f.runtime.Reconcile(context.Background(), runID); err != nil {
+				t.Fatal(err)
+			}
+			state, err := f.runtime.load(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock := &firingClock{inner: f.clock, at: 1}
+			clock.fire = func() {
+				if _, err := CancelRun(f.store, f.runtime.scheduler, f.clock.Now(), runID, "operator/stop"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.runtime.deps.Clock = clock
+			if err := f.runtime.recordDisposition(state, disposition, "stale_"+string(disposition)); err != nil {
+				t.Fatal(err)
+			}
+			if clock.fire != nil {
+				t.Fatal("the stop never landed inside the write, so nothing was contested")
+			}
+			document, found, err := f.store.Run(runID)
+			if err != nil || !found {
+				t.Fatal(err, found)
+			}
+			if document.Disposition != Cancelled {
+				t.Fatalf("a stale %q settle overwrote the operator's stop: the run document is %q", disposition, document.Disposition)
+			}
+			reloaded, err := f.runtime.load(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.snapshot.Disposition != Cancelled {
+				t.Fatalf("replay reports %q for a stopped run", reloaded.snapshot.Disposition)
+			}
+			// The pass must also KNOW, or it reports a pending stop as still
+			// running to the operator who issued it.
+			if state.run.Disposition != Cancelled {
+				t.Fatalf("the pass went on believing the run was %q", state.run.Disposition)
+			}
+			// THE CRUX. A pass that loses this write still holds the live
+			// value it read before the stop, and Reconcile carries on with it.
+			// That buys the pass nothing only if the stale value cannot be
+			// turned into a LEASE: handle has exactly one call site, directly
+			// after Start, and Start only accepts an operation AcquireOperation
+			// leased. So the lease is the single capability every material
+			// action - provider invocation, candidate mutation, commit, push,
+			// publication - is behind, and it is refused here.
+			if _, _, err := f.runtime.scheduler.Plan(RunOperation{
+				RunID: runID, Kind: OpExecutionInvoke, IdempotencyKey: "stale-pass-probe", MaxAttempts: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			leased, err := f.runtime.scheduler.Next(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if leased != nil {
+				t.Fatalf("a pass that lost the stop race still leased %q, which is a Start away from the provider", leased.ID)
+			}
+		})
+	}
+}
+
+// TestSQLiteAStoppedRunDocumentIsNeverReplaced states the durable rule on its
+// own. PutRun is the only update path a run row has, so one condition there is
+// the whole guarantee - and it has to be IN the statement, because the writer
+// that loses this race lost it by reading first.
+func TestSQLiteAStoppedRunDocumentIsNeverReplaced(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	run := newJournalRun("run-a")
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	run.Disposition, run.Reason = Cancelled, "operator/stop"
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []Disposition{Waiting, Failed, Completed, Active} {
+		attempt := run
+		attempt.Disposition, attempt.Reason = stale, "stale_"+string(stale)
+		if err := store.PutRun(attempt); err != nil {
+			t.Fatal(err)
+		}
+		stored, found, err := store.Run("run-a")
+		if err != nil || !found {
+			t.Fatal(err, found)
+		}
+		if stored.Disposition != Cancelled || stored.Reason != "operator/stop" {
+			t.Fatalf("a %q write replaced the operator's stop: %q %q", stale, stored.Disposition, stored.Reason)
+		}
+	}
+	// A stop is still REPEATABLE: writing cancellation again must land, or the
+	// retry path #179 established stops working.
+	run.Reason = "operator/stop-again"
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err := store.Run("run-a")
+	if err != nil || !found {
+		t.Fatal(err, found)
+	}
+	if stored.Reason != "operator/stop-again" {
+		t.Fatalf("a repeated stop was refused: reason is %q", stored.Reason)
+	}
+}
+
+// chainedHistory builds a valid hash-chained journal of disposition events.
+func chainedHistory(t *testing.T, runID string, types ...string) []EngineeringEvent {
+	t.Helper()
+	var out []EngineeringEvent
+	var prev EngineeringEvent
+	for i, eventType := range types {
+		payload, err := json.Marshal(map[string]string{"reason": eventType})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := EngineeringEvent{
+			SchemaVersion: SchemaVersion, ID: fmt.Sprintf("e%d", i+1), RunID: runID,
+			Sequence: int64(i + 1), Type: eventType, OccurredAt: time.Unix(int64(i+1), 0), Payload: payload,
+		}
+		if i > 0 {
+			e.PreviousEventID, e.PreviousEventHash = prev.ID, prev.EventHash
+		}
+		hash, err := EventDigest(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.EventHash = hash
+		out = append(out, e)
+		prev = e
+	}
+	return out
+}
+
+// TestReplayNeverUnCancelsARun is the other half of the same rule, on the other
+// authority. The run document can be repaired from replay; replay cannot be
+// repaired from anything, so a stale disposition event landing after a stop has
+// to be inert there too.
+//
+// The merged case is NOT symmetric and is asserted as such. A cancelled run
+// whose candidate merged genuinely IS completed - conditions() consults
+// MergePrecedence before it consults cancellation - so guarding run.completed
+// here would contradict a rule the runtime already states elsewhere.
+func TestReplayNeverUnCancelsARun(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		history []string
+		want    Disposition
+	}{
+		{"a wait after a stop", []string{EventRunCancelled, EventRunWaiting}, Cancelled},
+		{"a failure after a stop", []string{EventRunCancelled, EventRunFailed}, Cancelled},
+		{"both after a stop", []string{EventRunCancelled, EventRunWaiting, EventRunFailed}, Cancelled},
+		{"a merge after a stop", []string{EventRunCancelled, EventRunCompleted}, Completed},
+		{"an ordinary wait", []string{EventRunWaiting}, Waiting},
+		{"an ordinary failure", []string{EventRunFailed}, Failed},
+		{"a failure then a wait", []string{EventRunFailed, EventRunWaiting}, Waiting},
+		{"a stop after a failure", []string{EventRunFailed, EventRunCancelled}, Cancelled},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			run := EngineeringRun{SchemaVersion: SchemaVersion, ID: "r", Disposition: Active}
+			snapshot, err := Reduce(run, chainedHistory(t, "r", c.history...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Disposition != c.want {
+				t.Fatalf("replay of %v reports %q, want %q", c.history, snapshot.Disposition, c.want)
+			}
+		})
 	}
 }

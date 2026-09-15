@@ -1785,10 +1785,13 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 	// to waiting, which returned the run to the supervisor's active set and
 	// handed the work the operator stopped straight back to the next tick.
 	//
-	// The re-read is deliberately not the whole guarantee, and does not have to
-	// be: a stop that lands between this read and the write below is caught by
-	// replay, where cancellation is sticky, so the next pass refuses on
-	// `run is terminal` before it plans anything and settles the document back.
+	// The re-read is not the guarantee - PutRun's own condition is, and it
+	// refuses to replace a cancelled row whatever this pass decided. What the
+	// re-read buys is the COMMON case: a stop that has already landed stops
+	// this pass from appending a junk run.waiting or run.failed to the hash
+	// chain at all, which the write below cannot do anything about because the
+	// append comes first. A stop that lands between this read and that write
+	// is caught by the condition, and adopted straight afterwards.
 	if disposition != Cancelled {
 		live, found, err := r.deps.Store.Run(state.run.ID)
 		if err != nil {
@@ -1822,7 +1825,28 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 	run.Contract = state.projection.Contract
 	run.UpdatedAt = r.deps.Clock.Now()
 	state.run = run
-	return r.deps.Store.PutRun(run)
+	if err := r.deps.Store.PutRun(run); err != nil {
+		return err
+	}
+	// ADOPT WHAT THE ROW ACTUALLY SAYS. The write above is conditional and
+	// refuses silently, so a stop that won the race leaves this pass holding a
+	// disposition the database never accepted. Nothing durable is wrong at that
+	// point - the row and replay both say cancelled, and the acquisition
+	// statement reads the row - but the pass would go on to REPORT `waiting`
+	// for a run the operator stopped, which is the one thing its caller acts
+	// on. One read is cheaper than an operator who believes their stop is still
+	// pending.
+	if disposition != Cancelled {
+		live, found, err := r.deps.Store.Run(run.ID)
+		if err != nil {
+			return err
+		}
+		if found && live.Disposition == Cancelled {
+			state.run = live
+			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
+		}
+	}
+	return nil
 }
 
 var dispositionEvents = map[Disposition]string{
