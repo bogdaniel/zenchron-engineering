@@ -224,6 +224,10 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 	if err != nil {
 		return nil, err
 	}
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store:             c.store,
 		Plans:             plans,
@@ -232,7 +236,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
 		StateDir:          c.config.StateDir,
 		Repositories:      repositories,
-		MaxConcurrentRuns: settings.MaxConcurrentRuns,
+		MaxConcurrentRuns: ceiling,
 		PollInterval:      settings.PollInterval,
 		Discovery:         discovery,
 		Agents:            c.agents,
@@ -280,7 +284,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		}
 		return controlOK(outcome)
 	case runtime.ControlStatus:
-		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, c.maxConcurrentRuns(), time.Now().UTC())
+		ceiling, err := c.maxConcurrentRuns()
+		if err != nil {
+			return controlError(err)
+		}
+		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, time.Now().UTC())
 		if err != nil {
 			return controlError(err)
 		}
@@ -525,12 +533,23 @@ func controlError(err error) runtime.ControlResponse {
 	return runtime.ControlResponse{Error: err.Error()}
 }
 
-func (c *composition) maxConcurrentRuns() int {
+// maxConcurrentRuns is the operator's effective run ceiling, resolved in ONE
+// place. The supervisor bounds its goroutines by it, the fleet view advertises
+// it, and every engine the composition builds enforces it durably through its
+// scheduler; reading it from three different derivations is how the advertised
+// number and the enforced number came to disagree.
+//
+// It returns the resolution error rather than a fallback. Unresolvable watch
+// settings are refused by operator validation before any of these callers runs,
+// so the branch is unreachable today - but every one of them is in a position
+// to report the error, and a function four callers now trust to state the
+// ceiling must not be able to invent one.
+func (c *composition) maxConcurrentRuns() (int, error) {
 	settings, err := c.config.WatchSettings()
 	if err != nil {
-		return 1
+		return 0, err
 	}
-	return settings.MaxConcurrentRuns
+	return settings.MaxConcurrentRuns, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -611,7 +630,11 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	}
 	defer built.release()
 
-	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, built.maxConcurrentRuns(), time.Now().UTC())
+	ceiling, err := built.maxConcurrentRuns()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, time.Now().UTC())
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
