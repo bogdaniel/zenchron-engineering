@@ -164,3 +164,28 @@ func TestThePlanViewCannotDriveTheTerminal(t *testing.T) {
 		t.Fatalf("the JSON surface emitted a raw escape:\n%q", encoded.String())
 	}
 }
+
+func TestPlanTextExplainsPendingDependencyBlocker(t *testing.T) {
+	view := runtime.PlanView{
+		Plan: domain.EngineeringPlan{Stages: []domain.PlanStage{{ID: "review", Kind: domain.StageAgent}}},
+		Snapshot: runtime.PlanSnapshot{Stages: map[string]runtime.PlanStageProjection{
+			"review": {StageID: "review", State: runtime.PlanStagePending, BlockedBy: []runtime.PlanDependencyBlocker{
+				{StageID: "producer", Reason: "run_wall_budget_exhausted"},
+			}},
+		}},
+	}
+	var out bytes.Buffer
+	if _, err := planOutput(autonomyFlags{Text: true}, view, &out, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "pending") || !strings.Contains(out.String(), "blocked by producer: run_wall_budget_exhausted") {
+		t.Fatalf("missing dependency diagnostic: %s", out.String())
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"blocked_by":[{"stage_id":"producer","reason":"run_wall_budget_exhausted"}]`) {
+		t.Fatalf("JSON missing diagnostic: %s", encoded)
+	}
+}
