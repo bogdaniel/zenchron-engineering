@@ -213,6 +213,21 @@ type ForgeViewer interface {
 	Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error)
 }
 
+// ForgeAppIdentity is the OPTIONAL capability of a CREDENTIAL that knows the
+// identity it publishes under without being asked.
+//
+// It exists because GET /user - the ordinary answer to "who am I" - is refused
+// to a GitHub App installation token, so the adapter cannot resolve the
+// publication identity the way it resolves a user's. The App can: it holds the
+// private key that authenticates as the App itself, and the App's own comments
+// are authored by its slug with GitHub's "[bot]" suffix.
+type ForgeAppIdentity interface {
+	// AppIdentity names the actor the forge stamps on this credential's own
+	// comments. It is not repository-scoped: an App is the same actor on every
+	// repository it is installed on.
+	AppIdentity(ctx context.Context) (GitHubActor, error)
+}
+
 // ForgeConversation is the OPTIONAL capability of reading conversation
 // comments - the pull request's own thread, and the source issue's. Inline
 // review comments are not here: they are already part of the head-bound
@@ -511,8 +526,11 @@ func (GitHubCLICredential) Credential(identity RemoteIdentity) (string, string, 
 }
 
 // GitHubTokenFileCredential resolves the PUBLICATION credential from a file the
-// operator provisioned - a GitHub App installation token or a dedicated runtime
-// account's token.
+// operator provisioned - a dedicated runtime account's token.
+//
+// Not a GitHub App's: an App issues no token that can live in a file, and
+// GitHubAppCredential is that path. This one is for a token whose value the
+// operator already holds.
 //
 // It exists so the runtime can act as SOMEBODY ELSE. With the `gh` credential
 // the runtime authenticates as the operator, so a comment it publishes and a
