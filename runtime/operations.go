@@ -969,12 +969,13 @@ type executionRecord struct {
 	Checkpoint bool `json:"checkpoint,omitempty"`
 }
 
-// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
-// bounded to one payload field, and the message is redacted with the same
+// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Descriptive fields
+// are bounded to one payload field, and the message is redacted with the same
 // redactor that guards transcript artifacts, so no API key, Authorization
 // header, forge token, or raw provider body can become a durable row. Bulk
 // material stays in the artifact store; ArtifactRef names it when one exists,
-// and is absent when no provider interaction produced one.
+// and is absent when no provider interaction produced one. Artifact references
+// remain complete so operators can resolve them.
 type ExecutionDiagnostic struct {
 	Stage              string       `json:"stage"`
 	FailureClass       FailureClass `json:"failure_class,omitempty"`
@@ -1023,9 +1024,9 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		diagnostic.ProviderErrorParam = boundedDetail(stop.Param)
 	}
 	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
-		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
+		diagnostic.ArtifactRef = result.Failure.RawDiagnosticRef
 	} else if len(result.Artifacts) > 0 {
-		diagnostic.ArtifactRef = boundedDetail(result.Artifacts[0].Path)
+		diagnostic.ArtifactRef = result.Artifacts[0].Path
 	}
 	return diagnostic
 }

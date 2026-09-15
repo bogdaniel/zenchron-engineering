@@ -15,6 +15,9 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -130,5 +133,49 @@ func TestExecutionDiagnosticIsProjectedFromTheJournalAlone(t *testing.T) {
 	}
 	if empty.ExecutionDiagnostic != nil {
 		t.Fatalf("an empty journal projected a diagnostic: %#v", empty.ExecutionDiagnostic)
+	}
+}
+
+// Artifact locators must survive diagnostic construction and serialization intact.
+func TestExecutionDiagnosticPreservesLongArtifactPaths(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("a", 100), strings.Repeat("b", 100))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "transcript.json")
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if len(path) <= maxPayloadFieldBytes {
+		t.Fatal("fixture path must exceed detail bound")
+	}
+	for _, tc := range []struct {
+		name   string
+		result ExecutionResult
+	}{
+		{"failure reference", ExecutionResult{Failure: &ProviderFailure{RawDiagnosticRef: path}, Artifacts: []Artifact{{Path: "fallback"}}}},
+		{"artifact fallback", ExecutionResult{Artifacts: []Artifact{{Path: path}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &EngineeringRuntime{}
+			diagnostic := r.executionDiagnostic(execStageProviderResult, FailureUnknown, tc.result, errors.New(strings.Repeat("detail", 100)))
+			encoded, err := json.Marshal(diagnostic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored ExecutionDiagnostic
+			if err := json.Unmarshal(encoded, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if restored.ArtifactRef != path {
+				t.Fatalf("artifact path = %q, want %q", restored.ArtifactRef, path)
+			}
+			if _, err := os.Stat(restored.ArtifactRef); err != nil {
+				t.Fatalf("artifact locator does not resolve: %v", err)
+			}
+			if len(restored.Message) > maxPayloadFieldBytes {
+				t.Fatal("detail exceeds field bound")
+			}
+		})
 	}
 }
