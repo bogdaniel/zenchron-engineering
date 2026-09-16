@@ -278,3 +278,18 @@ Terminal failure reasons carry the operation that exhausted: for example
 - [troubleshooting.md](troubleshooting.md) — symptom to cause to fix
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [spec/runtime-v0.1.md](spec/runtime-v0.1.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
+
+Worker validation scratch is runtime-owned and separate from candidate source.
+For native Go workers, the per-attempt scratch path is supplied as `GOCACHE`,
+`GOTMPDIR`, `TMPDIR`, and `GOPATH`; `GOENV=off` prevents ambient Go configuration
+from redirecting these locations. Codex and Claude receive an explicit write
+grant for that directory. Scratch identity is reconstructed from the run,
+operation, and attempt on replay, and scratch is retired with the run.
+
+Credential admission conservatively scans the entire candidate working tree,
+including ignored and untracked source. Scratch is outside that subject and
+outside the Git worktree used for commits, changed-path evidence, and
+reassessment. There are no cache-name or Git-ignore exemptions: source under
+`.test-cache` or `.work-cache` receives the same fail-closed checks as any other
+source. Oversized candidate files remain inconclusive and refused. Existing
+nested-repository and gitlink checks still apply before a runtime commit.

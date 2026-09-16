@@ -1,6 +1,9 @@
 package runtime
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // The native-CLI catalogue: one spec per supported coding CLI.
 //
@@ -95,6 +98,10 @@ var codexSpec = cliAgentSpec{
 		args := []string{"--ask-for-approval", "never", "exec", "--sandbox", sandbox, "--ignore-user-config"}
 		if !i.Bypass {
 			args = append(args, "-c", "sandbox_workspace_write.network_access=false")
+			if i.ScratchDir != "" {
+				roots, _ := json.Marshal([]string{i.ScratchDir})
+				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(roots))
+			}
 		}
 		args = append(args, "-c", "project_doc_max_bytes=0")
 		if i.Model() != "" {
@@ -182,6 +189,9 @@ var claudeSpec = cliAgentSpec{
 		// goes in. --allowedTools names exactly the executables the contract
 		// already requires. Neither is a bypass, neither is arbitrary shell
 		// authority, and a stage that needs neither is given neither.
+		if i.ScratchDir != "" {
+			args = append(args, "--add-dir", i.ScratchDir)
+		}
 		if i.ResultDir != "" {
 			args = append(args, "--add-dir", i.ResultDir)
 		}
