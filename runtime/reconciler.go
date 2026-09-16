@@ -720,6 +720,11 @@ func (s *runState) invariants() error {
 // Conditions
 // ---------------------------------------------------------------------------
 
+func (s *runState) wallBudgetExhausted() bool {
+	limit := s.budgets().WallLimit
+	return limit > 0 && s.activeElapsed(s.rt.deps.Clock.Now()) > limit
+}
+
 // conditions evaluates the run's live disposition from replayed state. It is
 // pure and ordered, and the order is the policy:
 //
@@ -747,7 +752,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
-	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
+	if s.wallBudgetExhausted() {
 		return Failed, "run_wall_budget_exhausted"
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
@@ -1424,6 +1429,11 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		}
 		live, reason := state.conditions()
 		if terminalDisposition(live) {
+			if reason == "run_wall_budget_exhausted" {
+				if err := r.reportReviewBudgetStop(ctx, state); err != nil {
+					return Outcome{}, err
+				}
+			}
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()

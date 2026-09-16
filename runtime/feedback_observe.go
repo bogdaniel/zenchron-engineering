@@ -83,6 +83,12 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		observation.Unavailable = "this generation is terminal; new feedback routes to the active generation for the source issue"
 		return observation, nil
 	}
+	// Admission is a promise of future work. Leave feedback unjudged when
+	// the run cannot start that work, so a budget raise can recover it.
+	if state.wallBudgetExhausted() {
+		observation.Unavailable = "run_wall_budget_exhausted: review feedback is deferred until the operator raises the budget and resumes the run"
+		return observation, nil
+	}
 	permissions, ok := r.deps.GitHub.(ForgeActorPermissions)
 	// A DECORATOR around the adapter satisfies the interface whether or not
 	// the thing it wraps can answer, so a decorator is asked directly. Without

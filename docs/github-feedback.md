@@ -7,6 +7,20 @@ a coding agent running under your account would otherwise read as engineering
 direction. So every model-visible item passes one admission gate, and the gate
 is the same for all four classes it accepts.
 
+## Exhausted execution budget
+
+Review work uses the run's remaining execution budget. Once it is exhausted,
+feedback observation defers new items without recording admission or refusal.
+Previously admitted, undelivered feedback remains pending for recovery.
+
+Before settling `failed/run_wall_budget_exhausted`, a published run updates its
+PR body with a visible stop notice and instructions to raise the budget and
+resume. The PR remains open for human review. This bounded status update uses
+the existing publication authority and never includes feedback text or provider
+output. A failed write, changed head, or unavailable authority is surfaced as
+an error and leaves the run retryable rather than silently ending it. Repeating
+a write after a crash produces the same body.
+
 ## The loop
 
 ```text
