@@ -84,9 +84,9 @@ func (r *EngineeringRuntime) ObserveFeedback(ctx context.Context, runID string) 
 		return observation, nil
 	}
 	// Admission is a promise of future work. Leave feedback unjudged when
-	// the run cannot start that work, so a budget raise can recover it.
+	// the run cannot start that work, until an explicit budget extension authorizes more work.
 	if state.wallBudgetExhausted() {
-		observation.Unavailable = "run_wall_budget_exhausted: review feedback is deferred until the operator raises the budget and resumes the run"
+		observation.Unavailable = "run_wall_budget_exhausted: review feedback is deferred until the operator authorizes a budget extension and resumes the run"
 		return observation, nil
 	}
 	permissions, ok := r.deps.GitHub.(ForgeActorPermissions)

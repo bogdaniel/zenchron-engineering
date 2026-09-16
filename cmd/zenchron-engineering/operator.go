@@ -605,6 +605,8 @@ func nextOperatorAction(view statusView) string {
 		return "the candidate's integrity is unproven; inspect `autonomy events " + run + "` before doing anything else"
 	}
 	switch view.Reason {
+	case runtime.ReasonReviewBudgetExhausted:
+		return "authorize a larger total wall allowance with `autonomy budget-extend " + run + " <total-duration>`, then resume; configuration changes alone do not extend this run"
 	case "source_intent_changed":
 		return "the pinned source moved; re-read it explicitly with `autonomy refresh " + run + "`. A plain resume will not absorb it"
 	case runtime.WatchWaitingOptInRemoved:
@@ -1176,4 +1178,23 @@ func firstConfigured(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// autonomyBudgetExtend takes exclusive ownership through the composition root.
+// Unlike resume or a config edit, this records explicit resource authority.
+func autonomyBudgetExtend(flags autonomyFlags, overrides autonomyOverrides, runID string, total time.Duration, stdout io.Writer) (int, error) {
+	built, engine, err := buildEngine(flags, overrides)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer built.release()
+	operator, err := operatorIdentity(built)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	if err := engine.ExtendWallBudget(context.Background(), runID, total, operator); err != nil {
+		return runtime.ExitFailed, err
+	}
+	fmt.Fprintf(stdout, "Authorized total active wall allowance %s for %s; resume the run to continue.\n", total, runID)
+	return runtime.ExitCompleted, nil
 }

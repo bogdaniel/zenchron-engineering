@@ -349,6 +349,7 @@ var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
+	ReasonReviewBudgetExhausted:     true,
 	"awaiting_authority":            true,
 	"authority_blocked":             true,
 	"authority_unknown":             true,
@@ -743,8 +744,8 @@ func (s *runState) conditions() (Disposition, string) {
 	if disposition, reason := MergePrecedence(s.merged(), false); disposition == Completed {
 		return disposition, reason
 	}
-	if s.snapshot.Disposition == Cancelled {
-		return Cancelled, s.snapshot.Reason
+	if terminalDisposition(s.snapshot.Disposition) {
+		return s.snapshot.Disposition, s.snapshot.Reason
 	}
 	now := s.rt.deps.Clock.Now()
 	// The execution budget bounds ACTIVE work; see activeElapsed. A separate,
@@ -753,6 +754,9 @@ func (s *runState) conditions() (Disposition, string) {
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
 	if s.wallBudgetExhausted() {
+		if pr := s.projection.PullRequest; s.run.Plan == nil && pr != nil && !pr.Merged && pr.State == string(GitHubOpen) {
+			return Waiting, ReasonReviewBudgetExhausted
+		}
 		return Failed, "run_wall_budget_exhausted"
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
@@ -874,6 +878,7 @@ func (s *runState) plan() (desiredOperation, bool) {
 func (s *runState) budgets() RunBudgets {
 	budgets := s.rt.deps.Budgets.defaults()
 	if s.run.Budgets == nil {
+		budgets.WallLimit = s.authorizedWallLimit(budgets.WallLimit)
 		return budgets
 	}
 	if wall := s.run.Budgets.WallLimit; wall > 0 && wall < budgets.WallLimit {
@@ -882,6 +887,7 @@ func (s *runState) budgets() RunBudgets {
 	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
 		budgets.MaxExecutionAttempts = attempts
 	}
+	budgets.WallLimit = s.authorizedWallLimit(budgets.WallLimit)
 	return budgets
 }
 
@@ -1428,12 +1434,13 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			return r.settle(state, Failed, "invariant_violation")
 		}
 		live, reason := state.conditions()
-		if terminalDisposition(live) {
-			if reason == "run_wall_budget_exhausted" {
-				if err := r.reportReviewBudgetStop(ctx, state); err != nil {
-					return Outcome{}, err
-				}
+		if reason == ReasonReviewBudgetExhausted {
+			if err := r.reportReviewBudgetStop(ctx, state); err != nil {
+				return Outcome{}, err
 			}
+			return r.settle(state, Waiting, reason)
+		}
+		if terminalDisposition(live) {
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()

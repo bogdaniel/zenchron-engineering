@@ -13,13 +13,21 @@ Review work uses the run's remaining execution budget. Once it is exhausted,
 feedback observation defers new items without recording admission or refusal.
 Previously admitted, undelivered feedback remains pending for recovery.
 
-Before settling `failed/run_wall_budget_exhausted`, a published run updates its
-PR body with a visible stop notice and instructions to raise the budget and
-resume. The PR remains open for human review. This bounded status update uses
-the existing publication authority and never includes feedback text or provider
-output. A failed write, changed head, or unavailable authority is surfaced as
-an error and leaves the run retryable rather than silently ending it. Repeating
-a write after a crash produces the same body.
+A published standalone run settles in `waiting/review_wall_budget_exhausted`, retaining
+the same generation, consumed time, and pending feedback. Before settling it
+updates the PR body with a visible stop notice. The update uses existing
+publication authority and includes no feedback text. A failed write or changed
+head surfaces an error and is retried.
+
+An operator can explicitly authorize a larger **total** active wall allowance:
+`autonomy budget-extend <run> 2h`, then `autonomy resume <run>`.
+This command holds exclusive state ownership and records operator provenance
+and the new total in the durable journal. It does not reset consumed time,
+change the original persisted budget, or grant provider/publication authority.
+A config increase alone cannot authorize recovery. Retries of the same extension
+are idempotent. Terminal runs remain terminal; this command refuses them, changed
+controller/source bindings, and plan stage runs (which need plan budget governance).
+Unpublished exhausted runs still fail. Existing failed generations are not migrated.
 
 ## The loop
 

@@ -169,6 +169,12 @@ var eventPayloads = map[string]payloadValidator{
 			nonNegative("finding_count", p.FindingCount))
 	}),
 	EventHumanAuthorityRecorded: humanAuthorityPayload,
+	EventRunWallBudgetExtended: payloadSchema(func(p WallBudgetExtension) error {
+		if p.Total <= 0 || p.Operator.Provenance != ProvenanceLocalUnverified {
+			return fmt.Errorf("invalid wall budget extension")
+		}
+		return required("operator.id", p.Operator.ID)
+	}),
 
 	EventRunAgentAssigned: payloadSchema(func(p AgentAssignedPayload) error {
 		if _, known := agentKinds[p.ProviderKind]; !known {

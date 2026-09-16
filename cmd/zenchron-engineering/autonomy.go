@@ -37,7 +37,7 @@ import (
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
-	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
+	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|budget-extend <run> <total-duration>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
 	"stop <run>|stop-all [--reason <text>]|drain|shutdown|watch|doctor [--text]|gc [--dry-run]} " +
@@ -324,6 +324,19 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 			return runtime.ExitInvalid, err
 		}
 		return autonomyAgentSet(flags, overrides, runID, stdout)
+	case "budget-extend":
+		if len(rest) < 2 {
+			return runtime.ExitInvalid, errors.New(autonomyUsage)
+		}
+		total, err := time.ParseDuration(rest[1])
+		if err != nil || total <= 0 {
+			return runtime.ExitInvalid, errors.New("budget-extend requires a positive total duration")
+		}
+		flags, err := parseAutonomyFlags(rest[2:])
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		return autonomyBudgetExtend(flags, overrides, rest[0], total, stdout)
 	case "logs":
 		if len(rest) < 1 || strings.TrimSpace(rest[0]) == "" {
 			return runtime.ExitInvalid, errors.New(autonomyUsage)
