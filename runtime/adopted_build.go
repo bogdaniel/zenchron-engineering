@@ -71,9 +71,16 @@ type AdoptedBuildRequest struct {
 // set none of them; they exist because the refusals below must be reachable in
 // a test without a real repository, a real GitHub, or a real trusted main.
 type AdoptedBuildDeps struct {
-	Rulesets func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error)
-	RefSHA   func(context.Context, GitHubRepo, string) (RefObservation, error)
-	Git      func(dir string, args ...string) (string, error)
+	// Governance is the read-only governance-observation seam. It is a whole
+	// interface rather than a bare Rulesets function because the builder needs
+	// two things from it that must not be separable: the trust root, and the
+	// provenance of the identity that disclosed it. A build that recorded the
+	// first without the second would be evidence that cannot be audited - the
+	// reader could not tell whether the gate was observed by an identity
+	// entitled to see it, which after #219 is the question.
+	Governance ForgeGovernance
+	RefSHA     func(context.Context, GitHubRepo, string) (RefObservation, error)
+	Git        func(dir string, args ...string) (string, error)
 	// Fetch is separate from Git because it is the one step that reaches the
 	// network, and it must be bound to the governed remote exactly like every
 	// other remote operation the runtime performs.
@@ -158,6 +165,55 @@ type TrustRootRecord struct {
 	Digest      string      `json:"digest"`
 	Policy      TrustPolicy `json:"policy"`
 	Enforcement string      `json:"enforcement"`
+	// ObservedBy is the provenance of the identity that disclosed this gate,
+	// with no secret in it. It is recorded because "the ruleset discloses no
+	// bypass actor" and "the identity that asked was not shown any" are
+	// different statements, and a reader of the evidence must be able to tell
+	// which one was made.
+	ObservedBy CredentialProvenance `json:"observed_by"`
+	// Bypass is that same distinction written down rather than left to be
+	// inferred from a zero. An auditor reading this record months later must
+	// be able to see which of the two facts the build actually established.
+	Bypass BypassDisclosure `json:"bypass"`
+}
+
+// BypassDisclosure is what the governance observation ESTABLISHED about who can
+// bypass the trust root.
+//
+// The zero value is "nothing was established", which is the honest reading of a
+// record that carries no disclosure - an absent fact is not a favourable fact,
+// and that is true of a record as much as of a decision. Observed is therefore
+// a separate member from Count rather than Count being allowed to speak for
+// both: {observed:false, count:0} and {observed:true, count:0} are opposite
+// statements that a bare zero would have collapsed into one.
+//
+// A successful adopted build can only ever write {observed:true, count:0}: any
+// other combination is refused before a record exists, so every combination the
+// type can express is either that one or evidence that something was refused.
+type BypassDisclosure struct {
+	// Observed reports that the forge actually disclosed the bypass actor set
+	// to the governance identity that asked.
+	Observed bool `json:"observed"`
+	// Count is the size of that set, meaningful only when Observed is true.
+	Count int `json:"count"`
+	// Detail states which of the two facts this is in one sentence, so the
+	// record cannot be misread by someone skimming for a number.
+	Detail string `json:"detail"`
+}
+
+// describeBypass turns an observed ruleset into the recorded disclosure. It
+// reads the SAME two fields VerifyTrustRoot decides on, so the evidence and the
+// decision can never disagree about what was seen.
+func describeBypass(root TrustedMainRuleset) BypassDisclosure {
+	if !root.BypassActorsKnown {
+		return BypassDisclosure{
+			Detail: "the forge disclosed no bypass actor set to the governance identity, so nothing about bypasses was established by this observation",
+		}
+	}
+	return BypassDisclosure{
+		Observed: true, Count: root.BypassActors,
+		Detail: fmt.Sprintf("the governance identity was shown the bypass actor set and it contained %d actor(s)", root.BypassActors),
+	}
 }
 
 type RevisionRecord struct {
@@ -187,8 +243,17 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	// The production dependencies have no honest default: guessing a forge or
 	// a ref observer would be inventing the trust root. Missing ones are a
 	// typed refusal, never a panic.
-	if deps.Rulesets == nil || deps.RefSHA == nil {
+	if deps.Governance == nil || deps.RefSHA == nil {
 		return out, fmt.Errorf("the builder has no way to observe the trust root or trusted main, so nothing may be called adopted")
+	}
+	// FAIL CLOSED on the provenance of the observation itself. An observer that
+	// will not name the role it observed under is not thereby trusted: the
+	// whole reason this seam exists is that one identity class can see the
+	// trust root and another cannot, so an unattributed observation is an
+	// observation of unknown standing, which is not a fact.
+	observedBy := deps.Governance.GovernanceProvenance()
+	if observedBy.Role != CredentialRoleGovernance || strings.TrimSpace(observedBy.Method) == "" {
+		return out, fmt.Errorf("the governance observer does not identify itself as a %s credential, so the trust root it reports is of unknown standing and nothing may be called adopted", CredentialRoleGovernance)
 	}
 	// The adoption policy is FROZEN, not a parameter. A caller that could
 	// weaken the trusted ref, the required check, the allowed merge methods or
@@ -353,7 +418,8 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 		Repository:    request.Repository.String(),
 		TrustRoot: TrustRootRecord{
 			RulesetID: finalRoot.ID, Name: finalRoot.Name, Digest: finalDigest,
-			Policy: policy, Enforcement: finalRoot.Enforcement,
+			Policy: policy, Enforcement: finalRoot.Enforcement, ObservedBy: observedBy,
+			Bypass: describeBypass(finalRoot),
 		},
 		TrustedMain:  RevisionRecord{Revision: finalMain, Tree: mainTree},
 		Source:       RevisionRecord{Revision: source, Tree: tree},
@@ -396,7 +462,7 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 
 // observeTrustRoot reads the gate and refuses anything that is not one.
 func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy TrustPolicy) (TrustedMainRuleset, error) {
-	rulesets, err := deps.Rulesets(ctx, repo)
+	rulesets, err := deps.Governance.Rulesets(ctx, repo)
 	if err != nil {
 		return TrustedMainRuleset{}, fmt.Errorf("the trust root could not be observed, so nothing may be called adopted: %w", err)
 	}
