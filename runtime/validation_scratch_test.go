@@ -127,7 +127,18 @@ func TestValidationScratchCannotOverlapCandidate(t *testing.T) {
 func TestGoValidationLeavesOnlySourceInCandidate(t *testing.T) {
 	workspace := commitGateWorkspace(t)
 	candidate := workspace.Dir
-	scratch := t.TempDir()
+	// The verifier's default temporary directory may be mounted noexec.
+	// Use the runtime's published executable scratch for Go's test binary,
+	// while retaining an isolated directory and test-owned cleanup.
+	scratch, err := os.MkdirTemp(ExecCapableScratchBase(t.TempDir()), "validation-scratch-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(scratch); err != nil {
+			t.Errorf("remove validation scratch: %v", err)
+		}
+	})
 	if err := prepareValidationScratch(candidate, scratch); err != nil {
 		t.Fatal(err)
 	}
