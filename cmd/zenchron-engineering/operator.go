@@ -668,11 +668,14 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
 	line("phase", view.Phase)
+	line("active consumed", view.ActiveElapsed)
+	line("external wait", view.ExternalWaitElapsed)
+	line("lifecycle age", view.Elapsed)
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))
 	line("candidate", fmt.Sprintf("%s rev=%s tree=%s", view.Candidate.Branch, short(view.Candidate.Revision), short(view.Candidate.Tree)))
 	line("contract", view.Contract.ID+"@"+view.Contract.Revision)
 	if view.Operation != nil {
-		line("operation", fmt.Sprintf("%s %s attempt %d/%d elapsed %s",
+		line("operation", fmt.Sprintf("%s %s attempt %d/%d active consumed %s",
 			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed))
 	}
 	if view.Lease != nil {

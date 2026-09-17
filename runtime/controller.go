@@ -926,9 +926,12 @@ type StatusReport struct {
 	Contract      Ref                `json:"contract"`
 	Operation     *OperationStatus   `json:"operation,omitempty"`
 
-	CreatedAt time.Time     `json:"created_at"`
-	Now       time.Time     `json:"now"`
-	Elapsed   time.Duration `json:"elapsed"`
+	CreatedAt time.Time `json:"created_at"`
+	Now       time.Time `json:"now"`
+	// Elapsed is lifecycle age, retained for JSON compatibility.
+	Elapsed             time.Duration `json:"elapsed"`
+	ActiveElapsed       time.Duration `json:"active_elapsed"`
+	ExternalWaitElapsed time.Duration `json:"external_wait_elapsed"`
 
 	Evidence             []Ref                   `json:"evidence,omitempty"`
 	Assurance            *AssuranceObservation   `json:"assurance,omitempty"`
@@ -983,6 +986,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		CreatedAt:             state.run.CreatedAt,
 		Now:                   now,
 		Elapsed:               now.Sub(state.run.CreatedAt),
+		ActiveElapsed:         state.activeElapsed(now),
+		ExternalWaitElapsed:   now.Sub(state.run.CreatedAt) - state.activeElapsed(now),
 		Evidence:              state.projection.EvidenceBundles,
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,
@@ -1022,7 +1027,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		status := OperationStatus{
 			ID: op.ID, Kind: op.Kind, State: op.State,
 			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts,
-			StartedAt: op.StartedAt, Elapsed: OperationElapsed(op, now),
+			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
 		}
 		if op.Lease != nil {
 			heartbeat := op.Lease.HeartbeatAt
@@ -1031,6 +1036,31 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		report.Operation = &status
 	}
 	return report, nil
+}
+
+// The journal's after payload is written before Scheduler.Finish and older
+// payloads still carry ActiveSince. Bound that projection by the durable after
+// timestamp, without changing the scheduler's budget counter or journal bytes.
+func statusOperationElapsed(op RunOperation, events []EngineeringEvent, now time.Time) time.Duration {
+	end := now
+	var before time.Time
+	for _, event := range events {
+		if event.OperationID != op.ID {
+			continue
+		}
+		switch event.Type {
+		case EventOperationBefore:
+			before = event.OccurredAt
+			end = now
+		case EventOperationAfter:
+			end = event.OccurredAt
+		}
+	}
+	// Journals predating the active counter still have before/after boundaries.
+	if op.ActiveSince == nil && op.ConsumedExecution == 0 && !before.IsZero() {
+		op.ActiveSince = &before
+	}
+	return OperationElapsed(op, end)
 }
 
 func publicationAuthorityOf(state *runState) *PublicationAuthority {
