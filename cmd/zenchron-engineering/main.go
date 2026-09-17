@@ -105,6 +105,19 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 2 && args[0] == "controller" && args[1] == "inspect-self" {
 		return controllerInspectSelf(args[2:], stdout)
 	}
+	if len(args) >= 2 && args[0] == "controller" && args[1] == "inspect-state-format" {
+		if len(args) != 2 {
+			return runtime.ExitInvalid, fmt.Errorf("controller inspect-state-format takes no arguments")
+		}
+		format, err := runtime.CurrentControllerStateFormat()
+		if err != nil {
+			return runtime.ExitFailed, err
+		}
+		if err := writeJSON(stdout, format); err != nil {
+			return runtime.ExitFailed, err
+		}
+		return runtime.ExitCompleted, nil
+	}
 	if len(args) >= 2 && args[0] == "controller" && args[1] == "build-adopted" {
 		return controllerBuildAdopted(args[2:], autonomyOverrides{}, stdout)
 	}
