@@ -6,21 +6,38 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	stdruntime "runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
+// Run the probe through the already executable test binary. Temporary data
+// directories need not permit execution of newly written scripts.
+func TestMain(m *testing.M) {
+	if os.Getenv("ZENCHRON_STATE_FORMAT_HELPER") == "1" && len(os.Args) == 3 &&
+		os.Args[1] == "controller" && os.Args[2] == "inspect-state-format" {
+		if os.Getenv("ZENCHRON_STATE_FORMAT_EXIT") == "1" {
+			os.Exit(1)
+		}
+		_, err := os.Stdout.WriteString(os.Getenv("ZENCHRON_STATE_FORMAT_OUTPUT"))
+		if err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 func TestSuccessorStateFormatProbeFailsClosed(t *testing.T) {
-	if stdruntime.GOOS == "windows" {
-		t.Skip("fixture uses a POSIX executable")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
 	format, err := CurrentControllerStateFormat()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range []string{"none", "schema", "migration", "protocol", "unknown"} {
+	for _, change := range []string{"none", "schema", "migration", "protocol", "unknown", "malformed", "command_failed"} {
 		t.Run(change, func(t *testing.T) {
 			value := format
 			switch change {
@@ -37,13 +54,27 @@ func TestSuccessorStateFormatProbeFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			binary := filepath.Join(t.TempDir(), "probe")
-			if err := os.WriteFile(binary, []byte("#!/bin/sh\ncat <<'FORMAT'\n"+string(data)+"\nFORMAT\n"), 0700); err != nil {
-				t.Fatal(err)
+			wantError := "successor state format needs an explicit migration"
+			t.Setenv("ZENCHRON_STATE_FORMAT_HELPER", "1")
+			t.Setenv("ZENCHRON_STATE_FORMAT_EXIT", "0")
+			switch change {
+			case "none":
+				wantError = ""
+			case "malformed":
+				data = []byte("invalid JSON")
+				wantError = "successor state format is unknown"
+			case "command_failed":
+				t.Setenv("ZENCHRON_STATE_FORMAT_EXIT", "1")
+				wantError = "successor cannot report its state format: exit status 1"
 			}
+			t.Setenv("ZENCHRON_STATE_FORMAT_OUTPUT", string(data))
 			err = CheckSuccessorStateFormat(context.Background(), binary)
-			if (err == nil) != (change == "none") {
-				t.Fatalf("state format %s: %v", change, err)
+			if wantError == "" {
+				if err != nil {
+					t.Fatalf("state format %s: %v", change, err)
+				}
+			} else if err == nil || err.Error() != wantError {
+				t.Fatalf("state format %s: got %v, want %q", change, err, wantError)
 			}
 		})
 	}
