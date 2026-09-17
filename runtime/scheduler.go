@@ -464,6 +464,12 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		}
 		op.State = Running
 		op.Attempt++
+		// The PHYSICAL attempt identity of the try about to happen, allocated
+		// separately from the budget attempt above because RestoreAttempt may
+		// give that one back. This one is never given back: a transcript slot
+		// that has been written stays written, so the identity of the next try
+		// has to be past it whatever the budget did.
+		op.AttemptIdentity++
 		op.StartedAt = &now
 		op.LastProgressAt = &now
 		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
@@ -560,6 +566,31 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 // and the elapsed-time origin are given back, so the wall budget measures the
 // next real attempt rather than however long a human took to restore an
 // account.
+// ReserveAttemptIdentity raises an operation's allocated attempt identity and
+// persists it, so nothing can write evidence under an identity this runtime has
+// not already committed to owning.
+//
+// It exists because the identity is decided by two durable facts and the later
+// one wins: what the scheduler allocated, and what the evidence store says is
+// still free. When the evidence is ahead - a record written before the identity
+// was tracked, or an operation already stranded on an occupied slot - the
+// selected identity is higher than the one on the record, and dispatching a
+// provider under it without writing it down first is a crash away from handing
+// the same identity out twice: the counter would still be behind, the slot
+// would still look free, and the second invocation would claim it.
+//
+// It only ever raises. A caller asking for an identity at or below the one
+// already allocated is not an error and changes nothing: the operation has
+// already committed to owning at least that far.
+func (s Scheduler) ReserveAttemptIdentity(id string, identity int) (RunOperation, error) {
+	return s.transition(id, func(op *RunOperation, _ time.Time) error {
+		if identity > op.AttemptIdentity {
+			op.AttemptIdentity = identity
+		}
+		return nil
+	})
+}
+
 func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, _ time.Time) error {
 		if op.State != OperationFailed {
@@ -568,6 +599,9 @@ func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation
 		if op.Attempt > 0 {
 			op.Attempt--
 		}
+		// AttemptIdentity is deliberately NOT restored. The attempt ceiling is a
+		// budget and may be refunded; the try that just happened is a fact, and
+		// its evidence is filed under an identity no later try may reuse.
 		op.Lease = nil
 		op.StartedAt = nil
 		// The execution budget is given back ONLY when no execution happened.

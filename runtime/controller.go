@@ -881,9 +881,16 @@ type OperationStatus struct {
 	State       OperationState `json:"state"`
 	Attempt     int            `json:"attempt"`
 	MaxAttempts int            `json:"max_attempts"`
-	StartedAt   *time.Time     `json:"started_at,omitempty"`
-	HeartbeatAt *time.Time     `json:"heartbeat_at,omitempty"`
-	Elapsed     time.Duration  `json:"elapsed"`
+	// AttemptIdentity is the physical attempt identity this operation has
+	// allocated. It is reported alongside Attempt because the two legitimately
+	// disagree: a provider condition that routes to an external wait refunds the
+	// attempt and does not unhappen the try. Without it, an operator reading
+	// "attempt 1/2" after two provider calls has no way to tell a refunded wait
+	// from a stuck scheduler.
+	AttemptIdentity int           `json:"attempt_identity,omitempty"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	HeartbeatAt     *time.Time    `json:"heartbeat_at,omitempty"`
+	Elapsed         time.Duration `json:"elapsed"`
 }
 
 // SourceIdentity is the pinned, untrusted source the run answers. The title
@@ -1026,7 +1033,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 	if op, ok := state.currentOperation(); ok {
 		status := OperationStatus{
 			ID: op.ID, Kind: op.Kind, State: op.State,
-			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts,
+			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts, AttemptIdentity: op.AttemptIdentity,
 			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
 		}
 		if op.Lease != nil {

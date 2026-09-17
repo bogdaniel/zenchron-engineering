@@ -675,8 +675,17 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	line("candidate", fmt.Sprintf("%s rev=%s tree=%s", view.Candidate.Branch, short(view.Candidate.Revision), short(view.Candidate.Tree)))
 	line("contract", view.Contract.ID+"@"+view.Contract.Revision)
 	if view.Operation != nil {
-		line("operation", fmt.Sprintf("%s %s attempt %d/%d active consumed %s",
-			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed))
+		operation := fmt.Sprintf("%s %s attempt %d/%d active consumed %s",
+			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed)
+		// The provider invocation count is shown only when it disagrees with
+		// the attempt, which is exactly when an operator needs it: a refunded
+		// external wait leaves more invocations behind than attempts spent, and
+		// the two numbers reading differently is the explanation rather than a
+		// contradiction.
+		if view.Operation.AttemptIdentity > view.Operation.Attempt {
+			operation += fmt.Sprintf(" attempt identity %d", view.Operation.AttemptIdentity)
+		}
+		line("operation", operation)
 	}
 	if view.Lease != nil {
 		heartbeat := "never"
