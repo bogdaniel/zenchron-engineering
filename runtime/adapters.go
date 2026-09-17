@@ -28,9 +28,16 @@ type ExecutionRequest struct {
 	// controller has no durable name it alone may reconcile, and recovery would
 	// have to guess by prefix or label.
 	OperationID string
-	// Attempt is the scheduler's attempt number for OperationID. The scheduler
-	// increments it when it starts the operation, so it is a fact the runtime
-	// already owns; a provider must never invent, default, or carry it over.
+	// Attempt is the PHYSICAL invocation number for OperationID: which try of
+	// this operation this particular provider call is. The runtime derives it
+	// from its own monotonic invocation count and the evidence already stored,
+	// so it is a fact the runtime owns; a provider must never invent, default,
+	// or carry it over.
+	//
+	// It is not the operation's budget attempt. That one is refunded when a
+	// provider condition routes to an external wait, so it can move backwards -
+	// and an identity that moves backwards points at a transcript that already
+	// exists.
 	//
 	// Together with RunID and OperationID it is the complete identity of ONE
 	// invocation, and therefore of the forensic transcript that invocation

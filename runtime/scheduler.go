@@ -464,6 +464,12 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		}
 		op.State = Running
 		op.Attempt++
+		// The PHYSICAL invocation about to happen, counted separately from the
+		// budget attempt above because RestoreAttempt may give that one back.
+		// This one is never given back: a transcript slot that has been written
+		// stays written, so the identity of the next invocation has to be past
+		// it whatever the budget did.
+		op.Invocations++
 		op.StartedAt = &now
 		op.LastProgressAt = &now
 		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
@@ -568,6 +574,10 @@ func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation
 		if op.Attempt > 0 {
 			op.Attempt--
 		}
+		// Invocations is deliberately NOT restored. The attempt ceiling is a
+		// budget and may be refunded; the invocation that just happened is a
+		// fact, and its transcript is durable evidence filed under an identity
+		// no later invocation may reuse.
 		op.Lease = nil
 		op.StartedAt = nil
 		// The execution budget is given back ONLY when no execution happened.

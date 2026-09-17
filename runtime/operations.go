@@ -622,6 +622,31 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
+	//
+	// It is NOT operation.Attempt. That is the budget counter, and a provider
+	// condition that routes to an external wait gives it back - which is right
+	// for a ceiling and wrong for an identity, because the transcript filed
+	// under it is create-once. A run that met a usage limit and was resumed
+	// addressed the first invocation's transcript slot and was refused by the
+	// evidence store, so the recoverable wait #87 promises could never resume.
+	//
+	// Two durable facts decide it and the later one wins. Invocations is the
+	// monotonic count the scheduler advanced when it started this invocation,
+	// journalled before the provider is reached. NextAttempt is what the
+	// evidence itself says is free, and it is what carries an operation written
+	// before this counter existed - including one already stranded - past the
+	// slot it is stuck on. Taking the maximum keeps both honest: the identity
+	// never goes backwards, and never lands on evidence that exists.
+	physicalAttempt := operation.Invocations
+	if physicalAttempt < 1 {
+		physicalAttempt = 1
+	}
+	if free := r.deps.Artifacts.NextAttempt(r.deps.Agent.ID, ExecutionAttemptRef{
+		RunID: state.run.ID, OperationID: operation.ID, Attempt: 1,
+	}); free > physicalAttempt {
+		physicalAttempt = free
+	}
 	// THE REVIEWER RESULT SLOT, prepared before the invocation and only for a
 	// stage whose role produces a verdict. An implementer is given no path at
 	// all, so it has nowhere to write one: the authority is carried by the
@@ -629,7 +654,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	reviewerResultPath := ""
 	if stage.producesVerdict() {
 		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
-			RunID: state.run.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 		})
 		if err != nil {
 			return effect{state: OperationFailed, result: executionRecord{
@@ -643,7 +668,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// binary that command links, and the default temporary location is noexec
 	// inside this runtime's own sandbox.
 	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, ExecutionAttemptRef{
-		RunID: state.run.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+		RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 	})
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
@@ -660,10 +685,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// removed before the next, so one identity per invocation is exact
 		// rather than merely unique.
 		OperationID: operation.ID,
-		// The scheduler incremented this when it started the operation, so it
-		// is the real attempt this invocation IS - never a provider-local
-		// default. It is what makes this attempt's transcript addressable.
-		Attempt:               operation.Attempt,
+		// The PHYSICAL invocation this is, derived above from the scheduler's
+		// monotonic count and the evidence already on disk - never the budget
+		// attempt, which a refunded external wait moves backwards, and never a
+		// provider-local default. It is what makes this invocation's transcript
+		// addressable, and addressable exactly once.
+		Attempt:               physicalAttempt,
 		PriorAttemptFailure:   priorFailure,
 		RunID:                 state.run.ID,
 		SourceSnapshot:        Ref{ID: sourceSnapshotID(state), Revision: state.source.Digest},

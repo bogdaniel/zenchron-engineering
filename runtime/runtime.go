@@ -364,13 +364,31 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
-	SchemaVersion    string          `json:"schema_version"`
-	ID               string          `json:"id"`
-	RunID            string          `json:"run_id"`
-	Kind             string          `json:"kind"`
-	IdempotencyKey   string          `json:"idempotency_key"`
-	State            OperationState  `json:"state"`
-	Attempt          int             `json:"attempt"`
+	SchemaVersion  string         `json:"schema_version"`
+	ID             string         `json:"id"`
+	RunID          string         `json:"run_id"`
+	Kind           string         `json:"kind"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	State          OperationState `json:"state"`
+	Attempt        int            `json:"attempt"`
+	// Invocations counts the PHYSICAL provider invocations this operation has
+	// begun. It is not Attempt, and the difference is the whole point.
+	//
+	// Attempt is the BUDGET counter, and RestoreAttempt gives it back when a
+	// provider condition routes to an external wait: observing an account quota
+	// is not work the attempt ceiling should pay for. That makes Attempt
+	// deliberately non-monotonic, which is correct for a budget and unusable as
+	// an identity - and a provider transcript is create-once, so the identity it
+	// is filed under may never be reused. Sourcing one from the other stranded a
+	// resumable run: the second physical invocation of the same logical
+	// operation addressed the first one's transcript slot and was refused by the
+	// evidence store, correctly.
+	//
+	// So this advances once per invocation and never goes backwards. It is
+	// durable, and journalled with the operation before the provider is
+	// reached, which is what lets a restart between attempts arrive at the same
+	// next identity rather than recomputing one from a counter that moved.
+	Invocations      int             `json:"invocations,omitempty"`
 	MaxAttempts      int             `json:"max_attempts"`
 	DependsOn        []string        `json:"depends_on,omitempty"`
 	InputStateSHA256 string          `json:"input_state_sha256"`
