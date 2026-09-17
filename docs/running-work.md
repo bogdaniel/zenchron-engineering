@@ -130,6 +130,14 @@ so it is safe to tail a run a supervisor is driving. A payload above 1 KiB is
 replaced by its size and digest rather than truncated into JSON that no longer
 parses.
 
+Timing in status separates `active consumed` (`active_elapsed` in JSON),
+`external wait` (`external_wait_elapsed`), and `lifecycle age` (`elapsed`).
+Only active consumed time spends the run wall budget. An optional lifecycle
+deadline bounds calendar age independently. A completed operation's active
+consumption is fixed at its journalled completion; it does not grow while the
+run waits for review. Polling during an external wait adds only the observation
+work, and replay preserves the recorded consumption across restart.
+
 Both reads exit with the run's own disposition mapping, so `status` and `run`
 can never disagree about what a disposition means.
 

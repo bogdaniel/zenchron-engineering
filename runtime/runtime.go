@@ -565,7 +565,6 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 	return op.Lease == nil || (!ownerAlive && !now.Before(op.Lease.ExpiresAt))
 }
 
-// OperationElapsed reports elapsed time only for an actively started operation.
 // OperationRemaining is how much ACTIVE execution authority is left.
 //
 // It is what a provider invocation is bounded by, so a second attempt inherits
@@ -593,11 +592,14 @@ func OperationExpired(op RunOperation, now time.Time) bool {
 	return op.WallBudget > 0 && OperationRemaining(op, now) <= 0
 }
 
+// OperationElapsed reports cumulative active execution across attempts. Finished
+// operations retain their durable consumption; external waiting never adds time.
 func OperationElapsed(op RunOperation, now time.Time) time.Duration {
-	if op.StartedAt == nil || now.Before(*op.StartedAt) {
-		return 0
+	spent := op.ConsumedExecution
+	if op.ActiveSince != nil && now.After(*op.ActiveSince) {
+		spent += now.Sub(*op.ActiveSince)
 	}
-	return now.Sub(*op.StartedAt)
+	return spent
 }
 
 // NoProgressExceeded is deliberately separate from wall time: a heartbeat can

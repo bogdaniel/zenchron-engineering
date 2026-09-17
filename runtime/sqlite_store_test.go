@@ -947,3 +947,17 @@ func TestAReclaimedOperationIsStillRepairedFromItsJournal(t *testing.T) {
 			stored.State, journalled.State)
 	}
 }
+
+func TestSQLiteStateDirectoryURIEscaping(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state%23with?#characters")
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "runtime.db")); err != nil {
+		t.Fatal(err)
+	}
+}

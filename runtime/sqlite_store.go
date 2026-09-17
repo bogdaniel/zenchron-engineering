@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -296,7 +297,7 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
 	// reads state it is about to overwrite (journal sequence allocation) waits
 	// on busy_timeout instead of failing an unretryable upgrade in WAL mode.
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
