@@ -26,13 +26,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-const serveUsage = "usage: zenchron-engineering serve [--repo owner/name] [--config <path>] [--agent <id>]"
+const serveUsage = "usage: zenchron-engineering serve [--repo owner/name] [--config <path>] [--agent <id>] [--follow-main <controller-source-clone>]"
 
 // ---------------------------------------------------------------------------
 // serve
@@ -46,6 +47,26 @@ const serveUsage = "usage: zenchron-engineering serve [--repo owner/name] [--con
 // own journal says. Cancelling runs is `autonomy stop RUN` and `autonomy
 // stop-all`, and neither is what closing this process means.
 func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
+	standby := false
+	requireIdle := false
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--successor-require-idle" {
+			requireIdle = true
+		} else if arg == "--successor-standby" {
+			standby = true
+		} else {
+			filtered = append(filtered, arg)
+		}
+	}
+	args = filtered
+	plain, source, err := successorServeArgs(args)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	if source != "" {
+		return serveFollowingMain(plain, source, overrides, stdout)
+	}
 	flags, err := parseAutonomyFlags(args)
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -68,6 +89,15 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 		return runtime.ExitInvalid, err
 	}
 	defer listener.Close()
+	if requireIdle {
+		blockers, err := runtime.SuccessorCompatibilityReport(built.store)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		if len(blockers) != 0 {
+			return runtime.ExitInvalid, errors.New("successor found live state requiring migration")
+		}
+	}
 
 	supervisor, err := built.supervisor(repositories)
 	if err != nil {
@@ -76,6 +106,12 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	activated := make(chan struct{})
+	var activateOnce sync.Once
+	activate := func() { activateOnce.Do(func() { close(activated) }) }
+	if !standby {
+		activate()
+	}
 
 	// The endpoint answers on its own goroutine so an operator command is not
 	// queued behind a run that is mid-reconcile.
@@ -87,6 +123,17 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 		// also defeats `stop` and `stop-all`, so this stops the supervisor
 		// rather than leaving it un-commandable.
 		if err := listener.Serve(func(request runtime.ControlRequest) runtime.ControlResponse {
+			if request.Command == "successor-activate" {
+				activate()
+				return controlOK(built.build)
+			}
+			select {
+			case <-activated:
+			default:
+				if request.Command != runtime.ControlPing && request.Command != runtime.ControlShutdown {
+					return controlError(errors.New("successor is awaiting activation"))
+				}
+			}
 			return built.handleControl(ctx, supervisor, stopSignals, request)
 		}); err != nil && !errors.Is(err, net.ErrClosed) {
 			fmt.Fprintf(stdout, "the control endpoint stopped accepting connections: %v\n", err)
@@ -102,6 +149,11 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
 
+	select {
+	case <-ctx.Done():
+		return runtime.ExitCompleted, nil
+	case <-activated:
+	}
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
 		_ = writeJSON(stdout, report)
 	})
@@ -276,7 +328,13 @@ func (c *composition) planService() (runtime.PlanService, error) {
 func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
 	switch request.Command {
 	case runtime.ControlPing:
-		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
+		return controlOK(map[string]any{"state_dir": c.config.StateDir, "agent": c.agent.ID, "build": c.build, "pid": os.Getpid()})
+	case "successor-compatibility":
+		report, err := runtime.SuccessorCompatibilityReport(c.store)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(report)
 	case runtime.ControlSubmit:
 		outcome, err := supervisor.Submit(ctx, request)
 		if err != nil {

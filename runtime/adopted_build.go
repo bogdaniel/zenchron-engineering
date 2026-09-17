@@ -901,7 +901,9 @@ func measureExecutable(path string) (string, error) {
 // load, the probe was silently skipped and the artifact recorded "not probed",
 // which is the one state an adopted artifact may not be in.
 func probeControllerBuild(binary string) (ControllerBuild, error) {
-	cmd := exec.Command(binary, "controller", "inspect-self", "--json")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "controller", "inspect-self", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return ControllerBuild{}, fmt.Errorf("the binary could not report its own provenance: %w", err)
