@@ -638,14 +638,31 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// before this counter existed - including one already stranded - past the
 	// slot it is stuck on. Taking the maximum keeps both honest: the identity
 	// never goes backwards, and never lands on evidence that exists.
-	physicalAttempt := operation.Invocations
+	physicalAttempt := operation.AttemptIdentity
 	if physicalAttempt < 1 {
 		physicalAttempt = 1
 	}
 	if free := r.deps.Artifacts.NextAttempt(r.deps.Agent.ID, ExecutionAttemptRef{
 		RunID: state.run.ID, OperationID: operation.ID, Attempt: 1,
 	}); free > physicalAttempt {
-		physicalAttempt = free
+		// THE EVIDENCE IS AHEAD, so the identity this invocation will use is
+		// higher than the one on the durable record - and it has to be written
+		// down BEFORE the provider is dispatched. A crash after dispatch and
+		// before the transcript exists would otherwise leave the record behind
+		// and the slot still free, and the next invocation would select the same
+		// identity: two physical invocations sharing one immutable slot, which
+		// is the defect this change exists to prevent, moved one crash later.
+		//
+		// Fails closed. An identity this runtime cannot commit to owning is one
+		// it must not let a provider write under.
+		reserved, err := r.scheduler.ReserveAttemptIdentity(operation.ID, free)
+		if err != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureUnknown},
+				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureUnknown, ExecutionResult{}, err),
+			}}
+		}
+		physicalAttempt = reserved.AttemptIdentity
 	}
 	// THE REVIEWER RESULT SLOT, prepared before the invocation and only for a
 	// stage whose role produces a verdict. An implementer is given no path at

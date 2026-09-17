@@ -371,24 +371,32 @@ type RunOperation struct {
 	IdempotencyKey string         `json:"idempotency_key"`
 	State          OperationState `json:"state"`
 	Attempt        int            `json:"attempt"`
-	// Invocations counts the PHYSICAL provider invocations this operation has
-	// begun. It is not Attempt, and the difference is the whole point.
+	// AttemptIdentity is the highest PHYSICAL attempt identity allocated for
+	// this operation. It is an identity, not a count of anything, and it only
+	// ever moves forward.
 	//
-	// Attempt is the BUDGET counter, and RestoreAttempt gives it back when a
-	// provider condition routes to an external wait: observing an account quota
-	// is not work the attempt ceiling should pay for. That makes Attempt
-	// deliberately non-monotonic, which is correct for a budget and unusable as
-	// an identity - and a provider transcript is create-once, so the identity it
-	// is filed under may never be reused. Sourcing one from the other stranded a
+	// Attempt is the BUDGET, and RestoreAttempt gives it back when a provider
+	// condition routes to an external wait: observing an account quota is not
+	// work the attempt ceiling should pay for. That makes Attempt deliberately
+	// non-monotonic, which is correct for a budget and unusable as an identity -
+	// and a provider transcript is create-once, so the identity it is filed
+	// under may never be reused. Sourcing one from the other stranded a
 	// resumable run: the second physical invocation of the same logical
 	// operation addressed the first one's transcript slot and was refused by the
 	// evidence store, correctly.
 	//
-	// So this advances once per invocation and never goes backwards. It is
-	// durable, and journalled with the operation before the provider is
-	// reached, which is what lets a restart between attempts arrive at the same
-	// next identity rather than recomputing one from a counter that moved.
-	Invocations      int             `json:"invocations,omitempty"`
+	// It is allocated when the operation is started and RESERVED before a
+	// provider is dispatched, so it is durable before anything can write
+	// evidence under it. That ordering is what makes a crash safe: an
+	// invocation that began and produced no transcript still consumed its
+	// identity, and the next one is strictly later rather than landing on a slot
+	// that merely looks free.
+	//
+	// It advances for every operation kind. That is deliberate: it names which
+	// try of an operation this is, which is meaningful whether or not the try
+	// reaches a provider, and a scheduler that had to know which kinds file
+	// evidence would be a scheduler that knows about providers.
+	AttemptIdentity  int             `json:"attempt_identity,omitempty"`
 	MaxAttempts      int             `json:"max_attempts"`
 	DependsOn        []string        `json:"depends_on,omitempty"`
 	InputStateSHA256 string          `json:"input_state_sha256"`

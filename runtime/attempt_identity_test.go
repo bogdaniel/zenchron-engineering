@@ -166,8 +166,8 @@ func TestAProviderRetryGetsItsOwnTranscriptIdentity(t *testing.T) {
 		t.Fatalf("the retry became a different logical operation: %q/%q -> %q/%q",
 			first.ID, first.IdempotencyKey, second.ID, second.IdempotencyKey)
 	}
-	if second.Invocations <= first.Invocations {
-		t.Fatalf("the physical invocation count did not advance: %d -> %d", first.Invocations, second.Invocations)
+	if second.AttemptIdentity <= first.AttemptIdentity {
+		t.Fatalf("the physical attempt identity did not advance: %d -> %d", first.AttemptIdentity, second.AttemptIdentity)
 	}
 	if second.ConsumedExecution < firstConsumed {
 		t.Fatalf("the active budget reset: %s -> %s", firstConsumed, second.ConsumedExecution)
@@ -238,5 +238,125 @@ func TestTheEvidenceStoreStillRefusesTheSameIdentityTwice(t *testing.T) {
 	}
 	if _, err := store.StoreExecutionAttemptTranscript("codex", ref, []byte("second\n"), nil); err == nil {
 		t.Fatal("the evidence store overwrote an existing attempt transcript")
+	}
+}
+
+// crashingProvider begins an invocation and produces NO transcript, which is
+// the crash this test is about: the dispatch happened, so the identity is
+// spent, and the evidence that would prove it is exactly what is missing.
+type crashingProvider struct {
+	attempts []int
+	crashes  int
+}
+
+func (p *crashingProvider) Isolation() ProviderIsolation {
+	return ProviderIsolation{
+		FilesystemRead: IsolationProven, FilesystemWrite: IsolationProven,
+		NetworkDenied: IsolationProven, CredentialScope: IsolationProven,
+	}
+}
+
+func (p *crashingProvider) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	p.attempts = append(p.attempts, request.Attempt)
+	if len(p.attempts) <= p.crashes {
+		// Dispatched, and then nothing. No transcript is stored, so the slot
+		// this invocation claimed still LOOKS free to the evidence store.
+		return ExecutionResult{
+			ProviderID: "codex", Attempt: request.Attempt, Outcome: OperationFailed,
+			Failure: &ProviderFailure{Classification: FailureProviderQuota},
+		}, nil
+	}
+	return ExecutionResult{ProviderID: "codex", Attempt: request.Attempt, Outcome: Succeeded}, nil
+}
+
+// TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt is the crash hole
+// the first repair left open.
+//
+// The identity is decided by two durable facts and the later one wins: what the
+// scheduler allocated, and what the evidence says is free. When the evidence is
+// AHEAD - a record written before the identity was tracked, or one already
+// stranded on an occupied slot - the selected identity is higher than the one on
+// the record. Dispatching under it without writing it down first is one crash
+// away from handing the same identity out twice: the counter is still behind,
+// the slot still looks free, and the next invocation claims it.
+//
+// So the selection is reserved durably BEFORE the provider is dispatched, and
+// the next invocation after a crash is strictly later even though the crashed
+// one left no evidence behind.
+func TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	provider := &crashingProvider{crashes: 1}
+	deps := fixture.deps
+	deps.Provider = provider
+	deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	engine := fixture.newRuntime(deps)
+
+	runID, err := engine.StartOrResumeIssueRun(context.Background(), fixture.issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operation has to exist before its evidence can be ahead of it, so the
+	// first pass is what creates it. It crashes without a transcript.
+	if _, err := engine.Reconcile(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	operation := executionOperation(t, fixture.store, runID)
+	if len(provider.attempts) != 1 {
+		t.Fatalf("the provider was invoked %d time(s), want one", len(provider.attempts))
+	}
+
+	// EVIDENCE AHEAD OF THE RECORD, written the way a controller that predates
+	// the identity would have written it: a transcript exists at the identity
+	// the record is sitting on.
+	seeded := ExecutionAttemptRef{RunID: runID, OperationID: operation.ID, Attempt: operation.AttemptIdentity}
+	if _, err := deps.Artifacts.StoreExecutionAttemptTranscript("codex", seeded, []byte("written by an earlier controller\n"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// THE CRASHING DISPATCH. The identity it receives must be past the seeded
+	// evidence, and must be durable before the provider is reached.
+	restarted := fixture.newRuntime(deps)
+	provider.crashes = 2
+	if _, err := restarted.Reconcile(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.attempts) < 2 {
+		t.Fatalf("the provider was not reached again: %v", provider.attempts)
+	}
+	crashed := provider.attempts[1]
+	if crashed <= seeded.Attempt {
+		t.Fatalf("the invocation landed on or behind seeded evidence: got %d, seeded %d", crashed, seeded.Attempt)
+	}
+	reserved := executionOperation(t, fixture.store, runID)
+	if reserved.AttemptIdentity < crashed {
+		t.Fatalf("identity %d was dispatched but only %d was reserved durably; a crash here reuses it",
+			crashed, reserved.AttemptIdentity)
+	}
+
+	// THE RESTART. The crashed invocation left no transcript, so the evidence
+	// store still reports its slot free. Only the reservation stops it being
+	// handed out a second time.
+	afterCrash := fixture.newRuntime(deps)
+	if _, err := afterCrash.Reconcile(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.attempts) < 3 {
+		t.Fatalf("the restarted runtime never reached the provider: %v", provider.attempts)
+	}
+	if next := provider.attempts[2]; next <= crashed {
+		t.Fatalf("a crash without a transcript let identity %d be reused: %v", crashed, provider.attempts)
+	}
+
+	// Same logical operation, and nothing about the budget started over.
+	final := executionOperation(t, fixture.store, runID)
+	if final.ID != operation.ID || final.IdempotencyKey != operation.IdempotencyKey {
+		t.Fatalf("the crash changed the logical operation: %q -> %q", operation.ID, final.ID)
+	}
+	if final.ConsumedExecution < operation.ConsumedExecution {
+		t.Fatalf("the execution budget reset across the crash: %s -> %s",
+			operation.ConsumedExecution, final.ConsumedExecution)
+	}
+	if final.AttemptIdentity <= reserved.AttemptIdentity-1 {
+		t.Fatalf("the identity did not advance across the crash: %d", final.AttemptIdentity)
 	}
 }

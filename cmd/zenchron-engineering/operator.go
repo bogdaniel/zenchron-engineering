@@ -682,8 +682,8 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		// external wait leaves more invocations behind than attempts spent, and
 		// the two numbers reading differently is the explanation rather than a
 		// contradiction.
-		if view.Operation.Invocations > view.Operation.Attempt {
-			operation += fmt.Sprintf(" provider invocations %d", view.Operation.Invocations)
+		if view.Operation.AttemptIdentity > view.Operation.Attempt {
+			operation += fmt.Sprintf(" attempt identity %d", view.Operation.AttemptIdentity)
 		}
 		line("operation", operation)
 	}
