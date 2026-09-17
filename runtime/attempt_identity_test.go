@@ -308,9 +308,16 @@ func TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt(t *testing.T) {
 	// EVIDENCE AHEAD OF THE RECORD, written the way a controller that predates
 	// the identity would have written it: a transcript exists at the identity
 	// the record is sitting on.
-	seeded := ExecutionAttemptRef{RunID: runID, OperationID: operation.ID, Attempt: operation.AttemptIdentity}
-	if _, err := deps.Artifacts.StoreExecutionAttemptTranscript("codex", seeded, []byte("written by an earlier controller\n"), nil); err != nil {
-		t.Fatal(err)
+	// It is seeded SEVERAL identities ahead on purpose. One would be caught by
+	// the allocation the scheduler performs at every start, which would leave
+	// the reservation untested: the gap has to be wider than what starting
+	// again closes on its own.
+	seeded := ExecutionAttemptRef{RunID: runID, OperationID: operation.ID}
+	for n := operation.AttemptIdentity; n < operation.AttemptIdentity+3; n++ {
+		seeded.Attempt = n
+		if _, err := deps.Artifacts.StoreExecutionAttemptTranscript("codex", seeded, []byte("written by an earlier controller\n"), nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// THE CRASHING DISPATCH. The identity it receives must be past the seeded
