@@ -446,3 +446,288 @@ func TestObservedOutputReachesTheDurableProgressRecorder(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The classification trust boundary, end to end
+// ---------------------------------------------------------------------------
+
+// shellQuoted makes one string safe inside a single-quoted shell word.
+func shellQuoted(text string) string {
+	return "'" + strings.ReplaceAll(text, "'", `'\''`) + "'"
+}
+
+// TestSessionOutputCannotCreateAnExternalProviderWait is the negative
+// regression review 5246735510 asked for, driven through a real process so the
+// two streams are the real two streams.
+//
+// The provider writes a recognized transport phrase into its SESSION OUTPUT -
+// which is what a model quoting an error, a test log, or a documentation
+// excerpt looks like from here - and then fails for an unrelated reason. The
+// run must not be parked as execution_provider_unavailable, because nothing
+// about the provider's transport failed and the accounting transition that
+// class causes would be false.
+func TestSessionOutputCannotCreateAnExternalProviderWait(t *testing.T) {
+	for name, session := range sessionQuotingTransportPhrases {
+		t.Run(name, func(t *testing.T) {
+			// stdout carries the session; stderr carries the real, unrelated
+			// failure; the process exits non-zero, so this is a genuinely
+			// failed invocation rather than one nobody classifies.
+			provider, request, _ := inactivityFixture(t,
+				"echo "+shellQuoted(session)+"\n"+
+					"echo 'error: the patch did not apply' >&2\n"+
+					"exit 2\n")
+
+			result, err := provider.Execute(context.Background(), request)
+			if err == nil {
+				t.Fatal("a non-zero exit returned no error")
+			}
+			if result.Failure == nil {
+				t.Fatal("a failed invocation recorded no failure")
+			}
+			switch result.Failure.Classification {
+			case FailureProviderUnavailable, FailureProviderQuota, FailureProviderRateLimited, FailureProviderAccountUnavailable:
+				t.Fatalf("session output asserted the provider condition %q; a transcript is evidence, not an assertion",
+					result.Failure.Classification)
+			}
+			// UNKNOWN IS THE CORRECT ANSWER and it fails closed: the run stops
+			// for a human rather than being parked on an external condition
+			// that does not exist.
+			if result.Failure.Classification != FailureUnknown {
+				t.Fatalf("classification = %q, want the fail-closed %q", result.Failure.Classification, FailureUnknown)
+			}
+			if RouteFailure(result.Failure.Classification) == RouteWait {
+				t.Fatal("untrusted session output routed the run to an external wait")
+			}
+			// The bytes are still EVIDENCE. Excluding them from classification
+			// must not exclude them from the transcript.
+			raw, readErr := os.ReadFile(result.Artifacts[0].Path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !strings.Contains(string(raw), strings.SplitN(session, "\n", 2)[0]) {
+				t.Fatal("the session output was dropped from the attempt transcript")
+			}
+		})
+	}
+}
+
+// TestAGenuineTransportDiagnosticStillReachesABoundedWait is the other half:
+// narrowing the surface must not have deleted the capability.
+func TestAGenuineTransportDiagnosticStillReachesABoundedWait(t *testing.T) {
+	provider, request, _ := inactivityFixture(t,
+		"echo 'Reading the repository'\n"+
+			"echo 'ERROR: error sending request for url (https://chatgpt.com/backend-api/codex/responses): dns error' >&2\n"+
+			"exit 1\n")
+
+	result, err := provider.Execute(context.Background(), request)
+	if err == nil {
+		t.Fatal("a non-zero exit returned no error")
+	}
+	if result.Failure == nil || result.Failure.Classification != FailureProviderUnavailable {
+		t.Fatalf("failure = %#v, want %q from the provider's own terminal diagnostic", result.Failure, FailureProviderUnavailable)
+	}
+	if RouteFailure(result.Failure.Classification) != RouteWait {
+		t.Fatal("a genuine transport failure no longer waits")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Precedence: a stated condition outranks silence
+// ---------------------------------------------------------------------------
+
+// TestARecognizedConditionSurvivesTheInactivityTermination is #238's
+// distinction between an explicit provider diagnostic and mere silence.
+//
+// Each provider here states its condition on its own diagnostic stream and then
+// hangs, so the inactivity policy is what ends the process. Both facts are
+// durable and they say different things: TerminationCause records that policy
+// ended it, and the CLASSIFICATION records what the provider said was wrong.
+// Replacing the second with the first would send an operator to investigate a
+// stalled provider when their allowance had simply run out - and would spend a
+// retry on a condition no retry can clear.
+func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
+	for name, tc := range map[string]struct {
+		diagnostic string
+		want       FailureClass
+		route      FailureRoute
+	}{
+		"quota then silence":       {"ERROR: You've hit your usage limit.", FailureProviderQuota, RouteWait},
+		"unavailable then silence": {"ERROR: error sending request: dns error", FailureProviderUnavailable, RouteWait},
+		"account then silence":     {"ERROR: your refresh token was revoked", FailureProviderAccountUnavailable, RouteWait},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider, request, _ := inactivityFixture(t,
+				"trap '' TERM\n"+
+					"echo "+shellQuoted(tc.diagnostic)+" >&2\n"+
+					"while :; do sleep 30; done\n")
+			request.Budgets.InactivityLimit = inactivityWindow
+
+			result, err := provider.Execute(context.Background(), request)
+			if err == nil {
+				t.Fatal("the hung provider was not terminated")
+			}
+			// The policy DID end it, and that stays recorded.
+			if result.Invocation == nil || result.Invocation.TerminationCause != "provider_inactivity_limit_reached" {
+				t.Fatalf("the inactivity policy is not recorded as the terminator: %#v", result.Invocation)
+			}
+			// And the CONDITION is the one the provider stated.
+			if result.Failure == nil || result.Failure.Classification != tc.want {
+				t.Fatalf("classification = %#v, want the stated %q", result.Failure, tc.want)
+			}
+			if got := RouteFailure(result.Failure.Classification); got != tc.route {
+				t.Fatalf("route = %q, want %q", got, tc.route)
+			}
+		})
+	}
+}
+
+// TestSilenceWithNothingStatedIsStillNoProgress keeps the preservation above
+// from swallowing the rule it qualifies, and proves the preservation is not
+// reachable from untrusted text.
+func TestSilenceWithNothingStatedIsStillNoProgress(t *testing.T) {
+	// A provider that says nothing recognizable and hangs.
+	provider, request, _ := inactivityFixture(t,
+		"trap '' TERM\necho 'thinking' >&2\nwhile :; do sleep 30; done\n")
+	request.Budgets.InactivityLimit = inactivityWindow
+	result, err := provider.Execute(context.Background(), request)
+	if err == nil {
+		t.Fatal("the hung provider was not terminated")
+	}
+	if result.Failure == nil || result.Failure.Classification != FailureProviderNoProgress {
+		t.Fatalf("failure = %#v, want %q", result.Failure, FailureProviderNoProgress)
+	}
+
+	// A provider whose SESSION quotes a quota phrase and then hangs is still a
+	// stall. Preserving a recognized condition must not become a channel for
+	// untrusted output to outrank a bound the runtime actually enforced.
+	quoted, request2, _ := inactivityFixture(t,
+		"trap '' TERM\necho 'The docs say: usage limit reached'\nwhile :; do sleep 30; done\n")
+	request2.Budgets.InactivityLimit = inactivityWindow
+	result2, err := quoted.Execute(context.Background(), request2)
+	if err == nil {
+		t.Fatal("the hung provider was not terminated")
+	}
+	if result2.Failure == nil || result2.Failure.Classification != FailureProviderNoProgress {
+		t.Fatalf("session output outranked the inactivity bound: %#v", result2.Failure)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The completion/expiry boundary
+// ---------------------------------------------------------------------------
+
+// TestCompletionBeatsTheInactivityTimerDeterministically is the race-boundary
+// regression, and it is deterministic rather than probabilistic.
+//
+// The property under test is not "the timer usually loses". It is: ONCE
+// COMPLETION HAS BEEN RECORDED, NO CANCELLATION CAN EVER BE PUBLISHED. The
+// caller reads context.Cause after the executor returns, so anything a watcher
+// can still do after that point turns a natural exit into a stall.
+//
+// The old shape failed this exactly: watch() computed `remaining` and cancelled
+// BEFORE looking at its stop channel, so a watcher scheduled after completion
+// with an already-expired window cancelled unconditionally - and stop() was a
+// bare channel close that never waited for the watcher at all.
+func TestCompletionBeatsTheInactivityTimerDeterministically(t *testing.T) {
+	// A window that is already expired the instant the watcher runs, so the
+	// timer branch is permanently ready and there is nothing to wait for.
+	ctx, release := withProviderInactivity(context.Background(), time.Nanosecond, nil)
+	defer release()
+	watch := armInactivityWatch(ctx)
+	if watch == nil {
+		t.Fatal("no watch was armed")
+	}
+	time.Sleep(time.Millisecond) // the window is now unambiguously past
+	if watch.silent() < watch.policy.limit {
+		t.Fatal("the window has not expired, so this proves nothing")
+	}
+
+	// THE PROCESS COMPLETED FIRST. This is exactly what the executor records
+	// the moment runBoundedProcess returns, and nothing else has happened yet.
+	watch.complete()
+	// A watcher scheduled only now, with a permanently ready timer, must do
+	// nothing at all. Under the old shape it computed its remaining window and
+	// cancelled before ever looking at its stop channel.
+	watch.watch()
+
+	if providerInactivityCause(ctx) {
+		t.Fatal("a watcher that ran after completion cancelled the invocation; a natural exit would be reported as provider_no_progress")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the completed invocation's context was cancelled: %v", ctx.Err())
+	}
+	// Recording completion is idempotent: the executor must be able to say it
+	// on every path without coordinating.
+	watch.complete()
+	if providerInactivityCause(ctx) {
+		t.Fatal("a repeated completion published a cancellation")
+	}
+}
+
+// TestTheWatcherIsJoinedBeforeTheCallerClassifies proves the second half of the
+// lifecycle: the stop the executor calls does not merely signal the watcher, it
+// WAITS for it. Signalling alone leaves the watcher free to publish a
+// cancellation after the executor has returned, which is after the caller has
+// already read the cause.
+func TestTheWatcherIsJoinedBeforeTheCallerClassifies(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		ctx, release := withProviderInactivity(context.Background(), time.Nanosecond, nil)
+		watch := armInactivityWatch(ctx)
+		stop := watch.watchUntilComplete()
+		// The watcher is racing a permanently expired window. Whatever it is
+		// doing, stop must leave nothing that can still be running.
+		stop()
+		// THE WATCHER HAS ALREADY EXITED. It closes `stopped` on its way out,
+		// so this receive is ready only if stop waited for it - which is the
+		// difference between signalling and joining, and the difference
+		// between a caller that may classify now and one that may not.
+		select {
+		case <-watch.stopped:
+		default:
+			t.Fatalf("round %d: stop returned while the watcher was still running; nothing joined it before the caller classifies", round)
+		}
+		cause := providerInactivityCause(ctx)
+		for i := 0; i < 50; i++ {
+			if providerInactivityCause(ctx) != cause {
+				t.Fatalf("round %d: the cause changed after the watcher was joined", round)
+			}
+		}
+		release()
+	}
+}
+
+// TestANaturallyExitingProviderIsNeverReportedAsStalled drives the same
+// boundary through the real executor, repeatedly.
+//
+// Every round arms a real watcher, runs a real process group to a natural exit,
+// and joins the watcher through the executor's own path. The window is
+// comfortably larger than the process runtime, so the ONLY way a round can
+// report a stall is a watcher that was still able to act after completion -
+// which is the defect. The primitive-level proof that completion wins is
+// TestCompletionBeatsTheInactivityTimerDeterministically; this is the proof
+// that the executor wires it up.
+func TestANaturallyExitingProviderIsNeverReportedAsStalled(t *testing.T) {
+	const rounds = 60
+	for round := 0; round < rounds; round++ {
+		// The provider speaks once and exits on its own. The window is short
+		// enough that an armed watcher is doing real work in every round, and
+		// long enough that a correct one never reaches its expiry.
+		provider, request, _ := inactivityFixture(t, "echo working\nexit 0\n")
+		request.Budgets.InactivityLimit = 5 * time.Second
+
+		result, err := provider.Execute(context.Background(), request)
+		if err != nil {
+			t.Fatalf("round %d: a provider that exited cleanly failed: %v", round, err)
+		}
+		if result.Invocation == nil {
+			t.Fatalf("round %d: no provenance", round)
+		}
+		if result.Invocation.TerminationCause != "provider_returned" {
+			t.Fatalf("round %d: termination cause = %q, want the provider's own return - a natural exit was attributed to the inactivity policy",
+				round, result.Invocation.TerminationCause)
+		}
+		if result.Failure != nil {
+			t.Fatalf("round %d: a clean exit recorded failure %#v", round, result.Failure)
+		}
+	}
+}

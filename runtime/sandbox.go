@@ -149,15 +149,20 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	// whole group, forced kill after the grace period - rather than adding a
 	// second way to end a child.
 	watch := armInactivityWatch(ctx)
-	done := make(chan struct{})
 	out := &boundedBuffer{limit: maxCapturedProcessBytes, observe: watch.progress}
 	errOut := &boundedBuffer{limit: maxCapturedProcessBytes, observe: watch.progress}
 	cmd.Stdout, cmd.Stderr = out, errOut
-	go watch.watch(done)
+	stopWatch := watch.watchUntilComplete()
 	err := runBoundedProcess(ctx, cmd, grace)
-	// The watch stops before the output is read, so nothing can still be
-	// writing into the buffers this returns.
-	close(done)
+	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the
+	// order is the whole point. The process has returned, so completion is a
+	// fact; recording it under the watcher's own lock and then waiting for the
+	// watcher to exit means no cancellation can be published afterwards. The
+	// caller reads context.Cause several frames up, and a natural exit that
+	// raced an expiring timer would otherwise be classified as a stall.
+	//
+	// It also guarantees nothing is still writing into the buffers read below.
+	stopWatch()
 	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
 	// Read after the run: Start happens inside, and a process that never
 	// started truthfully reports no pid.

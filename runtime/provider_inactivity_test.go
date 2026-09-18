@@ -50,7 +50,7 @@ func TestRecognizedConnectivityDiagnosticsRouteToABoundedWait(t *testing.T) {
 		"gateway": {codexSpec, "unexpected status 503 Service Unavailable"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := classifyAgentFailure(tc.spec, []byte(tc.diagnostic), nil); got != FailureProviderUnavailable {
+			if got := classifyAgentFailure(tc.spec, terminalDiagnostic([]byte(tc.diagnostic))); got != FailureProviderUnavailable {
 				t.Fatalf("classified as %q, want %q - an unclassified connectivity failure is what became hours of apparent active work", got, FailureProviderUnavailable)
 			}
 		})
@@ -94,7 +94,7 @@ func TestSilenceIsNeverClassifiedAsOffline(t *testing.T) {
 		"error sending mail", // not "error sending request"
 	} {
 		for name, spec := range map[string]cliAgentSpec{"codex": codexSpec, "claude": claudeSpec, "gemini": geminiSpec, "qwen": qwenSpec} {
-			if got := classifyAgentFailure(spec, []byte(diagnostic), nil); got == FailureProviderUnavailable {
+			if got := classifyAgentFailure(spec, terminalDiagnostic([]byte(diagnostic))); got == FailureProviderUnavailable {
 				t.Fatalf("%s guessed %q into %q", name, diagnostic, got)
 			}
 		}
@@ -130,13 +130,13 @@ func TestProviderCapacityClassificationIsUnchangedByConnectivitySignals(t *testi
 		"quota beside a reset": {codexSpec, "connection reset by peer\nusage limit reached", FailureProviderQuota},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := classifyAgentFailure(tc.spec, []byte(tc.diagnostic), nil); got != tc.want {
+			if got := classifyAgentFailure(tc.spec, terminalDiagnostic([]byte(tc.diagnostic))); got != tc.want {
 				t.Fatalf("classified as %q, want the unchanged %q", got, tc.want)
 			}
 		})
 	}
 	// Unknown stays unknown and stays fail-closed.
-	if got := classifyAgentFailure(codexSpec, []byte("the model produced an invalid patch"), nil); got != FailureUnknown {
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte("the model produced an invalid patch"))); got != FailureUnknown {
 		t.Fatalf("an unrecognized diagnostic became %q", got)
 	}
 }
@@ -613,5 +613,59 @@ func TestARunKeepsTheTighterWindowItWasCreatedUnder(t *testing.T) {
 	state.run.Budgets = &RunBudgets{}
 	if got := state.budgets().ProviderInactivityLimit; got != 10*time.Minute {
 		t.Fatalf("a pre-existing run resolved to %s, want the configured window", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The trust boundary: a transcript is evidence, not an assertion
+// ---------------------------------------------------------------------------
+
+// sessionQuotingTransportPhrases is ordinary model-visible content that happens
+// to carry a phrase this runtime recognizes: a model quoting an error it read,
+// a captured test log, documentation, a review comment, prose about a quota,
+// and a source file the worker wrote.
+//
+// None of it is a statement about the provider's transport, and none of it may
+// move a run into a typed external wait. The end-to-end proof is
+// TestSessionOutputCannotCreateAnExternalProviderWait, which puts these on
+// STDOUT of a real process; the structural reason is that the classification
+// surface no longer accepts stdout at all.
+var sessionQuotingTransportPhrases = map[string]string{
+	"model quoting a transport error": "I ran the integration suite and it printed `dial tcp 127.0.0.1:8080: connect: ECONNREFUSED`, so the fixture server is not running.",
+	"a captured test log":             "--- FAIL: TestUpstreamFetch\n    client_test.go:88: getaddrinfo ENOTFOUND api.example.internal\nFAIL\nexit status 1",
+	"documentation the worker read":   "The retry table in docs/http.md lists 502 Bad Gateway and 503 Service Unavailable as retryable statuses.",
+	"a review comment":                "This handler swallows connection reset by peer, which hides a real outage from the operator.",
+	"a quota phrase in prose":         "The rate limiter returns once the usage limit reached state clears; see limiter.go.",
+	"a source file the worker wrote":  "// handleUnavailable answers 503 Service Unavailable while the pool drains.",
+}
+
+// TestTheTerminalSurfaceExcludesTheSessionRendering states the rule itself
+// rather than a consequence of it: stdout is never consulted, stderr is, and
+// only its final words are.
+func TestTheTerminalSurfaceExcludesTheSessionRendering(t *testing.T) {
+	// A genuine offline diagnostic is preserved, which is the whole point of
+	// keeping the classification rather than deleting it.
+	genuine := "ERROR: stream error: error sending request for url (https://chatgpt.com/backend-api/codex/responses): dns error\n"
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(genuine))); got != FailureProviderUnavailable {
+		t.Fatalf("a genuine transport diagnostic classified as %q", got)
+	}
+	// The SAME bytes, arriving as session output instead, assert nothing. This
+	// is the pair that makes the boundary a boundary: identical text, opposite
+	// answers, decided by which channel it arrived on.
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic(nil)); got != FailureUnknown {
+		t.Fatalf("an empty diagnostic stream classified as %q", got)
+	}
+
+	// AND ONLY THE TAIL. A phrase buried far behind the process's last words is
+	// not the condition it exited with.
+	restore := maxTerminalDiagnosticBytes
+	t.Cleanup(func() { maxTerminalDiagnosticBytes = restore })
+	maxTerminalDiagnosticBytes = 64
+	buried := genuine + strings.Repeat("x", 200)
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(buried))); got != FailureUnknown {
+		t.Fatalf("a phrase outside the terminal window classified as %q", got)
+	}
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(strings.Repeat("x", 200)+"dns error\n"))); got != FailureProviderUnavailable {
+		t.Fatalf("the process's last words classified as %q", got)
 	}
 }

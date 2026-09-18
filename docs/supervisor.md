@@ -179,9 +179,23 @@ fresh one — four minutes of proven silence leaves six, not ten. That is a
 different authority from the execution budget, which separately charges the
 abandoned interval in full. An attempt that was settled — observed, journalled
 and classified — does get a fresh window, because that is what a bounded retry
-is; the attempt ceiling is what ends it. An
-explicit connectivity diagnostic is `provider_unavailable` instead, and waits
-without spending the active-work budget. `autonomy status` prints the pair an
+is; the attempt ceiling is what ends it.
+
+An explicit connectivity diagnostic is `provider_unavailable` instead, and waits
+without spending the active-work budget — but only when the CLI itself said so.
+A typed provider condition is read from the **terminal diagnostic surface**: the
+bounded tail of the CLI's own diagnostic stream. The session rendering, where
+model text and tool output go, is never consulted. A worker quoting an error, a
+captured test log, or a documentation excerpt therefore cannot park a run on an
+external wait that pauses accounting — a transcript is evidence, not an
+assertion about the world.
+
+Where the provider did state a condition and then went quiet, both facts are
+kept: the classification is the condition the provider named, and the
+termination cause records that the inactivity policy ended the process. Silence
+is the weaker statement, so it does not overwrite the stronger one.
+
+`autonomy status` prints the pair an
 operator needs — time since recognized progress, and the window it is measured
 against:
 

@@ -618,7 +618,13 @@ func TestAgentFailureClassificationIsRecognizedOrUnknown(t *testing.T) {
 	} {
 		provider, request, fake := agentFixture(t, AgentKindCodexCLI)
 		fake.err = errors.New("cli exited non-zero")
-		fake.outputs = []CommandOutput{{Stdout: []byte(tc.diagnostic), ExitCode: 1}}
+		// THE DIAGNOSTIC IS ON STDERR, which is where a CLI states its own
+		// terminal condition and the only surface a typed provider condition
+		// may be read from. Stdout is the session rendering - model text and
+		// tool output - and putting it there would be asserting that untrusted
+		// content can classify a run; see terminalDiagnostic and
+		// TestSessionOutputCannotCreateAnExternalProviderWait.
+		fake.outputs = []CommandOutput{{Stderr: []byte(tc.diagnostic), ExitCode: 1}}
 		result, err := provider.Execute(context.Background(), request)
 		if err == nil {
 			t.Fatalf("provider failure was not surfaced for %q", tc.diagnostic)
@@ -793,13 +799,13 @@ func TestARevokedSignInWaitsForTheOperatorInsteadOfKillingTheRun(t *testing.T) {
 		"ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
 		"Failed to refresh token: Your access token could not be refreshed because your REFRESH TOKEN WAS REVOKED.",
 	} {
-		if got := classifyAgentFailure(codexSpec, nil, []byte(diagnostic)); got != FailureProviderAccountUnavailable {
+		if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(diagnostic))); got != FailureProviderAccountUnavailable {
 			t.Fatalf("a revoked sign-in classified as %q, want %q: %s", got, FailureProviderAccountUnavailable, diagnostic)
 		}
 	}
 	// A quota refusal stays a quota refusal: the two are different operator
 	// actions - wait for the window, versus sign in again.
-	if got := classifyAgentFailure(codexSpec, nil, []byte("You've hit your usage limit.")); got != FailureProviderQuota {
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte("You've hit your usage limit."))); got != FailureProviderQuota {
 		t.Fatalf("a quota refusal classified as %q", got)
 	}
 }

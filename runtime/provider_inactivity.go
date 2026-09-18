@@ -163,8 +163,19 @@ type inactivityWatch struct {
 	last  atomic.Int64
 	bytes atomic.Int64
 
+	// quit is closed once the process is done; stopped is closed by watch as
+	// it returns, so the stop returned by watchUntilComplete can JOIN the
+	// watcher rather than merely signalling it.
+	quit      chan struct{}
+	stopped   chan struct{}
+	closeQuit sync.Once
+
 	mu         sync.Mutex
 	recordedAt time.Duration
+	// finished records that the PROCESS COMPLETED FIRST. It is read and
+	// written under mu, on the same side of the same lock as the decision to
+	// cancel, so completion and expiry can never both win.
+	finished bool
 }
 
 // armInactivityWatch returns the watch bound to ctx, or nil when no bound
@@ -175,7 +186,10 @@ func armInactivityWatch(ctx context.Context) *inactivityWatch {
 	if !ok || policy.limit <= 0 {
 		return nil
 	}
-	return &inactivityWatch{policy: policy, start: time.Now()}
+	return &inactivityWatch{
+		policy: policy, start: time.Now(),
+		quit: make(chan struct{}), stopped: make(chan struct{}),
+	}
 }
 
 // progress records n observed output bytes. It is called on the copy
@@ -213,26 +227,97 @@ func (w *inactivityWatch) silent() time.Duration {
 	return time.Since(w.start) - time.Duration(w.last.Load())
 }
 
+// complete records that the PROCESS FINISHED FIRST.
+//
+// It is the whole of the race fix, and it is one flag set under the same mutex
+// the cancellation is taken under - so completion and expiry are totally
+// ordered and cannot both win. The previous shape had no such flag: the watcher
+// computed its remaining window and cancelled before ever consulting its stop
+// channel, so a watcher scheduled after a natural exit cancelled
+// unconditionally, and the caller - reading context.Cause a few statements
+// later - reported a clean exit as provider_no_progress.
+//
+// It is idempotent, because the executor's normal path and its failure paths
+// must both be able to say "the process is done" without coordinating.
+func (w *inactivityWatch) complete() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.finished = true
+	w.mu.Unlock()
+}
+
+// watchUntilComplete starts the watcher and returns the stop that JOINS it.
+//
+// The join is the property the caller depends on. Signalling without waiting
+// leaves the watcher free to publish a cancellation after the executor has
+// returned, and `select` chooses uniformly when both of its arms are ready - so
+// a fire-and-forget close is not enough on its own, however the loop is
+// written. Once the returned function has returned, no cancellation can be
+// published, which is what makes classifying context.Cause afterwards sound.
+//
+// A nil watch hands back a no-op, so the process runner needs no branch.
+func (w *inactivityWatch) watchUntilComplete() func() {
+	if w == nil {
+		return func() {}
+	}
+	go w.watch()
+	return func() {
+		w.complete()
+		w.closeQuit.Do(func() { close(w.quit) })
+		<-w.stopped
+	}
+}
+
+// expire cancels the invocation unless the process already completed, and
+// reports whether it did.
+//
+// The check and the cancel are ONE critical section. Checking outside it would
+// reintroduce the race in a smaller window rather than removing it: stop could
+// set finished between the check and the cancel, and the caller would then be
+// classifying a cause that was published after completion was recorded.
+func (w *inactivityWatch) expire() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.finished {
+		return false
+	}
+	w.policy.cancel(ErrProviderInactive)
+	return true
+}
+
 // watch cancels the invocation's context, with ErrProviderInactive as the
-// cause, once the window passes with no output. It returns when done closes.
+// cause, once the window passes with no output. It returns when stop is called,
+// and closing `stopped` on the way out is what lets stop join it.
 //
 // It is a recomputing loop rather than a timer that is Reset on every write:
 // Reset from two copy goroutines per byte of output is a lock convoy on the
 // hot path of a noisy provider, and the loop re-arms at most once per silent
 // window.
-func (w *inactivityWatch) watch(done <-chan struct{}) {
+func (w *inactivityWatch) watch() {
 	if w == nil {
 		return
 	}
+	defer close(w.stopped)
 	for {
+		// STOP IS CHECKED BEFORE EXPIRY, and expiry re-checks it under the
+		// lock. A watcher that reached its window at the same instant the
+		// process exited must not cancel: this arm is the fast path for that,
+		// and expire is the one that makes it airtight.
+		select {
+		case <-w.quit:
+			return
+		default:
+		}
 		remaining := w.policy.limit - w.silent()
 		if remaining <= 0 {
-			w.policy.cancel(ErrProviderInactive)
+			w.expire()
 			return
 		}
 		timer := time.NewTimer(remaining)
 		select {
-		case <-done:
+		case <-w.quit:
 			timer.Stop()
 			return
 		case <-timer.C:

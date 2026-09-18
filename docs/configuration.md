@@ -185,7 +185,10 @@ rather than an immediate failure, and why reaching it is a bounded retry rather
 than a terminal failure. An invocation the policy terminates is recorded as
 `provider_no_progress`; a provider that emits an explicit connectivity
 diagnostic is `provider_unavailable` and waits instead, without spending the
-active-work budget. Silence is never classified as offline.
+active-work budget. Silence is never classified as offline, and neither is
+anything a worker merely wrote: a typed provider condition is read only from the
+bounded tail of the CLI's own diagnostic stream, never from the session output
+a model and its tools control.
 
 ### Concurrency and polling
 
