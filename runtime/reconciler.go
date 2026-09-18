@@ -359,7 +359,12 @@ var externalWaitReasons = map[string]bool{
 	// Rate limiting is the other capacity wait. It is the provider declining to
 	// be asked yet, not the runtime working, and leaving it out charged an
 	// operator for their provider's backoff.
-	"execution_provider_rate_limited":  true,
+	"execution_provider_rate_limited": true,
+	// The host cannot reach the provider at all. A machine with no network is
+	// not performing engineering work, and #238's whole defect was charging
+	// exactly this interval to the active-work budget - so leaving it out here
+	// would fix the detection and keep the accounting lie.
+	"execution_provider_unavailable":   true,
 	"assurance_dependency_unavailable": true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
@@ -876,6 +881,14 @@ func (s *runState) budgets() RunBudgets {
 	}
 	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
 		budgets.MaxExecutionAttempts = attempts
+	}
+	// The no-progress window narrows the same way, and for the same reason: a
+	// run persisted under a tighter window keeps it. It narrows ONLY - a run
+	// created before this budget existed carries no window at all, and reading
+	// its absence as a bound of zero would hand exactly those runs the
+	// unbounded behaviour this budget exists to remove.
+	if window := s.run.Budgets.ProviderInactivityLimit; window > 0 && window < budgets.ProviderInactivityLimit {
+		budgets.ProviderInactivityLimit = window
 	}
 	return budgets
 }
@@ -1718,8 +1731,13 @@ var waitReasons = map[FailureClass]string{
 	// action differs: a quota comes back on the provider's own schedule, while
 	// repeated rate limiting means the configured concurrency is above what
 	// that account tolerates.
-	FailureProviderQuota:         "execution_provider_quota",
-	FailureProviderRateLimited:   "execution_provider_rate_limited",
+	FailureProviderQuota:       "execution_provider_quota",
+	FailureProviderRateLimited: "execution_provider_rate_limited",
+	// The host cannot REACH the provider. It is reported separately from the
+	// two capacity waits and from the account prerequisite because the
+	// operator action is different again: nothing is spent, nothing is
+	// revoked, and what has to change is connectivity.
+	FailureProviderUnavailable:   "execution_provider_unavailable",
 	FailureStateStorageExhausted: "state_storage_exhausted",
 	FailureControllerShutdown:    "controller_shutdown",
 }

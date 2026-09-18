@@ -64,7 +64,8 @@ terms nobody approved.
     "max_execution_attempts": 2,
     "max_execution_continuations": 8,
     "max_remediation_attempts": 2,
-    "max_assurance_attempts": 2
+    "max_assurance_attempts": 2,
+    "provider_inactivity_seconds": 600
   },
   "supervisor": {"max_concurrent_runs": 3, "poll_interval_seconds": 60},
   "storage": {"max_state_bytes": 21474836480},
@@ -166,6 +167,26 @@ refused like any other malformed bound. Attempts and continuations are different
 resources: attempts retry one execution binding, continuations are successive
 pieces of productive work.
 
+`provider_inactivity_seconds` bounds how long ONE provider invocation may go
+without producing output. It is a third dimension: `wall_limit_seconds` bounds
+the work, `lifecycle_deadline_seconds` bounds the calendar, and this bounds
+SILENCE. It exists because a live subprocess is not evidence of progress — a
+laptop that loses its network keeps a coding CLI alive and quiet, and without
+this bound the run-wide wall budget was what eventually noticed, eight hours and
+fifty-five minutes later. It may be absent, and absent resolves to 600; an
+explicit 0 is read as absent, and a negative value is refused. There is
+deliberately no value that disables it: an unattended CLI worker with no
+inactivity bound is the configuration this budget exists to prevent.
+
+Progress means output arriving from the child process. It deliberately does not
+mean the process existing, a scheduler lease heartbeat, or a clock tick. A CLI
+that is legitimately thinking in silence is why the bound is a window of minutes
+rather than an immediate failure, and why reaching it is a bounded retry rather
+than a terminal failure. An invocation the policy terminates is recorded as
+`provider_no_progress`; a provider that emits an explicit connectivity
+diagnostic is `provider_unavailable` and waits instead, without spending the
+active-work budget. Silence is never classified as offline.
+
 ### Concurrency and polling
 
 `supervisor.max_concurrent_runs` and `watch.max_concurrent_runs` both state the
@@ -200,6 +221,7 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
+| `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without producing output before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
 | `operator.id` | The identity a run is recorded as having been authorized by. It is provenance, not authentication: nothing here is signed and no challenge was issued. | the local account name |
@@ -223,6 +245,7 @@ May name:
 | `budgets.max_execution_continuations` | at least 1, at or below the operator value |
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
+| `budgets.provider_inactivity_seconds` | at least 1, at or below the operator value |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 

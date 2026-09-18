@@ -693,6 +693,35 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// THE NO-PROGRESS WINDOW THIS INVOCATION GETS: the run's PERSISTED bound
+	// less the silence already durably recorded against this operation.
+	//
+	// Deriving it from the operation row rather than from a stopwatch is what
+	// makes it survive a restart, and it is why the recorder below exists at
+	// all: a controller that died mid-invocation must hand its successor the
+	// remainder, not a fresh envelope.
+	inactivityLimit := state.budgets().ProviderInactivityLimit
+	inactivityRemaining := ProviderInactivityRemaining(inactivityLimit, operation, r.deps.Clock.Now())
+	// EXHAUSTED MEANS REFUSED, NOT UNBOUNDED. A zero window is how "no bound
+	// was configured" is spelled downstream, so dispatching with one would
+	// silently restore the pre-#238 behaviour for exactly the operation that
+	// has already been silent for its whole window. There is nothing left to
+	// spend, so nothing is started.
+	if inactivityLimit > 0 && inactivityRemaining <= 0 {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
+			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
+				fmt.Errorf("no provider progress was recorded within the %s inactivity bound", inactivityLimit)),
+		}}
+	}
+	// Observed progress is written back to the operation row, so "silent for"
+	// in status is a durable observation about the WORK rather than the age of
+	// the attempt. It goes through the scheduler's narrow progress transition,
+	// never through the lease heartbeat: a controller being alive is a
+	// different claim from the work moving, and #238 is the cost of letting the
+	// first stand in for the second.
+	ctx = withProviderProgressRecorder(ctx,
+		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, key) })
 	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
 		ReviewerResultPath: reviewerResultPath,
 		ScratchDir:         scratchDir,
@@ -734,7 +763,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// the first one did not spend instead of being handed the whole
 		// envelope again. An operation with no deadline falls back to the run
 		// budget, which is what it had before deadlines existed.
-		Budgets: ProviderBudget{WallLimit: executionWallBound(state, operation)},
+		Budgets: ProviderBudget{
+			WallLimit: executionWallBound(state, operation),
+			// The no-progress window, carried beside the total bound so the
+			// adapter applies one policy rather than two.
+			InactivityLimit: inactivityRemaining,
+		},
 		// The same authority as an instant, so the process bound and the
 		// provenance record cannot describe different realities.
 		Deadline: operation.Deadline,

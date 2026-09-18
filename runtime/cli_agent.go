@@ -784,9 +784,16 @@ type InvocationProvenance struct {
 	CompletedAt     *time.Time    `json:"execution_completed_at,omitempty"`
 	Elapsed         time.Duration `json:"observed_wall_elapsed,omitempty"`
 	OverranDeadline bool          `json:"overran_deadline,omitempty"`
-	// TerminationCause is why the process stopped: it returned on its own, or
-	// the runtime ended it at the deadline.
+	// TerminationCause is why the process stopped: it returned on its own, the
+	// runtime ended it at the deadline, or the runtime ended it because it had
+	// produced no output for the whole inactivity window.
 	TerminationCause string `json:"termination_cause,omitempty"`
+	// InactivityLimit is the no-progress window this invocation ran under, and
+	// zero when none was in force. It is recorded beside the deadline because
+	// it is the same kind of fact - a bound the runtime imposed - and an
+	// operator reading a stalled invocation needs to know which window it was
+	// measured against.
+	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
 	// ProcessID is the pid - and, because every bounded process is started with
 	// Setpgid, the process-GROUP id - the runtime owned.
 	ProcessID int `json:"process_id,omitempty"`
@@ -964,6 +971,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// as its authority are the same fact. Re-deriving "now plus a duration"
 	// here is what let a retry run under one deadline while the operation's
 	// authority had ended at another.
+	// THE NO-PROGRESS BOUND IS ARMED HERE, for every caller, because this is
+	// the one place every native CLI invocation passes through.
+	//
+	// A live subprocess is not evidence of progress, and the total bound above
+	// cannot tell the difference: the run that produced #238 spent 8h55m16s of
+	// active-work budget on a Codex process that was alive, silent, and unable
+	// to reach its endpoint. Enforcement lives beside the deadline rather than
+	// at each dispatch site so that the producer path and the planner path -
+	// the one that runs unattended in a read-only mode - cannot drift apart
+	// about whether a stalling provider is bounded at all.
+	if limit := request.Budgets.InactivityLimit; limit > 0 {
+		bounded, release := withProviderInactivity(ctx, limit, providerProgressRecorder(ctx))
+		defer release()
+		ctx = bounded
+	}
 	if request.Deadline != nil {
 		bounded, cancel := context.WithDeadline(ctx, *request.Deadline)
 		defer cancel()
@@ -987,8 +1009,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		provenance.Deadline = &deadline
 		provenance.OverranDeadline = completedAt.After(deadline)
 	}
+	// The inactivity bound in force, recorded whether or not it fired: the
+	// invocation that needs explaining later is the one that looked normal,
+	// and "which no-progress window was this running under" is not
+	// reconstructible from a transcript.
+	provenance.InactivityLimit = providerInactivityLimit(ctx)
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		provenance.TerminationCause = "deadline_reached"
+	}
+	// THE STALL IS NAMED BEFORE THE SHUTDOWN. An inactivity kill cancels this
+	// context, so through ctx.Err() alone it is indistinguishable from a
+	// supervisor draining - and those mean opposite things: one is a provider
+	// that stopped moving, the other is a pause the run resumes from.
+	inactive := providerInactivityCause(ctx)
+	if inactive {
+		provenance.TerminationCause = "provider_inactivity_limit_reached"
 	}
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(p.Agent.ID, request.AttemptRef(), output.Stdout, output.Stderr)
 	if artifactErr != nil {
@@ -1006,6 +1041,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		switch {
+		case inactive:
+			// The PROVIDER STOPPED MOVING and the runtime ended it. The
+			// process group is already gone by the time this is reached - the
+			// same graceful-then-forced stop a deadline performs - and the
+			// transcript below holds whatever it had said before it went
+			// quiet. It is not a deadline (the operation had authority left),
+			// not a shutdown (the controller is fine), and not an unknown
+			// (nothing about it is undiagnosed).
+			//
+			// Any provider diagnostic in the output is DISCARDED in favour of
+			// this class. A CLI that printed a connectivity error and then hung
+			// forever is a stall the runtime terminated, and reporting the
+			// error it happened to print last would describe an external
+			// condition rather than the bound that actually ended it.
+			result.Failure.Classification = FailureProviderNoProgress
 		case ctx.Err() != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
 			// THIS INVOCATION ran out of its own wall bound. Nothing stopped,
 			// and saying "the controller stopped" was affirmatively false: it

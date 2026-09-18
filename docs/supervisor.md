@@ -159,6 +159,25 @@ wall_limit_seconds          bounds the time the SYSTEM is working
 
 lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
                             optional, absent by default
+
+provider_inactivity_seconds bounds how long ONE provider invocation may go
+                            without producing output; finite always
+```
+
+The third bound is the stall detector, and the run wall budget is not. A
+provider subprocess being alive is not evidence of progress: a host that loses
+its network keeps a coding CLI alive and silent, and until that was bounded the
+run-wide wall budget was what discovered a dead provider — in the live run that
+prompted it, 8h55m16s of "active engineering work" with zero external wait.
+Reaching the window terminates the provider's process group, preserves its
+transcript, and records `provider_no_progress`, which is a bounded retry. An
+explicit connectivity diagnostic is `provider_unavailable` instead, and waits
+without spending the active-work budget. `autonomy status` prints the pair an
+operator needs — time since recognized progress, and the window it is measured
+against:
+
+```text
+progress   last 2026-09-18T09:14:02Z silent 4m12s inactivity limit 10m0s
 ```
 
 These answer different questions and were the same number until a live run

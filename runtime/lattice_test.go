@@ -132,6 +132,12 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
+		// The provider no-progress window: a THIRD budget dimension beside the
+		// active-work limit and the calendar deadline, and the one #238 was
+		// missing. It is a bound, not a capability, and it is tightenable -
+		// asking for a shorter window is a narrowing, so a repository may name
+		// it and appears below.
+		"budgets.provider_inactivity_seconds",
 		"watch.repositories",
 		// The brokered worker execution environment. Both members are
 		// CAPABILITY statements and neither is an unsafe override: the path
@@ -232,6 +238,7 @@ func TestRepositoryLayerReachesOnlyTightenableBounds(t *testing.T) {
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
+		"budgets.provider_inactivity_seconds",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
 	})
@@ -367,6 +374,12 @@ func TestTightenLatticePerDimension(t *testing.T) {
 			`{"budgets": {"max_assurance_attempts": 3}}`,
 			`{"budgets": {"max_assurance_attempts": 0}}`,
 			func(_ *testing.T, c Config) int { return c.Budgets.MaxAssuranceAttempts },
+		},
+		{
+			"budgets.provider_inactivity_seconds", `{"budgets": {"provider_inactivity_seconds": 120}}`, 120,
+			`{"budgets": {"provider_inactivity_seconds": 601}}`,
+			`{"budgets": {"provider_inactivity_seconds": 0}}`,
+			func(_ *testing.T, c Config) int { return c.Budgets.ProviderInactivitySeconds },
 		},
 		{
 			// Inverted: tighter is a LONGER interval.

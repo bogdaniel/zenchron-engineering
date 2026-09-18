@@ -417,6 +417,22 @@ type BudgetConfig struct {
 	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
 	MaxRemediationAttempts    int  `json:"max_remediation_attempts"`
 	MaxAssuranceAttempts      int  `json:"max_assurance_attempts"`
+	// ProviderInactivitySeconds bounds how long ONE provider invocation may go
+	// without producing output. It is a third bound beside wall_limit_seconds,
+	// which bounds the work, and lifecycle_deadline_seconds, which bounds the
+	// calendar: a provider subprocess being alive is not evidence that the
+	// invocation is moving, and without this the run wall budget was the thing
+	// that eventually discovered a dead provider - eight hours and fifty-five
+	// minutes later, in the run that produced #238.
+	//
+	// It is optional so that configurations written before it existed stay
+	// loadable, and absent resolves to DefaultProviderInactivitySeconds rather
+	// than to no bound at all. There is deliberately no spelling that disables
+	// it: an unattended CLI worker with no inactivity bound is the exact
+	// configuration this budget exists to prevent. An explicit 0 is therefore
+	// read as absent, like lifecycle_deadline_seconds, and a negative value is
+	// refused.
+	ProviderInactivitySeconds int `json:"provider_inactivity_seconds,omitempty"`
 }
 
 // DefaultMaxExecutionContinuations is the M1 continuation depth for a new run.
@@ -435,6 +451,13 @@ func (b BudgetConfig) resolved() BudgetConfig {
 	if b.MaxExecutionContinuations == nil {
 		fallback := DefaultMaxExecutionContinuations
 		b.MaxExecutionContinuations = &fallback
+	}
+	// Resolved here rather than at the point of use, so the effective bound is
+	// the one the digest covers and the one `doctor` prints: an inactivity
+	// window invented where the process starts would be a bound nothing in the
+	// configuration lattice had ever agreed to.
+	if b.ProviderInactivitySeconds <= 0 {
+		b.ProviderInactivitySeconds = DefaultProviderInactivitySeconds
 	}
 	return b
 }
@@ -572,6 +595,11 @@ type RepositoryBudgets struct {
 	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
 	MaxRemediationAttempts    *int `json:"max_remediation_attempts,omitempty"`
 	MaxAssuranceAttempts      *int `json:"max_assurance_attempts,omitempty"`
+	// ProviderInactivitySeconds is TIGHTEN-ONLY like every other bound here: a
+	// repository may ask for a shorter no-progress window for its own work and
+	// can never ask for a longer one. A repository that could widen it would be
+	// choosing how long its own provider may stall.
+	ProviderInactivitySeconds *int `json:"provider_inactivity_seconds,omitempty"`
 }
 
 // RepositoryWatch is the only part of watch a repository may address, and both
@@ -622,6 +650,7 @@ func (c Config) RunBudgets() RunBudgets {
 		MaxExecutionContinuations: c.Budgets.continuations(),
 		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
 		MaxAssuranceAttempts:      c.Budgets.MaxAssuranceAttempts,
+		ProviderInactivityLimit:   time.Duration(c.Budgets.ProviderInactivitySeconds) * time.Second,
 	}
 }
 
@@ -785,6 +814,7 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		{"budgets.max_execution_continuations", budgets.MaxExecutionContinuations, &continuations},
 		{"budgets.max_remediation_attempts", budgets.MaxRemediationAttempts, &tightened.Budgets.MaxRemediationAttempts},
 		{"budgets.max_assurance_attempts", budgets.MaxAssuranceAttempts, &tightened.Budgets.MaxAssuranceAttempts},
+		{"budgets.provider_inactivity_seconds", budgets.ProviderInactivitySeconds, &tightened.Budgets.ProviderInactivitySeconds},
 	}
 	for _, proposal := range proposals {
 		if proposal.proposed == nil {
@@ -1057,6 +1087,12 @@ func (c OperatorConfig) validate(path string) error {
 	// how a run dies for a reason its configuration does not explain.
 	if c.Budgets.LifecycleDeadlineSeconds < 0 {
 		return refuse("budgets.lifecycle_deadline_seconds must not be negative")
+	}
+	// provider_inactivity_seconds is optional in the same shape: 0 means absent
+	// and resolves to the default, because there must be no way to spell "no
+	// inactivity bound". A negative value is still a mistake.
+	if c.Budgets.ProviderInactivitySeconds < 0 {
+		return refuse("budgets.provider_inactivity_seconds must not be negative")
 	}
 	if d := c.Budgets.LifecycleDeadlineSeconds; d > 0 && d < c.Budgets.WallLimitSeconds {
 		return refuse(fmt.Sprintf(

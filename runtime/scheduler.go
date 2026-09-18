@@ -522,6 +522,31 @@ func (s Scheduler) Heartbeat(id string, progress string) (RunOperation, error) {
 		return nil
 	})
 }
+
+// RecordProviderProgress makes one observation of provider activity DURABLE.
+//
+// It is deliberately narrower than Heartbeat, which also renews the lease.
+// Renewing a lease is a claim about the CONTROLLER being alive; this is a claim
+// about the WORK moving, and #238 is precisely the defect of letting the first
+// stand in for the second. Merging them would mean an inactivity window could
+// be refreshed by a supervisor that is merely still running.
+//
+// The key is a progress FINGERPRINT, and the durable instant advances only when
+// it changes - so re-observing the same output is not progress. An unowned or
+// finished operation is not an error: the process this records for may outlive
+// the lease it was started under, and losing a progress note is not a reason to
+// fail an invocation that is working.
+func (s Scheduler) RecordProviderProgress(id, key string) (RunOperation, error) {
+	return s.transition(id, func(op *RunOperation, now time.Time) error {
+		if key == "" || key == op.NoProgressKey {
+			return nil
+		}
+		op.NoProgressKey = key
+		op.LastProgressAt = &now
+		return nil
+	})
+}
+
 func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error) {
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")
