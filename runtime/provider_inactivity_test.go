@@ -669,3 +669,79 @@ func TestTheTerminalSurfaceExcludesTheSessionRendering(t *testing.T) {
 		t.Fatalf("the process's last words classified as %q", got)
 	}
 }
+
+// TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority is the invariant
+// at the API boundary rather than at the one call site that happens to exist.
+//
+// A lease heartbeat says a CONTROLLER is alive. Provider inactivity authority
+// is a claim that the WORK moved. #238 is the cost of letting the first stand
+// in for the second, and Scheduler.Heartbeat used to take a progress value and
+// advance the durable progress datum whenever it changed - so a supervisor that
+// was merely still running could have held a dead provider's window open
+// indefinitely. Nothing in production called it that way, which is exactly why
+// it needed pinning: an untrue invariant with no current caller is a regression
+// waiting for its first one.
+func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
+	const window = 10 * time.Minute
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+
+	// Real provider output, recorded durably, opens the window where it should.
+	clock.advance(time.Minute)
+	if _, err := scheduler.RecordProviderProgress(op.ID, "512"); err != nil {
+		t.Fatal(err)
+	}
+	observed, _, _, err := scheduler.Store.Operation(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressAt, fingerprint := *observed.LastProgressAt, observed.NoProgressKey
+	if !progressAt.Equal(clock.Now()) || fingerprint != "512" {
+		t.Fatalf("provider progress was not recorded: %s %q", progressAt, fingerprint)
+	}
+
+	// FOUR MINUTES OF HEARTBEATS AND NO PROVIDER OUTPUT. The lease is renewed
+	// every minute, which is what a live controller does; none of it is
+	// evidence that the invocation is advancing.
+	for minute := 0; minute < 4; minute++ {
+		clock.advance(time.Minute)
+		beat, err := scheduler.Heartbeat(op.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !beat.Lease.HeartbeatAt.Equal(clock.Now()) {
+			t.Fatalf("the lease was not renewed: %s", beat.Lease.HeartbeatAt)
+		}
+		if beat.LastProgressAt == nil || !beat.LastProgressAt.Equal(progressAt) {
+			t.Fatalf("a lease heartbeat moved the inactivity datum to %v", beat.LastProgressAt)
+		}
+		if beat.NoProgressKey != fingerprint {
+			t.Fatalf("a lease heartbeat rewrote the progress fingerprint to %q", beat.NoProgressKey)
+		}
+	}
+	// The window has therefore been spent, exactly as if nothing had called
+	// Heartbeat at all.
+	spent, _, _, err := scheduler.Store.Operation(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ProviderInactivityRemaining(window, spent, clock.Now()); got != 6*time.Minute {
+		t.Fatalf("after four minutes of heartbeats the operation holds %s of inactivity authority, want 6m", got)
+	}
+
+	// AND REAL OUTPUT STILL DOES BOTH. The narrowing must not have made the
+	// durable record unreachable.
+	moved, err := scheduler.RecordProviderProgress(op.ID, "1024")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.LastProgressAt == nil || !moved.LastProgressAt.Equal(clock.Now()) {
+		t.Fatalf("observed output did not advance the datum: %v", moved.LastProgressAt)
+	}
+	if moved.NoProgressKey != "1024" {
+		t.Fatalf("observed output did not advance the fingerprint: %q", moved.NoProgressKey)
+	}
+	if got := ProviderInactivityRemaining(window, moved, clock.Now()); got != window {
+		t.Fatalf("recognized progress left %s of the window, want the full %s", got, window)
+	}
+}

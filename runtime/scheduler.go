@@ -544,28 +544,41 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		return nil
 	})
 }
-func (s Scheduler) Heartbeat(id string, progress string) (RunOperation, error) {
+
+// Heartbeat renews the LEASE and nothing else.
+//
+// It used to take a progress value and advance NoProgressKey/LastProgressAt
+// when that value changed, which made the #238 law false at this API boundary:
+// a caller could refresh provider inactivity authority without the provider
+// having produced anything. Liveness of the CONTROLLER and movement of the WORK
+// are different claims, and letting the first stand in for the second is the
+// whole defect - a supervisor that is merely still running would have kept a
+// dead provider's window open indefinitely.
+//
+// The progress argument is REMOVED rather than ignored. An ignored parameter
+// leaves the wrong call shape compiling and reads as though it still means
+// something; removing it makes the invariant structural, so the mistake cannot
+// be made again without changing this signature. Provider progress moves only
+// through RecordProviderProgress.
+func (s Scheduler) Heartbeat(id string) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
 		if op.Lease == nil || op.Lease.Owner != s.Owner {
 			return fmt.Errorf("operation lease is not owned")
 		}
 		op.Lease.HeartbeatAt = now
 		op.Lease.ExpiresAt = now.Add(s.defaults().LeaseDuration)
-		if progress != op.NoProgressKey {
-			op.NoProgressKey = progress
-			op.LastProgressAt = &now
-		}
 		return nil
 	})
 }
 
 // RecordProviderProgress makes one observation of provider activity DURABLE.
 //
-// It is deliberately narrower than Heartbeat, which also renews the lease.
-// Renewing a lease is a claim about the CONTROLLER being alive; this is a claim
-// about the WORK moving, and #238 is precisely the defect of letting the first
-// stand in for the second. Merging them would mean an inactivity window could
-// be refreshed by a supervisor that is merely still running.
+// It is deliberately separate from Heartbeat, which renews the lease and
+// touches nothing else. Renewing a lease is a claim about the CONTROLLER being
+// alive; this is a claim about the WORK moving, and #238 is precisely the
+// defect of letting the first stand in for the second. Merging them would mean
+// an inactivity window could be refreshed by a supervisor that is merely still
+// running.
 //
 // The key is a progress FINGERPRINT, and the durable instant advances only when
 // it changes - so re-observing the same output is not progress. An unowned or

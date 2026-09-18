@@ -56,16 +56,52 @@ func (c *inactivityCLI) Run(ctx context.Context, _ string, _ []string, dir strin
 		append(append([]string(nil), env...), "PATH="+os.Getenv("PATH")), grace)
 }
 
-// silentProviderScript is the reported provider: it records its process-group
-// id, refuses SIGTERM, and holds forever without saying anything.
+// silentProviderScript is the reported provider: it holds forever without
+// saying anything, refuses SIGTERM, and records BOTH of the processes it
+// consists of.
+//
+// Recording two pids is the point. `$$` is only the process-GROUP LEADER; the
+// `sleep` it is waiting on is a separate process with its own pid, and it is
+// the one that models a real coding CLI's child - the tool invocation, the
+// language server, the thing that actually holds the workspace. A test that
+// checked the leader alone would report "no child survives" while a live
+// descendant went on running, which is the precise claim #238 acceptance 4
+// makes and the precise way it could be false.
 //
 // Ignoring SIGTERM is deliberate. It forces the stop sequence past its graceful
-// signal into the forced kill, so "no detached child survives" is proved
-// against a process that actively resists the polite request.
-func silentProviderScript(pidFile string) string {
+// signal into the forced kill, so the claim is proved against a process that
+// actively resists the polite request.
+func silentProviderScript(pidFile, childPidFile string) string {
 	return "trap '' TERM\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + childPidFile + "\n" +
+		// The leader's pid is written LAST, so a reader that has seen this file
+		// has necessarily already seen the descendant's.
 		"echo $$ > " + pidFile + "\n" +
-		"while :; do sleep 30; done\n"
+		"wait\n"
+}
+
+// silentProviderFixture builds the fixture and the two pid files it records.
+func silentProviderFixture(t *testing.T) (CLIAgentProvider, ExecutionRequest, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	leader, child := filepath.Join(dir, "provider.pid"), filepath.Join(dir, "descendant.pid")
+	provider, request, _ := inactivityFixture(t, silentProviderScript(leader, child))
+	return provider, request, leader, child
+}
+
+// assertProcessGroupIsGone proves the WHOLE group died, not just its leader.
+func assertProcessGroupIsGone(t *testing.T, leader, child string) {
+	t.Helper()
+	if err := waitForFile(leader, 5*time.Second); err != nil {
+		t.Fatalf("the provider never started: %v", err)
+	}
+	if processFromFileAlive(leader) {
+		t.Fatal("the silent provider's process-group leader outlived its termination")
+	}
+	if processFromFileAlive(child) {
+		t.Fatal("a descendant of the silent provider outlived its termination and can still mutate the candidate")
+	}
 }
 
 // inactivityFixture is one native CLI agent whose invocation is a real process.
@@ -96,8 +132,8 @@ const inactivityWindow = 400 * time.Millisecond
 // TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget is acceptance 1-5.
 func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 	const limit = inactivityWindow
-	pidFile := filepath.Join(t.TempDir(), "provider.pid")
-	provider, request, cli := inactivityFixture(t, silentProviderScript(pidFile))
+	provider, request, leaderPid, childPid := silentProviderFixture(t)
+	cli := provider.Executor.(*inactivityCLI)
 	request.Budgets.InactivityLimit = limit
 
 	started := time.Now()
@@ -139,13 +175,9 @@ func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 		t.Fatal("the process the runtime owned was not recorded")
 	}
 
-	// NO DETACHED CHILD SURVIVES, even one that refused SIGTERM.
-	if err := waitForFile(pidFile, 5*time.Second); err != nil {
-		t.Fatalf("the provider never started: %v", err)
-	}
-	if processFromFileAlive(pidFile) {
-		t.Fatal("the silent provider outlived its termination and can still mutate the candidate")
-	}
+	// NO DETACHED CHILD SURVIVES, even one that refused SIGTERM - and that is
+	// asked of the descendant as well as the leader.
+	assertProcessGroupIsGone(t, leaderPid, childPid)
 
 	// THE EVIDENCE IS PRESERVED and the stall grants nothing.
 	if len(result.Artifacts) == 0 {
@@ -241,9 +273,7 @@ func TestContinuousProgressStillCannotExceedTheTotalWallBound(t *testing.T) {
 // durable settlement of the operation. Nothing is settled here on purpose: the
 // test asks what a controller that died in that window would leave behind.
 func TestAStallTerminationLeavesNoSecondProcessAndNoOverwrittenTranscript(t *testing.T) {
-	dir := t.TempDir()
-	first := filepath.Join(dir, "first.pid")
-	provider, request, _ := inactivityFixture(t, silentProviderScript(first))
+	provider, request, first, firstChild := silentProviderFixture(t)
 	request.Budgets.InactivityLimit = inactivityWindow
 
 	first1, err := provider.Execute(context.Background(), request)
@@ -260,15 +290,15 @@ func TestAStallTerminationLeavesNoSecondProcessAndNoOverwrittenTranscript(t *tes
 	// crash window cannot contain a live provider at all. That is what makes
 	// "no duplicate provider process" a structural answer rather than a race
 	// the next attempt has to win.
-	if processFromFileAlive(first) {
-		t.Fatal("a provider survived the termination decision into the crash window")
+	if processFromFileAlive(first) || processFromFileAlive(firstChild) {
+		t.Fatal("a provider process survived the termination decision into the crash window")
 	}
 
 	// The controller dies here: no operation.after, no Finish. Recovery
 	// allocates the next PHYSICAL attempt identity, per #237, and dispatches
 	// again.
-	second := filepath.Join(dir, "second.pid")
-	retry, retryRequest, cli := inactivityFixture(t, silentProviderScript(second))
+	retry, retryRequest, second, secondChild := silentProviderFixture(t)
+	cli := retry.Executor.(*inactivityCLI)
 	retry.ArtifactStore = provider.ArtifactStore
 	retryRequest.RunID, retryRequest.OperationID = request.RunID, request.OperationID
 	retryRequest.Attempt = request.Attempt + 1
@@ -280,8 +310,8 @@ func TestAStallTerminationLeavesNoSecondProcessAndNoOverwrittenTranscript(t *tes
 	if cli.runs != 1 {
 		t.Fatalf("the retry started %d provider processes", cli.runs)
 	}
-	if processFromFileAlive(second) {
-		t.Fatal("the retry's provider outlived its termination")
+	if processFromFileAlive(second) || processFromFileAlive(secondChild) {
+		t.Fatal("the retry's provider process group outlived its termination")
 	}
 
 	// A FRESH IMMUTABLE IDENTITY, and the earlier transcript byte-identical.
@@ -322,8 +352,7 @@ func TestAStallTerminationLeavesNoSecondProcessAndNoOverwrittenTranscript(t *tes
 // This is the answer to that: the assertion is about the mechanism's ABSENCE.
 func TestRemovingTheInactivityPolicyLetsTheSilentProviderRunOn(t *testing.T) {
 	const limit = inactivityWindow
-	pidFile := filepath.Join(t.TempDir(), "provider.pid")
-	provider, request, _ := inactivityFixture(t, silentProviderScript(pidFile))
+	provider, request, pidFile, childPid := silentProviderFixture(t)
 
 	// THE ONE CHANGED VARIABLE: no inactivity bound on the request. Everything
 	// else is byte-for-byte the fixture the passing test uses.
@@ -363,8 +392,8 @@ func TestRemovingTheInactivityPolicyLetsTheSilentProviderRunOn(t *testing.T) {
 	if result.Invocation != nil && strings.Contains(result.Invocation.TerminationCause, "inactivity") {
 		t.Fatalf("a cancellation was recorded as an inactivity termination: %q", result.Invocation.TerminationCause)
 	}
-	if processFromFileAlive(pidFile) {
-		t.Fatal("the provider outlived the cancellation")
+	if processFromFileAlive(pidFile) || processFromFileAlive(childPid) {
+		t.Fatal("the provider process group outlived the cancellation")
 	}
 }
 
@@ -559,7 +588,7 @@ func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
 			provider, request, _ := inactivityFixture(t,
 				"trap '' TERM\n"+
 					"echo "+shellQuoted(tc.diagnostic)+" >&2\n"+
-					"while :; do sleep 30; done\n")
+					"sleep 30 &\nwait\n")
 			request.Budgets.InactivityLimit = inactivityWindow
 
 			result, err := provider.Execute(context.Background(), request)
@@ -587,7 +616,7 @@ func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
 func TestSilenceWithNothingStatedIsStillNoProgress(t *testing.T) {
 	// A provider that says nothing recognizable and hangs.
 	provider, request, _ := inactivityFixture(t,
-		"trap '' TERM\necho 'thinking' >&2\nwhile :; do sleep 30; done\n")
+		"trap '' TERM\necho 'thinking' >&2\nsleep 30 &\nwait\n")
 	request.Budgets.InactivityLimit = inactivityWindow
 	result, err := provider.Execute(context.Background(), request)
 	if err == nil {
@@ -601,7 +630,7 @@ func TestSilenceWithNothingStatedIsStillNoProgress(t *testing.T) {
 	// stall. Preserving a recognized condition must not become a channel for
 	// untrusted output to outrank a bound the runtime actually enforced.
 	quoted, request2, _ := inactivityFixture(t,
-		"trap '' TERM\necho 'The docs say: usage limit reached'\nwhile :; do sleep 30; done\n")
+		"trap '' TERM\necho 'The docs say: usage limit reached'\nsleep 30 &\nwait\n")
 	request2.Budgets.InactivityLimit = inactivityWindow
 	result2, err := quoted.Execute(context.Background(), request2)
 	if err == nil {
