@@ -304,10 +304,43 @@ func (e *GitDiscardRefusedError) Error() string {
 // record are worth more when they say what was at stake - but it is observed
 // after the decision and it cannot change it.
 func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, stderr io.Writer) (int, error) {
-	class, reason := ClassifyGitCommand(args)
-	if class == GitOperationPermitted {
-		return execRealGit(candidateDir, args, stdout, stderr)
+	// THE EFFECTIVE COMMAND FIRST, because the classifier has to be looking at
+	// what real Git will run. An alias expands inside Git, after the broker
+	// would otherwise have authorized the verb it was spelled with - and both a
+	// provider and a checked-out .git/config can define one, since `config` is
+	// an ordinary command. See git_alias.go.
+	effective, resolveErr := ResolveGitCommand(candidateDir, args)
+	if resolveErr != nil {
+		// FAIL CLOSED. "I could not tell what this would do" is not "this is
+		// safe", and the boundary must never answer the second when it means
+		// the first.
+		return refuseGitCommand(candidateDir, refusalLog, args,
+			"the effective operation could not be resolved: "+resolveErr.Error(), stderr)
 	}
+	class, reason := ClassifyGitCommand(effective)
+	if class == GitOperationPermitted {
+		// The RESOLVED form is executed. Where no alias was involved it is the
+		// original argv unchanged, which is almost every invocation; where one
+		// was, running the expansion the broker actually classified is what
+		// stops the lookup and the execution from being able to disagree.
+		return execRealGit(candidateDir, effective, stdout, stderr)
+	}
+	if aliased := boundedGitArgv(args); aliased != boundedGitArgv(effective) {
+		// The record names BOTH: what the provider asked for and what it
+		// resolved to. An operator reading `git co` needs to be told it was a
+		// checkout, and a reader of `git checkout` needs to know nobody typed
+		// that.
+		reason += " (requested as " + aliased + ")"
+	}
+	return refuseGitCommand(candidateDir, refusalLog, effective, reason, stderr)
+}
+
+// refuseGitCommand records the refusal durably and tells the provider why.
+//
+// It is one function because every refusal has to do all of it: a refusal that
+// executed nothing but recorded nothing would be invisible, and one that
+// recorded without explaining would leave the worker to guess.
+func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, stderr io.Writer) (int, error) {
 	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason}
 	// Observation, after the decision. A workspace whose status cannot be read
 	// does not soften the refusal; it just means the record names no paths.
@@ -330,6 +363,11 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 	// Git's own exit status for a command it would not perform.
 	return 1, nil
 }
+
+// aliasResolutionReason is recognizable in a refusal record, so a reviewer can
+// tell a classified discard from a command whose meaning could not be
+// established. Both are refusals; they are not the same fact.
+const aliasResolutionReason = "the effective operation could not be resolved"
 
 // execRealGit runs a permitted command through the real binary.
 //

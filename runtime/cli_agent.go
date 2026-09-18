@@ -312,6 +312,19 @@ type CLIAgentProvider struct {
 	// controller's own executable and its broker subcommand. See git_guard.go
 	// for why it is a parameter and not something the boundary discovers.
 	GitBroker []string
+	// RequireGitGuard makes the #241 boundary a PRECONDITION of dispatch
+	// rather than a best effort.
+	//
+	// It exists because two situations look identical from inside this adapter
+	// and are not: a composition that deliberately runs unguarded - a unit
+	// test, a probe, an embedder driving one invocation - and the production
+	// composition, which always intends the guard and may fail to resolve the
+	// controller's own executable. The first is honest and is recorded as
+	// GitGuarded=false. The second is a controller that cannot enforce its own
+	// boundary, and continuing would hand a worker a candidate workspace it
+	// could erase. Only the composition root knows which one it is, so only the
+	// composition root sets this.
+	RequireGitGuard bool
 	// ExecScratchDir is the runtime-owned, exec-capable build scratch for the
 	// invocation in flight. Execute sets it per invocation from the request; it
 	// is a field rather than a parameter because every environment this
@@ -949,11 +962,20 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// probe runs under the same brokered Git environment the invocation will.
 	// A boundary that only covered the main command would be a boundary with a
 	// documented hole in it.
-	if guard, err := p.prepareGitGuard(request); err != nil {
+	guard, err := p.prepareGitGuard(request)
+	if err != nil {
 		return ExecutionResult{}, err
-	} else if guard != nil {
-		p.gitGuard = guard
 	}
+	// A COMPOSITION THAT REQUIRES THE BOUNDARY AND DID NOT GET IT DISPATCHES
+	// NOTHING. Raised here, before the probe and before any process, so a
+	// controller that cannot enforce #241 spends no invocation discovering it
+	// and hands no worker a workspace it could erase.
+	if guard == nil && p.RequireGitGuard {
+		return ExecutionResult{}, &CandidateGitGuardUnavailableError{
+			AgentID: p.Agent.ID, StateDir: p.StateDir, Broker: len(p.GitBroker) > 0,
+		}
+	}
+	p.gitGuard = guard
 	if err := p.probe(ctx, spec, home); err != nil {
 		return ExecutionResult{}, err
 	}

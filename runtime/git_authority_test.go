@@ -597,3 +597,274 @@ func TestDirtyCandidateStateSurvivesRestartAndStaysProtected(t *testing.T) {
 		t.Fatalf("the successor's record is not its own: %#v", second)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Aliases: the classifier must see what real Git will run
+// ---------------------------------------------------------------------------
+
+// setGitAlias writes one alias into the candidate repository's own
+// configuration - which is exactly how a provider or a checked-out tree would,
+// since `git config` is an ordinary permitted command.
+func setGitAlias(t *testing.T, dir, name, value string) {
+	t.Helper()
+	if _, err := (GitRunner{Dir: dir}).run("config", "alias."+name, value); err != nil {
+		t.Fatalf("setting alias.%s: %v", name, err)
+	}
+}
+
+// TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker is the hole review
+// 5249945424 found, closed and proved.
+//
+// The classifier used to read the literal verb and then hand the original argv
+// to real Git, which expands aliases itself - after the broker had already
+// authorized what it saw. A provider could author the bypass out of two
+// permitted commands, and a repository could ship it in .git/config.
+func TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker(t *testing.T) {
+	for name, tc := range map[string]struct {
+		alias, value string
+		argv         []string
+	}{
+		"checkout by alias": {"co", "checkout", []string{"co", "--", "implementation.go"}},
+		"reset by alias":    {"nuke", "reset --hard", []string{"nuke"}},
+		"clean by alias":    {"wipe", "clean -fd", []string{"wipe"}},
+		"restore by alias":  {"undo", "restore .", []string{"undo"}},
+		// The flags may live on either side of the expansion, so both have to
+		// be assembled before classification.
+		"flag from the caller": {"c", "checkout", []string{"c", "-f"}},
+		"quoted value":         {"q", `checkout "--"`, []string{"q", "implementation.go"}},
+		// A global option must not hide the alias either, and -c is the form
+		// that defines the alias in the same breath as using it.
+		"alias behind -C":   {"co2", "reset --hard", []string{"-C", ".", "co2"}},
+		"inline -c defines": {"", "", []string{"-c", "alias.zap=reset --hard", "zap"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, refusalLog := gitAuthorityFixture(t)
+			const work = "package candidate\n\n// work an alias must not reach\n"
+			writeCandidateFile(t, dir, "implementation.go", work)
+			writeCandidateFile(t, dir, "added.go", "package candidate\n")
+			if tc.alias != "" {
+				setGitAlias(t, dir, tc.alias, tc.value)
+			}
+
+			code, diagnostic := brokerGit(t, dir, refusalLog, tc.argv...)
+			if code == 0 {
+				t.Fatalf("%v was permitted through its alias", tc.argv)
+			}
+			if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+				t.Fatalf("%v discarded the tracked modification:\n%q", tc.argv, got)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "added.go")); err != nil {
+				t.Fatalf("%v deleted the untracked candidate file: %v", tc.argv, err)
+			}
+			if !strings.Contains(diagnostic, "destructive Git refused") {
+				t.Fatalf("the refusal was not explained: %s", diagnostic)
+			}
+			// The record names the EFFECTIVE operation, so an operator reading
+			// `git co` is told it was a checkout.
+			refusals, err := ReadGitRefusals(refusalLog)
+			if err != nil || len(refusals) != 1 {
+				t.Fatalf("the refusal was not recorded: %v %#v", err, refusals)
+			}
+			t.Logf("recorded: %s | %s", refusals[0].Operation, refusals[0].Reason)
+		})
+	}
+
+	// MUTATION, in the test rather than only in a patch: the identical alias
+	// invocation with no resolution in front of it really does erase the
+	// fixture. Without this the refusals above assert that something harmless
+	// was refused.
+	dir, _ := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// work an alias must not reach\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+	setGitAlias(t, dir, "co", "checkout")
+	// Real Git expands the alias itself, which is the whole defect: the argv
+	// the classifier used to see is not the operation that runs.
+	unguardedGit(t, dir, "co", "--", "implementation.go")
+	if got := candidateFileBody(t, dir, "implementation.go"); got == work {
+		t.Fatal("an unresolved alias did NOT discard the work, so these refusals prove nothing")
+	}
+}
+
+// TestAnAliasChainIsFollowedAndACycleFailsClosed covers the two shapes review
+// 5249945424 named explicitly.
+func TestAnAliasChainIsFollowedAndACycleFailsClosed(t *testing.T) {
+	t.Run("chain", func(t *testing.T) {
+		dir, refusalLog := gitAuthorityFixture(t)
+		const work = "package candidate\n\n// work a chain must not reach\n"
+		writeCandidateFile(t, dir, "implementation.go", work)
+		// a -> b -> checkout
+		setGitAlias(t, dir, "a", "b")
+		setGitAlias(t, dir, "b", "checkout")
+
+		if code, _ := brokerGit(t, dir, refusalLog, "a", "--", "implementation.go"); code == 0 {
+			t.Fatal("a two-hop alias chain was permitted")
+		}
+		if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+			t.Fatalf("the chain discarded the work:\n%q", got)
+		}
+		// And real Git agrees the chain resolves that way, so the resolver is
+		// mirroring Git rather than inventing its own rule.
+		resolved, err := ResolveGitCommand(dir, []string{"a", "--", "implementation.go"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if verb, _ := gitVerb(resolved); verb != "checkout" {
+			t.Fatalf("the chain resolved to %q, want checkout: %v", verb, resolved)
+		}
+	})
+
+	t.Run("cycle", func(t *testing.T) {
+		dir, refusalLog := gitAuthorityFixture(t)
+		const work = "package candidate\n\n// work a cycle must not reach\n"
+		writeCandidateFile(t, dir, "implementation.go", work)
+		setGitAlias(t, dir, "a", "b")
+		setGitAlias(t, dir, "b", "a")
+
+		// FAIL CLOSED, and without running real Git: the resolver cannot say
+		// what this would do, and "I cannot tell" is not "this is safe".
+		if _, err := ResolveGitCommand(dir, []string{"a"}); err == nil {
+			t.Fatal("a cycle resolved to something")
+		}
+		code, diagnostic := brokerGit(t, dir, refusalLog, "a")
+		if code == 0 {
+			t.Fatalf("a cyclic alias was permitted: %s", diagnostic)
+		}
+		if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+			t.Fatalf("a cyclic alias changed the candidate:\n%q", got)
+		}
+		refusals, err := ReadGitRefusals(refusalLog)
+		if err != nil || len(refusals) != 1 {
+			t.Fatalf("the refusal was not recorded: %v %#v", err, refusals)
+		}
+		if !strings.Contains(refusals[0].Reason, aliasResolutionReason) {
+			t.Fatalf("a cycle was recorded as something other than unresolvable: %q", refusals[0].Reason)
+		}
+	})
+}
+
+// TestAShellAliasIsRefusedWithoutBeingExecuted is the rule that a boundary must
+// not run the thing it is deciding about.
+func TestAShellAliasIsRefusedWithoutBeingExecuted(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// work a shell alias must not reach\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+	// The alias would erase the work AND leave a marker, so executing it to
+	// find out what it means is observable.
+	marker := filepath.Join(dir, "shell-alias-ran")
+	setGitAlias(t, dir, "sneaky", "!touch "+marker+" && git reset --hard")
+
+	if code, _ := brokerGit(t, dir, refusalLog, "sneaky"); code == 0 {
+		t.Fatal("a shell alias was permitted")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the boundary EXECUTED the shell alias to decide what it meant")
+	}
+	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+		t.Fatalf("the shell alias discarded the work:\n%q", got)
+	}
+	refusals, err := ReadGitRefusals(refusalLog)
+	if err != nil || len(refusals) != 1 {
+		t.Fatalf("the refusal was not recorded: %v %#v", err, refusals)
+	}
+	if !strings.Contains(refusals[0].Reason, "shell alias") {
+		t.Fatalf("the record does not say it was a shell alias: %q", refusals[0].Reason)
+	}
+}
+
+// TestOrdinaryAliasesAndVerbsStillWork keeps the resolver from becoming a
+// second refusal surface. A guard that broke every alias would have replaced
+// one expensive failure with another.
+func TestOrdinaryAliasesAndVerbsStillWork(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	writeCandidateFile(t, dir, "implementation.go", "package candidate\n\n// dirty\n")
+	setGitAlias(t, dir, "st", "status --porcelain")
+	setGitAlias(t, dir, "ll", "log --oneline")
+	setGitAlias(t, dir, "d", "diff")
+
+	for _, argv := range [][]string{
+		{"st"}, {"ll", "-1"}, {"d"},
+		{"status"}, {"diff"}, {"log", "-1"}, {"rev-parse", "HEAD"},
+	} {
+		if code, out := brokerGit(t, dir, refusalLog, argv...); code != 0 {
+			t.Fatalf("ordinary %v exited %d: %s", argv, code, out)
+		}
+	}
+	if refusals, _ := ReadGitRefusals(refusalLog); len(refusals) != 0 {
+		t.Fatalf("ordinary commands were refused: %#v", refusals)
+	}
+	// AND AN ALIAS NAMED AFTER A COMMAND IS IGNORED, exactly as Git ignores it.
+	// Refusing here would mean refusing `git status` because a config file once
+	// mentioned it.
+	setGitAlias(t, dir, "status", "reset --hard")
+	if code, out := brokerGit(t, dir, refusalLog, "status", "--porcelain"); code != 0 {
+		t.Fatalf("git status was refused because an ignored alias shadowed it: %s", out)
+	}
+}
+
+// TestAnAliasValueThatCannotBeParsedFailsClosed: a value nobody can split the
+// same way twice is not something to authorize a decision on.
+func TestAnAliasValueThatCannotBeParsedFailsClosed(t *testing.T) {
+	if _, err := splitGitAliasValue(`checkout "--`); err == nil {
+		t.Fatal("an unbalanced quote parsed successfully")
+	}
+	if _, err := splitGitAliasValue(`checkout '`); err == nil {
+		t.Fatal("an unbalanced single quote parsed successfully")
+	}
+	// And the ordinary shapes split the way Git splits them.
+	for value, want := range map[string][]string{
+		"checkout":            {"checkout"},
+		"reset --hard":        {"reset", "--hard"},
+		`checkout "--" a.go`:  {"checkout", "--", "a.go"},
+		`commit -m 'a b'`:     {"commit", "-m", "a b"},
+		`commit -m "a \"b\""`: {"commit", "-m", `a "b"`},
+		"  clean   -fd  ":     {"clean", "-fd"},
+	} {
+		got, err := splitGitAliasValue(value)
+		if err != nil {
+			t.Fatalf("%q: %v", value, err)
+		}
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("%q split to %#v, want %#v", value, got, want)
+		}
+	}
+	// An empty alias resolves to nothing, which is unresolvable rather than
+	// permitted.
+	dir, refusalLog := gitAuthorityFixture(t)
+	writeCandidateFile(t, dir, "implementation.go", "package candidate\n\n// dirty\n")
+	setGitAlias(t, dir, "empty", "   ")
+	if code, _ := brokerGit(t, dir, refusalLog, "empty"); code == 0 {
+		t.Fatal("an alias expanding to nothing was permitted")
+	}
+}
+
+// TestTheResolvedFormIsWhatExecutes closes the last gap: the broker executes
+// the expansion it classified, so a provider cannot rewrite the alias between
+// the lookup and the execution and make the two disagree.
+func TestTheResolvedFormIsWhatExecutes(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	writeCandidateFile(t, dir, "implementation.go", "package candidate\n\n// dirty\n")
+	setGitAlias(t, dir, "st", "status --porcelain")
+
+	resolved, err := ResolveGitCommand(dir, []string{"st"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verb, _ := gitVerb(resolved); verb != "status" {
+		t.Fatalf("the alias resolved to %q: %v", verb, resolved)
+	}
+	// The permitted path runs that form, so its output is the expansion's.
+	code, _ := brokerGit(t, dir, refusalLog, "st")
+	if code != 0 {
+		t.Fatalf("the resolved alias did not execute: %d", code)
+	}
+	// A non-alias argv is returned byte-identical, which is what keeps the
+	// overwhelming majority of invocations behaving exactly as before.
+	original := []string{"-C", ".", "diff", "--stat", "--", "implementation.go"}
+	same, err := ResolveGitCommand(dir, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(same, "\x00") != strings.Join(original, "\x00") {
+		t.Fatalf("a non-alias argv was rewritten: %#v", same)
+	}
+}

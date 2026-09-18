@@ -329,6 +329,20 @@ uncommitted work away: `checkout`, `switch`, `restore`, `clean`,
 `log`, `show`, `add`, `apply`, `commit` — is passed through untouched. This is a
 destruction guard, not a Git allowlist.
 
+**Aliases are resolved before classification.** A worker could otherwise author
+its own bypass out of two permitted commands — `git config alias.co checkout`,
+then `git co -- file` — because real Git expands aliases *after* the broker has
+authorized the verb it was spelled with, and a checked-out `.git/config` can
+carry one too. The lookup runs under the same configuration the execution will
+use, including leading `-c`/`-C` options, so `git -c alias.x=reset\ --hard x` is
+resolved too. Chains are followed, cycles, shell aliases (`!…`), malformed
+values and expansions that will not terminate all **fail closed** — "I could not
+tell what this would do" is not "this is safe", and nothing executes alias
+content to find out what it means. An alias whose name collides with a real Git
+command is ignored, exactly as Git ignores it, so `git status` is never refused
+because a config file once mentioned it. A resolved command is executed in its
+resolved form, so the lookup and the execution cannot disagree.
+
 **A destructive command is refused whether or not the workspace is dirty.** That
 is the smaller law and the stronger one: permitting it on an observably clean
 tree would require checking dirtiness and then executing, which is a race the
@@ -356,6 +370,16 @@ trust mode already names, and it is why `RequireProtectedIsolation` refuses
 these adapters for protected work. What is closed is the whole of the observed
 failure: habitual destructive recovery, in every spelling that does not
 dismantle the runtime's own environment.
+
+**A controller that cannot install the boundary dispatches nothing.** The
+production composition always intends the guard, so a broker executable it
+cannot resolve is a controller unable to enforce its own law rather than a
+composition that chose not to. That is refused before the capability probe and
+before any process, as `candidate_guard_unavailable` — a typed wait an operator
+clears by repairing the installation, never a provider fault, because nothing
+about the worker, the work, the account or the network is wrong. A deliberately
+unguarded composition — a unit test, a probe, an embedder driving one
+invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
 
 The boundary grants the worker no new command surface. It adds no tool to any
 provider's allowlist, so a stage that was obliged nothing is still obliged

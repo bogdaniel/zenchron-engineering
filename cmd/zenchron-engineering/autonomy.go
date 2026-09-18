@@ -1001,6 +1001,13 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// pretending to one.
 			StateDir:  config.StateDir,
 			GitBroker: gitBrokerCommand(),
+			// AND IT IS REQUIRED HERE. This is the production composition: it
+			// always intends the boundary, so a broker it could not resolve is
+			// a controller that cannot enforce #241 rather than a composition
+			// that chose not to. Requiring it converts that into a typed
+			// pre-dispatch refusal instead of an unguarded worker, which is
+			// the difference between an honest absence and a silent one.
+			RequireGitGuard: true,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{

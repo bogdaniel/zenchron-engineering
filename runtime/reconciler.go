@@ -383,6 +383,10 @@ var externalWaitReasons = map[string]bool{
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
+	// The controller could not install the brokered candidate-Git boundary, so
+	// it performed no execution at all. Nothing is running and an operator has
+	// to repair the installation.
+	"candidate_guard_unavailable": true,
 	// The controller stopped. The run is not working, and it is waiting for a
 	// supervisor to exist again rather than for anything it can do itself.
 	"controller_shutdown":  true,
@@ -1753,7 +1757,10 @@ var waitReasons = map[FailureClass]string{
 	// revoked, and what has to change is connectivity.
 	FailureProviderUnavailable:   "execution_provider_unavailable",
 	FailureStateStorageExhausted: "state_storage_exhausted",
-	FailureControllerShutdown:    "controller_shutdown",
+	// The controller cannot install its own candidate-Git boundary. An
+	// operator repairs the installation; nothing about the work is wrong.
+	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
+	FailureControllerShutdown:        "controller_shutdown",
 }
 
 func waitReason(class FailureClass) string {

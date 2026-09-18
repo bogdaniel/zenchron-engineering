@@ -349,11 +349,18 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 			// provider that was refused and then did the work properly is the
 			// common case and the one worth telling an operator about: it is
 			// where expensive reasoning was nearly lost and was not.
-			if refusals, refused, err := executionDiscardRefusalsOf(operation.Result); err != nil {
+			// ASSIGNED UNCONDITIONALLY, INCLUDING ZERO. Projecting only when
+			// there were refusals left the previous attempt's count visible
+			// after a later attempt made none - so a run whose second attempt
+			// behaved perfectly still reported that a destructive command had
+			// been refused. The projection is a view of the LATEST attempt, and
+			// "this attempt refused nothing" is as much a fact about it as any
+			// other.
+			refusals, refused, err := executionDiscardRefusalsOf(operation.Result)
+			if err != nil {
 				return err
-			} else if refusals > 0 {
-				p.CandidateDiscardRefusals, p.CandidateDiscardRefused = refusals, refused
 			}
+			p.CandidateDiscardRefusals, p.CandidateDiscardRefused = refusals, refused
 		}
 		// The ordering rule: a new baseline is adopted only from an operation
 		// that SUCCEEDED. operation.after is the last event an operation

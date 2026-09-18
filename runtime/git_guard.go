@@ -40,6 +40,7 @@ package runtime
 // environment fails closed, and the refusal becomes durable evidence.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -271,4 +272,42 @@ func lastProviderGitRefusal(result ExecutionResult) string {
 		rendered += fmt.Sprintf(" (%d dirty candidate path(s) preserved)", last.DirtyCount)
 	}
 	return boundedDetail(rendered)
+}
+
+// CandidateGitGuardUnavailableError is the typed refusal for a composition that
+// requires the #241 boundary and could not install it.
+//
+// It names which half was missing, because the two have different repairs: no
+// state root is a misconfigured composition, and no broker command is a
+// controller that could not resolve its own executable. Neither is a provider
+// fault, and the failure class it carries says so.
+type CandidateGitGuardUnavailableError struct {
+	AgentID  string
+	StateDir string
+	Broker   bool
+}
+
+func (e *CandidateGitGuardUnavailableError) Error() string {
+	missing := "the controller could not resolve its own brokered Git executable"
+	if strings.TrimSpace(e.StateDir) == "" {
+		missing = "no runtime state root was configured for the brokered Git guard"
+	}
+	return "refusing to dispatch agent " + e.AgentID +
+		": candidate Git must be brokered and " + missing +
+		". No provider was invoked and the candidate workspace was not touched"
+}
+
+// candidateGuardFailureClass maps a pre-dispatch guard refusal onto its typed
+// class, and reports whether the error was one.
+//
+// It exists so the classification lives beside the error rather than in the
+// execution handler: the handler asks one question and gets the runtime's own
+// answer, instead of a provider refusal falling through to FailureUnknown and
+// being reported as though the worker had done something wrong.
+func candidateGuardFailureClass(err error) (FailureClass, bool) {
+	var guard *CandidateGitGuardUnavailableError
+	if errors.As(err, &guard) {
+		return FailureCandidateGuardUnavailable, true
+	}
+	return "", false
 }

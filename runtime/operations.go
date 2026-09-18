@@ -940,6 +940,14 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		if result.Failure != nil {
 			class = result.Failure.Classification
 		}
+		// THE RUNTIME'S OWN PRE-DISPATCH REFUSALS ARE NOT PROVIDER FAULTS. A
+		// controller that could not install its candidate-Git boundary invoked
+		// nothing and touched nothing, so reporting it as an unknown provider
+		// failure would send an operator to look at their worker for a problem
+		// in their controller installation.
+		if guarded, ok := candidateGuardFailureClass(execErr); ok {
+			class = guarded
+		}
 		record.FailureClass = class
 		// One of the runtime's OWN bounds ended the invocation: that is
 		// INCOMPLETE, not unknown. The runtime set the ceiling, the runtime

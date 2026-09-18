@@ -9,6 +9,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -625,4 +627,91 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 // stateDir keeps the guard outside the candidate workspace, as production does.
 func (p *discardAttemptingProvider) stateDir(request ExecutionRequest) string {
 	return filepath.Join(filepath.Dir(request.CandidateDir), "guard-state")
+}
+
+// TestALaterAttemptWithNoRefusalsClearsTheStaleObservation is the finding from
+// review 5249945424, closed and proved through the REAL projection.
+//
+// The projection assigned the refusal fields only when there WERE refusals, so
+// a second attempt that behaved perfectly left the first attempt's count on
+// display. An operator would read "a destructive command was refused" about an
+// attempt that never attempted one - worse than silence, because it is the
+// runtime being confidently wrong about its own history.
+//
+// The projection is a view of the LATEST attempt, and "this attempt refused
+// nothing" is as much a fact about it as any other. This drives Project over
+// two real operation.after events, which is the fold production uses, so
+// restoring the `if refusals > 0` guard fails it.
+func TestALaterAttemptWithNoRefusalsClearsTheStaleObservation(t *testing.T) {
+	refused, err := marshalPayloadJSON(executionRecord{
+		mutationResult: mutationResult{
+			Mutated: true, PathCount: 1, ProviderID: "codex", ProviderExecuted: true,
+			DiscardRefusals: 1,
+			DiscardRefused:  "git reset --hard (2 dirty candidate path(s) preserved)",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, err := marshalPayloadJSON(executionRecord{
+		mutationResult: mutationResult{
+			Mutated: true, PathCount: 3, ProviderID: "codex", ProviderExecuted: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ATTEMPT 1 REFUSED ONE COMMAND, and the projection says so.
+	afterOne := executionAfterEvent(t, 1, Succeeded, refused)
+	projection, err := Project([]EngineeringEvent{afterOne})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.CandidateDiscardRefusals != 1 ||
+		!strings.Contains(projection.CandidateDiscardRefused, "reset --hard") {
+		t.Fatalf("the first attempt's refusal was not projected: %d %q",
+			projection.CandidateDiscardRefusals, projection.CandidateDiscardRefused)
+	}
+
+	// ATTEMPT 2 REFUSED NOTHING, and the projection must say THAT.
+	afterTwo := executionAfterEvent(t, 2, Succeeded, clean)
+	projection, err = Project([]EngineeringEvent{afterOne, afterTwo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.CandidateDiscardRefusals != 0 || projection.CandidateDiscardRefused != "" {
+		t.Fatalf("the second attempt left the first attempt's observation on display: %d %q",
+			projection.CandidateDiscardRefusals, projection.CandidateDiscardRefused)
+	}
+
+	// And the order is the fold's, not the values': a refusal AFTER a clean
+	// attempt is shown, so clearing is not the same as ignoring.
+	projection, err = Project([]EngineeringEvent{afterTwo, executionAfterEvent(t, 3, Succeeded, refused)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.CandidateDiscardRefusals != 1 {
+		t.Fatalf("a later refusal was not projected: %d", projection.CandidateDiscardRefusals)
+	}
+}
+
+// executionAfterEvent is one operation.after for an execution.invoke attempt,
+// which is the event the projection folds.
+func executionAfterEvent(t *testing.T, attempt int, state OperationState, result json.RawMessage) EngineeringEvent {
+	t.Helper()
+	payload, err := marshalPayloadJSON(RunOperation{
+		SchemaVersion: SchemaVersion, ID: "op-invoke", RunID: "run-1",
+		Kind: OpExecutionInvoke, IdempotencyKey: "invoke-1",
+		State: state, Attempt: attempt, AttemptIdentity: attempt, MaxAttempts: 3,
+		Result: result,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: fmt.Sprintf("event-%d", attempt), RunID: "run-1",
+		Sequence: int64(attempt), Type: EventOperationAfter, OperationID: "op-invoke",
+		Payload: payload,
+	}
 }
