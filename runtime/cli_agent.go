@@ -784,9 +784,16 @@ type InvocationProvenance struct {
 	CompletedAt     *time.Time    `json:"execution_completed_at,omitempty"`
 	Elapsed         time.Duration `json:"observed_wall_elapsed,omitempty"`
 	OverranDeadline bool          `json:"overran_deadline,omitempty"`
-	// TerminationCause is why the process stopped: it returned on its own, or
-	// the runtime ended it at the deadline.
+	// TerminationCause is why the process stopped: it returned on its own, the
+	// runtime ended it at the deadline, or the runtime ended it because it had
+	// produced no output for the whole inactivity window.
 	TerminationCause string `json:"termination_cause,omitempty"`
+	// InactivityLimit is the no-progress window this invocation ran under, and
+	// zero when none was in force. It is recorded beside the deadline because
+	// it is the same kind of fact - a bound the runtime imposed - and an
+	// operator reading a stalled invocation needs to know which window it was
+	// measured against.
+	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
 	// ProcessID is the pid - and, because every bounded process is started with
 	// Setpgid, the process-GROUP id - the runtime owned.
 	ProcessID int `json:"process_id,omitempty"`
@@ -964,6 +971,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// as its authority are the same fact. Re-deriving "now plus a duration"
 	// here is what let a retry run under one deadline while the operation's
 	// authority had ended at another.
+	// THE NO-PROGRESS BOUND IS ARMED HERE, for every caller, because this is
+	// the one place every native CLI invocation passes through.
+	//
+	// A live subprocess is not evidence of progress, and the total bound above
+	// cannot tell the difference: the run that produced #238 spent 8h55m16s of
+	// active-work budget on a Codex process that was alive, silent, and unable
+	// to reach its endpoint. Enforcement lives beside the deadline rather than
+	// at each dispatch site so that the producer path and the planner path -
+	// the one that runs unattended in a read-only mode - cannot drift apart
+	// about whether a stalling provider is bounded at all.
+	if limit := request.Budgets.InactivityLimit; limit > 0 {
+		bounded, release := withProviderInactivity(ctx, limit, providerProgressRecorder(ctx))
+		defer release()
+		ctx = bounded
+	}
 	if request.Deadline != nil {
 		bounded, cancel := context.WithDeadline(ctx, *request.Deadline)
 		defer cancel()
@@ -987,8 +1009,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		provenance.Deadline = &deadline
 		provenance.OverranDeadline = completedAt.After(deadline)
 	}
+	// The inactivity bound in force, recorded whether or not it fired: the
+	// invocation that needs explaining later is the one that looked normal,
+	// and "which no-progress window was this running under" is not
+	// reconstructible from a transcript.
+	provenance.InactivityLimit = providerInactivityLimit(ctx)
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		provenance.TerminationCause = "deadline_reached"
+	}
+	// THE STALL IS NAMED BEFORE THE SHUTDOWN. An inactivity kill cancels this
+	// context, so through ctx.Err() alone it is indistinguishable from a
+	// supervisor draining - and those mean opposite things: one is a provider
+	// that stopped moving, the other is a pause the run resumes from.
+	inactive := providerInactivityCause(ctx)
+	if inactive {
+		provenance.TerminationCause = "provider_inactivity_limit_reached"
 	}
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(p.Agent.ID, request.AttemptRef(), output.Stdout, output.Stderr)
 	if artifactErr != nil {
@@ -1001,11 +1036,43 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	}
 	if runErr != nil || ctx.Err() != nil {
 		result.Outcome = OperationFailed
+		// The typed condition the PROVIDER ITSELF stated, read only from the
+		// narrow terminal surface. FailureUnknown here means the CLI named
+		// nothing this runtime recognizes, which is the fail-closed answer and
+		// the one the runtime's own bounds below are allowed to replace.
+		recognized := classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
 		result.Failure = &ProviderFailure{
-			Classification:   classifyAgentFailure(spec, output.Stdout, output.Stderr),
+			Classification:   recognized,
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		switch {
+		case inactive && recognized != FailureUnknown:
+			// THE PROVIDER SAID WHAT WAS WRONG AND THEN WENT QUIET. Both facts
+			// are true and they are recorded separately: the CONDITION is the
+			// one the provider named, and how the process ENDED is already in
+			// TerminationCause above.
+			//
+			// Silence is the weaker statement of the two. A CLI that printed
+			// "usage limit reached" and then hung has an exhausted allowance,
+			// not an unexplained stall, and telling an operator to investigate
+			// a stalled provider would send them to look at the wrong thing -
+			// and would spend a remediation attempt on a condition no retry can
+			// clear. Overwriting it was this adapter's first draft and it
+			// inverted the precedence #238 asks for.
+			//
+			// This preserves a condition read from the TERMINAL SURFACE only.
+			// A phrase the model wrote into its session output never reaches
+			// here at all, so preserving it cannot become a way for untrusted
+			// text to outrank a bound the runtime actually enforced.
+		case inactive:
+			// The PROVIDER STOPPED MOVING and the runtime ended it, with
+			// nothing recognized to say why. The process group is already gone
+			// by the time this is reached - the same graceful-then-forced stop
+			// a deadline performs - and the transcript holds whatever it had
+			// said before it went quiet. It is not a deadline (the operation
+			// had authority left), not a shutdown (the controller is fine), and
+			// not an unknown (nothing about the BOUND is undiagnosed).
+			result.Failure.Classification = FailureProviderNoProgress
 		case ctx.Err() != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
 			// THIS INVOCATION ran out of its own wall bound. Nothing stopped,
 			// and saying "the controller stopped" was affirmatively false: it
@@ -1095,9 +1162,65 @@ func validateExecutionBinding(request ExecutionRequest) error {
 	return nil
 }
 
+// maxTerminalDiagnosticBytes bounds the tail of stderr a typed provider
+// condition may be read from.
+//
+// It is a bound on the SURFACE, not a truncation of evidence: the whole of both
+// streams is still stored in the immutable attempt transcript, and this governs
+// only how much of them may move a run into a typed wait. A CLI states its own
+// terminal condition in its last words, so a window measured in kilobytes is
+// what that claim needs; anything larger is just more room for a long session
+// to contain a sentence that looks like one.
+//
+// It is a var only so a test can lower it and drive the real boundary rather
+// than asserting against a hand-built string.
+var maxTerminalDiagnosticBytes = 4 << 10
+
+// terminalDiagnostic is the narrow surface a TYPED provider condition may be
+// read from: the bounded tail of the CLI's own diagnostic stream.
+//
+// EVERYTHING ABOUT THIS FUNCTION IS A TRUST BOUNDARY, so it is worth being
+// exact about what each half of it excludes.
+//
+// STDOUT IS EXCLUDED ENTIRELY. All four adapters run their CLI in a
+// non-interactive print/exec mode whose PRODUCT is written to stdout: the
+// assistant's text, and the tool output the CLI renders into the session. That
+// is model-controlled and tool-controlled content. Classifying from it let a
+// worker quoting an error, a test log printing ECONNREFUSED, a documentation
+// file, or a model reasoning aloud about a 503 move the run into
+// execution_provider_unavailable - a typed EXTERNAL WAIT that pauses
+// active-work accounting. Untrusted observation must never be able to create
+// that transition; a transcript is evidence, and evidence is not an assertion
+// about the world.
+//
+// THE TAIL IS THE PROCESS'S LAST WORDS. A provider that could not reach its
+// endpoint says so as it dies, so the condition it names is in what it wrote
+// last. Reading the whole stream instead would re-admit the same problem one
+// channel over for any CLI that forwards a tool's stderr.
+//
+// WHAT THIS DOES NOT PROVE, stated rather than glossed: stderr is the CLI's own
+// diagnostic channel by convention, not by a boundary this runtime enforces. A
+// CLI that passed a tool's file descriptor 2 straight through could still put
+// tool bytes here. Closing that gap completely needs a structured-output mode
+// with a typed error field - and this adapter probes every flag it relies on
+// before relying on it, so claiming one that has not been probed against the
+// installed binary would be the exact "guessed and ran anyway" failure the rest
+// of this file exists to avoid. What is claimed here is the narrowing: the
+// surface is the CLI's own stream, bounded to its final words, and the session
+// rendering cannot reach it.
+func terminalDiagnostic(stderr []byte) string {
+	if len(stderr) > maxTerminalDiagnosticBytes {
+		stderr = stderr[len(stderr)-maxTerminalDiagnosticBytes:]
+	}
+	return strings.ToLower(string(stderr))
+}
+
 // classifyAgentFailure classifies a failed native-CLI invocation from the
 // diagnostics that provider is KNOWN to emit, then falls back to the existing
 // narrow capacity classification the brokered provider already uses.
+//
+// It takes the TERMINAL DIAGNOSTIC rather than the two streams, so that every
+// caller has to name the surface it is trusting. See terminalDiagnostic.
 //
 // The order matters. Provider-specific signals are consulted first because a
 // provider naming its own condition is better evidence than a generic phrase;
@@ -1105,16 +1228,19 @@ func validateExecutionBinding(request ExecutionRequest) error {
 // the same thing everywhere. Everything else stays FailureUnknown, which is
 // fail-closed: an unrecognized diagnostic stops the run for a human rather than
 // being guessed into a retry or a wait.
-func classifyAgentFailure(spec cliAgentSpec, stdout, stderr []byte) FailureClass {
-	diagnostic := strings.ToLower(string(stdout) + "\n" + string(stderr))
+func classifyAgentFailure(spec cliAgentSpec, terminal string) FailureClass {
 	for _, signals := range [][]diagnosticSignal{spec.Signals, sharedAgentSignals} {
 		for _, signal := range signals {
-			if strings.Contains(diagnostic, signal.Match) {
+			if strings.Contains(terminal, signal.Match) {
 				return signal.Class
 			}
 		}
 	}
-	return ClassifyProviderFailure(stdout, stderr)
+	// The shared capacity phrases are read from the SAME narrow surface. They
+	// route to a retry rather than a wait, so the cost of trusting them wrongly
+	// is smaller - but two trust models for one classification is how the
+	// narrow one stops being the rule.
+	return ClassifyProviderFailure([]byte(terminal), nil)
 }
 
 // resultDirFor is the directory a typed result slot lives in, or empty when the

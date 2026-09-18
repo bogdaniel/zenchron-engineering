@@ -159,6 +159,48 @@ wall_limit_seconds          bounds the time the SYSTEM is working
 
 lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
                             optional, absent by default
+
+provider_inactivity_seconds bounds how long ONE provider invocation may go
+                            without producing output; finite always
+```
+
+The third bound is the stall detector, and the run wall budget is not. A
+provider subprocess being alive is not evidence of progress: a host that loses
+its network keeps a coding CLI alive and silent, and until that was bounded the
+run-wide wall budget was what discovered a dead provider — in the live run that
+prompted it, 8h55m16s of "active engineering work" with zero external wait.
+Reaching the window terminates the provider's process group, preserves its
+transcript, and records `provider_no_progress`, which is a bounded retry.
+
+A restart does not refund it. Silence is measured from the last moment output
+was actually observed, and that datum is durable, so a controller that dies
+mid-invocation hands its successor the REMAINDER of the window rather than a
+fresh one — four minutes of proven silence leaves six, not ten. That is a
+different authority from the execution budget, which separately charges the
+abandoned interval in full. An attempt that was settled — observed, journalled
+and classified — does get a fresh window, because that is what a bounded retry
+is; the attempt ceiling is what ends it.
+
+An explicit connectivity diagnostic is `provider_unavailable` instead, and waits
+without spending the active-work budget — but only when the CLI itself said so.
+A typed provider condition is read from the **terminal diagnostic surface**: the
+bounded tail of the CLI's own diagnostic stream. The session rendering, where
+model text and tool output go, is never consulted. A worker quoting an error, a
+captured test log, or a documentation excerpt therefore cannot park a run on an
+external wait that pauses accounting — a transcript is evidence, not an
+assertion about the world.
+
+Where the provider did state a condition and then went quiet, both facts are
+kept: the classification is the condition the provider named, and the
+termination cause records that the inactivity policy ended the process. Silence
+is the weaker statement, so it does not overwrite the stronger one.
+
+`autonomy status` prints the pair an
+operator needs — time since recognized progress, and the window it is measured
+against:
+
+```text
+progress   last 2026-09-18T09:14:02Z silent 4m12s inactivity limit 10m0s
 ```
 
 These answer different questions and were the same number until a live run

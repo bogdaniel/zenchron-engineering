@@ -233,6 +233,17 @@ type ProviderBudget struct {
 	MaxTokens     *int64
 	MaxCostMicros *int64
 	WallLimit     time.Duration
+	// InactivityLimit is how long this ONE invocation may go without producing
+	// observable output before the runtime terminates it.
+	//
+	// It sits beside WallLimit because it is the same kind of statement - a
+	// bound this invocation runs under - and because every caller that states
+	// one has to state the other in the same place. It is not a share of
+	// WallLimit and does not reduce it: a provider that keeps talking is still
+	// stopped by the total bound, and a provider that goes quiet is stopped by
+	// this one long before the total bound would notice. Zero means no
+	// inactivity bound, which is what a caller predating this budget gets.
+	InactivityLimit time.Duration
 }
 type ExecutionResult struct {
 	ProviderID, Model, AuthMode string
@@ -597,6 +608,44 @@ const (
 	// configured concurrency is above what that account tolerates - and an
 	// operator cannot see that difference through one merged class.
 	FailureProviderRateLimited FailureClass = "provider_rate_limited"
+	// FailureProviderNoProgress is a provider invocation the runtime ended
+	// because it produced no output for the whole configured inactivity
+	// window.
+	//
+	// It is not a quota, not an account condition, and not a verdict about the
+	// work: nothing external refused anything, and the process was alive the
+	// entire time. That liveness is exactly what made it invisible - the run
+	// that exposed it charged 8h55m of an active-work budget to a coding CLI
+	// that had lost its network, and the run wall budget was what eventually
+	// noticed.
+	//
+	// It routes to a bounded RETRY rather than a wait. A stall is a runtime
+	// bound reached, like FailureExecutionIncomplete, and the condition may
+	// well be gone by the next attempt - but it is bounded by the execution
+	// attempt ceiling and the silent interval is still charged to the wall
+	// budget, so a provider that always stalls exhausts its attempts in
+	// minutes instead of consuming the day. It is deliberately NOT
+	// continuation-eligible: silence is not interrupted work waiting to be
+	// resumed, and a retry inherits no observations from it.
+	FailureProviderNoProgress FailureClass = "provider_no_progress"
+	// FailureProviderUnavailable is the provider's TRANSPORT being gone, named
+	// by the provider's own diagnostic: DNS did not resolve, the connection was
+	// refused or reset, or the endpoint answered that it is unavailable.
+	//
+	// It is a recognized statement, never an inference from silence. Silence
+	// is FailureProviderNoProgress; only an explicit diagnostic reaches here,
+	// because guessing "offline" from an arbitrary substring is how a provider
+	// bug becomes a permanent wait. It is separate from
+	// FailureProviderAccountUnavailable - the credential is fine and there is
+	// nothing for an operator to repair in their account - and separate from
+	// FailureTransientProvider, which is that provider's own capacity rather
+	// than the host's ability to reach it at all.
+	//
+	// It routes to a bounded external WAIT under the existing #83 accounting:
+	// a host with no network is not performing engineering work, so the
+	// interval must not be charged to the active-work budget, and the same run
+	// continues once connectivity returns.
+	FailureProviderUnavailable FailureClass = "provider_unavailable"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -743,7 +792,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	// budget is what makes it terminal; being unrouted never should have.
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
-	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete:
+	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
+		FailureProviderNoProgress:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
@@ -756,7 +806,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteStop
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
-		FailureStateStorageExhausted, FailureControllerShutdown:
+		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable:
 		return RouteWait
 	default:
 		return RouteStop

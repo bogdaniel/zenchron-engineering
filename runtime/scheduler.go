@@ -471,7 +471,12 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// has to be past it whatever the budget did.
 		op.AttemptIdentity++
 		op.StartedAt = &now
-		op.LastProgressAt = &now
+		// THE PROGRESS FINGERPRINT IS PER PHYSICAL ATTEMPT and is always
+		// cleared. It is a cumulative byte count of ONE process's output, so a
+		// successor's first bytes would otherwise be compared against a dead
+		// process's total and read as "nothing new" - which would suppress the
+		// successor's real progress until it out-talked its predecessor.
+		op.NoProgressKey = ""
 		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
 		//
 		// The attempt's deadline is derived from what the operation has NOT yet
@@ -490,11 +495,42 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// original defect in a narrower place. Charging it is the fail-safe
 		// direction: an attempt that was active and cannot say how much of its
 		// time was useful is charged for all of it.
-		if op.ActiveSince != nil {
+		//
+		// ABANDONED IS NOT THE SAME AS SETTLED, and the difference decides what
+		// the successor inherits. An operation that still carries ActiveSince
+		// here was never finished by anyone: its controller died mid-attempt,
+		// so nothing observed how that attempt ended and nothing classified it.
+		abandoned := op.ActiveSince != nil
+		if abandoned {
 			if orphaned := now.Sub(*op.ActiveSince); orphaned > 0 {
 				op.ConsumedExecution += orphaned
 				op.LastAttemptExecution = orphaned
 			}
+		}
+		// THE INACTIVITY DATUM IS THE SECOND THING A RESTART MUST NOT REFUND,
+		// and it is a different authority from the execution budget above.
+		//
+		// Charging the orphaned interval to ConsumedExecution proves the run's
+		// wall budget did not reset. It says nothing about the no-progress
+		// window, which is measured from the last moment output was actually
+		// observed - so stamping this to `now` for an ABANDONED attempt hands
+		// the successor a fresh full window and forgives silence the previous
+		// invocation had already proven. A supervisor that bounced every few
+		// minutes would reproduce #238 exactly, one clean window at a time.
+		//
+		// Carrying it forward is the reconstruction #238 asks for: the datum is
+		// durable, it was advanced only by real observed output, and the
+		// successor therefore starts with limit-minus-silence rather than
+		// limit. See ProviderInactivityRemaining.
+		//
+		// A SETTLED attempt is the opposite case and resets. Its outcome was
+		// observed, journalled and classified - a stall is recorded as
+		// provider_no_progress and routed to a BOUNDED retry - and a bounded
+		// retry that inherited an exhausted window would refuse before dispatch
+		// forever, which is not a retry. The attempt ceiling is what bounds it,
+		// exactly as it bounds every other reattemptable class.
+		if !abandoned || op.LastProgressAt == nil {
+			op.LastProgressAt = &now
 		}
 		op.ActiveSince = &now
 		if op.WallBudget > 0 {
@@ -508,20 +544,58 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		return nil
 	})
 }
-func (s Scheduler) Heartbeat(id string, progress string) (RunOperation, error) {
+
+// Heartbeat renews the LEASE and nothing else.
+//
+// It used to take a progress value and advance NoProgressKey/LastProgressAt
+// when that value changed, which made the #238 law false at this API boundary:
+// a caller could refresh provider inactivity authority without the provider
+// having produced anything. Liveness of the CONTROLLER and movement of the WORK
+// are different claims, and letting the first stand in for the second is the
+// whole defect - a supervisor that is merely still running would have kept a
+// dead provider's window open indefinitely.
+//
+// The progress argument is REMOVED rather than ignored. An ignored parameter
+// leaves the wrong call shape compiling and reads as though it still means
+// something; removing it makes the invariant structural, so the mistake cannot
+// be made again without changing this signature. Provider progress moves only
+// through RecordProviderProgress.
+func (s Scheduler) Heartbeat(id string) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
 		if op.Lease == nil || op.Lease.Owner != s.Owner {
 			return fmt.Errorf("operation lease is not owned")
 		}
 		op.Lease.HeartbeatAt = now
 		op.Lease.ExpiresAt = now.Add(s.defaults().LeaseDuration)
-		if progress != op.NoProgressKey {
-			op.NoProgressKey = progress
-			op.LastProgressAt = &now
-		}
 		return nil
 	})
 }
+
+// RecordProviderProgress makes one observation of provider activity DURABLE.
+//
+// It is deliberately separate from Heartbeat, which renews the lease and
+// touches nothing else. Renewing a lease is a claim about the CONTROLLER being
+// alive; this is a claim about the WORK moving, and #238 is precisely the
+// defect of letting the first stand in for the second. Merging them would mean
+// an inactivity window could be refreshed by a supervisor that is merely still
+// running.
+//
+// The key is a progress FINGERPRINT, and the durable instant advances only when
+// it changes - so re-observing the same output is not progress. An unowned or
+// finished operation is not an error: the process this records for may outlive
+// the lease it was started under, and losing a progress note is not a reason to
+// fail an invocation that is working.
+func (s Scheduler) RecordProviderProgress(id, key string) (RunOperation, error) {
+	return s.transition(id, func(op *RunOperation, now time.Time) error {
+		if key == "" || key == op.NoProgressKey {
+			return nil
+		}
+		op.NoProgressKey = key
+		op.LastProgressAt = &now
+		return nil
+	})
+}
+
 func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error) {
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")

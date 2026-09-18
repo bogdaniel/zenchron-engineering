@@ -56,6 +56,39 @@ var sharedAgentSignals = []diagnosticSignal{
 	{"rate limit exceeded", FailureProviderRateLimited},
 	{"rate_limit_exceeded", FailureProviderRateLimited},
 	{"too many requests", FailureProviderRateLimited},
+	// THE ENDPOINT SAYING IT IS UNAVAILABLE. These are HTTP's own status
+	// phrases, so they belong here rather than in any vendor's list, and they
+	// are the gateway statuses only: a 500 is the provider failing at a
+	// request, which says nothing about reachability, and classifying it as
+	// unavailable would park a run on a wait no operator can clear.
+	{"502 bad gateway", FailureProviderUnavailable},
+	{"503 service unavailable", FailureProviderUnavailable},
+	{"504 gateway timeout", FailureProviderUnavailable},
+}
+
+// nodeTransportSignals are the connectivity diagnostics a Node-based CLI emits,
+// which is three of the four adapters here: Claude Code, Gemini and Qwen Code
+// all surface libuv/undici errno strings when the host cannot reach their
+// endpoint.
+//
+// They are errno TOKENS, not prose, which is what keeps this from being a
+// substring swamp: ENOTFOUND is emitted by the resolver and means the name did
+// not resolve, and no amount of ordinary model output contains it. Deliberately
+// absent are ETIMEDOUT and undici's bare "fetch failed": the first is
+// indistinguishable from a slow provider, and the second wraps every transport
+// outcome including ones that are not connectivity at all.
+//
+// Silence is NOT here, and that is the boundary #238 draws: a host with no
+// network that says nothing is FailureProviderNoProgress, and only a provider
+// that NAMES its transport failure reaches FailureProviderUnavailable.
+var nodeTransportSignals = []diagnosticSignal{
+	{"getaddrinfo enotfound", FailureProviderUnavailable},
+	{"getaddrinfo eai_again", FailureProviderUnavailable},
+	{"econnrefused", FailureProviderUnavailable},
+	{"econnreset", FailureProviderUnavailable},
+	{"enetunreach", FailureProviderUnavailable},
+	{"ehostunreach", FailureProviderUnavailable},
+	{"enetdown", FailureProviderUnavailable},
 }
 
 // codexSpec drives the installed Codex CLI.
@@ -89,6 +122,17 @@ var codexSpec = cliAgentSpec{
 		// was revoked. Please log out and sign in again."
 		{"refresh token was revoked", FailureProviderAccountUnavailable},
 		{"please log out and sign in again", FailureProviderAccountUnavailable},
+		// CODEX CANNOT REACH ITS ENDPOINT. Codex is a Rust binary over
+		// reqwest/hyper, so its connectivity vocabulary is that stack's rather
+		// than Node's: a resolver failure is reported as "dns error", and a
+		// transport that never completed as "error sending request". Both are
+		// statements that no exchange happened, which is what separates them
+		// from a provider that answered badly.
+		{"dns error", FailureProviderUnavailable},
+		{"error sending request", FailureProviderUnavailable},
+		{"connection refused", FailureProviderUnavailable},
+		{"connection reset by peer", FailureProviderUnavailable},
+		{"network is unreachable", FailureProviderUnavailable},
 	},
 	Args: func(i cliInvocation) []string {
 		sandbox := "workspace-write"
@@ -161,10 +205,10 @@ var claudeSpec = cliAgentSpec{
 	HomeEnv:                         "CLAUDE_CONFIG_DIR",
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
-	Signals: []diagnosticSignal{
+	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},
-	},
+	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "acceptEdits"
 		if i.Bypass {
@@ -250,10 +294,10 @@ var geminiSpec = cliAgentSpec{
 	VersionArgs:    []string{"--version"},
 	AuthStatePaths: []string{".gemini/oauth_creds.json"},
 	Permission:     cliPermissionModes{Safe: "auto_edit", Bypass: "yolo"},
-	Signals: []diagnosticSignal{
+	Signals: append([]diagnosticSignal{
 		{"resource_exhausted", FailureProviderQuota},
 		{"quota exceeded", FailureProviderQuota},
-	},
+	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "auto_edit"
 		if i.Bypass {
@@ -297,10 +341,10 @@ var qwenSpec = cliAgentSpec{
 	HomeEnv:                         "QWEN_HOME",
 	Permission:                      cliPermissionModes{Safe: "auto-edit", Bypass: "yolo"},
 	SuppressesWorkspaceInstructions: true,
-	Signals: []diagnosticSignal{
+	Signals: append([]diagnosticSignal{
 		{"resource_exhausted", FailureProviderQuota},
 		{"quota exceeded", FailureProviderQuota},
-	},
+	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "auto-edit"
 		if i.Bypass {

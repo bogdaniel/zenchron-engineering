@@ -144,7 +144,7 @@ func TestSQLiteHeartbeatUpdatesAreNotLost(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		c.now = c.now.Add(10 * time.Second)
-		if _, err := s.Heartbeat(op.ID, "progress"); err != nil {
+		if _, err := s.Heartbeat(op.ID); err != nil {
 			t.Fatal(err)
 		}
 		durable, _, ok, err := storeB.Operation(op.ID)
@@ -173,7 +173,7 @@ func TestSQLiteStaleWriteCannotOverwriteLeaseState(t *testing.T) {
 		t.Fatal(err, ok)
 	}
 	c.now = c.now.Add(30 * time.Second)
-	if _, err := s.Heartbeat(op.ID, "progress"); err != nil {
+	if _, err := s.Heartbeat(op.ID); err != nil {
 		t.Fatal(err)
 	}
 	stale.State = OperationFailed

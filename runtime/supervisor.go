@@ -711,7 +711,15 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	// every producer invocation is bounded by. Zero here meant NO deadline at
 	// all, so the one stage type that runs unattended against a provider was
 	// the only one that could run forever.
-	budgets := ProviderBudget{WallLimit: engine.planningWallLimit(request.WallSeconds)}
+	// The no-progress window applies to the PLANNER too, and it is the stage
+	// that needs it most: a planning invocation runs unattended in a read-only
+	// mode against the same CLIs, so a host that loses its network stalls it
+	// exactly as it stalled the producer in #238. Leaving it out would have
+	// bounded the path that is watched and not the one that is not.
+	budgets := ProviderBudget{
+		WallLimit:       engine.planningWallLimit(request.WallSeconds),
+		InactivityLimit: engine.deps.Budgets.defaults().ProviderInactivityLimit,
+	}
 	return InvokePlanner(ctx, PlannerInput{
 		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Budgets: budgets,
 		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),

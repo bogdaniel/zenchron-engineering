@@ -686,6 +686,20 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			operation += fmt.Sprintf(" attempt identity %d", view.Operation.AttemptIdentity)
 		}
 		line("operation", operation)
+		// WHETHER THE WORK IS MOVING, which is a different question from
+		// whether the operation is leased and was previously unanswerable from
+		// status. The two numbers are printed together on purpose: a silence of
+		// four minutes means nothing without the window it is measured
+		// against, and reading the pair is how an operator tells a provider
+		// that is thinking from one whose host lost its network.
+		if limit := view.Operation.InactivityLimit; limit > 0 {
+			progress := "none recorded"
+			if view.Operation.LastProgressAt != nil {
+				progress = view.Operation.LastProgressAt.UTC().Format(time.RFC3339)
+			}
+			line("progress", fmt.Sprintf("last %s silent %s inactivity limit %s",
+				progress, view.Operation.SilentFor, limit))
+		}
 	}
 	if view.Lease != nil {
 		heartbeat := "never"
@@ -738,8 +752,19 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
 			d.Stage, d.FailureClass, d.Route, d.Code))
-		if d.FailureClass == runtime.FailureProviderAccountUnavailable {
+		switch d.FailureClass {
+		case runtime.FailureProviderAccountUnavailable:
 			failure = "provider account unavailable (" + failure + ")"
+		// The three provider conditions an operator most needs kept apart, and
+		// the ones #238 collapsed into hours of apparent active work. A stall
+		// is a live process that stopped moving; unavailable is a host that
+		// cannot reach the provider; quota is an allowance that will come back.
+		case runtime.FailureProviderNoProgress:
+			failure = "provider stalled: terminated by the inactivity policy (" + failure + ")"
+		case runtime.FailureProviderUnavailable:
+			failure = "provider unavailable: the host could not reach the provider (" + failure + ")"
+		case runtime.FailureProviderQuota:
+			failure = "provider quota exhausted (" + failure + ")"
 		}
 		line("execution failure", failure)
 		line("execution provider", strings.TrimSpace(fmt.Sprintf("%s model=%s", d.ProviderKind, d.Model)))

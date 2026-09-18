@@ -66,12 +66,22 @@ var maxCapturedProcessBytes = 8 << 20
 // noisy, and the bound exists to protect this process rather than to punish
 // that one.
 type boundedBuffer struct {
-	limit   int
-	buf     []byte
+	limit int
+	buf   []byte
+	// observe is notified of every write, INCLUDING the bytes the bound
+	// refused. This is the one place in the runtime where a child process's
+	// output is observed as it arrives, which makes it the only honest place to
+	// decide whether that process is still making progress. A provider that
+	// overran the capture bound is noisy, not silent, so refusing to count
+	// those bytes would let a runaway process be killed as a stall.
+	observe func(int)
 	dropped int
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.observe != nil {
+		b.observe(len(p))
+	}
 	if room := b.limit - len(b.buf); room > 0 {
 		if len(p) <= room {
 			b.buf = append(b.buf, p...)
@@ -128,10 +138,31 @@ func (b *boundedBuffer) Bytes() []byte {
 func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir, cmd.Env = dir, env
-	out := &boundedBuffer{limit: maxCapturedProcessBytes}
-	errOut := &boundedBuffer{limit: maxCapturedProcessBytes}
+	// THE NO-PROGRESS BOUND IS ENFORCED HERE, where output actually arrives.
+	//
+	// It cannot be enforced by the adapter above: the executor hands back one
+	// CommandOutput when the process has already finished, so an adapter
+	// waiting on it cannot tell a provider that is thinking from one whose
+	// network died an hour ago. Firing the watch cancels this context with
+	// ErrProviderInactive as the cause, which runs the SAME bounded
+	// process-group stop sequence a deadline runs - graceful signal to the
+	// whole group, forced kill after the grace period - rather than adding a
+	// second way to end a child.
+	watch := armInactivityWatch(ctx)
+	out := &boundedBuffer{limit: maxCapturedProcessBytes, observe: watch.progress}
+	errOut := &boundedBuffer{limit: maxCapturedProcessBytes, observe: watch.progress}
 	cmd.Stdout, cmd.Stderr = out, errOut
+	stopWatch := watch.watchUntilComplete()
 	err := runBoundedProcess(ctx, cmd, grace)
+	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the
+	// order is the whole point. The process has returned, so completion is a
+	// fact; recording it under the watcher's own lock and then waiting for the
+	// watcher to exit means no cancellation can be published afterwards. The
+	// caller reads context.Cause several frames up, and a natural exit that
+	// raced an expiring timer would otherwise be classified as a stall.
+	//
+	// It also guarantees nothing is still writing into the buffers read below.
+	stopWatch()
 	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
 	// Read after the run: Start happens inside, and a process that never
 	// started truthfully reports no pid.
