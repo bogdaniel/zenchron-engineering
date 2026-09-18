@@ -108,6 +108,13 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 2 && args[0] == "controller" && args[1] == "build-adopted" {
 		return controllerBuildAdopted(args[2:], autonomyOverrides{}, stdout)
 	}
+	// The brokered Git decision of #241. It is dispatched first and separately
+	// because it is not an operator command: a provider's shim execs it, its
+	// exit status is the Git exit status the provider must see, and its output
+	// is Git's output rather than a rendered view.
+	if len(args) >= 1 && args[0] == gitBrokerSubcommand {
+		return gitBroker(args[1:])
+	}
 	if len(args) >= 1 && args[0] == "autonomy" {
 		return autonomy(args[1:], autonomyOverrides{}, stdout)
 	}

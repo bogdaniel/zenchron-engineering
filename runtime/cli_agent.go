@@ -299,12 +299,30 @@ type CLIAgentProvider struct {
 	// had the cache and the producer did not, so `go test` stopped during
 	// dependency loading with the network correctly denied.
 	DependencyCacheDir string
+	// StateDir is the runtime-owned state root. It is where this invocation's
+	// brokered Git guard is materialized, and it is injected rather than
+	// derived so the composition root remains the one place that decides which
+	// directory the runtime owns.
+	//
+	// Empty means no guard is prepared, which is recorded truthfully in
+	// provenance rather than passed over: an unguarded invocation is a fact an
+	// operator should be able to read back, not an absence.
+	StateDir string
+	// GitBroker is the argv that decides one provider Git command - the
+	// controller's own executable and its broker subcommand. See git_guard.go
+	// for why it is a parameter and not something the boundary discovers.
+	GitBroker []string
 	// ExecScratchDir is the runtime-owned, exec-capable build scratch for the
 	// invocation in flight. Execute sets it per invocation from the request; it
 	// is a field rather than a parameter because every environment this
 	// provider builds has to agree about it, including the ones it builds while
 	// probing.
 	ExecScratchDir string
+	// gitGuard is the guard for the invocation in flight. Execute sets it per
+	// invocation, as it does ExecScratchDir, because every environment this
+	// provider builds - including the ones it builds while probing - has to
+	// agree about it. A nil guard is a no-op at every call site it reaches.
+	gitGuard *GitGuard
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -427,7 +445,13 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	if searchPath == "" {
 		searchPath = os.Getenv("PATH")
 	}
-	env := []string{"PATH=" + searchPath}
+	// THE BROKERED GIT BOUNDARY, applied to the environment every native CLI
+	// invocation receives. The guard directory goes FIRST so a bare `git`
+	// resolves to the broker, and the sentinel GIT_DIR makes every other
+	// spelling fail closed rather than reach the candidate repository. See
+	// git_guard.go, including what it does not claim.
+	env := []string{"PATH=" + p.gitGuard.SearchPath(searchPath)}
+	env = append(env, p.gitGuard.Env()...)
 	env = append(env, p.toolchainEnv()...)
 	if home == "" {
 		return env
@@ -797,6 +821,21 @@ type InvocationProvenance struct {
 	// ProcessID is the pid - and, because every bounded process is started with
 	// Setpgid, the process-GROUP id - the runtime owned.
 	ProcessID int `json:"process_id,omitempty"`
+
+	// GitGuarded reports that this invocation ran under the brokered Git
+	// boundary of #241. It is recorded because its ABSENCE matters: a
+	// composition that prepared no guard produced a worker that could discard
+	// dirty candidate work, and that must be a durable fact rather than
+	// something an operator has to infer from the configuration.
+	GitGuarded bool `json:"git_guarded,omitempty"`
+	// GitRefusals are the destructive Git operations the runtime refused during
+	// this invocation, bounded and carrying no provider-chosen operand.
+	//
+	// They are OBSERVATION, not failure. A provider that reached for a
+	// destructive recovery, was refused, and then did the work properly
+	// succeeded - and the refusal is still the most interesting thing that
+	// happened, because it is where expensive reasoning was nearly lost.
+	GitRefusals []GitRefusal `json:"git_refusals,omitempty"`
 }
 
 // maxProvenanceArgs bounds the recorded vector. Every native CLI the runtime
@@ -906,6 +945,15 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 		p.ExecScratchDir = scratch
 	}
+	// THE GUARD IS PREPARED BEFORE THE CAPABILITY PROBE, so that even the
+	// probe runs under the same brokered Git environment the invocation will.
+	// A boundary that only covered the main command would be a boundary with a
+	// documented hole in it.
+	if guard, err := p.prepareGitGuard(request); err != nil {
+		return ExecutionResult{}, err
+	} else if guard != nil {
+		p.gitGuard = guard
+	}
 	if err := p.probe(ctx, spec, home); err != nil {
 		return ExecutionResult{}, err
 	}
@@ -1008,6 +1056,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	if deadline, bounded := ctx.Deadline(); bounded {
 		provenance.Deadline = &deadline
 		provenance.OverranDeadline = completedAt.After(deadline)
+	}
+	// WHAT THE #241 BOUNDARY DID, read back from the runtime-owned record the
+	// broker wrote inside the provider's own process tree. It is read after the
+	// process has returned, so nothing the provider is still running can add to
+	// it, and an unreadable record leaves the observation empty rather than
+	// failing an invocation that may have succeeded.
+	provenance.GitGuarded = p.gitGuard != nil
+	if p.gitGuard != nil {
+		if refusals, err := ReadGitRefusals(p.gitGuard.RefusalLog); err == nil {
+			provenance.GitRefusals = refusals
+		}
 	}
 	// The inactivity bound in force, recorded whether or not it fired: the
 	// invocation that needs explaining later is the one that looked normal,

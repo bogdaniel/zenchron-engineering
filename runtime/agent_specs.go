@@ -425,6 +425,22 @@ func claudePromptArg(args []string, prompt string) []string {
 // worker to run `go test` does not also allow it to run anything else.
 func claudeAllowedTools(i cliInvocation) []string {
 	var allowed []string
+	// GIT IS DELIBERATELY NOT GRANTED HERE, and that absence is the #241
+	// answer for this provider rather than a gap in it.
+	//
+	// The first draft of the brokered boundary added `Bash(git *)` so that a
+	// bare `git` - which resolves to the runtime's broker - would be the only
+	// Git Claude could invoke. That is structurally true and it was still
+	// wrong: this allowlist is derived from the invocation's own obligations,
+	// so adding a standing grant would have widened the worker's command
+	// surface to CREATE the capability the broker then has to guard, and it
+	// broke the law that a stage needing neither a directory nor a tool is
+	// given neither. #241 excludes permission widening explicitly.
+	//
+	// So Claude reaches Git only where a contract already obliges it, and then
+	// only through the broker, because the guard directory is first on the
+	// worker's search path and the brokered sentinel answers every other
+	// spelling. The boundary does not rest on this file.
 	if i.ResultDir != "" {
 		// The typed result is WRITTEN, which needs the Write tool; --add-dir
 		// above is what bounds where it may be written to.

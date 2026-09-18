@@ -65,6 +65,12 @@ type RunProjection struct {
 	// row the diagnostic is, so replay explains a retry's inherited context
 	// from the journal alone rather than from process-local provider state.
 	ExecutionPriorContext *PriorAttemptObservations `json:"execution_prior_attempt_context,omitempty"`
+	// CandidateDiscardRefusals and CandidateDiscardRefused are the #241
+	// boundary's observations for the latest execution attempt: how many
+	// destructive Git operations the runtime refused, and the bounded shape of
+	// the most recent one.
+	CandidateDiscardRefusals int    `json:"candidate_discard_refusals,omitempty"`
+	CandidateDiscardRefused  string `json:"candidate_discard_refused,omitempty"`
 	// CandidateComplete reports whether the CURRENT candidate head is
 	// execution-complete: a producer finished against it, rather than being cut
 	// off mid-invocation with its partial work preserved. It is what separates
@@ -338,6 +344,16 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 			if prior != nil {
 				p.ExecutionPriorContext = prior
 			}
+			// WHAT THE #241 BOUNDARY REFUSED. It is projected from a
+			// SUCCEEDED invocation as readily as from a failed one, because a
+			// provider that was refused and then did the work properly is the
+			// common case and the one worth telling an operator about: it is
+			// where expensive reasoning was nearly lost and was not.
+			if refusals, refused, err := executionDiscardRefusalsOf(operation.Result); err != nil {
+				return err
+			} else if refusals > 0 {
+				p.CandidateDiscardRefusals, p.CandidateDiscardRefused = refusals, refused
+			}
 		}
 		// The ordering rule: a new baseline is adopted only from an operation
 		// that SUCCEEDED. operation.after is the last event an operation
@@ -417,6 +433,26 @@ func decodePayload[T any](raw json.RawMessage) (T, error) {
 	var payload T
 	err := strictJSON(raw, &payload)
 	return payload, err
+}
+
+// executionDiscardRefusalsOf reads what the #241 boundary refused from one
+// execution.invoke result. Like its neighbours it decodes the same one shared
+// field rather than a payload of its own.
+func executionDiscardRefusalsOf(result json.RawMessage) (int, string, error) {
+	if len(result) == 0 {
+		return 0, "", nil
+	}
+	var decoded struct {
+		DiscardRefusals int    `json:"discard_refusals"`
+		DiscardRefused  string `json:"discard_refused"`
+	}
+	if err := decodeJSON(result, &decoded); err != nil {
+		// An unreadable result is not a projection failure here: the refusal is
+		// an observation, and the rest of the projection has already decided
+		// what to do about a result it cannot read.
+		return 0, "", nil
+	}
+	return decoded.DiscardRefusals, decoded.DiscardRefused, nil
 }
 
 // executionDiagnosticOf reads the sanitized diagnostic an execution.invoke

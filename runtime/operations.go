@@ -783,6 +783,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
+		// WHAT THE #241 BOUNDARY REFUSED, folded into durable operation state
+		// so status can say it without re-reading a provider transcript. The
+		// most recent operation's shape is kept and the rest are counted: the
+		// count is what says a provider tried repeatedly, and the shape is
+		// what an operator needs to recognise which command it was.
+		DiscardRefusals: len(providerGitRefusals(result)),
+		DiscardRefused:  lastProviderGitRefusal(result),
 		// Invocation provenance is written only after the process returns, so
 		// it is the honest signal for "this attempt reached a worker" - the
 		// same signal the feedback-delivery record below relies on.

@@ -996,8 +996,17 @@ type StatusReport struct {
 	// runtime bound dropped. It names attempt numbers and byte counts only;
 	// the observations themselves stay in the local-only attempt artifacts.
 	ExecutionPriorContext *PriorAttemptObservations `json:"execution_prior_attempt_context,omitempty"`
-	Budgets               RunBudgets                `json:"budgets"`
-	StateSHA256           string                    `json:"state_sha256"`
+	// CandidateDiscardRefusals is how many destructive Git operations the
+	// runtime refused for this run's latest execution attempt, and
+	// CandidateDiscardRefused is the bounded shape of the most recent one.
+	//
+	// It is projected because an operator reading a run that took two provider
+	// attempts deserves to know that one of them tried to erase the other's
+	// work. It is not a failure and it is deliberately not rendered as one.
+	CandidateDiscardRefusals int        `json:"candidate_discard_refusals,omitempty"`
+	CandidateDiscardRefused  string     `json:"candidate_discard_refused,omitempty"`
+	Budgets                  RunBudgets `json:"budgets"`
+	StateSHA256              string     `json:"state_sha256"`
 }
 
 // Status replays the run and reports it. It performs no network call and no
@@ -1040,6 +1049,9 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		PublicationAuthority:  publicationAuthorityOf(state),
 		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,
 		ExecutionPriorContext: state.projection.ExecutionPriorContext,
+
+		CandidateDiscardRefusals: state.projection.CandidateDiscardRefusals,
+		CandidateDiscardRefused:  state.projection.CandidateDiscardRefused,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{

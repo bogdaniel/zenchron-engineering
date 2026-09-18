@@ -142,6 +142,20 @@ type mutationResult struct {
 	// minutes of provider work before it appeared, and only the first may be
 	// refunded to the run's execution budget.
 	ProviderExecuted bool `json:"provider_executed,omitempty"`
+	// DiscardRefusals is how many destructive Git operations the runtime
+	// refused during this invocation, and DiscardRefused is the bounded shape
+	// of the most recent one.
+	//
+	// They are OBSERVATION and not failure: a provider that reached for a
+	// destructive recovery, was refused, and then did the work properly
+	// succeeded - and the refusal is still the most interesting thing that
+	// happened, because it is where expensive reasoning was nearly lost. That
+	// is why it is recorded here rather than becoming a FailureClass: the
+	// runtime knows exactly what it refused, so #241's rule against reporting
+	// it as quota, unavailability, a stall or an unknown is satisfied by it
+	// not being a failure at all.
+	DiscardRefusals int    `json:"discard_refusals,omitempty"`
+	DiscardRefused  string `json:"discard_refused,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already

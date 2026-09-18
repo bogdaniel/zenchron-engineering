@@ -992,6 +992,15 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// resolve offline exactly what the verifier resolves.
 			Toolchain:          config.Toolchain,
 			DependencyCacheDir: config.Assurance.DependencyCacheDir,
+			// THE BROKERED GIT BOUNDARY of #241. The state root is where the
+			// guard is materialized; the broker argv is this controller's own
+			// executable, so the binary that enforces the boundary is the
+			// binary the operator is running and not whatever a search path
+			// resolved. A controller that cannot name its own executable
+			// prepares no guard and says so in provenance rather than
+			// pretending to one.
+			StateDir:  config.StateDir,
+			GitBroker: gitBrokerCommand(),
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{
