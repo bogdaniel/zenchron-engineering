@@ -214,50 +214,254 @@ func TestTheInactivityWindowIsReconstructedFromDurableStateOnly(t *testing.T) {
 	}
 }
 
-// TestAControllerThatDiesMidSilenceStillPaysForTheSilence is the other half of
-// acceptance 10, and the one that makes a restart loop bounded.
+// abandonExecution is a controller DEATH, not a settlement: the lease is
+// dropped and nothing else about the row is touched, which is exactly the
+// smallest-true-thing write reclaimAbandoned performs for a driver that died
+// between leasing and finishing.
 //
-// A restarted controller does start a NEW attempt, and a new attempt does get
-// its own inactivity window - that is ordinary bounded-retry semantics. What
-// must not happen is for the silent interval to be forgiven: if it were, a
-// supervisor restarting every ten minutes would reproduce the 8h55m run
-// exactly, one fresh window at a time.
-func TestAControllerThatDiesMidSilenceStillPaysForTheSilence(t *testing.T) {
-	scheduler, clock := deadlineScheduler(t)
-	op := plannedExecution(t, scheduler, 30*time.Minute)
-
-	// Ten minutes of silence, then the controller dies: no Finish, no
-	// settlement, nothing folded by the process that was driving it.
-	clock.advance(10 * time.Minute)
-	// The abandoned lease is dropped and NOTHING else about the row is touched
-	// - the same smallest-true-thing write reclaimAbandoned performs for a
-	// driver that died between leasing and finishing. ActiveSince is therefore
-	// still set, which is exactly the state a crash leaves behind.
-	crashed, revision, ok, err := scheduler.Store.Operation(op.ID)
+// ActiveSince therefore survives, and that survival is the durable evidence
+// that the attempt was never observed to end. Everything the successor
+// inherits - the charged execution interval and the inactivity datum - is
+// keyed off it.
+func abandonExecution(t *testing.T, scheduler Scheduler, id string) {
+	t.Helper()
+	crashed, revision, ok, err := scheduler.Store.Operation(id)
 	if err != nil || !ok {
-		t.Fatalf("operation %q: %v", op.ID, err)
+		t.Fatalf("operation %q: %v", id, err)
+	}
+	if crashed.ActiveSince == nil {
+		t.Fatal("the operation was not executing, so there is no crash to simulate")
 	}
 	crashed.Lease = nil
 	if _, written, err := scheduler.Store.PutOperation(crashed, revision); err != nil || !written {
 		t.Fatalf("dropping the abandoned lease: %v %v", written, err)
 	}
-	if _, err := scheduler.Next(op.RunID); err != nil {
+	if _, err := scheduler.Next(crashed.RunID); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestARestartDuringSilenceInheritsTheRemainingInactivityAuthority is #238
+// acceptance 10, stated as the contract requires rather than as the
+// implementation found convenient.
+//
+// The distinction the whole test turns on is that there are TWO authorities
+// here and a restart must not refund either:
+//
+//	execution authority     ConsumedExecution against WallBudget
+//	inactivity authority    LastProgressAt against the no-progress window
+//
+// Charging the orphaned interval to the first proves the run wall budget did
+// not reset. It proves nothing at all about the second - and an earlier draft
+// of this change reset LastProgressAt to `now` in Scheduler.Start, so every
+// reclaim handed the successor a brand-new full window. A supervisor that
+// bounced every few minutes would have reproduced the 8h55m run exactly, one
+// clean window at a time, while this test passed.
+func TestARestartDuringSilenceInheritsTheRemainingInactivityAuthority(t *testing.T) {
+	const window = 10 * time.Minute
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	if op.LastProgressAt == nil || !op.LastProgressAt.Equal(clock.Now()) {
+		t.Fatalf("a first attempt did not open its inactivity window: %v", op.LastProgressAt)
+	}
+	if got := ProviderInactivityRemaining(window, op, clock.Now()); got != window {
+		t.Fatalf("the first attempt received %s of a %s window", got, window)
+	}
+
+	// FOUR MINUTES OF PROVEN SILENCE. Nothing records progress, which is what
+	// silence IS: the durable datum stays where the attempt opened it.
+	clock.advance(4 * time.Minute)
+	if got := ProviderInactivityRemaining(window, op, clock.Now()); got != 6*time.Minute {
+		t.Fatalf("the live attempt reports %s remaining after 4m of silence, want 6m", got)
+	}
+
+	// The controller dies here. No Finish, no journalled outcome, no
+	// classification - nothing observed how that attempt ended.
+	abandonExecution(t, scheduler, op.ID)
 	resumed, err := scheduler.Start(op.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.ConsumedExecution < 10*time.Minute {
-		t.Fatalf("the silent interval was refunded: consumed %s of a 30m budget", resumed.ConsumedExecution)
+
+	// THE ASSERTION THIS TEST EXISTS FOR. Six minutes, not a fresh ten.
+	//
+	// This is what fails if Scheduler.Start resets the progress origin to
+	// `now`: the successor would report the full window and the silence the
+	// dead attempt had already proven would be forgiven.
+	remaining := ProviderInactivityRemaining(window, resumed, clock.Now())
+	if remaining == window {
+		t.Fatalf("the restart granted a fresh full %s inactivity window; the 4m of proven silence was refunded", window)
 	}
-	if got := OperationRemaining(resumed, clock.Now()); got != 20*time.Minute {
-		t.Fatalf("remaining execution authority = %s, want the 20m the silence did not spend", got)
+	if remaining != 6*time.Minute {
+		t.Fatalf("the successor received %s of inactivity authority, want the 6m the dead attempt did not spend", remaining)
 	}
-	// The attempt IDENTITY advanced, per #236/#237, so the resumed invocation
-	// cannot address the transcript slot the silent one already owned.
-	if resumed.AttemptIdentity <= op.AttemptIdentity {
-		t.Fatalf("attempt identity did not advance across the restart: %d then %d", op.AttemptIdentity, resumed.AttemptIdentity)
+	if resumed.LastProgressAt == nil || !resumed.LastProgressAt.Equal(*op.LastProgressAt) {
+		t.Fatalf("the inactivity datum was rewritten across the restart: %v then %v", op.LastProgressAt, resumed.LastProgressAt)
+	}
+	if got := ProviderSilence(resumed, clock.Now()); got != 4*time.Minute {
+		t.Fatalf("the successor reports %s of silence, want the 4m it inherited", got)
+	}
+
+	// AND THE OTHER AUTHORITY IS STILL CHARGED, separately and as before. The
+	// two are different budgets and both must survive the restart; proving one
+	// has never been proof of the other.
+	if resumed.ConsumedExecution < 4*time.Minute {
+		t.Fatalf("the orphaned interval was refunded: consumed %s of a 30m budget", resumed.ConsumedExecution)
+	}
+	if got := OperationRemaining(resumed, clock.Now()); got != 26*time.Minute {
+		t.Fatalf("remaining execution authority = %s, want the 26m the silence did not spend", got)
+	}
+
+	// #236/#237 SURVIVE UNCHANGED. The physical attempt identity advances, so
+	// the successor cannot address the transcript slot the dead attempt owned,
+	// and the evidence store still refuses to reuse it.
+	if resumed.AttemptIdentity != op.AttemptIdentity+1 {
+		t.Fatalf("attempt identity %d did not advance monotonically from %d", resumed.AttemptIdentity, op.AttemptIdentity)
+	}
+	store := ArtifactStore{Root: t.TempDir()}
+	before := ExecutionAttemptRef{RunID: op.RunID, OperationID: op.ID, Attempt: op.AttemptIdentity}
+	after := ExecutionAttemptRef{RunID: op.RunID, OperationID: op.ID, Attempt: resumed.AttemptIdentity}
+	first, err := store.StoreExecutionAttemptTranscript("codex", before, []byte("attempt one"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.StoreExecutionAttemptTranscript("codex", after, []byte("attempt two"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[0].Path == second[0].Path {
+		t.Fatalf("both attempts addressed one transcript slot: %s", first[0].Path)
+	}
+	if _, err := store.StoreExecutionAttemptTranscript("codex", before, []byte("overwrite"), nil); err == nil {
+		t.Fatal("the dead attempt's transcript was overwritable")
+	}
+	// The per-physical-attempt progress FINGERPRINT is cleared, which is the
+	// other half of the distinction: it is a byte count of one dead process's
+	// output, and comparing the successor's first bytes against it would read
+	// real progress as "nothing new".
+	if resumed.NoProgressKey != "" {
+		t.Fatalf("the successor inherited the dead process's output fingerprint %q", resumed.NoProgressKey)
+	}
+}
+
+// TestASilentRestartCannotBeRepeatedIntoAFreshWindow is the loop the law is
+// actually about. Three reclaims in a row, each after four minutes of silence,
+// must add up: twelve minutes of proven silence exhausts a ten-minute window
+// rather than resetting it three times.
+func TestASilentRestartCannotBeRepeatedIntoAFreshWindow(t *testing.T) {
+	const window = 10 * time.Minute
+	scheduler, clock := deadlineScheduler(t)
+	// A generous ATTEMPT ceiling and a generous wall budget, so that neither of
+	// them is what stops the loop. The only bound under test here is the
+	// inactivity authority.
+	planned, _, err := scheduler.Plan(RunOperation{
+		RunID: "run-restarts", Kind: OpExecutionInvoke, IdempotencyKey: "invoke-restarts",
+		MaxAttempts: 8, WallBudget: 4 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.Next(planned.RunID); err != nil {
+		t.Fatal(err)
+	}
+	op, err := scheduler.Start(planned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := *op.LastProgressAt
+
+	for round := 1; round <= 3; round++ {
+		clock.advance(4 * time.Minute)
+		abandonExecution(t, scheduler, op.ID)
+		resumed, err := scheduler.Start(op.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !resumed.LastProgressAt.Equal(opened) {
+			t.Fatalf("round %d moved the inactivity datum to %s", round, resumed.LastProgressAt)
+		}
+		want := window - time.Duration(round)*4*time.Minute
+		if want < 0 {
+			want = 0
+		}
+		if got := ProviderInactivityRemaining(window, resumed, clock.Now()); got != want {
+			t.Fatalf("after %d restarts the successor holds %s of inactivity authority, want %s", round, got, want)
+		}
+	}
+	// Twelve minutes of accumulated silence, so there is nothing left to
+	// spend. invokeExecution refuses rather than dispatching, because a zero
+	// window is how "no bound configured" is spelled downstream and
+	// dispatching with one would restore the pre-#238 behaviour exactly where
+	// it is least affordable.
+	final, _, _, err := scheduler.Store.Operation(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ProviderInactivityRemaining(window, final, clock.Now()); got != 0 {
+		t.Fatalf("twelve minutes of silence left %s of a %s window", got, window)
+	}
+}
+
+// TestASettledStallStillGetsItsBoundedRetry is the other side of the same
+// rule, and it is what keeps the fix above from turning a bounced supervisor
+// into a dead run.
+//
+// An ABANDONED attempt carries its silence forward, because nothing observed
+// how it ended. A SETTLED one does not: its outcome was journalled and
+// classified, provider_no_progress routes to a bounded RETRY, and a retry that
+// inherited an exhausted window would refuse before dispatch forever. The
+// attempt ceiling is what bounds it, exactly as it bounds every other
+// reattemptable class.
+//
+// Without this distinction the repair would be self-perpetuating: one long
+// reclaim gap would exhaust the window, every successor would refuse without
+// calling the provider, and the run would die of attempt exhaustion having
+// never dispatched.
+func TestASettledStallStillGetsItsBoundedRetry(t *testing.T) {
+	const window = 10 * time.Minute
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 4*time.Hour)
+
+	// The whole window is spent in silence and the attempt is TERMINATED and
+	// SETTLED - the durable shape the inactivity policy itself produces.
+	clock.advance(window + time.Minute)
+	if got := ProviderInactivityRemaining(window, op, clock.Now()); got != 0 {
+		t.Fatalf("a fully silent attempt still holds %s", got)
+	}
+	settled, err := scheduler.Finish(op.ID, OperationFailed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SETTLING IS WHAT MAKES THE DIFFERENCE VISIBLE, and it is one durable
+	// fact: Finish clears ActiveSince, so the next Start cannot mistake this
+	// attempt for one nobody observed. It is the same fact the pre-dispatch
+	// refusal produces - that path fails the operation, which is journalled and
+	// finished exactly like this - so a run whose window was exhausted by a
+	// long reclaim gap spends ONE attempt naming it and then dispatches for
+	// real, rather than refusing forever without ever calling the provider.
+	if settled.ActiveSince != nil {
+		t.Fatalf("a settled attempt still looks abandoned: ActiveSince=%s", settled.ActiveSince)
+	}
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ProviderInactivityRemaining(window, retried, clock.Now()); got != window {
+		t.Fatalf("a settled stall's bounded retry received %s, want a full %s window", got, window)
+	}
+	// It is a RETRY, not a refund. The silence it already spent stays charged
+	// to the execution budget, and the attempt ceiling is what ends this.
+	if retried.ConsumedExecution < window {
+		t.Fatalf("settling refunded the silent interval: consumed %s", retried.ConsumedExecution)
+	}
+	if retried.Attempt <= op.Attempt {
+		t.Fatalf("the retry did not spend an attempt: %d then %d", op.Attempt, retried.Attempt)
+	}
+	if retried.AttemptIdentity != op.AttemptIdentity+1 {
+		t.Fatalf("attempt identity %d did not advance from %d", retried.AttemptIdentity, op.AttemptIdentity)
 	}
 }
 

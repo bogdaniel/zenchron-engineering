@@ -711,7 +711,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
 			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
-				fmt.Errorf("no provider progress was recorded within the %s inactivity bound", inactivityLimit)),
+				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound before this invocation could start",
+					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit)),
 		}}
 	}
 	// Observed progress is written back to the operation row, so "silent for"

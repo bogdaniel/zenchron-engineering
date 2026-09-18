@@ -471,7 +471,12 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// has to be past it whatever the budget did.
 		op.AttemptIdentity++
 		op.StartedAt = &now
-		op.LastProgressAt = &now
+		// THE PROGRESS FINGERPRINT IS PER PHYSICAL ATTEMPT and is always
+		// cleared. It is a cumulative byte count of ONE process's output, so a
+		// successor's first bytes would otherwise be compared against a dead
+		// process's total and read as "nothing new" - which would suppress the
+		// successor's real progress until it out-talked its predecessor.
+		op.NoProgressKey = ""
 		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
 		//
 		// The attempt's deadline is derived from what the operation has NOT yet
@@ -490,11 +495,42 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// original defect in a narrower place. Charging it is the fail-safe
 		// direction: an attempt that was active and cannot say how much of its
 		// time was useful is charged for all of it.
-		if op.ActiveSince != nil {
+		//
+		// ABANDONED IS NOT THE SAME AS SETTLED, and the difference decides what
+		// the successor inherits. An operation that still carries ActiveSince
+		// here was never finished by anyone: its controller died mid-attempt,
+		// so nothing observed how that attempt ended and nothing classified it.
+		abandoned := op.ActiveSince != nil
+		if abandoned {
 			if orphaned := now.Sub(*op.ActiveSince); orphaned > 0 {
 				op.ConsumedExecution += orphaned
 				op.LastAttemptExecution = orphaned
 			}
+		}
+		// THE INACTIVITY DATUM IS THE SECOND THING A RESTART MUST NOT REFUND,
+		// and it is a different authority from the execution budget above.
+		//
+		// Charging the orphaned interval to ConsumedExecution proves the run's
+		// wall budget did not reset. It says nothing about the no-progress
+		// window, which is measured from the last moment output was actually
+		// observed - so stamping this to `now` for an ABANDONED attempt hands
+		// the successor a fresh full window and forgives silence the previous
+		// invocation had already proven. A supervisor that bounced every few
+		// minutes would reproduce #238 exactly, one clean window at a time.
+		//
+		// Carrying it forward is the reconstruction #238 asks for: the datum is
+		// durable, it was advanced only by real observed output, and the
+		// successor therefore starts with limit-minus-silence rather than
+		// limit. See ProviderInactivityRemaining.
+		//
+		// A SETTLED attempt is the opposite case and resets. Its outcome was
+		// observed, journalled and classified - a stall is recorded as
+		// provider_no_progress and routed to a BOUNDED retry - and a bounded
+		// retry that inherited an exhausted window would refuse before dispatch
+		// forever, which is not a retry. The attempt ceiling is what bounds it,
+		// exactly as it bounds every other reattemptable class.
+		if !abandoned || op.LastProgressAt == nil {
+			op.LastProgressAt = &now
 		}
 		op.ActiveSince = &now
 		if op.WallBudget > 0 {
