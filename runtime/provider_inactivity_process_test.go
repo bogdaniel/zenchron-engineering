@@ -72,13 +72,23 @@ func (c *inactivityCLI) Run(ctx context.Context, _ string, _ []string, dir strin
 // signal into the forced kill, so the claim is proved against a process that
 // actively resists the polite request.
 func silentProviderScript(pidFile, childPidFile string) string {
+	// THE FOREGROUND LOOP IS LOAD-BEARING and is not decoration. An earlier
+	// draft ended in `sleep 300 & wait`, which looked equivalent and was not:
+	// the group's SIGTERM kills the backgrounded sleep, `wait` with no operands
+	// then returns 0, and the shell EXITS CLEANLY. The provider would have
+	// terminated itself rather than being terminated, and every assertion about
+	// the policy killing it would be answered by an exit that had nothing to do
+	// with the policy. macOS happened to SIGKILL the shell before `wait` could
+	// return, so it passed locally and failed on Linux CI. The loop restores
+	// the property the fixture actually needs: this process never exits on its
+	// own, whatever is done to its children.
 	return "trap '' TERM\n" +
-		"sleep 30 &\n" +
+		"sleep 300 &\n" +
 		"echo $! > " + childPidFile + "\n" +
 		// The leader's pid is written LAST, so a reader that has seen this file
 		// has necessarily already seen the descendant's.
 		"echo $$ > " + pidFile + "\n" +
-		"wait\n"
+		"while :; do sleep 30; done\n"
 }
 
 // silentProviderFixture builds the fixture and the two pid files it records.
@@ -588,7 +598,7 @@ func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
 			provider, request, _ := inactivityFixture(t,
 				"trap '' TERM\n"+
 					"echo "+shellQuoted(tc.diagnostic)+" >&2\n"+
-					"sleep 30 &\nwait\n")
+					"while :; do sleep 30; done\n")
 			request.Budgets.InactivityLimit = inactivityWindow
 
 			result, err := provider.Execute(context.Background(), request)
@@ -616,7 +626,7 @@ func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
 func TestSilenceWithNothingStatedIsStillNoProgress(t *testing.T) {
 	// A provider that says nothing recognizable and hangs.
 	provider, request, _ := inactivityFixture(t,
-		"trap '' TERM\necho 'thinking' >&2\nsleep 30 &\nwait\n")
+		"trap '' TERM\necho 'thinking' >&2\nwhile :; do sleep 30; done\n")
 	request.Budgets.InactivityLimit = inactivityWindow
 	result, err := provider.Execute(context.Background(), request)
 	if err == nil {
@@ -630,7 +640,7 @@ func TestSilenceWithNothingStatedIsStillNoProgress(t *testing.T) {
 	// stall. Preserving a recognized condition must not become a channel for
 	// untrusted output to outrank a bound the runtime actually enforced.
 	quoted, request2, _ := inactivityFixture(t,
-		"trap '' TERM\necho 'The docs say: usage limit reached'\nsleep 30 &\nwait\n")
+		"trap '' TERM\necho 'The docs say: usage limit reached'\nwhile :; do sleep 30; done\n")
 	request2.Budgets.InactivityLimit = inactivityWindow
 	result2, err := quoted.Execute(context.Background(), request2)
 	if err == nil {
@@ -759,4 +769,68 @@ func TestANaturallyExitingProviderIsNeverReportedAsStalled(t *testing.T) {
 			t.Fatalf("round %d: a clean exit recorded failure %#v", round, result.Failure)
 		}
 	}
+}
+
+// TestTheSilentProviderFixtureReallyHasALiveDescendant proves the premise the
+// termination assertions rest on.
+//
+// "No detached child survives" is only a claim if there WAS a child. This runs
+// the same script through the same bounded process, observes both recorded
+// processes alive while it is running, then cancels and observes both gone -
+// so the descendant check in the tests above is testing a real second process
+// and not an empty file.
+//
+// It also exercises the production process-group cancellation directly, which
+// is the machinery the inactivity policy reuses rather than replaces.
+func TestTheSilentProviderFixtureReallyHasALiveDescendant(t *testing.T) {
+	requireBoundedProcess(t)
+	dir := t.TempDir()
+	leader, child := filepath.Join(dir, "provider.pid"), filepath.Join(dir, "descendant.pid")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = OSCommandExecutor{}.Run(ctx, "sh", []string{"-c", silentProviderScript(leader, child)},
+			dir, os.Environ(), 150*time.Millisecond)
+	}()
+
+	if err := waitForFile(leader, 5*time.Second); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("the fixture never started: %v", err)
+	}
+	// BOTH ARE REAL AND BOTH ARE RUNNING. The leader is the process group; the
+	// descendant is a separate process that a group-only kill would miss.
+	leaderPid, childPid := strings.TrimSpace(readFileOrEmpty(t, leader)), strings.TrimSpace(readFileOrEmpty(t, child))
+	if leaderPid == "" || childPid == "" || leaderPid == childPid {
+		cancel()
+		<-done
+		t.Fatalf("the fixture did not record two distinct processes: leader=%q descendant=%q", leaderPid, childPid)
+	}
+	if !processAlive(leaderPid) || !processAlive(childPid) {
+		cancel()
+		<-done
+		t.Fatalf("the fixture's processes are not both running: leader=%v descendant=%v",
+			processAlive(leaderPid), processAlive(childPid))
+	}
+
+	// The SAME bounded cancellation the inactivity policy triggers.
+	cancel()
+	<-done
+	if processAlive(leaderPid) {
+		t.Fatal("the process-group leader survived cancellation")
+	}
+	if processAlive(childPid) {
+		t.Fatal("the descendant survived cancellation; a leader-only kill would satisfy every other assertion here")
+	}
+}
+
+func readFileOrEmpty(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
