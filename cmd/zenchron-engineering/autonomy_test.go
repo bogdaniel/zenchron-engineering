@@ -1758,7 +1758,15 @@ func TestGCDryRunEqualsTheRealPlanAndPreservesActiveRuns(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(path, "file.go"), []byte("package main\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		workspaces[id] = path
+		// GC reports the canonical path, while this test holds the spelling
+		// t.TempDir() returned - on macOS /var/... against /private/var/... for
+		// one directory. Resolve here, while the directory still exists, because
+		// the eligible one is asserted on again after gc has deleted it.
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspaces[id] = resolved
 	}
 
 	var planned bytes.Buffer
@@ -1775,6 +1783,16 @@ func TestGCDryRunEqualsTheRealPlanAndPreservesActiveRuns(t *testing.T) {
 	}
 	if !containsWorkspace(plan.Retained, workspaces["run-still-going"]) {
 		t.Fatalf("an active run's workspace was judged eligible: %+v", plan)
+	}
+	// The two workspaces are siblings under one state directory, so each must be
+	// absent from the other's list. This is what keeps the comparison above from
+	// degenerating into "some path under the temp root": resolving the spelling
+	// must not resolve away which run a workspace belongs to.
+	if containsWorkspace(plan.Eligible, workspaces["run-still-going"]) {
+		t.Fatalf("an active run's workspace was judged eligible: %+v", plan.Eligible)
+	}
+	if containsWorkspace(plan.Retained, workspaces[terminalRun]) {
+		t.Fatalf("the terminal run's workspace was retained: %+v", plan.Retained)
 	}
 
 	var executed bytes.Buffer
