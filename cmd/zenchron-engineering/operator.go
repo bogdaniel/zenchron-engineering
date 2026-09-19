@@ -749,6 +749,16 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("execution prior context", fmt.Sprintf("attempt=%d supplied=%s omitted=%s truncated=%s bytes=%d digest=%s",
 			c.Attempt, attemptNumbers(c.Supplied), attemptNumbers(c.Omitted), attemptNumbers(c.Truncated), c.Bytes, short(c.Digest)))
 	}
+	// WHAT THE RUNTIME REFUSED ON THE PROVIDER'S BEHALF. It is printed ABOVE
+	// the execution diagnostic and separately from it, because it is not a
+	// failure: the invocation that carried it may well have succeeded, and
+	// where it did, this line is the only place an operator learns that the
+	// worker tried to erase its own uncommitted work and was stopped.
+	if n := view.CandidateDiscardRefusals; n > 0 {
+		line("candidate discard refused", fmt.Sprintf(
+			"%d destructive Git operation(s) refused; dirty candidate work preserved: %s",
+			n, view.CandidateDiscardRefused))
+	}
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
 			d.Stage, d.FailureClass, d.Route, d.Code))

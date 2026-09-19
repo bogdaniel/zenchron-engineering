@@ -294,3 +294,114 @@ provider's name.
 - [`supervisor.md`](supervisor.md) — what drives them
 - [`configuration.md`](configuration.md) — the full configuration surface
 - [`../ROADMAP.md`](../ROADMAP.md) — agents versus future engineering roles
+
+## Candidate Git is brokered
+
+A provider may create and modify candidate work. It has **no authority to
+destructively discard it**.
+
+That law exists because of a measured cost. During live dogfood a coding CLI
+twice reached for habitual recovery — `git checkout -- <path>` against a dirty
+runtime-owned candidate workspace — and erased its own uncommitted
+implementation edits. No governed candidate commit was lost, because the runtime
+owns those; what was lost was the expensive part, the reasoning already
+performed, and the worker then spent more subscription capacity reconstructing
+it.
+
+Every native CLI invocation therefore runs under a brokered Git boundary:
+
+```text
+provider runs git
+      ↓
+runtime-owned shim, first on the worker search path
+      ↓
+classify the argv
+      ↓
+discard family  → refused, recorded, diagnostic to the provider
+everything else → executed as the real git
+```
+
+The refused family is the operations whose purpose or effect is to throw
+uncommitted work away: `checkout`, `switch`, `restore`, `clean`,
+`reset --hard`/`--merge`, `stash` (push/save/clear/drop), forced `git rm`,
+`checkout-index`, `sparse-checkout`, `worktree`, `read-tree -u`, and
+`submodule deinit`. Read-only and ordinary engineering Git — `status`, `diff`,
+`log`, `show`, `add`, `apply`, `commit` — is passed through untouched. This is a
+destruction guard, not a Git allowlist.
+
+**Aliases are resolved before classification.** A worker could otherwise author
+its own bypass out of two permitted commands — `git config alias.co checkout`,
+then `git co -- file` — because real Git expands aliases *after* the broker has
+authorized the verb it was spelled with, and a checked-out `.git/config` can
+carry one too. The lookup runs under the same configuration the execution will
+use, including leading `-c`/`-C` options, so `git -c alias.x=reset\ --hard x` is
+resolved too. Chains are followed, cycles, shell aliases (`!…`), malformed
+values and expansions that will not terminate all **fail closed** — "I could not
+tell what this would do" is not "this is safe", and nothing executes alias
+content to find out what it means. An alias whose name collides with a real Git
+command is ignored, exactly as Git ignores it, so `git status` is never refused
+because a config file once mentioned it. A resolved command is executed in its
+resolved form, so the lookup and the execution cannot disagree.
+
+**A destructive command is refused whether or not the workspace is dirty.** That
+is the smaller law and the stronger one: permitting it on an observably clean
+tree would require checking dirtiness and then executing, which is a race the
+provider's own process can win by writing a file in between. The decision is
+made from the argv, which cannot change. Dirtiness is still *observed*, so the
+diagnostic and the durable record can say what was at stake, but it cannot
+change the answer.
+
+### Why an absolute path does not get around it
+
+Two mechanisms, and the second is the one that matters. The guard directory is
+first on the worker's search path, so a bare `git` — what a model types —
+resolves to the broker. And the worker's environment carries a brokered
+`GIT_DIR` naming a path that is not a repository, so Git performs no discovery
+at all: `/usr/bin/git reset --hard`, `sh -c '/usr/bin/git clean -fd'` and
+`command /usr/bin/git restore .` fail, naming the brokered path in Git's own
+error. The shim is the one caller that clears the sentinel.
+
+**What is not claimed.** These workers are `operator_trusted`: they run under
+the operator's own account. A worker that deliberately sets out to defeat the
+runtime can both go around the name *and* clear the variable — `unset GIT_DIR;
+/usr/bin/git reset --hard` reaches the repository. No in-process mechanism
+closes that while one account owns both sides; it is the same residual this
+trust mode already names, and it is why `RequireProtectedIsolation` refuses
+these adapters for protected work. What is closed is the whole of the observed
+failure: habitual destructive recovery, in every spelling that does not
+dismantle the runtime's own environment.
+
+**A controller that cannot install the boundary dispatches nothing.** The
+production composition always intends the guard, so a broker executable it
+cannot resolve is a controller unable to enforce its own law rather than a
+composition that chose not to. That is refused before the capability probe and
+before any process, as `candidate_guard_unavailable` — a typed wait an operator
+clears by repairing the installation, never a provider fault, because nothing
+about the worker, the work, the account or the network is wrong. A deliberately
+unguarded composition — a unit test, a probe, an embedder driving one
+invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
+
+The boundary grants the worker no new command surface. It adds no tool to any
+provider's allowlist, so a stage that was obliged nothing is still obliged
+nothing.
+
+### What an operator sees
+
+A refusal is an **observation, not a failure** — the invocation that carried it
+may well have succeeded, which is the case worth reporting, because it is where
+expensive reasoning was nearly lost and was not. `autonomy status` prints it
+separately from any execution diagnostic:
+
+```text
+candidate discard refused   1 destructive Git operation(s) refused; dirty candidate work preserved: git checkout -- <1 operand(s)> (2 dirty candidate path(s) preserved)
+```
+
+It is never reported as provider quota, unavailability, a stall, an assurance
+failure or an unknown: the runtime knew exactly what it refused.
+
+The runtime's own candidate Git is unaffected. `RepositoryGitRunner` and
+`GitRunner` build their environment from scratch and resolve Git from their own
+trusted search path, so they never see the guard's path or its sentinel —
+candidate creation, inspection, staging, runtime-owned commits, branches and
+authorized pushes all behave exactly as before. The restriction is on the
+execution provider's authority, not on Zenchron's candidate machinery.

@@ -142,6 +142,20 @@ type mutationResult struct {
 	// minutes of provider work before it appeared, and only the first may be
 	// refunded to the run's execution budget.
 	ProviderExecuted bool `json:"provider_executed,omitempty"`
+	// DiscardRefusals is how many destructive Git operations the runtime
+	// refused during this invocation, and DiscardRefused is the bounded shape
+	// of the most recent one.
+	//
+	// They are OBSERVATION and not failure: a provider that reached for a
+	// destructive recovery, was refused, and then did the work properly
+	// succeeded - and the refusal is still the most interesting thing that
+	// happened, because it is where expensive reasoning was nearly lost. That
+	// is why it is recorded here rather than becoming a FailureClass: the
+	// runtime knows exactly what it refused, so #241's rule against reporting
+	// it as quota, unavailability, a stall or an unknown is satisfied by it
+	// not being a failure at all.
+	DiscardRefusals int    `json:"discard_refusals,omitempty"`
+	DiscardRefused  string `json:"discard_refused,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -369,6 +383,10 @@ var externalWaitReasons = map[string]bool{
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
+	// The controller could not install the brokered candidate-Git boundary, so
+	// it performed no execution at all. Nothing is running and an operator has
+	// to repair the installation.
+	"candidate_guard_unavailable": true,
 	// The controller stopped. The run is not working, and it is waiting for a
 	// supervisor to exist again rather than for anything it can do itself.
 	"controller_shutdown":  true,
@@ -1739,7 +1757,10 @@ var waitReasons = map[FailureClass]string{
 	// revoked, and what has to change is connectivity.
 	FailureProviderUnavailable:   "execution_provider_unavailable",
 	FailureStateStorageExhausted: "state_storage_exhausted",
-	FailureControllerShutdown:    "controller_shutdown",
+	// The controller cannot install its own candidate-Git boundary. An
+	// operator repairs the installation; nothing about the work is wrong.
+	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
+	FailureControllerShutdown:        "controller_shutdown",
 }
 
 func waitReason(class FailureClass) string {

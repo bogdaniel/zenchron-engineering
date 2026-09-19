@@ -992,6 +992,22 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// resolve offline exactly what the verifier resolves.
 			Toolchain:          config.Toolchain,
 			DependencyCacheDir: config.Assurance.DependencyCacheDir,
+			// THE BROKERED GIT BOUNDARY of #241. The state root is where the
+			// guard is materialized; the broker argv is this controller's own
+			// executable, so the binary that enforces the boundary is the
+			// binary the operator is running and not whatever a search path
+			// resolved. A controller that cannot name its own executable
+			// prepares no guard and says so in provenance rather than
+			// pretending to one.
+			StateDir:  config.StateDir,
+			GitBroker: gitBrokerCommand(),
+			// AND IT IS REQUIRED HERE. This is the production composition: it
+			// always intends the boundary, so a broker it could not resolve is
+			// a controller that cannot enforce #241 rather than a composition
+			// that chose not to. Requiring it converts that into a typed
+			// pre-dispatch refusal instead of an unguarded worker, which is
+			// the difference between an honest absence and a silent one.
+			RequireGitGuard: true,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{

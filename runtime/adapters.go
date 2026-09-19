@@ -751,11 +751,27 @@ const (
 	// clears it is removing the material from what the run is about, which is
 	// a different subject and therefore a different run.
 	FailureCandidateCredentialMaterial FailureClass = "candidate_credential_material"
-	FailureGovernanceMismatch          FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity          FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict     FailureClass = "base_integration_conflict"
-	FailureFlaky                       FailureClass = "flaky_verification"
-	FailureUnknown                     FailureClass = "unknown"
+	// FailureCandidateGuardUnavailable is the controller unable to install its
+	// own #241 boundary: the composition requires the brokered Git guard and
+	// could not resolve the executable that enforces it.
+	//
+	// It is NOT a provider failure and must not be reported as one. Nothing
+	// about the worker, the work, the provider's account or the network is
+	// wrong; the runtime cannot enforce a law it holds itself to, so it
+	// performs no execution at all. It is detected BEFORE dispatch, so no
+	// invocation is spent and no candidate is touched.
+	//
+	// It waits rather than stopping: an operator repairs the controller
+	// installation and the same run continues against the same candidate.
+	// Terminalizing a run because the controller could not name its own
+	// executable would destroy work over a condition that is entirely local
+	// and entirely fixable.
+	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
+	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
+	FailureFlaky                     FailureClass = "flaky_verification"
+	FailureUnknown                   FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -806,7 +822,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteStop
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
-		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable:
+		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
+		FailureCandidateGuardUnavailable:
 		return RouteWait
 	default:
 		return RouteStop
