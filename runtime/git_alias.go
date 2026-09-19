@@ -90,6 +90,64 @@ func splitGitCommand(args []string) (globals []string, verb string, rest []strin
 	return args, "", nil
 }
 
+// refusedGitGlobals are the global options this boundary will not execute.
+//
+// They are refused because each one changes WHAT GIT RUNS or WHICH REPOSITORY
+// IT RUNS AGAINST, and the broker's whole claim is that it classified the
+// operation that was about to happen against the candidate.
+//
+// `--exec-path` is the one that makes this urgent rather than tidy.
+// ClassifyGitCommand permits verbs it does not recognize - deliberately, since
+// this is a destruction guard and not a Git allowlist - and Git resolves an
+// unknown verb by looking for `git-<verb>` on its exec path. So a provider
+// could drop a script in a directory it controls and run
+// `git --exec-path=<dir> anything`: the classifier sees an unlisted verb,
+// permits it, and execRealGit then runs that script with the brokered sentinel
+// removed, which is precisely the reach the sentinel exists to deny. The verb
+// being harmless-looking is the point.
+//
+// `-c` and `--config-env` are refused for the same reason one layer along: Git
+// has configuration keys whose values are programs it executes, so an
+// inline override is an execution redirect wearing different syntax. They are
+// also how an alias can be defined in the same breath as being used, which the
+// resolver would otherwise have to chase.
+//
+// `--git-dir`, `--work-tree`, `--namespace` and `--super-prefix` point the
+// command at a different repository or a different tree. The broker is the
+// CANDIDATE's Git; a command asking to be something else is not a command this
+// boundary has classified.
+//
+// `-C` is deliberately NOT here. It changes directory and cannot change which
+// program Git runs, and a destructive verb under it is still classified as
+// destructive - so refusing it would cost `git -C subdir status` for nothing.
+var refusedGitGlobals = map[string]string{
+	"--exec-path":    "it redirects where Git resolves the program it runs",
+	"-c":             "it overrides configuration, and Git has configuration keys whose values are programs it executes",
+	"--config-env":   "it overrides configuration from the environment",
+	"--git-dir":      "it points the command at a different repository",
+	"--work-tree":    "it points the command at a different working tree",
+	"--namespace":    "it points the command at a different ref namespace",
+	"--super-prefix": "it rewrites the paths the command addresses",
+}
+
+// refusedGitGlobal reports the first global option this boundary will not
+// execute, in either its separate or its `--x=y` form.
+func refusedGitGlobal(args []string) (string, string, bool) {
+	for _, arg := range args {
+		if arg == "--" {
+			return "", "", false
+		}
+		name := arg
+		if equals := strings.Index(arg, "="); equals > 0 {
+			name = arg[:equals]
+		}
+		if reason, refused := refusedGitGlobals[name]; refused {
+			return name, reason, true
+		}
+	}
+	return "", "", false
+}
+
 // ResolveGitCommand expands args through the effective Git configuration and
 // returns the command real Git will actually run.
 //
@@ -101,6 +159,13 @@ func ResolveGitCommand(candidateDir string, args []string) ([]string, error) {
 	seen := map[string]bool{}
 	for hop := 0; ; hop++ {
 		globals, verb, rest := splitGitCommand(args)
+		// REFUSED BEFORE ANYTHING IS RESOLVED OR RUN. A global that redirects
+		// what Git executes defeats the boundary whatever the verb turns out to
+		// be, so it is answered here rather than being carried into a
+		// classification that would then be about the wrong thing.
+		if name, reason, refused := refusedGitGlobal(globals); refused {
+			return nil, &GitAliasUnresolvableError{Verb: name, Detail: reason}
+		}
 		if verb == "" {
 			return args, nil
 		}

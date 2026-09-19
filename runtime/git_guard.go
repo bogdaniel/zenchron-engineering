@@ -244,7 +244,20 @@ func (p CLIAgentProvider) prepareGitGuard(request ExecutionRequest) (*GitGuard, 
 	if strings.TrimSpace(p.StateDir) == "" || len(p.GitBroker) == 0 {
 		return nil, nil
 	}
-	return PrepareGitGuard(p.StateDir, request.AttemptRef(), request.CandidateDir, p.GitBroker)
+	guard, err := PrepareGitGuard(p.StateDir, request.AttemptRef(), request.CandidateDir, p.GitBroker)
+	if err != nil {
+		// A CONFIGURED GUARD THAT COULD NOT BE MATERIALIZED IS THE SAME FACT
+		// as one that could not be resolved: this controller cannot enforce
+		// #241, so it dispatches nothing. Returning the raw filesystem error
+		// instead left it unclassified, which routed a full disk or a
+		// permission problem to RouteStop and terminalized the run - a
+		// repairable local condition destroying work, which is the opposite of
+		// what fail-closed is for.
+		return nil, &CandidateGitGuardUnavailableError{
+			AgentID: p.Agent.ID, StateDir: p.StateDir, Broker: true, Cause: err,
+		}
+	}
+	return guard, nil
 }
 
 // providerGitRefusals is the refusals one invocation's provenance recorded.
@@ -285,17 +298,30 @@ type CandidateGitGuardUnavailableError struct {
 	AgentID  string
 	StateDir string
 	Broker   bool
+	// Cause is the underlying failure when the guard was configured and could
+	// not be MATERIALIZED - a directory that could not be created, a shim that
+	// could not be written. It is preserved rather than flattened into text
+	// because the repair depends on it, and because a wrapped error keeps the
+	// typed classification working for a failure nobody anticipated.
+	Cause error
 }
 
 func (e *CandidateGitGuardUnavailableError) Error() string {
 	missing := "the controller could not resolve its own brokered Git executable"
-	if strings.TrimSpace(e.StateDir) == "" {
+	switch {
+	case e.Cause != nil:
+		missing = "installing the brokered Git guard failed: " + e.Cause.Error()
+	case strings.TrimSpace(e.StateDir) == "":
 		missing = "no runtime state root was configured for the brokered Git guard"
 	}
 	return "refusing to dispatch agent " + e.AgentID +
 		": candidate Git must be brokered and " + missing +
 		". No provider was invoked and the candidate workspace was not touched"
 }
+
+// Unwrap keeps the original failure reachable, so a caller that wants the
+// filesystem error still has it.
+func (e *CandidateGitGuardUnavailableError) Unwrap() error { return e.Cause }
 
 // candidateGuardFailureClass maps a pre-dispatch guard refusal onto its typed
 // class, and reports whether the error was one.

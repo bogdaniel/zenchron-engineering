@@ -632,9 +632,14 @@ func TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker(t *testing.T) {
 		// be assembled before classification.
 		"flag from the caller": {"c", "checkout", []string{"c", "-f"}},
 		"quoted value":         {"q", `checkout "--"`, []string{"q", "implementation.go"}},
-		// A global option must not hide the alias either, and -c is the form
-		// that defines the alias in the same breath as using it.
-		"alias behind -C":   {"co2", "reset --hard", []string{"-C", ".", "co2"}},
+		// A global option must not hide the alias either.
+		"alias behind -C": {"co2", "reset --hard", []string{"-C", ".", "co2"}},
+		// `-c` defines the alias in the same breath as using it. It is refused
+		// one step earlier than the others - as a global that overrides
+		// configuration at all - because Git has configuration keys whose
+		// values are programs it executes, so an inline override is an
+		// execution redirect wearing different syntax. Refused either way, and
+		// this row keeps the spelling covered.
 		"inline -c defines": {"", "", []string{"-c", "alias.zap=reset --hard", "zap"}},
 	} {
 		t.Run(name, func(t *testing.T) {

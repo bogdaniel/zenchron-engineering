@@ -10,6 +10,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -713,5 +714,144 @@ func executionAfterEvent(t *testing.T, attempt int, state OperationState, result
 		SchemaVersion: SchemaVersion, ID: fmt.Sprintf("event-%d", attempt), RunID: "run-1",
 		Sequence: int64(attempt), Type: EventOperationAfter, OperationID: "op-invoke",
 		Payload: payload,
+	}
+}
+
+// TestAnExecPathRedirectCannotReachTheCandidateRepository is CodeRabbit's
+// finding on git_alias.go:84, closed and proved.
+//
+// ClassifyGitCommand permits verbs it does not recognize - deliberately, since
+// this is a destruction guard and not a Git allowlist - and Git resolves an
+// unknown verb by looking for `git-<verb>` on its exec path. So
+// `git --exec-path=<provider dir> anything` was a straight escape: an unlisted
+// verb, permitted, then executed with the brokered sentinel removed. The verb
+// looking harmless is the point.
+func TestAnExecPathRedirectCannotReachTheCandidateRepository(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// work an exec-path redirect must not reach\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+
+	// A helper the provider controls, which does what the provider wanted all
+	// along: discard the candidate work.
+	helpers := t.TempDir()
+	helper := filepath.Join(helpers, "git-zap")
+	script := "#!/bin/sh\nrm -f " + filepath.Join(dir, "implementation.go") + "\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, argv := range map[string][]string{
+		"exec-path equals":   {"--exec-path=" + helpers, "zap"},
+		"exec-path separate": {"--exec-path", helpers, "zap"},
+		// The same shape one layer along: configuration keys whose values are
+		// programs Git executes.
+		"inline config":    {"-c", "core.pager=" + helper, "log"},
+		"config env":       {"--config-env", "core.pager=EVIL", "log"},
+		"other repository": {"--git-dir=" + filepath.Join(dir, ".git"), "reset", "--hard"},
+		"other work tree":  {"--work-tree=/tmp", "checkout", "--", "."},
+		"namespace":        {"--namespace=x", "zap"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, diagnostic := brokerGit(t, dir, refusalLog, argv...)
+			if code == 0 {
+				t.Fatalf("%v was permitted", argv)
+			}
+			if !strings.Contains(diagnostic, "destructive Git refused") {
+				t.Fatalf("%v was not refused by the boundary: %s", argv, diagnostic)
+			}
+			if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+				t.Fatalf("%v reached the candidate:\n%q", argv, got)
+			}
+		})
+	}
+
+	// MUTATION, inline: with the redirect permitted, the helper really does
+	// run and really does erase the file.
+	if _, err := execRealGit(dir, []string{"--exec-path=" + helpers, "zap"}, io.Discard, io.Discard); err != nil {
+		t.Skipf("this git does not honour --exec-path for an unknown verb here: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "implementation.go")); err == nil {
+		t.Fatal("an unguarded --exec-path redirect did NOT run the helper, so these refusals prove nothing")
+	}
+}
+
+// TestOrdinaryGlobalOptionsStillWork keeps the refusal list from becoming a
+// second wall. -C is deliberately not refused: it cannot change which program
+// Git runs, and a destructive verb under it is still classified as one.
+func TestOrdinaryGlobalOptionsStillWork(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	writeCandidateFile(t, dir, "implementation.go", "package candidate\n\n// dirty\n")
+	for _, argv := range [][]string{
+		{"-C", ".", "status", "--porcelain"},
+		{"--no-pager", "log", "--oneline", "-1"},
+		{"--literal-pathspecs", "diff", "--stat"},
+		{"-C", ".", "--no-pager", "diff"},
+	} {
+		if code, out := brokerGit(t, dir, refusalLog, argv...); code != 0 {
+			t.Fatalf("ordinary %v exited %d: %s", argv, code, out)
+		}
+	}
+	if refusals, _ := ReadGitRefusals(refusalLog); len(refusals) != 0 {
+		t.Fatalf("ordinary global options were refused: %#v", refusals)
+	}
+	// And -C with a destructive verb is still caught, so permitting -C is not
+	// a hole.
+	if code, _ := brokerGit(t, dir, refusalLog, "-C", ".", "reset", "--hard"); code == 0 {
+		t.Fatal("-C hid a destructive verb")
+	}
+}
+
+// TestAGuardThatCannotBeInstalledWaitsRatherThanStoppingTheRun is CodeRabbit's
+// finding on git_guard.go:310, closed.
+//
+// A configured guard can fail to MATERIALIZE - a full disk, a read-only state
+// directory, a shim that cannot be written. That error used to be returned raw,
+// so it classified as FailureUnknown and routed to RouteStop: a repairable
+// local condition terminalizing a run and destroying the work it was
+// protecting, which is the opposite of what fail-closed is for.
+func TestAGuardThatCannotBeInstalledWaitsRatherThanStoppingTheRun(t *testing.T) {
+	candidate := t.TempDir()
+	// A state root that cannot be written into, which is what a full or
+	// read-only state directory looks like from here.
+	state := filepath.Join(t.TempDir(), "unwritable")
+	if err := os.WriteFile(state, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := CLIAgentProvider{
+		Agent:           ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted},
+		StateDir:        state,
+		GitBroker:       []string{"/unused", "__git-broker"},
+		RequireGitGuard: true,
+	}
+	_, err := provider.prepareGitGuard(ExecutionRequest{
+		RunID: "run-1", OperationID: "run-1:execution.invoke:initial|1|base", Attempt: 1,
+		CandidateDir: candidate,
+	})
+	if err == nil {
+		t.Fatal("an uninstallable guard reported success")
+	}
+	// IT IS THE RUNTIME'S OWN TYPED REFUSAL, so it routes as a repairable wait
+	// rather than stopping the run.
+	var refusal *CandidateGitGuardUnavailableError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("a guard setup failure is not classified: %T %v", err, err)
+	}
+	if class, ok := candidateGuardFailureClass(err); !ok || class != FailureCandidateGuardUnavailable {
+		t.Fatalf("the failure class is %q (%v)", class, ok)
+	}
+	if got := RouteFailure(FailureCandidateGuardUnavailable); got != RouteWait {
+		t.Fatalf("a repairable controller setup failure routes to %q", got)
+	}
+	// The original failure is still reachable, because the repair depends on it.
+	if refusal.Cause == nil {
+		t.Fatal("the underlying failure was flattened away")
+	}
+	if !strings.Contains(err.Error(), "installing the brokered Git guard failed") {
+		t.Fatalf("the refusal does not say what happened: %v", err)
+	}
+	// And it still fails closed: no guard was returned.
+	if refusal.Broker != true {
+		t.Fatalf("the refusal misreports which half was missing: %#v", refusal)
 	}
 }
