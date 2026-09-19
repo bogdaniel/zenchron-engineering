@@ -777,7 +777,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
 	}
-	paths, pathErr := changedPaths(workspace.Dir)
+	paths, pathErr := candidateChangedPaths(workspace.Dir)
 	if pathErr != nil {
 		return failed(pathErr)
 	}
@@ -1313,7 +1313,7 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 	if err := (LocalGofmt{}).Format(ctx, workspace.Dir, goPaths); err != nil {
 		return failed(err)
 	}
-	changed, err := changedPaths(workspace.Dir)
+	changed, err := candidateChangedPaths(workspace.Dir)
 	if err != nil {
 		return failed(err)
 	}
@@ -1325,10 +1325,11 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 // ---------------------------------------------------------------------------
 
 type commitRecord struct {
-	Commit         string `json:"commit"`
-	Tree           string `json:"tree"`
-	PathCount      int    `json:"path_count"`
-	MetadataDigest string `json:"metadata_digest,omitempty"`
+	Commit         string   `json:"commit"`
+	Tree           string   `json:"tree"`
+	PathCount      int      `json:"path_count"`
+	MetadataDigest string   `json:"metadata_digest,omitempty"`
+	ExcludedPaths  []string `json:"excluded_paths,omitempty"`
 }
 
 // commitCandidate is the only place a candidate change becomes a commit. It
@@ -1393,11 +1394,12 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 		state: Succeeded,
 		// The commit succeeded and the workspace refreshed its own baseline;
 		// journalling it here is what makes the new baseline durable.
-		result: commitRecord{result.Commit, result.Tree, len(result.Paths), workspace.TrustedMetadata},
+		result: commitRecord{result.Commit, result.Tree, len(result.Paths), workspace.TrustedMetadata, boundedPaths(result.Excluded)},
 		events: []journalEntry{
 			{Type: commitEvent, Payload: CandidateCommittedPayload{
 				Commit: result.Commit, Tree: result.Tree,
 				PathCount: len(result.Paths), PathsDigest: pathsDigest(result.Paths),
+				ExcludedPaths: boundedPaths(result.Excluded),
 			}},
 			{Type: EventReassessmentCompleted, Payload: ReassessmentCompletedPayload{
 				Material:                next.Reassessment.Material,
@@ -1412,6 +1414,16 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 // maxCandidateBytes bounds one runtime-owned commit. It is the candidate size
 // ceiling GuardCandidate enforces, not a policy decision.
 const maxCandidateBytes = 8 << 20
+
+// boundedPaths keeps a runtime-owned path list inside the payload ceiling every
+// other journalled list observes. Truncation is deliberate over a digest here:
+// the point of recording an exclusion is that an operator can read the path.
+func boundedPaths(paths []string) []string {
+	if len(paths) > maxPayloadListItems {
+		return paths[:maxPayloadListItems]
+	}
+	return paths
+}
 
 func pathsDigest(paths []string) string {
 	sorted := append([]string(nil), paths...)

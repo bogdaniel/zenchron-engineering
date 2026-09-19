@@ -360,6 +360,13 @@ type CandidateCommittedPayload struct {
 	Tree        string `json:"tree"`
 	PathCount   int    `json:"path_count"`
 	PathsDigest string `json:"paths_digest"`
+	// ExcludedPaths names, in full, the runtime-owned paths this commit did
+	// not carry. It is the durable half of the #189 ownership decision: a
+	// crashed run's inherited scratch is left out of the tree deliberately,
+	// and an operator reading the journal has to be able to see WHICH paths
+	// rather than infer them from a path count that does not add up. It is
+	// bounded like every other payload list.
+	ExcludedPaths []string `json:"excluded_paths,omitempty"`
 }
 
 // ExecutionCompletedPayload records that the producer finished its invocation
