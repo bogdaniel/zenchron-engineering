@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -306,8 +308,36 @@ func TestRuntimeOwnedEphemeralStateIsDisjointFromTheCandidateWorkspace(t *testin
 	}
 	// And the grant refuses to be pointed back in, so a future caller cannot
 	// undo the separation by composing the path differently.
-	if err := prepareValidationScratch(candidate, filepath.Join(candidate, ".validation-tmp")); err == nil {
+	//
+	// The candidate directory is created FIRST and an outside grant is proven
+	// to be accepted, because otherwise this asserts nothing: an unresolvable
+	// candidate path fails the same call for a reason that has nothing to do
+	// with containment, and the test would pass with the containment check
+	// deleted.
+	if err := os.MkdirAll(candidate, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareValidationScratch(candidate, scratch); err != nil {
+		t.Fatalf("a scratch grant outside the candidate workspace was refused: %v", err)
+	}
+	err = prepareValidationScratch(candidate, filepath.Join(candidate, ".validation-tmp"))
+	if err == nil {
 		t.Fatal("validation scratch was granted inside the candidate workspace")
+	}
+	if !strings.Contains(err.Error(), "validation scratch must be disjoint from candidate workspace") {
+		t.Fatalf("the refusal is not the containment law: %v", err)
+	}
+	// And the other direction: a candidate workspace nested inside the grant is
+	// the same violation, so neither side can be made to contain the other.
+	// This one exists too, for the same reason the one above does.
+	inner := filepath.Join(scratch, "inner")
+	if err := os.MkdirAll(inner, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareValidationScratch(inner, scratch); err == nil {
+		t.Fatal("a candidate workspace inside the validation scratch was accepted")
+	} else if !strings.Contains(err.Error(), "validation scratch must be disjoint from candidate workspace") {
+		t.Fatalf("the refusal is not the containment law: %v", err)
 	}
 }
 
@@ -401,5 +431,289 @@ func TestScratchAloneIsNotACandidateChange(t *testing.T) {
 	}
 	if len(paths) != 1 || paths[0] != "README.md" {
 		t.Fatalf("the candidate change set is not the producer's edit alone: %q", paths)
+	}
+}
+
+// writeCandidateGitignore installs a candidate-controlled ignore file and makes
+// it part of the workspace history, so what follows is about the ignore rule
+// rather than about an untracked `.gitignore`.
+func writeCandidateGitignore(t *testing.T, w *CandidateWorkspace, lines ...string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(w.Dir, ".gitignore"), []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(w.Dir, "add", "-A", "--"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", "candidate ignore rules"); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	if w.TrustedMetadata, err = gitMetadataDigest(w.Dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 1. An IGNORED nested repository still reaches structural classification.
+//
+// The ignored-path refusal exists so a candidate-controlled `.gitignore` cannot
+// decide what a runtime commit leaves out, and it errored before
+// classifyRuntimeDebris ever ran. A killed attempt's scratch is routinely both
+// ignored and a real repository, so recovery died on an ignore rule over a path
+// the classifier exists to exclude.
+func TestAnIgnoredNestedRepositoryIsClassifiedRatherThanRefused(t *testing.T) {
+	w := commitGateWorkspace(t)
+	writeCandidateGitignore(t, w, "scratch/")
+	scratch := workerTestScratchRepository(t, w.Dir, "scratch", true)
+	if err := os.WriteFile(filepath.Join(w.Dir, "README.md"), []byte("intended edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.Commit("runtime candidate", 1<<20)
+	if err != nil {
+		t.Fatalf("an ignored nested repository blocked recovery: %v", err)
+	}
+	if !contains(result.Excluded, scratch) {
+		t.Fatalf("the ignored nested repository was not excluded structurally: %q", result.Excluded)
+	}
+	if content, err := gitOutput(w.Dir, "show", "HEAD:README.md"); err != nil || strings.TrimSpace(content) != "intended edit" {
+		t.Fatalf("the candidate edit is not in the commit: %q %v", content, err)
+	}
+	if tree := commitTree(t, w); strings.Contains(tree, "scratch") || strings.Contains(tree, "160000") {
+		t.Fatalf("the ignored scratch entered the candidate tree: %q", tree)
+	}
+}
+
+// 1 (negative). An ignored ORDINARY file is still refused.
+//
+// This is what stops the exception becoming ".gitignore decides". The rule is
+// structural: being a Git repository is what earns exclusion, and being listed
+// in an ignore file earns nothing.
+func TestAnIgnoredOrdinaryCandidateFileIsStillRefused(t *testing.T) {
+	w := commitGateWorkspace(t)
+	writeCandidateGitignore(t, w, "ordinary-file.txt")
+	if err := os.WriteFile(filepath.Join(w.Dir, "ordinary-file.txt"), []byte("hidden\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "README.md"), []byte("intended edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("runtime candidate", 1<<20); err == nil {
+		t.Fatal("a candidate-controlled ignore rule removed an ordinary file from the runtime's view")
+	} else if !strings.Contains(err.Error(), "ignored candidate file") {
+		t.Fatalf("the refusal is not the ignored-file rule: %v", err)
+	}
+}
+
+// 2. A path the commit will not carry cannot veto the commit by its NAME.
+//
+// The sensitive-basename refusal is a statement about the object being
+// published. An inherited scratch repository called `.env` publishes no bytes,
+// so it is not a credential in the candidate - and letting it refuse the commit
+// is the #189 dead end wearing a different error message.
+func TestAnExcludedNestedRepositoryCannotVetoTheCommitByName(t *testing.T) {
+	w := commitGateWorkspace(t)
+	scratch := workerTestScratchRepository(t, w.Dir, ".env", true)
+	if err := os.WriteFile(filepath.Join(w.Dir, "README.md"), []byte("intended edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.Commit("runtime candidate", 1<<20)
+	if err != nil {
+		t.Fatalf("an excluded nested repository vetoed the commit by its name: %v", err)
+	}
+	if !contains(result.Excluded, scratch) {
+		t.Fatalf("the nested repository was not excluded: %q", result.Excluded)
+	}
+	if content, err := gitOutput(w.Dir, "show", "HEAD:README.md"); err != nil || strings.TrimSpace(content) != "intended edit" {
+		t.Fatalf("the candidate edit is not in the commit: %q %v", content, err)
+	}
+}
+
+// 2 (negative). An ELIGIBLE candidate file with the same name is still refused.
+//
+// Nothing about the credential boundary on candidate work is weakened; only the
+// subject of the question changed.
+func TestAnEligibleCredentialShapedPathIsStillRefused(t *testing.T) {
+	w := commitGateWorkspace(t)
+	workerTestScratchRepository(t, w.Dir, "scratch", true)
+	if err := os.WriteFile(filepath.Join(w.Dir, "id_rsa"), []byte("x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("runtime candidate", 1<<20); err == nil {
+		t.Fatal("a credential-shaped candidate file was committed")
+	} else if !strings.Contains(err.Error(), "sensitive candidate path") {
+		t.Fatalf("the refusal is not the sensitive-path gate: %v", err)
+	}
+}
+
+// 2 (size). The candidate size ceiling is charged for what the commit carries.
+//
+// The scale is worth being honest about: a nested repository contributes only
+// its own directory entry, because Git never descends into one, so the 64 KiB
+// underneath it here were never charged even before the split. What changed is
+// the SUBJECT of the ceiling, and the ceiling below is derived from the fixture
+// so that the change is observable rather than asserted.
+func TestTheCandidateSizeCeilingCountsOnlyWhatTheCommitCarries(t *testing.T) {
+	w := commitGateWorkspace(t)
+	scratch := workerTestScratchRepository(t, w.Dir, "scratch", true)
+	if err := os.WriteFile(filepath.Join(w.Dir, filepath.FromSlash(scratch), "bulk.bin"), make([]byte, 1<<16), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "README.md"), []byte("small\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A ceiling of one byte: the excluded directory entry alone exceeds it on
+	// any filesystem, so the two subjects give opposite answers.
+	if err := GuardCandidateCommitContent(w.Dir, []string{scratch + "/"}, 1); err == nil {
+		t.Fatal("the fixture does not distinguish the two subjects")
+	}
+	if err := GuardCandidateCommitContent(w.Dir, []string{"README.md"}, 1<<20); err != nil {
+		t.Fatalf("an eligible path was refused by the ceiling it fits under: %v", err)
+	}
+	// A ceiling derived from the fixture rather than guessed: it admits the
+	// eligible file and would not admit it plus the excluded directory entry,
+	// on any filesystem, so this half fails if the subject regresses.
+	readme, err := os.Lstat(filepath.Join(w.Dir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Lstat(filepath.Join(w.Dir, filepath.FromSlash(scratch)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("runtime candidate", readme.Size()+dir.Size()-1); err != nil {
+		t.Fatalf("excluded scratch was charged to the candidate size ceiling: %v", err)
+	}
+	// The same ceiling, against a file the commit does carry.
+	oversized := commitGateWorkspace(t)
+	workerTestScratchRepository(t, oversized.Dir, "scratch", true)
+	if err := os.WriteFile(filepath.Join(oversized.Dir, "bulk.bin"), make([]byte, 1<<16), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oversized.Commit("runtime candidate", 4096); err == nil {
+		t.Fatal("an oversized eligible candidate file was committed")
+	} else if !strings.Contains(err.Error(), "candidate exceeds size ceiling") {
+		t.Fatalf("the refusal is not the size ceiling: %v", err)
+	}
+}
+
+// 2 (content). The credential-value scan asks about what the commit carries.
+//
+// Today that is a consistency change rather than a behaviour change, and the
+// test says so rather than implying more: the scan reads regular files, a
+// nested repository is a directory Git does not descend into, so a value
+// underneath one never reached the scan and never reaches the tree either. What
+// is asserted is the part that matters - the boundary on candidate work is
+// unchanged, and excluded scratch neither refuses the commit nor enters it.
+func TestTheCredentialValueScanAsksAboutWhatTheCommitCarries(t *testing.T) {
+	const secret = "github_pat_11ABCDEFG0aaaaaaaaaaaa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	w := commitGateWorkspace(t)
+	scratch := workerTestScratchRepository(t, w.Dir, "scratch", true)
+	if err := os.WriteFile(filepath.Join(w.Dir, filepath.FromSlash(scratch), "leaked.txt"), []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "README.md"), []byte("intended edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("runtime candidate", 1<<20); err != nil {
+		t.Fatalf("a value inside excluded scratch refused the candidate commit: %v", err)
+	}
+	if _, err := gitOutput(w.Dir, "show", "HEAD:"+scratch+"/leaked.txt"); err == nil {
+		t.Fatal("the excluded scratch reached the tree, so unscanned bytes were published")
+	}
+	// The scan itself is unchanged, and still refuses the value wherever it is
+	// asked about a regular file.
+	if err := scanPathsForCredentialValues(w.Dir, []string{scratch + "/leaked.txt"}); err == nil {
+		t.Fatal("the credential scan stopped recognizing a value")
+	}
+	// And the same bytes in candidate work are refused by the commit.
+	leaking := commitGateWorkspace(t)
+	workerTestScratchRepository(t, leaking.Dir, "scratch", true)
+	if err := os.WriteFile(filepath.Join(leaking.Dir, "config.go"), []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leaking.Commit("runtime candidate", 1<<20); err == nil {
+		t.Fatal("a credential value in candidate work was committed")
+	}
+}
+
+// 4 (commit side). More debris than one journal payload may carry is refused
+// BEFORE a commit is written, because the alternative is a commit whose own
+// event cannot be recorded.
+func TestMoreExcludedPathsThanThePayloadBoundRefuseBeforeTheCommit(t *testing.T) {
+	w := commitGateWorkspace(t)
+	for i := 0; i <= maxPayloadListItems; i++ {
+		workerTestScratchRepository(t, w.Dir, filepath.Join("scratch", "repo-"+strconv.Itoa(i)), true)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "README.md"), []byte("intended edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = w.Commit("runtime candidate", 1<<20)
+	if err == nil {
+		t.Fatal("more excluded paths than the payload bound were recorded anyway")
+	}
+	if !strings.Contains(err.Error(), "excluded_paths") || !strings.Contains(err.Error(), "scratch/repo-0") {
+		t.Fatalf("the refusal does not name the bound and the paths: %v", err)
+	}
+	after, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(after) != strings.TrimSpace(before) {
+		t.Fatal("the runtime wrote a commit whose own event it could not journal")
+	}
+}
+
+// 4 (schema side). `excluded_paths` is durable journal content, so the payload
+// contract bounds it like every other list: a valid set is accepted, and an
+// over-long or over-full one is REFUSED rather than truncated or digested.
+//
+// Both event types carry the same payload, and a checkpoint is a real
+// runtime-owned commit, so both are asserted.
+func TestExcludedPathsAreBoundedInTheDurablePayload(t *testing.T) {
+	base := CandidateCommittedPayload{
+		Commit: "c", Tree: "t", PathCount: 1, PathsDigest: "d",
+	}
+	many := make([]string, maxPayloadListItems+1)
+	for i := range many {
+		many[i] = "scratch/repo-" + strconv.Itoa(i)
+	}
+	for _, event := range []string{EventCandidateCommitted, EventCandidateCheckpointed} {
+		validate, ok := eventPayloads[event]
+		if !ok {
+			t.Fatalf("%s has no payload schema", event)
+		}
+		for _, c := range []struct {
+			name    string
+			paths   []string
+			refused bool
+		}{
+			{"none", nil, false},
+			{"a valid set", []string{".validation-tmp/assurance/0077b658-1", "t/fixture-origin"}, false},
+			{"too many", many, true},
+			{"an overlong path", []string{strings.Repeat("a", maxPayloadListItemBytes+1)}, true},
+		} {
+			t.Run(event+"/"+c.name, func(t *testing.T) {
+				payload := base
+				payload.ExcludedPaths = c.paths
+				encoded, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = validate(encoded)
+				if c.refused && err == nil {
+					t.Fatal("an unbounded excluded_paths list was accepted into durable state")
+				}
+				if !c.refused && err != nil {
+					t.Fatalf("a bounded excluded_paths list was refused: %v", err)
+				}
+				if c.refused && !strings.Contains(err.Error(), "excluded_paths") {
+					t.Fatalf("the refusal does not name the field: %v", err)
+				}
+			})
+		}
 	}
 }

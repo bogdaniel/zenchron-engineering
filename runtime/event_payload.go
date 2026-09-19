@@ -82,7 +82,12 @@ var eventPayloads = map[string]payloadValidator{
 			required("commit", p.Commit),
 			required("tree", p.Tree),
 			nonNegative("path_count", p.PathCount),
-			required("paths_digest", p.PathsDigest))
+			required("paths_digest", p.PathsDigest),
+			// The excluded paths are carried WHOLE, so they are bounded like
+			// every other payload list rather than truncated or digested: a
+			// record of which paths a commit left behind is worth nothing if it
+			// is allowed to be a partial one.
+			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
 	// A checkpoint carries the same identity a commit does: it IS a real
 	// runtime-owned commit, and the difference is what it means, not what it
@@ -92,7 +97,8 @@ var eventPayloads = map[string]payloadValidator{
 			required("commit", p.Commit),
 			required("tree", p.Tree),
 			nonNegative("path_count", p.PathCount),
-			required("paths_digest", p.PathsDigest))
+			required("paths_digest", p.PathsDigest),
+			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
@@ -364,8 +370,12 @@ type CandidateCommittedPayload struct {
 	// not carry. It is the durable half of the #189 ownership decision: a
 	// crashed run's inherited scratch is left out of the tree deliberately,
 	// and an operator reading the journal has to be able to see WHICH paths
-	// rather than infer them from a path count that does not add up. It is
-	// bounded like every other payload list.
+	// rather than infer them from a path count that does not add up.
+	//
+	// It is bounded like every other payload list, and it is never truncated to
+	// fit: a workspace holding more debris than one payload may carry is
+	// refused at the commit gate, so this list is always the whole of the
+	// decision or there is no commit to describe.
 	ExcludedPaths []string `json:"excluded_paths,omitempty"`
 }
 

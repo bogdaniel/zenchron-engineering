@@ -313,6 +313,25 @@ from a `.gitignore`, a scratch-looking name, or anything a provider reports. The
 same rule decides whether the candidate changed at all, so scratch alone is not
 a change.
 
+An ignored candidate file is still refused outright — a candidate-controlled
+`.gitignore` does not decide what a runtime commit leaves out. The one exception
+is structural and grants the ignore file nothing: an ignored path that is itself
+a nested Git repository is classified as debris and excluded, exactly as the
+same path would be if nothing ignored it. Without that, a killed attempt's
+scratch — routinely both ignored and a real repository — blocked recovery on an
+ignore rule.
+
+The commit gates follow the same ownership split. Path normalization, traversal
+refusal and symlink safety apply to every path the workspace reported, because
+the runtime stats all of them. The credential-shaped-name refusal, the candidate
+size ceiling and the credential-value scan apply to the paths the commit will
+carry, because they are statements about the object being published; an excluded
+scratch repository therefore cannot veto a valid candidate commit, and nothing
+about those gates changes for candidate work. Excluded paths are recorded whole
+and bounded by the ordinary payload list contract — never truncated, never
+replaced by a digest — so a workspace holding more debris than one payload can
+carry is refused before a commit is written rather than after.
+
 Exclusion is an index write and never a worktree write. The directory stays on
 disk exactly as the producer left it — nothing is reset, cleaned, or deleted —
 so it is still dirty after a successful commit, and that residue is expected.

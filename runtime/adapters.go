@@ -510,28 +510,71 @@ type EvidenceBinding struct {
 // ScanCandidateForCredentialValues before a producer is admitted,
 // RedactCredentialValues on every model-visible tool result, and the commit
 // gate in CandidateWorkspace.Commit. See credential_boundary.go.
+//
+// It is the COMPOSITION of the two halves below, for a caller whose observed
+// paths are exactly the paths it is about to commit - a brokered tool write is
+// one, because the one path it names is the one path it writes. A caller that
+// observes more than it commits must ask the two halves separately, so that a
+// path it has already decided not to commit cannot veto the paths it does. See
+// CandidateWorkspace.Commit.
 func GuardCandidate(root string, paths []string, maxBytes int64) error {
+	if err := GuardCandidatePathShape(root, paths); err != nil {
+		return err
+	}
+	return GuardCandidateCommitContent(root, paths, maxBytes)
+}
+
+// GuardCandidatePathShape is the half that protects the RUNTIME from a path,
+// and it applies to every path the workspace reported.
+//
+// Normalization, traversal, absolute paths and symlinked leaves are questions
+// about what the runtime is about to touch on this filesystem - it joins these
+// names onto the workspace root and stats them - so they are asked about
+// anything observed, committed or not.
+func GuardCandidatePathShape(root string, paths []string) error {
+	for _, p := range paths {
+		normalized, err := normalizedCandidatePath(p)
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink candidate path %q", normalized)
+		}
+	}
+	return nil
+}
+
+// GuardCandidateCommitContent is the half that protects the COMMIT, and it
+// applies only to the paths that will be in it.
+//
+// The sensitive-name refusal and the size ceiling are both statements about the
+// object the runtime is about to publish. Asking them of a path the runtime has
+// already decided it cannot carry lets that path veto a commit it is not in:
+// an inherited scratch repository called `.env` is not a credential in the
+// candidate, and its bytes are not candidate bytes, because neither reaches the
+// tree. The gates are unchanged for everything that does reach it.
+func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
 	var total int64
 	for _, p := range paths {
-		normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{p}, PathsKnown: true})
-		if err != nil || filepath.IsAbs(p) || len(normalized.Paths) != 1 {
-			return fmt.Errorf("unsafe candidate path %q", p)
+		normalized, err := normalizedCandidatePath(p)
+		if err != nil {
+			return err
 		}
-		p = normalized.Paths[0]
 		// Credential-file SHAPES, not substrings. The predicate here used to
 		// match "secret", "private" and "credential" anywhere in a base name,
 		// which made secret_scanner.go, private_key_parser.go and
 		// credential_policy.go permanently unopenable by the engineering
 		// system that has to maintain them.
-		if sensitiveCredentialFilename(filepath.Base(p)) {
-			return fmt.Errorf("sensitive candidate path %q", p)
+		if sensitiveCredentialFilename(filepath.Base(normalized)) {
+			return fmt.Errorf("sensitive candidate path %q", normalized)
 		}
-		info, err := os.Lstat(filepath.Join(root, p))
+		info, err := os.Lstat(filepath.Join(root, normalized))
 		if err != nil {
 			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink candidate path %q", p)
 		}
 		total += info.Size()
 		if maxBytes > 0 && total > maxBytes {
@@ -539,6 +582,14 @@ func GuardCandidate(root string, paths []string, maxBytes int64) error {
 		}
 	}
 	return nil
+}
+
+func normalizedCandidatePath(p string) (string, error) {
+	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{p}, PathsKnown: true})
+	if err != nil || filepath.IsAbs(p) || len(normalized.Paths) != 1 {
+		return "", fmt.Errorf("unsafe candidate path %q", p)
+	}
+	return normalized.Paths[0], nil
 }
 
 // VerificationSurfaceChanged identifies candidate-controlled verifier inputs.

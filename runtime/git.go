@@ -324,7 +324,9 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if len(paths) == 0 {
 		return CommitResult{}, fmt.Errorf("candidate has no changes")
 	}
-	if err := GuardCandidate(w.Dir, paths, maxBytes); err != nil {
+	// THE FILESYSTEM GATE COVERS EVERY OBSERVED PATH, because the runtime is
+	// about to join all of them onto the workspace root and stat them.
+	if err := GuardCandidatePathShape(w.Dir, paths); err != nil {
 		return CommitResult{}, err
 	}
 	// After the path gate, so what is joined onto the workspace root here has
@@ -334,15 +336,6 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return CommitResult{}, err
 	}
 	eligible := withoutPaths(paths, debris.Excluded)
-	// The OUTPUT half of the credential boundary. Admission proved the
-	// workspace was clean before the producer was shown it; this proves the
-	// producer did not introduce a credential value into what is about to
-	// become a runtime-owned commit. A value found here is REFUSED, not
-	// redacted and not ignored: redacting it would commit a rewritten version
-	// of the producer's work, and ignoring it would publish the secret.
-	if err := scanPathsForCredentialValues(w.Dir, paths); err != nil {
-		return CommitResult{}, err
-	}
 	// NOTHING BUT DEBRIS IS NOT A CANDIDATE. Committing here would mint an
 	// empty-tree commit in the name of work nobody did; the workspace is
 	// answered for exactly as an unchanged one is, and the paths that were
@@ -350,6 +343,38 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// happened".
 	if len(eligible) == 0 {
 		return CommitResult{}, fmt.Errorf("candidate holds no change a runtime commit can carry, only runtime-owned scratch: %s", quotedPaths(debris.Excluded))
+	}
+	// THE EXCLUSION HAS TO FIT IN THE RECORD OF IT. Every excluded path is
+	// journalled in full - not truncated, not digested - so a workspace whose
+	// debris exceeds what one payload may carry is refused HERE, before a
+	// commit is written, rather than after: minting a commit whose own event
+	// cannot be journalled is how #191's abandoned commit moved HEAD out from
+	// under the recorded-revision check.
+	//
+	// It is the SAME bound the event schema applies, called through the same
+	// function, so the gate and the schema cannot drift into disagreeing about
+	// what is recordable. It is a deliberate ceiling, and it names every path.
+	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
+		return CommitResult{}, fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded))
+	}
+	// THE COMMIT GATES COVER WHAT THE COMMIT WILL HOLD, and nothing else. A
+	// sensitive-looking basename and the size ceiling are both statements about
+	// the object being published, so a path already excluded from it cannot
+	// veto it.
+	if err := GuardCandidateCommitContent(w.Dir, eligible, maxBytes); err != nil {
+		return CommitResult{}, err
+	}
+	// The OUTPUT half of the credential boundary. Admission proved the
+	// workspace was clean before the producer was shown it; this proves the
+	// producer did not introduce a credential value into what is about to
+	// become a runtime-owned commit. A value found here is REFUSED, not
+	// redacted and not ignored: redacting it would commit a rewritten version
+	// of the producer's work, and ignoring it would publish the secret. It asks
+	// about the eligible paths for the same reason the gates above do - the
+	// bytes of an excluded path are not bytes this commit publishes - and
+	// nothing about the check on candidate work is weakened.
+	if err := scanPathsForCredentialValues(w.Dir, eligible); err != nil {
+		return CommitResult{}, err
 	}
 	// THE EXCLUSION IS AN INDEX WRITE, NEVER A WORKTREE WRITE.
 	//
@@ -494,14 +519,10 @@ type runtimeDebris struct{ Excluded, Unlink []string }
 // submodule's content to assurance either.
 func classifyRuntimeDebris(dir string, paths []string) (runtimeDebris, error) {
 	excluded, unlink := map[string]bool{}, map[string]bool{}
-	nested := func(p string) bool {
-		_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p), ".git"))
-		return err == nil
-	}
 	for _, p := range paths {
 		// Git reports an untracked nested repository as a directory, trailing
 		// separator and all, because it does not descend into one.
-		if p = strings.TrimSuffix(p, "/"); nested(p) {
+		if p = strings.TrimSuffix(p, "/"); isNestedRepository(dir, p) {
 			excluded[p] = true
 		}
 	}
@@ -526,11 +547,20 @@ func classifyRuntimeDebris(dir string, paths []string) (runtimeDebris, error) {
 			continue
 		}
 		unlink[p] = true
-		if nested(p) {
+		if isNestedRepository(dir, p) {
 			excluded[p] = true
 		}
 	}
 	return runtimeDebris{Excluded: sortedPathSet(excluded), Unlink: sortedPathSet(unlink)}, nil
+}
+
+// isNestedRepository is the whole of the structural test, in one place because
+// two callers must agree on it: a workspace path that holds its own `.git` is a
+// repository whose content no tree this runtime owns can carry. Nothing about
+// the path's SPELLING participates.
+func isNestedRepository(dir, p string) bool {
+	_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p), ".git"))
+	return err == nil
 }
 
 func sortedPathSet(set map[string]bool) []string {
@@ -636,6 +666,26 @@ func statusPaths(dir string, refuseIgnored bool) ([]string, error) {
 			continue
 		}
 		if strings.HasPrefix(rec, "!! ") {
+			// AN IGNORED PATH IS REFUSED, AND A NESTED REPOSITORY IS NOT AN
+			// IGNORED PATH - it is debris the runtime can classify.
+			//
+			// The refusal exists so a candidate-controlled `.gitignore` cannot
+			// decide what a runtime commit leaves out, and it stays exactly
+			// that strict for ordinary files. But a killed attempt's scratch is
+			// routinely BOTH ignored and a real Git repository, and erroring
+			// here meant it never reached classifyRuntimeDebris at all: the
+			// structural exclusion #189 exists for could not run, and recovery
+			// died on an ignore rule.
+			//
+			// The exception is structural and grants the ignore file nothing.
+			// A path that is its own Git repository is excluded whether it is
+			// ignored or not, so `.gitignore` cannot move anything from one
+			// side of the decision to the other; it can only decide whether the
+			// runtime is allowed to SEE a path it would have excluded anyway.
+			if p := strings.TrimSuffix(rec[3:], "/"); isNestedRepository(dir, p) {
+				paths = append(paths, rec[3:])
+				continue
+			}
 			return nil, fmt.Errorf("ignored candidate file %q", rec[3:])
 		}
 		if len(rec) < 4 {
