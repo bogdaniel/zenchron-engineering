@@ -299,5 +299,23 @@ including ignored and untracked source. Scratch is outside that subject and
 outside the Git worktree used for commits, changed-path evidence, and
 reassessment. There are no cache-name or Git-ignore exemptions: source under
 `.test-cache` or `.work-cache` receives the same fail-closed checks as any other
-source. Oversized candidate files remain inconclusive and refused. Existing
-nested-repository and gitlink checks still apply before a runtime commit.
+source. Oversized candidate files remain inconclusive and refused.
+
+A runtime commit carries engineering work, never a path Git cannot hold content
+for. A nested Git repository under the candidate workspace — the kind a killed
+attempt's own `go test` run leaves behind when recovery reuses the workspace —
+is recorded by `git add -A` as a gitlink naming a commit that exists only inside
+that nested repository, so no tree the runtime owns holds its files. Such a path
+is excluded from the commit and named in full in the `candidate.committed`
+journal entry (`excluded_paths`) and in the operation record. The determination
+is structural and runtime-owned: it comes from the workspace and the index, not
+from a `.gitignore`, a scratch-looking name, or anything a provider reports. The
+same rule decides whether the candidate changed at all, so scratch alone is not
+a change.
+
+Exclusion is an index write and never a worktree write. The directory stays on
+disk exactly as the producer left it — nothing is reset, cleaned, or deleted —
+so it is still dirty after a successful commit, and that residue is expected.
+Because the runtime knows which paths it excluded, that residue cannot fail the
+post-commit cleanliness check; anything else still dirty does, and the message
+names the paths.
