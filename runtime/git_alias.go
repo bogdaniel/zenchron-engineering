@@ -192,30 +192,32 @@ func refusedGitGlobal(args []string) (string, string, bool) {
 // The signing keys are here and the signing PROGRAM is not, which is the
 // distinction the whole list turns on: `commit.gpgsign=false` chooses whether
 // to sign, and `gpg.program` chooses what to execute.
+// WHAT IS NOT HERE, AND WHY, because the exclusions are the law:
+//
+//   - gc.auto and maintenance.auto. They read as "turn the background work
+//     off", and `gc.auto=0` is exactly what a tool sets - but the key is
+//     classified for EVERY value, and `gc.auto=1` asks Git to run automatic
+//     housekeeping that repacks objects and expires reflogs inside a workspace
+//     whose metadata the runtime holds a digest of. Being unable to prove a
+//     side effect impossible is the same answer as knowing it is possible.
+//
+//   - a whole `advice.` section. Allowing a section by prefix is the opposite
+//     of an allowlist: an advice key added by a future Git would arrive
+//     permitted without anybody having looked at it. No `advice.` key appears
+//     in the observed provider argv either, so listing one would be inventing
+//     a requirement.
+//
+// The list grows by evidence and review, one key at a time, and a refusal names
+// the key precisely so that growing it is a decision somebody can make.
 var inertGitConfigKeys = map[string]bool{
 	"commit.gpgsign": true, "tag.gpgsign": true, "log.showsignature": true,
 	"core.quotepath": true, "core.abbrev": true, "core.checkstat": true,
 	"core.trustctime": true, "core.precomposeunicode": true,
-	"gc.auto": true, "maintenance.auto": true,
 	"log.date": true, "color.ui": true,
 }
 
-// inertGitConfigSections are whole sections whose every key is inert. `advice.`
-// is the only one: every key under it is a boolean that turns one of Git's
-// hints on or off, and a hint cannot execute, redirect or authorize anything.
-var inertGitConfigSections = []string{"advice."}
-
 func inertGitConfigKey(key string) bool {
-	key = strings.ToLower(key)
-	if inertGitConfigKeys[key] {
-		return true
-	}
-	for _, section := range inertGitConfigSections {
-		if strings.HasPrefix(key, section) && strings.Count(key, ".") == 1 {
-			return true
-		}
-	}
-	return false
+	return inertGitConfigKeys[strings.ToLower(key)]
 }
 
 // gitConfigOverrideRefusal reports the first `-c` or `--config-env` key this

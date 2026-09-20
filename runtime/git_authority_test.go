@@ -905,14 +905,12 @@ func TestBenignConfigOverridesReachTheirVerb(t *testing.T) {
 	for name, argv := range map[string][]string{
 		"log behind a signing toggle": {"-c", "log.showSignature=false", "log", "-1", "--format=%H:%ct"},
 		"ls-files behind quotepath":   {"-c", "core.quotepath=false", "ls-files", "--error-unmatch", "--", "go.mod"},
-		"status behind gc.auto":       {"-c", "gc.auto=0", "status", "--porcelain"},
-		"advice is a whole section":   {"-c", "advice.detachedHead=false", "status"},
 		// Both spellings of the option, and the keyless `-c key` shorthand.
 		"separated key and value": {"-c", "core.abbrev=12", "log", "-1"},
 		"config-env joined":       {"--config-env=color.ui=ZC_COLOR", "status"},
 		"config-env separated":    {"--config-env", "core.quotepath=ZC_QUOTE", "status"},
-		"bare key means true":     {"-c", "advice.addEmbeddedRepo", "status"},
-		"several overrides":       {"-c", "gc.auto=0", "-c", "core.quotepath=false", "status"},
+		"bare key means true":     {"-c", "commit.gpgsign", "status"},
+		"several overrides":       {"-c", "core.abbrev=12", "-c", "core.quotepath=false", "status"},
 		// Case-insensitive, as Git's own key matching is.
 		"mixed case key": {"-c", "Core.QuotePath=false", "status"},
 	} {
@@ -961,6 +959,17 @@ func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
 		// An unknown key is refused because it is unknown, not because it is
 		// recognized as dangerous. That is the direction the list has to fail.
 		"a key nobody has reasoned about": {[]string{"-c", "zenchron.invented=1", "status"}, "zenchron.invented"},
+		// REMOVED FROM THE INERT LIST AFTER REVIEW. `gc.auto=0` reads as
+		// turning background work off, but the key is classified for every
+		// value and `gc.auto=1` asks Git to repack objects and expire reflogs
+		// inside a workspace whose metadata the runtime holds a digest of.
+		"automatic gc":          {[]string{"-c", "gc.auto=0", "status"}, "gc.auto"},
+		"automatic maintenance": {[]string{"-c", "maintenance.auto=0", "status"}, "maintenance.auto"},
+		// A SECTION IS NOT AN ALLOWLIST. Permitting `advice.` by prefix would
+		// admit an advice key a future Git adds, without anybody having looked
+		// at it - and no advice key appears in the observed provider argv.
+		"an advice key":        {[]string{"-c", "advice.detachedHead=false", "status"}, "advice.detachedHead"},
+		"an unseen advice key": {[]string{"-c", "advice.somethingNew=false", "status"}, "advice.somethingNew"},
 		// The same key arriving by the other spelling.
 		"config-env redirect": {[]string{"--config-env=core.pager=EVIL", "log"}, "core.pager"},
 		// An override with nothing to override cannot be resolved either.
@@ -992,12 +1001,12 @@ func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
 // failed: accepting the override must not accept the verb behind it.
 func TestDestructiveCommandsBehindABenignOverrideAreStillRefused(t *testing.T) {
 	for name, argv := range map[string][]string{
-		"reset":    {"-c", "gc.auto=0", "reset", "--hard"},
-		"clean":    {"-c", "gc.auto=0", "clean", "-fd"},
+		"reset":    {"-c", "color.ui=never", "reset", "--hard"},
+		"clean":    {"-c", "core.quotepath=false", "clean", "-fd"},
 		"clean x":  {"-c", "core.quotepath=false", "clean", "-fdx"},
 		"checkout": {"-c", "advice.detachedHead=false", "checkout", "--", "implementation.go"},
 		"restore":  {"-c", "log.date=iso", "restore", "."},
-		"stash":    {"-c", "gc.auto=0", "stash", "push"},
+		"stash":    {"-c", "core.abbrev=12", "stash", "push"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if class, _ := ClassifyGitCommand(argv); class != GitOperationDiscard {
@@ -1047,5 +1056,63 @@ func TestARuntimeOwnedRefusalNamesThePermittedNextAction(t *testing.T) {
 	refusals, err := ReadGitRefusals(refusalLog)
 	if err != nil || len(refusals) != 1 {
 		t.Fatalf("the refusal was not recorded: %v %#v", err, refusals)
+	}
+}
+
+// TestRefCreationIsRuntimeOwnedAndRefReadingIsNot is the third review blocker
+// on #248.
+//
+// The runtime-owned diagnostic tells a provider not to create "commits,
+// branches or tags", and only the commit half was enforced: `checkout -b` and
+// `switch -c` were already refused as worktree-replacing, which left the direct
+// spellings as the way around a law the refusal was stating anyway. The trusted
+// provider instructions have always said Git metadata belongs to the runtime.
+//
+// The reading forms must stay permitted. Refusing `git branch --show-current`
+// would rebuild, one verb along, exactly the trap #248 exists to remove.
+func TestRefCreationIsRuntimeOwnedAndRefReadingIsNot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		argv []string
+		want GitOperationClass
+	}{
+		// Writing.
+		"create a branch":      {[]string{"branch", "feature"}, GitOperationRuntimeOwned},
+		"create from a commit": {[]string{"branch", "feature", "HEAD~1"}, GitOperationRuntimeOwned},
+		"delete a branch":      {[]string{"branch", "-D", "feature"}, GitOperationRuntimeOwned},
+		"rename a branch":      {[]string{"branch", "-m", "old", "new"}, GitOperationRuntimeOwned},
+		"set upstream":         {[]string{"branch", "--set-upstream-to", "origin/main"}, GitOperationRuntimeOwned},
+		"create a tag":         {[]string{"tag", "v1.0.0"}, GitOperationRuntimeOwned},
+		"annotated tag":        {[]string{"tag", "-a", "v1", "-m", "release"}, GitOperationRuntimeOwned},
+		"delete a tag":         {[]string{"tag", "-d", "v1"}, GitOperationRuntimeOwned},
+		"write a ref":          {[]string{"update-ref", "refs/heads/x", "HEAD"}, GitOperationRuntimeOwned},
+		"delete a ref":         {[]string{"update-ref", "-d", "refs/heads/x"}, GitOperationRuntimeOwned},
+		"behind a benign -c":   {[]string{"-c", "color.ui=never", "branch", "feature"}, GitOperationRuntimeOwned},
+		"after the separator":  {[]string{"branch", "--", "feature"}, GitOperationRuntimeOwned},
+
+		// Reading. Every one of these answers a question a worker legitimately
+		// has, and several carry an operand that is a revision or a pattern
+		// rather than a name.
+		"list branches":        {[]string{"branch"}, GitOperationPermitted},
+		"list all branches":    {[]string{"branch", "-a"}, GitOperationPermitted},
+		"verbose list":         {[]string{"branch", "-vv"}, GitOperationPermitted},
+		"current branch":       {[]string{"branch", "--show-current"}, GitOperationPermitted},
+		"branches containing":  {[]string{"branch", "--contains", "HEAD"}, GitOperationPermitted},
+		"branches merged":      {[]string{"branch", "--merged", "origin/main"}, GitOperationPermitted},
+		"formatted list":       {[]string{"branch", "--format=%(refname)"}, GitOperationPermitted},
+		"list tags":            {[]string{"tag"}, GitOperationPermitted},
+		"tag pattern":          {[]string{"tag", "-l", "v*"}, GitOperationPermitted},
+		"tags pointing at":     {[]string{"tag", "--points-at", "HEAD"}, GitOperationPermitted},
+		"for-each-ref is read": {[]string{"for-each-ref", "refs/heads"}, GitOperationPermitted},
+		"rev-parse is read":    {[]string{"rev-parse", "HEAD"}, GitOperationPermitted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, reason := ClassifyGitCommand(tc.argv)
+			if got != tc.want {
+				t.Fatalf("classified %v as %q, want %q", tc.argv, got, tc.want)
+			}
+			if got != GitOperationPermitted && strings.TrimSpace(reason) == "" {
+				t.Fatalf("a refusal of %v carries no reason", tc.argv)
+			}
+		})
 	}
 }

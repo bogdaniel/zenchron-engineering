@@ -142,9 +142,99 @@ func ClassifyGitCommand(args []string) (GitOperationClass, string) {
 	// and the work is safe where it is.
 	case "commit", "commit-tree":
 		return GitOperationRuntimeOwned, "creating a candidate commit is the runtime's, not the provider's"
+	// REFS ARE THE RUNTIME'S TOO. The trusted provider instructions already say
+	// so - "Do not create commits, branches, tags, remotes, or any other Git
+	// metadata" - and until now only the commit half was enforced, so the
+	// refusal was promising something the classifier did not deliver.
+	//
+	// `checkout -b` and `switch -c` are already refused as worktree-replacing,
+	// which left the direct spellings as the way around a law that was being
+	// stated anyway.
+	//
+	// The READING forms stay permitted, and that distinction is the whole
+	// point of #248: `git branch --show-current` and `git tag -l` answer
+	// questions a worker legitimately has, and refusing them would rebuild the
+	// trap this change exists to remove.
+	case "branch":
+		if namesANewRef(rest, branchReadValueFlags, branchWritingFlags) {
+			return GitOperationRuntimeOwned, "candidate branches are the runtime's, not the provider's"
+		}
+	case "tag":
+		// -l/--list takes an optional PATTERN, so an operand beside it is a
+		// filter rather than a tag name.
+		if !hasAnyFlag(rest, "-l", "--list") && namesANewRef(rest, tagReadValueFlags, tagWritingFlags) {
+			return GitOperationRuntimeOwned, "candidate tags are the runtime's, not the provider's"
+		}
+	// update-ref has no reading form at all: every invocation writes or deletes
+	// a ref, so there is no distinction to draw.
+	case "update-ref":
+		return GitOperationRuntimeOwned, "candidate refs are the runtime's, not the provider's"
 	}
 	return GitOperationPermitted, ""
 }
+
+// namesANewRef reports whether a `branch` or `tag` invocation would CREATE or
+// CHANGE a ref rather than report on one.
+//
+// It is argv-only, like everything else here. A writing flag settles it; so
+// does a bare operand once the flags that legitimately carry a value have been
+// consumed, because the operand a reading form leaves behind is a pattern or a
+// revision and the operand a writing form leaves behind is the ref's name.
+//
+// The value-carrying reading flags are enumerated rather than guessed, because
+// `git branch --contains HEAD` has an operand and is a read: treating every
+// operand as a name would refuse exactly the questions a worker is entitled to
+// ask, which is the failure this whole change is undoing.
+func namesANewRef(rest []string, readValueFlags map[string]bool, writingFlags []string) bool {
+	if hasAnyFlag(rest, writingFlags...) {
+		return true
+	}
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		if arg == "--" {
+			// Everything after the separator is an operand, and for these two
+			// verbs an operand is a ref name.
+			return i+1 < len(rest)
+		}
+		if strings.HasPrefix(arg, "-") {
+			if name, _, joined := strings.Cut(arg, "="); joined {
+				_ = name
+				continue
+			}
+			if readValueFlags[arg] && i+1 < len(rest) {
+				i++
+			}
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+var (
+	branchReadValueFlags = map[string]bool{
+		"--contains": true, "--no-contains": true, "--merged": true,
+		"--no-merged": true, "--points-at": true, "--format": true,
+		"--sort": true, "--color": true, "--abbrev": true,
+	}
+	// Creating, renaming, copying, deleting, or repointing a branch.
+	branchWritingFlags = []string{
+		"-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
+		"-f", "--force", "-u", "--set-upstream-to", "--unset-upstream",
+		"--edit-description",
+	}
+	tagReadValueFlags = map[string]bool{
+		"--contains": true, "--no-contains": true, "--merged": true,
+		"--no-merged": true, "--points-at": true, "--format": true,
+		"--sort": true, "--color": true,
+	}
+	// Creating, signing, annotating, replacing, or deleting a tag.
+	tagWritingFlags = []string{
+		"-a", "--annotate", "-s", "--sign", "-u", "--local-user",
+		"-m", "--message", "-F", "--file", "-d", "--delete",
+		"-f", "--force", "-e", "--edit",
+	}
+)
 
 // gitVerb finds the subcommand, skipping Git's global options.
 //
