@@ -616,6 +616,7 @@ func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
 		}
 	}
 	root := moduleRoot(t)
+	requireTrackedSource(t, root)
 	candidate, tracked := materializeTrackedSource(t, root)
 	if len(tracked) == 0 {
 		t.Fatal("no tracked source was materialized, so this test asked nothing")
@@ -649,6 +650,83 @@ func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
 // symlink's target is either inside the tree - where it is materialized on its
 // own - or outside it, where it is not candidate content. This is the same
 // distinction ScanCandidateForCredentialValues draws.
+// trackedSourceProbe is what asking Git for the repository answered. It is
+// three outcomes rather than two because "Git did not answer" is not one
+// condition: an absent repository is a place where the question has no meaning,
+// and everything else is a repository that exists and would not answer.
+type trackedSourceProbe int
+
+const (
+	// trackedSourceAvailable: a repository answered, so the guard can run.
+	trackedSourceAvailable trackedSourceProbe = iota
+	// trackedSourceNoRepository: there is no repository here at all.
+	trackedSourceNoRepository
+	// trackedSourceUnavailable: Git failed for some other reason - metadata it
+	// refuses to read, a missing program, a broken invocation.
+	trackedSourceUnavailable
+)
+
+// classifyTrackedSourceProbe decides which of the three a Git failure was.
+//
+// It is a pure function of the exit and the diagnostic so the taxonomy is a
+// table a reader can check, and so the arm that must NOT skip is testable
+// without breaking a real repository to produce it.
+//
+// Only Git's own "not a git repository" earns the skip. Dubious ownership, an
+// unreadable object store, a missing `git` - each of those is a repository that
+// exists and will not answer, or an environment that cannot ask, and skipping
+// on them is how a guard silently stops guarding.
+func classifyTrackedSourceProbe(err error, diagnostic string) trackedSourceProbe {
+	if err == nil {
+		return trackedSourceAvailable
+	}
+	if strings.Contains(diagnostic, "not a git repository") {
+		return trackedSourceNoRepository
+	}
+	return trackedSourceUnavailable
+}
+
+// requireTrackedSource skips a test that cannot name the tracked set because
+// there is no Git repository to name it from - and only for that reason.
+//
+// THE ASSURANCE SANDBOX HAS NO GIT HISTORY, ON PURPOSE. sandbox.go mounts an
+// empty tmpfs over /candidate/.git, so a verifier sees the candidate TREE and
+// nothing about how it was made; `git rev-parse` there answers "not a git
+// repository". A guard that read that as a finding reported the sandbox's own
+// boundary as a defect in the repository - which is what it did: the #148
+// smoke run's assurance failed on this test, on a candidate with no credential
+// in it.
+//
+// It is the same shape as requireExecutableTemp above, and it is a skip for the
+// same reason: the question is unanswerable here, not answered badly. Where a
+// repository IS reachable - a developer checkout, CI - the guard runs, so the
+// invariant still gates every merge.
+//
+// Everything else FAILS. A skip is the guard switching itself off, so it is
+// spent on one named condition and nothing else: corrupted or inaccessible
+// metadata, a Git that will not run, an invocation that broke - all of those
+// are conditions worth failing on, and all of them used to skip.
+//
+// LC_ALL is pinned so the classification reads Git's own English diagnostic
+// rather than whatever the surrounding shell localized it to.
+func requireTrackedSource(t *testing.T, root string) {
+	t.Helper()
+	probe := exec.Command("git", "-C", root, "rev-parse", "--git-dir")
+	probe.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	var diagnostic strings.Builder
+	probe.Stderr = &diagnostic
+	switch err := probe.Run(); classifyTrackedSourceProbe(err, diagnostic.String()) {
+	case trackedSourceAvailable:
+		return
+	case trackedSourceNoRepository:
+		t.Skipf("no Git repository at %s, so the tracked source set cannot be named: %s",
+			root, strings.TrimSpace(diagnostic.String()))
+	default:
+		t.Fatalf("the tracked source set could not be named at %s, and this is not an absent repository: %v: %s",
+			root, err, strings.TrimSpace(diagnostic.String()))
+	}
+}
+
 func materializeTrackedSource(t *testing.T, root string) (string, []string) {
 	t.Helper()
 	listed, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
@@ -699,5 +777,42 @@ func moduleRoot(t *testing.T) string {
 			t.Fatal("no go.mod above the package source directory")
 		}
 		dir = parent
+	}
+}
+
+// TestTrackedSourceProbeSkipsOnlyAnAbsentRepository pins the one arm that is
+// allowed to switch the self-hosting guard off.
+//
+// The helper previously skipped on every failed `git rev-parse`, which meant
+// inaccessible metadata, a missing Git, or a broken invocation all silently
+// disabled the guard - a guard that cannot fail is not a guard. Only Git's own
+// "not a git repository" is the sandbox condition; everything else is a
+// repository that exists and would not answer.
+func TestTrackedSourceProbeSkipsOnlyAnAbsentRepository(t *testing.T) {
+	failed := exec.Command("false").Run()
+	if failed == nil {
+		t.Fatal("the fixture needs a failing command to classify")
+	}
+	for name, c := range map[string]struct {
+		err        error
+		diagnostic string
+		want       trackedSourceProbe
+	}{
+		"a repository answered": {nil, "", trackedSourceAvailable},
+		// The assurance sandbox, verbatim.
+		"no repository at all": {failed,
+			"fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+			trackedSourceNoRepository},
+		"a named absent repository": {failed, "fatal: not a git repository: '/candidate/.git'\n", trackedSourceNoRepository},
+		// A repository that EXISTS and will not answer. Skipping here is how
+		// the guard stops guarding on a machine nobody is looking at.
+		"metadata Git refuses to read": {failed,
+			"fatal: detected dubious ownership in repository at '/candidate'\n", trackedSourceUnavailable},
+		"an unreadable object store": {failed, "error: object file .git/objects/ab/cdef is empty\n", trackedSourceUnavailable},
+		"no git program":             {failed, "", trackedSourceUnavailable},
+	} {
+		if got := classifyTrackedSourceProbe(c.err, c.diagnostic); got != c.want {
+			t.Errorf("%s classified as %d, want %d", name, got, c.want)
+		}
 	}
 }
