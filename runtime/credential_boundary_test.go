@@ -616,6 +616,7 @@ func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
 		}
 	}
 	root := moduleRoot(t)
+	requireTrackedSource(t, root)
 	candidate, tracked := materializeTrackedSource(t, root)
 	if len(tracked) == 0 {
 		t.Fatal("no tracked source was materialized, so this test asked nothing")
@@ -649,6 +650,30 @@ func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
 // symlink's target is either inside the tree - where it is materialized on its
 // own - or outside it, where it is not candidate content. This is the same
 // distinction ScanCandidateForCredentialValues draws.
+// requireTrackedSource skips a test that cannot name the tracked set because
+// there is no Git repository to name it from.
+//
+// THE ASSURANCE SANDBOX HAS NO GIT HISTORY, ON PURPOSE. sandbox.go mounts an
+// empty tmpfs over /candidate/.git, so a verifier sees the candidate TREE and
+// nothing about how it was made; `git rev-parse` there answers "not a git
+// repository". A guard that read that as a finding reported the sandbox's own
+// boundary as a defect in the repository - which is what it did: the #148
+// smoke run's assurance failed on this test, on a candidate with no credential
+// in it.
+//
+// It is the same shape as requireExecutableTemp above, and it is a skip for the
+// same reason: the question is unanswerable here, not answered badly. Where a
+// repository IS reachable - a developer checkout, CI - the guard runs, so the
+// invariant still gates every merge. Only the absence of a repository skips;
+// any other Git failure is still an error, because a repository that exists and
+// will not answer is a condition worth failing on.
+func requireTrackedSource(t *testing.T, root string) {
+	t.Helper()
+	if err := exec.Command("git", "-C", root, "rev-parse", "--git-dir").Run(); err != nil {
+		t.Skipf("no Git repository at %s, so the tracked source set cannot be named: %v", root, err)
+	}
+}
+
 func materializeTrackedSource(t *testing.T, root string) (string, []string) {
 	t.Helper()
 	listed, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
