@@ -999,16 +999,30 @@ func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
 // TestDestructiveCommandsBehindABenignOverrideAreStillRefused is the
 // composition, and the one that would make this change a regression if it
 // failed: accepting the override must not accept the verb behind it.
+//
+// EVERY KEY HERE IS ON THE INERT LIST, and that is load-bearing rather than
+// incidental. A fixture built on a key the classifier refuses would be refused
+// at the key and never reach the verb - so it would pass while proving nothing
+// about the composition it is named for, which is what an earlier round of this
+// test did with `advice.detachedHead` after that key stopped being inert.
+//
+// So the override is asserted to SURVIVE resolution first, and the verb behind
+// it to be refused second. Two assertions, because one of them passing for the
+// wrong reason is the failure mode this test exists to have.
 func TestDestructiveCommandsBehindABenignOverrideAreStillRefused(t *testing.T) {
 	for name, argv := range map[string][]string{
 		"reset":    {"-c", "color.ui=never", "reset", "--hard"},
 		"clean":    {"-c", "core.quotepath=false", "clean", "-fd"},
 		"clean x":  {"-c", "core.quotepath=false", "clean", "-fdx"},
-		"checkout": {"-c", "advice.detachedHead=false", "checkout", "--", "implementation.go"},
+		"checkout": {"-c", "core.quotepath=false", "checkout", "--", "implementation.go"},
 		"restore":  {"-c", "log.date=iso", "restore", "."},
 		"stash":    {"-c", "core.abbrev=12", "stash", "push"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			// The key is accepted, so the refusal below is about the VERB.
+			if _, err := ResolveGitCommand(t.TempDir(), argv); err != nil {
+				t.Fatalf("the fixture's override was itself refused, so this proves nothing about %v: %v", argv, err)
+			}
 			if class, _ := ClassifyGitCommand(argv); class != GitOperationDiscard {
 				t.Fatalf("%v classified as %q, want a discard", argv, class)
 			}
