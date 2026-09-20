@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -566,4 +568,136 @@ func asCredentialMaterial(err error, target **CredentialMaterialError) bool {
 		err = unwrapper.Unwrap()
 	}
 	return false
+}
+
+// TestRepositorySourceIsNotItselfCredentialMaterial is the self-hosting
+// invariant, and it is the one the assembly rule above exists to protect.
+//
+// This repository is its own candidate. Admission scans the complete candidate
+// workspace before any provider is admitted, so one complete token pasted into
+// any tracked file makes trusted main refuse itself: run
+// run-e3d2251de8447561ec518cf4f72f8d49 stopped at candidate_admission with
+// `candidate path "runtime/candidate_commit_recovery_test.go" contains a
+// credential value`, before Claude was ever invoked. The fixture that caused it
+// was in a test proving the credential gate works.
+//
+// THE SUBJECT IS THE TRACKED SOURCE TREE, because that is what becomes a fresh
+// candidate: CreateCandidateClone clones the governed remote, so a candidate
+// holds exactly the tracked files and nothing else. Naming that set with
+// `git ls-files` is what makes this deterministic AND exclusion-free - Git
+// history is not tracked content, and a local build artifact is not tracked at
+// all, so neither needs a rule that could also skip a real source file. The
+// bytes read are the WORKING TREE's, so a literal is caught before it is
+// committed rather than after.
+//
+// THE QUESTION IS ASKED BY PRODUCTION CODE. The tracked set is materialized and
+// handed to ScanCandidateForCredentialValues itself, so this cannot drift from
+// what admission does and is not limited to one file type: a complete token
+// pasted into Markdown, JSON or a shell script refuses trusted main exactly as
+// one in Go source does, and it fails here for the same reason, with the same
+// error. Nothing is exempted - not _test.go, not this package, not the
+// detector's own file - because an exemption here is an exemption in the thing
+// being proven.
+//
+// The module root is FOUND rather than assumed. A test binary runs in its
+// package's source directory, so walking up to go.mod is deterministic wherever
+// the repository is checked out.
+func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
+	// The fixtures still have to be credentials, or this test proves only that
+	// the repository contains no credentials because the detector found none.
+	for name, value := range map[string]string{
+		"the fine-grained GitHub fixture": githubFineGrainedTokenValue(),
+		"the classic GitHub fixture":      githubClassicTokenValue(),
+		"the AWS fixture":                 awsSecretAssignment(),
+		"the PEM fixture":                 pemPrivateKeyBlock(),
+	} {
+		if !ContainsCredentialValue([]byte(value)) {
+			t.Fatalf("%s no longer exercises credential detection", name)
+		}
+	}
+	root := moduleRoot(t)
+	candidate, tracked := materializeTrackedSource(t, root)
+	if len(tracked) == 0 {
+		t.Fatal("no tracked source was materialized, so this test asked nothing")
+	}
+	err := ScanCandidateForCredentialValues(candidate)
+	if err == nil {
+		return
+	}
+	// The production error names one path. Every offender is named here,
+	// because an operator shown a single example of a repository-wide condition
+	// goes looking for a one-off - and a scan that stops at the first one makes
+	// fixing this a loop.
+	var offending []string
+	for _, rel := range tracked {
+		data, readErr := os.ReadFile(filepath.Join(candidate, filepath.FromSlash(rel)))
+		if readErr == nil && ContainsCredentialValue(data) {
+			offending = append(offending, rel)
+		}
+	}
+	sort.Strings(offending)
+	t.Fatalf("candidate admission would refuse this repository's own source, so no provider could be admitted: %v; credential values in: %s",
+		err, strings.Join(offending, ", "))
+}
+
+// materializeTrackedSource builds the candidate a clone of this repository
+// would be: every tracked path, with the working tree's current bytes, under a
+// throwaway root. It returns that root and the paths it holds.
+//
+// A tracked path with no regular file behind it is skipped rather than
+// invented: a deletion staged in the working tree has no content to scan, and a
+// symlink's target is either inside the tree - where it is materialized on its
+// own - or outside it, where it is not candidate content. This is the same
+// distinction ScanCandidateForCredentialValues draws.
+func materializeTrackedSource(t *testing.T, root string) (string, []string) {
+	t.Helper()
+	listed, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		t.Fatalf("the tracked source set is unavailable, so the self-hosting subject cannot be named: %v", err)
+	}
+	candidate := t.TempDir()
+	var tracked []string
+	for _, rel := range strings.Split(strings.TrimRight(string(listed), "\x00"), "\x00") {
+		if rel == "" {
+			continue
+		}
+		source := filepath.Join(root, filepath.FromSlash(rel))
+		info, statErr := os.Lstat(source)
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		data, readErr := os.ReadFile(source)
+		if readErr != nil {
+			t.Fatalf("tracked source %q is unreadable: %v", rel, readErr)
+		}
+		target := filepath.Join(candidate, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tracked = append(tracked, rel)
+	}
+	return candidate, tracked
+}
+
+// moduleRoot walks up from the package's source directory to the directory
+// holding go.mod. It assumes no checkout path, only that the module has one.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the package source directory")
+		}
+		dir = parent
+	}
 }

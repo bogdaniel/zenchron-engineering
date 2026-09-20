@@ -605,7 +605,13 @@ func TestTheCandidateSizeCeilingCountsOnlyWhatTheCommitCarries(t *testing.T) {
 // is asserted is the part that matters - the boundary on candidate work is
 // unchanged, and excluded scratch neither refuses the commit nor enters it.
 func TestTheCredentialValueScanAsksAboutWhatTheCommitCarries(t *testing.T) {
-	const secret = "github_pat_11ABCDEFG0aaaaaaaaaaaa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	// ASSEMBLED, never written out - githubFineGrainedTokenValue is the
+	// package's own fixture helper and exists for exactly this reason. A
+	// complete token pasted into repository source makes the source itself
+	// credential material, and this repository is its own candidate: a literal
+	// here made production admission refuse trusted main before any provider
+	// could be admitted. See credential_boundary_test.go.
+	secret := githubFineGrainedTokenValue()
 	w := commitGateWorkspace(t)
 	scratch := workerTestScratchRepository(t, w.Dir, "scratch", true)
 	if err := os.WriteFile(filepath.Join(w.Dir, filepath.FromSlash(scratch), "leaked.txt"), []byte(secret), 0600); err != nil {
