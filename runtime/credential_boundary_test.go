@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -566,4 +568,99 @@ func asCredentialMaterial(err error, target **CredentialMaterialError) bool {
 		err = unwrapper.Unwrap()
 	}
 	return false
+}
+
+// TestRepositorySourceIsNotItselfCredentialMaterial is the self-hosting
+// invariant, and it is the one the assembly rule above exists to protect.
+//
+// This repository is its own candidate. Admission scans the complete candidate
+// workspace before any provider is admitted, so one complete token pasted into
+// any Go source makes trusted main refuse itself: run
+// run-e3d2251de8447561ec518cf4f72f8d49 stopped at candidate_admission with
+// `candidate path "runtime/candidate_commit_recovery_test.go" contains a
+// credential value`, before Claude was ever invoked. The fixture that caused it
+// was in a test proving the credential gate works.
+//
+// The invariant is asked of the SOURCE, with the production detector, so it
+// cannot drift from what admission asks. Nothing is exempted - not _test.go,
+// not this package, not the detector's own file - because an exemption here is
+// an exemption in the thing being proven. Every Go file in the module is read,
+// and non-Go files are not read at all: this is a bound on the walk, not a
+// credential exemption, and a credential fixture lives in source.
+//
+// The module root is FOUND rather than assumed. A test binary runs in its
+// package's source directory, so walking up to go.mod is deterministic wherever
+// the repository is checked out.
+func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
+	// The fixture still has to be a credential, or this test proves only that
+	// the repository contains no credentials because the detector found none.
+	for name, value := range map[string]string{
+		"the fine-grained GitHub fixture": githubFineGrainedTokenValue(),
+		"the classic GitHub fixture":      githubClassicTokenValue(),
+		"the AWS fixture":                 awsSecretAssignment(),
+		"the PEM fixture":                 pemPrivateKeyBlock(),
+	} {
+		if !ContainsCredentialValue([]byte(value)) {
+			t.Fatalf("%s no longer exercises credential detection", name)
+		}
+	}
+	root := moduleRoot(t)
+	var offending []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			// Git's object store holds compressed history, not source, and a
+			// build output directory holds no source at all. Neither is a
+			// place a credential fixture is written.
+			if name := entry.Name(); name == ".git" || name == "bin" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(entry.Name(), ".go") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if ContainsCredentialValue(data) {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				rel = path
+			}
+			offending = append(offending, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offending) > 0 {
+		sort.Strings(offending)
+		t.Fatalf("candidate admission would refuse this repository's own source, so no provider could be admitted: %s",
+			strings.Join(offending, ", "))
+	}
+}
+
+// moduleRoot walks up from the package's source directory to the directory
+// holding go.mod. It assumes no checkout path, only that the module has one.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the package source directory")
+		}
+		dir = parent
+	}
 }
