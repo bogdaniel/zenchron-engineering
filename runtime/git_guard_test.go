@@ -39,7 +39,12 @@ func guardFor(t *testing.T, candidateDir string) *GitGuard {
 	if err != nil {
 		t.Skip("no true(1) to stand in for the broker")
 	}
-	guard, err := PrepareGitGuard(t.TempDir(), ExecutionAttemptRef{
+	// THE SHIM HAS TO RUN, so the guard directory has to be somewhere this
+	// environment will execute from. Under the assurance sandbox's noexec /tmp
+	// it is not, and the shim then loses PATH resolution to the system git -
+	// which is #247, and which made these tests fail on a guard that was
+	// working correctly.
+	guard, err := PrepareGitGuard(execCapableTempDir(t), ExecutionAttemptRef{
 		RunID: "run-guard", OperationID: "run-guard:execution.invoke:initial|1|base", Attempt: 1,
 	}, candidateDir, []string{broker})
 	if err != nil {
@@ -476,15 +481,23 @@ func TestTheRealControllerBinaryRefusesADestructiveProviderCommand(t *testing.T)
 	const work = "package candidate\n\n// the expensive uncommitted implementation\nfunc Added() {}\n"
 	writeCandidateFile(t, dir, "implementation.go", work)
 
-	// The real controller binary.
-	binary := filepath.Join(t.TempDir(), "zenchron-engineering")
-	build := exec.Command(goTool, "build", "-o", binary, "./cmd/zenchron-engineering")
+	// The real controller binary. Both it and the shim that forwards to it are
+	// executed, so both live somewhere this environment will execute from.
+	execDir := execCapableTempDir(t)
+	binary := filepath.Join(execDir, "zenchron-engineering")
+	// -buildvcs=false because the assurance sandbox masks /candidate/.git with
+	// an empty tmpfs: Go sees a .git, asks Git about it, gets "not a git
+	// repository" and refuses to build at all. Stamping the provenance of a
+	// throwaway fixture binary was never the point, and without this the one
+	// end-to-end proof of the boundary skips in the only environment whose
+	// answer matters.
+	build := exec.Command(goTool, "build", "-buildvcs=false", "-o", binary, "./cmd/zenchron-engineering")
 	build.Dir = repositoryRootForTest(t)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Skipf("cannot build the controller here: %v\n%s", err, out)
 	}
 
-	guard, err := PrepareGitGuard(t.TempDir(), ExecutionAttemptRef{
+	guard, err := PrepareGitGuard(execCapableTempDir(t), ExecutionAttemptRef{
 		RunID: "run-e2e", OperationID: "run-e2e:execution.invoke:initial|1|base", Attempt: 1,
 	}, dir, []string{binary, "__git-broker"})
 	if err != nil {
@@ -732,8 +745,10 @@ func TestAnExecPathRedirectCannotReachTheCandidateRepository(t *testing.T) {
 	writeCandidateFile(t, dir, "implementation.go", work)
 
 	// A helper the provider controls, which does what the provider wanted all
-	// along: discard the candidate work.
-	helpers := t.TempDir()
+	// along: discard the candidate work. The MUTATION at the end of this test
+	// runs it, so it has to live somewhere executable - otherwise the mutation
+	// cannot fire and the test says so, correctly, by failing.
+	helpers := execCapableTempDir(t)
 	helper := filepath.Join(helpers, "git-zap")
 	script := "#!/bin/sh\nrm -f " + filepath.Join(dir, "implementation.go") + "\n"
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
