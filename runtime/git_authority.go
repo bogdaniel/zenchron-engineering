@@ -59,6 +59,10 @@ const (
 	// GitOperationDiscard is an operation whose purpose or effect is to
 	// discard uncommitted candidate state. It is refused.
 	GitOperationDiscard GitOperationClass = "discard"
+	// GitOperationRuntimeOwned is a command that would take over something the
+	// RUNTIME owns. It destroys nothing by itself; it is refused because the
+	// runtime cannot let it succeed. See the commit arm of ClassifyGitCommand.
+	GitOperationRuntimeOwned GitOperationClass = "runtime_owned"
 )
 
 // ClassifyGitCommand decides what a provider's Git argv is, from the argv
@@ -118,6 +122,26 @@ func ClassifyGitCommand(args []string) (GitOperationClass, string) {
 		if len(rest) > 0 && rest[0] == "deinit" {
 			return GitOperationDiscard, "would remove a submodule working tree"
 		}
+	// COMMITTING IS THE RUNTIME'S, and until #248 nothing said so here.
+	//
+	// It was unreachable rather than permitted: every `git commit` a provider
+	// sent arrived with a `-c` prefix and died on the blanket config refusal,
+	// which is why 58 of one attempt's 73 refusals were commits. Accepting
+	// inert `-c` keys makes it reachable for the first time, so the arm that
+	// was always missing has to exist before that lands.
+	//
+	// A provider commit is not harmless. It moves HEAD, gitMetadataDigest
+	// covers HEAD, so the next AssertIntegrity reads the provider's own commit
+	// as tampering - and workspace_integrity_violation routes to RouteRestore,
+	// which is `reset --hard` plus `clean -fdx`. The provider would destroy the
+	// candidate by committing it, which is the #241 outcome reached through the
+	// one verb #241 does not classify.
+	//
+	// It is deliberately NOT GitOperationDiscard. Nothing is being discarded
+	// and saying so would be false; what is true is that the runtime owns this
+	// and the work is safe where it is.
+	case "commit", "commit-tree":
+		return GitOperationRuntimeOwned, "creating a candidate commit is the runtime's, not the provider's"
 	}
 	return GitOperationPermitted, ""
 }
@@ -280,6 +304,24 @@ func (e *GitDiscardRefusedError) Error() string {
 		" Read-only Git (status, diff, log, show) is unaffected."
 }
 
+// GitRuntimeOwnedRefusedError is the refusal for a command the runtime owns.
+//
+// It exists so the provider is told the one thing that ends the loop: the work
+// is already safe and the runtime will commit it. #248's worker sent the same
+// commit 58 times because every answer it got described a problem with its own
+// invocation, which is a problem a model will keep trying to solve. A refusal
+// that names the permitted next action preserves exactly the same authority and
+// costs the run one command instead of its whole budget.
+type GitRuntimeOwnedRefusedError struct{ Operation, Reason string }
+
+func (e *GitRuntimeOwnedRefusedError) Error() string {
+	return "runtime-owned Git refused: " + e.Operation + " (" + e.Reason + ")." +
+		" Do not retry this command and do not create commits, branches or tags:" +
+		" Zenchron commits the candidate itself from your working tree." +
+		" Leave your changes as edited files and continue with the rest of the task." +
+		" Read-only Git (status, diff, log, show) is unaffected."
+}
+
 // BrokerGitCommand is the decision, and it is the whole enforcement point.
 //
 // It classifies, records a refusal durably where one is needed, and otherwise
@@ -314,8 +356,13 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
 		// the first.
+		// The underlying refusal already says what to do about itself - a
+		// configuration override names its key and how to proceed without it -
+		// so the provider is given THAT, while the durable record keeps the
+		// resolution prefix a reviewer reads it by.
 		return refuseGitCommand(candidateDir, refusalLog, args,
-			"the effective operation could not be resolved: "+resolveErr.Error(), stderr)
+			"the effective operation could not be resolved: "+resolveErr.Error(),
+			GitOperationClass(""), stderr)
 	}
 	class, reason := ClassifyGitCommand(effective)
 	if class == GitOperationPermitted {
@@ -332,7 +379,7 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// that.
 		reason += " (requested as " + aliased + ")"
 	}
-	return refuseGitCommand(candidateDir, refusalLog, effective, reason, stderr)
+	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, stderr)
 }
 
 // refuseGitCommand records the refusal durably and tells the provider why.
@@ -340,7 +387,7 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 // It is one function because every refusal has to do all of it: a refusal that
 // executed nothing but recorded nothing would be invisible, and one that
 // recorded without explaining would leave the worker to guess.
-func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, stderr io.Writer) (int, error) {
+func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, stderr io.Writer) (int, error) {
 	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason}
 	// Observation, after the decision. A workspace whose status cannot be read
 	// does not soften the refusal; it just means the record names no paths.
@@ -356,10 +403,25 @@ func refuseGitCommand(candidateDir, refusalLog string, args []string, reason str
 		// refusal into an execution. The provider is still refused.
 		fmt.Fprintln(stderr, "zenchron: recording the refusal failed:", err)
 	}
-	fmt.Fprintln(stderr, (&GitDiscardRefusedError{
-		Operation: refusal.Operation, Reason: reason,
-		Dirty: refusal.DirtyPaths, DirtyTotal: refusal.DirtyCount,
-	}).Error())
+	// THE MESSAGE MATCHES THE REASON. Every refusal used to be described as a
+	// destructive discard, so a provider refused an inert `-c log` was told its
+	// read would lose uncommitted work - which is false, unactionable, and
+	// exactly the shape that produced #248's retry loop.
+	var diagnostic string
+	switch class {
+	case GitOperationRuntimeOwned:
+		diagnostic = (&GitRuntimeOwnedRefusedError{Operation: refusal.Operation, Reason: reason}).Error()
+	case GitOperationDiscard:
+		diagnostic = (&GitDiscardRefusedError{
+			Operation: refusal.Operation, Reason: reason,
+			Dirty: refusal.DirtyPaths, DirtyTotal: refusal.DirtyCount,
+		}).Error()
+	default:
+		// A command whose meaning could not be established. The reason carries
+		// the underlying refusal's own words, which already name what to do.
+		diagnostic = "Git refused: " + refusal.Operation + ": " + reason
+	}
+	fmt.Fprintln(stderr, diagnostic)
 	// Git's own exit status for a command it would not perform.
 	return 1, nil
 }

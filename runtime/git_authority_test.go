@@ -386,7 +386,6 @@ func TestGitDiscardTaxonomy(t *testing.T) {
 		"show":                {[]string{"show", "HEAD"}, GitOperationPermitted},
 		"add":                 {[]string{"add", "-A"}, GitOperationPermitted},
 		"apply":               {[]string{"apply", "patch.diff"}, GitOperationPermitted},
-		"commit":              {[]string{"commit", "-m", "x"}, GitOperationPermitted},
 		"empty":               {nil, GitOperationPermitted},
 
 		// GLOBAL OPTIONS MUST NOT HIDE THE VERB. Prefixing one is exactly what
@@ -404,13 +403,25 @@ func TestGitDiscardTaxonomy(t *testing.T) {
 		// A FILE NAMED LIKE A FLAG is an operand, not a flag: the pathspec
 		// separator ends flag parsing, exactly as it does for git.
 		"file called --hard": {[]string{"reset", "--", "--hard"}, GitOperationPermitted},
+
+		// COMMITTING IS THE RUNTIME'S. It reached this table as "permitted"
+		// only because it was unreachable in practice: every provider commit
+		// arrived behind a `-c` prefix and died on the blanket config refusal.
+		// Accepting inert `-c` keys makes it reachable, and a provider commit
+		// moves HEAD, which the next AssertIntegrity reads as tampering and
+		// answers with `reset --hard` plus `clean -fdx`. It is its own class
+		// because nothing is being discarded and saying so would be false.
+		"commit":            {[]string{"commit", "-m", "x"}, GitOperationRuntimeOwned},
+		"commit-tree":       {[]string{"commit-tree", "HEAD^{tree}"}, GitOperationRuntimeOwned},
+		"commit behind -c":  {[]string{"-c", "commit.gpgsign=false", "commit", "-m", "x"}, GitOperationRuntimeOwned},
+		"status is not one": {[]string{"status", "--porcelain"}, GitOperationPermitted},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, reason := ClassifyGitCommand(tc.args)
 			if got != tc.want {
 				t.Fatalf("classified %v as %q, want %q", tc.args, got, tc.want)
 			}
-			if got == GitOperationDiscard && strings.TrimSpace(reason) == "" {
+			if got != GitOperationPermitted && strings.TrimSpace(reason) == "" {
 				t.Fatalf("a refusal of %v carries no reason", tc.args)
 			}
 		})
@@ -623,24 +634,28 @@ func TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker(t *testing.T) {
 	for name, tc := range map[string]struct {
 		alias, value string
 		argv         []string
+		explanation  string
 	}{
-		"checkout by alias": {"co", "checkout", []string{"co", "--", "implementation.go"}},
-		"reset by alias":    {"nuke", "reset --hard", []string{"nuke"}},
-		"clean by alias":    {"wipe", "clean -fd", []string{"wipe"}},
-		"restore by alias":  {"undo", "restore .", []string{"undo"}},
+		"checkout by alias": {"co", "checkout", []string{"co", "--", "implementation.go"}, "destructive Git refused"},
+		"reset by alias":    {"nuke", "reset --hard", []string{"nuke"}, "destructive Git refused"},
+		"clean by alias":    {"wipe", "clean -fd", []string{"wipe"}, "destructive Git refused"},
+		"restore by alias":  {"undo", "restore .", []string{"undo"}, "destructive Git refused"},
 		// The flags may live on either side of the expansion, so both have to
 		// be assembled before classification.
-		"flag from the caller": {"c", "checkout", []string{"c", "-f"}},
-		"quoted value":         {"q", `checkout "--"`, []string{"q", "implementation.go"}},
+		"flag from the caller": {"c", "checkout", []string{"c", "-f"}, "destructive Git refused"},
+		"quoted value":         {"q", `checkout "--"`, []string{"q", "implementation.go"}, "destructive Git refused"},
 		// A global option must not hide the alias either.
-		"alias behind -C": {"co2", "reset --hard", []string{"-C", ".", "co2"}},
-		// `-c` defines the alias in the same breath as using it. It is refused
-		// one step earlier than the others - as a global that overrides
-		// configuration at all - because Git has configuration keys whose
-		// values are programs it executes, so an inline override is an
-		// execution redirect wearing different syntax. Refused either way, and
-		// this row keeps the spelling covered.
-		"inline -c defines": {"", "", []string{"-c", "alias.zap=reset --hard", "zap"}},
+		"alias behind -C": {"co2", "reset --hard", []string{"-C", ".", "co2"}, "destructive Git refused"},
+		// `-c` defines the alias in the same breath as using it, and it is
+		// refused one step earlier than the others: `alias.*` is not on the
+		// runtime's inert key list, so the override never reaches the verb.
+		// Since #248 the diagnostic NAMES that key rather than describing the
+		// command as a destructive discard it is not - a provider that is told
+		// which override was objected to can send the command without it, and
+		// the one that was told only "could not be resolved" sent it again 58
+		// times.
+		"inline -c defines": {"", "", []string{"-c", "alias.zap=reset --hard", "zap"},
+			"configuration override `-c alias.zap` is not permitted"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir, refusalLog := gitAuthorityFixture(t)
@@ -661,8 +676,8 @@ func TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, "added.go")); err != nil {
 				t.Fatalf("%v deleted the untracked candidate file: %v", tc.argv, err)
 			}
-			if !strings.Contains(diagnostic, "destructive Git refused") {
-				t.Fatalf("the refusal was not explained: %s", diagnostic)
+			if !strings.Contains(diagnostic, tc.explanation) {
+				t.Fatalf("the refusal was not explained as %q: %s", tc.explanation, diagnostic)
 			}
 			// The record names the EFFECTIVE operation, so an operator reading
 			// `git co` is told it was a checkout.
@@ -871,5 +886,166 @@ func TestTheResolvedFormIsWhatExecutes(t *testing.T) {
 	}
 	if strings.Join(same, "\x00") != strings.Join(original, "\x00") {
 		t.Fatalf("a non-alias argv was rewritten: %#v", same)
+	}
+}
+
+// TestBenignConfigOverridesReachTheirVerb is #248.
+//
+// Claude Code prefixes its Git argv with `-c`, and the blanket refusal of that
+// option turned a safety boundary into a productivity trap: run
+// run-ca6aecf437c10bc6d2983fe978c5c00a met it 67 times in one attempt, for
+// commits, logs, ls-files and remote reads, none of which can discard anything.
+// The worker could not read its own repository and retried until its inactivity
+// window closed.
+//
+// The override is now classified by KEY. An inert key reaches its verb, where
+// the ordinary taxonomy decides; anything else is refused and NAMED.
+func TestBenignConfigOverridesReachTheirVerb(t *testing.T) {
+	// The real Claude forms, from the refusal log of that run.
+	for name, argv := range map[string][]string{
+		"log behind a signing toggle": {"-c", "log.showSignature=false", "log", "-1", "--format=%H:%ct"},
+		"ls-files behind quotepath":   {"-c", "core.quotepath=false", "ls-files", "--error-unmatch", "--", "go.mod"},
+		"status behind gc.auto":       {"-c", "gc.auto=0", "status", "--porcelain"},
+		"advice is a whole section":   {"-c", "advice.detachedHead=false", "status"},
+		// Both spellings of the option, and the keyless `-c key` shorthand.
+		"separated key and value": {"-c", "core.abbrev=12", "log", "-1"},
+		"config-env joined":       {"--config-env=color.ui=ZC_COLOR", "status"},
+		"config-env separated":    {"--config-env", "core.quotepath=ZC_QUOTE", "status"},
+		"bare key means true":     {"-c", "advice.addEmbeddedRepo", "status"},
+		"several overrides":       {"-c", "gc.auto=0", "-c", "core.quotepath=false", "status"},
+		// Case-insensitive, as Git's own key matching is.
+		"mixed case key": {"-c", "Core.QuotePath=false", "status"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+			if _, err := ResolveGitCommand(t.TempDir(), argv); err != nil {
+				t.Fatalf("%v did not survive resolution: %v", argv, err)
+			}
+		})
+	}
+}
+
+// TestConfigOverridesThatRedirectAreStillRefused is the other half, and it is
+// the half that keeps this from being "allow Claude's Git flags".
+//
+// The list is an ALLOWLIST, so an unknown key fails closed, and every refusal
+// names the key it objected to.
+func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		argv []string
+		key  string
+	}{
+		// Programs Git executes.
+		"pager":             {[]string{"-c", "core.pager=/tmp/evil", "log"}, "core.pager"},
+		"editor":            {[]string{"-c", "core.editor=/tmp/evil", "commit"}, "core.editor"},
+		"hooks path":        {[]string{"-c", "core.hooksPath=/tmp/hooks", "status"}, "core.hooksPath"},
+		"ssh command":       {[]string{"-c", "core.sshCommand=/tmp/evil", "fetch"}, "core.sshCommand"},
+		"askpass":           {[]string{"-c", "core.askPass=/tmp/evil", "fetch"}, "core.askPass"},
+		"fsmonitor":         {[]string{"-c", "core.fsmonitor=/tmp/evil", "status"}, "core.fsmonitor"},
+		"credential helper": {[]string{"-c", "credential.helper=/tmp/evil", "fetch"}, "credential.helper"},
+		"signing program":   {[]string{"-c", "gpg.program=/tmp/evil", "commit"}, "gpg.program"},
+		"clean filter":      {[]string{"-c", "filter.x.clean=/tmp/evil", "add", "-A"}, "filter.x.clean"},
+		"external diff":     {[]string{"-c", "diff.external=/tmp/evil", "diff"}, "diff.external"},
+		// Authority, location and transport.
+		"alias defined inline": {[]string{"-c", "alias.zap=reset --hard", "zap"}, "alias.zap"},
+		"included config":      {[]string{"-c", "include.path=/tmp/evil", "status"}, "include.path"},
+		"conditional include":  {[]string{"-c", "includeIf.gitdir:/.path=/tmp/evil", "status"}, "includeIf.gitdir:/.path"},
+		"safe directory":       {[]string{"-c", "safe.directory=*", "status"}, "safe.directory"},
+		"bare repository":      {[]string{"-c", "safe.bareRepository=all", "status"}, "safe.bareRepository"},
+		"file protocol":        {[]string{"-c", "protocol.file.allow=always", "fetch"}, "protocol.file.allow"},
+		"url rewrite":          {[]string{"-c", "url.https://evil/.insteadOf=https://github.com/", "fetch"}, "url.https://evil/.insteadOf"},
+		"tls off":              {[]string{"-c", "http.sslVerify=false", "fetch"}, "http.sslVerify"},
+		"identity":             {[]string{"-c", "user.email=someone@else", "commit"}, "user.email"},
+		// An unknown key is refused because it is unknown, not because it is
+		// recognized as dangerous. That is the direction the list has to fail.
+		"a key nobody has reasoned about": {[]string{"-c", "zenchron.invented=1", "status"}, "zenchron.invented"},
+		// The same key arriving by the other spelling.
+		"config-env redirect": {[]string{"--config-env=core.pager=EVIL", "log"}, "core.pager"},
+		// An override with nothing to override cannot be resolved either.
+		"dangling override": {[]string{"-c"}, "-c"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ResolveGitCommand(t.TempDir(), tc.argv)
+			if err == nil {
+				t.Fatalf("%v was permitted", tc.argv)
+			}
+			refusal, ok := err.(*GitConfigOverrideRefusedError)
+			if !ok {
+				t.Fatalf("%v was refused by something other than the key classifier: %T %v", tc.argv, err, err)
+			}
+			if refusal.Key != tc.key {
+				t.Fatalf("%v was refused for %q, want the key %q", tc.argv, refusal.Key, tc.key)
+			}
+			// NAMING THE KEY IS THE POINT: a provider told only that `-c` is
+			// refused cannot tell which part of its invocation to drop.
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("the refusal does not name %q: %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestDestructiveCommandsBehindABenignOverrideAreStillRefused is the
+// composition, and the one that would make this change a regression if it
+// failed: accepting the override must not accept the verb behind it.
+func TestDestructiveCommandsBehindABenignOverrideAreStillRefused(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"reset":    {"-c", "gc.auto=0", "reset", "--hard"},
+		"clean":    {"-c", "gc.auto=0", "clean", "-fd"},
+		"clean x":  {"-c", "core.quotepath=false", "clean", "-fdx"},
+		"checkout": {"-c", "advice.detachedHead=false", "checkout", "--", "implementation.go"},
+		"restore":  {"-c", "log.date=iso", "restore", "."},
+		"stash":    {"-c", "gc.auto=0", "stash", "push"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, _ := ClassifyGitCommand(argv); class != GitOperationDiscard {
+				t.Fatalf("%v classified as %q, want a discard", argv, class)
+			}
+		})
+	}
+}
+
+// TestARuntimeOwnedRefusalNamesThePermittedNextAction is the efficiency half of
+// #248, and it is a correctness requirement rather than a nicety.
+//
+// The worker in that run sent the same commit 58 times because every answer it
+// got described a problem with its own invocation - a problem a model will keep
+// trying to solve. A refusal that names what to do instead preserves exactly
+// the same authority and ends the loop on the first reply.
+func TestARuntimeOwnedRefusalNamesThePermittedNextAction(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// uncommitted work the provider must keep\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+
+	code, diagnostic := brokerGit(t, dir, refusalLog, "-c", "commit.gpgsign=false", "commit", "-am", "provider commit")
+	if code == 0 {
+		t.Fatal("a provider commit was permitted")
+	}
+	// It must not be described as a destructive discard, because it is not one
+	// and a false reason is a reason a model will argue with.
+	if strings.Contains(diagnostic, "destructive Git refused") {
+		t.Fatalf("a commit was explained as a discard: %s", diagnostic)
+	}
+	for _, want := range []string{
+		"runtime-owned Git refused",
+		"Do not retry this command",
+		"Zenchron commits the candidate itself",
+		"continue with the rest of the task",
+	} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("the refusal does not say %q: %s", want, diagnostic)
+		}
+	}
+	// The work is untouched, and HEAD did not move - which is the whole reason
+	// the refusal exists, since a moved HEAD is read as tampering and answered
+	// with reset --hard.
+	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+		t.Fatalf("the refused commit changed the candidate:\n%q", got)
+	}
+	refusals, err := ReadGitRefusals(refusalLog)
+	if err != nil || len(refusals) != 1 {
+		t.Fatalf("the refusal was not recorded: %v %#v", err, refusals)
 	}
 }
