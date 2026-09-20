@@ -80,8 +80,8 @@ func (e *GitConfigOverrideRefusedError) Error() string {
 	return "configuration override `-c " + e.Key + "` is not permitted here:" +
 		" Git has configuration keys whose values are programs it runs, paths it reads," +
 		" or credentials it presents, and this key is not on the runtime's inert list." +
-		" Run the same command without that override; Git's presentation and signing" +
-		" toggles are accepted, and read-only Git is unaffected."
+		" Run the same command without that override; Git's presentation and formatting" +
+		" keys are accepted, and read-only Git is unaffected."
 }
 
 // splitGitCommand separates one Git argv into its leading global options, its
@@ -201,6 +201,17 @@ func refusedGitGlobal(args []string) (string, string, bool) {
 //     whose metadata the runtime holds a digest of. Being unable to prove a
 //     side effect impossible is the same answer as knowing it is possible.
 //
+//   - the signing keys. commit.gpgsign, tag.gpgsign and log.showsignature read
+//     as booleans that choose WHETHER to sign or verify, with the program named
+//     by gpg.program, which is refused. That separation only holds while
+//     gpg.program cannot be set - and #251 is open: a provider can persist
+//     gpg.program into .git/config, where the inline allowlist does not reach
+//     it. `log.showSignature=true` then makes an ordinary `git log` run it.
+//     Commit and tag are runtime-owned now, but cherry-pick, revert, merge,
+//     rebase and am are not, and every one of them honours commit.gpgsign. A
+//     key whose safety depends on another boundary being closed is not inert;
+//     it is inert conditionally, which is a thing this list cannot express.
+//
 //   - a whole `advice.` section. Allowing a section by prefix is the opposite
 //     of an allowlist: an advice key added by a future Git would arrive
 //     permitted without anybody having looked at it. No `advice.` key appears
@@ -210,7 +221,6 @@ func refusedGitGlobal(args []string) (string, string, bool) {
 // The list grows by evidence and review, one key at a time, and a refusal names
 // the key precisely so that growing it is a decision somebody can make.
 var inertGitConfigKeys = map[string]bool{
-	"commit.gpgsign": true, "tag.gpgsign": true, "log.showsignature": true,
 	"core.quotepath": true, "core.abbrev": true, "core.checkstat": true,
 	"core.trustctime": true, "core.precomposeunicode": true,
 	"log.date": true, "color.ui": true,

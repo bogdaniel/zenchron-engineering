@@ -156,84 +156,170 @@ func ClassifyGitCommand(args []string) (GitOperationClass, string) {
 	// questions a worker legitimately has, and refusing them would rebuild the
 	// trap this change exists to remove.
 	case "branch":
-		if namesANewRef(rest, branchReadValueFlags, branchWritingFlags) {
+		if namesANewRef(rest, branchRefSpec) {
 			return GitOperationRuntimeOwned, "candidate branches are the runtime's, not the provider's"
 		}
 	case "tag":
-		// -l/--list takes an optional PATTERN, so an operand beside it is a
-		// filter rather than a tag name.
-		if !hasAnyFlag(rest, "-l", "--list") && namesANewRef(rest, tagReadValueFlags, tagWritingFlags) {
+		if namesANewRef(rest, tagRefSpec) {
 			return GitOperationRuntimeOwned, "candidate tags are the runtime's, not the provider's"
 		}
 	// update-ref has no reading form at all: every invocation writes or deletes
 	// a ref, so there is no distinction to draw.
 	case "update-ref":
 		return GitOperationRuntimeOwned, "candidate refs are the runtime's, not the provider's"
+	// symbolic-ref has both. One operand ASKS what a symbolic ref points at -
+	// `git symbolic-ref --short HEAD` is how a worker finds its branch without
+	// `git branch`. Two operands REPOINT it, and --delete removes it.
+	case "symbolic-ref":
+		if hasAnyFlag(rest, "-d", "--delete") || refOperands(rest, symbolicRefReadValue) >= 2 {
+			return GitOperationRuntimeOwned, "candidate refs are the runtime's, not the provider's"
+		}
 	}
 	return GitOperationPermitted, ""
 }
 
-// namesANewRef reports whether a `branch` or `tag` invocation would CREATE or
-// CHANGE a ref rather than report on one.
+// refVerbSpec is one ref verb's flag vocabulary, split by what a flag MEANS
+// for this question. It is a table rather than a chain of conditions because
+// the distinction it draws - between an operand that is a ref's name and an
+// operand that is a pattern or a revision - is exactly where a guess becomes a
+// refused read.
+type refVerbSpec struct {
+	// writing flags settle the question on their own.
+	writing map[string]bool
+	// writingShort are the same flags inside a short cluster: `-aD` is a delete.
+	writingShort string
+	// listing flags turn the invocation into a query, so whatever operands
+	// follow are patterns or revisions rather than names.
+	listing map[string]bool
+	// readValue flags take a SEPARATE value that must not be read as a name.
+	readValue map[string]bool
+}
+
+// namesANewRef reports whether a ref verb would CREATE or CHANGE a ref rather
+// than report on one.
 //
 // It is argv-only, like everything else here. A writing flag settles it; so
-// does a bare operand once the flags that legitimately carry a value have been
-// consumed, because the operand a reading form leaves behind is a pattern or a
-// revision and the operand a writing form leaves behind is the ref's name.
+// does a bare operand, once the flags that legitimately carry a value have been
+// consumed and once a listing flag has been given the chance to say that the
+// operands are patterns.
 //
-// The value-carrying reading flags are enumerated rather than guessed, because
-// `git branch --contains HEAD` has an operand and is a read: treating every
-// operand as a name would refuse exactly the questions a worker is entitled to
-// ask, which is the failure this whole change is undoing.
-func namesANewRef(rest []string, readValueFlags map[string]bool, writingFlags []string) bool {
-	if hasAnyFlag(rest, writingFlags...) {
-		return true
-	}
+// THE JOINED SPELLING IS THE SAME FLAG. `--set-upstream-to=origin/main` and
+// `--set-upstream-to origin/main` are one option, and an earlier version of
+// this function skipped the joined form as "a flag with a value" before asking
+// whether that flag writes - so the spelling with an `=` in it walked past the
+// check the spelling without one failed.
+func namesANewRef(rest []string, spec refVerbSpec) bool {
+	listing, operands := false, 0
 	for i := 0; i < len(rest); i++ {
 		arg := rest[i]
 		if arg == "--" {
-			// Everything after the separator is an operand, and for these two
-			// verbs an operand is a ref name.
-			return i+1 < len(rest)
+			// Everything after the separator is an operand.
+			operands += len(rest) - i - 1
+			break
 		}
-		if strings.HasPrefix(arg, "-") {
-			if name, _, joined := strings.Cut(arg, "="); joined {
-				_ = name
-				continue
-			}
-			if readValueFlags[arg] && i+1 < len(rest) {
-				i++
-			}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			operands++
 			continue
 		}
-		return true
+		name, joined := arg, false
+		if before, _, found := strings.Cut(arg, "="); found {
+			name, joined = before, true
+		}
+		if spec.writing[name] {
+			return true
+		}
+		if isShortCluster(arg) && strings.ContainsAny(arg[1:], spec.writingShort) {
+			return true
+		}
+		if spec.listing[name] {
+			listing = true
+			continue
+		}
+		if !joined && spec.readValue[name] && i+1 < len(rest) {
+			i++
+		}
 	}
-	return false
+	// A LISTING FORM'S OPERANDS ARE NOT NAMES. `git branch --list "feature/*"`
+	// and `git tag --verify v1` are questions, and refusing them would rebuild
+	// the #248 trap one verb along.
+	if listing {
+		return false
+	}
+	return operands > 0
+}
+
+// isShortCluster reports whether an argument is Git's `-abc` form, where every
+// character after the dash is its own single-letter flag.
+func isShortCluster(arg string) bool {
+	return len(arg) > 1 && arg[0] == '-' && arg[1] != '-'
+}
+
+// refOperands counts the operands of a verb whose flags carry no separate
+// value except the ones named.
+func refOperands(rest []string, readValue map[string]bool) int {
+	operands := 0
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		if arg == "--" {
+			return operands + len(rest) - i - 1
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			operands++
+			continue
+		}
+		if _, _, joined := strings.Cut(arg, "="); !joined && readValue[arg] && i+1 < len(rest) {
+			i++
+		}
+	}
+	return operands
 }
 
 var (
-	branchReadValueFlags = map[string]bool{
-		"--contains": true, "--no-contains": true, "--merged": true,
-		"--no-merged": true, "--points-at": true, "--format": true,
-		"--sort": true, "--color": true, "--abbrev": true,
+	branchRefSpec = refVerbSpec{
+		// Creating, renaming, copying, deleting, or repointing a branch.
+		writing: map[string]bool{
+			"-d": true, "-D": true, "--delete": true,
+			"-m": true, "-M": true, "--move": true,
+			"-c": true, "-C": true, "--copy": true,
+			"-f": true, "--force": true,
+			"-u": true, "--set-upstream-to": true, "--unset-upstream": true,
+			"--edit-description": true,
+		},
+		writingShort: "dDmMcCfu",
+		// `--list`, `-a` and `-r` all make the operands patterns.
+		listing: map[string]bool{
+			"-l": true, "--list": true, "-a": true, "--all": true,
+			"-r": true, "--remotes": true,
+		},
+		readValue: map[string]bool{
+			"--contains": true, "--no-contains": true, "--merged": true,
+			"--no-merged": true, "--points-at": true, "--format": true,
+			"--sort": true, "--color": true, "--abbrev": true,
+		},
 	}
-	// Creating, renaming, copying, deleting, or repointing a branch.
-	branchWritingFlags = []string{
-		"-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
-		"-f", "--force", "-u", "--set-upstream-to", "--unset-upstream",
-		"--edit-description",
+	tagRefSpec = refVerbSpec{
+		// Creating, signing, annotating, replacing, or deleting a tag.
+		writing: map[string]bool{
+			"-a": true, "--annotate": true, "-s": true, "--sign": true,
+			"-u": true, "--local-user": true,
+			"-m": true, "--message": true, "-F": true, "--file": true,
+			"-d": true, "--delete": true, "-f": true, "--force": true,
+			"-e": true, "--edit": true,
+		},
+		writingShort: "asumFdfe",
+		// `--verify` reads a tag's signature; `-l` filters by pattern.
+		listing: map[string]bool{
+			"-l": true, "--list": true, "-v": true, "--verify": true,
+		},
+		readValue: map[string]bool{
+			"--contains": true, "--no-contains": true, "--merged": true,
+			"--no-merged": true, "--points-at": true, "--format": true,
+			"--sort": true, "--color": true,
+		},
 	}
-	tagReadValueFlags = map[string]bool{
-		"--contains": true, "--no-contains": true, "--merged": true,
-		"--no-merged": true, "--points-at": true, "--format": true,
-		"--sort": true, "--color": true,
-	}
-	// Creating, signing, annotating, replacing, or deleting a tag.
-	tagWritingFlags = []string{
-		"-a", "--annotate", "-s", "--sign", "-u", "--local-user",
-		"-m", "--message", "-F", "--file", "-d", "--delete",
-		"-f", "--force", "-e", "--edit",
-	}
+	// symbolic-ref takes a reason with -m; nothing else it accepts carries a
+	// separate value.
+	symbolicRefReadValue = map[string]bool{"-m": true}
 )
 
 // gitVerb finds the subcommand, skipping Git's global options.

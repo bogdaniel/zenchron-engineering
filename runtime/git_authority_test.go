@@ -903,13 +903,13 @@ func TestTheResolvedFormIsWhatExecutes(t *testing.T) {
 func TestBenignConfigOverridesReachTheirVerb(t *testing.T) {
 	// The real Claude forms, from the refusal log of that run.
 	for name, argv := range map[string][]string{
-		"log behind a signing toggle": {"-c", "log.showSignature=false", "log", "-1", "--format=%H:%ct"},
+		"log behind a formatting key": {"-c", "log.date=iso", "log", "-1", "--format=%H:%ct"},
 		"ls-files behind quotepath":   {"-c", "core.quotepath=false", "ls-files", "--error-unmatch", "--", "go.mod"},
 		// Both spellings of the option, and the keyless `-c key` shorthand.
 		"separated key and value": {"-c", "core.abbrev=12", "log", "-1"},
 		"config-env joined":       {"--config-env=color.ui=ZC_COLOR", "status"},
 		"config-env separated":    {"--config-env", "core.quotepath=ZC_QUOTE", "status"},
-		"bare key means true":     {"-c", "commit.gpgsign", "status"},
+		"bare key means true":     {"-c", "core.quotepath", "status"},
 		"several overrides":       {"-c", "core.abbrev=12", "-c", "core.quotepath=false", "status"},
 		// Case-insensitive, as Git's own key matching is.
 		"mixed case key": {"-c", "Core.QuotePath=false", "status"},
@@ -970,6 +970,16 @@ func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
 		// at it - and no advice key appears in the observed provider argv.
 		"an advice key":        {[]string{"-c", "advice.detachedHead=false", "status"}, "advice.detachedHead"},
 		"an unseen advice key": {[]string{"-c", "advice.somethingNew=false", "status"}, "advice.somethingNew"},
+		// SIGNING KEYS CAME OFF THE LIST after review. They choose WHETHER to
+		// sign or verify and gpg.program chooses what to execute - but that
+		// separation only holds while gpg.program cannot be set, and #251 is
+		// open: persisted into .git/config it is beyond the inline allowlist's
+		// reach. log.showSignature=true then makes an ordinary `git log` run
+		// it, and commit.gpgsign is honoured by cherry-pick, revert, merge,
+		// rebase and am, none of which is runtime-owned.
+		"verify signatures on log": {[]string{"-c", "log.showSignature=true", "log"}, "log.showSignature"},
+		"sign commits":             {[]string{"-c", "commit.gpgsign=true", "cherry-pick", "HEAD"}, "commit.gpgsign"},
+		"sign tags":                {[]string{"-c", "tag.gpgsign=true", "status"}, "tag.gpgsign"},
 		// The same key arriving by the other spelling.
 		"config-env redirect": {[]string{"--config-env=core.pager=EVIL", "log"}, "core.pager"},
 		// An override with nothing to override cannot be resolved either.
@@ -1042,7 +1052,14 @@ func TestARuntimeOwnedRefusalNamesThePermittedNextAction(t *testing.T) {
 	const work = "package candidate\n\n// uncommitted work the provider must keep\n"
 	writeCandidateFile(t, dir, "implementation.go", work)
 
-	code, diagnostic := brokerGit(t, dir, refusalLog, "-c", "commit.gpgsign=false", "commit", "-am", "provider commit")
+	// THE OVERRIDE MUST BE ONE THE CLASSIFIER ACCEPTS, or the commit is refused
+	// at the key and never reaches the arm this test is named for - the same
+	// way the composition test above could pass without proving anything.
+	argv := []string{"-c", "core.quotepath=false", "commit", "-am", "provider commit"}
+	if _, err := ResolveGitCommand(dir, argv); err != nil {
+		t.Fatalf("the fixture's override was itself refused, so this proves nothing: %v", err)
+	}
+	code, diagnostic := brokerGit(t, dir, refusalLog, argv...)
 	if code == 0 {
 		t.Fatal("a provider commit was permitted")
 	}
@@ -1126,6 +1143,71 @@ func TestRefCreationIsRuntimeOwnedAndRefReadingIsNot(t *testing.T) {
 			}
 			if got != GitOperationPermitted && strings.TrimSpace(reason) == "" {
 				t.Fatalf("a refusal of %v carries no reason", tc.argv)
+			}
+		})
+	}
+}
+
+// TestRefReadingFormsWithOperandsStayPermitted is the review's second and third
+// blockers on the ref split.
+//
+// A read is not distinguished by having no operand - `git branch --list
+// "feature/*"`, `git tag --verify v1` and `git symbolic-ref --short HEAD` all
+// carry one and all ask questions. Classifying by "is there an operand" alone
+// would refuse exactly the inspection a worker is entitled to, which is the
+// #248 trap rebuilt one verb along.
+func TestRefReadingFormsWithOperandsStayPermitted(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"branch list by pattern":   {"branch", "--list", "feature/*"},
+		"branch list short":        {"branch", "-l", "feature/*"},
+		"branch remotes pattern":   {"branch", "-r", "origin/*"},
+		"branch all pattern":       {"branch", "--all", "feature/*"},
+		"branch remotes long":      {"branch", "--remotes", "origin/*"},
+		"tag verify":               {"tag", "--verify", "v1.0.0"},
+		"tag verify short":         {"tag", "-v", "v1.0.0"},
+		"symbolic-ref read":        {"symbolic-ref", "HEAD"},
+		"symbolic-ref short read":  {"symbolic-ref", "--short", "HEAD"},
+		"symbolic-ref quiet read":  {"symbolic-ref", "-q", "HEAD"},
+		"branch contains a commit": {"branch", "--contains", "HEAD"},
+		"branch sorted format":     {"branch", "--sort=-committerdate", "--format=%(refname)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+		})
+	}
+}
+
+// TestRefWritingFormsAreRuntimeOwnedHoweverSpelled is the fourth blocker: a
+// writing flag must be recognized in the spelling that carries its value with
+// an `=`, and inside a short cluster.
+//
+// The earlier helper skipped a joined flag as "a flag with a value" BEFORE
+// asking whether that flag writes, so `--set-upstream-to=origin/main` walked
+// past the check `--set-upstream-to origin/main` failed.
+func TestRefWritingFormsAreRuntimeOwnedHoweverSpelled(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"joined set-upstream":       {"branch", "--set-upstream-to=origin/main"},
+		"separated set-upstream":    {"branch", "--set-upstream-to", "origin/main"},
+		"joined move":               {"branch", "--move=old", "new"},
+		"joined delete":             {"branch", "--delete=feature"},
+		"short cluster delete":      {"branch", "-aD", "feature"},
+		"short cluster force":       {"branch", "-fm", "old", "new"},
+		"unset upstream":            {"branch", "--unset-upstream"},
+		"edit description":          {"branch", "--edit-description"},
+		"joined tag message":        {"tag", "--message=release", "v1"},
+		"tag force short cluster":   {"tag", "-af", "v1"},
+		"symbolic-ref write":        {"symbolic-ref", "HEAD", "refs/heads/other"},
+		"symbolic-ref with reason":  {"symbolic-ref", "-m", "why", "HEAD", "refs/heads/other"},
+		"symbolic-ref delete":       {"symbolic-ref", "--delete", "HEAD"},
+		"symbolic-ref delete short": {"symbolic-ref", "-d", "HEAD"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationRuntimeOwned {
+				t.Fatalf("%v classified as %q, want runtime-owned", argv, class)
+			} else if strings.TrimSpace(reason) == "" {
+				t.Fatalf("a refusal of %v carries no reason", argv)
 			}
 		})
 	}
