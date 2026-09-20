@@ -1212,3 +1212,69 @@ func TestRefWritingFormsAreRuntimeOwnedHoweverSpelled(t *testing.T) {
 		})
 	}
 }
+
+// TestAnOptionalValueFlagDoesNotSwallowTheRefName is a bypass this classifier
+// had, found in review and confirmed against real Git.
+//
+// `--color` and `--abbrev` take an OPTIONAL value, which Git requires to be
+// attached: `--color=always`, `--abbrev=12`. A bare argument after them is
+// therefore the branch or tag NAME, not the flag's value. Treating them as
+// value-carrying skipped the name, left no operand behind, and classified a ref
+// creation as permitted.
+//
+// Observed on git 2.55.0, in a scratch repository:
+//
+//	git branch --color probe-ref   -> refs/heads/probe-ref EXISTS
+//	git branch --abbrev probe-ref  -> refs/heads/probe-ref EXISTS
+//	git tag --color probe-ref      -> refs/tags/probe-ref EXISTS
+//
+// while every flag still on the listing table was observed NOT to create one.
+// That is why membership there is evidence rather than inference: the listing
+// table is the permissive direction, and a wrong entry is a bypass.
+func TestAnOptionalValueFlagDoesNotSwallowTheRefName(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"branch color":          {"branch", "--color", "provider-branch"},
+		"branch abbrev":         {"branch", "--abbrev", "provider-branch"},
+		"tag color":             {"tag", "--color", "provider-tag"},
+		"branch color attached": {"branch", "--color=always", "provider-branch"},
+		"branch verbose":        {"branch", "-v", "provider-branch"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, _ := ClassifyGitCommand(argv); class != GitOperationRuntimeOwned {
+				t.Fatalf("%v classified as %q, want runtime-owned: Git creates the ref", argv, class)
+			}
+		})
+	}
+	// And the attached form of the value, which IS how Git takes one, still
+	// leaves a listing invocation a listing invocation.
+	for name, argv := range map[string][]string{
+		"attached color while listing":  {"branch", "--list", "--color=always", "feature/*"},
+		"attached abbrev while listing": {"branch", "--list", "--abbrev=12"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+		})
+	}
+}
+
+// TestTagNumericListingIsARead covers `git tag -n[<num>]`, which Git documents
+// as implying --list, so the operand beside it is a pattern.
+func TestTagNumericListingIsARead(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"bare":             {"tag", "-n", "release-*"},
+		"with a count":     {"tag", "-n5", "release-*"},
+		"count no pattern": {"tag", "-n3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+		})
+	}
+	// -n is not a blanket escape: a writing flag beside it still writes.
+	if class, _ := ClassifyGitCommand([]string{"tag", "-n", "-d", "v1"}); class != GitOperationRuntimeOwned {
+		t.Fatalf("a delete behind -n was classified as %q", class)
+	}
+}

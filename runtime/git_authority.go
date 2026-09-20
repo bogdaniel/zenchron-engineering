@@ -189,10 +189,20 @@ type refVerbSpec struct {
 	// writingShort are the same flags inside a short cluster: `-aD` is a delete.
 	writingShort string
 	// listing flags turn the invocation into a query, so whatever operands
-	// follow are patterns or revisions rather than names.
+	// follow are patterns, revisions or sort keys rather than names.
+	//
+	// EVERY MEMBER IS THERE BECAUSE GIT WAS ASKED. `git branch <flag> name` was
+	// run against real Git for each one and observed not to create
+	// refs/heads/name; the flags that DID create it are deliberately absent.
+	// Membership here is permissive - it stops operands being read as names -
+	// so it is the direction that has to be evidence and not inference.
 	listing map[string]bool
-	// readValue flags take a SEPARATE value that must not be read as a name.
+	// readValue flags take a SEPARATE mandatory value that must not be read as
+	// a name, for a verb that has no listing mode to fall back on.
 	readValue map[string]bool
+	// numericListing marks a verb whose `-n[<num>]` implies --list, which is
+	// `git tag` and only `git tag`.
+	numericListing bool
 }
 
 // namesANewRef reports whether a ref verb would CREATE or CHANGE a ref rather
@@ -231,7 +241,7 @@ func namesANewRef(rest []string, spec refVerbSpec) bool {
 		if isShortCluster(arg) && strings.ContainsAny(arg[1:], spec.writingShort) {
 			return true
 		}
-		if spec.listing[name] {
+		if spec.listing[name] || (spec.numericListing && isNumericListing(name)) {
 			listing = true
 			continue
 		}
@@ -252,6 +262,21 @@ func namesANewRef(rest []string, spec refVerbSpec) bool {
 // character after the dash is its own single-letter flag.
 func isShortCluster(arg string) bool {
 	return len(arg) > 1 && arg[0] == '-' && arg[1] != '-'
+}
+
+// isNumericListing recognizes `git tag`'s `-n[<num>]`, which Git documents as
+// implying --list. The count is attached rather than separate, so `-n5` is one
+// argument and `git tag -n5 "v*"` is a query.
+func isNumericListing(arg string) bool {
+	if !strings.HasPrefix(arg, "-n") {
+		return false
+	}
+	for _, r := range arg[2:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // refOperands counts the operands of a verb whose flags carry no separate
@@ -286,15 +311,18 @@ var (
 			"--edit-description": true,
 		},
 		writingShort: "dDmMcCfu",
-		// `--list`, `-a` and `-r` all make the operands patterns.
+		// Each of these was observed NOT to create a branch when followed by a
+		// bare name. --color and --abbrev are absent because they DO: their
+		// value is optional and must be attached, so `git branch --color foo`
+		// creates foo. Listing them as value-carrying skipped the name and
+		// classified the creation as permitted, which is the bypass this list
+		// is shaped to avoid.
 		listing: map[string]bool{
 			"-l": true, "--list": true, "-a": true, "--all": true,
 			"-r": true, "--remotes": true,
-		},
-		readValue: map[string]bool{
 			"--contains": true, "--no-contains": true, "--merged": true,
-			"--no-merged": true, "--points-at": true, "--format": true,
-			"--sort": true, "--color": true, "--abbrev": true,
+			"--no-merged": true, "--points-at": true,
+			"--format": true, "--sort": true,
 		},
 	}
 	tagRefSpec = refVerbSpec{
@@ -307,15 +335,16 @@ var (
 			"-e": true, "--edit": true,
 		},
 		writingShort: "asumFdfe",
-		// `--verify` reads a tag's signature; `-l` filters by pattern.
+		// `--verify` reads a tag's signature, `-l` filters by pattern, and
+		// `-n[<num>]` implies --list. --color is absent for the same reason it
+		// is absent above: `git tag --color foo` creates foo.
 		listing: map[string]bool{
 			"-l": true, "--list": true, "-v": true, "--verify": true,
-		},
-		readValue: map[string]bool{
 			"--contains": true, "--no-contains": true, "--merged": true,
-			"--no-merged": true, "--points-at": true, "--format": true,
-			"--sort": true, "--color": true,
+			"--no-merged": true, "--points-at": true,
+			"--format": true, "--sort": true,
 		},
+		numericListing: true,
 	}
 	// symbolic-ref takes a reason with -m; nothing else it accepts carries a
 	// separate value.
