@@ -577,3 +577,82 @@ func TestTheExecutionContextCannotBeLaundered(t *testing.T) {
 		}
 	})
 }
+
+// TestTheContextScannersAgree pins the property the review found violated,
+// rather than the shape of any one past bug.
+//
+// Two functions read the same argv for the same option: one decides where the
+// command will be classified, the other decides what Git actually receives. If
+// they disagree about a single -C, the command is classified against one
+// repository and executed against another. That is not a narrower boundary, it
+// is a bypass, so the agreement is asserted directly.
+func TestTheContextScannersAgree(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no -C at all":                      {[]string{"status"}, "/base"},
+		"a bare -C":                         {[]string{"-C", "/x", "status"}, "/x"},
+		"-C behind an inert -c":             {[]string{"-c", "core.quotepath=false", "-C", "/x", "status"}, "/x"},
+		"-C behind a deferred -c":           {[]string{"-c", "user.email=a@b", "-C", "/x", "reset", "--hard"}, "/x"},
+		"-C behind two -c options":          {[]string{"-c", "user.name=n", "-c", "user.email=a@b", "-C", "/x", "status"}, "/x"},
+		"two -C options compose":            {[]string{"-C", "/x", "-C", "sub", "status"}, "/x/sub"},
+		"-C after a valueless global":       {[]string{"--no-pager", "-C", "/x", "status"}, "/x"},
+		"a pathspec that looks like a flag": {[]string{"-C", "/x", "reset", "--", "-C"}, "/x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := effectiveCwd("/base", tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("the pin resolved %q and the argv says %q", got, tc.want)
+			}
+			// NOTHING THE PIN ALREADY APPLIED MAY REACH GIT. A surviving -C is
+			// applied a second time, landing somewhere nobody classified.
+			executed := withoutDirectoryGlobals(tc.args)
+			for i, arg := range executed {
+				if arg == "--" {
+					break
+				}
+				if arg == "-C" {
+					t.Fatalf("a -C survived into the executed argv at %d: %v", i, executed)
+				}
+			}
+			// And the verb the classifier answered for must be the verb Git runs.
+			_, pinnedVerb, _ := splitGitCommand(executed)
+			_, originalVerb, _ := splitGitCommand(tc.args)
+			if pinnedVerb != originalVerb {
+				t.Fatalf("the executed verb is %q and the classified verb was %q", pinnedVerb, originalVerb)
+			}
+		})
+	}
+}
+
+// TestAnAliasCannotSlipAnIdentityPastAPermittedVerb is the case an earlier
+// version of the alias regression missed.
+//
+// `commit` is runtime-owned whatever identity it carries, so an alias expanding
+// to one is refused either way and proves nothing about WHERE the deferred keys
+// were read from. An alias expanding to a PERMITTED verb is the sharp case: a
+// check reading the original argv finds no override there, and the identity
+// reaches the candidate repository unexamined.
+func TestAnAliasCannotSlipAnIdentityPastAPermittedVerb(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	initTargetRepo(t, candidate)
+	log := filepath.Join(root, "refused.jsonl")
+
+	if _, err := brokerGitOutput(candidate, "config", "alias.peek",
+		"-c user.email=alias@example.invalid status --porcelain"); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, "peek"); code == 0 {
+		t.Fatal("an alias slipped an identity override past a permitted verb")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetCandidate {
+		t.Fatalf("the refusal recorded target=%q", got)
+	}
+}
