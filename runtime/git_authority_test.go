@@ -1610,25 +1610,18 @@ func TestExecRealGitRunsWhereItIsTold(t *testing.T) {
 	fixture, _ := gitAuthorityFixture(t)
 	writeCandidateFile(t, fixture, "implementation.go", "package candidate\n\n// dirty\n")
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	witness := filepath.Join(cwd, "sentinel-exec-contract.tmp")
-	if err := os.WriteFile(witness, []byte("untouched\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(witness)
-
-	// NON-EMPTY DIR: the command runs in the directory it was given.
+	// NON-EMPTY DIR: the command runs in the directory it was given, and the
+	// shared sentinel answers for the other direction - that it did not reach
+	// the directory the test itself is running in. It stands down where that
+	// directory refuses writes, because there a destructive command has
+	// nothing to damage.
+	reachedTheCheckout := sentinelOutside(t, fixture)
 	if _, err := execRealGit(fixture, []string{"reset", "--hard"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("reset in the named directory: %v", err)
 	}
+	reachedTheCheckout()
 	if body := candidateFileBody(t, fixture, "implementation.go"); strings.Contains(body, "dirty") {
 		t.Fatal("the command did not run in the directory it was given")
-	}
-	if body, readErr := os.ReadFile(witness); readErr != nil || string(body) != "untouched\n" {
-		t.Fatalf("the command reached %s instead of the fixture", cwd)
 	}
 
 	// EMPTY DIR: the caller's context is inherited. Asked with a read, and
