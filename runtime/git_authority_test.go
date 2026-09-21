@@ -107,10 +107,47 @@ func brokerGitFrom(t *testing.T, cwd, candidateDir, scratchDir, refusalLog strin
 // unguardedGit is the MUTATION: the identical argv with the guard removed. It
 // is what the provider would have run before #241, and what it still runs if
 // the enforcement point is bypassed or deleted.
+//
+// IT PLANTS A SENTINEL OUTSIDE THE FIXTURE FIRST. A test whose whole purpose is
+// to run `reset --hard` and `clean -fdx` for real is one wrong directory away
+// from attacking the checkout it is running in - which is not hypothetical. It
+// happened twice on this branch, and both times the test reported only that the
+// FIXTURE was undamaged, because the fixture was not where the command landed.
+// The sentinel turns a misdirected command into an immediate, loud failure
+// naming the directory it actually reached.
 func unguardedGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	defer sentinelOutside(t, dir)()
 	if _, err := execRealGit(dir, args, io.Discard, io.Discard); err != nil {
 		t.Fatalf("unguarded git %v: %v", args, err)
+	}
+}
+
+// sentinelOutside records a witness file outside dir and returns the check to
+// run afterwards.
+//
+// The witness lives in the directory the TEST PROCESS is running in, because
+// that is the thing a misdirected destructive command actually reaches: the
+// package source directory, which is part of the working checkout.
+func sentinelOutside(t *testing.T, dir string) func() {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cwd == dir {
+		t.Fatalf("the fixture is the test's own working directory, so no sentinel can distinguish them: %s", dir)
+	}
+	witness := filepath.Join(cwd, "sentinel-"+strings.ReplaceAll(t.Name(), "/", "_")+".tmp")
+	if err := os.WriteFile(witness, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		body, readErr := os.ReadFile(witness)
+		_ = os.Remove(witness)
+		if readErr != nil || string(body) != "untouched\n" {
+			t.Fatalf("a destructive command reached the test's own working directory %s, not the fixture %s", cwd, dir)
+		}
 	}
 }
 
@@ -1525,5 +1562,72 @@ func TestTheSmokeRunReplaysToTheExpectedTaxonomy(t *testing.T) {
 	// The candidate is untouched after all 54, which is the point of the six.
 	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
 		t.Fatalf("the replay reached the candidate:\n%q", got)
+	}
+}
+
+// TestExecRealGitRunsWhereItIsTold pins the two halves of the execution-context
+// contract independently, because conflating them destroyed a working tree.
+//
+//	non-empty dir → the command runs THERE, and nowhere else
+//	empty dir     → the command inherits the caller's context
+//
+// The first half asserts BOTH directions: the fixture changed, and the
+// directory the test itself runs in did not. Asserting only the first is what
+// let a misdirected `reset --hard` look like an ordinary test failure while it
+// erased uncommitted work.
+//
+// It is also the pre-mutation sanity check for this package: if this test is
+// absent or failing, the guard it describes is not present, and no mutation
+// experiment against execRealGit should be run.
+func TestExecRealGitRunsWhereItIsTold(t *testing.T) {
+	requireGitFixture(t)
+	fixture, _ := gitAuthorityFixture(t)
+	writeCandidateFile(t, fixture, "implementation.go", "package candidate\n\n// dirty\n")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness := filepath.Join(cwd, "sentinel-exec-contract.tmp")
+	if err := os.WriteFile(witness, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(witness)
+
+	// NON-EMPTY DIR: the command runs in the directory it was given.
+	if _, err := execRealGit(fixture, []string{"reset", "--hard"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("reset in the named directory: %v", err)
+	}
+	if body := candidateFileBody(t, fixture, "implementation.go"); strings.Contains(body, "dirty") {
+		t.Fatal("the command did not run in the directory it was given")
+	}
+	if body, readErr := os.ReadFile(witness); readErr != nil || string(body) != "untouched\n" {
+		t.Fatalf("the command reached %s instead of the fixture", cwd)
+	}
+
+	// EMPTY DIR: the caller's context is inherited. Asked with a read, and
+	// asserted by what it REPORTS rather than by what it destroys.
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(restore) }()
+	if err := os.Chdir(fixture); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if _, err := execRealGit("", []string{"rev-parse", "--show-toplevel"}, &out, io.Discard); err != nil {
+		t.Fatalf("inherited-context run: %v", err)
+	}
+	reported, resolveErr := filepath.EvalSymlinks(strings.TrimSpace(out.String()))
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	expected, resolveErr := filepath.EvalSymlinks(fixture)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	if reported != expected {
+		t.Fatalf("an empty dir did not inherit the caller's context: ran in %s, want %s", reported, expected)
 	}
 }
