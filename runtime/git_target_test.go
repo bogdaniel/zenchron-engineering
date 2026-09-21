@@ -711,6 +711,7 @@ func TestAGrantedAuthorityCannotWriteOutsideItsResource(t *testing.T) {
 			candidateIndexBefore := indexDigest(t, candidate)
 			candidateHeadBefore := repoHead(t, candidate)
 			candidateObjectsBefore := objectCount(t, candidate)
+			fixtureHeadBefore := repoHead(t, fixture)
 
 			key, value := redirect(candidate)
 			t.Setenv(key, value)
@@ -721,8 +722,11 @@ func TestAGrantedAuthorityCannotWriteOutsideItsResource(t *testing.T) {
 				"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
 				t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
 			}
-			// The grant was real.
-			if repoHead(t, fixture) == "" {
+			// THE GRANT WAS REAL. Asserting a non-empty HEAD could not fail -
+			// initTargetRepo already committed a base - so it had to be a
+			// MOVED head, or a boundary that silently no-opped every redirected
+			// command would pass the candidate-untouched half and prove nothing.
+			if repoHead(t, fixture) == fixtureHeadBefore {
 				t.Fatal("the permitted scratch commit did not run")
 			}
 			// And it stopped at the scratch repository.

@@ -844,11 +844,16 @@ func brokerGitEnv() []string {
 // brokerGitStripped is the non-GIT_ half: names that still hand Git a command
 // to run or a configuration tree to read, and so carry the same authority
 // under a different spelling.
+// Git's editor fallback is GIT_EDITOR, then core.editor, then VISUAL, then
+// EDITOR. The GIT_ prefix rule and the configuration pins close the first two,
+// so leaving VISUAL would leave the third: a provider-named program Git runs
+// for any command that opens an editor.
 var brokerGitStripped = map[string]bool{
 	"SSH_ASKPASS":     true,
 	"SSH_AUTH_SOCK":   true,
 	"XDG_CONFIG_HOME": true,
 	"EDITOR":          true,
+	"VISUAL":          true,
 }
 
 // brokerGitPins put back, as fixed values, the few GIT_* settings whose absence
@@ -862,6 +867,7 @@ var brokerGitPins = []string{
 	"GIT_ATTR_NOSYSTEM=1",
 	"GIT_TERMINAL_PROMPT=0",
 	"GIT_PAGER=cat",
+	"PAGER=cat",
 	"GIT_OPTIONAL_LOCKS=0",
 }
 

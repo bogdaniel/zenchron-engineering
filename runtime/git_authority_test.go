@@ -1650,3 +1650,92 @@ func TestExecRealGitRunsWhereItIsTold(t *testing.T) {
 		t.Fatalf("an empty dir did not inherit the caller's context: ran in %s, want %s", reported, expected)
 	}
 }
+
+// TestTheBrokerEnvironmentDropsProviderGitAuthority guards the namespace rule
+// itself, rather than any one command's behaviour.
+//
+// The behavioural tests prove specific escapes are closed. This proves the
+// SHAPE: provider-controlled Git authority is not inherited, the runtime's own
+// controls are present as values, and ordinary environment still passes through
+// so a brokered command runs in the provider's context.
+//
+// It is the test that would have caught VISUAL. Git's editor fallback is
+// GIT_EDITOR, core.editor, VISUAL, EDITOR - and an earlier version of the strip
+// list named only the last of those four.
+func TestTheBrokerEnvironmentDropsProviderGitAuthority(t *testing.T) {
+	for _, name := range []string{
+		// Repository location and writable state.
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_CEILING_DIRECTORIES", "GIT_TEMPLATE_DIR",
+		// Configuration injection: `-c` by another spelling.
+		"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG_PARAMETERS",
+		// Identity, which never appears in argv.
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+		// Programs Git will run.
+		"GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_PROXY_COMMAND",
+		"GIT_EXTERNAL_DIFF", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
+		"SSH_ASKPASS", "SSH_AUTH_SOCK", "EDITOR", "VISUAL", "XDG_CONFIG_HOME",
+		// A variable Git has not invented yet, standing for the prefix rule.
+		"GIT_SOMETHING_INVENTED_LATER",
+		// Writes a trace to a path of the provider's choosing.
+		"GIT_TRACE", "GIT_TRACE2",
+	} {
+		t.Setenv(name, "/provider/controlled")
+	}
+	// Ordinary environment a brokered command legitimately needs.
+	t.Setenv("ZENCHRON_ORDINARY_VARIABLE", "kept")
+
+	present := map[string]string{}
+	for _, entry := range brokerGitEnv() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("a malformed environment entry: %q", entry)
+		}
+		// Duplicates matter: Git takes the LAST occurrence, so a pin appearing
+		// after an inherited value is what makes the pin authoritative.
+		present[key] = value
+	}
+
+	for _, name := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG_PARAMETERS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_SSH", "GIT_SSH_COMMAND",
+		"GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_EDITOR",
+		"GIT_SEQUENCE_EDITOR", "SSH_ASKPASS", "SSH_AUTH_SOCK", "EDITOR", "VISUAL",
+		"XDG_CONFIG_HOME", "GIT_SOMETHING_INVENTED_LATER", "GIT_TRACE", "GIT_TRACE2",
+		"GIT_TEMPLATE_DIR", "GIT_CEILING_DIRECTORIES",
+	} {
+		if got, ok := present[name]; ok && got == "/provider/controlled" {
+			t.Fatalf("%s was inherited from the provider", name)
+		}
+	}
+
+	for name, want := range map[string]string{
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_SYSTEM":   "/dev/null",
+		"GIT_CONFIG_GLOBAL":   "/dev/null",
+		"GIT_ATTR_NOSYSTEM":   "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"GIT_PAGER":           "cat",
+		"PAGER":               "cat",
+		"GIT_OPTIONAL_LOCKS":  "0",
+	} {
+		if got := present[name]; got != want {
+			t.Fatalf("pin %s = %q, want %q", name, got, want)
+		}
+	}
+
+	// NORMALIZED IS NOT EMPTIED. A brokered command runs in the provider's
+	// context and needs it.
+	if present["ZENCHRON_ORDINARY_VARIABLE"] != "kept" {
+		t.Fatal("ordinary environment did not survive normalization")
+	}
+	if present["PATH"] == "" {
+		t.Fatal("PATH did not survive normalization")
+	}
+}
