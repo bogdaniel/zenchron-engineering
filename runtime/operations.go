@@ -1074,12 +1074,15 @@ type executionRecord struct {
 	Checkpoint bool `json:"checkpoint,omitempty"`
 }
 
-// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
-// bounded to one payload field, and the message is redacted with the same
-// redactor that guards transcript artifacts, so no API key, Authorization
-// header, forge token, or raw provider body can become a durable row. Bulk
-// material stays in the artifact store; ArtifactRef names it when one exists,
-// and is absent when no provider interaction produced one.
+// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Every free-text
+// field is bounded to one payload field, and the message is redacted with the
+// same redactor that guards transcript artifacts, so no API key, Authorization
+// header, forge token, or raw provider body can become a durable row.
+// ArtifactRef is the one exception to the bound: it is a path built from the
+// runtime's own bounded components, not text a provider or process produced,
+// and truncating a path does not shrink it so much as break it. Bulk material
+// stays in the artifact store; ArtifactRef names it when one exists, and is
+// absent when no provider interaction produced one.
 type ExecutionDiagnostic struct {
 	Stage              string       `json:"stage"`
 	FailureClass       FailureClass `json:"failure_class,omitempty"`
@@ -1127,10 +1130,16 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		diagnostic.HTTPStatus, diagnostic.ProviderErrorCode = stop.Status, boundedDetail(stop.Code)
 		diagnostic.ProviderErrorParam = boundedDetail(stop.Param)
 	}
+	// ArtifactRef is a locator, not free text: boundedDetail's byte cut can land
+	// mid-path (even mid-commit-sha, since operation ids embed one) and produce
+	// a path that looks complete but opens nothing. It is built by the runtime
+	// itself from a small set of bounded components - never from provider or
+	// process output - so it needs no truncation to stay well inside the
+	// journal row's own ceiling.
 	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
-		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
+		diagnostic.ArtifactRef = result.Failure.RawDiagnosticRef
 	} else if len(result.Artifacts) > 0 {
-		diagnostic.ArtifactRef = boundedDetail(result.Artifacts[0].Path)
+		diagnostic.ArtifactRef = result.Artifacts[0].Path
 	}
 	return diagnostic
 }
