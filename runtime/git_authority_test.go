@@ -1278,3 +1278,151 @@ func TestTagNumericListingIsARead(t *testing.T) {
 		t.Fatalf("a delete behind -n was classified as %q", class)
 	}
 }
+
+// smokeRunBrokerArgv is the Git argv Claude Code actually emitted during run
+// run-9bd736a983ab21ea6be069da6f24e364 — the first governed self-hosted run a
+// Claude worker carried through candidate, assurance, authority and
+// publication (PR #252, candidate 72c178bd, assurance passed on attempt 1).
+//
+// It is kept as a FIXTURE rather than a note, because its numbers are the
+// benchmark the boundary is tuned against:
+//
+//	broker refusals   54
+//	  config-key      48   user.email 43, core.hooksPath 3, core.fsmonitor 1, log.showSignature 1
+//	  destructive      6   reset --hard x2, clean -fd, clean -fdx, checkout -- <path>, restore <path>
+//
+// The six destructive refusals are NOT a target for optimization. They are
+// evidence that #241 protected paid-for candidate work, and a change that
+// reduced them would be a regression wearing an improvement's clothes. The
+// optimization target is only the repeated configuration and authority
+// friction: 43 identical commits, answered 43 times with a complaint about the
+// provider's own invocation.
+var smokeRunBrokerArgv = []struct {
+	name  string
+	argv  []string
+	want  GitOperationClass
+	count int
+}{
+	// The loop. One provider intent, refused forty-three times.
+	{"commit behind an identity override", []string{"-c", "user.email=agent@example.invalid", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 43},
+	// Reads, each refused once on a key that must stay refused.
+	{"ls-files behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "ls-files", "--error-unmatch", "--", "go.mod"}, GitOperationPermitted, 1},
+	{"remote behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote"}, GitOperationPermitted, 1},
+	{"remote -v behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote", "-v"}, GitOperationPermitted, 1},
+	{"log behind a monitor", []string{"-c", "core.fsmonitor=/tmp/watch", "log", "-1", "--format=%H:%ct"}, GitOperationPermitted, 1},
+	{"log behind a signature toggle", []string{"-c", "log.showSignature=true", "log", "--since=7.days", "--name-only"}, GitOperationPermitted, 1},
+	// The six that must stay refused, and stay DESTRUCTIVE.
+	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 2},
+	{"clean", []string{"clean", "-fd"}, GitOperationDiscard, 1},
+	{"clean x", []string{"clean", "-fdx"}, GitOperationDiscard, 1},
+	{"checkout a path", []string{"checkout", "--", "implementation.go"}, GitOperationDiscard, 1},
+	{"restore a path", []string{"restore", "implementation.go"}, GitOperationDiscard, 1},
+}
+
+// TestTheSmokeRunArgvGetsTheAnswerThatEndsTheLoop replays that run through the
+// broker and asserts the answer each shape now receives.
+//
+// The measure is not "were there refusals". One runtime-owned refusal is
+// healthy and expected. The measure is whether the FIRST answer terminates the
+// provider's decision tree: a commit must be told that committing is not its
+// to do, not that its override is invalid.
+func TestTheSmokeRunArgvGetsTheAnswerThatEndsTheLoop(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// the work this run produced\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+
+	for _, tc := range smokeRunBrokerArgv {
+		t.Run(tc.name, func(t *testing.T) {
+			code, diagnostic := brokerGit(t, dir, refusalLog, tc.argv...)
+			switch tc.want {
+			case GitOperationRuntimeOwned:
+				if code == 0 {
+					t.Fatalf("%v was permitted", tc.argv)
+				}
+				// THE TERMINAL FACT LEADS. This is the whole of #253: the
+				// provider must read the authority decision, not a fixable
+				// complaint about its own invocation.
+				for _, want := range []string{
+					"runtime-owned Git refused",
+					"Do not retry this command",
+					"Zenchron commits the candidate itself",
+				} {
+					if !strings.Contains(diagnostic, want) {
+						t.Fatalf("the answer does not say %q, so it does not end the loop: %s", want, diagnostic)
+					}
+				}
+				// The configuration is still refused - it is simply not the
+				// reason, and the provider is told that removing it would not
+				// help.
+				if !strings.Contains(diagnostic, "user.email") {
+					t.Fatalf("the refused override is no longer recorded in the answer: %s", diagnostic)
+				}
+				if strings.Index(diagnostic, "runtime-owned Git refused") > strings.Index(diagnostic, "user.email") {
+					t.Fatalf("the incidental objection leads the answer: %s", diagnostic)
+				}
+			case GitOperationDiscard:
+				// NOT A TARGET FOR OPTIMIZATION. These are #241 protecting
+				// paid-for candidate work.
+				if code == 0 {
+					t.Fatalf("%v was permitted", tc.argv)
+				}
+				if !strings.Contains(diagnostic, "destructive Git refused") {
+					t.Fatalf("%v is no longer answered as a discard: %s", tc.argv, diagnostic)
+				}
+			case GitOperationPermitted:
+				// Refused today on the key, and #254 is where that changes.
+				// What must hold now is that the answer NAMES the key, so the
+				// provider can act on it rather than guess.
+				if code != 0 && !strings.Contains(diagnostic, "configuration override") {
+					t.Fatalf("%v was refused without naming the objection: %s", tc.argv, diagnostic)
+				}
+			}
+			if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+				t.Fatalf("%v reached the candidate:\n%q", tc.argv, got)
+			}
+		})
+	}
+}
+
+// TestTheRuntimeOwnedAnswerIsUnchangedWithoutAnOverride keeps the precedence
+// change from being the only path that produces the actionable answer.
+func TestTheRuntimeOwnedAnswerIsUnchangedWithoutAnOverride(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	writeCandidateFile(t, dir, "implementation.go", "package candidate\n")
+	code, diagnostic := brokerGit(t, dir, refusalLog, "commit", "-m", "wip")
+	if code == 0 {
+		t.Fatal("a bare provider commit was permitted")
+	}
+	if !strings.Contains(diagnostic, "runtime-owned Git refused") {
+		t.Fatalf("a commit with no override lost its answer: %s", diagnostic)
+	}
+	// With nothing incidental to report, nothing incidental is reported.
+	if strings.Contains(diagnostic, "also carried") {
+		t.Fatalf("an incidental note appeared with no incidental objection: %s", diagnostic)
+	}
+}
+
+// TestAnAliasCannotBecomeARuntimeOwnedAnswer is the anti-regression for the
+// precedence change: classifying the UNRESOLVED argv must not let an alias
+// present itself as a runtime-owned verb and collect the gentler answer.
+func TestAnAliasCannotBecomeARuntimeOwnedAnswer(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// work an alias must not reach\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+	// An alias NAMED like a runtime-owned verb cannot exist - Git ignores an
+	// alias whose name collides with a builtin - so the hostile shape is an
+	// alias with its own name, defined inline, expanding to a discard.
+	code, diagnostic := brokerGit(t, dir, refusalLog, "-c", "alias.ci=reset --hard", "ci")
+	if code == 0 {
+		t.Fatal("an inline alias was permitted")
+	}
+	if strings.Contains(diagnostic, "runtime-owned Git refused") {
+		t.Fatalf("an alias collected the runtime-owned answer: %s", diagnostic)
+	}
+	if !strings.Contains(diagnostic, "alias.ci") {
+		t.Fatalf("the refusal does not name the override: %s", diagnostic)
+	}
+	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+		t.Fatalf("the alias reached the candidate:\n%q", got)
+	}
+}

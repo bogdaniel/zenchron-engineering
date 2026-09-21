@@ -520,11 +520,22 @@ func (e *GitDiscardRefusedError) Error() string {
 type GitRuntimeOwnedRefusedError struct{ Operation, Reason string }
 
 func (e *GitRuntimeOwnedRefusedError) Error() string {
-	return "runtime-owned Git refused: " + e.Operation + " (" + e.Reason + ")." +
+	// THE TERMINAL FACT LEADS. Anything else the invocation was also wrong
+	// about comes after the instruction, because a provider reads the first
+	// actionable-looking sentence and acts on it - which is how forty-three
+	// identical commits got sent.
+	headline, incidental, _ := strings.Cut(e.Reason, "; ")
+	message := "runtime-owned Git refused: " + e.Operation + " (" + headline + ")." +
 		" Do not retry this command and do not create commits, branches or tags:" +
 		" Zenchron commits the candidate itself from your working tree." +
 		" Leave your changes as edited files and continue with the rest of the task." +
 		" Read-only Git (status, diff, log, show) is unaffected."
+	if incidental != "" {
+		message += " (This invocation also carried something the boundary refuses" +
+			" independently - " + incidental + " - which is not why this command was refused," +
+			" and removing it would not make the command permitted.)"
+	}
+	return message
 }
 
 // BrokerGitCommand is the decision, and it is the whole enforcement point.
@@ -558,6 +569,36 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 	// an ordinary command. See git_alias.go.
 	effective, resolveErr := ResolveGitCommand(candidateDir, args)
 	if resolveErr != nil {
+		// AUTHORITY OUTRANKS AN INCIDENTAL OBJECTION.
+		//
+		// Both answers refuse. But when the argv also names something the
+		// runtime categorically owns, the configuration complaint is the wrong
+		// one to give: it describes a fixable problem with the provider's own
+		// invocation, so the provider fixes it and sends the command again.
+		// Production did exactly that - run
+		// run-9bd736a983ab21ea6be069da6f24e364 refused `git -c user.email=...
+		// commit -m ...` FORTY-THREE times in one invocation, each time saying
+		// "run the same command without that override", and the worker never
+		// once saw that committing was not its to do. It spent the invocation's
+		// whole inactivity budget on it.
+		//
+		// The general law the case taught: when several boundaries object,
+		// answer with the one that most accurately terminates the provider's
+		// decision tree.
+		//
+		// CLASSIFYING THE UNRESOLVED ARGV IS SOUND HERE, and only here. The
+		// runtime-owned verbs are Git BUILTINS, and Git ignores an alias whose
+		// name collides with a command - so for these the literal verb IS the
+		// effective verb and no expansion can change it. An alias that expands
+		// TO one of them is not recognized, which costs a better message and
+		// nothing else: the command is still refused, by the arm below.
+		//
+		// Nothing is executed on this path either way. Only the class, and the
+		// sentence the provider reads, differ.
+		if class, reason := ClassifyGitCommand(args); class == GitOperationRuntimeOwned {
+			return refuseGitCommand(candidateDir, refusalLog, args,
+				reason+"; "+resolveErr.Error(), class, stderr)
+		}
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
 		// the first.
