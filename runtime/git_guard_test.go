@@ -116,9 +116,16 @@ func TestTheGuardPutsItsOwnGitFirstOnTheWorkerPath(t *testing.T) {
 // something that is not a repository, so Git performs no discovery at all.
 func TestUnshimmedGitFailsClosedAgainstTheCandidateRepository(t *testing.T) {
 	guard, dir := guardFixture(t)
-	systemGit, err := exec.LookPath("git")
+	// THE REAL GIT, RESOLVED THE WAY THE RUNTIME RESOLVES IT - not by a PATH
+	// lookup. This test's whole premise is invoking Git by a spelling that goes
+	// AROUND the shim, and exec.LookPath finds whatever is first on the search
+	// path, which inside a brokered environment is a shim. A provider running
+	// this suite under the guard would therefore have been "bypassing" the
+	// boundary with the boundary, and the test would report on something it was
+	// not written to measure.
+	systemGit, err := gitBinary()
 	if err != nil {
-		t.Skip("no system git to attempt a bypass with")
+		t.Skip("no trusted git to attempt a bypass with")
 	}
 	const work = "package candidate\n\n// work a bypass must not reach\n"
 	writeCandidateFile(t, dir, "implementation.go", work)
