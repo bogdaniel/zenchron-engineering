@@ -1074,12 +1074,15 @@ type executionRecord struct {
 	Checkpoint bool `json:"checkpoint,omitempty"`
 }
 
-// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
-// bounded to one payload field, and the message is redacted with the same
-// redactor that guards transcript artifacts, so no API key, Authorization
-// header, forge token, or raw provider body can become a durable row. Bulk
-// material stays in the artifact store; ArtifactRef names it when one exists,
-// and is absent when no provider interaction produced one.
+// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Every free-form
+// text field is bounded to one payload field, and the message is redacted
+// with the same redactor that guards transcript artifacts, so no API key,
+// Authorization header, forge token, or raw provider body can become a
+// durable row. Bulk material stays in the artifact store; ArtifactRef names
+// it when one exists, and is absent when no provider interaction produced
+// one. ArtifactRef is a runtime-constructed path rather than provider text,
+// so it is exempt from the bound: it needs no redaction, and truncating a
+// locator only breaks the one thing it is for.
 type ExecutionDiagnostic struct {
 	Stage              string       `json:"stage"`
 	FailureClass       FailureClass `json:"failure_class,omitempty"`
@@ -1127,10 +1130,17 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		diagnostic.HTTPStatus, diagnostic.ProviderErrorCode = stop.Status, boundedDetail(stop.Code)
 		diagnostic.ProviderErrorParam = boundedDetail(stop.Param)
 	}
+	// ArtifactRef is a filesystem path the runtime itself constructed, not
+	// narrative provider text - it carries no secret and needs no redaction.
+	// boundedDetail exists to cap free-form text at a byte offset; run a path
+	// through it and the cut lands mid-component (mid commit sha, mid run ID)
+	// with no indication anything was removed. A truncated locator does not
+	// degrade gracefully like truncated prose does: it just stops resolving.
+	// The path is left whole so an operator can open exactly what is printed.
 	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
-		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
+		diagnostic.ArtifactRef = result.Failure.RawDiagnosticRef
 	} else if len(result.Artifacts) > 0 {
-		diagnostic.ArtifactRef = boundedDetail(result.Artifacts[0].Path)
+		diagnostic.ArtifactRef = result.Artifacts[0].Path
 	}
 	return diagnostic
 }
