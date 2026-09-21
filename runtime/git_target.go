@@ -275,3 +275,58 @@ func within(path, root string, id fileID) bool {
 	}
 	return pathContains(root, path)
 }
+
+// effectiveCwd applies the `-C` globals the way Git does: in order, each one
+// relative to the directory the previous ones produced.
+//
+// The execution context has to be the COMMAND'S OWN. Resolving a target from
+// one directory and executing in another is not a smaller version of the
+// defect this repair is for - it is a laundering path, because a destructive
+// command classified against a scratch repository would land wherever the
+// execution context actually pointed.
+func effectiveCwd(base string, args []string) (string, error) {
+	cwd := base
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		if args[i] != "-C" {
+			if !strings.HasPrefix(args[i], "-") {
+				break
+			}
+			continue
+		}
+		if i+1 >= len(args) {
+			return "", fmt.Errorf("-C requires a directory")
+		}
+		i++
+		if filepath.IsAbs(args[i]) {
+			cwd = args[i]
+			continue
+		}
+		cwd = filepath.Join(cwd, args[i])
+	}
+	return cwd, nil
+}
+
+// withoutDirectoryGlobals removes the `-C` options the broker has already
+// applied by establishing its own working directory, so Git does not apply them
+// a second time and land somewhere nobody asked for. Everything else passes
+// through untouched.
+func withoutDirectoryGlobals(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			return append(out, args[i:]...)
+		}
+		if args[i] == "-C" {
+			i++
+			continue
+		}
+		if !strings.HasPrefix(args[i], "-") {
+			return append(out, args[i:]...)
+		}
+		out = append(out, args[i])
+	}
+	return out
+}

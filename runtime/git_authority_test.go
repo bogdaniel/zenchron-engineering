@@ -74,10 +74,32 @@ func candidateFileBody(t *testing.T, dir, name string) string {
 // diagnostic #241 acceptance 5 is about.
 func brokerGit(t *testing.T, dir, refusalLog string, args ...string) (int, string) {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	code, err := BrokerGitCommand(dir, refusalLog, args, &stdout, &stderr)
+	return brokerGitFrom(t, dir, dir, "", refusalLog, args...)
+}
+
+// brokerGitFrom runs one brokered decision from a chosen EXECUTION CONTEXT.
+//
+// The broker establishes its own working directory from the caller's, so a test
+// that wants a command to run somewhere has to be there - the same way a
+// provider's shell is. The caller's directory is restored afterwards, and a
+// sentinel guards the window: these commands are real, and a permitted
+// destructive one in the wrong place would attack the checkout the test is
+// running in.
+func brokerGitFrom(t *testing.T, cwd, candidateDir, scratchDir, refusalLog string, args ...string) (int, string) {
+	t.Helper()
+	defer sentinelOutside(t, cwd)()
+	restore, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("broker %v: %v", args, err)
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(restore) }()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, args, &stdout, &stderr)
+	if brokerErr != nil {
+		t.Fatalf("broker %v: %v", args, brokerErr)
 	}
 	return code, stderr.String()
 }

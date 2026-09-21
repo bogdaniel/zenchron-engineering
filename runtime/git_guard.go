@@ -92,7 +92,7 @@ func GitGuardDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
 // composition root chose which binary is the controller, and a boundary that
 // resolved its own enforcer from the environment would be enforcing with
 // whatever the environment supplied.
-func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir string, broker []string) (*GitGuard, error) {
+func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir, scratchDir string, broker []string) (*GitGuard, error) {
 	if len(broker) == 0 || strings.TrimSpace(broker[0]) == "" {
 		return nil, fmt.Errorf("a brokered Git guard requires the controller's own broker command")
 	}
@@ -126,7 +126,7 @@ func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir 
 	if err := os.RemoveAll(guard.SentinelGitDir); err != nil {
 		return nil, err
 	}
-	if err := writeGitShim(filepath.Join(bin, "git"), candidateDir, guard.RefusalLog, broker); err != nil {
+	if err := writeGitShim(filepath.Join(bin, "git"), candidateDir, scratchDir, guard.RefusalLog, broker); err != nil {
 		return nil, err
 	}
 	return guard, nil
@@ -138,14 +138,19 @@ func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir 
 // decide is already decided in Go: it forwards the argv to the broker with the
 // candidate workspace and the record it must write. Putting any classification
 // here would put part of the law in a file no test reads.
-func writeGitShim(path, candidateDir, refusalLog string, broker []string) error {
+func writeGitShim(path, candidateDir, scratchDir, refusalLog string, broker []string) error {
 	quoted := make([]string, 0, len(broker)+4)
 	for _, part := range broker {
 		quoted = append(quoted, shellSingleQuoted(part))
 	}
-	quoted = append(quoted,
-		"--candidate", shellSingleQuoted(candidateDir),
-		"--refusal-log", shellSingleQuoted(refusalLog), "--")
+	quoted = append(quoted, "--candidate", shellSingleQuoted(candidateDir))
+	// The attempt's own temp root, named only when the runtime granted one. An
+	// absent grant yields no scratch authority rather than a default, so a
+	// contract with no toolchain scratch refuses mutation everywhere.
+	if strings.TrimSpace(scratchDir) != "" {
+		quoted = append(quoted, "--scratch", shellSingleQuoted(scratchDir))
+	}
+	quoted = append(quoted, "--refusal-log", shellSingleQuoted(refusalLog), "--")
 	script := "#!/bin/sh\n" +
 		"# Runtime-owned. Zenchron brokers candidate Git; see issue #241.\n" +
 		"exec " + strings.Join(quoted, " ") + " \"$@\"\n"
@@ -244,7 +249,7 @@ func (p CLIAgentProvider) prepareGitGuard(request ExecutionRequest) (*GitGuard, 
 	if strings.TrimSpace(p.StateDir) == "" || len(p.GitBroker) == 0 {
 		return nil, nil
 	}
-	guard, err := PrepareGitGuard(p.StateDir, request.AttemptRef(), request.CandidateDir, p.GitBroker)
+	guard, err := PrepareGitGuard(p.StateDir, request.AttemptRef(), request.CandidateDir, request.ScratchDir, p.GitBroker)
 	if err != nil {
 		// A CONFIGURED GUARD THAT COULD NOT BE MATERIALIZED IS THE SAME FACT
 		// as one that could not be resolved: this controller cannot enforce

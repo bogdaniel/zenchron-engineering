@@ -46,7 +46,7 @@ func guardFor(t *testing.T, candidateDir string) *GitGuard {
 	// working correctly.
 	guard, err := PrepareGitGuard(execCapableTempDir(t), ExecutionAttemptRef{
 		RunID: "run-guard", OperationID: "run-guard:execution.invoke:initial|1|base", Attempt: 1,
-	}, candidateDir, []string{broker})
+	}, candidateDir, "", []string{broker})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 	state := t.TempDir()
 	attempt := ExecutionAttemptRef{RunID: "run-x", OperationID: "run-x:execution.invoke:initial|1|base", Attempt: 1}
 
-	first, err := PrepareGitGuard(state, attempt, dir, []string{"/bin/true"})
+	first, err := PrepareGitGuard(state, attempt, dir, "", []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 	// The same attempt prepared again: the record starts empty, so what is read
 	// back afterwards explains the invocation being explained rather than
 	// accumulating across a crash.
-	again, err := PrepareGitGuard(state, attempt, dir, []string{"/bin/true"})
+	again, err := PrepareGitGuard(state, attempt, dir, "", []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 	// A different attempt identity is a different guard, per #236/#237.
 	next := attempt
 	next.Attempt = 2
-	second, err := PrepareGitGuard(state, next, dir, []string{"/bin/true"})
+	second, err := PrepareGitGuard(state, next, dir, "", []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,13 +344,13 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 func TestAGuardRefusesToPrepareWithoutRuntimeOwnedInputs(t *testing.T) {
 	state := t.TempDir()
 	attempt := ExecutionAttemptRef{RunID: "r", OperationID: "r:execution.invoke:initial|1|b", Attempt: 1}
-	if _, err := PrepareGitGuard(state, attempt, "/tmp/candidate", nil); err == nil {
+	if _, err := PrepareGitGuard(state, attempt, "/tmp/candidate", "", nil); err == nil {
 		t.Fatal("a guard prepared with no broker command")
 	}
-	if _, err := PrepareGitGuard(state, attempt, "relative/candidate", []string{"/bin/true"}); err == nil {
+	if _, err := PrepareGitGuard(state, attempt, "relative/candidate", "", []string{"/bin/true"}); err == nil {
 		t.Fatal("a guard prepared against a relative candidate workspace")
 	}
-	if _, err := PrepareGitGuard(state, ExecutionAttemptRef{}, "/tmp/candidate", []string{"/bin/true"}); err == nil {
+	if _, err := PrepareGitGuard(state, ExecutionAttemptRef{}, "/tmp/candidate", "", []string{"/bin/true"}); err == nil {
 		t.Fatal("a guard prepared without an attempt identity")
 	}
 }
@@ -499,7 +499,7 @@ func TestTheRealControllerBinaryRefusesADestructiveProviderCommand(t *testing.T)
 
 	guard, err := PrepareGitGuard(execCapableTempDir(t), ExecutionAttemptRef{
 		RunID: "run-e2e", OperationID: "run-e2e:execution.invoke:initial|1|base", Attempt: 1,
-	}, dir, []string{binary, "__git-broker"})
+	}, dir, "", []string{binary, "__git-broker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,11 +617,11 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 	}
 	// The provider asks the runtime to discard its own dirty work. The guard is
 	// the real one: the same BrokerGitCommand a shim would have reached.
-	guard, prepareErr := PrepareGitGuard(p.stateDir(request), request.AttemptRef(), request.CandidateDir, []string{"/unused"})
+	guard, prepareErr := PrepareGitGuard(p.stateDir(request), request.AttemptRef(), request.CandidateDir, request.ScratchDir, []string{"/unused"})
 	if prepareErr != nil {
 		return result, err
 	}
-	if _, brokerErr := BrokerGitCommand(request.CandidateDir, guard.RefusalLog,
+	if _, brokerErr := BrokerGitCommand(request.CandidateDir, request.ScratchDir, guard.RefusalLog,
 		[]string{"checkout", "--", "."}, io.Discard, io.Discard); brokerErr != nil {
 		return result, err
 	}

@@ -427,6 +427,11 @@ type GitRefusal struct {
 	Operation string `json:"operation"`
 	// Reason is the runtime's own words for what it refused.
 	Reason string `json:"reason"`
+	// Target is the RESOURCE the invocation resolved to. It is recorded because
+	// a refusal is not interpretable without it: the same argv is a protected
+	// operation against the candidate and an ordinary one against a test's own
+	// fixture, and #257 exists because the boundary could not tell them apart.
+	Target GitTargetClass `json:"target,omitempty"`
 	// DirtyPaths is the bounded set of candidate paths that would have been
 	// discarded, or empty when the workspace held no delta. It is OBSERVATION
 	// for the operator and for the provider's next decision; it is not what
@@ -572,7 +577,37 @@ func (e *GitRuntimeOwnedRefusedError) Error() string {
 // one. Dirtiness is still OBSERVED, because the diagnostic and the durable
 // record are worth more when they say what was at stake - but it is observed
 // after the decision and it cannot change it.
-func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, stderr io.Writer) (int, error) {
+func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string, stdout, stderr io.Writer) (int, error) {
+	// THE EXECUTION CONTEXT IS THE COMMAND'S OWN, established before anything
+	// is classified or resolved.
+	//
+	// It used to be the candidate's: every permitted command ran with the
+	// candidate as its working directory whatever the caller's was, so
+	// `cd fixture && git remote add origin <url>` added a remote to the
+	// CANDIDATE. Resource scoping cannot be built on that - classifying a
+	// target from the caller's directory while executing in the candidate's is
+	// a laundering path, not a smaller defect.
+	//
+	// `-C` is applied here rather than left in the argv, and the broker's own
+	// working directory is moved to the result, which pins the context to a
+	// DIRECTORY HANDLE: the handle follows the inode, so renaming or replacing
+	// the path underneath cannot redirect what the command reaches. The `-C`
+	// options are then dropped from what executes, because applying them twice
+	// would land somewhere nobody asked for.
+	base, pinErr := os.Getwd()
+	pinned := base
+	if pinErr == nil {
+		pinned, pinErr = effectiveCwd(base, args)
+	}
+	if pinErr == nil {
+		pinErr = os.Chdir(pinned)
+	}
+	if pinErr != nil {
+		return refuseGitCommand(candidateDir, refusalLog, args,
+			"the execution context could not be established: "+pinErr.Error(),
+			GitOperationClass(""), GitTargetExternalOrUnknown, stderr)
+	}
+	args = withoutDirectoryGlobals(args)
 	// THE EFFECTIVE COMMAND FIRST, because the classifier has to be looking at
 	// what real Git will run. An alias expands inside Git, after the broker
 	// would otherwise have authorized the verb it was spelled with - and both a
@@ -619,7 +654,7 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// sentence the provider reads, differ.
 		if class, reason := ClassifyGitCommand(args); class != GitOperationPermitted {
 			return refuseGitCommand(candidateDir, refusalLog, args,
-				reason+"; "+resolveErr.Error(), class, stderr)
+				reason+"; "+resolveErr.Error(), class, targetOf(pinned, candidateDir, scratchDir), stderr)
 		}
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
@@ -630,15 +665,31 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// resolution prefix a reviewer reads it by.
 		return refuseGitCommand(candidateDir, refusalLog, args,
 			"the effective operation could not be resolved: "+resolveErr.Error(),
-			GitOperationClass(""), stderr)
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
 	}
 	class, reason := ClassifyGitCommand(effective)
+	// WHICH RESOURCE - asked only when the answer can change the decision. A
+	// permitted verb is permitted everywhere it was permitted before, so reads
+	// are untouched by this change and pay no resolution cost.
+	target := GitTargetClass("")
+	if class != GitOperationPermitted {
+		target = targetOf(pinned, candidateDir, scratchDir)
+		// THE ONLY THING THIS PERMITS THAT WAS REFUSED BEFORE. A destructive or
+		// runtime-owned verb against the attempt's OWN temp root is a test
+		// operating on a repository it created, and governing that was the
+		// defect. The candidate, an operator's unrelated repositories, and
+		// every context that could not be resolved are refused exactly as
+		// before.
+		if target == GitTargetRuntimeScratch {
+			class = GitOperationPermitted
+		}
+	}
 	if class == GitOperationPermitted {
 		// The RESOLVED form is executed. Where no alias was involved it is the
 		// original argv unchanged, which is almost every invocation; where one
 		// was, running the expansion the broker actually classified is what
 		// stops the lookup and the execution from being able to disagree.
-		return execRealGit(candidateDir, effective, stdout, stderr)
+		return execRealGit("", effective, stdout, stderr)
 	}
 	if aliased := boundedGitArgv(args); aliased != boundedGitArgv(effective) {
 		// The record names BOTH: what the provider asked for and what it
@@ -647,7 +698,19 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// that.
 		reason += " (requested as " + aliased + ")"
 	}
-	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, stderr)
+	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, stderr)
+}
+
+// targetOf resolves the resource from the PINNED context, establishing the
+// runtime's anchors first so nothing a provider supplied contributes to them.
+// Every failure answers external_or_unknown, which is a refusal for the classes
+// that reach here: unknown never widens authority.
+func targetOf(pinned, candidateDir, scratchDir string) GitTargetClass {
+	identity, err := resolveRepoIdentity(pinned)
+	if err != nil {
+		return GitTargetExternalOrUnknown
+	}
+	return ClassifyGitTarget(identity, EstablishGitAuthorityAnchors(candidateDir, scratchDir))
 }
 
 // refuseGitCommand records the refusal durably and tells the provider why.
@@ -655,8 +718,8 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 // It is one function because every refusal has to do all of it: a refusal that
 // executed nothing but recorded nothing would be invisible, and one that
 // recorded without explaining would leave the worker to guess.
-func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, stderr io.Writer) (int, error) {
-	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason}
+func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, target GitTargetClass, stderr io.Writer) (int, error) {
+	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason, Target: target}
 	// Observation, after the decision. A workspace whose status cannot be read
 	// does not soften the refusal; it just means the record names no paths.
 	if dirty, err := CandidateDirtyPaths(candidateDir); err == nil {
