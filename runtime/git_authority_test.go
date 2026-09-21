@@ -1311,8 +1311,12 @@ var smokeRunBrokerArgv = []struct {
 	{"remote -v behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote", "-v"}, GitOperationPermitted, 1},
 	{"log behind a monitor", []string{"-c", "core.fsmonitor=/tmp/watch", "log", "-1", "--format=%H:%ct"}, GitOperationPermitted, 1},
 	{"log behind a signature toggle", []string{"-c", "log.showSignature=true", "log", "--since=7.days", "--name-only"}, GitOperationPermitted, 1},
-	// The six that must stay refused, and stay DESTRUCTIVE.
-	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 2},
+	// The six that must stay refused, and stay DESTRUCTIVE. Two of them were
+	// sent behind the same identity override the commits carried, which is the
+	// case that proves the precedence rule is about CLASS and not about one
+	// favoured arm.
+	{"reset behind an identity override", []string{"-c", "user.email=agent@example.invalid", "reset", "--hard"}, GitOperationDiscard, 1},
+	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 1},
 	{"clean", []string{"clean", "-fd"}, GitOperationDiscard, 1},
 	{"clean x", []string{"clean", "-fdx"}, GitOperationDiscard, 1},
 	{"checkout a path", []string{"checkout", "--", "implementation.go"}, GitOperationDiscard, 1},
@@ -1424,5 +1428,80 @@ func TestAnAliasCannotBecomeARuntimeOwnedAnswer(t *testing.T) {
 	}
 	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
 		t.Fatalf("the alias reached the candidate:\n%q", got)
+	}
+}
+
+// TestTheSmokeRunReplaysToTheExpectedTaxonomy replays the run's FULL call
+// sequence - all 54 invocations, at their production multiplicity - and asserts
+// what the refusal record accumulates to.
+//
+// The row-wise test above asks what each shape is answered with. This one asks
+// what an operator reading the durable evidence afterwards would see, which is
+// a different question and the one the benchmark is for: the taxonomy is how
+// the next run is compared to this one.
+//
+// WHAT THIS PROVES AND WHAT IT DOES NOT. It proves the ANSWER is stable across
+// 43 identical commits. It cannot prove the provider stops after the first one
+// - that is behaviour, not classification, and only a live run can measure it.
+// The target #253 records ("no repeated equivalent refusal") is therefore
+// validated by the next Claude smoke, not here. What here can catch is the
+// answer regressing back to the sentence that caused the loop.
+func TestTheSmokeRunReplaysToTheExpectedTaxonomy(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// the work this run produced\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+
+	calls := 0
+	for _, tc := range smokeRunBrokerArgv {
+		for i := 0; i < tc.count; i++ {
+			if code, _ := brokerGit(t, dir, refusalLog, tc.argv...); code == 0 && tc.want != GitOperationPermitted {
+				t.Fatalf("%v was permitted", tc.argv)
+			}
+			calls++
+		}
+	}
+	if calls != 54 {
+		t.Fatalf("the fixture replayed %d calls, and the run made 54", calls)
+	}
+
+	refusals, err := ReadGitRefusals(refusalLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taxonomy := map[string]int{}
+	for _, refusal := range refusals {
+		switch {
+		case strings.Contains(refusal.Reason, "not the provider's"):
+			taxonomy["runtime-owned"]++
+		case strings.Contains(refusal.Reason, "would discard"), strings.Contains(refusal.Reason, "would delete"),
+			strings.Contains(refusal.Reason, "would replace"), strings.Contains(refusal.Reason, "would overwrite"),
+			strings.Contains(refusal.Reason, "would remove"):
+			taxonomy["destructive"]++
+		case strings.Contains(refusal.Reason, "configuration override"):
+			taxonomy["config-key"]++
+		default:
+			taxonomy["other"]++
+		}
+	}
+	// The production run recorded 48 config-key and 6 destructive. The 43
+	// commits move to runtime-owned, and the two destructive commands that
+	// carried the same override move to destructive - which is the whole of
+	// #253 expressed as a count.
+	for class, want := range map[string]int{
+		"runtime-owned": 43,
+		"destructive":   6,
+		"config-key":    5,
+		"other":         0,
+	} {
+		if taxonomy[class] != want {
+			t.Errorf("%s refusals: got %d, want %d (full taxonomy %v)", class, taxonomy[class], want, taxonomy)
+		}
+	}
+	if total := len(refusals); total != 54 {
+		t.Fatalf("recorded %d refusals, want the run's 54", total)
+	}
+	// The candidate is untouched after all 54, which is the point of the six.
+	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+		t.Fatalf("the replay reached the candidate:\n%q", got)
 	}
 }
