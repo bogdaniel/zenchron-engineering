@@ -498,15 +498,26 @@ func TestTheExecutionContextCannotBeLaundered(t *testing.T) {
 		}
 	})
 
-	// THE SAME SHAPE WITH THE REDIRECT IN THE ENVIRONMENT. Resolution used a
-	// sanitized environment and could not see GIT_WORK_TREE; execution
-	// inherited the provider's and could.
+	// THE SAME SHAPE WITH THE REDIRECT IN THE ENVIRONMENT. This began as a
+	// consistency bug - resolution sanitized the environment and could not see
+	// GIT_WORK_TREE, execution inherited it and could - and consistency alone
+	// was not the right repair. Agreeing about a redirected repository is still
+	// agreement about the wrong one, so GIT_WORK_TREE now takes the GIT_DIR
+	// route: removed from the canonical environment for both paths.
+	//
+	// So what is asserted is not refusal. Acting on the fixture is legitimate,
+	// and the command must still DO something - a boundary that silently turned
+	// every redirected command into a no-op would pass a candidate-untouched
+	// check while being useless.
 	t.Run("GIT_WORK_TREE from the environment", func(t *testing.T) {
 		candidate, scratch, fixture, log := newLab(t)
+		makeDirty(t, fixture, "fixture work\n")
 		t.Setenv("GIT_WORK_TREE", candidate)
-		code, _ := brokerGitFrom(t, fixture, candidate, scratch, log, "checkout", "--", ".")
-		if code == 0 {
-			t.Fatal("a command redirected by the environment was permitted")
+		if code, out := brokerGitFrom(t, fixture, candidate, scratch, log, "checkout", "--", "."); code != 0 {
+			t.Fatalf("a scratch checkout was refused: %d %s", code, out)
+		}
+		if body := dirtyBody(t, fixture); body == "fixture work\n" {
+			t.Fatal("the permitted checkout did not run")
 		}
 		if body := dirtyBody(t, candidate); body != precious {
 			t.Fatalf("candidate work was discarded: %q", body)
@@ -655,4 +666,191 @@ func TestAnAliasCannotSlipAnIdentityPastAPermittedVerb(t *testing.T) {
 	if got := lastRefusalTarget(t, log); got != GitTargetCandidate {
 		t.Fatalf("the refusal recorded target=%q", got)
 	}
+}
+
+// TestAGrantedAuthorityCannotWriteOutsideItsResource is the law the environment
+// was still able to break after resolution and execution were made consistent.
+//
+// Consistency answered "which repository is this command against?". It did not
+// answer "and where will the writes land?", because several Git variables move
+// the writable state without moving the repository's identity at all:
+// GIT_INDEX_FILE names the index file, GIT_OBJECT_DIRECTORY names the object
+// store, GIT_ALTERNATE_OBJECT_DIRECTORIES adds another. A command classified as
+// runtime_scratch_repo - and legitimately permitted there - could carry any of
+// them pointed at the candidate.
+//
+// Each case runs a PERMITTED scratch command, so nothing here depends on a
+// refusal. The grant is real; what must be true is that it stops at the
+// resource it was granted over.
+func TestAGrantedAuthorityCannotWriteOutsideItsResource(t *testing.T) {
+	requireGitFixture(t)
+	const precious = "uncommitted candidate work\n"
+
+	for name, redirect := range map[string]func(candidate string) (string, string){
+		"GIT_INDEX_FILE at the candidate index": func(c string) (string, string) {
+			return "GIT_INDEX_FILE", filepath.Join(c, ".git", "index")
+		},
+		"GIT_OBJECT_DIRECTORY at the candidate object store": func(c string) (string, string) {
+			return "GIT_OBJECT_DIRECTORY", filepath.Join(c, ".git", "objects")
+		},
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES at the candidate": func(c string) (string, string) {
+			return "GIT_ALTERNATE_OBJECT_DIRECTORIES", filepath.Join(c, ".git", "objects")
+		},
+		"GIT_COMMON_DIR at the candidate": func(c string) (string, string) {
+			return "GIT_COMMON_DIR", filepath.Join(c, ".git")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			candidate := filepath.Join(root, "candidate")
+			scratch := filepath.Join(root, "scratch")
+			fixture := filepath.Join(scratch, "TestFixture1234567", "001")
+			initTargetRepo(t, candidate)
+			initTargetRepo(t, fixture)
+			makeDirty(t, candidate, precious)
+			log := filepath.Join(root, "refused.jsonl")
+
+			candidateIndexBefore := indexDigest(t, candidate)
+			candidateHeadBefore := repoHead(t, candidate)
+
+			key, value := redirect(candidate)
+			t.Setenv(key, value)
+
+			// A permitted, runtime-owned commit in the attempt's own scratch.
+			if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+				"-c", "user.email=r@runtime", "-c", "user.name=runtime",
+				"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
+				t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
+			}
+			// The grant was real.
+			if repoHead(t, fixture) == "" {
+				t.Fatal("the permitted scratch commit did not run")
+			}
+			// And it stopped at the scratch repository.
+			if got := indexDigest(t, candidate); got != candidateIndexBefore {
+				t.Fatalf("%s moved a write into the candidate index", key)
+			}
+			if got := repoHead(t, candidate); got != candidateHeadBefore {
+				t.Fatalf("%s moved candidate history to %s", key, got)
+			}
+			if body := dirtyBody(t, candidate); body != precious {
+				t.Fatalf("%s discarded candidate work: %q", key, body)
+			}
+		})
+	}
+}
+
+// TestTheEnvironmentIsNotASecondArgv covers the two powers that bypass argv
+// classification entirely rather than redirecting it.
+//
+// GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n is exactly `-c` in
+// environment form, so every rule that reads configuration overrides out of the
+// argv - the bounded allow/deny classification, and the narrow
+// user.name/user.email scoping - is blind to it. GIT_AUTHOR_* and
+// GIT_COMMITTER_* name a committer the same way, and never appear in argv at
+// all.
+func TestTheEnvironmentIsNotASecondArgv(t *testing.T) {
+	requireGitFixture(t)
+
+	setup := func(t *testing.T) (candidate, scratch, fixture, log string) {
+		t.Helper()
+		root := t.TempDir()
+		candidate = filepath.Join(root, "candidate")
+		scratch = filepath.Join(root, "scratch")
+		fixture = filepath.Join(scratch, "TestFixture1234567", "001")
+		initTargetRepo(t, candidate)
+		initTargetRepo(t, fixture)
+		return candidate, scratch, fixture, filepath.Join(root, "refused.jsonl")
+	}
+
+	// `-c user.email=` against the candidate is refused by the identity rule.
+	// The environment spelling must not be the way around it.
+	t.Run("GIT_CONFIG_COUNT cannot inject an identity", func(t *testing.T) {
+		candidate, scratch, fixture, log := setup(t)
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "user.email")
+		t.Setenv("GIT_CONFIG_VALUE_0", "injected@example.invalid")
+		if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+			"-c", "user.email=r@runtime", "-c", "user.name=runtime",
+			"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
+			t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
+		}
+		if got := commitAuthor(t, fixture); got != "r@runtime" {
+			t.Fatalf("the environment named the committer: %s", got)
+		}
+	})
+
+	// core.hooksPath is the sharper form: it does not change what Git writes,
+	// it makes Git RUN something of the provider's choosing on a runtime-owned
+	// commit.
+	t.Run("GIT_CONFIG_COUNT cannot point Git at a hook directory", func(t *testing.T) {
+		candidate, scratch, fixture, log := setup(t)
+		hooks := filepath.Join(t.TempDir(), "hooks")
+		if err := os.MkdirAll(hooks, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		witness := filepath.Join(t.TempDir(), "hook-ran")
+		hook := "#!/bin/sh\necho ran > " + witness + "\n"
+		if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte(hook), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+		t.Setenv("GIT_CONFIG_VALUE_0", hooks)
+
+		if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+			"-c", "user.email=r@runtime", "-c", "user.name=runtime",
+			"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
+			t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
+		}
+		if _, err := os.Stat(witness); err == nil {
+			t.Fatal("a provider hook ran on a runtime-owned commit")
+		}
+	})
+
+	t.Run("GIT_AUTHOR_EMAIL cannot name the author", func(t *testing.T) {
+		candidate, scratch, fixture, log := setup(t)
+		t.Setenv("GIT_AUTHOR_EMAIL", "injected@example.invalid")
+		t.Setenv("GIT_AUTHOR_NAME", "injected")
+		t.Setenv("GIT_COMMITTER_EMAIL", "injected@example.invalid")
+		t.Setenv("GIT_COMMITTER_NAME", "injected")
+		if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+			"-c", "user.email=r@runtime", "-c", "user.name=runtime",
+			"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
+			t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
+		}
+		if got := commitAuthor(t, fixture); got != "r@runtime" {
+			t.Fatalf("the environment named the author: %s", got)
+		}
+	})
+}
+
+// indexDigest fingerprints a repository's index, reporting a missing one as a
+// distinct value rather than an error - a redirect that CREATES an index where
+// there was none is as much a write outside the resource as one that edits it.
+func indexDigest(t *testing.T, dir string) string {
+	t.Helper()
+	digest, err := fileDigest(filepath.Join(dir, ".git", "index"))
+	if err != nil {
+		return "absent"
+	}
+	return digest
+}
+
+func repoHead(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := brokerGitOutput(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func commitAuthor(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := brokerGitOutput(dir, "log", "-1", "--format=%ae")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }

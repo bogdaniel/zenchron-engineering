@@ -186,23 +186,6 @@ func (g *GitGuard) SearchPath(path string) string {
 	return g.BinDir + string(os.PathListSeparator) + path
 }
 
-// withoutBrokeredGitDir strips the sentinel from an environment.
-//
-// The broker is the ONE caller that must see past it: it has already decided
-// the command is permitted, and the real Git it then runs has to discover the
-// candidate repository normally. Nothing else in the worker's process tree
-// clears it.
-func withoutBrokeredGitDir(env []string) []string {
-	out := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, brokeredGitDirEnv+"=") {
-			continue
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
 // ReadGitRefusals reads the refusals one attempt's provider produced.
 //
 // An absent file is no refusals and not an error: the overwhelmingly common

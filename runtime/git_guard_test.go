@@ -280,8 +280,10 @@ func TestTheBrokerSeesPastItsOwnSentinel(t *testing.T) {
 	guard, dir := guardFixture(t)
 	t.Setenv(brokeredGitDirEnv, guard.SentinelGitDir)
 
-	stripped := withoutBrokeredGitDir(os.Environ())
-	for _, entry := range stripped {
+	// Asserted against the environment the broker actually builds, not against
+	// a helper standing in for it - the sentinel is a GIT_ variable, so what
+	// removes it now is the same prefix rule that removes every other one.
+	for _, entry := range brokerGitEnv() {
 		if strings.HasPrefix(entry, brokeredGitDirEnv+"=") {
 			t.Fatalf("the sentinel survived into the broker's own child environment: %s", entry)
 		}

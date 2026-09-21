@@ -803,13 +803,67 @@ const aliasResolutionReason = "the effective operation could not be resolved"
 // brokered sentinel, which exists to make unshimmed Git fail closed and which
 // the shim is the one caller allowed to see past.
 //
-// Stripping repository variables one at a time was considered and rejected:
-// the list of environment variables that steer Git's repository discovery is
-// long, version-dependent, and exactly the kind of thing a boundary gets
-// quietly wrong. Resolving in the same environment makes the question and the
-// answer refer to the same repository by construction rather than by
-// enumeration.
-func brokerGitEnv() []string { return withoutBrokeredGitDir(os.Environ()) }
+// Consistency alone is not enough, though, and an earlier version of this
+// comment stopped there. Two paths agreeing about a redirected repository still
+// agree about the wrong one: authority granted over runtime_scratch_repo must
+// not also be authority to write an index, an object store, or a committer
+// identity somewhere else. So the provider's Git authority is normalized away
+// rather than inherited.
+//
+// Three distinct powers travel in this environment, and only the first is
+// obvious. GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
+// their relatives move where Git reads and writes. GIT_CONFIG_COUNT with
+// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n is `-c` spelled as an environment
+// variable, so it would walk straight past argv classification and could set
+// core.hooksPath. GIT_AUTHOR_* and GIT_COMMITTER_* name a committer without
+// ever appearing in argv, which is the same identity question the deferred
+// user.name/user.email rule answers for `-c`.
+//
+// Enumerating those was considered and rejected before, on the grounds that the
+// list is long, version-dependent, and exactly what a boundary gets quietly
+// wrong. That objection was right about enumeration and wrong about the
+// conclusion: the rule here is a PREFIX, not a list. Every GIT_* variable is
+// removed and only the pins below are put back, so a Git release that invents a
+// new authority-bearing variable is already handled. Unknown fails closed.
+func brokerGitEnv() []string {
+	host := os.Environ()
+	env := make([]string, 0, len(host)+len(brokerGitPins))
+	for _, entry := range host {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || strings.HasPrefix(name, "GIT_") || brokerGitStripped[name] {
+			continue
+		}
+		env = append(env, entry)
+	}
+	// The pins are values, not inheritance, so the provider cannot unset them
+	// by unsetting a variable. They restate for brokered Git the isolation
+	// trustedGitEnv gives runtime Git.
+	return append(env, brokerGitPins...)
+}
+
+// brokerGitStripped is the non-GIT_ half: names that still hand Git a command
+// to run or a configuration tree to read, and so carry the same authority
+// under a different spelling.
+var brokerGitStripped = map[string]bool{
+	"SSH_ASKPASS":     true,
+	"SSH_AUTH_SOCK":   true,
+	"XDG_CONFIG_HOME": true,
+	"EDITOR":          true,
+}
+
+// brokerGitPins put back, as fixed values, the few GIT_* settings whose absence
+// would be worse than their presence: without GIT_TERMINAL_PROMPT=0 a brokered
+// command can block on a credential prompt, and without the configuration pins
+// Git falls back to discovering the host user's system and global files.
+var brokerGitPins = []string{
+	"GIT_CONFIG_NOSYSTEM=1",
+	"GIT_CONFIG_SYSTEM=/dev/null",
+	"GIT_CONFIG_GLOBAL=/dev/null",
+	"GIT_ATTR_NOSYSTEM=1",
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_PAGER=cat",
+	"GIT_OPTIONAL_LOCKS=0",
+}
 
 // brokerGitOutput asks Git a question in the same environment the command will
 // execute in, with the binary resolved off the runtime's trusted search path
