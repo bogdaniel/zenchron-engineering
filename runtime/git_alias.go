@@ -66,6 +66,24 @@ func (e *GitAliasUnresolvableError) Error() string {
 	return "cannot resolve what `git " + e.Verb + "` would do: " + e.Detail
 }
 
+// GitConfigOverrideRefusedError is the fail-closed refusal for an inline
+// configuration override this boundary has not reasoned about.
+//
+// It is its own type, and its own message, because the provider has something
+// to do about it and that is the whole point: drop the override, or ask the
+// operator to allow the key. The blanket `-c` refusal it replaces said only
+// that the operation "could not be resolved", which is true and unactionable,
+// and a provider that cannot act on a refusal sends the command again.
+type GitConfigOverrideRefusedError struct{ Key string }
+
+func (e *GitConfigOverrideRefusedError) Error() string {
+	return "configuration override `-c " + e.Key + "` is not permitted here:" +
+		" Git has configuration keys whose values are programs it runs, paths it reads," +
+		" or credentials it presents, and this key is not on the runtime's inert list." +
+		" Run the same command without that override; Git's presentation and formatting" +
+		" keys are accepted, and read-only Git is unaffected."
+}
+
 // splitGitCommand separates one Git argv into its leading global options, its
 // verb, and the rest.
 //
@@ -106,11 +124,11 @@ func splitGitCommand(args []string) (globals []string, verb string, rest []strin
 // removed, which is precisely the reach the sentinel exists to deny. The verb
 // being harmless-looking is the point.
 //
-// `-c` and `--config-env` are refused for the same reason one layer along: Git
-// has configuration keys whose values are programs it executes, so an
-// inline override is an execution redirect wearing different syntax. They are
-// also how an alias can be defined in the same breath as being used, which the
-// resolver would otherwise have to chase.
+// `-c` and `--config-env` are NOT here, and are classified by KEY instead. Git
+// has configuration keys whose values are programs it executes, so most of an
+// inline override is an execution redirect wearing different syntax - but not
+// all of it, and refusing the whole option refused ordinary engineering Git as
+// well. See gitConfigOverrideRefusal.
 //
 // `--git-dir`, `--work-tree`, `--namespace` and `--super-prefix` point the
 // command at a different repository or a different tree. The broker is the
@@ -122,8 +140,6 @@ func splitGitCommand(args []string) (globals []string, verb string, rest []strin
 // destructive - so refusing it would cost `git -C subdir status` for nothing.
 var refusedGitGlobals = map[string]string{
 	"--exec-path":    "it redirects where Git resolves the program it runs",
-	"-c":             "it overrides configuration, and Git has configuration keys whose values are programs it executes",
-	"--config-env":   "it overrides configuration from the environment",
 	"--git-dir":      "it points the command at a different repository",
 	"--work-tree":    "it points the command at a different working tree",
 	"--namespace":    "it points the command at a different ref namespace",
@@ -148,6 +164,115 @@ func refusedGitGlobal(args []string) (string, string, bool) {
 	return "", "", false
 }
 
+// inertGitConfigKeys are the configuration keys an inline `-c` override may
+// set, and it is an ALLOWLIST: a key that is not named here is refused, so a
+// key nobody has reasoned about fails closed rather than arriving permitted.
+//
+// WHY THERE IS A LIST AT ALL. Refusing every `-c` was correct about what it
+// refused and wrong about what it cost. Claude Code prefixes its Git argv with
+// `-c`, so run run-ca6aecf437c10bc6d2983fe978c5c00a met this boundary 67 times
+// in one attempt - 58 of them an ordinary `commit`, the rest `log`, `ls-files`
+// and `remote`, none of which can discard anything. The worker could not read
+// its own repository, read the refusal as a problem with its invocation, and
+// retried until its inactivity window closed. A boundary that refuses
+// engineering work it has no objection to is not a stricter boundary; it is the
+// same boundary with a denial of service attached. See #248.
+//
+// WHAT EARNS A PLACE. A key here must be unable to name a program, redirect a
+// path, reach a network, or change which repository or identity the command
+// acts as - for ANY value, because only the key is classified. That is why
+// `core.pager`, `core.editor`, `core.fsmonitor`, `core.hooksPath`,
+// `core.sshCommand`, `core.askPass`, `credential.helper`, `gpg.program`,
+// `filter.*`, `diff.external`, `http.*`, `protocol.*`, `url.*`, `safe.*`,
+// `include.path`, `includeIf.*` and `alias.*` are all absent and stay absent:
+// each of them is an execution, transport or authority redirect, and
+// `core.pager` in particular is the exact escape git_guard_test.go already
+// proves - `-c core.pager=<script> log` runs the script.
+//
+// The signing keys are here and the signing PROGRAM is not, which is the
+// distinction the whole list turns on: `commit.gpgsign=false` chooses whether
+// to sign, and `gpg.program` chooses what to execute.
+// WHAT IS NOT HERE, AND WHY, because the exclusions are the law:
+//
+//   - gc.auto and maintenance.auto. They read as "turn the background work
+//     off", and `gc.auto=0` is exactly what a tool sets - but the key is
+//     classified for EVERY value, and `gc.auto=1` asks Git to run automatic
+//     housekeeping that repacks objects and expires reflogs inside a workspace
+//     whose metadata the runtime holds a digest of. Being unable to prove a
+//     side effect impossible is the same answer as knowing it is possible.
+//
+//   - the signing keys. commit.gpgsign, tag.gpgsign and log.showsignature read
+//     as booleans that choose WHETHER to sign or verify, with the program named
+//     by gpg.program, which is refused. That separation only holds while
+//     gpg.program cannot be set - and #251 is open: a provider can persist
+//     gpg.program into .git/config, where the inline allowlist does not reach
+//     it. `log.showSignature=true` then makes an ordinary `git log` run it.
+//     Commit and tag are runtime-owned now, but cherry-pick, revert, merge,
+//     rebase and am are not, and every one of them honours commit.gpgsign. A
+//     key whose safety depends on another boundary being closed is not inert;
+//     it is inert conditionally, which is a thing this list cannot express.
+//
+//   - a whole `advice.` section. Allowing a section by prefix is the opposite
+//     of an allowlist: an advice key added by a future Git would arrive
+//     permitted without anybody having looked at it. No `advice.` key appears
+//     in the observed provider argv either, so listing one would be inventing
+//     a requirement.
+//
+// The list grows by evidence and review, one key at a time, and a refusal names
+// the key precisely so that growing it is a decision somebody can make.
+var inertGitConfigKeys = map[string]bool{
+	"core.quotepath": true, "core.abbrev": true, "core.checkstat": true,
+	"core.trustctime": true, "core.precomposeunicode": true,
+	"log.date": true, "color.ui": true,
+}
+
+func inertGitConfigKey(key string) bool {
+	return inertGitConfigKeys[strings.ToLower(key)]
+}
+
+// gitConfigOverrideRefusal reports the first `-c` or `--config-env` key this
+// boundary will not accept, and names it.
+//
+// Naming the key is not decoration. A provider told only that `-c` is refused
+// has no way to learn which part of its own invocation to drop, and the one in
+// #248 responded by sending the same command again; a provider told that
+// `core.pager` is the objection can send the command without it.
+//
+// Both spellings are parsed, in both their joined and separated forms, because
+// `git -c k=v`, `git -c` `k=v` and `git --config-env=k=VAR` are the same act.
+// `--config-env` names an environment variable rather than a value, so its
+// value is opaque here - which changes nothing, because the KEY is what decides.
+func gitConfigOverrideRefusal(globals []string) (string, bool) {
+	for i := 0; i < len(globals); i++ {
+		arg := globals[i]
+		setting := ""
+		switch {
+		case arg == "-c" || arg == "--config-env":
+			if i+1 >= len(globals) {
+				// An override with nothing to override is not resolvable, and
+				// naming it is more useful than guessing at it.
+				return arg, true
+			}
+			i++
+			setting = globals[i]
+		case strings.HasPrefix(arg, "--config-env="):
+			setting = strings.TrimPrefix(arg, "--config-env=")
+		default:
+			continue
+		}
+		// `-c key` with no `=` is Git's shorthand for `key=true`. It is still a
+		// key, and it is classified as one.
+		key := setting
+		if equals := strings.Index(setting, "="); equals >= 0 {
+			key = setting[:equals]
+		}
+		if !inertGitConfigKey(key) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
 // ResolveGitCommand expands args through the effective Git configuration and
 // returns the command real Git will actually run.
 //
@@ -165,6 +290,11 @@ func ResolveGitCommand(candidateDir string, args []string) ([]string, error) {
 		// classification that would then be about the wrong thing.
 		if name, reason, refused := refusedGitGlobal(globals); refused {
 			return nil, &GitAliasUnresolvableError{Verb: name, Detail: reason}
+		}
+		// The same question for the option that is classified by KEY rather
+		// than refused outright.
+		if key, refused := gitConfigOverrideRefusal(globals); refused {
+			return nil, &GitConfigOverrideRefusedError{Key: key}
 		}
 		if verb == "" {
 			return args, nil

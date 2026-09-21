@@ -59,6 +59,10 @@ const (
 	// GitOperationDiscard is an operation whose purpose or effect is to
 	// discard uncommitted candidate state. It is refused.
 	GitOperationDiscard GitOperationClass = "discard"
+	// GitOperationRuntimeOwned is a command that would take over something the
+	// RUNTIME owns. It destroys nothing by itself; it is refused because the
+	// runtime cannot let it succeed. See the commit arm of ClassifyGitCommand.
+	GitOperationRuntimeOwned GitOperationClass = "runtime_owned"
 )
 
 // ClassifyGitCommand decides what a provider's Git argv is, from the argv
@@ -118,9 +122,234 @@ func ClassifyGitCommand(args []string) (GitOperationClass, string) {
 		if len(rest) > 0 && rest[0] == "deinit" {
 			return GitOperationDiscard, "would remove a submodule working tree"
 		}
+	// COMMITTING IS THE RUNTIME'S, and until #248 nothing said so here.
+	//
+	// It was unreachable rather than permitted: every `git commit` a provider
+	// sent arrived with a `-c` prefix and died on the blanket config refusal,
+	// which is why 58 of one attempt's 73 refusals were commits. Accepting
+	// inert `-c` keys makes it reachable for the first time, so the arm that
+	// was always missing has to exist before that lands.
+	//
+	// A provider commit is not harmless. It moves HEAD, gitMetadataDigest
+	// covers HEAD, so the next AssertIntegrity reads the provider's own commit
+	// as tampering - and workspace_integrity_violation routes to RouteRestore,
+	// which is `reset --hard` plus `clean -fdx`. The provider would destroy the
+	// candidate by committing it, which is the #241 outcome reached through the
+	// one verb #241 does not classify.
+	//
+	// It is deliberately NOT GitOperationDiscard. Nothing is being discarded
+	// and saying so would be false; what is true is that the runtime owns this
+	// and the work is safe where it is.
+	case "commit", "commit-tree":
+		return GitOperationRuntimeOwned, "creating a candidate commit is the runtime's, not the provider's"
+	// REFS ARE THE RUNTIME'S TOO. The trusted provider instructions already say
+	// so - "Do not create commits, branches, tags, remotes, or any other Git
+	// metadata" - and until now only the commit half was enforced, so the
+	// refusal was promising something the classifier did not deliver.
+	//
+	// `checkout -b` and `switch -c` are already refused as worktree-replacing,
+	// which left the direct spellings as the way around a law that was being
+	// stated anyway.
+	//
+	// The READING forms stay permitted, and that distinction is the whole
+	// point of #248: `git branch --show-current` and `git tag -l` answer
+	// questions a worker legitimately has, and refusing them would rebuild the
+	// trap this change exists to remove.
+	case "branch":
+		if namesANewRef(rest, branchRefSpec) {
+			return GitOperationRuntimeOwned, "candidate branches are the runtime's, not the provider's"
+		}
+	case "tag":
+		if namesANewRef(rest, tagRefSpec) {
+			return GitOperationRuntimeOwned, "candidate tags are the runtime's, not the provider's"
+		}
+	// update-ref has no reading form at all: every invocation writes or deletes
+	// a ref, so there is no distinction to draw.
+	case "update-ref":
+		return GitOperationRuntimeOwned, "candidate refs are the runtime's, not the provider's"
+	// symbolic-ref has both. One operand ASKS what a symbolic ref points at -
+	// `git symbolic-ref --short HEAD` is how a worker finds its branch without
+	// `git branch`. Two operands REPOINT it, and --delete removes it.
+	case "symbolic-ref":
+		if hasAnyFlag(rest, "-d", "--delete") || refOperands(rest, symbolicRefReadValue) >= 2 {
+			return GitOperationRuntimeOwned, "candidate refs are the runtime's, not the provider's"
+		}
 	}
 	return GitOperationPermitted, ""
 }
+
+// refVerbSpec is one ref verb's flag vocabulary, split by what a flag MEANS
+// for this question. It is a table rather than a chain of conditions because
+// the distinction it draws - between an operand that is a ref's name and an
+// operand that is a pattern or a revision - is exactly where a guess becomes a
+// refused read.
+type refVerbSpec struct {
+	// writing flags settle the question on their own.
+	writing map[string]bool
+	// writingShort are the same flags inside a short cluster: `-aD` is a delete.
+	writingShort string
+	// listing flags turn the invocation into a query, so whatever operands
+	// follow are patterns, revisions or sort keys rather than names.
+	//
+	// EVERY MEMBER IS THERE BECAUSE GIT WAS ASKED. `git branch <flag> name` was
+	// run against real Git for each one and observed not to create
+	// refs/heads/name; the flags that DID create it are deliberately absent.
+	// Membership here is permissive - it stops operands being read as names -
+	// so it is the direction that has to be evidence and not inference.
+	listing map[string]bool
+	// readValue flags take a SEPARATE mandatory value that must not be read as
+	// a name, for a verb that has no listing mode to fall back on.
+	readValue map[string]bool
+	// numericListing marks a verb whose `-n[<num>]` implies --list, which is
+	// `git tag` and only `git tag`.
+	numericListing bool
+}
+
+// namesANewRef reports whether a ref verb would CREATE or CHANGE a ref rather
+// than report on one.
+//
+// It is argv-only, like everything else here. A writing flag settles it; so
+// does a bare operand, once the flags that legitimately carry a value have been
+// consumed and once a listing flag has been given the chance to say that the
+// operands are patterns.
+//
+// THE JOINED SPELLING IS THE SAME FLAG. `--set-upstream-to=origin/main` and
+// `--set-upstream-to origin/main` are one option, and an earlier version of
+// this function skipped the joined form as "a flag with a value" before asking
+// whether that flag writes - so the spelling with an `=` in it walked past the
+// check the spelling without one failed.
+func namesANewRef(rest []string, spec refVerbSpec) bool {
+	listing, operands := false, 0
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		if arg == "--" {
+			// Everything after the separator is an operand.
+			operands += len(rest) - i - 1
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			operands++
+			continue
+		}
+		name, joined := arg, false
+		if before, _, found := strings.Cut(arg, "="); found {
+			name, joined = before, true
+		}
+		if spec.writing[name] {
+			return true
+		}
+		if isShortCluster(arg) && strings.ContainsAny(arg[1:], spec.writingShort) {
+			return true
+		}
+		if spec.listing[name] || (spec.numericListing && isNumericListing(name)) {
+			listing = true
+			continue
+		}
+		if !joined && spec.readValue[name] && i+1 < len(rest) {
+			i++
+		}
+	}
+	// A LISTING FORM'S OPERANDS ARE NOT NAMES. `git branch --list "feature/*"`
+	// and `git tag --verify v1` are questions, and refusing them would rebuild
+	// the #248 trap one verb along.
+	if listing {
+		return false
+	}
+	return operands > 0
+}
+
+// isShortCluster reports whether an argument is Git's `-abc` form, where every
+// character after the dash is its own single-letter flag.
+func isShortCluster(arg string) bool {
+	return len(arg) > 1 && arg[0] == '-' && arg[1] != '-'
+}
+
+// isNumericListing recognizes `git tag`'s `-n[<num>]`, which Git documents as
+// implying --list. The count is attached rather than separate, so `-n5` is one
+// argument and `git tag -n5 "v*"` is a query.
+func isNumericListing(arg string) bool {
+	if !strings.HasPrefix(arg, "-n") {
+		return false
+	}
+	for _, r := range arg[2:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// refOperands counts the operands of a verb whose flags carry no separate
+// value except the ones named.
+func refOperands(rest []string, readValue map[string]bool) int {
+	operands := 0
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		if arg == "--" {
+			return operands + len(rest) - i - 1
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			operands++
+			continue
+		}
+		if _, _, joined := strings.Cut(arg, "="); !joined && readValue[arg] && i+1 < len(rest) {
+			i++
+		}
+	}
+	return operands
+}
+
+var (
+	branchRefSpec = refVerbSpec{
+		// Creating, renaming, copying, deleting, or repointing a branch.
+		writing: map[string]bool{
+			"-d": true, "-D": true, "--delete": true,
+			"-m": true, "-M": true, "--move": true,
+			"-c": true, "-C": true, "--copy": true,
+			"-f": true, "--force": true,
+			"-u": true, "--set-upstream-to": true, "--unset-upstream": true,
+			"--edit-description": true,
+		},
+		writingShort: "dDmMcCfu",
+		// Each of these was observed NOT to create a branch when followed by a
+		// bare name. --color and --abbrev are absent because they DO: their
+		// value is optional and must be attached, so `git branch --color foo`
+		// creates foo. Listing them as value-carrying skipped the name and
+		// classified the creation as permitted, which is the bypass this list
+		// is shaped to avoid.
+		listing: map[string]bool{
+			"-l": true, "--list": true, "-a": true, "--all": true,
+			"-r": true, "--remotes": true,
+			"--contains": true, "--no-contains": true, "--merged": true,
+			"--no-merged": true, "--points-at": true,
+			"--format": true, "--sort": true,
+		},
+	}
+	tagRefSpec = refVerbSpec{
+		// Creating, signing, annotating, replacing, or deleting a tag.
+		writing: map[string]bool{
+			"-a": true, "--annotate": true, "-s": true, "--sign": true,
+			"-u": true, "--local-user": true,
+			"-m": true, "--message": true, "-F": true, "--file": true,
+			"-d": true, "--delete": true, "-f": true, "--force": true,
+			"-e": true, "--edit": true,
+		},
+		writingShort: "asumFdfe",
+		// `--verify` reads a tag's signature, `-l` filters by pattern, and
+		// `-n[<num>]` implies --list. --color is absent for the same reason it
+		// is absent above: `git tag --color foo` creates foo.
+		listing: map[string]bool{
+			"-l": true, "--list": true, "-v": true, "--verify": true,
+			"--contains": true, "--no-contains": true, "--merged": true,
+			"--no-merged": true, "--points-at": true,
+			"--format": true, "--sort": true,
+		},
+		numericListing: true,
+	}
+	// symbolic-ref takes a reason with -m; nothing else it accepts carries a
+	// separate value.
+	symbolicRefReadValue = map[string]bool{"-m": true}
+)
 
 // gitVerb finds the subcommand, skipping Git's global options.
 //
@@ -280,6 +509,24 @@ func (e *GitDiscardRefusedError) Error() string {
 		" Read-only Git (status, diff, log, show) is unaffected."
 }
 
+// GitRuntimeOwnedRefusedError is the refusal for a command the runtime owns.
+//
+// It exists so the provider is told the one thing that ends the loop: the work
+// is already safe and the runtime will commit it. #248's worker sent the same
+// commit 58 times because every answer it got described a problem with its own
+// invocation, which is a problem a model will keep trying to solve. A refusal
+// that names the permitted next action preserves exactly the same authority and
+// costs the run one command instead of its whole budget.
+type GitRuntimeOwnedRefusedError struct{ Operation, Reason string }
+
+func (e *GitRuntimeOwnedRefusedError) Error() string {
+	return "runtime-owned Git refused: " + e.Operation + " (" + e.Reason + ")." +
+		" Do not retry this command and do not create commits, branches or tags:" +
+		" Zenchron commits the candidate itself from your working tree." +
+		" Leave your changes as edited files and continue with the rest of the task." +
+		" Read-only Git (status, diff, log, show) is unaffected."
+}
+
 // BrokerGitCommand is the decision, and it is the whole enforcement point.
 //
 // It classifies, records a refusal durably where one is needed, and otherwise
@@ -314,8 +561,13 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
 		// the first.
+		// The underlying refusal already says what to do about itself - a
+		// configuration override names its key and how to proceed without it -
+		// so the provider is given THAT, while the durable record keeps the
+		// resolution prefix a reviewer reads it by.
 		return refuseGitCommand(candidateDir, refusalLog, args,
-			"the effective operation could not be resolved: "+resolveErr.Error(), stderr)
+			"the effective operation could not be resolved: "+resolveErr.Error(),
+			GitOperationClass(""), stderr)
 	}
 	class, reason := ClassifyGitCommand(effective)
 	if class == GitOperationPermitted {
@@ -332,7 +584,7 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// that.
 		reason += " (requested as " + aliased + ")"
 	}
-	return refuseGitCommand(candidateDir, refusalLog, effective, reason, stderr)
+	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, stderr)
 }
 
 // refuseGitCommand records the refusal durably and tells the provider why.
@@ -340,7 +592,7 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 // It is one function because every refusal has to do all of it: a refusal that
 // executed nothing but recorded nothing would be invisible, and one that
 // recorded without explaining would leave the worker to guess.
-func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, stderr io.Writer) (int, error) {
+func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, stderr io.Writer) (int, error) {
 	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason}
 	// Observation, after the decision. A workspace whose status cannot be read
 	// does not soften the refusal; it just means the record names no paths.
@@ -356,10 +608,25 @@ func refuseGitCommand(candidateDir, refusalLog string, args []string, reason str
 		// refusal into an execution. The provider is still refused.
 		fmt.Fprintln(stderr, "zenchron: recording the refusal failed:", err)
 	}
-	fmt.Fprintln(stderr, (&GitDiscardRefusedError{
-		Operation: refusal.Operation, Reason: reason,
-		Dirty: refusal.DirtyPaths, DirtyTotal: refusal.DirtyCount,
-	}).Error())
+	// THE MESSAGE MATCHES THE REASON. Every refusal used to be described as a
+	// destructive discard, so a provider refused an inert `-c log` was told its
+	// read would lose uncommitted work - which is false, unactionable, and
+	// exactly the shape that produced #248's retry loop.
+	var diagnostic string
+	switch class {
+	case GitOperationRuntimeOwned:
+		diagnostic = (&GitRuntimeOwnedRefusedError{Operation: refusal.Operation, Reason: reason}).Error()
+	case GitOperationDiscard:
+		diagnostic = (&GitDiscardRefusedError{
+			Operation: refusal.Operation, Reason: reason,
+			Dirty: refusal.DirtyPaths, DirtyTotal: refusal.DirtyCount,
+		}).Error()
+	default:
+		// A command whose meaning could not be established. The reason carries
+		// the underlying refusal's own words, which already name what to do.
+		diagnostic = "Git refused: " + refusal.Operation + ": " + reason
+	}
+	fmt.Fprintln(stderr, diagnostic)
 	// Git's own exit status for a command it would not perform.
 	return 1, nil
 }

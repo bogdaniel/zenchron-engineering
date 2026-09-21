@@ -386,7 +386,6 @@ func TestGitDiscardTaxonomy(t *testing.T) {
 		"show":                {[]string{"show", "HEAD"}, GitOperationPermitted},
 		"add":                 {[]string{"add", "-A"}, GitOperationPermitted},
 		"apply":               {[]string{"apply", "patch.diff"}, GitOperationPermitted},
-		"commit":              {[]string{"commit", "-m", "x"}, GitOperationPermitted},
 		"empty":               {nil, GitOperationPermitted},
 
 		// GLOBAL OPTIONS MUST NOT HIDE THE VERB. Prefixing one is exactly what
@@ -404,13 +403,25 @@ func TestGitDiscardTaxonomy(t *testing.T) {
 		// A FILE NAMED LIKE A FLAG is an operand, not a flag: the pathspec
 		// separator ends flag parsing, exactly as it does for git.
 		"file called --hard": {[]string{"reset", "--", "--hard"}, GitOperationPermitted},
+
+		// COMMITTING IS THE RUNTIME'S. It reached this table as "permitted"
+		// only because it was unreachable in practice: every provider commit
+		// arrived behind a `-c` prefix and died on the blanket config refusal.
+		// Accepting inert `-c` keys makes it reachable, and a provider commit
+		// moves HEAD, which the next AssertIntegrity reads as tampering and
+		// answers with `reset --hard` plus `clean -fdx`. It is its own class
+		// because nothing is being discarded and saying so would be false.
+		"commit":            {[]string{"commit", "-m", "x"}, GitOperationRuntimeOwned},
+		"commit-tree":       {[]string{"commit-tree", "HEAD^{tree}"}, GitOperationRuntimeOwned},
+		"commit behind -c":  {[]string{"-c", "commit.gpgsign=false", "commit", "-m", "x"}, GitOperationRuntimeOwned},
+		"status is not one": {[]string{"status", "--porcelain"}, GitOperationPermitted},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, reason := ClassifyGitCommand(tc.args)
 			if got != tc.want {
 				t.Fatalf("classified %v as %q, want %q", tc.args, got, tc.want)
 			}
-			if got == GitOperationDiscard && strings.TrimSpace(reason) == "" {
+			if got != GitOperationPermitted && strings.TrimSpace(reason) == "" {
 				t.Fatalf("a refusal of %v carries no reason", tc.args)
 			}
 		})
@@ -623,24 +634,28 @@ func TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker(t *testing.T) {
 	for name, tc := range map[string]struct {
 		alias, value string
 		argv         []string
+		explanation  string
 	}{
-		"checkout by alias": {"co", "checkout", []string{"co", "--", "implementation.go"}},
-		"reset by alias":    {"nuke", "reset --hard", []string{"nuke"}},
-		"clean by alias":    {"wipe", "clean -fd", []string{"wipe"}},
-		"restore by alias":  {"undo", "restore .", []string{"undo"}},
+		"checkout by alias": {"co", "checkout", []string{"co", "--", "implementation.go"}, "destructive Git refused"},
+		"reset by alias":    {"nuke", "reset --hard", []string{"nuke"}, "destructive Git refused"},
+		"clean by alias":    {"wipe", "clean -fd", []string{"wipe"}, "destructive Git refused"},
+		"restore by alias":  {"undo", "restore .", []string{"undo"}, "destructive Git refused"},
 		// The flags may live on either side of the expansion, so both have to
 		// be assembled before classification.
-		"flag from the caller": {"c", "checkout", []string{"c", "-f"}},
-		"quoted value":         {"q", `checkout "--"`, []string{"q", "implementation.go"}},
+		"flag from the caller": {"c", "checkout", []string{"c", "-f"}, "destructive Git refused"},
+		"quoted value":         {"q", `checkout "--"`, []string{"q", "implementation.go"}, "destructive Git refused"},
 		// A global option must not hide the alias either.
-		"alias behind -C": {"co2", "reset --hard", []string{"-C", ".", "co2"}},
-		// `-c` defines the alias in the same breath as using it. It is refused
-		// one step earlier than the others - as a global that overrides
-		// configuration at all - because Git has configuration keys whose
-		// values are programs it executes, so an inline override is an
-		// execution redirect wearing different syntax. Refused either way, and
-		// this row keeps the spelling covered.
-		"inline -c defines": {"", "", []string{"-c", "alias.zap=reset --hard", "zap"}},
+		"alias behind -C": {"co2", "reset --hard", []string{"-C", ".", "co2"}, "destructive Git refused"},
+		// `-c` defines the alias in the same breath as using it, and it is
+		// refused one step earlier than the others: `alias.*` is not on the
+		// runtime's inert key list, so the override never reaches the verb.
+		// Since #248 the diagnostic NAMES that key rather than describing the
+		// command as a destructive discard it is not - a provider that is told
+		// which override was objected to can send the command without it, and
+		// the one that was told only "could not be resolved" sent it again 58
+		// times.
+		"inline -c defines": {"", "", []string{"-c", "alias.zap=reset --hard", "zap"},
+			"configuration override `-c alias.zap` is not permitted"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir, refusalLog := gitAuthorityFixture(t)
@@ -661,8 +676,8 @@ func TestAnAliasCannotSmuggleADestructiveCommandPastTheBroker(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, "added.go")); err != nil {
 				t.Fatalf("%v deleted the untracked candidate file: %v", tc.argv, err)
 			}
-			if !strings.Contains(diagnostic, "destructive Git refused") {
-				t.Fatalf("the refusal was not explained: %s", diagnostic)
+			if !strings.Contains(diagnostic, tc.explanation) {
+				t.Fatalf("the refusal was not explained as %q: %s", tc.explanation, diagnostic)
 			}
 			// The record names the EFFECTIVE operation, so an operator reading
 			// `git co` is told it was a checkout.
@@ -871,5 +886,395 @@ func TestTheResolvedFormIsWhatExecutes(t *testing.T) {
 	}
 	if strings.Join(same, "\x00") != strings.Join(original, "\x00") {
 		t.Fatalf("a non-alias argv was rewritten: %#v", same)
+	}
+}
+
+// TestBenignConfigOverridesReachTheirVerb is #248.
+//
+// Claude Code prefixes its Git argv with `-c`, and the blanket refusal of that
+// option turned a safety boundary into a productivity trap: run
+// run-ca6aecf437c10bc6d2983fe978c5c00a met it 67 times in one attempt, for
+// commits, logs, ls-files and remote reads, none of which can discard anything.
+// The worker could not read its own repository and retried until its inactivity
+// window closed.
+//
+// The override is now classified by KEY. An inert key reaches its verb, where
+// the ordinary taxonomy decides; anything else is refused and NAMED.
+func TestBenignConfigOverridesReachTheirVerb(t *testing.T) {
+	// The real Claude forms, from the refusal log of that run.
+	for name, argv := range map[string][]string{
+		"log behind a formatting key": {"-c", "log.date=iso", "log", "-1", "--format=%H:%ct"},
+		"ls-files behind quotepath":   {"-c", "core.quotepath=false", "ls-files", "--error-unmatch", "--", "go.mod"},
+		// Both spellings of the option, and the keyless `-c key` shorthand.
+		"separated key and value": {"-c", "core.abbrev=12", "log", "-1"},
+		"config-env joined":       {"--config-env=color.ui=ZC_COLOR", "status"},
+		"config-env separated":    {"--config-env", "core.quotepath=ZC_QUOTE", "status"},
+		"bare key means true":     {"-c", "core.quotepath", "status"},
+		"several overrides":       {"-c", "core.abbrev=12", "-c", "core.quotepath=false", "status"},
+		// Case-insensitive, as Git's own key matching is.
+		"mixed case key": {"-c", "Core.QuotePath=false", "status"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+			if _, err := ResolveGitCommand(t.TempDir(), argv); err != nil {
+				t.Fatalf("%v did not survive resolution: %v", argv, err)
+			}
+		})
+	}
+}
+
+// TestConfigOverridesThatRedirectAreStillRefused is the other half, and it is
+// the half that keeps this from being "allow Claude's Git flags".
+//
+// The list is an ALLOWLIST, so an unknown key fails closed, and every refusal
+// names the key it objected to.
+func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		argv []string
+		key  string
+	}{
+		// Programs Git executes.
+		"pager":             {[]string{"-c", "core.pager=/tmp/evil", "log"}, "core.pager"},
+		"editor":            {[]string{"-c", "core.editor=/tmp/evil", "commit"}, "core.editor"},
+		"hooks path":        {[]string{"-c", "core.hooksPath=/tmp/hooks", "status"}, "core.hooksPath"},
+		"ssh command":       {[]string{"-c", "core.sshCommand=/tmp/evil", "fetch"}, "core.sshCommand"},
+		"askpass":           {[]string{"-c", "core.askPass=/tmp/evil", "fetch"}, "core.askPass"},
+		"fsmonitor":         {[]string{"-c", "core.fsmonitor=/tmp/evil", "status"}, "core.fsmonitor"},
+		"credential helper": {[]string{"-c", "credential.helper=/tmp/evil", "fetch"}, "credential.helper"},
+		"signing program":   {[]string{"-c", "gpg.program=/tmp/evil", "commit"}, "gpg.program"},
+		"clean filter":      {[]string{"-c", "filter.x.clean=/tmp/evil", "add", "-A"}, "filter.x.clean"},
+		"external diff":     {[]string{"-c", "diff.external=/tmp/evil", "diff"}, "diff.external"},
+		// Authority, location and transport.
+		"alias defined inline": {[]string{"-c", "alias.zap=reset --hard", "zap"}, "alias.zap"},
+		"included config":      {[]string{"-c", "include.path=/tmp/evil", "status"}, "include.path"},
+		"conditional include":  {[]string{"-c", "includeIf.gitdir:/.path=/tmp/evil", "status"}, "includeIf.gitdir:/.path"},
+		"safe directory":       {[]string{"-c", "safe.directory=*", "status"}, "safe.directory"},
+		"bare repository":      {[]string{"-c", "safe.bareRepository=all", "status"}, "safe.bareRepository"},
+		"file protocol":        {[]string{"-c", "protocol.file.allow=always", "fetch"}, "protocol.file.allow"},
+		"url rewrite":          {[]string{"-c", "url.https://evil/.insteadOf=https://github.com/", "fetch"}, "url.https://evil/.insteadOf"},
+		"tls off":              {[]string{"-c", "http.sslVerify=false", "fetch"}, "http.sslVerify"},
+		"identity":             {[]string{"-c", "user.email=someone@else", "commit"}, "user.email"},
+		// An unknown key is refused because it is unknown, not because it is
+		// recognized as dangerous. That is the direction the list has to fail.
+		"a key nobody has reasoned about": {[]string{"-c", "zenchron.invented=1", "status"}, "zenchron.invented"},
+		// REMOVED FROM THE INERT LIST AFTER REVIEW. `gc.auto=0` reads as
+		// turning background work off, but the key is classified for every
+		// value and `gc.auto=1` asks Git to repack objects and expire reflogs
+		// inside a workspace whose metadata the runtime holds a digest of.
+		"automatic gc":          {[]string{"-c", "gc.auto=0", "status"}, "gc.auto"},
+		"automatic maintenance": {[]string{"-c", "maintenance.auto=0", "status"}, "maintenance.auto"},
+		// A SECTION IS NOT AN ALLOWLIST. Permitting `advice.` by prefix would
+		// admit an advice key a future Git adds, without anybody having looked
+		// at it - and no advice key appears in the observed provider argv.
+		"an advice key":        {[]string{"-c", "advice.detachedHead=false", "status"}, "advice.detachedHead"},
+		"an unseen advice key": {[]string{"-c", "advice.somethingNew=false", "status"}, "advice.somethingNew"},
+		// SIGNING KEYS CAME OFF THE LIST after review. They choose WHETHER to
+		// sign or verify and gpg.program chooses what to execute - but that
+		// separation only holds while gpg.program cannot be set, and #251 is
+		// open: persisted into .git/config it is beyond the inline allowlist's
+		// reach. log.showSignature=true then makes an ordinary `git log` run
+		// it, and commit.gpgsign is honoured by cherry-pick, revert, merge,
+		// rebase and am, none of which is runtime-owned.
+		"verify signatures on log": {[]string{"-c", "log.showSignature=true", "log"}, "log.showSignature"},
+		"sign commits":             {[]string{"-c", "commit.gpgsign=true", "cherry-pick", "HEAD"}, "commit.gpgsign"},
+		"sign tags":                {[]string{"-c", "tag.gpgsign=true", "status"}, "tag.gpgsign"},
+		// The same key arriving by the other spelling.
+		"config-env redirect": {[]string{"--config-env=core.pager=EVIL", "log"}, "core.pager"},
+		// An override with nothing to override cannot be resolved either.
+		"dangling override": {[]string{"-c"}, "-c"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ResolveGitCommand(t.TempDir(), tc.argv)
+			if err == nil {
+				t.Fatalf("%v was permitted", tc.argv)
+			}
+			refusal, ok := err.(*GitConfigOverrideRefusedError)
+			if !ok {
+				t.Fatalf("%v was refused by something other than the key classifier: %T %v", tc.argv, err, err)
+			}
+			if refusal.Key != tc.key {
+				t.Fatalf("%v was refused for %q, want the key %q", tc.argv, refusal.Key, tc.key)
+			}
+			// NAMING THE KEY IS THE POINT: a provider told only that `-c` is
+			// refused cannot tell which part of its invocation to drop.
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("the refusal does not name %q: %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestDestructiveCommandsBehindABenignOverrideAreStillRefused is the
+// composition, and the one that would make this change a regression if it
+// failed: accepting the override must not accept the verb behind it.
+//
+// EVERY KEY HERE IS ON THE INERT LIST, and that is load-bearing rather than
+// incidental. A fixture built on a key the classifier refuses would be refused
+// at the key and never reach the verb - so it would pass while proving nothing
+// about the composition it is named for, which is what an earlier round of this
+// test did with `advice.detachedHead` after that key stopped being inert.
+//
+// So the override is asserted to SURVIVE resolution first, and the verb behind
+// it to be refused second. Two assertions, because one of them passing for the
+// wrong reason is the failure mode this test exists to have.
+func TestDestructiveCommandsBehindABenignOverrideAreStillRefused(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"reset":    {"-c", "color.ui=never", "reset", "--hard"},
+		"clean":    {"-c", "core.quotepath=false", "clean", "-fd"},
+		"clean x":  {"-c", "core.quotepath=false", "clean", "-fdx"},
+		"checkout": {"-c", "core.quotepath=false", "checkout", "--", "implementation.go"},
+		"restore":  {"-c", "log.date=iso", "restore", "."},
+		"stash":    {"-c", "core.abbrev=12", "stash", "push"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The key is accepted, so the refusal below is about the VERB.
+			if _, err := ResolveGitCommand(t.TempDir(), argv); err != nil {
+				t.Fatalf("the fixture's override was itself refused, so this proves nothing about %v: %v", argv, err)
+			}
+			if class, _ := ClassifyGitCommand(argv); class != GitOperationDiscard {
+				t.Fatalf("%v classified as %q, want a discard", argv, class)
+			}
+		})
+	}
+}
+
+// TestARuntimeOwnedRefusalNamesThePermittedNextAction is the efficiency half of
+// #248, and it is a correctness requirement rather than a nicety.
+//
+// The worker in that run sent the same commit 58 times because every answer it
+// got described a problem with its own invocation - a problem a model will keep
+// trying to solve. A refusal that names what to do instead preserves exactly
+// the same authority and ends the loop on the first reply.
+func TestARuntimeOwnedRefusalNamesThePermittedNextAction(t *testing.T) {
+	dir, refusalLog := gitAuthorityFixture(t)
+	const work = "package candidate\n\n// uncommitted work the provider must keep\n"
+	writeCandidateFile(t, dir, "implementation.go", work)
+
+	// THE OVERRIDE MUST BE ONE THE CLASSIFIER ACCEPTS, or the commit is refused
+	// at the key and never reaches the arm this test is named for - the same
+	// way the composition test above could pass without proving anything.
+	argv := []string{"-c", "core.quotepath=false", "commit", "-am", "provider commit"}
+	if _, err := ResolveGitCommand(dir, argv); err != nil {
+		t.Fatalf("the fixture's override was itself refused, so this proves nothing: %v", err)
+	}
+	code, diagnostic := brokerGit(t, dir, refusalLog, argv...)
+	if code == 0 {
+		t.Fatal("a provider commit was permitted")
+	}
+	// It must not be described as a destructive discard, because it is not one
+	// and a false reason is a reason a model will argue with.
+	if strings.Contains(diagnostic, "destructive Git refused") {
+		t.Fatalf("a commit was explained as a discard: %s", diagnostic)
+	}
+	for _, want := range []string{
+		"runtime-owned Git refused",
+		"Do not retry this command",
+		"Zenchron commits the candidate itself",
+		"continue with the rest of the task",
+	} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("the refusal does not say %q: %s", want, diagnostic)
+		}
+	}
+	// The work is untouched, and HEAD did not move - which is the whole reason
+	// the refusal exists, since a moved HEAD is read as tampering and answered
+	// with reset --hard.
+	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
+		t.Fatalf("the refused commit changed the candidate:\n%q", got)
+	}
+	refusals, err := ReadGitRefusals(refusalLog)
+	if err != nil || len(refusals) != 1 {
+		t.Fatalf("the refusal was not recorded: %v %#v", err, refusals)
+	}
+}
+
+// TestRefCreationIsRuntimeOwnedAndRefReadingIsNot is the third review blocker
+// on #248.
+//
+// The runtime-owned diagnostic tells a provider not to create "commits,
+// branches or tags", and only the commit half was enforced: `checkout -b` and
+// `switch -c` were already refused as worktree-replacing, which left the direct
+// spellings as the way around a law the refusal was stating anyway. The trusted
+// provider instructions have always said Git metadata belongs to the runtime.
+//
+// The reading forms must stay permitted. Refusing `git branch --show-current`
+// would rebuild, one verb along, exactly the trap #248 exists to remove.
+func TestRefCreationIsRuntimeOwnedAndRefReadingIsNot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		argv []string
+		want GitOperationClass
+	}{
+		// Writing.
+		"create a branch":      {[]string{"branch", "feature"}, GitOperationRuntimeOwned},
+		"create from a commit": {[]string{"branch", "feature", "HEAD~1"}, GitOperationRuntimeOwned},
+		"delete a branch":      {[]string{"branch", "-D", "feature"}, GitOperationRuntimeOwned},
+		"rename a branch":      {[]string{"branch", "-m", "old", "new"}, GitOperationRuntimeOwned},
+		"set upstream":         {[]string{"branch", "--set-upstream-to", "origin/main"}, GitOperationRuntimeOwned},
+		"create a tag":         {[]string{"tag", "v1.0.0"}, GitOperationRuntimeOwned},
+		"annotated tag":        {[]string{"tag", "-a", "v1", "-m", "release"}, GitOperationRuntimeOwned},
+		"delete a tag":         {[]string{"tag", "-d", "v1"}, GitOperationRuntimeOwned},
+		"write a ref":          {[]string{"update-ref", "refs/heads/x", "HEAD"}, GitOperationRuntimeOwned},
+		"delete a ref":         {[]string{"update-ref", "-d", "refs/heads/x"}, GitOperationRuntimeOwned},
+		"behind a benign -c":   {[]string{"-c", "color.ui=never", "branch", "feature"}, GitOperationRuntimeOwned},
+		"after the separator":  {[]string{"branch", "--", "feature"}, GitOperationRuntimeOwned},
+
+		// Reading. Every one of these answers a question a worker legitimately
+		// has, and several carry an operand that is a revision or a pattern
+		// rather than a name.
+		"list branches":        {[]string{"branch"}, GitOperationPermitted},
+		"list all branches":    {[]string{"branch", "-a"}, GitOperationPermitted},
+		"verbose list":         {[]string{"branch", "-vv"}, GitOperationPermitted},
+		"current branch":       {[]string{"branch", "--show-current"}, GitOperationPermitted},
+		"branches containing":  {[]string{"branch", "--contains", "HEAD"}, GitOperationPermitted},
+		"branches merged":      {[]string{"branch", "--merged", "origin/main"}, GitOperationPermitted},
+		"formatted list":       {[]string{"branch", "--format=%(refname)"}, GitOperationPermitted},
+		"list tags":            {[]string{"tag"}, GitOperationPermitted},
+		"tag pattern":          {[]string{"tag", "-l", "v*"}, GitOperationPermitted},
+		"tags pointing at":     {[]string{"tag", "--points-at", "HEAD"}, GitOperationPermitted},
+		"for-each-ref is read": {[]string{"for-each-ref", "refs/heads"}, GitOperationPermitted},
+		"rev-parse is read":    {[]string{"rev-parse", "HEAD"}, GitOperationPermitted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, reason := ClassifyGitCommand(tc.argv)
+			if got != tc.want {
+				t.Fatalf("classified %v as %q, want %q", tc.argv, got, tc.want)
+			}
+			if got != GitOperationPermitted && strings.TrimSpace(reason) == "" {
+				t.Fatalf("a refusal of %v carries no reason", tc.argv)
+			}
+		})
+	}
+}
+
+// TestRefReadingFormsWithOperandsStayPermitted is the review's second and third
+// blockers on the ref split.
+//
+// A read is not distinguished by having no operand - `git branch --list
+// "feature/*"`, `git tag --verify v1` and `git symbolic-ref --short HEAD` all
+// carry one and all ask questions. Classifying by "is there an operand" alone
+// would refuse exactly the inspection a worker is entitled to, which is the
+// #248 trap rebuilt one verb along.
+func TestRefReadingFormsWithOperandsStayPermitted(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"branch list by pattern":   {"branch", "--list", "feature/*"},
+		"branch list short":        {"branch", "-l", "feature/*"},
+		"branch remotes pattern":   {"branch", "-r", "origin/*"},
+		"branch all pattern":       {"branch", "--all", "feature/*"},
+		"branch remotes long":      {"branch", "--remotes", "origin/*"},
+		"tag verify":               {"tag", "--verify", "v1.0.0"},
+		"tag verify short":         {"tag", "-v", "v1.0.0"},
+		"symbolic-ref read":        {"symbolic-ref", "HEAD"},
+		"symbolic-ref short read":  {"symbolic-ref", "--short", "HEAD"},
+		"symbolic-ref quiet read":  {"symbolic-ref", "-q", "HEAD"},
+		"branch contains a commit": {"branch", "--contains", "HEAD"},
+		"branch sorted format":     {"branch", "--sort=-committerdate", "--format=%(refname)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+		})
+	}
+}
+
+// TestRefWritingFormsAreRuntimeOwnedHoweverSpelled is the fourth blocker: a
+// writing flag must be recognized in the spelling that carries its value with
+// an `=`, and inside a short cluster.
+//
+// The earlier helper skipped a joined flag as "a flag with a value" BEFORE
+// asking whether that flag writes, so `--set-upstream-to=origin/main` walked
+// past the check `--set-upstream-to origin/main` failed.
+func TestRefWritingFormsAreRuntimeOwnedHoweverSpelled(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"joined set-upstream":       {"branch", "--set-upstream-to=origin/main"},
+		"separated set-upstream":    {"branch", "--set-upstream-to", "origin/main"},
+		"joined move":               {"branch", "--move=old", "new"},
+		"joined delete":             {"branch", "--delete=feature"},
+		"short cluster delete":      {"branch", "-aD", "feature"},
+		"short cluster force":       {"branch", "-fm", "old", "new"},
+		"unset upstream":            {"branch", "--unset-upstream"},
+		"edit description":          {"branch", "--edit-description"},
+		"joined tag message":        {"tag", "--message=release", "v1"},
+		"tag force short cluster":   {"tag", "-af", "v1"},
+		"symbolic-ref write":        {"symbolic-ref", "HEAD", "refs/heads/other"},
+		"symbolic-ref with reason":  {"symbolic-ref", "-m", "why", "HEAD", "refs/heads/other"},
+		"symbolic-ref delete":       {"symbolic-ref", "--delete", "HEAD"},
+		"symbolic-ref delete short": {"symbolic-ref", "-d", "HEAD"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationRuntimeOwned {
+				t.Fatalf("%v classified as %q, want runtime-owned", argv, class)
+			} else if strings.TrimSpace(reason) == "" {
+				t.Fatalf("a refusal of %v carries no reason", argv)
+			}
+		})
+	}
+}
+
+// TestAnOptionalValueFlagDoesNotSwallowTheRefName is a bypass this classifier
+// had, found in review and confirmed against real Git.
+//
+// `--color` and `--abbrev` take an OPTIONAL value, which Git requires to be
+// attached: `--color=always`, `--abbrev=12`. A bare argument after them is
+// therefore the branch or tag NAME, not the flag's value. Treating them as
+// value-carrying skipped the name, left no operand behind, and classified a ref
+// creation as permitted.
+//
+// Observed on git 2.55.0, in a scratch repository:
+//
+//	git branch --color probe-ref   -> refs/heads/probe-ref EXISTS
+//	git branch --abbrev probe-ref  -> refs/heads/probe-ref EXISTS
+//	git tag --color probe-ref      -> refs/tags/probe-ref EXISTS
+//
+// while every flag still on the listing table was observed NOT to create one.
+// That is why membership there is evidence rather than inference: the listing
+// table is the permissive direction, and a wrong entry is a bypass.
+func TestAnOptionalValueFlagDoesNotSwallowTheRefName(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"branch color":          {"branch", "--color", "provider-branch"},
+		"branch abbrev":         {"branch", "--abbrev", "provider-branch"},
+		"tag color":             {"tag", "--color", "provider-tag"},
+		"branch color attached": {"branch", "--color=always", "provider-branch"},
+		"branch verbose":        {"branch", "-v", "provider-branch"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, _ := ClassifyGitCommand(argv); class != GitOperationRuntimeOwned {
+				t.Fatalf("%v classified as %q, want runtime-owned: Git creates the ref", argv, class)
+			}
+		})
+	}
+	// And the attached form of the value, which IS how Git takes one, still
+	// leaves a listing invocation a listing invocation.
+	for name, argv := range map[string][]string{
+		"attached color while listing":  {"branch", "--list", "--color=always", "feature/*"},
+		"attached abbrev while listing": {"branch", "--list", "--abbrev=12"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+		})
+	}
+}
+
+// TestTagNumericListingIsARead covers `git tag -n[<num>]`, which Git documents
+// as implying --list, so the operand beside it is a pattern.
+func TestTagNumericListingIsARead(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"bare":             {"tag", "-n", "release-*"},
+		"with a count":     {"tag", "-n5", "release-*"},
+		"count no pattern": {"tag", "-n3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if class, reason := ClassifyGitCommand(argv); class != GitOperationPermitted {
+				t.Fatalf("%v was refused as %q: %s", argv, class, reason)
+			}
+		})
+	}
+	// -n is not a blanket escape: a writing flag beside it still writes.
+	if class, _ := ClassifyGitCommand([]string{"tag", "-n", "-d", "v1"}); class != GitOperationRuntimeOwned {
+		t.Fatalf("a delete behind -n was classified as %q", class)
 	}
 }

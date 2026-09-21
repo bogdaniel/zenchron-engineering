@@ -755,24 +755,35 @@ func TestAnExecPathRedirectCannotReachTheCandidateRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for name, argv := range map[string][]string{
-		"exec-path equals":   {"--exec-path=" + helpers, "zap"},
-		"exec-path separate": {"--exec-path", helpers, "zap"},
+	// EACH ROW NAMES WHAT THE REFUSAL MUST OBJECT TO, rather than asserting one
+	// sentence for all of them. Every refusal here used to be described as a
+	// destructive discard, which for `git --exec-path=<dir> zap` is simply
+	// false - it discards nothing, it redirects what Git runs - and a false
+	// reason is one a provider will argue with. Since #248 the diagnostic says
+	// which option or key was the objection; see git_authority.go.
+	for name, tc := range map[string]struct {
+		argv      []string
+		objection string
+	}{
+		"exec-path equals":   {[]string{"--exec-path=" + helpers, "zap"}, "--exec-path"},
+		"exec-path separate": {[]string{"--exec-path", helpers, "zap"}, "--exec-path"},
 		// The same shape one layer along: configuration keys whose values are
-		// programs Git executes.
-		"inline config":    {"-c", "core.pager=" + helper, "log"},
-		"config env":       {"--config-env", "core.pager=EVIL", "log"},
-		"other repository": {"--git-dir=" + filepath.Join(dir, ".git"), "reset", "--hard"},
-		"other work tree":  {"--work-tree=/tmp", "checkout", "--", "."},
-		"namespace":        {"--namespace=x", "zap"},
+		// programs Git executes. `core.pager` is not on the inert list and
+		// never will be, and the refusal names the key.
+		"inline config":    {[]string{"-c", "core.pager=" + helper, "log"}, "core.pager"},
+		"config env":       {[]string{"--config-env", "core.pager=EVIL", "log"}, "core.pager"},
+		"other repository": {[]string{"--git-dir=" + filepath.Join(dir, ".git"), "reset", "--hard"}, "--git-dir"},
+		"other work tree":  {[]string{"--work-tree=/tmp", "checkout", "--", "."}, "--work-tree"},
+		"namespace":        {[]string{"--namespace=x", "zap"}, "--namespace"},
 	} {
+		argv := tc.argv
 		t.Run(name, func(t *testing.T) {
 			code, diagnostic := brokerGit(t, dir, refusalLog, argv...)
 			if code == 0 {
 				t.Fatalf("%v was permitted", argv)
 			}
-			if !strings.Contains(diagnostic, "destructive Git refused") {
-				t.Fatalf("%v was not refused by the boundary: %s", argv, diagnostic)
+			if !strings.Contains(diagnostic, "refused") || !strings.Contains(diagnostic, tc.objection) {
+				t.Fatalf("%v was not refused by the boundary naming %q: %s", argv, tc.objection, diagnostic)
 			}
 			if got := candidateFileBody(t, dir, "implementation.go"); got != work {
 				t.Fatalf("%v reached the candidate:\n%q", argv, got)
