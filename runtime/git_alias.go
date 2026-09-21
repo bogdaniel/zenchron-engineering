@@ -42,7 +42,6 @@ package runtime
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -529,8 +528,8 @@ func gitBuiltinCommands(candidateDir string) []string {
 // It resolves the binary the way execRealGit does - from the runtime's own
 // trusted search path, never by name - because the guard directory is first on
 // the provider's path and resolving by name here would make the broker call
-// itself. The environment is the provider's minus the sentinel, which is
-// exactly what the execution gets, so the configuration this reads is the
+// itself. The environment comes from brokerGitEnv, the single definition the
+// execution also uses, so the configuration this reads cannot drift from the
 // configuration that will apply.
 func effectiveGit(candidateDir string, args ...string) (string, int, error) {
 	binary, err := gitBinary()
@@ -539,7 +538,7 @@ func effectiveGit(candidateDir string, args ...string) (string, int, error) {
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = candidateDir
-	cmd.Env = withoutBrokeredGitDir(os.Environ())
+	cmd.Env = brokerGitEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
