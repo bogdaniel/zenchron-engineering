@@ -3,6 +3,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -217,5 +218,141 @@ func TestCandidateIdentityIsAPair(t *testing.T) {
 	}
 	if got := ClassifyGitTarget(containing, anchors); got != GitTargetCandidate {
 		t.Fatalf("a work tree containing the candidate classified %s", got)
+	}
+}
+
+// lastRefusalTarget reads the resource the most recent refusal was about.
+//
+// It is asserted rather than inferred, so a future regression cannot produce
+// the right refusal for the wrong reason - refusing a scratch command because
+// the target resolution silently failed would otherwise look identical to
+// refusing a candidate command correctly.
+func lastRefusalTarget(t *testing.T, log string) GitTargetClass {
+	t.Helper()
+	refusals, err := ReadGitRefusals(log)
+	if err != nil || len(refusals) == 0 {
+		t.Fatalf("no refusal was recorded: %v", err)
+	}
+	return refusals[len(refusals)-1].Target
+}
+
+func dirtyBody(t *testing.T, dir string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dir, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func makeDirty(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTheAuthorityMatrix is slice 3's whole claim: resource scoping alone moves
+// mutation authority exactly where intended, and nowhere else.
+//
+// The proof is SYMMETRIC - the same argv against each of the three resources -
+// because a per-case assertion cannot distinguish "scoping works" from "this
+// one command happened to be allowed". And it asserts BOTH halves of an
+// authority claim:
+//
+//	permission works where intended  - the scratch command actually mutated
+//	refusal preserves work           - the refused ones left their state intact
+//
+// Returning 0 is not evidence that a command ran, and returning 1 is not
+// evidence that anything was protected.
+//
+// The scratch repositories carry their own committer identity already, so this
+// exercises resource scoping only. The `-c user.name` / `-c user.email` question
+// is deliberately absent; it belongs to the next slice.
+func TestTheAuthorityMatrix(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	scratchForCommit := filepath.Join(scratch, "TestCommit1234567", "001")
+	scratchForReset := filepath.Join(scratch, "TestReset7654321", "001")
+	external := filepath.Join(t.TempDir(), "unrelated")
+	for _, dir := range []string{candidate, scratchForCommit, scratchForReset, external} {
+		initTargetRepo(t, dir)
+	}
+	log := filepath.Join(t.TempDir(), "refused.jsonl")
+
+	const dirty = "uncommitted work that must survive a refusal\n"
+	for _, dir := range []string{candidate, external, scratchForCommit, scratchForReset} {
+		makeDirty(t, dir, dirty)
+	}
+
+	// ----- commit -------------------------------------------------------
+	if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, "commit", "-a", "-m", "x"); code == 0 {
+		t.Fatal("a provider committed to the candidate")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetCandidate {
+		t.Fatalf("candidate commit recorded target=%q", got)
+	}
+	if body := dirtyBody(t, candidate); body != dirty {
+		t.Fatalf("the refused candidate commit changed the workspace: %q", body)
+	}
+
+	if code, _ := brokerGitFrom(t, external, candidate, scratch, log, "commit", "-a", "-m", "x"); code == 0 {
+		t.Fatal("a provider committed to an unrelated repository")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetExternalOrUnknown {
+		t.Fatalf("external commit recorded target=%q", got)
+	}
+	if body := dirtyBody(t, external); body != dirty {
+		t.Fatalf("the refused external commit changed the repository: %q", body)
+	}
+
+	before, err := runGit(scratchForCommit, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := brokerGitFrom(t, scratchForCommit, candidate, scratch, log, "commit", "-a", "-m", "fixture"); code != 0 {
+		t.Fatalf("a fixture could not commit to its own repository: %s", out)
+	}
+	// PERMISSION MUST HAVE DONE SOMETHING. A zero exit status proves the broker
+	// did not refuse; only the repository proves the command ran.
+	after, err := runGit(scratchForCommit, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(before)) == strings.TrimSpace(string(after)) {
+		t.Fatal("the permitted scratch commit did not create a commit")
+	}
+	if status, err := runGit(scratchForCommit, "status", "--porcelain"); err != nil || strings.TrimSpace(string(status)) != "" {
+		t.Fatalf("the permitted scratch commit left the work uncommitted: %q %v", status, err)
+	}
+
+	// ----- reset --hard -------------------------------------------------
+	if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, "reset", "--hard"); code == 0 {
+		t.Fatal("a provider discarded candidate work")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetCandidate {
+		t.Fatalf("candidate reset recorded target=%q", got)
+	}
+	if body := dirtyBody(t, candidate); body != dirty {
+		t.Fatalf("the refused candidate reset discarded the work: %q", body)
+	}
+
+	if code, _ := brokerGitFrom(t, external, candidate, scratch, log, "reset", "--hard"); code == 0 {
+		t.Fatal("a provider discarded work in an unrelated repository")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetExternalOrUnknown {
+		t.Fatalf("external reset recorded target=%q", got)
+	}
+	if body := dirtyBody(t, external); body != dirty {
+		t.Fatalf("the refused external reset discarded the work: %q", body)
+	}
+
+	if code, out := brokerGitFrom(t, scratchForReset, candidate, scratch, log, "reset", "--hard"); code != 0 {
+		t.Fatalf("a fixture could not reset its own repository: %s", out)
+	}
+	if body := dirtyBody(t, scratchForReset); body == dirty {
+		t.Fatal("the permitted scratch reset did not discard the fixture's work")
 	}
 }
