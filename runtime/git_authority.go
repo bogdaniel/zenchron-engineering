@@ -704,13 +704,33 @@ const aliasResolutionReason = "the effective operation could not be resolved"
 // It resolves Git from the runtime's own trusted search path rather than from
 // whatever PATH the provider is running under - the shim is FIRST on that path,
 // so resolving by name here would make the broker invoke itself forever.
-func execRealGit(candidateDir string, args []string, stdout, stderr io.Writer) (int, error) {
+// THE dir PARAMETER IS THE EXECUTION CONTEXT, and its contract is explicit
+// because leaving it implicit cost real work.
+//
+//	dir != ""  run the command in that directory.
+//	dir == ""  the CALLER has already established the context; inherit it.
+//
+// The empty form exists for one caller: the broker, which pins its own working
+// directory to a verified handle before deciding, so that the directory the
+// command was classified against is the directory it executes in. Everything
+// else must name where it runs.
+//
+// An earlier version of this function ignored the parameter entirely, on the
+// reasoning that the broker had already chdir'd. It had - but the guard TESTS
+// call this directly to prove a destructive command would destroy work, and
+// with no Dir they ran `git reset --hard` and `git clean -fdx` in the
+// development checkout instead of in their fixtures. The tests reported
+// "unguarded git reset --hard did NOT discard the work", which was true of the
+// fixture and false of the repository. See TestExecRealGitRunsWhereItIsTold.
+func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, error) {
 	binary, err := gitBinary()
 	if err != nil {
 		return 1, err
 	}
 	cmd := exec.Command(binary, args...)
-	cmd.Dir = candidateDir
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	// The provider's own environment is inherited so that a permitted command
 	// behaves exactly as it would have without the guard, MINUS the brokered
 	// sentinel: the sentinel exists to make unshimmed Git fail closed, and the
