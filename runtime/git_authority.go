@@ -34,6 +34,7 @@ package runtime
 // boundary is testable without a model.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -613,7 +614,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// would otherwise have authorized the verb it was spelled with - and both a
 	// provider and a checked-out .git/config can define one, since `config` is
 	// an ordinary command. See git_alias.go.
-	effective, resolveErr := ResolveGitCommand(candidateDir, args)
+	effective, resolveErr := ResolveGitCommand(pinned, args)
 	if resolveErr != nil {
 		// AUTHORITY OUTRANKS AN INCIDENTAL OBJECTION.
 		//
@@ -672,7 +673,12 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// and `-c user.name` carry no intrinsic capability, so parse time did not
 	// refuse them; what they DO carry is whose history a commit is written
 	// into, and only the target answers that.
-	deferred := DeferredGitConfigOverrides(args)
+	// FROM THE EFFECTIVE COMMAND, not the one that was typed. Git honours an
+	// alias that begins with `-c`, so `alias.sneak = -c user.email=... commit`
+	// introduces an identity override during expansion - after a check reading
+	// the original argv has already decided there was none. Verified: such an
+	// alias commits as the address it names.
+	deferred := DeferredGitConfigOverrides(effective)
 	// WHICH RESOURCE - asked only when the answer can change the decision. A
 	// permitted verb carrying no deferred override is permitted everywhere it
 	// was permitted before, so reads are untouched and pay no resolution cost.
@@ -788,6 +794,41 @@ func refuseGitCommand(candidateDir, refusalLog string, args []string, reason str
 // established. Both are refusals; they are not the same fact.
 const aliasResolutionReason = "the effective operation could not be resolved"
 
+// brokerGitEnv is THE environment for every Git this broker runs - both the
+// resolution that decides and the execution that follows.
+//
+// One definition, because two were a way for authorization and execution to
+// disagree. The provider's own environment is carried so that a permitted
+// command behaves exactly as it would have without the guard, MINUS the
+// brokered sentinel, which exists to make unshimmed Git fail closed and which
+// the shim is the one caller allowed to see past.
+//
+// Stripping repository variables one at a time was considered and rejected:
+// the list of environment variables that steer Git's repository discovery is
+// long, version-dependent, and exactly the kind of thing a boundary gets
+// quietly wrong. Resolving in the same environment makes the question and the
+// answer refer to the same repository by construction rather than by
+// enumeration.
+func brokerGitEnv() []string { return withoutBrokeredGitDir(os.Environ()) }
+
+// brokerGitOutput asks Git a question in the same environment the command will
+// execute in, with the binary resolved off the runtime's trusted search path
+// rather than the provider's.
+func brokerGitOutput(dir string, args ...string) ([]byte, error) {
+	binary, err := gitBinary()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(binary, args...)
+	cmd.Dir, cmd.Env = dir, brokerGitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
 // execRealGit runs a permitted command through the real binary.
 //
 // It resolves Git from the runtime's own trusted search path rather than from
@@ -820,11 +861,8 @@ func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, erro
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// The provider's own environment is inherited so that a permitted command
-	// behaves exactly as it would have without the guard, MINUS the brokered
-	// sentinel: the sentinel exists to make unshimmed Git fail closed, and the
-	// shim is the one caller that must see past it. See git_guard.go.
-	cmd.Env = withoutBrokeredGitDir(os.Environ())
+	// THE SAME environment the resolution used. See brokerGitEnv.
+	cmd.Env = brokerGitEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

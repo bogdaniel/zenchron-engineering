@@ -458,3 +458,122 @@ func TestIdentityOverridesAreScopedToScratch(t *testing.T) {
 		t.Fatal("an identity override reached the candidate behind a permitted verb")
 	}
 }
+
+// TestTheExecutionContextCannotBeLaundered is the review's three blockers, each
+// of which was demonstrated to destroy candidate work before the repair.
+//
+// They are one defect wearing three costumes: the decision and the execution
+// consulted different information about which repository was involved. A
+// boundary that classifies against one repository and acts on another has not
+// been narrowed, it has been bypassed.
+func TestTheExecutionContextCannotBeLaundered(t *testing.T) {
+	requireGitFixture(t)
+	const precious = "uncommitted candidate work\n"
+
+	newLab := func(t *testing.T) (candidate, scratch, fixture, log string) {
+		t.Helper()
+		root := t.TempDir()
+		candidate = filepath.Join(root, "candidate")
+		scratch = filepath.Join(root, "scratch")
+		fixture = filepath.Join(scratch, "TestFixture1234567", "001")
+		initTargetRepo(t, candidate)
+		initTargetRepo(t, fixture)
+		makeDirty(t, candidate, precious)
+		return candidate, scratch, fixture, filepath.Join(root, "refused.jsonl")
+	}
+
+	// A `-C` HIDDEN BEHIND A VALUE-TAKING GLOBAL. The context scanners stopped
+	// at `user.email=...` because it does not begin with a dash, so the `-C`
+	// was invisible to the pin, survived into the argv, and Git applied it.
+	// Classified against scratch, executed against the candidate.
+	t.Run("a -C behind another global", func(t *testing.T) {
+		candidate, scratch, fixture, log := newLab(t)
+		code, _ := brokerGitFrom(t, fixture, candidate, scratch, log,
+			"-c", "user.email=x@example.invalid", "-C", candidate, "reset", "--hard")
+		if code == 0 {
+			t.Fatal("a redirected destructive command was permitted")
+		}
+		if body := dirtyBody(t, candidate); body != precious {
+			t.Fatalf("candidate work was discarded: %q", body)
+		}
+	})
+
+	// THE SAME SHAPE WITH THE REDIRECT IN THE ENVIRONMENT. Resolution used a
+	// sanitized environment and could not see GIT_WORK_TREE; execution
+	// inherited the provider's and could.
+	t.Run("GIT_WORK_TREE from the environment", func(t *testing.T) {
+		candidate, scratch, fixture, log := newLab(t)
+		t.Setenv("GIT_WORK_TREE", candidate)
+		code, _ := brokerGitFrom(t, fixture, candidate, scratch, log, "checkout", "--", ".")
+		if code == 0 {
+			t.Fatal("a command redirected by the environment was permitted")
+		}
+		if body := dirtyBody(t, candidate); body != precious {
+			t.Fatalf("candidate work was discarded: %q", body)
+		}
+	})
+
+	// GIT_DIR takes the OTHER route to the same guarantee: it is removed from
+	// the canonical environment outright, for the decision and the execution
+	// alike, because that variable is the brokered sentinel's own. So it
+	// redirects neither, and the command acts on the directory it was run in.
+	// What matters here is not that it is refused - acting on the fixture is
+	// legitimate - but that it cannot reach the candidate.
+	t.Run("GIT_DIR from the environment", func(t *testing.T) {
+		candidate, scratch, fixture, log := newLab(t)
+		t.Setenv("GIT_DIR", filepath.Join(candidate, ".git"))
+		brokerGitFrom(t, fixture, candidate, scratch, log, "checkout", "--", ".")
+		if body := dirtyBody(t, candidate); body != precious {
+			t.Fatalf("candidate work was discarded: %q", body)
+		}
+	})
+
+	// AN ALIAS THAT INTRODUCES AN IDENTITY OVERRIDE. Git honours an alias
+	// beginning with `-c`, so the override appears during expansion - after a
+	// check reading the original argv has already decided there was none.
+	t.Run("an alias introducing an identity override", func(t *testing.T) {
+		candidate, scratch, _, log := newLab(t)
+		// Written with real Git rather than the trusted runner, which refuses
+		// to put an [alias] section into a candidate at all. A provider's own
+		// `git config` is not so constrained, which is why the resolver has to
+		// answer for one.
+		if _, err := brokerGitOutput(candidate, "config", "alias.sneak",
+			"-c user.email=alias@example.invalid commit --allow-empty -m viaalias"); err != nil {
+			t.Fatal(err)
+		}
+		// Read with real Git for the same reason the alias was written with it:
+		// the trusted runner refuses a repository carrying an [alias] section
+		// outright, which is its own boundary and not the one under test here.
+		before, err := brokerGitOutput(candidate, "log", "-1", "--format=%H")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, "sneak"); code == 0 {
+			t.Fatal("an alias-introduced commit was permitted against the candidate")
+		}
+		after, err := brokerGitOutput(candidate, "log", "-1", "--format=%H")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(before)) != strings.TrimSpace(string(after)) {
+			t.Fatal("the alias moved candidate history")
+		}
+	})
+
+	// AND THE REPAIR DOES NOT COST THE LEGITIMATE FORM: `-C` into the attempt's
+	// own scratch still works, with the other globals still in place.
+	t.Run("a legitimate -C into scratch still works", func(t *testing.T) {
+		candidate, scratch, fixture, log := newLab(t)
+		makeDirty(t, fixture, "fixture work\n")
+		if code, out := brokerGitFrom(t, candidate, candidate, scratch, log,
+			"-c", "user.email=x@example.invalid", "-C", fixture, "reset", "--hard"); code != 0 {
+			t.Fatalf("a scratch reset reached through -C was refused: %s", out)
+		}
+		if body := dirtyBody(t, fixture); body == "fixture work\n" {
+			t.Fatal("the permitted scratch reset did not run")
+		}
+		if body := dirtyBody(t, candidate); body != precious {
+			t.Fatalf("the scratch reset reached the candidate: %q", body)
+		}
+	})
+}

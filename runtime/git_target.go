@@ -104,10 +104,19 @@ type repoIdentity struct {
 // executing - which is the failure ResolveGitCommand already exists to prevent
 // for aliases, one layer along.
 //
-// It is asked through the TRUSTED runner, so the question is not itself
-// answerable by anything the provider put on its PATH.
+// It is asked in the SAME ENVIRONMENT the command will execute in, through
+// brokerGitOutput. Asking in a sanitized one instead was a second way for
+// authorization and execution to disagree: GIT_WORK_TREE, GIT_DIR,
+// GIT_CEILING_DIRECTORIES and their relatives are repository inputs, and a
+// resolution that cannot see them answers for a repository that is not the one
+// Git will act on. A provider carrying GIT_WORK_TREE=<candidate> in its own
+// environment had a scratch command classified as scratch and executed against
+// the candidate.
+//
+// The binary is still resolved off the runtime's trusted search path, so the
+// question is not answerable by anything the provider put on its PATH.
 func resolveRepoIdentity(cwd string) (repoIdentity, error) {
-	out, err := RepositoryGitRunner{Dir: cwd, Local: controlPolicy()}.run("rev-parse", "--git-common-dir")
+	out, err := brokerGitOutput(cwd, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return repoIdentity{}, err
 	}
@@ -129,7 +138,7 @@ func resolveRepoIdentity(cwd string) (repoIdentity, error) {
 	// fails rather than answering. That is not an error here: it is one of the
 	// two shapes a repository comes in, and the common directory alone decides
 	// for it.
-	top, topErr := RepositoryGitRunner{Dir: cwd, Local: controlPolicy()}.run("rev-parse", "--show-toplevel")
+	top, topErr := brokerGitOutput(cwd, "rev-parse", "--show-toplevel")
 	if topErr == nil {
 		if work := strings.TrimSpace(string(top)); work != "" {
 			if identity.WorkTree, err = canonicalPath(work); err != nil {
@@ -286,25 +295,25 @@ func within(path, root string, id fileID) bool {
 // execution context actually pointed.
 func effectiveCwd(base string, args []string) (string, error) {
 	cwd := base
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--" {
-			break
-		}
-		if args[i] != "-C" {
-			if !strings.HasPrefix(args[i], "-") {
-				break
+	globals, _, _ := splitGitCommand(args)
+	for i := 0; i < len(globals); i++ {
+		if globals[i] != "-C" {
+			// Any other global that carries a separate value has that value
+			// stepped over, so a later -C cannot be hidden behind it.
+			if gitGlobalTakesValue(globals[i]) {
+				i++
 			}
 			continue
 		}
-		if i+1 >= len(args) {
+		if i+1 >= len(globals) {
 			return "", fmt.Errorf("-C requires a directory")
 		}
 		i++
-		if filepath.IsAbs(args[i]) {
-			cwd = args[i]
+		if filepath.IsAbs(globals[i]) {
+			cwd = globals[i]
 			continue
 		}
-		cwd = filepath.Join(cwd, args[i])
+		cwd = filepath.Join(cwd, globals[i])
 	}
 	return cwd, nil
 }
@@ -314,19 +323,23 @@ func effectiveCwd(base string, args []string) (string, error) {
 // a second time and land somewhere nobody asked for. Everything else passes
 // through untouched.
 func withoutDirectoryGlobals(args []string) []string {
+	globals, verb, rest := splitGitCommand(args)
 	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--" {
-			return append(out, args[i:]...)
-		}
-		if args[i] == "-C" {
+	for i := 0; i < len(globals); i++ {
+		if globals[i] == "-C" {
 			i++
 			continue
 		}
-		if !strings.HasPrefix(args[i], "-") {
-			return append(out, args[i:]...)
+		out = append(out, globals[i])
+		// A global's separate value travels with it, so removing -C cannot
+		// strand somebody else's argument as a verb.
+		if gitGlobalTakesValue(globals[i]) && i+1 < len(globals) {
+			i++
+			out = append(out, globals[i])
 		}
-		out = append(out, args[i])
 	}
-	return out
+	if verb == "" {
+		return out
+	}
+	return append(append(out, verb), rest...)
 }

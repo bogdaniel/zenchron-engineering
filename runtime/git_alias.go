@@ -84,6 +84,27 @@ func (e *GitConfigOverrideRefusedError) Error() string {
 		" keys are accepted, and read-only Git is unaffected."
 }
 
+// gitGlobalTakesValue names the global options whose value is a SEPARATE
+// argument, and it is the single definition every scanner uses.
+//
+// Three scanners once had their own idea of this - the alias splitter knew the
+// list, and the two that establish the execution context did not. So
+// `git -c k=v -C <dir> reset --hard` was read by the splitter as globals plus a
+// verb, and by the context scanners as ending at `k=v`: the `-C` was invisible
+// to the pin, survived into the argv, and Git applied it. A command classified
+// against a scratch repository then executed against the candidate and
+// destroyed uncommitted work. Resolution and execution must not be able to
+// disagree about where a command lands, and the cheapest way to guarantee that
+// is for them to parse with one function.
+func gitGlobalTakesValue(arg string) bool {
+	switch arg {
+	case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+		"--super-prefix", "--config-env", "--attr-source":
+		return true
+	}
+	return false
+}
+
 // splitGitCommand separates one Git argv into its leading global options, its
 // verb, and the rest.
 //
@@ -97,12 +118,8 @@ func splitGitCommand(args []string) (globals []string, verb string, rest []strin
 		if !strings.HasPrefix(arg, "-") {
 			return args[:i], arg, args[i+1:]
 		}
-		switch arg {
-		case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
-			"--super-prefix", "--config-env", "--attr-source":
-			if i+1 < len(args) {
-				i++
-			}
+		if gitGlobalTakesValue(arg) && i+1 < len(args) {
+			i++
 		}
 	}
 	return args, "", nil
