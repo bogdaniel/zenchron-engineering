@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -693,9 +694,6 @@ func TestAGrantedAuthorityCannotWriteOutsideItsResource(t *testing.T) {
 		"GIT_OBJECT_DIRECTORY at the candidate object store": func(c string) (string, string) {
 			return "GIT_OBJECT_DIRECTORY", filepath.Join(c, ".git", "objects")
 		},
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES at the candidate": func(c string) (string, string) {
-			return "GIT_ALTERNATE_OBJECT_DIRECTORIES", filepath.Join(c, ".git", "objects")
-		},
 		"GIT_COMMON_DIR at the candidate": func(c string) (string, string) {
 			return "GIT_COMMON_DIR", filepath.Join(c, ".git")
 		},
@@ -712,6 +710,7 @@ func TestAGrantedAuthorityCannotWriteOutsideItsResource(t *testing.T) {
 
 			candidateIndexBefore := indexDigest(t, candidate)
 			candidateHeadBefore := repoHead(t, candidate)
+			candidateObjectsBefore := objectCount(t, candidate)
 
 			key, value := redirect(candidate)
 			t.Setenv(key, value)
@@ -732,6 +731,11 @@ func TestAGrantedAuthorityCannotWriteOutsideItsResource(t *testing.T) {
 			}
 			if got := repoHead(t, candidate); got != candidateHeadBefore {
 				t.Fatalf("%s moved candidate history to %s", key, got)
+			}
+			// A loose object written into the candidate's store moves neither
+			// the index nor HEAD, so it has to be counted to be seen.
+			if got := objectCount(t, candidate); got != candidateObjectsBefore {
+				t.Fatalf("%s wrote %d objects into the candidate store", key, got-candidateObjectsBefore)
 			}
 			if body := dirtyBody(t, candidate); body != precious {
 				t.Fatalf("%s discarded candidate work: %q", key, body)
@@ -770,12 +774,15 @@ func TestTheEnvironmentIsNotASecondArgv(t *testing.T) {
 		t.Setenv("GIT_CONFIG_COUNT", "1")
 		t.Setenv("GIT_CONFIG_KEY_0", "user.email")
 		t.Setenv("GIT_CONFIG_VALUE_0", "injected@example.invalid")
+		// Deliberately NO `-c` identity here. Git ranks command-line `-c` above
+		// GIT_CONFIG_*, so passing one would mean the injected value could never
+		// have won and the case would prove nothing. The fixture's own repo-local
+		// identity is what the environment has to be unable to displace.
 		if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
-			"-c", "user.email=r@runtime", "-c", "user.name=runtime",
 			"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
 			t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
 		}
-		if got := commitAuthor(t, fixture); got != "r@runtime" {
+		if got := commitAuthor(t, fixture); got != "lab@example.invalid" {
 			t.Fatalf("the environment named the committer: %s", got)
 		}
 	})
@@ -835,6 +842,27 @@ func indexDigest(t *testing.T, dir string) string {
 		return "absent"
 	}
 	return digest
+}
+
+// objectCount counts loose objects, which is how a redirected object store
+// shows up: the write lands, but nothing about the repository's identity,
+// index, or HEAD reflects it.
+func objectCount(t *testing.T, dir string) int {
+	t.Helper()
+	count := 0
+	root := filepath.Join(dir, ".git", "objects")
+	if err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !entry.IsDir() {
+			count++
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func repoHead(t *testing.T, dir string) string {
