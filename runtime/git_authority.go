@@ -495,8 +495,13 @@ func (e *GitDiscardRefusedError) Error() string {
 	// reader who can act on it, and a refusal a worker cannot act on just
 	// becomes a retry of the same command. So it says what was refused, why,
 	// what would have been lost, and what to do instead.
+	//
+	// An incidental objection the same invocation also carried comes last, for
+	// the reason it does in the runtime-owned message: the terminal fact has to
+	// lead, or the provider acts on whatever it reads first.
+	headline, incidental, _ := strings.Cut(e.Reason, "; ")
 	message := "destructive Git refused: " + e.Operation +
-		" would discard dirty runtime-owned candidate work (" + e.Reason + ")."
+		" would discard dirty runtime-owned candidate work (" + headline + ")."
 	if e.DirtyTotal > 0 {
 		message += fmt.Sprintf(" %d uncommitted candidate path(s) would have been lost", e.DirtyTotal)
 		if len(e.Dirty) > 0 {
@@ -504,9 +509,15 @@ func (e *GitDiscardRefusedError) Error() string {
 		}
 		message += "."
 	}
-	return message + " Zenchron owns candidate commits and candidate discard;" +
+	message += " Zenchron owns candidate commits and candidate discard;" +
 		" keep working from the current files, or edit them back yourself." +
 		" Read-only Git (status, diff, log, show) is unaffected."
+	if incidental != "" {
+		message += " (This invocation also carried something the boundary refuses" +
+			" independently - " + incidental + " - which is not why this command was refused," +
+			" and removing it would not make the command permitted.)"
+	}
+	return message
 }
 
 // GitRuntimeOwnedRefusedError is the refusal for a command the runtime owns.
@@ -520,11 +531,22 @@ func (e *GitDiscardRefusedError) Error() string {
 type GitRuntimeOwnedRefusedError struct{ Operation, Reason string }
 
 func (e *GitRuntimeOwnedRefusedError) Error() string {
-	return "runtime-owned Git refused: " + e.Operation + " (" + e.Reason + ")." +
+	// THE TERMINAL FACT LEADS. Anything else the invocation was also wrong
+	// about comes after the instruction, because a provider reads the first
+	// actionable-looking sentence and acts on it - which is how forty-three
+	// identical commits got sent.
+	headline, incidental, _ := strings.Cut(e.Reason, "; ")
+	message := "runtime-owned Git refused: " + e.Operation + " (" + headline + ")." +
 		" Do not retry this command and do not create commits, branches or tags:" +
 		" Zenchron commits the candidate itself from your working tree." +
 		" Leave your changes as edited files and continue with the rest of the task." +
 		" Read-only Git (status, diff, log, show) is unaffected."
+	if incidental != "" {
+		message += " (This invocation also carried something the boundary refuses" +
+			" independently - " + incidental + " - which is not why this command was refused," +
+			" and removing it would not make the command permitted.)"
+	}
+	return message
 }
 
 // BrokerGitCommand is the decision, and it is the whole enforcement point.
@@ -558,6 +580,47 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 	// an ordinary command. See git_alias.go.
 	effective, resolveErr := ResolveGitCommand(candidateDir, args)
 	if resolveErr != nil {
+		// AUTHORITY OUTRANKS AN INCIDENTAL OBJECTION.
+		//
+		// Both answers refuse. But when the argv also names something the
+		// runtime categorically owns, the configuration complaint is the wrong
+		// one to give: it describes a fixable problem with the provider's own
+		// invocation, so the provider fixes it and sends the command again.
+		// Production did exactly that - run
+		// run-9bd736a983ab21ea6be069da6f24e364 refused `git -c user.email=...
+		// commit -m ...` FORTY-THREE times in one invocation, each time saying
+		// "run the same command without that override", and the worker never
+		// once saw that committing was not its to do. It spent the invocation's
+		// whole inactivity budget on it.
+		//
+		// The general law the case taught: when several boundaries object,
+		// answer with the one that most accurately terminates the provider's
+		// decision tree.
+		//
+		// EVERY classified answer outranks the incidental one, not just the
+		// runtime-owned arm. `git -c user.email=... reset --hard` is a
+		// destructive discard that happens to carry a refused key, and telling
+		// its sender to "run the same command without that override" invites
+		// exactly one thing: running the same destructive command without the
+		// override. The law is about which answer TERMINATES the decision
+		// tree, and a discard refusal terminates it for the same reason a
+		// runtime-owned one does - it says the operation is not available,
+		// rather than that the invocation is malformed.
+		//
+		// CLASSIFYING THE UNRESOLVED ARGV IS SOUND HERE, and only here. Every
+		// verb this classifier names is a Git BUILTIN, and Git ignores an alias
+		// whose name collides with a command - so for these the literal verb IS
+		// the effective verb and no expansion can change it. An alias that
+		// expands TO one of them is not recognized, which costs a better
+		// message and nothing else: the command is still refused, by the arm
+		// below.
+		//
+		// Nothing is executed on this path either way. Only the class, and the
+		// sentence the provider reads, differ.
+		if class, reason := ClassifyGitCommand(args); class != GitOperationPermitted {
+			return refuseGitCommand(candidateDir, refusalLog, args,
+				reason+"; "+resolveErr.Error(), class, stderr)
+		}
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
 		// the first.
