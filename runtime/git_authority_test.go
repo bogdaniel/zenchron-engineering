@@ -1014,7 +1014,6 @@ func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
 		"file protocol":        {[]string{"-c", "protocol.file.allow=always", "fetch"}, "protocol.file.allow"},
 		"url rewrite":          {[]string{"-c", "url.https://evil/.insteadOf=https://github.com/", "fetch"}, "url.https://evil/.insteadOf"},
 		"tls off":              {[]string{"-c", "http.sslVerify=false", "fetch"}, "http.sslVerify"},
-		"identity":             {[]string{"-c", "user.email=someone@else", "commit"}, "user.email"},
 		// An unknown key is refused because it is unknown, not because it is
 		// recognized as dangerous. That is the direction the list has to fail.
 		"a key nobody has reasoned about": {[]string{"-c", "zenchron.invented=1", "status"}, "zenchron.invented"},
@@ -1357,29 +1356,39 @@ func TestTagNumericListingIsARead(t *testing.T) {
 // friction: 43 identical commits, answered 43 times with a complaint about the
 // provider's own invocation.
 var smokeRunBrokerArgv = []struct {
-	name  string
-	argv  []string
-	want  GitOperationClass
+	name string
+	argv []string
+	want GitOperationClass
+	// count is the production multiplicity, replayed by the taxonomy test.
 	count int
+	// incidental names an objection the same invocation carries that is NOT
+	// the reason it was refused, and which must therefore be recorded after
+	// the terminal fact rather than instead of it. Empty when the argv carries
+	// none - which is now the case for the identity keys, since #257 defers
+	// rather than refuses them.
+	incidental string
 }{
 	// The loop. One provider intent, refused forty-three times.
-	{"commit behind an identity override", []string{"-c", "user.email=agent@example.invalid", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 43},
+	{"commit behind an identity override", []string{"-c", "user.email=agent@example.invalid", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 43, ""},
+	// The #253 property, on a key that is still refused at every target: the
+	// terminal fact leads and the incidental objection follows it.
+	{"commit behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 0, "core.hooksPath"},
 	// Reads, each refused once on a key that must stay refused.
-	{"ls-files behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "ls-files", "--error-unmatch", "--", "go.mod"}, GitOperationPermitted, 1},
-	{"remote behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote"}, GitOperationPermitted, 1},
-	{"remote -v behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote", "-v"}, GitOperationPermitted, 1},
-	{"log behind a monitor", []string{"-c", "core.fsmonitor=/tmp/watch", "log", "-1", "--format=%H:%ct"}, GitOperationPermitted, 1},
-	{"log behind a signature toggle", []string{"-c", "log.showSignature=true", "log", "--since=7.days", "--name-only"}, GitOperationPermitted, 1},
+	{"ls-files behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "ls-files", "--error-unmatch", "--", "go.mod"}, GitOperationPermitted, 1, ""},
+	{"remote behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote"}, GitOperationPermitted, 1, ""},
+	{"remote -v behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote", "-v"}, GitOperationPermitted, 1, ""},
+	{"log behind a monitor", []string{"-c", "core.fsmonitor=/tmp/watch", "log", "-1", "--format=%H:%ct"}, GitOperationPermitted, 1, ""},
+	{"log behind a signature toggle", []string{"-c", "log.showSignature=true", "log", "--since=7.days", "--name-only"}, GitOperationPermitted, 1, ""},
 	// The six that must stay refused, and stay DESTRUCTIVE. Two of them were
 	// sent behind the same identity override the commits carried, which is the
 	// case that proves the precedence rule is about CLASS and not about one
 	// favoured arm.
-	{"reset behind an identity override", []string{"-c", "user.email=agent@example.invalid", "reset", "--hard"}, GitOperationDiscard, 1},
-	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 1},
-	{"clean", []string{"clean", "-fd"}, GitOperationDiscard, 1},
-	{"clean x", []string{"clean", "-fdx"}, GitOperationDiscard, 1},
-	{"checkout a path", []string{"checkout", "--", "implementation.go"}, GitOperationDiscard, 1},
-	{"restore a path", []string{"restore", "implementation.go"}, GitOperationDiscard, 1},
+	{"reset behind an identity override", []string{"-c", "user.email=agent@example.invalid", "reset", "--hard"}, GitOperationDiscard, 1, ""},
+	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 1, ""},
+	{"clean", []string{"clean", "-fd"}, GitOperationDiscard, 1, ""},
+	{"clean x", []string{"clean", "-fdx"}, GitOperationDiscard, 1, ""},
+	{"checkout a path", []string{"checkout", "--", "implementation.go"}, GitOperationDiscard, 1, ""},
+	{"restore a path", []string{"restore", "implementation.go"}, GitOperationDiscard, 1, ""},
 }
 
 // TestTheSmokeRunArgvGetsTheAnswerThatEndsTheLoop replays that run through the
@@ -1414,13 +1423,20 @@ func TestTheSmokeRunArgvGetsTheAnswerThatEndsTheLoop(t *testing.T) {
 						t.Fatalf("the answer does not say %q, so it does not end the loop: %s", want, diagnostic)
 					}
 				}
-				// The configuration is still refused - it is simply not the
-				// reason, and the provider is told that removing it would not
-				// help.
-				if !strings.Contains(diagnostic, "user.email") {
-					t.Fatalf("the refused override is no longer recorded in the answer: %s", diagnostic)
+				// AN INCIDENTAL OBJECTION IS RECORDED AND DOES NOT LEAD.
+				//
+				// `user.email` is no longer one: #257 made the identity keys
+				// DEFERRED rather than refused, so an argv carrying them has
+				// nothing incidental left to report and the answer is the
+				// verb's alone. The property #253 exists for is asserted on a
+				// key that is still refused at any target, below.
+				if tc.incidental == "" {
+					break
 				}
-				if strings.Index(diagnostic, "runtime-owned Git refused") > strings.Index(diagnostic, "user.email") {
+				if !strings.Contains(diagnostic, tc.incidental) {
+					t.Fatalf("the refused override %q is not recorded in the answer: %s", tc.incidental, diagnostic)
+				}
+				if strings.Index(diagnostic, "runtime-owned Git refused") > strings.Index(diagnostic, tc.incidental) {
 					t.Fatalf("the incidental objection leads the answer: %s", diagnostic)
 				}
 			case GitOperationDiscard:

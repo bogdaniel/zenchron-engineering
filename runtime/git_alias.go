@@ -230,28 +230,48 @@ func inertGitConfigKey(key string) bool {
 	return inertGitConfigKeys[strings.ToLower(key)]
 }
 
-// gitConfigOverrideRefusal reports the first `-c` or `--config-env` key this
-// boundary will not accept, and names it.
+// deferredGitConfigKeys are the two overrides whose authority DEPENDS ON THE
+// TARGET rather than being decidable from the key alone.
 //
-// Naming the key is not decoration. A provider told only that `-c` is refused
-// has no way to learn which part of its own invocation to drop, and the one in
-// #248 responded by sending the same command again; a provider told that
-// `core.pager` is the objection can send the command without it.
+// A repository's committer identity is meaningless outside the repository it is
+// set on. It names no program, reads no path, presents no credential, and
+// cannot redirect discovery - so unlike every other key here it carries no
+// intrinsic capability, and the only question it raises is WHOSE history a
+// commit would be written into.
+//
+// That question has no answer until the target is known. So these are neither
+// refused at parse time nor admitted: they are carried through as DEFERRED and
+// become authoritative only for a repository the attempt itself created. On the
+// candidate they are refused exactly as before, because a provider must not
+// choose the identity of candidate history.
+//
+// Two keys, and not a precedent for a general target-aware config model.
+// core.pager, core.hooksPath, core.fsmonitor, credential.helper, gpg.program,
+// diff.external and core.sshCommand execute programs or move authority whatever
+// repository they are pointed at, and stay refused everywhere.
+var deferredGitConfigKeys = map[string]bool{"user.name": true, "user.email": true}
+
+func deferredGitConfigKey(key string) bool { return deferredGitConfigKeys[strings.ToLower(key)] }
+
+// gitConfigOverrideKeys walks the global options and reports every `-c` or
+// `--config-env` key, plus whether one was written with nothing to set.
+//
+// One walker, two consumers, so the refusal and the deferral cannot come to
+// disagree about which keys an argv carries.
 //
 // Both spellings are parsed, in both their joined and separated forms, because
 // `git -c k=v`, `git -c` `k=v` and `git --config-env=k=VAR` are the same act.
 // `--config-env` names an environment variable rather than a value, so its
 // value is opaque here - which changes nothing, because the KEY is what decides.
-func gitConfigOverrideRefusal(globals []string) (string, bool) {
+func gitConfigOverrideKeys(globals []string) (keys []string, dangling bool) {
 	for i := 0; i < len(globals); i++ {
 		arg := globals[i]
 		setting := ""
 		switch {
 		case arg == "-c" || arg == "--config-env":
 			if i+1 >= len(globals) {
-				// An override with nothing to override is not resolvable, and
-				// naming it is more useful than guessing at it.
-				return arg, true
+				// An override with nothing to override is not resolvable.
+				return keys, true
 			}
 			i++
 			setting = globals[i]
@@ -266,11 +286,42 @@ func gitConfigOverrideRefusal(globals []string) (string, bool) {
 		if equals := strings.Index(setting, "="); equals >= 0 {
 			key = setting[:equals]
 		}
-		if !inertGitConfigKey(key) {
+		keys = append(keys, key)
+	}
+	return keys, false
+}
+
+// gitConfigOverrideRefusal reports the first key this boundary will not accept
+// AT ANY TARGET, and names it.
+//
+// Naming the key is not decoration. A provider told only that `-c` is refused
+// has no way to learn which part of its own invocation to drop, and the one in
+// #248 responded by sending the same command again; a provider told that
+// `core.pager` is the objection can send the command without it.
+func gitConfigOverrideRefusal(globals []string) (string, bool) {
+	keys, dangling := gitConfigOverrideKeys(globals)
+	if dangling {
+		return "-c", true
+	}
+	for _, key := range keys {
+		if !inertGitConfigKey(key) && !deferredGitConfigKey(key) {
 			return key, true
 		}
 	}
 	return "", false
+}
+
+// DeferredGitConfigOverrides reports the identity keys an argv carries, whose
+// admission waits on the target.
+func DeferredGitConfigOverrides(globals []string) []string {
+	keys, _ := gitConfigOverrideKeys(globals)
+	var deferred []string
+	for _, key := range keys {
+		if deferredGitConfigKey(key) {
+			deferred = append(deferred, key)
+		}
+	}
+	return deferred
 }
 
 // ResolveGitCommand expands args through the effective Git configuration and

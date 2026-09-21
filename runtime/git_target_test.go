@@ -356,3 +356,105 @@ func TestTheAuthorityMatrix(t *testing.T) {
 		t.Fatal("the permitted scratch reset did not discard the fixture's work")
 	}
 }
+
+// TestIdentityOverridesAreScopedToScratch is slice 4's claim, and the contrast
+// is what keeps it from being read as "scratch permits configuration".
+//
+// A fixture that sets its own committer identity is doing ordinary repository
+// setup - tests do it precisely so they do not depend on the machine's global
+// Git identity - and forcing them to drop it would make the boundary dictate
+// how a candidate writes its tests. That is backwards: the boundary should
+// accommodate safe fixture behaviour.
+//
+// The same argv is put to all three resources, and then the NEGATIVE case pins
+// that it is identity being scoped and not config authority generally.
+func TestIdentityOverridesAreScopedToScratch(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	fixture := filepath.Join(scratch, "TestFixture1234567", "001")
+	external := filepath.Join(t.TempDir(), "unrelated")
+	for _, dir := range []string{candidate, fixture, external} {
+		initTargetRepo(t, dir)
+	}
+	log := filepath.Join(t.TempDir(), "refused.jsonl")
+
+	const dirty = "uncommitted work that must survive a refusal\n"
+	for _, dir := range []string{candidate, external} {
+		makeDirty(t, dir, dirty)
+	}
+	makeDirty(t, fixture, "fixture work\n")
+
+	identity := []string{"-c", "user.email=fixture@example.invalid", "-c", "user.name=fixture",
+		"commit", "-a", "-m", "fixture"}
+
+	// SCRATCH: permitted, and it must actually have committed.
+	before, err := runGit(fixture, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := brokerGitFrom(t, fixture, candidate, scratch, log, identity...); code != 0 {
+		t.Fatalf("a fixture could not set its own committer identity: %s", out)
+	}
+	after, err := runGit(fixture, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(before)) == strings.TrimSpace(string(after)) {
+		t.Fatal("the permitted identity commit did not create a commit")
+	}
+
+	// CANDIDATE: refused, work intact.
+	if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, identity...); code == 0 {
+		t.Fatal("a provider chose the identity of candidate history")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetCandidate {
+		t.Fatalf("candidate identity commit recorded target=%q", got)
+	}
+	if body := dirtyBody(t, candidate); body != dirty {
+		t.Fatalf("the refused candidate commit changed the workspace: %q", body)
+	}
+
+	// EXTERNAL: refused, work intact.
+	if code, _ := brokerGitFrom(t, external, candidate, scratch, log, identity...); code == 0 {
+		t.Fatal("a provider committed to an unrelated repository")
+	}
+	if got := lastRefusalTarget(t, log); got != GitTargetExternalOrUnknown {
+		t.Fatalf("external identity commit recorded target=%q", got)
+	}
+	if body := dirtyBody(t, external); body != dirty {
+		t.Fatalf("the refused external commit changed the repository: %q", body)
+	}
+
+	// THE NEGATIVE CASE. Scratch scope admits an identity, not a capability: a
+	// key that can execute a program, name a path or present a credential is
+	// refused there exactly as everywhere else. One of each family is enough -
+	// the rest are covered by TestConfigOverridesThatRedirectAreStillRefused,
+	// which is target-independent by construction.
+	for name, key := range map[string]string{
+		"a hooks directory":    "core.hooksPath=/tmp/hooks",
+		"a pager program":      "core.pager=/tmp/evil",
+		"a credential helper":  "credential.helper=/tmp/evil",
+		"a signing program":    "gpg.program=/tmp/evil",
+		"a filesystem monitor": "core.fsmonitor=/tmp/evil",
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+				"-c", key, "commit", "--allow-empty", "-m", "x")
+			if code == 0 {
+				t.Fatalf("%s was admitted by scratch scope", key)
+			}
+			if !strings.Contains(out, "configuration override") {
+				t.Fatalf("%s was refused for the wrong reason: %s", key, out)
+			}
+		})
+	}
+
+	// A READ carrying an identity override is still a question about whose
+	// identity, so the candidate refuses it even though the verb is permitted.
+	if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log,
+		"-c", "user.email=x@example.invalid", "status", "--porcelain"); code == 0 {
+		t.Fatal("an identity override reached the candidate behind a permitted verb")
+	}
+}

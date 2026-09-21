@@ -668,21 +668,47 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
 	}
 	class, reason := ClassifyGitCommand(effective)
+	// DEFERRED AUTHORITY, resolved here and nowhere earlier. `-c user.email`
+	// and `-c user.name` carry no intrinsic capability, so parse time did not
+	// refuse them; what they DO carry is whose history a commit is written
+	// into, and only the target answers that.
+	deferred := DeferredGitConfigOverrides(args)
 	// WHICH RESOURCE - asked only when the answer can change the decision. A
-	// permitted verb is permitted everywhere it was permitted before, so reads
-	// are untouched by this change and pay no resolution cost.
+	// permitted verb carrying no deferred override is permitted everywhere it
+	// was permitted before, so reads are untouched and pay no resolution cost.
 	target := GitTargetClass("")
-	if class != GitOperationPermitted {
+	if class != GitOperationPermitted || len(deferred) > 0 {
 		target = targetOf(pinned, candidateDir, scratchDir)
+	}
+	// THE VERB IS ANSWERED FIRST, and that ordering is #253's law applied one
+	// layer along. `-c user.email=... reset --hard` against the candidate is a
+	// destructive command that happens to carry an identity override, and
+	// telling its sender the identity was the objection invites them to send
+	// the same destructive command without it. Removing the override would not
+	// make it permitted, so the override is not the answer that terminates the
+	// decision.
+	if class != GitOperationPermitted {
 		// THE ONLY THING THIS PERMITS THAT WAS REFUSED BEFORE. A destructive or
 		// runtime-owned verb against the attempt's OWN temp root is a test
 		// operating on a repository it created, and governing that was the
 		// defect. The candidate, an operator's unrelated repositories, and
 		// every context that could not be resolved are refused exactly as
 		// before.
-		if target == GitTargetRuntimeScratch {
-			class = GitOperationPermitted
+		if target != GitTargetRuntimeScratch {
+			return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, stderr)
 		}
+		class = GitOperationPermitted
+	}
+	// ONLY NOW is the identity question the terminal one: the verb would be
+	// permitted, so what remains to decide is whose history it writes. Identity
+	// may be chosen for a repository the attempt itself created; on the
+	// candidate a provider must not decide whose commit it is, and outside both
+	// there is nothing this runtime is entitled to write at all.
+	if len(deferred) > 0 && target != GitTargetRuntimeScratch {
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"setting the committer identity ("+strings.Join(deferred, ", ")+
+				") is not the provider's outside a repository this attempt created; the runtime owns candidate history",
+			class, target, stderr)
 	}
 	if class == GitOperationPermitted {
 		// The RESOLVED form is executed. Where no alias was involved it is the
