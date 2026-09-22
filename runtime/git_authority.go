@@ -678,6 +678,27 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// introduces an identity override during expansion - after a check reading
 	// the original argv has already decided there was none. Verified: such an
 	// alias commits as the address it names.
+	// A FEW VERBS EXIST TO RUN A PROGRAM THE REPOSITORY NAMES, and no pin can
+	// reach them: `difftool` runs difftool.<tool>.cmd, `mergetool` runs
+	// mergetool.<tool>.cmd, `interpret-trailers` runs trailer.<token>.command.
+	// The tool and token are the provider's choice, so the key space is open
+	// the way the attribute drivers were - but nothing selects these through
+	// attributes, so the empty attribute source does not reach them.
+	//
+	// They are refused rather than neutralized, because what would be refused
+	// IS the verb's purpose: each exists to invoke an external tool, and a
+	// worker inspecting a candidate has diff, log and show for that.
+	//
+	// Deliberately NOT a new class in ClassifyGitCommand. The taxonomy #253
+	// ordered and #255 benchmarks is untouched; this carries no class, the same
+	// way the context-establishment refusal does.
+	if verbRunsAConfiguredProgram(effective) {
+		_, verb, _ := splitGitCommand(effective)
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"`git "+verb+"` runs a program named by repository configuration, which a provider controls; "+
+				"use diff, log or show to inspect the candidate",
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
+	}
 	deferred := DeferredGitConfigOverrides(effective)
 	// WHICH RESOURCE - asked only when the answer can change the decision. A
 	// permitted verb carrying no deferred override is permitted everywhere it
@@ -793,6 +814,22 @@ func refuseGitCommand(candidateDir, refusalLog string, args []string, reason str
 // tell a classified discard from a command whose meaning could not be
 // established. Both are refusals; they are not the same fact.
 const aliasResolutionReason = "the effective operation could not be resolved"
+
+// verbsRunningAConfiguredProgram are the verbs whose whole purpose is to invoke
+// a program the repository's own configuration names. Each was demonstrated
+// executing a provider-chosen program out of a repository's local config, and
+// none can be closed by pinning a key, because the tool and trailer names are
+// as open as the attribute driver names were.
+var verbsRunningAConfiguredProgram = map[string]bool{
+	"difftool":           true,
+	"mergetool":          true,
+	"interpret-trailers": true,
+}
+
+func verbRunsAConfiguredProgram(args []string) bool {
+	_, verb, _ := splitGitCommand(args)
+	return verbsRunningAConfiguredProgram[verb]
+}
 
 // brokerGitEnv is THE environment for every Git this broker runs - both the
 // resolution that decides and the execution that follows.

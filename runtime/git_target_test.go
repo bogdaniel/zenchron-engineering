@@ -1068,3 +1068,99 @@ func TestAttributeSelectedProgramsAreUnreachable(t *testing.T) {
 		})
 	}
 }
+
+// TestVerbsThatRunConfiguredProgramsAreRefused covers what the attribute source
+// cannot reach.
+//
+// `difftool`, `mergetool` and `interpret-trailers` select their program from
+// diff.tool/difftool.<tool>.cmd and trailer.<token>.command. No attribute is
+// involved, so the empty attribute source does not touch them, and the tool and
+// token names are the provider's, so there is no key to pin either.
+//
+// Each was demonstrated running a program out of a repository's own config.
+func TestVerbsThatRunConfiguredProgramsAreRefused(t *testing.T) {
+	requireGitFixture(t)
+
+	for name, tc := range map[string]struct {
+		config [][]string
+		argv   []string
+	}{
+		"difftool runs difftool.<tool>.cmd": {
+			[][]string{{"diff.tool", "zz"}, {"difftool.zz.cmd", "PROGRAM"}, {"difftool.prompt", "false"}},
+			[]string{"difftool", "--no-prompt", "-y"},
+		},
+		"interpret-trailers runs trailer.<token>.command": {
+			[][]string{{"trailer.sign.command", "PROGRAM"}},
+			[]string{"interpret-trailers", "--trailer", "sign:x"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			candidate := filepath.Join(root, "candidate")
+			scratch := filepath.Join(root, "scratch")
+			initTargetRepo(t, candidate)
+			log := filepath.Join(root, "refused.jsonl")
+
+			witness := filepath.Join(root, "ran")
+			program := filepath.Join(root, "program")
+			body := "#!/bin/sh\necho ran > " + witness + "\ncat >/dev/null 2>&1\nexit 0\n"
+			if err := os.WriteFile(program, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, pair := range tc.config {
+				value := strings.ReplaceAll(pair[1], "PROGRAM", program)
+				if _, err := brokerGitOutput(candidate, "config", "--local", pair[0], value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			makeDirty(t, candidate, "modified content\n")
+
+			if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, tc.argv...); code == 0 {
+				t.Fatal("a verb that runs a configured program was permitted")
+			}
+			if _, err := os.Stat(witness); err == nil {
+				t.Fatal("the configured program ran")
+			}
+		})
+	}
+}
+
+// TestOrdinaryReadsStillWork is the other half of every neutralization above.
+//
+// A boundary that made `git status` refuse, or silently report nothing, would
+// pass every "the program did not run" assertion in this file while destroying
+// the worker's ability to do its job. #241 exists because a refusal in the
+// wrong place is itself the failure.
+func TestOrdinaryReadsStillWork(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	initTargetRepo(t, candidate)
+	makeDirty(t, candidate, "modified content\n")
+	log := filepath.Join(root, "refused.jsonl")
+
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"status", "--porcelain"}, "f"},
+		{[]string{"diff", "--stat"}, "f"},
+		{[]string{"log", "--oneline", "-1"}, "base"},
+		{[]string{"show", "--stat", "HEAD"}, "base"},
+		{[]string{"rev-parse", "--abbrev-ref", "HEAD"}, ""},
+	} {
+		code, answer, complaint := brokerGitAnswer(t, candidate, candidate, scratch, log, tc.argv...)
+		if code != 0 {
+			t.Fatalf("%v was refused: %d %s", tc.argv, code, complaint)
+		}
+		// AND IT STILL ANSWERS. Neutralization must not have turned a read
+		// into a successful no-op.
+		if strings.TrimSpace(answer) == "" {
+			t.Fatalf("%v produced no output", tc.argv)
+		}
+		if tc.want != "" && !strings.Contains(answer, tc.want) {
+			t.Fatalf("%v did not report %q: %q", tc.argv, tc.want, answer)
+		}
+	}
+}

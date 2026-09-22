@@ -104,6 +104,29 @@ func brokerGitFrom(t *testing.T, cwd, candidateDir, scratchDir, refusalLog strin
 	return code, stderr.String()
 }
 
+// brokerGitAnswer is brokerGitFrom for the cases that care what Git SAID rather
+// than why it refused. The two are separate helpers because reading the wrong
+// stream is a silent way to assert nothing: a test checking stderr for a
+// successful read finds it empty and can conclude whatever it likes.
+func brokerGitAnswer(t *testing.T, cwd, candidateDir, scratchDir, refusalLog string, args ...string) (int, string, string) {
+	t.Helper()
+	defer sentinelOutside(t, cwd)()
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(restore) }()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, args, &stdout, &stderr)
+	if brokerErr != nil {
+		t.Fatalf("broker %v: %v", args, brokerErr)
+	}
+	return code, stdout.String(), stderr.String()
+}
+
 // unguardedGit is the MUTATION: the identical argv with the guard removed. It
 // is what the provider would have run before #241, and what it still runs if
 // the enforcement point is bypassed or deleted.
