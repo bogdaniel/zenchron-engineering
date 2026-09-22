@@ -930,11 +930,10 @@ func TestAPermittedReadCannotRunAProgram(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Arming it is ordinary permitted configuration - of the CANDIDATE.
-	if code, out := brokerGitFrom(t, candidate, candidate, scratch, log,
-		"config", "--local", "core.fsmonitor", program); code != 0 {
-		t.Fatalf("configuring the candidate was refused: %d %s", code, out)
-	}
+	// ARMED AS PRE-EXISTING CONFIGURATION. Writing it through the broker is
+	// refused now, which is the write-time half; a repository can still ARRIVE
+	// carrying this, and the execution-time half is what has to hold then.
+	armLocalConfig(t, candidate, "core", "", "fsmonitor", program)
 	// And a read is permitted against the candidate by design.
 	if code, out := brokerGitFrom(t, candidate, candidate, scratch, log,
 		"status", "--porcelain"); code != 0 {
@@ -975,11 +974,9 @@ func TestRepositoryLocalConfigCannotRunAProgram(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Setting it is ordinary permitted configuration of the attempt's own repo.
-	if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
-		"config", "--local", "core.hooksPath", hooks); code != 0 {
-		t.Fatalf("configuring the scratch repository was refused: %d %s", code, out)
-	}
+	// Pre-existing, for the same reason: the write path is refused now, and a
+	// repository that already carries the setting is the case that remains.
+	armLocalConfig(t, fixture, "core", "", "hooksPath", hooks)
 	// And the commit is a legitimate runtime-owned scratch mutation.
 	headBefore := repoHead(t, fixture)
 	if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
@@ -1046,17 +1043,9 @@ func TestAttributeSelectedProgramsAreUnreachable(t *testing.T) {
 			// PRE-EXISTING CONFIGURATION, appended to .git/config directly
 			// rather than written through the broker. A repository can arrive
 			// carrying this, so closing the write path would not close this.
-			config := filepath.Join(candidate, ".git", "config")
-			existing, err := os.ReadFile(config)
-			if err != nil {
-				t.Fatal(err)
-			}
 			section, leaf, _ := strings.Cut(tc.key, ".")
 			driver, field, _ := strings.Cut(leaf, ".")
-			stanza := "\n[" + section + " \"" + driver + "\"]\n\t" + field + " = " + program + "\n"
-			if err := os.WriteFile(config, append(existing, []byte(stanza)...), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			armLocalConfig(t, candidate, section, driver, field, program)
 			makeDirty(t, candidate, "modified content\n")
 
 			if code, out := brokerGitFrom(t, candidate, candidate, scratch, log, tc.verb...); code != 0 {
@@ -1162,5 +1151,134 @@ func TestOrdinaryReadsStillWork(t *testing.T) {
 		if tc.want != "" && !strings.Contains(answer, tc.want) {
 			t.Fatalf("%v did not report %q: %q", tc.argv, tc.want, answer)
 		}
+	}
+}
+
+// armLocalConfig appends a stanza to a repository's own .git/config.
+//
+// Written directly rather than through the broker on purpose. The broker
+// refuses these keys at write time now, and a repository can still arrive
+// already carrying them - from an operator, a clone, or a provider process that
+// never went through a shim. Execution-time neutralization is what has to hold
+// for those, so the tests arm the repository the way reality does.
+func armLocalConfig(t *testing.T, dir, section, name, key, value string) {
+	t.Helper()
+	path := filepath.Join(dir, ".git", "config")
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := "[" + section + "]"
+	if name != "" {
+		header = "[" + section + " \"" + name + "\"]"
+	}
+	stanza := "\n" + header + "\n\t" + key + " = " + value + "\n"
+	if err := os.WriteFile(path, append(existing, []byte(stanza)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSmudgeIsUnreachableOnTheVerbThatTriggersIt finishes the filter pair.
+//
+// filter.<driver>.clean runs on status, diff and add, and those are covered
+// against the candidate. smudge runs on checkout, which is refused against the
+// candidate - so the case that matters is a scratch repository, where checkout
+// is legitimately permitted and the attempt owns the repository outright.
+//
+// Calling the pair closed without exercising smudge on checkout would have been
+// exactly the assumption this issue keeps punishing.
+func TestSmudgeIsUnreachableOnTheVerbThatTriggersIt(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	fixture := filepath.Join(scratch, "TestFixture1234567", "001")
+	initTargetRepo(t, candidate)
+	initTargetRepo(t, fixture)
+	log := filepath.Join(root, "refused.jsonl")
+
+	witness := filepath.Join(root, "ran")
+	program := filepath.Join(root, "program")
+	body := "#!/bin/sh\necho ran > " + witness + "\ncat\nexit 0\n"
+	if err := os.WriteFile(program, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture, ".gitattributes"), []byte("f filter=ff\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	armLocalConfig(t, fixture, "filter", "ff", "smudge", program)
+
+	// Remove the file so checkout has to materialise it, which is when a
+	// smudge filter runs.
+	if err := os.Remove(filepath.Join(fixture, "f")); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := brokerGitFrom(t, fixture, candidate, scratch, log, "checkout", "--", "."); code != 0 {
+		t.Fatalf("a permitted scratch checkout was refused: %d %s", code, out)
+	}
+	// The grant was real: the file came back.
+	if _, err := os.Stat(filepath.Join(fixture, "f")); err != nil {
+		t.Fatalf("the permitted checkout did not restore the file: %v", err)
+	}
+	if _, err := os.Stat(witness); err == nil {
+		t.Fatal("a smudge filter ran on a permitted scratch checkout")
+	}
+}
+
+// TestWritingAuthorityBearingConfigurationIsRefused is the write-time half.
+//
+// It does not replace the execution-time neutralization - a repository can
+// arrive already carrying any of these - but a provider should not be able to
+// ADD them through the boundary either.
+//
+// The reading forms must survive, because refusing those would break ordinary
+// inspection for nothing, and the ordinary writes must survive too: a fixture
+// setting its own user.email or core.autocrlf is engineering, not an attack.
+func TestWritingAuthorityBearingConfigurationIsRefused(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	fixture := filepath.Join(scratch, "TestFixture1234567", "001")
+	initTargetRepo(t, candidate)
+	initTargetRepo(t, fixture)
+	log := filepath.Join(root, "refused.jsonl")
+	// Present beforehand, so that reading and unsetting it exercise the policy
+	// rather than Git's exit 5 for a key that was never there.
+	armLocalConfig(t, fixture, "core", "", "hooksPath", "/tmp/armed")
+
+	for name, tc := range map[string]struct {
+		argv    []string
+		refused bool
+	}{
+		"a hook path":            {[]string{"config", "--local", "core.hooksPath", "/tmp/x"}, true},
+		"a filesystem monitor":   {[]string{"config", "core.fsmonitor", "/tmp/x"}, true},
+		"a textconv driver":      {[]string{"config", "diff.zz.textconv", "/tmp/x"}, true},
+		"a clean filter":         {[]string{"config", "filter.ff.clean", "/tmp/x"}, true},
+		"a difftool command":     {[]string{"config", "difftool.zz.cmd", "/tmp/x"}, true},
+		"a credential helper":    {[]string{"config", "credential.helper", "/tmp/x"}, true},
+		"an editor session":      {[]string{"config", "--edit"}, true},
+		"reading a hook path":    {[]string{"config", "--get", "core.hooksPath"}, false},
+		"unsetting a hook path":  {[]string{"config", "--unset", "core.hooksPath"}, false},
+		"listing configuration":  {[]string{"config", "--list"}, false},
+		"an ordinary setting":    {[]string{"config", "core.autocrlf", "false"}, false},
+		"a fixture's own author": {[]string{"config", "user.email", "fixture@example.invalid"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Against the attempt's OWN scratch repository, so nothing here is
+			// explained by the resource boundary instead of the key policy.
+			code, complaint := brokerGitFrom(t, fixture, candidate, scratch, log, tc.argv...)
+			// THE BOUNDARY'S refusal, not Git's own exit status. `git config`
+			// exits non-zero for ordinary reasons - 5 for a missing key - and
+			// reading a non-zero code as "the policy refused this" would let a
+			// permitted case pass for entirely the wrong reason.
+			refused := strings.Contains(complaint, "Git refused:")
+			if tc.refused && !refused {
+				t.Fatalf("%v was permitted (code %d)", tc.argv, code)
+			}
+			if !tc.refused && refused {
+				t.Fatalf("%v was refused: %s", tc.argv, complaint)
+			}
+		})
 	}
 }

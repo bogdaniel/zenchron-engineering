@@ -692,6 +692,12 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// Deliberately NOT a new class in ClassifyGitCommand. The taxonomy #253
 	// ordered and #255 benchmarks is untouched; this carries no class, the same
 	// way the context-establishment refusal does.
+	if key, writes := configWriteIntroducingAuthority(effective); writes {
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"writing "+key+" into a repository names a program Git would run or moves where Git reads and writes; "+
+				"that configuration is the runtime's, not the provider's",
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
+	}
 	if verbRunsAConfiguredProgram(effective) {
 		_, verb, _ := splitGitCommand(effective)
 		return refuseGitCommand(candidateDir, refusalLog, effective,
@@ -814,6 +820,83 @@ func refuseGitCommand(candidateDir, refusalLog string, args []string, reason str
 // tell a classified discard from a command whose meaning could not be
 // established. Both are refusals; they are not the same fact.
 const aliasResolutionReason = "the effective operation could not be resolved"
+
+// authorityBearingConfigKey reports whether a configuration key names a program
+// or redirects where Git reads and writes.
+//
+// It is a DENY list, unlike the inline `-c` policy which is an allow list, and
+// the difference is deliberate. `-c` applies to one invocation the boundary is
+// already classifying, so refusing everything unrecognised costs nothing. A
+// repository's own configuration is ordinary engineering state - a fixture
+// setting core.autocrlf or merge.ff is not an attack - and refusing every
+// unrecognised write would make the boundary dictate how a candidate configures
+// itself. What it refuses is the set that names programs or moves state.
+//
+// This is NOT the protection. A repository can arrive already carrying any of
+// these, so the neutralization at execution is what holds; this only stops new
+// poison from being written through the broker, which is still worth doing.
+func authorityBearingConfigKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if fixedAuthorityConfigKeys[k] {
+		return true
+	}
+	// The families are section.<name>.leaf, where <name> is the provider's
+	// choice: diff.<driver>.textconv, filter.<driver>.clean, and so on.
+	if parts := strings.Split(k, "."); len(parts) == 3 {
+		return authorityConfigFamilies[parts[0]+"."+parts[2]]
+	}
+	return false
+}
+
+var fixedAuthorityConfigKeys = map[string]bool{
+	"core.hookspath": true, "core.fsmonitor": true, "core.pager": true,
+	"core.editor": true, "core.sshcommand": true, "core.alternaterefscommand": true,
+	"core.attributesfile": true, "credential.helper": true, "gpg.program": true,
+	"sequence.editor": true, "uploadpack.packobjectshook": true,
+	"init.templatedir": true, "protocol.ext.allow": true, "diff.external": true,
+}
+
+var authorityConfigFamilies = map[string]bool{
+	"diff.textconv": true, "diff.command": true,
+	"filter.clean": true, "filter.smudge": true, "filter.process": true,
+	"difftool.cmd": true, "mergetool.cmd": true,
+	"merge.driver": true, "trailer.command": true,
+}
+
+// configWriteIntroducingAuthority names the key a `git config` invocation would
+// WRITE, when that key is one of the above.
+//
+// Reading forms are untouched: `git config --get`, `--list` and `--unset` ask
+// or remove, and refusing them would break ordinary inspection for no gain.
+func configWriteIntroducingAuthority(args []string) (string, bool) {
+	_, verb, rest := splitGitCommand(args)
+	if verb != "config" {
+		return "", false
+	}
+	for i := 0; i < len(rest); i++ {
+		argument := rest[i]
+		if !strings.HasPrefix(argument, "-") {
+			// The first operand is the key, and everything after it is a value
+			// or a pattern.
+			if authorityBearingConfigKey(argument) {
+				return argument, true
+			}
+			return "", false
+		}
+		switch argument {
+		case "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+			"--unset", "--unset-all", "--remove-section", "--rename-section",
+			"--get-color", "--get-colorbool":
+			return "", false
+		case "-e", "--edit":
+			// --edit opens core.editor, which is a program the repository names.
+			return "--edit", true
+		case "--file", "-f", "--blob", "--type", "-t", "--default":
+			i++
+		}
+	}
+	return "", false
+}
 
 // verbsRunningAConfiguredProgram are the verbs whose whole purpose is to invoke
 // a program the repository's own configuration names. Each was demonstrated
