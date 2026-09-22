@@ -715,7 +715,7 @@ func (r *EngineeringRuntime) refuseUnlessSucceeded(runID string, existing Engine
 	// An unreadable journal admits nothing. The refusal below is the same one
 	// the caller would have received before, which is the safe answer for a
 	// state this process could not read.
-	if err == nil && ControllerSuccessionContinues(existing, events, r.controller, r.activatedHandoffs()) {
+	if err == nil && ControllerSuccessionContinues(existing, events, r.controller, r.wasTransitionActivated()) {
 		return nil
 	}
 	return &RunAdoptionRefusedError{
