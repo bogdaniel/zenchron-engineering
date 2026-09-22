@@ -620,7 +620,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	// also refuses a second invocation that would share this identity, and
 	// releasing it on shutdown is how a watcher gives ownership back.
 	owner := runtime.NewRuntimeOwner()
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, owner)
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, owner)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot take exclusive ownership of state dir %s; another zenchron-engineering process may already be running against it: %w", config.StateDir, err)

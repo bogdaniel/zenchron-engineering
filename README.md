@@ -266,7 +266,7 @@ identity is durable and caller-owned while sequence, chain links, and state
 digests are allocated inside the append transaction, so a watch controller
 holding a run's lease and an operator command holding none can write the same
 journal concurrently without colliding and without a gap. Owner liveness is
-the OS advisory ownership lock, held for a runtime instance's whole lifetime
+the OS advisory controller-instance lock, held for a runtime instance's whole lifetime
 and released by the kernel on death; a lock file is never liveness evidence,
 and a platform that cannot decide reports the owner alive so takeover is
 blocked rather than guessed.

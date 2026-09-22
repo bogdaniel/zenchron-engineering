@@ -223,3 +223,58 @@ func TestControllerRoleGrantsNeitherServiceNorActivation(t *testing.T) {
 		t.Fatal("removing a socket file released the controller role")
 	}
 }
+
+// The anchor is refused rather than followed when it is a symlink: taking the
+// role on whatever inode a link names is the split-inode failure by another
+// route.
+func TestControllerRoleRefusesASymlinkedAnchor(t *testing.T) {
+	state := t.TempDir()
+	path := ControllerRoleLockPath(state)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "somewhere-else")
+	if err := os.WriteFile(elsewhere, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireControllerRole(state); err == nil {
+		t.Fatal("the role was taken through a symlinked anchor")
+	} else if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error = %v, want one naming the symlink", err)
+	}
+}
+
+// The two locks answer different questions, and the instance lock never
+// answered the role's. Two controllers with different instance identities take
+// two different instance locks and exclude each other from nothing.
+func TestInstanceLockIsNotTheRoleLock(t *testing.T) {
+	state := t.TempDir()
+	// Two controller processes on one host: different pids, therefore
+	// different owner identities, therefore DIFFERENT instance lock paths.
+	first, err := AcquireControllerInstanceLock(state, "host/1111/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Release() })
+	second, err := AcquireControllerInstanceLock(state, "host/2222/")
+	if err != nil {
+		t.Fatalf("two instances could not both take their own instance locks: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Release() })
+	if first.Path() == second.Path() {
+		t.Fatal("two instance identities shared one lock path")
+	}
+
+	// Meanwhile the role admits exactly one.
+	role, err := AcquireControllerRole(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = role.Release() })
+	if _, err := AcquireControllerRole(state); err == nil {
+		t.Fatal("the role admitted a second holder while two instance locks were held")
+	}
+}

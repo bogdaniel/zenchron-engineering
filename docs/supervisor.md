@@ -86,7 +86,7 @@ is not recovery.
 The endpoint requires a platform where owner-only permissions can be verified.
 Where they cannot, `serve` declines to offer a control path rather than
 publishing one whose exposure it cannot describe — the same conservative choice
-the ownership lock and the sandbox adapter already make. Everything else still
+the controller-instance lock and the sandbox adapter already make. Everything else still
 works there: runs are driven by the command that started them, exactly as before
 `serve` existed.
 
