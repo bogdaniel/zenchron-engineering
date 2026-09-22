@@ -42,7 +42,7 @@ func gitBrokerCommand() []string {
 // the `--` separator, so no provider-chosen string can be read as a flag to
 // this command.
 func gitBroker(args []string) (int, error) {
-	var candidate, refusalLog string
+	var candidate, scratch, refusalLog string
 	for len(args) > 0 {
 		switch args[0] {
 		case "--candidate":
@@ -50,6 +50,11 @@ func gitBroker(args []string) (int, error) {
 				return exitUsage, fmt.Errorf("--candidate requires the candidate workspace")
 			}
 			candidate, args = args[1], args[2:]
+		case "--scratch":
+			if len(args) < 2 {
+				return exitUsage, fmt.Errorf("--scratch requires the attempt's runtime-owned temp root")
+			}
+			scratch, args = args[1], args[2:]
 		case "--refusal-log":
 			if len(args) < 2 {
 				return exitUsage, fmt.Errorf("--refusal-log requires a path")
@@ -57,7 +62,7 @@ func gitBroker(args []string) (int, error) {
 			refusalLog, args = args[1], args[2:]
 		case "--":
 			// Everything after this is the provider's Git argv.
-			code, err := runtime.BrokerGitCommand(candidate, refusalLog, args[1:], os.Stdout, os.Stderr)
+			code, err := runtime.BrokerGitCommand(candidate, scratch, refusalLog, args[1:], os.Stdout, os.Stderr)
 			if err != nil {
 				return code, err
 			}

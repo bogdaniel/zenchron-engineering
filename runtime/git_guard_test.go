@@ -46,7 +46,7 @@ func guardFor(t *testing.T, candidateDir string) *GitGuard {
 	// working correctly.
 	guard, err := PrepareGitGuard(execCapableTempDir(t), ExecutionAttemptRef{
 		RunID: "run-guard", OperationID: "run-guard:execution.invoke:initial|1|base", Attempt: 1,
-	}, candidateDir, []string{broker})
+	}, candidateDir, "", []string{broker})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,9 +116,16 @@ func TestTheGuardPutsItsOwnGitFirstOnTheWorkerPath(t *testing.T) {
 // something that is not a repository, so Git performs no discovery at all.
 func TestUnshimmedGitFailsClosedAgainstTheCandidateRepository(t *testing.T) {
 	guard, dir := guardFixture(t)
-	systemGit, err := exec.LookPath("git")
+	// THE REAL GIT, RESOLVED THE WAY THE RUNTIME RESOLVES IT - not by a PATH
+	// lookup. This test's whole premise is invoking Git by a spelling that goes
+	// AROUND the shim, and exec.LookPath finds whatever is first on the search
+	// path, which inside a brokered environment is a shim. A provider running
+	// this suite under the guard would therefore have been "bypassing" the
+	// boundary with the boundary, and the test would report on something it was
+	// not written to measure.
+	systemGit, err := gitBinary()
 	if err != nil {
-		t.Skip("no system git to attempt a bypass with")
+		t.Skip("no trusted git to attempt a bypass with")
 	}
 	const work = "package candidate\n\n// work a bypass must not reach\n"
 	writeCandidateFile(t, dir, "implementation.go", work)
@@ -273,8 +280,10 @@ func TestTheBrokerSeesPastItsOwnSentinel(t *testing.T) {
 	guard, dir := guardFixture(t)
 	t.Setenv(brokeredGitDirEnv, guard.SentinelGitDir)
 
-	stripped := withoutBrokeredGitDir(os.Environ())
-	for _, entry := range stripped {
+	// Asserted against the environment the broker actually builds, not against
+	// a helper standing in for it - the sentinel is a GIT_ variable, so what
+	// removes it now is the same prefix rule that removes every other one.
+	for _, entry := range brokerGitEnv() {
 		if strings.HasPrefix(entry, brokeredGitDirEnv+"=") {
 			t.Fatalf("the sentinel survived into the broker's own child environment: %s", entry)
 		}
@@ -296,7 +305,7 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 	state := t.TempDir()
 	attempt := ExecutionAttemptRef{RunID: "run-x", OperationID: "run-x:execution.invoke:initial|1|base", Attempt: 1}
 
-	first, err := PrepareGitGuard(state, attempt, dir, []string{"/bin/true"})
+	first, err := PrepareGitGuard(state, attempt, dir, "", []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +319,7 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 	// The same attempt prepared again: the record starts empty, so what is read
 	// back afterwards explains the invocation being explained rather than
 	// accumulating across a crash.
-	again, err := PrepareGitGuard(state, attempt, dir, []string{"/bin/true"})
+	again, err := PrepareGitGuard(state, attempt, dir, "", []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +333,7 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 	// A different attempt identity is a different guard, per #236/#237.
 	next := attempt
 	next.Attempt = 2
-	second, err := PrepareGitGuard(state, next, dir, []string{"/bin/true"})
+	second, err := PrepareGitGuard(state, next, dir, "", []string{"/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,13 +353,13 @@ func TestPreparingTheGuardIsIdempotentAndAttemptScoped(t *testing.T) {
 func TestAGuardRefusesToPrepareWithoutRuntimeOwnedInputs(t *testing.T) {
 	state := t.TempDir()
 	attempt := ExecutionAttemptRef{RunID: "r", OperationID: "r:execution.invoke:initial|1|b", Attempt: 1}
-	if _, err := PrepareGitGuard(state, attempt, "/tmp/candidate", nil); err == nil {
+	if _, err := PrepareGitGuard(state, attempt, "/tmp/candidate", "", nil); err == nil {
 		t.Fatal("a guard prepared with no broker command")
 	}
-	if _, err := PrepareGitGuard(state, attempt, "relative/candidate", []string{"/bin/true"}); err == nil {
+	if _, err := PrepareGitGuard(state, attempt, "relative/candidate", "", []string{"/bin/true"}); err == nil {
 		t.Fatal("a guard prepared against a relative candidate workspace")
 	}
-	if _, err := PrepareGitGuard(state, ExecutionAttemptRef{}, "/tmp/candidate", []string{"/bin/true"}); err == nil {
+	if _, err := PrepareGitGuard(state, ExecutionAttemptRef{}, "/tmp/candidate", "", []string{"/bin/true"}); err == nil {
 		t.Fatal("a guard prepared without an attempt identity")
 	}
 }
@@ -499,7 +508,7 @@ func TestTheRealControllerBinaryRefusesADestructiveProviderCommand(t *testing.T)
 
 	guard, err := PrepareGitGuard(execCapableTempDir(t), ExecutionAttemptRef{
 		RunID: "run-e2e", OperationID: "run-e2e:execution.invoke:initial|1|base", Attempt: 1,
-	}, dir, []string{binary, "__git-broker"})
+	}, dir, "", []string{binary, "__git-broker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,17 +626,45 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 	}
 	// The provider asks the runtime to discard its own dirty work. The guard is
 	// the real one: the same BrokerGitCommand a shim would have reached.
-	guard, prepareErr := PrepareGitGuard(p.stateDir(request), request.AttemptRef(), request.CandidateDir, []string{"/unused"})
+	guard, prepareErr := PrepareGitGuard(p.stateDir(request), request.AttemptRef(), request.CandidateDir, request.ScratchDir, []string{"/unused"})
 	if prepareErr != nil {
-		return result, err
+		return result, prepareErr
 	}
-	if _, brokerErr := BrokerGitCommand(request.CandidateDir, guard.RefusalLog,
-		[]string{"checkout", "--", "."}, io.Discard, io.Discard); brokerErr != nil {
-		return result, err
+	// FROM THE CANDIDATE, because that is where a worker stands when its shim
+	// runs. Called in-process from wherever the test binary happens to be, the
+	// broker classifies the TEST'S directory and records external_or_unknown -
+	// still a refusal, so the provenance assertion downstream passes either
+	// way, and passes just as well if candidate classification broke entirely.
+	//
+	// The broker moves its own working directory and does not move it back,
+	// which is correct for the one-shot process it normally is and is not
+	// correct for an in-process caller, so the restore is this caller's job.
+	previous, wdErr := os.Getwd()
+	if wdErr != nil {
+		return result, wdErr
+	}
+	if chErr := os.Chdir(request.CandidateDir); chErr != nil {
+		return result, chErr
+	}
+	_, brokerErr := BrokerGitCommand(request.CandidateDir, request.ScratchDir, guard.RefusalLog,
+		[]string{"checkout", "--", "."}, io.Discard, io.Discard)
+	if restoreErr := os.Chdir(previous); restoreErr != nil {
+		return result, restoreErr
+	}
+	if brokerErr != nil {
+		return result, brokerErr
 	}
 	refusals, readErr := ReadGitRefusals(guard.RefusalLog)
-	if readErr != nil || len(refusals) == 0 {
-		return result, err
+	if readErr != nil {
+		return result, readErr
+	}
+	if len(refusals) == 0 {
+		return result, fmt.Errorf("the brokered discard recorded no refusal")
+	}
+	// AND IT IS THE REFUSAL WE MEANT. Carrying "some refusal" into provenance
+	// would be satisfied by one recorded against an unrelated directory.
+	if refusals[0].Target != GitTargetCandidate {
+		return result, fmt.Errorf("the discard was refused against %q, not the candidate", refusals[0].Target)
 	}
 	// The adapter's own job: carry what the boundary refused into provenance.
 	if result.Invocation == nil {

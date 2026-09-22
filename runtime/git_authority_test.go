@@ -74,21 +74,113 @@ func candidateFileBody(t *testing.T, dir, name string) string {
 // diagnostic #241 acceptance 5 is about.
 func brokerGit(t *testing.T, dir, refusalLog string, args ...string) (int, string) {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	code, err := BrokerGitCommand(dir, refusalLog, args, &stdout, &stderr)
+	return brokerGitFrom(t, dir, dir, "", refusalLog, args...)
+}
+
+// brokerGitFrom runs one brokered decision from a chosen EXECUTION CONTEXT.
+//
+// The broker establishes its own working directory from the caller's, so a test
+// that wants a command to run somewhere has to be there - the same way a
+// provider's shell is. The caller's directory is restored afterwards, and a
+// sentinel guards the window: these commands are real, and a permitted
+// destructive one in the wrong place would attack the checkout the test is
+// running in.
+func brokerGitFrom(t *testing.T, cwd, candidateDir, scratchDir, refusalLog string, args ...string) (int, string) {
+	t.Helper()
+	defer sentinelOutside(t, cwd)()
+	restore, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("broker %v: %v", args, err)
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(restore) }()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, args, &stdout, &stderr)
+	if brokerErr != nil {
+		t.Fatalf("broker %v: %v", args, brokerErr)
 	}
 	return code, stderr.String()
+}
+
+// brokerGitAnswer is brokerGitFrom for the cases that care what Git SAID rather
+// than why it refused. The two are separate helpers because reading the wrong
+// stream is a silent way to assert nothing: a test checking stderr for a
+// successful read finds it empty and can conclude whatever it likes.
+func brokerGitAnswer(t *testing.T, cwd, candidateDir, scratchDir, refusalLog string, args ...string) (int, string, string) {
+	t.Helper()
+	defer sentinelOutside(t, cwd)()
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(restore) }()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, args, &stdout, &stderr)
+	if brokerErr != nil {
+		t.Fatalf("broker %v: %v", args, brokerErr)
+	}
+	return code, stdout.String(), stderr.String()
 }
 
 // unguardedGit is the MUTATION: the identical argv with the guard removed. It
 // is what the provider would have run before #241, and what it still runs if
 // the enforcement point is bypassed or deleted.
+//
+// IT PLANTS A SENTINEL OUTSIDE THE FIXTURE FIRST. A test whose whole purpose is
+// to run `reset --hard` and `clean -fdx` for real is one wrong directory away
+// from attacking the checkout it is running in - which is not hypothetical. It
+// happened twice on this branch, and both times the test reported only that the
+// FIXTURE was undamaged, because the fixture was not where the command landed.
+// The sentinel turns a misdirected command into an immediate, loud failure
+// naming the directory it actually reached.
 func unguardedGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	defer sentinelOutside(t, dir)()
 	if _, err := execRealGit(dir, args, io.Discard, io.Discard); err != nil {
 		t.Fatalf("unguarded git %v: %v", args, err)
+	}
+}
+
+// sentinelOutside records a witness file outside dir and returns the check to
+// run afterwards.
+//
+// The witness lives in the directory the TEST PROCESS is running in, because
+// that is the thing a misdirected destructive command actually reaches: the
+// package source directory, which is part of the working checkout.
+func sentinelOutside(t *testing.T, dir string) func() {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cwd == dir {
+		t.Fatalf("the fixture is the test's own working directory, so no sentinel can distinguish them: %s", dir)
+	}
+	witness := filepath.Join(cwd, "sentinel-"+strings.ReplaceAll(t.Name(), "/", "_")+".tmp")
+	if err := os.WriteFile(witness, []byte("untouched\n"), 0o600); err != nil {
+		// A WITNESS CANNOT BE PLANTED IN A DIRECTORY NOTHING CAN WRITE TO -
+		// and in that directory the incident this guards against cannot
+		// happen either. The assurance sandbox mounts the candidate source
+		// read-only, so a misdirected destructive command has nothing to
+		// damage there; the filesystem is the containment and the tripwire is
+		// redundant.
+		//
+		// Logged rather than skipped silently: a guard that quietly stops
+		// guarding is how the first incident stayed invisible.
+		t.Logf("no sentinel in %s (%v); a destructive command cannot damage a directory that refuses writes", cwd, err)
+		return func() {}
+	}
+	return func() {
+		body, readErr := os.ReadFile(witness)
+		_ = os.Remove(witness)
+		if readErr != nil || string(body) != "untouched\n" {
+			t.Fatalf("a destructive command reached the test's own working directory %s, not the fixture %s", cwd, dir)
+		}
 	}
 }
 
@@ -955,7 +1047,6 @@ func TestConfigOverridesThatRedirectAreStillRefused(t *testing.T) {
 		"file protocol":        {[]string{"-c", "protocol.file.allow=always", "fetch"}, "protocol.file.allow"},
 		"url rewrite":          {[]string{"-c", "url.https://evil/.insteadOf=https://github.com/", "fetch"}, "url.https://evil/.insteadOf"},
 		"tls off":              {[]string{"-c", "http.sslVerify=false", "fetch"}, "http.sslVerify"},
-		"identity":             {[]string{"-c", "user.email=someone@else", "commit"}, "user.email"},
 		// An unknown key is refused because it is unknown, not because it is
 		// recognized as dangerous. That is the direction the list has to fail.
 		"a key nobody has reasoned about": {[]string{"-c", "zenchron.invented=1", "status"}, "zenchron.invented"},
@@ -1298,29 +1389,39 @@ func TestTagNumericListingIsARead(t *testing.T) {
 // friction: 43 identical commits, answered 43 times with a complaint about the
 // provider's own invocation.
 var smokeRunBrokerArgv = []struct {
-	name  string
-	argv  []string
-	want  GitOperationClass
+	name string
+	argv []string
+	want GitOperationClass
+	// count is the production multiplicity, replayed by the taxonomy test.
 	count int
+	// incidental names an objection the same invocation carries that is NOT
+	// the reason it was refused, and which must therefore be recorded after
+	// the terminal fact rather than instead of it. Empty when the argv carries
+	// none - which is now the case for the identity keys, since #257 defers
+	// rather than refuses them.
+	incidental string
 }{
 	// The loop. One provider intent, refused forty-three times.
-	{"commit behind an identity override", []string{"-c", "user.email=agent@example.invalid", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 43},
+	{"commit behind an identity override", []string{"-c", "user.email=agent@example.invalid", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 43, ""},
+	// The #253 property, on a key that is still refused at every target: the
+	// terminal fact leads and the incidental objection follows it.
+	{"commit behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "commit", "-m", "wip"}, GitOperationRuntimeOwned, 0, "core.hooksPath"},
 	// Reads, each refused once on a key that must stay refused.
-	{"ls-files behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "ls-files", "--error-unmatch", "--", "go.mod"}, GitOperationPermitted, 1},
-	{"remote behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote"}, GitOperationPermitted, 1},
-	{"remote -v behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote", "-v"}, GitOperationPermitted, 1},
-	{"log behind a monitor", []string{"-c", "core.fsmonitor=/tmp/watch", "log", "-1", "--format=%H:%ct"}, GitOperationPermitted, 1},
-	{"log behind a signature toggle", []string{"-c", "log.showSignature=true", "log", "--since=7.days", "--name-only"}, GitOperationPermitted, 1},
+	{"ls-files behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "ls-files", "--error-unmatch", "--", "go.mod"}, GitOperationPermitted, 1, ""},
+	{"remote behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote"}, GitOperationPermitted, 1, ""},
+	{"remote -v behind a hooks path", []string{"-c", "core.hooksPath=/tmp/hooks", "remote", "-v"}, GitOperationPermitted, 1, ""},
+	{"log behind a monitor", []string{"-c", "core.fsmonitor=/tmp/watch", "log", "-1", "--format=%H:%ct"}, GitOperationPermitted, 1, ""},
+	{"log behind a signature toggle", []string{"-c", "log.showSignature=true", "log", "--since=7.days", "--name-only"}, GitOperationPermitted, 1, ""},
 	// The six that must stay refused, and stay DESTRUCTIVE. Two of them were
 	// sent behind the same identity override the commits carried, which is the
 	// case that proves the precedence rule is about CLASS and not about one
 	// favoured arm.
-	{"reset behind an identity override", []string{"-c", "user.email=agent@example.invalid", "reset", "--hard"}, GitOperationDiscard, 1},
-	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 1},
-	{"clean", []string{"clean", "-fd"}, GitOperationDiscard, 1},
-	{"clean x", []string{"clean", "-fdx"}, GitOperationDiscard, 1},
-	{"checkout a path", []string{"checkout", "--", "implementation.go"}, GitOperationDiscard, 1},
-	{"restore a path", []string{"restore", "implementation.go"}, GitOperationDiscard, 1},
+	{"reset behind an identity override", []string{"-c", "user.email=agent@example.invalid", "reset", "--hard"}, GitOperationDiscard, 1, ""},
+	{"reset", []string{"reset", "--hard"}, GitOperationDiscard, 1, ""},
+	{"clean", []string{"clean", "-fd"}, GitOperationDiscard, 1, ""},
+	{"clean x", []string{"clean", "-fdx"}, GitOperationDiscard, 1, ""},
+	{"checkout a path", []string{"checkout", "--", "implementation.go"}, GitOperationDiscard, 1, ""},
+	{"restore a path", []string{"restore", "implementation.go"}, GitOperationDiscard, 1, ""},
 }
 
 // TestTheSmokeRunArgvGetsTheAnswerThatEndsTheLoop replays that run through the
@@ -1355,13 +1456,20 @@ func TestTheSmokeRunArgvGetsTheAnswerThatEndsTheLoop(t *testing.T) {
 						t.Fatalf("the answer does not say %q, so it does not end the loop: %s", want, diagnostic)
 					}
 				}
-				// The configuration is still refused - it is simply not the
-				// reason, and the provider is told that removing it would not
-				// help.
-				if !strings.Contains(diagnostic, "user.email") {
-					t.Fatalf("the refused override is no longer recorded in the answer: %s", diagnostic)
+				// AN INCIDENTAL OBJECTION IS RECORDED AND DOES NOT LEAD.
+				//
+				// `user.email` is no longer one: #257 made the identity keys
+				// DEFERRED rather than refused, so an argv carrying them has
+				// nothing incidental left to report and the answer is the
+				// verb's alone. The property #253 exists for is asserted on a
+				// key that is still refused at any target, below.
+				if tc.incidental == "" {
+					break
 				}
-				if strings.Index(diagnostic, "runtime-owned Git refused") > strings.Index(diagnostic, "user.email") {
+				if !strings.Contains(diagnostic, tc.incidental) {
+					t.Fatalf("the refused override %q is not recorded in the answer: %s", tc.incidental, diagnostic)
+				}
+				if strings.Index(diagnostic, "runtime-owned Git refused") > strings.Index(diagnostic, tc.incidental) {
 					t.Fatalf("the incidental objection leads the answer: %s", diagnostic)
 				}
 			case GitOperationDiscard:
@@ -1503,5 +1611,154 @@ func TestTheSmokeRunReplaysToTheExpectedTaxonomy(t *testing.T) {
 	// The candidate is untouched after all 54, which is the point of the six.
 	if got := candidateFileBody(t, dir, "implementation.go"); got != work {
 		t.Fatalf("the replay reached the candidate:\n%q", got)
+	}
+}
+
+// TestExecRealGitRunsWhereItIsTold pins the two halves of the execution-context
+// contract independently, because conflating them destroyed a working tree.
+//
+//	non-empty dir → the command runs THERE, and nowhere else
+//	empty dir     → the command inherits the caller's context
+//
+// The first half asserts BOTH directions: the fixture changed, and the
+// directory the test itself runs in did not. Asserting only the first is what
+// let a misdirected `reset --hard` look like an ordinary test failure while it
+// erased uncommitted work.
+//
+// It is also the pre-mutation sanity check for this package: if this test is
+// absent or failing, the guard it describes is not present, and no mutation
+// experiment against execRealGit should be run.
+func TestExecRealGitRunsWhereItIsTold(t *testing.T) {
+	requireGitFixture(t)
+	fixture, _ := gitAuthorityFixture(t)
+	writeCandidateFile(t, fixture, "implementation.go", "package candidate\n\n// dirty\n")
+
+	// NON-EMPTY DIR: the command runs in the directory it was given, and the
+	// shared sentinel answers for the other direction - that it did not reach
+	// the directory the test itself is running in. It stands down where that
+	// directory refuses writes, because there a destructive command has
+	// nothing to damage.
+	reachedTheCheckout := sentinelOutside(t, fixture)
+	if _, err := execRealGit(fixture, []string{"reset", "--hard"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("reset in the named directory: %v", err)
+	}
+	reachedTheCheckout()
+	if body := candidateFileBody(t, fixture, "implementation.go"); strings.Contains(body, "dirty") {
+		t.Fatal("the command did not run in the directory it was given")
+	}
+
+	// EMPTY DIR: the caller's context is inherited. Asked with a read, and
+	// asserted by what it REPORTS rather than by what it destroys.
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(restore) }()
+	if err := os.Chdir(fixture); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if _, err := execRealGit("", []string{"rev-parse", "--show-toplevel"}, &out, io.Discard); err != nil {
+		t.Fatalf("inherited-context run: %v", err)
+	}
+	reported, resolveErr := filepath.EvalSymlinks(strings.TrimSpace(out.String()))
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	expected, resolveErr := filepath.EvalSymlinks(fixture)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	if reported != expected {
+		t.Fatalf("an empty dir did not inherit the caller's context: ran in %s, want %s", reported, expected)
+	}
+}
+
+// TestTheBrokerEnvironmentDropsProviderGitAuthority guards the namespace rule
+// itself, rather than any one command's behaviour.
+//
+// The behavioural tests prove specific escapes are closed. This proves the
+// SHAPE: provider-controlled Git authority is not inherited, the runtime's own
+// controls are present as values, and ordinary environment still passes through
+// so a brokered command runs in the provider's context.
+//
+// It is the test that would have caught VISUAL. Git's editor fallback is
+// GIT_EDITOR, core.editor, VISUAL, EDITOR - and an earlier version of the strip
+// list named only the last of those four.
+func TestTheBrokerEnvironmentDropsProviderGitAuthority(t *testing.T) {
+	for _, name := range []string{
+		// Repository location and writable state.
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_CEILING_DIRECTORIES", "GIT_TEMPLATE_DIR",
+		// Configuration injection: `-c` by another spelling.
+		"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG_PARAMETERS",
+		// Identity, which never appears in argv.
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+		// Programs Git will run.
+		"GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_PROXY_COMMAND",
+		"GIT_EXTERNAL_DIFF", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
+		"SSH_ASKPASS", "SSH_AUTH_SOCK", "EDITOR", "VISUAL", "XDG_CONFIG_HOME",
+		// A variable Git has not invented yet, standing for the prefix rule.
+		"GIT_SOMETHING_INVENTED_LATER",
+		// Writes a trace to a path of the provider's choosing.
+		"GIT_TRACE", "GIT_TRACE2",
+	} {
+		t.Setenv(name, "/provider/controlled")
+	}
+	// Ordinary environment a brokered command legitimately needs.
+	t.Setenv("ZENCHRON_ORDINARY_VARIABLE", "kept")
+
+	present := map[string]string{}
+	for _, entry := range brokerGitEnv() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("a malformed environment entry: %q", entry)
+		}
+		// Duplicates matter: Git takes the LAST occurrence, so a pin appearing
+		// after an inherited value is what makes the pin authoritative.
+		present[key] = value
+	}
+
+	for _, name := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG_PARAMETERS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_SSH", "GIT_SSH_COMMAND",
+		"GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_EDITOR",
+		"GIT_SEQUENCE_EDITOR", "SSH_ASKPASS", "SSH_AUTH_SOCK", "EDITOR", "VISUAL",
+		"XDG_CONFIG_HOME", "GIT_SOMETHING_INVENTED_LATER", "GIT_TRACE", "GIT_TRACE2",
+		"GIT_TEMPLATE_DIR", "GIT_CEILING_DIRECTORIES",
+	} {
+		if got, ok := present[name]; ok && got == "/provider/controlled" {
+			t.Fatalf("%s was inherited from the provider", name)
+		}
+	}
+
+	for name, want := range map[string]string{
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_SYSTEM":   "/dev/null",
+		"GIT_CONFIG_GLOBAL":   "/dev/null",
+		"GIT_ATTR_NOSYSTEM":   "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"GIT_PAGER":           "cat",
+		"PAGER":               "cat",
+		"GIT_OPTIONAL_LOCKS":  "0",
+	} {
+		if got := present[name]; got != want {
+			t.Fatalf("pin %s = %q, want %q", name, got, want)
+		}
+	}
+
+	// NORMALIZED IS NOT EMPTIED. A brokered command runs in the provider's
+	// context and needs it.
+	if present["ZENCHRON_ORDINARY_VARIABLE"] != "kept" {
+		t.Fatal("ordinary environment did not survive normalization")
+	}
+	if present["PATH"] == "" {
+		t.Fatal("PATH did not survive normalization")
 	}
 }

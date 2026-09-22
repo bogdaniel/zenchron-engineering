@@ -34,6 +34,7 @@ package runtime
 // boundary is testable without a model.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -427,6 +428,11 @@ type GitRefusal struct {
 	Operation string `json:"operation"`
 	// Reason is the runtime's own words for what it refused.
 	Reason string `json:"reason"`
+	// Target is the RESOURCE the invocation resolved to. It is recorded because
+	// a refusal is not interpretable without it: the same argv is a protected
+	// operation against the candidate and an ordinary one against a test's own
+	// fixture, and #257 exists because the boundary could not tell them apart.
+	Target GitTargetClass `json:"target,omitempty"`
 	// DirtyPaths is the bounded set of candidate paths that would have been
 	// discarded, or empty when the workspace held no delta. It is OBSERVATION
 	// for the operator and for the provider's next decision; it is not what
@@ -572,13 +578,43 @@ func (e *GitRuntimeOwnedRefusedError) Error() string {
 // one. Dirtiness is still OBSERVED, because the diagnostic and the durable
 // record are worth more when they say what was at stake - but it is observed
 // after the decision and it cannot change it.
-func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, stderr io.Writer) (int, error) {
+func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string, stdout, stderr io.Writer) (int, error) {
+	// THE EXECUTION CONTEXT IS THE COMMAND'S OWN, established before anything
+	// is classified or resolved.
+	//
+	// It used to be the candidate's: every permitted command ran with the
+	// candidate as its working directory whatever the caller's was, so
+	// `cd fixture && git remote add origin <url>` added a remote to the
+	// CANDIDATE. Resource scoping cannot be built on that - classifying a
+	// target from the caller's directory while executing in the candidate's is
+	// a laundering path, not a smaller defect.
+	//
+	// `-C` is applied here rather than left in the argv, and the broker's own
+	// working directory is moved to the result, which pins the context to a
+	// DIRECTORY HANDLE: the handle follows the inode, so renaming or replacing
+	// the path underneath cannot redirect what the command reaches. The `-C`
+	// options are then dropped from what executes, because applying them twice
+	// would land somewhere nobody asked for.
+	base, pinErr := os.Getwd()
+	pinned := base
+	if pinErr == nil {
+		pinned, pinErr = effectiveCwd(base, args)
+	}
+	if pinErr == nil {
+		pinErr = os.Chdir(pinned)
+	}
+	if pinErr != nil {
+		return refuseGitCommand(candidateDir, refusalLog, args,
+			"the execution context could not be established: "+pinErr.Error(),
+			GitOperationClass(""), GitTargetExternalOrUnknown, stderr)
+	}
+	args = withoutDirectoryGlobals(args)
 	// THE EFFECTIVE COMMAND FIRST, because the classifier has to be looking at
 	// what real Git will run. An alias expands inside Git, after the broker
 	// would otherwise have authorized the verb it was spelled with - and both a
 	// provider and a checked-out .git/config can define one, since `config` is
 	// an ordinary command. See git_alias.go.
-	effective, resolveErr := ResolveGitCommand(candidateDir, args)
+	effective, resolveErr := ResolveGitCommand(pinned, args)
 	if resolveErr != nil {
 		// AUTHORITY OUTRANKS AN INCIDENTAL OBJECTION.
 		//
@@ -619,7 +655,7 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// sentence the provider reads, differ.
 		if class, reason := ClassifyGitCommand(args); class != GitOperationPermitted {
 			return refuseGitCommand(candidateDir, refusalLog, args,
-				reason+"; "+resolveErr.Error(), class, stderr)
+				reason+"; "+resolveErr.Error(), class, targetOf(pinned, candidateDir, scratchDir), stderr)
 		}
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
@@ -630,15 +666,104 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// resolution prefix a reviewer reads it by.
 		return refuseGitCommand(candidateDir, refusalLog, args,
 			"the effective operation could not be resolved: "+resolveErr.Error(),
-			GitOperationClass(""), stderr)
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
 	}
 	class, reason := ClassifyGitCommand(effective)
+	// DEFERRED AUTHORITY, resolved here and nowhere earlier. `-c user.email`
+	// and `-c user.name` carry no intrinsic capability, so parse time did not
+	// refuse them; what they DO carry is whose history a commit is written
+	// into, and only the target answers that.
+	// FROM THE EFFECTIVE COMMAND, not the one that was typed. Git honours an
+	// alias that begins with `-c`, so `alias.sneak = -c user.email=... commit`
+	// introduces an identity override during expansion - after a check reading
+	// the original argv has already decided there was none. Verified: such an
+	// alias commits as the address it names.
+	// A FEW VERBS EXIST TO RUN A PROGRAM THE REPOSITORY NAMES, and no pin can
+	// reach them: `difftool` runs difftool.<tool>.cmd, `mergetool` runs
+	// mergetool.<tool>.cmd, `interpret-trailers` runs trailer.<token>.command.
+	// The tool and token are the provider's choice, so the key space is open
+	// the way the attribute drivers were - but nothing selects these through
+	// attributes, so the empty attribute source does not reach them.
+	//
+	// They are refused rather than neutralized, because what would be refused
+	// IS the verb's purpose: each exists to invoke an external tool, and a
+	// worker inspecting a candidate has diff, log and show for that.
+	//
+	// Deliberately NOT a new class in ClassifyGitCommand. The taxonomy #253
+	// ordered and #255 benchmarks is untouched; this carries no class, the same
+	// way the context-establishment refusal does.
+	if verbRunsAConfiguredProgram(effective) {
+		_, verb, _ := splitGitCommand(effective)
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"`git "+verb+"` runs a program named by repository configuration, which a provider controls; "+
+				"use diff, log or show to inspect the candidate",
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
+	}
+	deferred := DeferredGitConfigOverrides(effective)
+	// WHICH RESOURCE - asked only when the answer can change the decision. A
+	// permitted verb carrying no deferred override is permitted everywhere it
+	// was permitted before, so reads are untouched and pay no resolution cost.
+	configKey, writesAuthority := configWriteIntroducingAuthority(effective)
+	target := GitTargetClass("")
+	if class != GitOperationPermitted || len(deferred) > 0 || writesAuthority {
+		target = targetOf(pinned, candidateDir, scratchDir)
+	}
+	// WHERE the configuration would land decides this, exactly as it decides
+	// the identity question below.
+	//
+	// A repository the attempt created is the provider's own sandbox: it can
+	// put what it likes in its own fixture, and the execution-time
+	// neutralization is what keeps that from mattering. Scoping this to the
+	// candidate is not a softening - it is the same resource law the rest of
+	// the boundary runs on.
+	//
+	// Found by self-hosting rather than by reasoning. The unscoped form refused
+	// this repository's OWN TestBrokeredDiffNeverRunsAnExternalDiffProgram,
+	// which arms diff.external in its fixture precisely to prove the broker
+	// never runs one. A boundary that stops a candidate from testing the
+	// boundary is the #241 failure mode wearing a different hat.
+	if writesAuthority && target != GitTargetRuntimeScratch {
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"writing "+configKey+" into this repository names a program Git would run or moves where Git reads "+
+				"and writes; candidate configuration is the runtime's, not the provider's",
+			GitOperationClass(""), target, stderr)
+	}
+	// THE VERB IS ANSWERED FIRST, and that ordering is #253's law applied one
+	// layer along. `-c user.email=... reset --hard` against the candidate is a
+	// destructive command that happens to carry an identity override, and
+	// telling its sender the identity was the objection invites them to send
+	// the same destructive command without it. Removing the override would not
+	// make it permitted, so the override is not the answer that terminates the
+	// decision.
+	if class != GitOperationPermitted {
+		// THE ONLY THING THIS PERMITS THAT WAS REFUSED BEFORE. A destructive or
+		// runtime-owned verb against the attempt's OWN temp root is a test
+		// operating on a repository it created, and governing that was the
+		// defect. The candidate, an operator's unrelated repositories, and
+		// every context that could not be resolved are refused exactly as
+		// before.
+		if target != GitTargetRuntimeScratch {
+			return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, stderr)
+		}
+		class = GitOperationPermitted
+	}
+	// ONLY NOW is the identity question the terminal one: the verb would be
+	// permitted, so what remains to decide is whose history it writes. Identity
+	// may be chosen for a repository the attempt itself created; on the
+	// candidate a provider must not decide whose commit it is, and outside both
+	// there is nothing this runtime is entitled to write at all.
+	if len(deferred) > 0 && target != GitTargetRuntimeScratch {
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"setting the committer identity ("+strings.Join(deferred, ", ")+
+				") is not the provider's outside a repository this attempt created; the runtime owns candidate history",
+			class, target, stderr)
+	}
 	if class == GitOperationPermitted {
 		// The RESOLVED form is executed. Where no alias was involved it is the
 		// original argv unchanged, which is almost every invocation; where one
 		// was, running the expansion the broker actually classified is what
 		// stops the lookup and the execution from being able to disagree.
-		return execRealGit(candidateDir, effective, stdout, stderr)
+		return execRealGit("", effective, stdout, stderr)
 	}
 	if aliased := boundedGitArgv(args); aliased != boundedGitArgv(effective) {
 		// The record names BOTH: what the provider asked for and what it
@@ -647,7 +772,19 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 		// that.
 		reason += " (requested as " + aliased + ")"
 	}
-	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, stderr)
+	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, stderr)
+}
+
+// targetOf resolves the resource from the PINNED context, establishing the
+// runtime's anchors first so nothing a provider supplied contributes to them.
+// Every failure answers external_or_unknown, which is a refusal for the classes
+// that reach here: unknown never widens authority.
+func targetOf(pinned, candidateDir, scratchDir string) GitTargetClass {
+	identity, err := resolveRepoIdentity(pinned)
+	if err != nil {
+		return GitTargetExternalOrUnknown
+	}
+	return ClassifyGitTarget(identity, EstablishGitAuthorityAnchors(candidateDir, scratchDir))
 }
 
 // refuseGitCommand records the refusal durably and tells the provider why.
@@ -655,8 +792,8 @@ func BrokerGitCommand(candidateDir, refusalLog string, args []string, stdout, st
 // It is one function because every refusal has to do all of it: a refusal that
 // executed nothing but recorded nothing would be invisible, and one that
 // recorded without explaining would leave the worker to guess.
-func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, stderr io.Writer) (int, error) {
-	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason}
+func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, target GitTargetClass, stderr io.Writer) (int, error) {
+	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason, Target: target}
 	// Observation, after the decision. A workspace whose status cannot be read
 	// does not soften the refusal; it just means the record names no paths.
 	if dirty, err := CandidateDirtyPaths(candidateDir); err == nil {
@@ -699,23 +836,289 @@ func refuseGitCommand(candidateDir, refusalLog string, args []string, reason str
 // established. Both are refusals; they are not the same fact.
 const aliasResolutionReason = "the effective operation could not be resolved"
 
+// authorityBearingConfigKey reports whether a configuration key names a program
+// or redirects where Git reads and writes.
+//
+// It is a DENY list, unlike the inline `-c` policy which is an allow list, and
+// the difference is deliberate. `-c` applies to one invocation the boundary is
+// already classifying, so refusing everything unrecognised costs nothing. A
+// repository's own configuration is ordinary engineering state - a fixture
+// setting core.autocrlf or merge.ff is not an attack - and refusing every
+// unrecognised write would make the boundary dictate how a candidate configures
+// itself. What it refuses is the set that names programs or moves state.
+//
+// This is NOT the protection. A repository can arrive already carrying any of
+// these, so the neutralization at execution is what holds; this only stops new
+// poison from being written through the broker, which is still worth doing.
+func authorityBearingConfigKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if fixedAuthorityConfigKeys[k] {
+		return true
+	}
+	// The families are section.<name>.leaf, where <name> is the provider's
+	// choice: diff.<driver>.textconv, filter.<driver>.clean, and so on.
+	if parts := strings.Split(k, "."); len(parts) == 3 {
+		return authorityConfigFamilies[parts[0]+"."+parts[2]]
+	}
+	return false
+}
+
+var fixedAuthorityConfigKeys = map[string]bool{
+	"core.hookspath": true, "core.fsmonitor": true, "core.pager": true,
+	"core.editor": true, "core.sshcommand": true, "core.alternaterefscommand": true,
+	"core.attributesfile": true, "credential.helper": true, "gpg.program": true,
+	"sequence.editor": true, "uploadpack.packobjectshook": true,
+	"init.templatedir": true, "protocol.ext.allow": true, "diff.external": true,
+}
+
+var authorityConfigFamilies = map[string]bool{
+	"diff.textconv": true, "diff.command": true,
+	"filter.clean": true, "filter.smudge": true, "filter.process": true,
+	"difftool.cmd": true, "mergetool.cmd": true,
+	"merge.driver": true, "trailer.command": true,
+}
+
+// configWriteIntroducingAuthority names the key a `git config` invocation would
+// WRITE, when that key is one of the above.
+//
+// Reading forms are untouched: `git config --get`, `--list` and `--unset` ask
+// or remove, and refusing them would break ordinary inspection for no gain.
+func configWriteIntroducingAuthority(args []string) (string, bool) {
+	_, verb, rest := splitGitCommand(args)
+	if verb != "config" {
+		return "", false
+	}
+	for i := 0; i < len(rest); i++ {
+		argument := rest[i]
+		if !strings.HasPrefix(argument, "-") {
+			// The first operand is the key, and everything after it is a value
+			// or a pattern.
+			if authorityBearingConfigKey(argument) {
+				return argument, true
+			}
+			return "", false
+		}
+		switch argument {
+		case "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+			"--unset", "--unset-all", "--remove-section", "--rename-section",
+			"--get-color", "--get-colorbool":
+			return "", false
+		case "-e", "--edit":
+			// --edit opens core.editor, which is a program the repository names.
+			return "--edit", true
+		case "--file", "-f", "--blob", "--type", "-t", "--default":
+			i++
+		}
+	}
+	return "", false
+}
+
+// verbsRunningAConfiguredProgram are the verbs whose whole purpose is to invoke
+// a program the repository's own configuration names. Each was demonstrated
+// executing a provider-chosen program out of a repository's local config, and
+// none can be closed by pinning a key, because the tool and trailer names are
+// as open as the attribute driver names were.
+var verbsRunningAConfiguredProgram = map[string]bool{
+	"difftool":           true,
+	"mergetool":          true,
+	"interpret-trailers": true,
+}
+
+func verbRunsAConfiguredProgram(args []string) bool {
+	_, verb, _ := splitGitCommand(args)
+	return verbsRunningAConfiguredProgram[verb]
+}
+
+// brokerGitEnv is THE environment for every Git this broker runs - both the
+// resolution that decides and the execution that follows.
+//
+// One definition, because two were a way for authorization and execution to
+// disagree. The provider's own environment is carried so that a permitted
+// command behaves exactly as it would have without the guard, MINUS the
+// brokered sentinel, which exists to make unshimmed Git fail closed and which
+// the shim is the one caller allowed to see past.
+//
+// Consistency alone is not enough, though, and an earlier version of this
+// comment stopped there. Two paths agreeing about a redirected repository still
+// agree about the wrong one: authority granted over runtime_scratch_repo must
+// not also be authority to write an index, an object store, or a committer
+// identity somewhere else. So the provider's Git authority is normalized away
+// rather than inherited.
+//
+// Three distinct powers travel in this environment, and only the first is
+// obvious. GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
+// their relatives move where Git reads and writes. GIT_CONFIG_COUNT with
+// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n is `-c` spelled as an environment
+// variable, so it would walk straight past argv classification and could set
+// core.hooksPath. GIT_AUTHOR_* and GIT_COMMITTER_* name a committer without
+// ever appearing in argv, which is the same identity question the deferred
+// user.name/user.email rule answers for `-c`.
+//
+// Enumerating those was considered and rejected before, on the grounds that the
+// list is long, version-dependent, and exactly what a boundary gets quietly
+// wrong. That objection was right about enumeration and wrong about the
+// conclusion: the rule here is a PREFIX, not a list. Every GIT_* variable is
+// removed and only the pins below are put back, so a Git release that invents a
+// new authority-bearing variable is already handled. Unknown fails closed.
+func brokerGitEnv() []string {
+	host := os.Environ()
+	env := make([]string, 0, len(host)+len(brokerGitPins))
+	for _, entry := range host {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || strings.HasPrefix(name, "GIT_") || brokerGitStripped[name] {
+			continue
+		}
+		env = append(env, entry)
+	}
+	// The pins are values, not inheritance, so the provider cannot unset them
+	// by unsetting a variable. They restate for brokered Git the isolation
+	// trustedGitEnv gives runtime Git.
+	return append(env, brokerGitPins...)
+}
+
+// brokerGitStripped is the non-GIT_ half: names that still hand Git a command
+// to run or a configuration tree to read, and so carry the same authority
+// under a different spelling.
+// Git's editor fallback is GIT_EDITOR, then core.editor, then VISUAL, then
+// EDITOR. The GIT_ prefix rule and the configuration pins close the first two,
+// so leaving VISUAL would leave the third: a provider-named program Git runs
+// for any command that opens an editor.
+var brokerGitStripped = map[string]bool{
+	"SSH_ASKPASS":     true,
+	"SSH_AUTH_SOCK":   true,
+	"XDG_CONFIG_HOME": true,
+	"EDITOR":          true,
+	"VISUAL":          true,
+}
+
+// brokerGitPins put back, as fixed values, the few GIT_* settings whose absence
+// would be worse than their presence: without GIT_TERMINAL_PROMPT=0 a brokered
+// command can block on a credential prompt, and without the configuration pins
+// Git falls back to discovering the host user's system and global files.
+// emptyTreeObject is Git's empty tree, the same value in every repository ever
+// created. Naming it as the attribute source means no path matches any
+// attribute, which is what makes the driver families below unselectable rather
+// than individually pinned.
+const emptyTreeObject = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+var brokerGitPins = []string{
+	"GIT_CONFIG_NOSYSTEM=1",
+	"GIT_CONFIG_SYSTEM=/dev/null",
+	"GIT_CONFIG_GLOBAL=/dev/null",
+	"GIT_ATTR_NOSYSTEM=1",
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_PAGER=cat",
+	"PAGER=cat",
+	"GIT_OPTIONAL_LOCKS=0",
+}
+
+// brokerGitOutput asks Git a question in the same environment the command will
+// execute in, with the binary resolved off the runtime's trusted search path
+// rather than the provider's.
+func brokerGitOutput(dir string, args ...string) ([]byte, error) {
+	binary, err := gitBinary()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(binary, args...)
+	cmd.Dir, cmd.Env = dir, brokerGitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
 // execRealGit runs a permitted command through the real binary.
 //
 // It resolves Git from the runtime's own trusted search path rather than from
 // whatever PATH the provider is running under - the shim is FIRST on that path,
 // so resolving by name here would make the broker invoke itself forever.
-func execRealGit(candidateDir string, args []string, stdout, stderr io.Writer) (int, error) {
+// THE dir PARAMETER IS THE EXECUTION CONTEXT, and its contract is explicit
+// because leaving it implicit cost real work.
+//
+//	dir != ""  run the command in that directory.
+//	dir == ""  the CALLER has already established the context; inherit it.
+//
+// The empty form exists for one caller: the broker, which pins its own working
+// directory to a verified handle before deciding, so that the directory the
+// command was classified against is the directory it executes in. Everything
+// else must name where it runs.
+//
+// An earlier version of this function ignored the parameter entirely, on the
+// reasoning that the broker had already chdir'd. It had - but the guard TESTS
+// call this directly to prove a destructive command would destroy work, and
+// with no Dir they ran `git reset --hard` and `git clean -fdx` in the
+// development checkout instead of in their fixtures. The tests reported
+// "unguarded git reset --hard did NOT discard the work", which was true of the
+// fixture and false of the repository. See TestExecRealGitRunsWhereItIsTold.
+func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, error) {
 	binary, err := gitBinary()
 	if err != nil {
 		return 1, err
 	}
-	cmd := exec.Command(binary, args...)
-	cmd.Dir = candidateDir
-	// The provider's own environment is inherited so that a permitted command
-	// behaves exactly as it would have without the guard, MINUS the brokered
-	// sentinel: the sentinel exists to make unshimmed Git fail closed, and the
-	// shim is the one caller that must see past it. See git_guard.go.
-	cmd.Env = withoutBrokeredGitDir(os.Environ())
+	// HOOKS ARE A THIRD SPELLING OF `-c`, and the only one that lives in the
+	// repository rather than in the invocation.
+	//
+	// `core.hooksPath` in a scratch repository's own .git/config names a
+	// program Git runs on a permitted, runtime-owned commit. Setting it is just
+	// `git config --local`, which is permitted, so a grant over
+	// runtime_scratch_repo became arbitrary execution - and the child inherits
+	// an environment with the sentinel already stripped, so real Git invoked
+	// from a hook reaches the candidate unbrokered. That was demonstrated
+	// destroying uncommitted candidate work.
+	//
+	// Command-line `-c` outranks repository-local configuration, so this pin
+	// cannot be overridden by the repository it runs against. /dev/null is what
+	// "no hooks" looks like to Git, the same way it is what "no configuration"
+	// looks like to GIT_CONFIG_SYSTEM.
+	//
+	// core.fsmonitor is the same key in a worse position. It is consumed by a
+	// permitted READ - `git status` runs it - and reads resolve no target, so
+	// it executes against the CANDIDATE, not merely against a scratch
+	// repository the provider already controls. Measured, both on the candidate:
+	//
+	//	core.fsmonitor      status → executed
+	//	diff.<d>.textconv   diff   → executed        ← NOT closed here, see #262
+	//	core.pager          log    → not executed (the GIT_PAGER pin dominates)
+	//
+	// This closes the two demonstrated escapes that a fixed key can close. It
+	// is NOT the general law, and one measured escape survives it: textconv is
+	// reached through `diff.<driver>.textconv`, where the driver name is
+	// arbitrary, so there is no fixed key to pin and no prefix rule for
+	// configuration the way there is for the environment. Classifying
+	// repository-local configuration the way argv and the environment are
+	// classified needs its own design, and is #262.
+	// ATTRIBUTES SELECT PROGRAMS, and that is the mechanism behind four
+	// execution surfaces rather than one:
+	//
+	//	diff.<driver>.textconv   run by diff, log -p, show, blame
+	//	diff.<driver>.command    run by diff, with no flag at all
+	//	filter.<driver>.clean    run by status, diff and add
+	//	filter.<driver>.smudge   run by checkout
+	//
+	// The driver name is arbitrary and the `.gitattributes` selecting it is
+	// provider-controlled, so there is no fixed key to pin, and configuration
+	// has no equivalent of the environment's prefix rule. What IS fixed is the
+	// attribute lookup. Point it at the empty tree and no path carries any
+	// attribute, so no driver is ever selected and none of the four is
+	// reachable whatever it is called.
+	//
+	// It is passed as a command-line global rather than as GIT_ATTR_SOURCE
+	// deliberately. A Git too old to know the variable ignores it silently and
+	// the protection is simply absent; a Git too old to know the OPTION exits
+	// 129. The boundary fails closed on the version it cannot defend.
+	cmd := exec.Command(binary, append([]string{
+		"--attr-source=" + emptyTreeObject,
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=false",
+	}, args...)...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	// THE SAME environment the resolution used. See brokerGitEnv.
+	cmd.Env = brokerGitEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

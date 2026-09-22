@@ -42,7 +42,6 @@ package runtime
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -84,6 +83,27 @@ func (e *GitConfigOverrideRefusedError) Error() string {
 		" keys are accepted, and read-only Git is unaffected."
 }
 
+// gitGlobalTakesValue names the global options whose value is a SEPARATE
+// argument, and it is the single definition every scanner uses.
+//
+// Three scanners once had their own idea of this - the alias splitter knew the
+// list, and the two that establish the execution context did not. So
+// `git -c k=v -C <dir> reset --hard` was read by the splitter as globals plus a
+// verb, and by the context scanners as ending at `k=v`: the `-C` was invisible
+// to the pin, survived into the argv, and Git applied it. A command classified
+// against a scratch repository then executed against the candidate and
+// destroyed uncommitted work. Resolution and execution must not be able to
+// disagree about where a command lands, and the cheapest way to guarantee that
+// is for them to parse with one function.
+func gitGlobalTakesValue(arg string) bool {
+	switch arg {
+	case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+		"--super-prefix", "--config-env", "--attr-source":
+		return true
+	}
+	return false
+}
+
 // splitGitCommand separates one Git argv into its leading global options, its
 // verb, and the rest.
 //
@@ -97,12 +117,8 @@ func splitGitCommand(args []string) (globals []string, verb string, rest []strin
 		if !strings.HasPrefix(arg, "-") {
 			return args[:i], arg, args[i+1:]
 		}
-		switch arg {
-		case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
-			"--super-prefix", "--config-env", "--attr-source":
-			if i+1 < len(args) {
-				i++
-			}
+		if gitGlobalTakesValue(arg) && i+1 < len(args) {
+			i++
 		}
 	}
 	return args, "", nil
@@ -144,6 +160,14 @@ var refusedGitGlobals = map[string]string{
 	"--work-tree":    "it points the command at a different working tree",
 	"--namespace":    "it points the command at a different ref namespace",
 	"--super-prefix": "it rewrites the paths the command addresses",
+	// The broker prepends `--attr-source=<empty tree>` so that no path carries
+	// an attribute and no textconv, external diff or filter driver can be
+	// selected. A LATER --attr-source wins, so leaving this executable would
+	// make that neutralization advisory - the same defect `--no-textconv` had,
+	// which is why the attribute source was chosen over it. Demonstrated:
+	// `--attr-source=HEAD` against a repository whose committed tree carries
+	// .gitattributes restored textconv execution.
+	"--attr-source": "it chooses which attributes apply, and attributes select programs Git runs",
 }
 
 // refusedGitGlobal reports the first global option this boundary will not
@@ -230,28 +254,48 @@ func inertGitConfigKey(key string) bool {
 	return inertGitConfigKeys[strings.ToLower(key)]
 }
 
-// gitConfigOverrideRefusal reports the first `-c` or `--config-env` key this
-// boundary will not accept, and names it.
+// deferredGitConfigKeys are the two overrides whose authority DEPENDS ON THE
+// TARGET rather than being decidable from the key alone.
 //
-// Naming the key is not decoration. A provider told only that `-c` is refused
-// has no way to learn which part of its own invocation to drop, and the one in
-// #248 responded by sending the same command again; a provider told that
-// `core.pager` is the objection can send the command without it.
+// A repository's committer identity is meaningless outside the repository it is
+// set on. It names no program, reads no path, presents no credential, and
+// cannot redirect discovery - so unlike every other key here it carries no
+// intrinsic capability, and the only question it raises is WHOSE history a
+// commit would be written into.
+//
+// That question has no answer until the target is known. So these are neither
+// refused at parse time nor admitted: they are carried through as DEFERRED and
+// become authoritative only for a repository the attempt itself created. On the
+// candidate they are refused exactly as before, because a provider must not
+// choose the identity of candidate history.
+//
+// Two keys, and not a precedent for a general target-aware config model.
+// core.pager, core.hooksPath, core.fsmonitor, credential.helper, gpg.program,
+// diff.external and core.sshCommand execute programs or move authority whatever
+// repository they are pointed at, and stay refused everywhere.
+var deferredGitConfigKeys = map[string]bool{"user.name": true, "user.email": true}
+
+func deferredGitConfigKey(key string) bool { return deferredGitConfigKeys[strings.ToLower(key)] }
+
+// gitConfigOverrideKeys walks the global options and reports every `-c` or
+// `--config-env` key, plus whether one was written with nothing to set.
+//
+// One walker, two consumers, so the refusal and the deferral cannot come to
+// disagree about which keys an argv carries.
 //
 // Both spellings are parsed, in both their joined and separated forms, because
 // `git -c k=v`, `git -c` `k=v` and `git --config-env=k=VAR` are the same act.
 // `--config-env` names an environment variable rather than a value, so its
 // value is opaque here - which changes nothing, because the KEY is what decides.
-func gitConfigOverrideRefusal(globals []string) (string, bool) {
+func gitConfigOverrideKeys(globals []string) (keys []string, dangling bool) {
 	for i := 0; i < len(globals); i++ {
 		arg := globals[i]
 		setting := ""
 		switch {
 		case arg == "-c" || arg == "--config-env":
 			if i+1 >= len(globals) {
-				// An override with nothing to override is not resolvable, and
-				// naming it is more useful than guessing at it.
-				return arg, true
+				// An override with nothing to override is not resolvable.
+				return keys, true
 			}
 			i++
 			setting = globals[i]
@@ -266,11 +310,42 @@ func gitConfigOverrideRefusal(globals []string) (string, bool) {
 		if equals := strings.Index(setting, "="); equals >= 0 {
 			key = setting[:equals]
 		}
-		if !inertGitConfigKey(key) {
+		keys = append(keys, key)
+	}
+	return keys, false
+}
+
+// gitConfigOverrideRefusal reports the first key this boundary will not accept
+// AT ANY TARGET, and names it.
+//
+// Naming the key is not decoration. A provider told only that `-c` is refused
+// has no way to learn which part of its own invocation to drop, and the one in
+// #248 responded by sending the same command again; a provider told that
+// `core.pager` is the objection can send the command without it.
+func gitConfigOverrideRefusal(globals []string) (string, bool) {
+	keys, dangling := gitConfigOverrideKeys(globals)
+	if dangling {
+		return "-c", true
+	}
+	for _, key := range keys {
+		if !inertGitConfigKey(key) && !deferredGitConfigKey(key) {
 			return key, true
 		}
 	}
 	return "", false
+}
+
+// DeferredGitConfigOverrides reports the identity keys an argv carries, whose
+// admission waits on the target.
+func DeferredGitConfigOverrides(globals []string) []string {
+	keys, _ := gitConfigOverrideKeys(globals)
+	var deferred []string
+	for _, key := range keys {
+		if deferredGitConfigKey(key) {
+			deferred = append(deferred, key)
+		}
+	}
+	return deferred
 }
 
 // ResolveGitCommand expands args through the effective Git configuration and
@@ -461,8 +536,8 @@ func gitBuiltinCommands(candidateDir string) []string {
 // It resolves the binary the way execRealGit does - from the runtime's own
 // trusted search path, never by name - because the guard directory is first on
 // the provider's path and resolving by name here would make the broker call
-// itself. The environment is the provider's minus the sentinel, which is
-// exactly what the execution gets, so the configuration this reads is the
+// itself. The environment comes from brokerGitEnv, the single definition the
+// execution also uses, so the configuration this reads cannot drift from the
 // configuration that will apply.
 func effectiveGit(candidateDir string, args ...string) (string, int, error) {
 	binary, err := gitBinary()
@@ -471,7 +546,7 @@ func effectiveGit(candidateDir string, args ...string) (string, int, error) {
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = candidateDir
-	cmd.Env = withoutBrokeredGitDir(os.Environ())
+	cmd.Env = brokerGitEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
