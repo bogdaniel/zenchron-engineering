@@ -641,18 +641,18 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 	// correct for an in-process caller, so the restore is this caller's job.
 	previous, wdErr := os.Getwd()
 	if wdErr != nil {
-		return result, err
+		return result, wdErr
 	}
 	if chErr := os.Chdir(request.CandidateDir); chErr != nil {
-		return result, err
+		return result, chErr
 	}
 	_, brokerErr := BrokerGitCommand(request.CandidateDir, request.ScratchDir, guard.RefusalLog,
 		[]string{"checkout", "--", "."}, io.Discard, io.Discard)
 	if restoreErr := os.Chdir(previous); restoreErr != nil {
-		return result, err
+		return result, restoreErr
 	}
 	if brokerErr != nil {
-		return result, err
+		return result, brokerErr
 	}
 	refusals, readErr := ReadGitRefusals(guard.RefusalLog)
 	if readErr != nil || len(refusals) == 0 {

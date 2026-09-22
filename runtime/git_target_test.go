@@ -904,6 +904,47 @@ func commitAuthor(t *testing.T, dir string) string {
 //
 // This asserts the demonstrated escape is closed. It does NOT assert the
 // general law: other repository-local keys still name programs.
+// TestAPermittedReadCannotRunAProgram is the sharper half of the same defect.
+//
+// core.hooksPath needed a runtime-owned mutation in a scratch repository. This
+// needs neither. `core.fsmonitor` is consumed by `git status`, reads resolve no
+// target and are permitted everywhere, and `git config --local` is permitted -
+// so a provider can arm it ON THE CANDIDATE and have Git run it there.
+//
+// "Reads never resolve a target, so they are untouched and pay no cost" was
+// true of authority and false of execution.
+func TestAPermittedReadCannotRunAProgram(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	initTargetRepo(t, candidate)
+	log := filepath.Join(root, "refused.jsonl")
+
+	witness := filepath.Join(root, "fsmonitor-ran")
+	program := filepath.Join(root, "fsmonitor")
+	// A fsmonitor hook answers with a NUL-terminated path list; the shape only
+	// has to be plausible enough that Git consults it.
+	body := "#!/bin/sh\necho ran > " + witness + "\nprintf '/\\0'\nexit 0\n"
+	if err := os.WriteFile(program, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Arming it is ordinary permitted configuration - of the CANDIDATE.
+	if code, out := brokerGitFrom(t, candidate, candidate, scratch, log,
+		"config", "--local", "core.fsmonitor", program); code != 0 {
+		t.Fatalf("configuring the candidate was refused: %d %s", code, out)
+	}
+	// And a read is permitted against the candidate by design.
+	if code, out := brokerGitFrom(t, candidate, candidate, scratch, log,
+		"status", "--porcelain"); code != 0 {
+		t.Fatalf("a permitted read was refused: %d %s", code, out)
+	}
+	if _, err := os.Stat(witness); err == nil {
+		t.Fatal("a repository-local program ran on a permitted read of the candidate")
+	}
+}
+
 func TestRepositoryLocalConfigCannotRunAProgram(t *testing.T) {
 	requireGitFixture(t)
 	const precious = "uncommitted candidate work\n"

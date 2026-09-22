@@ -933,11 +933,26 @@ func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, erro
 	// "no hooks" looks like to Git, the same way it is what "no configuration"
 	// looks like to GIT_CONFIG_SYSTEM.
 	//
-	// This closes the demonstrated escape. It is NOT the general law: other
-	// repository-local keys still name programs, and classifying local
-	// configuration the way argv and the environment are classified is its own
-	// piece of work.
-	cmd := exec.Command(binary, append([]string{"-c", "core.hooksPath=/dev/null"}, args...)...)
+	// core.fsmonitor is the same key in a worse position. It is consumed by a
+	// permitted READ - `git status` runs it - and reads resolve no target, so
+	// it executes against the CANDIDATE, not merely against a scratch
+	// repository the provider already controls. Measured, both on the candidate:
+	//
+	//	core.fsmonitor      status → executed
+	//	diff.<d>.textconv   diff   → executed        ← NOT closed here, see #262
+	//	core.pager          log    → not executed (the GIT_PAGER pin dominates)
+	//
+	// This closes the two demonstrated escapes that a fixed key can close. It
+	// is NOT the general law, and one measured escape survives it: textconv is
+	// reached through `diff.<driver>.textconv`, where the driver name is
+	// arbitrary, so there is no fixed key to pin and no prefix rule for
+	// configuration the way there is for the environment. Classifying
+	// repository-local configuration the way argv and the environment are
+	// classified needs its own design, and is #262.
+	cmd := exec.Command(binary, append([]string{
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=false",
+	}, args...)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
