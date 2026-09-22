@@ -1058,6 +1058,86 @@ func TestAttributeSelectedProgramsAreUnreachable(t *testing.T) {
 	}
 }
 
+// TestTheAttributeSourceCannotBeReopened is the blocker the empty attribute
+// source created by existing at all.
+//
+// The broker prepends `--attr-source=<empty tree>`, and a LATER --attr-source
+// wins - so provider argv, which comes afterward, could put the attributes
+// back. That is precisely the defect `--no-textconv` had and the reason the
+// attribute source was chosen over it; adopting the mechanism without refusing
+// the option would have carried the defect across.
+//
+// Demonstrated before the fix: `--attr-source=HEAD` against a repository whose
+// COMMITTED tree carries .gitattributes restored textconv execution. The tree
+// has to carry it - an earlier version of this probe pointed at a tree written
+// before .gitattributes existed, found no attributes, and would have reported
+// the bypass closed when it was open.
+func TestTheAttributeSourceCannotBeReopened(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	log := filepath.Join(root, "refused.jsonl")
+
+	witness := filepath.Join(root, "ran")
+	program := filepath.Join(root, "program")
+	body := "#!/bin/sh\necho ran > " + witness + "\ncat >/dev/null 2>&1\nexit 0\n"
+	if err := os.WriteFile(program, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initTargetRepoWithAttributes(t, candidate, "f diff=zz\n")
+	armLocalConfig(t, candidate, "diff", "zz", "textconv", program)
+	makeDirty(t, candidate, "modified content\n")
+
+	for _, argv := range [][]string{
+		{"--attr-source=HEAD", "diff"},
+		{"--attr-source", "HEAD", "diff"},
+		{"--attr-source=HEAD", "log", "-p", "-1"},
+	} {
+		if code, _ := brokerGitFrom(t, candidate, candidate, scratch, log, argv...); code == 0 {
+			t.Fatalf("%v was permitted", argv)
+		}
+		if _, err := os.Stat(witness); err == nil {
+			t.Fatalf("%v put the attributes back and ran the driver", argv)
+		}
+	}
+	// And the neutralization still holds for the ordinary form.
+	if code, out := brokerGitFrom(t, candidate, candidate, scratch, log, "diff"); code != 0 {
+		t.Fatalf("an ordinary diff was refused: %d %s", code, out)
+	}
+	if _, err := os.Stat(witness); err == nil {
+		t.Fatal("an ordinary diff ran the driver")
+	}
+}
+
+// initTargetRepoWithAttributes commits .gitattributes as part of the base
+// commit, which is what makes a tree-ish attribute source able to carry it.
+func initTargetRepoWithAttributes(t *testing.T, dir, attributes string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit("", "init", "-q", dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][]string{{"config", "user.name", "lab"}, {"config", "user.email", "lab@example.invalid"}} {
+		if _, err := runGit(dir, pair...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{"f": "content\n", ".gitattributes": attributes} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runGit(dir, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(dir, "commit", "--no-gpg-sign", "-m", "base"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestVerbsThatRunConfiguredProgramsAreRefused covers what the attribute source
 // cannot reach.
 //

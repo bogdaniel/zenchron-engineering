@@ -160,6 +160,14 @@ var refusedGitGlobals = map[string]string{
 	"--work-tree":    "it points the command at a different working tree",
 	"--namespace":    "it points the command at a different ref namespace",
 	"--super-prefix": "it rewrites the paths the command addresses",
+	// The broker prepends `--attr-source=<empty tree>` so that no path carries
+	// an attribute and no textconv, external diff or filter driver can be
+	// selected. A LATER --attr-source wins, so leaving this executable would
+	// make that neutralization advisory - the same defect `--no-textconv` had,
+	// which is why the attribute source was chosen over it. Demonstrated:
+	// `--attr-source=HEAD` against a repository whose committed tree carries
+	// .gitattributes restored textconv execution.
+	"--attr-source": "it chooses which attributes apply, and attributes select programs Git runs",
 }
 
 // refusedGitGlobal reports the first global option this boundary will not

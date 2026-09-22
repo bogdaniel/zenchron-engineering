@@ -628,7 +628,7 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 	// the real one: the same BrokerGitCommand a shim would have reached.
 	guard, prepareErr := PrepareGitGuard(p.stateDir(request), request.AttemptRef(), request.CandidateDir, request.ScratchDir, []string{"/unused"})
 	if prepareErr != nil {
-		return result, err
+		return result, prepareErr
 	}
 	// FROM THE CANDIDATE, because that is where a worker stands when its shim
 	// runs. Called in-process from wherever the test binary happens to be, the
@@ -655,8 +655,11 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 		return result, brokerErr
 	}
 	refusals, readErr := ReadGitRefusals(guard.RefusalLog)
-	if readErr != nil || len(refusals) == 0 {
-		return result, err
+	if readErr != nil {
+		return result, readErr
+	}
+	if len(refusals) == 0 {
+		return result, fmt.Errorf("the brokered discard recorded no refusal")
 	}
 	// AND IT IS THE REFUSAL WE MEANT. Carrying "some refusal" into provenance
 	// would be satisfied by one recorded against an unrelated directory.
