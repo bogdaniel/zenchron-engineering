@@ -692,12 +692,6 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// Deliberately NOT a new class in ClassifyGitCommand. The taxonomy #253
 	// ordered and #255 benchmarks is untouched; this carries no class, the same
 	// way the context-establishment refusal does.
-	if key, writes := configWriteIntroducingAuthority(effective); writes {
-		return refuseGitCommand(candidateDir, refusalLog, effective,
-			"writing "+key+" into a repository names a program Git would run or moves where Git reads and writes; "+
-				"that configuration is the runtime's, not the provider's",
-			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
-	}
 	if verbRunsAConfiguredProgram(effective) {
 		_, verb, _ := splitGitCommand(effective)
 		return refuseGitCommand(candidateDir, refusalLog, effective,
@@ -709,9 +703,30 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// WHICH RESOURCE - asked only when the answer can change the decision. A
 	// permitted verb carrying no deferred override is permitted everywhere it
 	// was permitted before, so reads are untouched and pay no resolution cost.
+	configKey, writesAuthority := configWriteIntroducingAuthority(effective)
 	target := GitTargetClass("")
-	if class != GitOperationPermitted || len(deferred) > 0 {
+	if class != GitOperationPermitted || len(deferred) > 0 || writesAuthority {
 		target = targetOf(pinned, candidateDir, scratchDir)
+	}
+	// WHERE the configuration would land decides this, exactly as it decides
+	// the identity question below.
+	//
+	// A repository the attempt created is the provider's own sandbox: it can
+	// put what it likes in its own fixture, and the execution-time
+	// neutralization is what keeps that from mattering. Scoping this to the
+	// candidate is not a softening - it is the same resource law the rest of
+	// the boundary runs on.
+	//
+	// Found by self-hosting rather than by reasoning. The unscoped form refused
+	// this repository's OWN TestBrokeredDiffNeverRunsAnExternalDiffProgram,
+	// which arms diff.external in its fixture precisely to prove the broker
+	// never runs one. A boundary that stops a candidate from testing the
+	// boundary is the #241 failure mode wearing a different hat.
+	if writesAuthority && target != GitTargetRuntimeScratch {
+		return refuseGitCommand(candidateDir, refusalLog, effective,
+			"writing "+configKey+" into this repository names a program Git would run or moves where Git reads "+
+				"and writes; candidate configuration is the runtime's, not the provider's",
+			GitOperationClass(""), target, stderr)
 	}
 	// THE VERB IS ANSWERED FIRST, and that ordering is #253's law applied one
 	// layer along. `-c user.email=... reset --hard` against the candidate is a

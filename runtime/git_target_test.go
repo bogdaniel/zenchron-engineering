@@ -1178,6 +1178,36 @@ func armLocalConfig(t *testing.T, dir, section, name, key, value string) {
 	}
 }
 
+// TestAFixtureMayConfigureItself is the other side of the write-time rule, and
+// it exists because the unscoped version broke this repository's own tests.
+//
+// A repository the attempt created is the provider's sandbox. Refusing it
+// diff.external would have stopped
+// TestBrokeredDiffNeverRunsAnExternalDiffProgram - a test that arms exactly
+// that key to prove the broker never runs an external diff - from running under
+// its own boundary. What keeps a fixture's configuration from mattering is the
+// neutralization at execution, not a refusal at write time.
+func TestAFixtureMayConfigureItself(t *testing.T) {
+	requireGitFixture(t)
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	fixture := filepath.Join(scratch, "TestFixture1234567", "001")
+	initTargetRepo(t, candidate)
+	initTargetRepo(t, fixture)
+	log := filepath.Join(root, "refused.jsonl")
+
+	for _, argv := range [][]string{
+		{"config", "--local", "diff.external", "/tmp/x"},
+		{"config", "--local", "core.hooksPath", "/tmp/x"},
+		{"config", "--local", "filter.ff.clean", "/tmp/x"},
+	} {
+		if _, complaint := brokerGitFrom(t, fixture, candidate, scratch, log, argv...); strings.Contains(complaint, "Git refused:") {
+			t.Fatalf("a fixture could not configure itself: %v: %s", argv, complaint)
+		}
+	}
+}
+
 // TestSmudgeIsUnreachableOnTheVerbThatTriggersIt finishes the filter pair.
 //
 // filter.<driver>.clean runs on status, diff and add, and those are covered
@@ -1245,7 +1275,7 @@ func TestWritingAuthorityBearingConfigurationIsRefused(t *testing.T) {
 	log := filepath.Join(root, "refused.jsonl")
 	// Present beforehand, so that reading and unsetting it exercise the policy
 	// rather than Git's exit 5 for a key that was never there.
-	armLocalConfig(t, fixture, "core", "", "hooksPath", "/tmp/armed")
+	armLocalConfig(t, candidate, "core", "", "hooksPath", "/tmp/armed")
 
 	for name, tc := range map[string]struct {
 		argv    []string
@@ -1265,9 +1295,10 @@ func TestWritingAuthorityBearingConfigurationIsRefused(t *testing.T) {
 		"a fixture's own author": {[]string{"config", "user.email", "fixture@example.invalid"}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// Against the attempt's OWN scratch repository, so nothing here is
-			// explained by the resource boundary instead of the key policy.
-			code, complaint := brokerGitFrom(t, fixture, candidate, scratch, log, tc.argv...)
+			// AGAINST THE CANDIDATE, which is where this rule applies. A
+			// repository the attempt created is the provider's own sandbox and
+			// is covered by the scratch case below.
+			code, complaint := brokerGitFrom(t, candidate, candidate, scratch, log, tc.argv...)
 			// THE BOUNDARY'S refusal, not Git's own exit status. `git config`
 			// exits non-zero for ordinary reasons - 5 for a missing key - and
 			// reading a non-zero code as "the policy refused this" would let a
