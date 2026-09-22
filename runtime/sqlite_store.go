@@ -246,6 +246,21 @@ CREATE TABLE plan_approved_assignments (
 	document TEXT NOT NULL,
 	PRIMARY KEY (plan_id, revision, stage_id)
 );
+`, `
+-- One row per controller transition (#234). It is durable state rather than
+-- process state because the question it answers - which controller may recover
+-- this handoff - has to survive the crash of both parties, and a phase held in
+-- memory is a phase that disappears with the process that was mid-transition.
+--
+-- phase is a column of its own, beside the document that also carries it, so a
+-- transition can be a conditional UPDATE: the compare-and-set is what stops two
+-- processes from advancing the same handoff along two different paths.
+CREATE TABLE controller_handoffs (
+	id                TEXT PRIMARY KEY,
+	phase             TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
