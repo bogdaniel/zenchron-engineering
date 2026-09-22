@@ -52,7 +52,7 @@ func TestUnobservableControllerIsUnknownAndNotAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), `"role_held_by_this_process"`) {
+	if strings.Contains(string(encoded), `"role"`) {
 		t.Fatalf("an unobserved role was reported as a fact: %s", encoded)
 	}
 	var named bool
@@ -72,7 +72,7 @@ func TestReachableEndpointWithoutTheRoleIsNotAnOwner(t *testing.T) {
 	fixture := activatedFixture(t)
 	status, err := DescribeControllerStatus(fixture.store, fixture.root, func() (LiveControllerSnapshot, error) {
 		return LiveControllerSnapshot{
-			Identity: fixture.self, RoleHeldByThisProcess: false,
+			Identity: fixture.self, Role: RoleNotHeld,
 			WorkAdmission: AdmissionWithheld, ObservedAt: statusNow(),
 		}, nil
 	}, statusNow())
@@ -85,7 +85,7 @@ func TestReachableEndpointWithoutTheRoleIsNotAnOwner(t *testing.T) {
 	if status.DurableConsistency != DurableConsistent {
 		t.Fatalf("durable consistency = %q, want consistent", status.DurableConsistency)
 	}
-	if status.Live.Snapshot.RoleHeldByThisProcess {
+	if status.Live.Snapshot.Role == RoleHeld {
 		t.Fatal("reachability was read as role ownership")
 	}
 }
@@ -104,7 +104,7 @@ func TestActivatedAndNotServingIsConsistent(t *testing.T) {
 	}
 	status, err := DescribeControllerStatus(fixture.store, fixture.root, func() (LiveControllerSnapshot, error) {
 		return LiveControllerSnapshot{
-			Identity: fixture.self, RoleHeldByThisProcess: true,
+			Identity: fixture.self, Role: RoleHeld,
 			WorkAdmission: AdmissionClosed, ObservedAt: statusNow(),
 		}, nil
 	}, statusNow())
@@ -139,13 +139,13 @@ func TestDrainedPredecessorIsObservableWithoutBeingAViolation(t *testing.T) {
 		mustName string
 	}{
 		{"drained and holding nothing", LiveControllerSnapshot{
-			Identity: predecessor, RoleHeldByThisProcess: false, WorkAdmission: AdmissionClosed,
+			Identity: predecessor, Role: RoleNotHeld, WorkAdmission: AdmissionClosed,
 		}, DurableConsistent, "durably active"},
 		{"still admitting work", LiveControllerSnapshot{
-			Identity: predecessor, RoleHeldByThisProcess: false, WorkAdmission: AdmissionOpen,
+			Identity: predecessor, Role: RoleNotHeld, WorkAdmission: AdmissionOpen,
 		}, DurableViolation, "admitting work"},
 		{"still holding the role", LiveControllerSnapshot{
-			Identity: predecessor, RoleHeldByThisProcess: true, WorkAdmission: AdmissionClosed,
+			Identity: predecessor, Role: RoleHeld, WorkAdmission: AdmissionClosed,
 		}, DurableViolation, "holds the controller role"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -194,7 +194,7 @@ func TestDurableStateMovingDuringCollectionIsNotAViolation(t *testing.T) {
 		}
 		// Observed state that WOULD look like a violation against the old read.
 		return LiveControllerSnapshot{
-			Identity: predecessor, RoleHeldByThisProcess: true,
+			Identity: predecessor, Role: RoleHeld,
 			WorkAdmission: AdmissionOpen, ObservedAt: statusNow(),
 		}, nil
 	}, statusNow())
@@ -270,7 +270,7 @@ func TestStatusCarriesProvenanceAndAVersionedSchema(t *testing.T) {
 	}
 	// The live half is the service's own coherent snapshot, and it knows it
 	// holds the role because it exercised the capability to find out.
-	if !status.Live.Snapshot.RoleHeldByThisProcess {
+	if status.Live.Snapshot.Role != RoleHeld {
 		t.Fatal("the serving process did not observe its own role")
 	}
 	if status.Live.Snapshot.WorkAdmission != AdmissionClosed {
@@ -283,14 +283,140 @@ func TestStatusCarriesProvenanceAndAVersionedSchema(t *testing.T) {
 func TestLiveSnapshotFollowsTheCapability(t *testing.T) {
 	fixture := activatedFixture(t)
 	snapshot := fixture.service.DescribeLiveController(fixture.record.ID, statusNow())
-	if !snapshot.RoleHeldByThisProcess {
+	if snapshot.Role != RoleHeld {
 		t.Fatal("a live service did not observe its own role")
 	}
 	if err := fixture.service.lease.Release(); err != nil {
 		t.Fatal(err)
 	}
 	after := fixture.service.DescribeLiveController(fixture.record.ID, statusNow())
-	if after.RoleHeldByThisProcess {
-		t.Fatal("a released lease was still observed as held")
+	if after.Role != RoleNotHeld {
+		t.Fatalf("a released lease was observed as %q, want not_held", after.Role)
+	}
+}
+
+// ACTIVATED, ROLE HELD, ADMISSION CLOSED, POINTER CURRENT is a legitimate
+// transient - the state #276 leaves between activation and opening service -
+// and must not classify as a broken invariant.
+func TestActivatedAndHoldingWithoutServingIsValid(t *testing.T) {
+	fixture := activatedFixture(t)
+	status, err := DescribeControllerStatus(fixture.store, fixture.root, func() (LiveControllerSnapshot, error) {
+		return fixture.service.DescribeLiveController(fixture.record.ID, statusNow()), nil
+	}, statusNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.DurableConsistency != DurableConsistent {
+		t.Fatalf("durable consistency = %q, want consistent (findings %v)", status.DurableConsistency, status.Findings)
+	}
+	if status.Serving != NotServing {
+		t.Fatalf("serving = %q, want not_serving", status.Serving)
+	}
+	if status.Projection.State != ProjectionCurrent {
+		t.Fatalf("projection = %q, want current", status.Projection.State)
+	}
+	if status.Live.Snapshot.Role != RoleHeld {
+		t.Fatal("the activated controller did not observe its own role")
+	}
+}
+
+// REACHING THE RIGHT PROCESS IS NOT OBSERVING ITS SERVICE. An endpoint that
+// answers identity without reporting role or admission leaves both unknown, and
+// serving stays unknown with it.
+func TestReachableRightGenerationWithUnreportedFactsStaysUnknown(t *testing.T) {
+	fixture := activatedFixture(t)
+	status, err := DescribeControllerStatus(fixture.store, fixture.root, func() (LiveControllerSnapshot, error) {
+		// Identity only: the zero values of the other two mean unknown.
+		return LiveControllerSnapshot{Identity: fixture.self, ObservedAt: statusNow()}, nil
+	}, statusNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Serving != ServingUnknown {
+		t.Fatalf("serving = %q, want unknown: identity is not service authority", status.Serving)
+	}
+	if status.DurableConsistency != DurableConsistent {
+		t.Fatalf("durable consistency = %q, want consistent", status.DurableConsistency)
+	}
+	// Both gaps are named rather than silently defaulted.
+	var admission, role bool
+	for _, finding := range status.Findings {
+		if strings.Contains(finding, "work admission") {
+			admission = true
+		}
+		if strings.Contains(finding, "role ownership") {
+			role = true
+		}
+	}
+	if !admission || !role {
+		t.Fatalf("findings %v do not name both unobserved facts", status.Findings)
+	}
+	// And neither absence serializes as a positive claim.
+	encoded, err := json.Marshal(status.Live.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"role"`) || strings.Contains(string(encoded), `"work_admission"`) {
+		t.Fatalf("an unobserved fact was serialized as a value: %s", encoded)
+	}
+}
+
+// THE UPDATE RESULT STAYS DIMENSIONAL. A projection that did not follow is a
+// completed succession with a stale pointer, not a failed one.
+func TestUpdateResultKeepsActivationAndProjectionApart(t *testing.T) {
+	succeeded := func() ControllerUpdateResult {
+		var result ControllerUpdateResult
+		result.Schema, result.HandoffID = ControllerUpdateSchema, "handoff-1"
+		result.Activation.Outcome, result.Activation.Phase = UpdateSucceeded, HandoffActivated
+		result.Projection.Outcome = UpdateSucceeded
+		result.WorkAdmission.Outcome = UpdateSucceeded
+		result.Predecessor.Outcome = UpdateSucceeded
+		return result
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*ControllerUpdateResult)
+		want   UpdateOutcome
+	}{
+		{"everything worked", nil, UpdateCompleted},
+		{"the pointer did not follow", func(r *ControllerUpdateResult) {
+			r.Projection.Outcome, r.Projection.Detail = UpdateDrifted, "a directory occupies the entrypoint"
+		}, UpdateCompletedWithDrift},
+		{"the projection repair failed outright", func(r *ControllerUpdateResult) {
+			r.Projection.Outcome = UpdateFailed
+		}, UpdateCompletedWithDrift},
+		{"the activation failed", func(r *ControllerUpdateResult) {
+			r.Activation.Outcome = UpdateFailed
+		}, UpdateFailed},
+		{"service could not be opened", func(r *ControllerUpdateResult) {
+			r.WorkAdmission.Outcome = UpdateFailed
+		}, UpdateFailed},
+		// The predecessor lingering is worth reporting and is not a failure of
+		// the succession: it is drained and holds nothing.
+		{"the predecessor has not exited yet", func(r *ControllerUpdateResult) {
+			r.Predecessor.Outcome = UpdateSkipped
+		}, UpdateCompleted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := succeeded()
+			if test.mutate != nil {
+				test.mutate(&result)
+			}
+			result.settle()
+			if result.Overall != test.want {
+				t.Fatalf("overall = %q, want %q", result.Overall, test.want)
+			}
+			// The dimensions survive into the document whatever the overall says.
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{`"activation"`, `"projection"`, `"work_admission"`, `"predecessor"`, `"schema"`} {
+				if !strings.Contains(string(encoded), field) {
+					t.Fatalf("the result dropped %s: %s", field, encoded)
+				}
+			}
+		})
 	}
 }

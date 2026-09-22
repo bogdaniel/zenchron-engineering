@@ -88,12 +88,32 @@ const (
 )
 
 // WorkAdmissionState is what a live controller says about its own gate.
+//
+// THE ZERO VALUE IS UNKNOWN, deliberately. A partially populated observation
+// must not read as "closed": not observed is not the same as observed to be
+// false, and the difference between them is the difference between "nobody is
+// serving" and "nobody looked".
 type WorkAdmissionState string
 
 const (
+	AdmissionUnknown  WorkAdmissionState = ""
 	AdmissionOpen     WorkAdmissionState = "open"
 	AdmissionWithheld WorkAdmissionState = "withheld"
 	AdmissionClosed   WorkAdmissionState = "closed"
+)
+
+// RoleObservation is what a live controller says about its own role, and the
+// zero value is unknown for the same reason.
+//
+// It is not a bool. A bool has no third state, so an observation that could not
+// establish role ownership would serialize as false - a positive claim nobody
+// made, about the one fact this architecture is most careful never to infer.
+type RoleObservation string
+
+const (
+	RoleUnknown RoleObservation = ""
+	RoleHeld    RoleObservation = "held"
+	RoleNotHeld RoleObservation = "not_held"
 )
 
 // LiveControllerSnapshot is ONE coherent observation a serving process makes of
@@ -105,13 +125,13 @@ const (
 // role gone, when in truth the drain closed one before releasing the other.
 type LiveControllerSnapshot struct {
 	Identity ControllerSelfRecord `json:"identity"`
-	// RoleHeldByThisProcess is derived by EXERCISING the capability, not by
-	// consulting a boolean. There is no Held() to read; the only way to learn
-	// this is to do something under the lease and see whether it was allowed.
-	RoleHeldByThisProcess bool               `json:"role_held_by_this_process"`
-	WorkAdmission         WorkAdmissionState `json:"work_admission"`
-	HandoffID             string             `json:"handoff_id,omitempty"`
-	ObservedAt            time.Time          `json:"observed_at"`
+	// Role is derived by EXERCISING the capability, not by consulting a flag.
+	// There is no Held() to read; the only way to learn this is to do something
+	// under the lease and see whether it was allowed.
+	Role          RoleObservation    `json:"role,omitempty"`
+	WorkAdmission WorkAdmissionState `json:"work_admission,omitempty"`
+	HandoffID     string             `json:"handoff_id,omitempty"`
+	ObservedAt    time.Time          `json:"observed_at"`
 }
 
 // DurableActive is the generation the durable record says is active.
@@ -119,7 +139,13 @@ type DurableActive struct {
 	Generation *ControllerBuild `json:"generation,omitempty"`
 	HandoffID  string           `json:"handoff_id,omitempty"`
 	Phase      HandoffPhase     `json:"phase,omitempty"`
-	Source     Provenance       `json:"source"`
+	// ArtifactDir is where the record says the active generation lives, and it
+	// is what the projection is compared against. Matching on the directory's
+	// NAME instead would be comparing a convention - build-adopted happens to
+	// name generation directories after their version - and a convention is not
+	// a fact the record asserts.
+	ArtifactDir string     `json:"artifact_dir,omitempty"`
+	Source      Provenance `json:"source"`
 }
 
 // ProjectionObservation is the stable entrypoint, and only that.
@@ -221,6 +247,9 @@ func describeDurableActive(store handoffStore) (DurableActive, error) {
 		active.Generation = record.Successor.Binding.Build
 		active.HandoffID = record.ID
 		active.Phase = record.Phase
+		if record.Successor.ArtifactPath != "" {
+			active.ArtifactDir = filepath.Dir(record.Successor.ArtifactPath)
+		}
 		return active, nil
 	}
 	// An unsettled transition is still worth naming: an operator whose upgrade
@@ -241,6 +270,9 @@ func describeDurableActive(store handoffStore) (DurableActive, error) {
 // genuinely moved world stable.
 func sameTransition(before, after DurableActive) bool {
 	if before.HandoffID != after.HandoffID || before.Phase != after.Phase {
+		return false
+	}
+	if before.ArtifactDir != after.ArtifactDir {
 		return false
 	}
 	if (before.Generation == nil) != (after.Generation == nil) {
@@ -270,13 +302,14 @@ func describeProjection(controllerRoot string, durable DurableActive) Projection
 		return observation
 	}
 	observation.Target = target
-	if durable.Generation == nil {
-		// Nothing is durably active, so there is nothing for the pointer to
-		// disagree with. Reporting drift here would invent a comparison.
+	if durable.Generation == nil || durable.ArtifactDir == "" {
+		// Nothing durably active, or a record that does not say where the
+		// active artifact lives: there is nothing for the pointer to disagree
+		// with, and reporting drift would invent a comparison.
 		observation.State = ProjectionCurrent
 		return observation
 	}
-	if filepath.Base(target) == durable.Generation.Version {
+	if target == durable.ArtifactDir {
 		observation.State = ProjectionCurrent
 		return observation
 	}
@@ -300,10 +333,20 @@ func (s *ControllerStatus) classify() {
 		return
 	}
 	live := s.Live.Snapshot
-	if live.WorkAdmission == AdmissionOpen {
+	switch live.WorkAdmission {
+	case AdmissionOpen:
 		s.Serving = Serving
-	} else {
+	case AdmissionUnknown:
+		// REACHING THE RIGHT PROCESS IS NOT OBSERVING ITS SERVICE. An endpoint
+		// that answered without saying whether it admits work leaves the
+		// question open, and identity does not close it.
+		s.Serving = ServingUnknown
+		s.Findings = append(s.Findings, "the observed controller did not report its work admission")
+	default:
 		s.Serving = NotServing
+	}
+	if live.Role == RoleUnknown {
+		s.Findings = append(s.Findings, "the observed controller did not report its role ownership")
 	}
 	if s.Durable.Generation == nil {
 		return
@@ -319,11 +362,14 @@ func (s *ControllerStatus) classify() {
 	s.Findings = append(s.Findings, fmt.Sprintf(
 		"the observed controller is generation %q while %q is durably active",
 		live.Identity.Build.Version, activeGeneration.Version))
+	// ONLY POSITIVE OBSERVATIONS CONVICT. An unknown role or an unreported gate
+	// is not evidence of a violation; overlapping LIVENESS is ordinary during an
+	// upgrade, and what the protocol forbids is overlapping AUTHORITY.
 	if live.WorkAdmission == AdmissionOpen {
 		s.DurableConsistency = DurableViolation
 		s.Findings = append(s.Findings, "a controller that is not the durably active generation is admitting work")
 	}
-	if live.RoleHeldByThisProcess {
+	if live.Role == RoleHeld {
 		s.DurableConsistency = DurableViolation
 		s.Findings = append(s.Findings, "a controller that is not the durably active generation holds the controller role")
 	}
@@ -340,8 +386,9 @@ func (s *ControllerService) DescribeLiveController(handoffID string, now time.Ti
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := LiveControllerSnapshot{Identity: s.self, HandoffID: handoffID, ObservedAt: now}
+	snapshot.Role = RoleNotHeld
 	if err := s.lease.WithAuthority(func() error { return nil }); err == nil {
-		snapshot.RoleHeldByThisProcess = true
+		snapshot.Role = RoleHeld
 	}
 	switch {
 	case s.admission == nil:
@@ -352,4 +399,80 @@ func (s *ControllerService) DescribeLiveController(handoffID string, now time.Ti
 		snapshot.WorkAdmission = AdmissionClosed
 	}
 	return snapshot
+}
+
+// ---------------------------------------------------------------------------
+// The update result
+// ---------------------------------------------------------------------------
+
+// ControllerUpdateSchema versions the machine-readable succession result, for
+// the same reason the status document is versioned.
+const ControllerUpdateSchema = "zenchron.controller-update/v1"
+
+// Update outcomes, per dimension. They are separate because the protocol has
+// already established that they fail separately: an activation that succeeded
+// with a projection that did not is a COMPLETED succession with a stale
+// pointer, and one boolean cannot say that.
+type UpdateOutcome string
+
+const (
+	UpdateSucceeded          UpdateOutcome = "succeeded"
+	UpdateFailed             UpdateOutcome = "failed"
+	UpdateSkipped            UpdateOutcome = "skipped"
+	UpdateDrifted            UpdateOutcome = "drift"
+	UpdateCompleted          UpdateOutcome = "completed"
+	UpdateCompletedWithDrift UpdateOutcome = "completed_with_drift"
+)
+
+// ControllerUpdateResult is what a succession reports. Every dimension the
+// protocol treats as independent is reported independently, and the overall
+// line is derived from them rather than replacing them.
+type ControllerUpdateResult struct {
+	Schema    string    `json:"schema"`
+	HandoffID string    `json:"handoff_id"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at"`
+
+	Activation struct {
+		Outcome UpdateOutcome `json:"outcome"`
+		Phase   HandoffPhase  `json:"phase,omitempty"`
+		Detail  string        `json:"detail,omitempty"`
+	} `json:"activation"`
+	Successor struct {
+		Generation *ControllerBuild `json:"generation,omitempty"`
+		Role       RoleObservation  `json:"role,omitempty"`
+	} `json:"successor"`
+	Projection struct {
+		Outcome UpdateOutcome `json:"outcome"`
+		Detail  string        `json:"detail,omitempty"`
+	} `json:"projection"`
+	WorkAdmission struct {
+		Outcome UpdateOutcome `json:"outcome"`
+		Detail  string        `json:"detail,omitempty"`
+	} `json:"work_admission"`
+	Predecessor struct {
+		Outcome UpdateOutcome `json:"outcome"`
+		Detail  string        `json:"detail,omitempty"`
+	} `json:"predecessor"`
+
+	Overall UpdateOutcome `json:"overall"`
+}
+
+// settle derives the overall line from the dimensions.
+//
+// A FAILED PROJECTION DOES NOT FAIL THE SUCCESSION, which is the whole reason
+// this result is dimensional: #276 established that authority is durable and
+// the pointer is a repairable projection of it, and collapsing the two here
+// would undo that at the last moment, in the place an operator actually reads.
+func (r *ControllerUpdateResult) settle() {
+	switch {
+	case r.Activation.Outcome != UpdateSucceeded:
+		r.Overall = UpdateFailed
+	case r.WorkAdmission.Outcome == UpdateFailed:
+		r.Overall = UpdateFailed
+	case r.Projection.Outcome == UpdateDrifted || r.Projection.Outcome == UpdateFailed:
+		r.Overall = UpdateCompletedWithDrift
+	default:
+		r.Overall = UpdateCompleted
+	}
 }

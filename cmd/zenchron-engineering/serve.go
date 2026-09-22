@@ -73,6 +73,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 		return runtime.ExitInvalid, err
 	}
 	defer func() { _ = role.Release() }()
+	built.role = role
 
 	// The control endpoint is opened before any work is driven, so an operator
 	// can reach a supervisor that is starting up. It proves nothing about
@@ -292,6 +293,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	switch request.Command {
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
+	case runtime.ControlCommandControllerSnapshot:
+		// READ-ONLY, and one coherent observation rather than three reads: the
+		// role and the gate move together during a drain, so sampling them
+		// separately could report a pair that never existed.
+		return controlOK(c.controllerSnapshot(supervisor))
 	case runtime.ControlSubmit:
 		outcome, err := supervisor.Submit(ctx, request)
 		if err != nil {
@@ -1020,4 +1026,35 @@ func sortedIssues(issues []int) []int {
 	out := append([]int(nil), issues...)
 	sort.Ints(out)
 	return out
+}
+
+// controllerSnapshot is this process's answer about itself: which generation it
+// is, whether it still holds the controller role, and whether it is admitting
+// work.
+//
+// The role fact comes from EXERCISING the lease rather than from reading a
+// flag, which is the only honest way to answer it - there is deliberately no
+// Held(). An identity this process cannot establish leaves the identity empty
+// rather than guessed, and the status model reads an unpopulated field as
+// unknown.
+func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime.LiveControllerSnapshot {
+	snapshot := runtime.LiveControllerSnapshot{ObservedAt: time.Now().UTC()}
+	if self, err := controllerSelf(); err == nil {
+		snapshot.Identity = self
+	}
+	snapshot.Role = runtime.RoleNotHeld
+	if c.role != nil {
+		if err := c.role.WithAuthority(func() error { return nil }); err == nil {
+			snapshot.Role = runtime.RoleHeld
+		}
+	}
+	switch {
+	case supervisor == nil:
+		snapshot.WorkAdmission = runtime.AdmissionUnknown
+	case supervisor.AdmittingWork():
+		snapshot.WorkAdmission = runtime.AdmissionOpen
+	default:
+		snapshot.WorkAdmission = runtime.AdmissionClosed
+	}
+	return snapshot
 }
