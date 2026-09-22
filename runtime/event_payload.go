@@ -1124,7 +1124,7 @@ var planPayloads = map[string]payloadValidator{
 		for _, refusal := range p.Refusals() {
 			return fmt.Errorf("a compatible decision carries no refusal, got %s", refusal)
 		}
-		return required("run_id", p.RunID)
+		return errors.Join(required("run_id", p.RunID), required("handoff_id", p.HandoffID))
 	}),
 	EventPlanAttemptRefused: payloadSchema(func(p PlanAttemptRefusedPayload) error {
 		if p.Revision < 1 {

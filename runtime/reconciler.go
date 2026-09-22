@@ -210,7 +210,7 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own
 		// journal; everything without that evidence parks exactly as before.
-		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller),
+		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller, r.activatedHandoffs()),
 	}
 	for _, op := range state.succeeded(OpSourceObserve) {
 		var record sourceRecord

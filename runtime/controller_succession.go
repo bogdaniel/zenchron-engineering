@@ -108,7 +108,21 @@ const (
 // continue one run. It names both parties exactly, records each dimension
 // separately, and is the payload of the journalled admission.
 type ControllerSuccessionDecision struct {
-	RunID       string            `json:"run_id"`
+	RunID string `json:"run_id"`
+	// HandoffID is the transition this decision was made for, and it is what
+	// stops an admission from outliving its occasion.
+	//
+	// Without it an admission is a standing capability: a transition that
+	// wrote admissions and then FAILED left every one of those runs saying the
+	// successor may append, forever, under any later circumstance. That was
+	// inert only because work admission is computed elsewhere, which makes the
+	// safety of the journal depend on a rule the journal does not state - and
+	// a latent capability that is safe by coincidence is not safe.
+	//
+	// Bound this way, the evidence means "the successor may continue this run
+	// IF transition H activates", and a transition that never activates leaves
+	// evidence that never means anything.
+	HandoffID   string            `json:"handoff_id"`
 	Predecessor ControllerBinding `json:"predecessor"`
 	Successor   ControllerBinding `json:"successor"`
 
@@ -311,10 +325,21 @@ func evaluateReplay(in ControllerSuccessionInput) SuccessionCheck {
 // the run currently stands is ignored rather than applied out of order - so a
 // stale decision recorded against an earlier generation cannot reattach a
 // controller the run has already succeeded past.
-func ControllerSuccessionContinues(run EngineeringRun, events []EngineeringEvent, controller string) bool {
+// activatedHandoffs answers whether one transition reached activation. It is a
+// predicate rather than a store so the chain rule stays a pure function over
+// (run, journal, authority), and so a caller that has already read the handoff
+// table once does not read it again per run.
+type activatedHandoffs func(handoffID string) bool
+
+func ControllerSuccessionContinues(run EngineeringRun, events []EngineeringEvent, controller string, activated activatedHandoffs) bool {
 	current := run.ControllerSHA256
 	if current == controller {
 		return true
+	}
+	if activated == nil {
+		// NO AUTHORITY ORACLE, NO SUCCESSION. A caller that cannot say which
+		// transitions activated cannot be told that one did.
+		return false
 	}
 	for _, event := range events {
 		if event.Type != EventControllerSuccessionAdmitted {
@@ -330,6 +355,12 @@ func ControllerSuccessionContinues(run EngineeringRun, events []EngineeringEvent
 		if decision.Result != SuccessionCompatible {
 			continue
 		}
+		// THE OCCASION MUST HAVE HAPPENED. An admission whose transition failed,
+		// or has not activated yet, grants nothing: it was evidence for a
+		// succession that the control model never adopted.
+		if decision.HandoffID == "" || !activated(decision.HandoffID) {
+			continue
+		}
 		from, fromErr := decision.Predecessor.Digest()
 		to, toErr := decision.Successor.Digest()
 		if fromErr != nil || toErr != nil || from != current {
@@ -341,6 +372,44 @@ func ControllerSuccessionContinues(run EngineeringRun, events []EngineeringEvent
 		}
 	}
 	return false
+}
+
+// alreadyAdmitted reports whether this exact evidence - this transition, this
+// successor - is already in the journal.
+func alreadyAdmitted(events []EngineeringEvent, handoffID, successor string) bool {
+	for _, event := range events {
+		if event.Type != EventControllerSuccessionAdmitted || len(event.Payload) == 0 {
+			continue
+		}
+		var recorded ControllerSuccessionDecision
+		if decodeJSON(event.Payload, &recorded) != nil || recorded.HandoffID != handoffID {
+			continue
+		}
+		if digest, err := recorded.Successor.Digest(); err == nil && digest == successor {
+			return true
+		}
+	}
+	return false
+}
+
+// activatedHandoffs reads which transitions this state directory records as
+// activated. It is the runtime's authority oracle for the chain rule, and it
+// reads the handoff table rather than anything live.
+func (r *EngineeringRuntime) activatedHandoffs() activatedHandoffs {
+	records, err := r.deps.Store.ControllerHandoffs()
+	if err != nil {
+		// FAIL CLOSED. "I could not read which transitions activated" is not
+		// "none did" for authority purposes, but it is the only safe answer
+		// here: an unreadable table must not promote a successor.
+		return func(string) bool { return false }
+	}
+	activated := make(map[string]bool, len(records))
+	for _, record := range records {
+		if record.Phase == HandoffActivated {
+			activated[record.ID] = true
+		}
+	}
+	return func(id string) bool { return activated[id] }
 }
 
 // AdmitControllerSuccession records that this run may be continued by the
@@ -364,6 +433,9 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	if decision.RunID != runID {
 		return fmt.Errorf("the decision names run %q and was offered for run %q", decision.RunID, runID)
 	}
+	if decision.HandoffID == "" {
+		return fmt.Errorf("a succession admission names the transition it was decided for")
+	}
 	run, ok, err := r.deps.Store.Run(runID)
 	if err != nil {
 		return err
@@ -379,9 +451,15 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	if err != nil {
 		return err
 	}
-	if ControllerSuccessionContinues(run, events, successor) {
+	// IDEMPOTENCE IS ABOUT THE RECORD, NOT ABOUT AUTHORITY. Asking "does the
+	// successor already continue this run" would answer no for an admission
+	// whose transition has not activated yet - which is every admission at the
+	// moment it is written - and a retry would then try to append the same
+	// evidence twice.
+	if alreadyAdmitted(events, decision.HandoffID, successor) {
 		return nil
 	}
+	activated := r.activatedHandoffs()
 	predecessor, err := decision.Predecessor.Digest()
 	if err != nil {
 		return err
@@ -389,7 +467,7 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	// THE TRANSITION MUST START WHERE THE RUN STANDS. Admitting one whose
 	// predecessor the run has already succeeded past would record a branch in
 	// a line that has to stay a line.
-	if !ControllerSuccessionContinues(run, events, predecessor) {
+	if !ControllerSuccessionContinues(run, events, predecessor, activated) {
 		return fmt.Errorf("run %s is not currently continued by the decision's predecessor", runID)
 	}
 	payload, err := marshalPayloadJSON(decision)
@@ -400,7 +478,7 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 		SchemaVersion: SchemaVersion,
 		// Deterministic in the transition, so the same succession cannot be
 		// journalled twice even if two callers race past the check above.
-		ID:         fmt.Sprintf("%s-controller-succession-%s", runID, shortSHA(successor)),
+		ID:         fmt.Sprintf("%s-controller-succession-%s-%s", runID, shortSHA(successor), decision.HandoffID),
 		RunID:      runID,
 		Type:       EventControllerSuccessionAdmitted,
 		OccurredAt: r.deps.Clock.Now(),
