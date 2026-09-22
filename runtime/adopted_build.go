@@ -801,7 +801,17 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 		return BuildEnvironment{}, err
 	}
 
-	if _, err := sandbox.run(ctx, adoptedBuildArgs(spec)); err != nil {
+	// The container's own stderr is the only account of WHY the compiler
+	// refused - a read-only --output, a module missing from the offline
+	// cache, an image that cannot run - and the caller has no run journal to
+	// fall back on, since none exists yet. It is captured bounded (the
+	// executor already ran it through boundedBuffer) and sanitised the same
+	// way an assurance transcript is before it reaches an operator.
+	out, err := sandbox.run(ctx, adoptedBuildArgs(spec))
+	if err != nil {
+		if detail := sanitizedDetail(compilerFailureDetail(out)); detail != "" {
+			return BuildEnvironment{}, fmt.Errorf("%w: %s", err, detail)
+		}
 		return BuildEnvironment{}, err
 	}
 
@@ -847,6 +857,18 @@ func adoptedBuildArgs(spec AdoptedBuildSpec) []string {
 	args = append(args, envArgs(adoptedBuildEnvironment(spec)...)...)
 	return append(args, spec.Sandbox.Image, "go", "build", "-trimpath",
 		"-ldflags", ldflags, "-o", "/out/"+filepath.Base(spec.Output), "./cmd/zenchron-engineering")
+}
+
+// compilerFailureDetail prefers stderr, since that is where `go build` writes
+// a compile failure, and falls back to stdout for a toolchain that used it
+// instead. It returns "" rather than the bare process error when the
+// container produced no output at all - a sandbox that never started has
+// nothing to add beyond what the caller's own error already says.
+func compilerFailureDetail(out CommandOutput) string {
+	if detail := strings.TrimSpace(string(out.Stderr)); detail != "" {
+		return detail
+	}
+	return strings.TrimSpace(string(out.Stdout))
 }
 
 // adoptedBuildToolchain records WHICH compiler ran, measured from the pinned
