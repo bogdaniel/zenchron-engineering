@@ -996,3 +996,75 @@ func TestRepositoryLocalConfigCannotRunAProgram(t *testing.T) {
 		t.Fatalf("a repository-local hook discarded candidate work: %q", body)
 	}
 }
+
+// TestAttributeSelectedProgramsAreUnreachable closes the family a pin could not.
+//
+// core.hooksPath and core.fsmonitor are single fixed keys. These four are not:
+// the driver name is chosen by the provider, in a `.gitattributes` the provider
+// also writes, so `diff.<anything>.textconv` has no key to pin and
+// configuration has no equivalent of the environment's prefix rule.
+//
+// What is fixed is the attribute LOOKUP. With the attribute source pointed at
+// the empty tree no path carries any attribute, so no driver is selected and
+// none of the four is reachable whatever it is named.
+//
+// Every case arms the candidate and then uses a verb that is PERMITTED against
+// it, because the point is not that a refusal happens - it is that an
+// authorized operation does not execute provider code.
+func TestAttributeSelectedProgramsAreUnreachable(t *testing.T) {
+	requireGitFixture(t)
+
+	for name, tc := range map[string]struct {
+		key        string
+		attributes string
+		verb       []string
+	}{
+		"textconv through diff":   {"diff.zz.textconv", "f diff=zz\n", []string{"diff"}},
+		"textconv through log -p": {"diff.zz.textconv", "f diff=zz\n", []string{"log", "-p", "-1"}},
+		"textconv through show":   {"diff.zz.textconv", "f diff=zz\n", []string{"show", "HEAD"}},
+		"textconv through blame":  {"diff.zz.textconv", "f diff=zz\n", []string{"blame", "f"}},
+		"external diff command":   {"diff.zz.command", "f diff=zz\n", []string{"diff"}},
+		"clean filter on status":  {"filter.ff.clean", "f filter=ff\n", []string{"status", "--porcelain"}},
+		"clean filter on diff":    {"filter.ff.clean", "f filter=ff\n", []string{"diff"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			candidate := filepath.Join(root, "candidate")
+			scratch := filepath.Join(root, "scratch")
+			initTargetRepo(t, candidate)
+			log := filepath.Join(root, "refused.jsonl")
+
+			witness := filepath.Join(root, "ran")
+			program := filepath.Join(root, "program")
+			body := "#!/bin/sh\necho ran > " + witness + "\ncat >/dev/null 2>&1\nexit 0\n"
+			if err := os.WriteFile(program, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(candidate, ".gitattributes"), []byte(tc.attributes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// PRE-EXISTING CONFIGURATION, appended to .git/config directly
+			// rather than written through the broker. A repository can arrive
+			// carrying this, so closing the write path would not close this.
+			config := filepath.Join(candidate, ".git", "config")
+			existing, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			section, leaf, _ := strings.Cut(tc.key, ".")
+			driver, field, _ := strings.Cut(leaf, ".")
+			stanza := "\n[" + section + " \"" + driver + "\"]\n\t" + field + " = " + program + "\n"
+			if err := os.WriteFile(config, append(existing, []byte(stanza)...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			makeDirty(t, candidate, "modified content\n")
+
+			if code, out := brokerGitFrom(t, candidate, candidate, scratch, log, tc.verb...); code != 0 {
+				t.Fatalf("a permitted read was refused: %d %s", code, out)
+			}
+			if _, err := os.Stat(witness); err == nil {
+				t.Fatalf("%s executed on a permitted read of the candidate", tc.key)
+			}
+		})
+	}
+}

@@ -860,6 +860,12 @@ var brokerGitStripped = map[string]bool{
 // would be worse than their presence: without GIT_TERMINAL_PROMPT=0 a brokered
 // command can block on a credential prompt, and without the configuration pins
 // Git falls back to discovering the host user's system and global files.
+// emptyTreeObject is Git's empty tree, the same value in every repository ever
+// created. Naming it as the attribute source means no path matches any
+// attribute, which is what makes the driver families below unselectable rather
+// than individually pinned.
+const emptyTreeObject = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 var brokerGitPins = []string{
 	"GIT_CONFIG_NOSYSTEM=1",
 	"GIT_CONFIG_SYSTEM=/dev/null",
@@ -949,7 +955,27 @@ func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, erro
 	// configuration the way there is for the environment. Classifying
 	// repository-local configuration the way argv and the environment are
 	// classified needs its own design, and is #262.
+	// ATTRIBUTES SELECT PROGRAMS, and that is the mechanism behind four
+	// execution surfaces rather than one:
+	//
+	//	diff.<driver>.textconv   run by diff, log -p, show, blame
+	//	diff.<driver>.command    run by diff, with no flag at all
+	//	filter.<driver>.clean    run by status, diff and add
+	//	filter.<driver>.smudge   run by checkout
+	//
+	// The driver name is arbitrary and the `.gitattributes` selecting it is
+	// provider-controlled, so there is no fixed key to pin, and configuration
+	// has no equivalent of the environment's prefix rule. What IS fixed is the
+	// attribute lookup. Point it at the empty tree and no path carries any
+	// attribute, so no driver is ever selected and none of the four is
+	// reachable whatever it is called.
+	//
+	// It is passed as a command-line global rather than as GIT_ATTR_SOURCE
+	// deliberately. A Git too old to know the variable ignores it silently and
+	// the protection is simply absent; a Git too old to know the OPTION exits
+	// 129. The boundary fails closed on the version it cannot defend.
 	cmd := exec.Command(binary, append([]string{
+		"--attr-source=" + emptyTreeObject,
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
 	}, args...)...)
