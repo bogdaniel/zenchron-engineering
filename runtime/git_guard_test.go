@@ -630,13 +630,38 @@ func (p *discardAttemptingProvider) Execute(ctx context.Context, request Executi
 	if prepareErr != nil {
 		return result, err
 	}
-	if _, brokerErr := BrokerGitCommand(request.CandidateDir, request.ScratchDir, guard.RefusalLog,
-		[]string{"checkout", "--", "."}, io.Discard, io.Discard); brokerErr != nil {
+	// FROM THE CANDIDATE, because that is where a worker stands when its shim
+	// runs. Called in-process from wherever the test binary happens to be, the
+	// broker classifies the TEST'S directory and records external_or_unknown -
+	// still a refusal, so the provenance assertion downstream passes either
+	// way, and passes just as well if candidate classification broke entirely.
+	//
+	// The broker moves its own working directory and does not move it back,
+	// which is correct for the one-shot process it normally is and is not
+	// correct for an in-process caller, so the restore is this caller's job.
+	previous, wdErr := os.Getwd()
+	if wdErr != nil {
+		return result, err
+	}
+	if chErr := os.Chdir(request.CandidateDir); chErr != nil {
+		return result, err
+	}
+	_, brokerErr := BrokerGitCommand(request.CandidateDir, request.ScratchDir, guard.RefusalLog,
+		[]string{"checkout", "--", "."}, io.Discard, io.Discard)
+	if restoreErr := os.Chdir(previous); restoreErr != nil {
+		return result, err
+	}
+	if brokerErr != nil {
 		return result, err
 	}
 	refusals, readErr := ReadGitRefusals(guard.RefusalLog)
 	if readErr != nil || len(refusals) == 0 {
 		return result, err
+	}
+	// AND IT IS THE REFUSAL WE MEANT. Carrying "some refusal" into provenance
+	// would be satisfied by one recorded against an unrelated directory.
+	if refusals[0].Target != GitTargetCandidate {
+		return result, fmt.Errorf("the discard was refused against %q, not the candidate", refusals[0].Target)
 	}
 	// The adapter's own job: carry what the boundary refused into provenance.
 	if result.Invocation == nil {
