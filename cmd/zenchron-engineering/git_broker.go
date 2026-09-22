@@ -12,6 +12,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -43,6 +44,7 @@ func gitBrokerCommand() []string {
 // this command.
 func gitBroker(args []string) (int, error) {
 	var candidate, scratch, refusalLog string
+	var anchor runtime.GitOriginAnchor
 	for len(args) > 0 {
 		switch args[0] {
 		case "--candidate":
@@ -60,9 +62,31 @@ func gitBroker(args []string) (int, error) {
 				return exitUsage, fmt.Errorf("--refusal-log requires a path")
 			}
 			refusalLog, args = args[1], args[2:]
+		// The actor anchor the controller wrote into the shim. Both values are
+		// runtime-owned, and an unparsable one is refused rather than dropped:
+		// silently attributing to a pid nobody chose is the failure this whole
+		// flag exists to end.
+		case "--controller-pid":
+			if len(args) < 2 {
+				return exitUsage, fmt.Errorf("--controller-pid requires the controller's process identity")
+			}
+			pid, err := strconv.Atoi(args[1])
+			if err != nil {
+				return exitUsage, fmt.Errorf("--controller-pid requires a process identity")
+			}
+			anchor.ControllerPID, args = pid, args[2:]
+		case "--tool-call-depth":
+			if len(args) < 2 {
+				return exitUsage, fmt.Errorf("--tool-call-depth requires the provider's measured depth")
+			}
+			depth, err := strconv.Atoi(args[1])
+			if err != nil {
+				return exitUsage, fmt.Errorf("--tool-call-depth requires a depth")
+			}
+			anchor.ToolCallDepth, args = depth, args[2:]
 		case "--":
 			// Everything after this is the provider's Git argv.
-			code, err := runtime.BrokerGitCommand(candidate, scratch, refusalLog, args[1:], os.Stdout, os.Stderr)
+			code, err := runtime.BrokerGitCommand(candidate, scratch, refusalLog, anchor, args[1:], os.Stdout, os.Stderr)
 			if err != nil {
 				return code, err
 			}

@@ -433,6 +433,17 @@ type GitRefusal struct {
 	// operation against the candidate and an ordinary one against a test's own
 	// fixture, and #257 exists because the boundary could not tell them apart.
 	Target GitTargetClass `json:"target,omitempty"`
+	// Origin is the actor that DIRECTLY originated the invocation, established
+	// from execution topology in git_origin.go. It is recorded on every
+	// refusal, including as "unknown", because a record that omits the actor
+	// is the record #259 exists to replace: the same refusal means opposite
+	// things depending on whether a model, the provider's own machinery or a
+	// test binary issued it, and 63 of them once meant the opposite of what
+	// was concluded. Nothing in this file reads it.
+	Origin GitActorOrigin `json:"origin"`
+	// OriginBasis is HOW that was established, so the derivation is auditable
+	// rather than asserted.
+	OriginBasis string `json:"origin_basis,omitempty"`
 	// DirtyPaths is the bounded set of candidate paths that would have been
 	// discarded, or empty when the workspace held no delta. It is OBSERVATION
 	// for the operator and for the provider's next decision; it is not what
@@ -578,7 +589,7 @@ func (e *GitRuntimeOwnedRefusedError) Error() string {
 // one. Dirtiness is still OBSERVED, because the diagnostic and the durable
 // record are worth more when they say what was at stake - but it is observed
 // after the decision and it cannot change it.
-func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string, stdout, stderr io.Writer) (int, error) {
+func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, anchor GitOriginAnchor, args []string, stdout, stderr io.Writer) (int, error) {
 	// THE EXECUTION CONTEXT IS THE COMMAND'S OWN, established before anything
 	// is classified or resolved.
 	//
@@ -595,6 +606,16 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	// the path underneath cannot redirect what the command reaches. The `-C`
 	// options are then dropped from what executes, because applying them twice
 	// would land somewhere nobody asked for.
+	// THE ACTOR IS ESTABLISHED FIRST, from topology the runtime anchored
+	// before this process existed, and is then carried through every arm
+	// below. It is computed once because the answer is a property of the
+	// invocation rather than of whichever rule ends up refusing it, and it is
+	// computed BEFORE the working directory moves, so nothing the decision
+	// does can change who is recorded as having asked.
+	//
+	// Nothing below consults it. See git_origin.go for why that is a rule and
+	// not an omission.
+	actor := EstablishGitActorOrigin(anchor, os.Getpid(), processParent)
 	base, pinErr := os.Getwd()
 	pinned := base
 	if pinErr == nil {
@@ -606,7 +627,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 	if pinErr != nil {
 		return refuseGitCommand(candidateDir, refusalLog, args,
 			"the execution context could not be established: "+pinErr.Error(),
-			GitOperationClass(""), GitTargetExternalOrUnknown, stderr)
+			GitOperationClass(""), GitTargetExternalOrUnknown, actor, stderr)
 	}
 	args = withoutDirectoryGlobals(args)
 	// THE EFFECTIVE COMMAND FIRST, because the classifier has to be looking at
@@ -655,7 +676,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		// sentence the provider reads, differ.
 		if class, reason := ClassifyGitCommand(args); class != GitOperationPermitted {
 			return refuseGitCommand(candidateDir, refusalLog, args,
-				reason+"; "+resolveErr.Error(), class, targetOf(pinned, candidateDir, scratchDir), stderr)
+				reason+"; "+resolveErr.Error(), class, targetOf(pinned, candidateDir, scratchDir), actor, stderr)
 		}
 		// FAIL CLOSED. "I could not tell what this would do" is not "this is
 		// safe", and the boundary must never answer the second when it means
@@ -666,7 +687,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		// resolution prefix a reviewer reads it by.
 		return refuseGitCommand(candidateDir, refusalLog, args,
 			"the effective operation could not be resolved: "+resolveErr.Error(),
-			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), actor, stderr)
 	}
 	class, reason := ClassifyGitCommand(effective)
 	// DEFERRED AUTHORITY, resolved here and nowhere earlier. `-c user.email`
@@ -697,7 +718,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		return refuseGitCommand(candidateDir, refusalLog, effective,
 			"`git "+verb+"` runs a program named by repository configuration, which a provider controls; "+
 				"use diff, log or show to inspect the candidate",
-			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), stderr)
+			GitOperationClass(""), targetOf(pinned, candidateDir, scratchDir), actor, stderr)
 	}
 	deferred := DeferredGitConfigOverrides(effective)
 	// WHICH RESOURCE - asked only when the answer can change the decision. A
@@ -726,7 +747,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		return refuseGitCommand(candidateDir, refusalLog, effective,
 			"writing "+configKey+" into this repository names a program Git would run or moves where Git reads "+
 				"and writes; candidate configuration is the runtime's, not the provider's",
-			GitOperationClass(""), target, stderr)
+			GitOperationClass(""), target, actor, stderr)
 	}
 	// THE VERB IS ANSWERED FIRST, and that ordering is #253's law applied one
 	// layer along. `-c user.email=... reset --hard` against the candidate is a
@@ -743,7 +764,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		// every context that could not be resolved are refused exactly as
 		// before.
 		if target != GitTargetRuntimeScratch {
-			return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, stderr)
+			return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, actor, stderr)
 		}
 		class = GitOperationPermitted
 	}
@@ -756,7 +777,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		return refuseGitCommand(candidateDir, refusalLog, effective,
 			"setting the committer identity ("+strings.Join(deferred, ", ")+
 				") is not the provider's outside a repository this attempt created; the runtime owns candidate history",
-			class, target, stderr)
+			class, target, actor, stderr)
 	}
 	if class == GitOperationPermitted {
 		// The RESOLVED form is executed. Where no alias was involved it is the
@@ -772,7 +793,7 @@ func BrokerGitCommand(candidateDir, scratchDir, refusalLog string, args []string
 		// that.
 		reason += " (requested as " + aliased + ")"
 	}
-	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, stderr)
+	return refuseGitCommand(candidateDir, refusalLog, effective, reason, class, target, actor, stderr)
 }
 
 // targetOf resolves the resource from the PINNED context, establishing the
@@ -792,8 +813,15 @@ func targetOf(pinned, candidateDir, scratchDir string) GitTargetClass {
 // It is one function because every refusal has to do all of it: a refusal that
 // executed nothing but recorded nothing would be invisible, and one that
 // recorded without explaining would leave the worker to guess.
-func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, target GitTargetClass, stderr io.Writer) (int, error) {
-	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason, Target: target}
+func refuseGitCommand(candidateDir, refusalLog string, args []string, reason string, class GitOperationClass, target GitTargetClass, actor GitActorAttribution, stderr io.Writer) (int, error) {
+	refusal := GitRefusal{Operation: boundedGitArgv(args), Reason: reason, Target: target,
+		Origin: actor.Origin, OriginBasis: actor.Basis}
+	if refusal.Origin == "" {
+		// A caller that established nothing still records an actor. The empty
+		// string would read as a field an older controller never wrote, and
+		// "not established" is a fact this boundary always knows.
+		refusal.Origin = GitOriginUnknown
+	}
 	// Observation, after the decision. A workspace whose status cannot be read
 	// does not soften the refusal; it just means the record names no paths.
 	if dirty, err := CandidateDirtyPaths(candidateDir); err == nil {
