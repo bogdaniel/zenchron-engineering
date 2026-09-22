@@ -197,3 +197,53 @@ func TestActivatedTransitionDoesNotConferPresentAuthority(t *testing.T) {
 		t.Fatal("a superseded generation may still admit work")
 	}
 }
+
+// THE SAME PROPERTY AT THE PASS LAYER. Submit is one intake path; the tick's
+// discovery and plan reconciliation are another, and they create runs too.
+//
+// This test exists so that moving either of them partially outside the intake
+// section - for latency, say - fails here rather than in production: a close
+// must not return while a pass is still creating work.
+func TestDrainWaitsForAnIntakePassAlreadyInProgress(t *testing.T) {
+	gate := newWorkAdmissionGate(true)
+	inPass := make(chan struct{})
+	finishPass := make(chan struct{})
+	created := make(chan int, 4)
+
+	go func() {
+		release, err := gate.section()
+		if err != nil {
+			t.Error("the intake section was refused while the gate was open")
+			close(inPass)
+			return
+		}
+		defer release()
+		close(inPass)
+		// A pass creates several runs across its lifetime; every one of them
+		// is inside the section.
+		for i := 0; i < 3; i++ {
+			<-finishPass
+			created <- i
+		}
+	}()
+	<-inPass
+
+	closed := make(chan struct{})
+	go func() { gate.close("drained"); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("the drain returned while a pass was still creating runs")
+	case <-time.After(50 * time.Millisecond):
+	}
+	for i := 0; i < 3; i++ {
+		finishPass <- struct{}{}
+	}
+	<-closed
+	if len(created) != 3 {
+		t.Fatalf("the pass created %d run(s) before the drain returned, want 3", len(created))
+	}
+	// And no pass may begin afterwards.
+	if _, err := gate.section(); err == nil {
+		t.Fatal("an intake pass began after the drain returned")
+	}
+}
