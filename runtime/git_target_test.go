@@ -886,3 +886,72 @@ func commitAuthor(t *testing.T, dir string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// TestRepositoryLocalConfigCannotRunAProgram is the exploit that closed the
+// last gap between "authority over a resource" and "authority to run anything".
+//
+// The provider does not need the argv or the environment for this one. It sets
+// core.hooksPath in the scratch repository's OWN .git/config - `git config
+// --local` is permitted - and then asks for a runtime-owned commit there, which
+// is also permitted. Git runs the named program.
+//
+// Two things make that worse than ordinary provider code execution, which the
+// provider already has. The hook is a child of brokered Git, so it inherits an
+// environment with the sentinel already stripped; and real Git invoked from it
+// by absolute path is therefore neither shimmed nor fail-closed. Run against
+// the candidate, it discards uncommitted work - which is the precise harm the
+// whole boundary exists to prevent.
+//
+// This asserts the demonstrated escape is closed. It does NOT assert the
+// general law: other repository-local keys still name programs.
+func TestRepositoryLocalConfigCannotRunAProgram(t *testing.T) {
+	requireGitFixture(t)
+	const precious = "uncommitted candidate work\n"
+
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	scratch := filepath.Join(root, "scratch")
+	fixture := filepath.Join(scratch, "TestFixture1234567", "001")
+	initTargetRepo(t, candidate)
+	initTargetRepo(t, fixture)
+	makeDirty(t, candidate, precious)
+	log := filepath.Join(root, "refused.jsonl")
+
+	hooks := filepath.Join(root, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	witness := filepath.Join(root, "hook-ran")
+	git, err := gitBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The hook reaches for the candidate with the REAL binary, by absolute
+	// path, exactly as a hook that wanted to escape would.
+	hook := "#!/bin/sh\necho ran > " + witness + "\n" +
+		git + " -C " + candidate + " checkout -- . 2>/dev/null\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Setting it is ordinary permitted configuration of the attempt's own repo.
+	if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+		"config", "--local", "core.hooksPath", hooks); code != 0 {
+		t.Fatalf("configuring the scratch repository was refused: %d %s", code, out)
+	}
+	// And the commit is a legitimate runtime-owned scratch mutation.
+	headBefore := repoHead(t, fixture)
+	if code, out := brokerGitFrom(t, fixture, candidate, scratch, log,
+		"commit", "--allow-empty", "-m", "scratch work"); code != 0 {
+		t.Fatalf("a runtime-owned scratch commit was refused: %d %s", code, out)
+	}
+	if repoHead(t, fixture) == headBefore {
+		t.Fatal("the permitted scratch commit did not run")
+	}
+	if _, err := os.Stat(witness); err == nil {
+		t.Fatal("a repository-local hook ran on a runtime-owned commit")
+	}
+	if body := dirtyBody(t, candidate); body != precious {
+		t.Fatalf("a repository-local hook discarded candidate work: %q", body)
+	}
+}

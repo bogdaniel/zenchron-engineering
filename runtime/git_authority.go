@@ -917,7 +917,27 @@ func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, erro
 	if err != nil {
 		return 1, err
 	}
-	cmd := exec.Command(binary, args...)
+	// HOOKS ARE A THIRD SPELLING OF `-c`, and the only one that lives in the
+	// repository rather than in the invocation.
+	//
+	// `core.hooksPath` in a scratch repository's own .git/config names a
+	// program Git runs on a permitted, runtime-owned commit. Setting it is just
+	// `git config --local`, which is permitted, so a grant over
+	// runtime_scratch_repo became arbitrary execution - and the child inherits
+	// an environment with the sentinel already stripped, so real Git invoked
+	// from a hook reaches the candidate unbrokered. That was demonstrated
+	// destroying uncommitted candidate work.
+	//
+	// Command-line `-c` outranks repository-local configuration, so this pin
+	// cannot be overridden by the repository it runs against. /dev/null is what
+	// "no hooks" looks like to Git, the same way it is what "no configuration"
+	// looks like to GIT_CONFIG_SYSTEM.
+	//
+	// This closes the demonstrated escape. It is NOT the general law: other
+	// repository-local keys still name programs, and classifying local
+	// configuration the way argv and the environment are classified is its own
+	// piece of work.
+	cmd := exec.Command(binary, append([]string{"-c", "core.hooksPath=/dev/null"}, args...)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
