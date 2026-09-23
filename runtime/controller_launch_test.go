@@ -316,10 +316,14 @@ func TestTheSuccessorDecidesOnlyAfterTheStateStopsMoving(t *testing.T) {
 		return asked, nil
 	}
 	ports := harness.ports()
-	quiesce, begin := ports.Quiesce, ports.Begin
+	quiesce, observe, begin := ports.Quiesce, ports.ObserveTrustedMain, ports.Begin
 	ports.Quiesce = func(ctx context.Context) (func(), error) {
 		order = append(order, "quiesce")
 		return quiesce(ctx)
+	}
+	ports.ObserveTrustedMain = func(ctx context.Context) (RevisionRecord, error) {
+		order = append(order, "recheck")
+		return observe(ctx)
 	}
 	ports.Begin = func(prepared ControllerHandoff) (ControllerHandoff, error) {
 		order = append(order, "begin")
@@ -329,7 +333,72 @@ func TestTheSuccessorDecidesOnlyAfterTheStateStopsMoving(t *testing.T) {
 	if launch := LaunchSuccession(context.Background(), record, subject, ports); !launch.Served {
 		t.Fatalf("the transition did not complete: %+v", launch)
 	}
-	if strings.Join(order, ",") != "quiesce,evaluate,begin" {
-		t.Fatalf("order = %v, want the state to stop moving, then the successor to decide, then the handover", order)
+	// CURRENCY IS PROVEN LAST. Quiescence and the successor's replay both take
+	// time a branch can move in, so a recheck before them would authorize a
+	// handover happening now with a fact about some time ago.
+	if strings.Join(order, ",") != "quiesce,evaluate,recheck,begin" {
+		t.Fatalf("order = %v, want the state to stop moving, the successor to decide, currency proven, then the handover", order)
+	}
+}
+
+// TRUSTED MAIN MOVING DURING THE EVALUATION IS CAUGHT.
+//
+// This is the window the final recheck exists for: the successor's decision
+// takes as long as replaying every live journal, and the branch it was built
+// from can advance while it is thinking. A currency proof taken before that
+// would be a fact about the branch as it was, used to authorize a handover
+// happening now.
+func TestTrustedMainMovingWhileTheSuccessorDecidesRefusesTheTransition(t *testing.T) {
+	harness, record, subject := launchFixture(t)
+	harness.decide = func(asked ControllerHandoff) (ControllerHandoff, error) {
+		// Somebody merges while the successor is replaying.
+		harness.trusted = RevisionRecord{Revision: strings.Repeat("9", 40), Tree: "tree-9"}
+		return asked, nil
+	}
+
+	launch := LaunchSuccession(context.Background(), record, subject, harness.ports())
+
+	if launch.Committed {
+		t.Fatalf("a successor built from a revision main had left was handed the role: %+v", launch)
+	}
+	if harness.began != 0 {
+		t.Fatal("the transition was begun after trusted main moved")
+	}
+	if launch.Evaluate.Outcome != StepSucceeded || launch.Recheck.Outcome != StepRefused {
+		t.Fatalf("the refusal is not the currency one: evaluate=%q recheck=%q",
+			launch.Evaluate.Outcome, launch.Recheck.Outcome)
+	}
+	if harness.resumed != 1 {
+		t.Fatalf("intake was resumed %d times after a pre-commitment refusal", harness.resumed)
+	}
+	if harness.successor.abandoned != 1 {
+		t.Fatal("the successor that will not be used was left running")
+	}
+}
+
+// AFTER COMMITMENT, INTAKE NEVER COMES BACK - including when the predecessor's
+// own half failed early enough that the gate it would have closed is still
+// only held.
+//
+// Committed is set before Begin is attempted precisely because that operation
+// can partially drain or release and report failure either way. Resuming
+// afterwards would have this process admit work again in the one state where
+// it has already decided it may not.
+func TestIntakeIsNotResumedAfterCommitmentEvenWhenBeginFailsEarly(t *testing.T) {
+	harness, record, subject := launchFixture(t)
+	// A Begin that refuses BEFORE it drains: the record is already there, so
+	// PutControllerHandoff returns without the gate having been touched.
+	harness.beginErr = fmt.Errorf("handoff %s is already recorded; resolve it before starting another", record.ID)
+
+	launch := LaunchSuccession(context.Background(), record, subject, harness.ports())
+
+	if !launch.Committed {
+		t.Fatalf("a failure after the drain was attempted left the controller believing it may serve: %+v", launch)
+	}
+	if harness.quiesced != 1 {
+		t.Fatalf("intake was suspended %d times", harness.quiesced)
+	}
+	if harness.resumed != 0 {
+		t.Fatal("a superseded controller resumed admitting work because its own half failed early")
 	}
 }

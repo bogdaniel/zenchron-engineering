@@ -15,11 +15,12 @@ package runtime
 //	identify  it says which generation it is, and that must be the generation
 //	          the prepared record names - asked of the process, not of the
 //	          path it was started from
-//	recheck   trusted main is still the subject this successor was built for
 //	quiesce   intake is suspended and the work this controller started is
 //	          finished, so the durable head cannot move again
 //	evaluate  the SUCCESSOR decides whether it can continue every live run,
 //	          against that quiescent head, using its own code
+//	recheck   trusted main is STILL the subject this successor was built for,
+//	          asked last because that is where it has to be true
 //	--------- the point of no return ------------------------------------------
 //	begin     the predecessor stops admitting work and releases the role
 //	signal    the successor is told it may proceed
@@ -41,6 +42,22 @@ package runtime
 // successor costs an update. The revalidation the successor performs after
 // acquiring ownership stays exactly as it was and is now a race check on a
 // state nothing can have moved, rather than the first time anybody asked.
+//
+// CURRENCY IS PROVEN LAST, and that is an ordering law rather than a
+// preference. Quiescence waits for work this controller started, which is
+// bounded in tens of minutes, and the successor's evaluation replays every
+// live journal; trusted main can move through both. A check that happened
+// before them would be a statement about a branch as it was some time ago,
+// used to authorize a handover happening now. Whatever the point of no return
+// moves to, the last proof of currency moves with it.
+//
+// INTAKE COMES BACK ONLY BEFORE COMMITMENT. The hold is reversible precisely so
+// a refusal costs an update instead of a controller - and Committed is set
+// BEFORE Begin is attempted, because that operation can partially drain or
+// release and report failure either way. Releasing the hold afterwards would
+// have this process resume admitting work in the one state where it has
+// already decided it may not: uncertainty after commitment narrows authority
+// and never widens it.
 //
 // EVERYTHING EXPENSIVE HAPPENS BEFORE THE POINT OF NO RETURN, deliberately. A
 // successor that cannot start, cannot prove what it is, or is already stale
@@ -106,9 +123,9 @@ type SuccessionLaunch struct {
 	HandoffID string     `json:"handoff_id"`
 	Spawn     LaunchStep `json:"spawn"`
 	Identify  LaunchStep `json:"identify"`
-	Recheck   LaunchStep `json:"recheck"`
 	Quiesce   LaunchStep `json:"quiesce"`
 	Evaluate  LaunchStep `json:"evaluate"`
+	Recheck   LaunchStep `json:"recheck"`
 	Begin     LaunchStep `json:"begin"`
 	Signal    LaunchStep `json:"signal"`
 	Activate  LaunchStep `json:"activate"`
@@ -147,7 +164,7 @@ func (l SuccessionLaunch) Summary() string {
 }
 
 func (l SuccessionLaunch) firstRefusal() string {
-	for _, step := range []LaunchStep{l.Spawn, l.Identify, l.Recheck, l.Quiesce, l.Evaluate, l.Begin, l.Signal, l.Activate} {
+	for _, step := range []LaunchStep{l.Spawn, l.Identify, l.Quiesce, l.Evaluate, l.Recheck, l.Begin, l.Signal, l.Activate} {
 		if step.Outcome == StepRefused {
 			return step.Detail
 		}
@@ -248,22 +265,6 @@ func LaunchSuccession(ctx context.Context, prepared ControllerHandoff, subject R
 	}
 	launch.Identify = LaunchStep{Outcome: StepSucceeded}
 
-	// STILL CURRENT? The build was validated against trusted main when it was
-	// produced, and time has passed. An observation that cannot be made fails
-	// closed for the same reason it does in the updater: "nobody could say
-	// otherwise" is not evidence of currency.
-	observed, err := ports.ObserveTrustedMain(ctx)
-	switch {
-	case err != nil:
-		launch.Recheck = stepRefused("trusted main could not be re-observed before the point of no return: %v", err)
-		return abandonAnd(successor, &launch.Recheck, settle)
-	case observed.Revision != subject.Revision || observed.Tree != subject.Tree:
-		launch.Recheck = stepRefused("trusted main is %s and this successor was built from %s",
-			shortSHA(observed.Revision), shortSHA(subject.Revision))
-		return abandonAnd(successor, &launch.Recheck, settle)
-	}
-	launch.Recheck = LaunchStep{Outcome: StepSucceeded}
-
 	// NOTHING MAY APPEND WHILE THE SUCCESSOR DECIDES. Intake is suspended and
 	// the run drivers this controller started are allowed to finish, so the
 	// journal the successor is about to read is the journal it will inherit.
@@ -273,10 +274,17 @@ func LaunchSuccession(ctx context.Context, prepared ControllerHandoff, subject R
 		return abandonAnd(successor, &launch.Quiesce, settle)
 	}
 	launch.Quiesce = LaunchStep{Outcome: StepSucceeded}
-	// The release is only meaningful before the gate is closed, and the hold
-	// makes a post-commitment call a no-op. Deferring it is therefore safe on
-	// every path and is the only way it survives an early return.
-	defer resume()
+	// INTAKE COMES BACK ON EVERY PRE-COMMITMENT EXIT AND ON NO OTHER. The flag
+	// is not a duplicate of launch.Committed for a reader's benefit: it is what
+	// makes the deferred release unreachable once this process has declared
+	// itself superseded, including on the paths where Begin failed so early
+	// that the gate it would have closed is still only held.
+	committed := false
+	defer func() {
+		if !committed {
+			resume()
+		}
+	}()
 
 	// THE SUCCESSOR DECIDES, NOT THIS PROCESS. A predecessor answering "can B
 	// read this journal" would be answering from its own decoders, which is
@@ -299,9 +307,28 @@ func LaunchSuccession(ctx context.Context, prepared ControllerHandoff, subject R
 	}
 	launch.Evaluate = LaunchStep{Outcome: StepSucceeded}
 
+	// STILL CURRENT, ASKED LAST. The build was validated against trusted main
+	// when it was produced, and everything since - the quiescence wait, the
+	// successor's replay of every live journal - takes time a branch can move
+	// in. An observation that cannot be made fails closed for the same reason
+	// it does in the updater: "nobody could say otherwise" is not evidence of
+	// currency.
+	observed, err := ports.ObserveTrustedMain(ctx)
+	switch {
+	case err != nil:
+		launch.Recheck = stepRefused("trusted main could not be re-observed before the point of no return: %v", err)
+		return abandonAnd(successor, &launch.Recheck, settle)
+	case observed.Revision != subject.Revision || observed.Tree != subject.Tree:
+		launch.Recheck = stepRefused("trusted main is %s and this successor was built from %s",
+			shortSHA(observed.Revision), shortSHA(subject.Revision))
+		return abandonAnd(successor, &launch.Recheck, settle)
+	}
+	launch.Recheck = LaunchStep{Outcome: StepSucceeded}
+
 	// ---------------------------------------------------------------------
 	// The point of no return.
 	// ---------------------------------------------------------------------
+	committed = true
 	launch.Committed = true
 	if _, err := ports.Begin(decided); err != nil {
 		launch.Begin = stepRefused("the predecessor's half of the transition did not complete: %v", err)
