@@ -496,3 +496,38 @@ func TestAdmissionPayloadRequiresATransition(t *testing.T) {
 		t.Fatal("the journal accepted an admission naming no transition")
 	}
 }
+
+// THE REGISTRY TAXONOMY IS PART OF THE CONTRACT. A succession admission is a
+// RUN-stream event, and the review of #266 found its payload validator
+// registered in the plan registry instead.
+//
+// That was not a live defect - init() merges the plan registry into the event
+// one, and stream placement is decided by planEventTypes, which never contained
+// this event - but it was one plausible refactor away from becoming one:
+// deriving the plan vocabulary from the plan registry's keys would have swept
+// succession admissions into the plan stream, after which every admission on a
+// run would be refused.
+//
+// So the placement is pinned rather than merely corrected.
+func TestSuccessionAdmissionBelongsToTheRunStream(t *testing.T) {
+	if _, registered := eventPayloads[EventControllerSuccessionAdmitted]; !registered {
+		t.Fatal("a succession admission has no payload validator, so nothing checks what reaches the journal")
+	}
+	if _, misfiled := planPayloads[EventControllerSuccessionAdmitted]; misfiled {
+		t.Fatal("a run-stream event is registered in the plan payload registry")
+	}
+	if planEventTypes[EventControllerSuccessionAdmitted] {
+		t.Fatal("a succession admission is classified as a plan event, and would be refused on the run stream that needs it")
+	}
+	if !eventTypes[EventControllerSuccessionAdmitted] {
+		t.Fatal("a succession admission is not in the run vocabulary, so replay would fail closed on it")
+	}
+	// And the validator that is registered is the one that refuses: a lookup
+	// finding SOMETHING is not evidence it finds the right thing.
+	if err := validateEventPayload(EngineeringEvent{
+		ID: "run-x-admission", RunID: "run-x", Type: EventControllerSuccessionAdmitted,
+		Payload: []byte(`{"run_id":"run-x","handoff_id":"h","result":"refused"}`),
+	}); err == nil {
+		t.Fatal("the registered validator accepted a refused decision")
+	}
+}
