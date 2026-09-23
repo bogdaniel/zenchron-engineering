@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -248,5 +250,86 @@ func TestClassifyThenExecuteAgainstTheRealService(t *testing.T) {
 	}
 	if again := ClassifyReconciliation(WatcherObservation{Status: settled, Self: self}); again.Action != ReconcileNone {
 		t.Fatalf("a converged controller still asks for %q: %s", again.Action, again.Reason)
+	}
+}
+
+// A STALE INTENT IS REFUSED BY THE RUNTIME, WITH NO HELP FROM THE EXECUTOR.
+//
+// This is the case #282 was built for, and the property being checked is as
+// much about this file as about that one: the executor carries the transition
+// it observed and contains no notion of currency, so if the refusal did not
+// come from below it would have to be invented here - and inventing it would
+// make the watcher responsible for deciding which activation governs.
+//
+//	T1  classify while H1 governs      → resume H1
+//	T2  H2 activates and supersedes it
+//	T3  execute the stale intent       → refused beneath, nothing changes
+func TestAStaleIntentIsRefusedBeneathTheExecutor(t *testing.T) {
+	inner := newChoreography(t)
+	released, err := BeginHandoff(inner.predecessorPorts(), inner.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := StartControllerService(inner.state, inner.root, inner.store, inner.self, newFakeAdmission())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.lease.Release() })
+	expect, err := Expect(released)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := service.ActivateSuccessor(expect, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// T1: classified while this transition governs.
+	status, err := DescribeControllerStatus(inner.store, inner.root, func() (LiveControllerSnapshot, error) {
+		return service.DescribeLiveController(activated.ID, executedAt()), nil
+	}, executedAt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := ClassifyReconciliation(WatcherObservation{Status: status, Self: inner.self})
+	if intent.Action != ReconcileResumeActivatedService {
+		t.Fatalf("intent = %q, want resume (%s)", intent.Action, intent.Reason)
+	}
+	projectionBefore, _ := os.Readlink(filepath.Join(inner.root, StableEntrypointName))
+
+	// T2: another transition activates. The intent in hand is now historical.
+	superseding := activated
+	superseding.ID = "handoff-superseding"
+	superseding.Predecessor = activated.Successor
+	superseding.Phase = HandoffRevalidated
+	superseding.UpdatedAt = executedAt().Add(time.Minute)
+	if wrote, err := inner.store.PutControllerHandoff(superseding, ""); err != nil || !wrote {
+		t.Fatalf("record the superseding transition: %v wrote=%v", err, wrote)
+	}
+	superseding.Phase = HandoffActivated
+	if wrote, err := inner.store.ActivateControllerHandoff(superseding, HandoffRevalidated); err != nil || !wrote {
+		t.Fatalf("activate the superseding transition: %v wrote=%v", err, wrote)
+	}
+
+	// T3: the executor runs the stale intent unchanged.
+	result := ExecuteReconciliation(service, intent, executedAt())
+
+	if result.Converged {
+		t.Fatalf("a stale intent converged: %s", result.Summary())
+	}
+	if result.Recovery.Outcome != StepRefused {
+		t.Fatalf("recovery = %q, want refused by the runtime", result.Recovery.Outcome)
+	}
+	if !strings.Contains(result.Recovery.Detail, "governs now") {
+		t.Fatalf("the refusal did not come from the currency check: %q", result.Recovery.Detail)
+	}
+	if result.WorkAdmission.Outcome != StepNotAttempted {
+		t.Fatalf("admission = %q, want not attempted", result.WorkAdmission.Outcome)
+	}
+	if service.AdmittingWork() {
+		t.Fatal("a stale intent opened service")
+	}
+	if after, _ := os.Readlink(filepath.Join(inner.root, StableEntrypointName)); after != projectionBefore {
+		t.Fatalf("the projection moved to %q, want it unchanged at %q", after, projectionBefore)
 	}
 }
