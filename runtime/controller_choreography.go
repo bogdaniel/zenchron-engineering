@@ -48,6 +48,14 @@ package runtime
 // the lock from becoming a second source of truth about which generation is
 // live.
 //
+// AVAILABILITY MAY FALL TO ZERO; ADMISSION AUTHORITY MUST NEVER RISE ABOVE ONE.
+// Between the predecessor draining and the successor activating, NOBODY is
+// permitted to admit work, and that gap is deliberate: a moment with no
+// controller serving is an availability cost, while a moment with two is a
+// correctness failure that durable state cannot describe. Any future change
+// that shortens the gap by letting both parties serve across it is trading the
+// invariant for the symptom.
+//
 // INSPECT BEFORE ACQUIRE FOR PLANNING; TRUST ONLY WHAT IS REVALIDATED AFTER.
 // Everything the preflight learned was learned while another process could
 // still act, so it is stale by definition the moment ownership changes hands.

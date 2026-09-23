@@ -241,6 +241,9 @@ func PreflightControllerHandoff(store runReader, in HandoffPreflightInput) (Cont
 			Predecessor: in.Predecessor.Binding, Successor: in.Successor.Binding,
 			TrustedMain: in.TrustedMain, IsAncestor: in.IsAncestor,
 		})
+		// The decision is evidence FOR THIS TRANSITION and for no other, so it
+		// carries the transition's identity from the moment it is made.
+		decision.HandoffID = record.ID
 		entry := HandoffRunDecision{
 			RunID: run.ID, Result: decision.Result, Refusals: decision.Refusals(),
 			EventCount: len(events), Decision: decision,

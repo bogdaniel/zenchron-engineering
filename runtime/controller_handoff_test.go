@@ -375,11 +375,11 @@ func TestSuccessorThatFailsRevalidationAdmitsNothingAndHandsBack(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("run %s: %v", runID, err)
 	}
-	if ControllerSuccessionContinues(run, eventsAfter, successorDigest) {
+	if ControllerSuccessionContinues(run, eventsAfter, successorDigest, everyHandoffActivated) {
 		t.Fatal("a successor that failed revalidation may continue the run")
 	}
 	// And the predecessor still can, which is what makes recovery possible.
-	if !ControllerSuccessionContinues(run, eventsAfter, predecessorRuntime.controller) {
+	if !ControllerSuccessionContinues(run, eventsAfter, predecessorRuntime.controller, everyHandoffActivated) {
 		t.Fatal("the predecessor can no longer continue its own run")
 	}
 }

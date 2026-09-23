@@ -142,10 +142,15 @@ func TestControllerSuccessionDecisionTable(t *testing.T) {
 
 // admission builds the event a compatible decision produces, without a store,
 // so the chain rule can be driven over exact shapes.
+// everyHandoffActivated is the oracle for tests about the CHAIN rather than
+// about the epoch: it says every transition activated, so a case can isolate
+// the question it is actually asking. The epoch tests supply their own.
+func everyHandoffActivated(string) bool { return true }
+
 func admission(t *testing.T, from, to ControllerBinding) EngineeringEvent {
 	t.Helper()
 	decision := ControllerSuccessionDecision{
-		RunID: "run-succession", Predecessor: from, Successor: to,
+		RunID: "run-succession", HandoffID: "handoff-fixture", Predecessor: from, Successor: to,
 		SourceLineage: passed("fixture"), TrustRoot: passed("fixture"), Configuration: passed("fixture"),
 		StateVocabulary: passed("fixture"), DurableReplay: passed("fixture"),
 	}
@@ -207,7 +212,7 @@ func TestControllerSuccessionChain(t *testing.T) {
 		}, digest(b), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := ControllerSuccessionContinues(run, test.events, test.controller); got != test.want {
+			if got := ControllerSuccessionContinues(run, test.events, test.controller, everyHandoffActivated); got != test.want {
 				t.Fatalf("continues = %v, want %v", got, test.want)
 			}
 		})
@@ -257,6 +262,10 @@ func TestAdmittedSuccessionRewritesNoHistory(t *testing.T) {
 	if decision.Result != SuccessionCompatible {
 		t.Fatalf("decision refused: %v", decision.Refusals())
 	}
+	// An admission is evidence for one transition. The record that would carry
+	// it is written by the handoff protocol; here the transition is named
+	// directly and treated as activated, so this test stays about history.
+	decision.HandoffID = "handoff-history"
 
 	// BEFORE the admission the successor is a stranger to this run.
 	if state, err := successorRuntime.load(runID); err != nil {
@@ -265,12 +274,40 @@ func TestAdmittedSuccessionRewritesNoHistory(t *testing.T) {
 		t.Fatal("an unadmitted successor was treated as the run's controller")
 	}
 
+	// THE TRANSITION THIS EVIDENCE BELONGS TO. Until it activates the admission
+	// means nothing, which is the point of binding the two.
+	successorDigest, err := decision.Successor.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition := ControllerHandoff{
+		ID: decision.HandoffID, Phase: HandoffSuccessorAcquired,
+		Predecessor:   HandoffParty{Binding: decision.Predecessor},
+		Successor:     HandoffParty{Binding: decision.Successor},
+		RecoveryOwner: before.ControllerSHA256, UpdatedAt: fixture.clock.Now(),
+	}
+	if wrote, err := fixture.store.PutControllerHandoff(transition, ""); err != nil || !wrote {
+		t.Fatalf("record the transition: %v wrote=%v", err, wrote)
+	}
+
 	if err := predecessorRuntime.AdmitControllerSuccession(runID, decision); err != nil {
 		t.Fatal(err)
 	}
-	// Idempotent: a repeated upgrade request is ordinary.
+	// Idempotent: a repeated upgrade request is ordinary, and idempotence must
+	// not depend on the transition having activated.
 	if err := predecessorRuntime.AdmitControllerSuccession(runID, decision); err != nil {
 		t.Fatal(err)
+	}
+	// Written, and still inert: authority follows the transition.
+	if state, err := successorRuntime.load(runID); err != nil {
+		t.Fatal(err)
+	} else if !state.controllerChanged {
+		t.Fatal("an admission whose transition has not activated promoted the successor")
+	}
+	activated := transition
+	activated.Phase, activated.RecoveryOwner = HandoffActivated, successorDigest
+	if wrote, err := fixture.store.PutControllerHandoff(activated, HandoffSuccessorAcquired); err != nil || !wrote {
+		t.Fatalf("activate the transition: %v wrote=%v", err, wrote)
 	}
 
 	after, ok, err := fixture.store.Run(runID)
@@ -324,7 +361,7 @@ func TestRefusedSuccessionIsNeverAdmitted(t *testing.T) {
 	build := deps.ControllerBuild
 	binding := ControllerBinding{Controller: deps.ControllerID, Build: &build, Config: deps.ConfigDigest}
 	refused := ControllerSuccessionDecision{
-		RunID: runID, Predecessor: binding, Successor: binding,
+		RunID: runID, HandoffID: "handoff-refused", Predecessor: binding, Successor: binding,
 		SourceLineage: refusedCheck("same revision"), TrustRoot: passed("x"), Configuration: passed("x"),
 		StateVocabulary: passed("x"), DurableReplay: passed("x"),
 	}
@@ -342,5 +379,155 @@ func TestRefusedSuccessionIsNeverAdmitted(t *testing.T) {
 		ID: runID + "-forced", RunID: runID, Type: EventControllerSuccessionAdmitted, Payload: payload,
 	}); err == nil {
 		t.Fatal("the journal accepted a refused succession")
+	}
+}
+
+// AN ADMISSION IS EVIDENCE FOR ONE OCCASION. A transition that wrote admissions
+// and then failed must not leave a standing capability behind, and a LATER
+// transition between the same two generations must not be able to cash in the
+// earlier one's evidence.
+func TestAdmissionIsBoundToItsTransition(t *testing.T) {
+	config := ConfigDigest{Global: "config-a"}
+	a := adoptedBinding(predecessorRevision, "tree-a", config)
+	b := adoptedBinding(successorRevision, "tree-b", config)
+	successor, err := b.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := runFor(t, a)
+
+	first := admission(t, a, b)
+	var decision ControllerSuccessionDecision
+	if err := decodeJSON(first.Payload, &decision); err != nil {
+		t.Fatal(err)
+	}
+	decision.HandoffID = "handoff-first"
+	payload, err := marshalPayloadJSON(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Payload = payload
+
+	// The first transition FAILED: its id never becomes activated.
+	failed := func(id string) bool { return false }
+	if ControllerSuccessionContinues(run, []EngineeringEvent{first}, successor, failed) {
+		t.Fatal("a failed transition's admission still promotes the successor")
+	}
+
+	// A SECOND transition begins between the same two generations and
+	// activates. The first transition's evidence is still not its evidence.
+	secondOnly := func(id string) bool { return id == "handoff-second" }
+	if ControllerSuccessionContinues(run, []EngineeringEvent{first}, successor, secondOnly) {
+		t.Fatal("a later transition cashed in an earlier transition's admission")
+	}
+
+	// Its own admission, under its own id, is what promotes the successor.
+	second := admission(t, a, b)
+	if err := decodeJSON(second.Payload, &decision); err != nil {
+		t.Fatal(err)
+	}
+	decision.HandoffID = "handoff-second"
+	if payload, err = marshalPayloadJSON(decision); err != nil {
+		t.Fatal(err)
+	}
+	second.Payload = payload
+	if !ControllerSuccessionContinues(run, []EngineeringEvent{first, second}, successor, secondOnly) {
+		t.Fatal("the second transition's own admission did not promote its successor")
+	}
+
+	// And an admission naming no transition at all grants nothing, whatever
+	// the oracle says.
+	unbound := admission(t, a, b)
+	if err := decodeJSON(unbound.Payload, &decision); err != nil {
+		t.Fatal(err)
+	}
+	decision.HandoffID = ""
+	if payload, err = marshalPayloadJSON(decision); err != nil {
+		t.Fatal(err)
+	}
+	unbound.Payload = payload
+	if ControllerSuccessionContinues(run, []EngineeringEvent{unbound}, successor, everyHandoffActivated) {
+		t.Fatal("an admission naming no transition promoted the successor")
+	}
+}
+
+// Without an authority oracle the chain rule answers no. A caller that cannot
+// say which transitions activated cannot be told that one did.
+func TestSuccessionRefusesWithoutAnAuthorityOracle(t *testing.T) {
+	config := ConfigDigest{Global: "config-a"}
+	a := adoptedBinding(predecessorRevision, "tree-a", config)
+	b := adoptedBinding(successorRevision, "tree-b", config)
+	successor, err := b.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := runFor(t, a)
+	if ControllerSuccessionContinues(run, []EngineeringEvent{admission(t, a, b)}, successor, nil) {
+		t.Fatal("succession was granted with no way to check the transition")
+	}
+	// The run's own creator never needs the oracle.
+	predecessor, err := a.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ControllerSuccessionContinues(run, nil, predecessor, nil) {
+		t.Fatal("a run stopped being continuable by the controller that created it")
+	}
+}
+
+// The journal refuses evidence that names no transition.
+func TestAdmissionPayloadRequiresATransition(t *testing.T) {
+	config := ConfigDigest{Global: "config-a"}
+	a := adoptedBinding(predecessorRevision, "tree-a", config)
+	b := adoptedBinding(successorRevision, "tree-b", config)
+	event := admission(t, a, b)
+	var decision ControllerSuccessionDecision
+	if err := decodeJSON(event.Payload, &decision); err != nil {
+		t.Fatal(err)
+	}
+	decision.HandoffID = ""
+	payload, err := marshalPayloadJSON(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateEventPayload(EngineeringEvent{
+		ID: "run-x-admission", RunID: "run-x", Type: EventControllerSuccessionAdmitted, Payload: payload,
+	}); err == nil {
+		t.Fatal("the journal accepted an admission naming no transition")
+	}
+}
+
+// THE REGISTRY TAXONOMY IS PART OF THE CONTRACT. A succession admission is a
+// RUN-stream event, and the review of #266 found its payload validator
+// registered in the plan registry instead.
+//
+// That was not a live defect - init() merges the plan registry into the event
+// one, and stream placement is decided by planEventTypes, which never contained
+// this event - but it was one plausible refactor away from becoming one:
+// deriving the plan vocabulary from the plan registry's keys would have swept
+// succession admissions into the plan stream, after which every admission on a
+// run would be refused.
+//
+// So the placement is pinned rather than merely corrected.
+func TestSuccessionAdmissionBelongsToTheRunStream(t *testing.T) {
+	if _, registered := eventPayloads[EventControllerSuccessionAdmitted]; !registered {
+		t.Fatal("a succession admission has no payload validator, so nothing checks what reaches the journal")
+	}
+	if _, misfiled := planPayloads[EventControllerSuccessionAdmitted]; misfiled {
+		t.Fatal("a run-stream event is registered in the plan payload registry")
+	}
+	if planEventTypes[EventControllerSuccessionAdmitted] {
+		t.Fatal("a succession admission is classified as a plan event, and would be refused on the run stream that needs it")
+	}
+	if !eventTypes[EventControllerSuccessionAdmitted] {
+		t.Fatal("a succession admission is not in the run vocabulary, so replay would fail closed on it")
+	}
+	// And the validator that is registered is the one that refuses: a lookup
+	// finding SOMETHING is not evidence it finds the right thing.
+	if err := validateEventPayload(EngineeringEvent{
+		ID: "run-x-admission", RunID: "run-x", Type: EventControllerSuccessionAdmitted,
+		Payload: []byte(`{"run_id":"run-x","handoff_id":"h","result":"refused"}`),
+	}); err == nil {
+		t.Fatal("the registered validator accepted a refused decision")
 	}
 }
