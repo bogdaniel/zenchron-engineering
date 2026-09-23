@@ -216,3 +216,18 @@ func TestAPublishedDirectoryThatDoesNotHoldUpIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// A REPORT LINE FOR A STATE THAT NEEDS NO EXPLANATION carries no dangling
+// punctuation. An operator reading "idle: " has been shown a colon and told
+// that something was omitted; nothing was.
+func TestAnUpgradeReportLineDoesNotTrailAnEmptyReason(t *testing.T) {
+	quiet := ControllerUpgradeAttempt{Update: ControllerUpdate{State: UpdateIdle}}
+	if line := quiet.Describe(); line != "idle" {
+		t.Fatalf("line = %q, want %q", line, "idle")
+	}
+	explained := ControllerUpgradeAttempt{Update: ControllerUpdate{
+		State: UpdateRefused, Detail: "the adopted build failed"}}
+	if line := explained.Describe(); line != "refused: the adopted build failed" {
+		t.Fatalf("line = %q, want the state and its reason", line)
+	}
+}
