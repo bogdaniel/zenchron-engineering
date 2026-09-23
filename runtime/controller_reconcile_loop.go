@@ -55,17 +55,16 @@ type ControllerReconciler struct {
 }
 
 // NewControllerReconciler binds the loop to a service the caller already owns.
-func NewControllerReconciler(service *ControllerService, store handoffStore, controllerRoot string, self ControllerSelfRecord, observe func() (LiveControllerSnapshot, error)) *ControllerReconciler {
+// The service parameter is the narrow executor interface rather than the
+// concrete type: the loop's whole reach into the runtime is two
+// authority-checked operations, and saying so in the signature keeps a future
+// change from quietly widening it.
+func NewControllerReconciler(service reconcilerService, store handoffStore, controllerRoot string, self ControllerSelfRecord, observe func() (LiveControllerSnapshot, error)) *ControllerReconciler {
 	return &ControllerReconciler{
 		executor: service, store: store, controllerRoot: controllerRoot,
 		self: self, observe: observe,
 	}
 }
-
-// serviceForTest points the loop at a different executor target. It exists so
-// a test can count CALLS - the failure mode of a loop is acting too often, and
-// a result alone does not show that - without a second production path.
-func (r *ControllerReconciler) serviceForTest(service reconcilerService) { r.executor = service }
 
 // ReconciliationAttempt is what one pass did about controller state.
 type ReconciliationAttempt struct {

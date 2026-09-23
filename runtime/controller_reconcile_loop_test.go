@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -113,11 +114,10 @@ func TestNonActionableStatesCallNothing(t *testing.T) {
 func TestRepeatedRefusalBacksOff(t *testing.T) {
 	fixture := activatedFixture(t)
 	service := &countingService{recoverErr: fmt.Errorf("this process is not the activated generation")}
-	reconciler := NewControllerReconciler(nil, fixture.store, fixture.root, fixture.self,
+	reconciler := NewControllerReconciler(service, fixture.store, fixture.root, fixture.self,
 		func() (LiveControllerSnapshot, error) {
 			return LiveControllerSnapshot{Identity: fixture.self, Role: RoleHeld, WorkAdmission: AdmissionClosed}, nil
 		})
-	reconciler.serviceForTest(service)
 
 	now := time.Unix(1700000202, 0).UTC()
 	first := reconciler.Attempt(now)
@@ -162,7 +162,7 @@ func TestTheLoopNeverReusesAnIntentAcrossPasses(t *testing.T) {
 	fixture := activatedFixture(t)
 	service := &countingService{}
 	observed := 0
-	reconciler := NewControllerReconciler(nil, fixture.store, fixture.root, fixture.self,
+	reconciler := NewControllerReconciler(service, fixture.store, fixture.root, fixture.self,
 		func() (LiveControllerSnapshot, error) {
 			observed++
 			// First pass: not serving, so the classification is resume.
@@ -172,7 +172,6 @@ func TestTheLoopNeverReusesAnIntentAcrossPasses(t *testing.T) {
 			// Later passes: serving, so there is nothing to do.
 			return LiveControllerSnapshot{Identity: fixture.self, Role: RoleHeld, WorkAdmission: AdmissionOpen}, nil
 		})
-	reconciler.serviceForTest(service)
 
 	now := time.Unix(1700000203, 0).UTC()
 	first := reconciler.Attempt(now)
@@ -213,5 +212,78 @@ func TestSupervisorDrivesReconciliationOncePerPass(t *testing.T) {
 	// And the report carries it without a new channel or subsystem.
 	if report.Reconciliation.NextEligibleAt.IsZero() {
 		t.Fatal("the report did not say when the loop looks again")
+	}
+}
+
+// A REAL SUPERVISOR PASS DRIVES IT. This is the test that would have failed on
+// the first version of this change: the loop existed, the supervisor knew how
+// to call it, and nothing ever bound the two - so serve would have run exactly
+// as before while looking maintained.
+func TestARealSupervisorPassDrivesTheReconciler(t *testing.T) {
+	phase8 := newPhase8Fixture(t)
+	supervisor := supervisorFixture(t, phase8, 1)
+	observed := 0
+	reconciler := NewControllerReconciler(&countingService{}, phase8.store, t.TempDir(),
+		ControllerSelfRecord{Build: activeGeneration()},
+		func() (LiveControllerSnapshot, error) {
+			observed++
+			return LiveControllerSnapshot{}, nil
+		})
+	if err := supervisor.BindControllerReconciler(reconciler); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Reconciliation == nil {
+		t.Fatal("a supervisor pass reported no reconciliation, so the loop is not wired to the tick")
+	}
+	if observed != 1 {
+		t.Fatalf("the world was observed %d times in one pass, want exactly 1", observed)
+	}
+
+	// A second pass looks again: the loop caches timing, not conclusions.
+	if _, err := supervisor.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if observed != 2 {
+		t.Fatalf("the world was observed %d times across two passes, want 2", observed)
+	}
+}
+
+// THE BINDING IS STARTUP-ONLY. A supervisor whose reconciler could be swapped
+// while running would be a runtime mechanism for changing controller
+// semantics, which nothing authorizes.
+func TestTheReconcilerBindsOnce(t *testing.T) {
+	phase8 := newPhase8Fixture(t)
+	supervisor := supervisorFixture(t, phase8, 1)
+	build := func() *ControllerReconciler {
+		return NewControllerReconciler(&countingService{}, phase8.store, t.TempDir(),
+			ControllerSelfRecord{Build: activeGeneration()},
+			func() (LiveControllerSnapshot, error) { return LiveControllerSnapshot{}, nil })
+	}
+	if err := supervisor.BindControllerReconciler(nil); err == nil {
+		t.Fatal("a nil reconciler was accepted")
+	}
+	if err := supervisor.BindControllerReconciler(build()); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.BindControllerReconciler(build()); err == nil {
+		t.Fatal("a second reconciler replaced the first")
+	}
+}
+
+// A supervisor with no reconciler behaves exactly as it always did.
+func TestASupervisorWithoutAReconcilerIsUnchanged(t *testing.T) {
+	phase8 := newPhase8Fixture(t)
+	supervisor := supervisorFixture(t, phase8, 1)
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Reconciliation != nil {
+		t.Fatal("an unbound supervisor reported a reconciliation")
 	}
 }

@@ -36,13 +36,6 @@ import (
 // dependency set, every external system is a seam and nothing is discovered
 // from ambient state.
 type SupervisorDependencies struct {
-	// Reconciler maintains this controller's own generation state, one attempt
-	// per pass. It is optional: a supervisor constructed without one does
-	// exactly what it always did. When present it is driven by the SAME tick
-	// that drives runs, because a second timer would be a second lifecycle -
-	// and the first thing it would get wrong is stopping at a different moment
-	// from the thing it maintains.
-	Reconciler *ControllerReconciler
 	// WorkAdmissionWithheld constructs the supervisor unable to take on work.
 	// It is how the successor half of a controller handoff holds the scheduler
 	// while it revalidates and proves itself: ownership is permission to
@@ -171,6 +164,12 @@ type Supervisor struct {
 	// "after the drain returns nothing new is admitted" false by construction.
 	// See work_admission.go.
 	admission *workAdmissionGate
+	// reconciler maintains this controller's own generation state, one attempt
+	// per pass. It is bound AFTER construction because the cycle is real: the
+	// supervisor owns the admission gate, the controller service needs that
+	// gate, and the reconciler needs the service. Binding once at startup
+	// resolves it without a second gate, a second lease or a factory callback.
+	reconciler *ControllerReconciler
 	// cursor is the rotation offset into the ACTIVE-run ring. It exists so a
 	// ceiling smaller than the active set is a rate limit rather than a fixed
 	// prefix; see admit.
@@ -362,6 +361,32 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	return outcome, err
 }
 
+// BindControllerReconciler installs the controller-maintenance loop. It is
+// STARTUP-ONLY and refuses replacement.
+//
+// The refusal is the point. A supervisor whose reconciler could be swapped
+// while running would be a mechanism for changing controller semantics at
+// runtime, which is a governance surface nobody asked for and nothing
+// authorizes. Binding once is composition; rebinding would be policy.
+func (s *Supervisor) BindControllerReconciler(reconciler *ControllerReconciler) error {
+	if reconciler == nil {
+		return fmt.Errorf("a controller reconciler is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reconciler != nil {
+		return fmt.Errorf("a controller reconciler is already bound to this supervisor")
+	}
+	s.reconciler = reconciler
+	return nil
+}
+
+func (s *Supervisor) controllerReconciler() *ControllerReconciler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reconciler
+}
+
 // Drain stops accepting and starting work while letting started work finish.
 // It is reversible only by restarting the supervisor, which is deliberate: a
 // drain is an operator saying "wind this down", and un-draining silently would
@@ -478,8 +503,8 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	// this controller from repairing a stale pointer or resuming an activation
 	// it already holds, and every operation underneath enforces its own
 	// authority regardless of what this loop asks for.
-	if s.deps.Reconciler != nil {
-		attempt := s.deps.Reconciler.Attempt(now)
+	if reconciler := s.controllerReconciler(); reconciler != nil {
+		attempt := reconciler.Attempt(now)
 		report.Reconciliation = &attempt
 	}
 	// PLANS are reconciled BEFORE the run list is read, so a stage that became

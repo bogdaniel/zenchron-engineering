@@ -88,6 +88,12 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
+	// CONTROLLER MAINTENANCE IS PART OF SERVING, not an optional extra. Without
+	// this the loop exists and never runs, which is the same as not existing
+	// while looking like it does.
+	if err := built.installControllerReconciler(supervisor, role); err != nil {
+		return runtime.ExitInvalid, err
+	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -1026,6 +1032,34 @@ func sortedIssues(issues []int) []int {
 	out := append([]int(nil), issues...)
 	sort.Ints(out)
 	return out
+}
+
+// installControllerReconciler wires the controller-maintenance loop into the
+// supervisor that will drive it.
+//
+// IT RESOLVES A REAL CYCLE. The supervisor owns the work-admission gate, the
+// controller service needs that gate to open service, and the reconciler needs
+// the service - so the service cannot be built before the supervisor exists.
+// Binding once after construction is the smallest resolution: no second gate,
+// no second lease, no factory callback.
+//
+// The role lease passed here is the one serve already holds. Nothing in this
+// path acquires ownership.
+func (c *composition) installControllerReconciler(supervisor *runtime.Supervisor, role *runtime.ControllerRoleLease) error {
+	self, err := controllerSelf()
+	if err != nil {
+		return fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	service := runtime.BindControllerService(
+		c.config.StateDir, controllerRoot(), c.store, self, role, supervisor)
+	// The observation is this process asking ITSELF, directly. An operator's
+	// status command crosses a socket to ask the same question; a controller
+	// maintaining itself has no reason to.
+	observe := func() (runtime.LiveControllerSnapshot, error) {
+		return c.controllerSnapshot(supervisor), nil
+	}
+	return supervisor.BindControllerReconciler(
+		runtime.NewControllerReconciler(service, c.store, controllerRoot(), self, observe))
 }
 
 // controllerSnapshot is this process's answer about itself: which generation it
