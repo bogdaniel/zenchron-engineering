@@ -355,7 +355,7 @@ func doctorStateLock(in DoctorInput) DoctorCheck {
 	if strings.TrimSpace(in.StateDir) == "" {
 		return fail(doctorGroupState, id, "no state directory is configured, so the ownership lock cannot be taken")
 	}
-	lock, err := AcquireOwnershipLock(in.StateDir, NewRuntimeOwner())
+	lock, err := AcquireControllerInstanceLock(in.StateDir, NewRuntimeOwner())
 	if err != nil {
 		return fail(doctorGroupState, id, "the runtime ownership lock could not be taken: "+err.Error()+"; another process may already own this state directory")
 	}
@@ -375,7 +375,7 @@ func doctorStateLiveness(in DoctorInput) DoctorCheck {
 		return fail(doctorGroupState, id, "no state directory is configured, so owner liveness has no evidence to read")
 	}
 	owner := NewRuntimeOwner()
-	lock, err := AcquireOwnershipLock(in.StateDir, owner)
+	lock, err := AcquireControllerInstanceLock(in.StateDir, owner)
 	if err != nil {
 		return fail(doctorGroupState, id, "owner liveness could not be probed because the ownership lock could not be taken: "+err.Error())
 	}

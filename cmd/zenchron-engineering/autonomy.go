@@ -557,6 +557,10 @@ type composition struct {
 	assurance   runtime.AssuranceProvider
 	semantic    runtime.AssuranceProvider
 	build       runtime.ControllerBuild
+	// role is this process's controller-role capability when it is serving. It
+	// is held rather than queried: the snapshot answers "do I own the role" by
+	// exercising it, because there is deliberately no way to ask.
+	role *runtime.ControllerRoleLease
 	// agents is the operator's registry, and agent is the one this invocation
 	// resolved. Both are here because the two are different questions: which
 	// workers exist, and which one this command is driving.
@@ -620,7 +624,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	// also refuses a second invocation that would share this identity, and
 	// releasing it on shutdown is how a watcher gives ownership back.
 	owner := runtime.NewRuntimeOwner()
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, owner)
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, owner)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot take exclusive ownership of state dir %s; another zenchron-engineering process may already be running against it: %w", config.StateDir, err)

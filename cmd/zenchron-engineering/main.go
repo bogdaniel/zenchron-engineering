@@ -1,13 +1,10 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -32,49 +29,27 @@ var (
 	sourceTree     string
 )
 
-// controllerBuild is this process's provenance, resolved once from the injected
-// metadata plus a measurement of the executable that is actually running.
+// controllerDeclaration is what this build claims about itself: the link-time
+// values, and nothing measured.
+func controllerDeclaration() runtime.ControllerDeclaration {
+	return runtime.ControllerDeclaration{
+		Kind: buildKind, Version: version, SourceRevision: sourceRevision, SourceTree: sourceTree,
+	}
+}
+
+// controllerSelf is this process's canonical identity. The resolution lives in
+// the runtime because an activation proof needs it IN PROCESS: a controller
+// cannot establish which generation it is by executing a binary it has to
+// assume is itself. Everything here presents that one value.
+func controllerSelf() (runtime.ControllerSelfRecord, error) {
+	return runtime.CurrentControllerIdentity(controllerDeclaration())
+}
+
+// controllerBuild is the provenance document that identity carries.
 func controllerBuild() (runtime.ControllerBuild, error) {
-	return buildProvenance(buildKind, version, sourceRevision, sourceTree, runningBinaryDigest)
+	self, err := controllerSelf()
+	return self.Build, err
 }
-
-// buildProvenance takes its inputs instead of reading the package variables, so
-// a test asserts the exact same resolution without a real -ldflags build and
-// without hashing whatever binary happens to be running.
-func buildProvenance(kind, version, revision, tree string, digest func() (string, error)) (runtime.ControllerBuild, error) {
-	if kind == "" || kind == runtime.ControllerUnattested {
-		return runtime.ControllerBuild{Kind: runtime.ControllerUnattested}, nil
-	}
-	binary, err := digest()
-	if err != nil {
-		return runtime.ControllerBuild{}, fmt.Errorf("cannot measure the running controller binary: %w", err)
-	}
-	return runtime.ControllerBuild{
-		Kind: kind, Version: version, SourceRevision: revision, SourceTree: tree, BinarySHA256: binary,
-	}, nil
-}
-
-// runningBinaryDigest hashes the executable this process was started from. A
-// binary cannot contain its own final digest, and an adjacent metadata file is
-// a claim rather than a measurement, so the only honest answer is to read the
-// running artifact back and hash it. It is computed at most once: the file
-// cannot change identity under a running process.
-var runningBinaryDigest = sync.OnceValues(func() (string, error) {
-	path, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	sum := sha256.New()
-	if _, err := io.Copy(sum, file); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
-})
 
 // exitUsage is the historical exit status for a top-level usage or selfhost
 // failure. The autonomy subcommand reports the runtime exit codes instead.
@@ -104,6 +79,9 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	}
 	if len(args) >= 2 && args[0] == "controller" && args[1] == "inspect-self" {
 		return controllerInspectSelf(args[2:], stdout)
+	}
+	if len(args) >= 2 && args[0] == "controller" && args[1] == "status" {
+		return controllerStatus(args[2:], autonomyOverrides{}, stdout)
 	}
 	if len(args) >= 2 && args[0] == "controller" && args[1] == "build-adopted" {
 		return controllerBuildAdopted(args[2:], autonomyOverrides{}, stdout)
@@ -140,7 +118,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
 }
 
 func parseModelFlags(args []string) ([]string, error) {

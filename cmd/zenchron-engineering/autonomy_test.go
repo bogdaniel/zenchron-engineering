@@ -623,7 +623,7 @@ func TestSecondInvocationAgainstAHeldStateDirIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A first invocation already owns this state directory.
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, runtime.NewRuntimeOwner())
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, runtime.NewRuntimeOwner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1655,7 +1655,7 @@ func TestEventsFollowObservesAConcurrentAppendWithoutTakingOwnership(t *testing.
 		t.Fatal(err)
 	}
 	// Somebody else already owns this state directory and is driving the run.
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, runtime.NewRuntimeOwner())
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, runtime.NewRuntimeOwner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1910,14 +1910,22 @@ func TestOperatorExitStatusIsTheRealProcessStatus(t *testing.T) {
 // real ldflags build, and without hashing whatever binary is running the test.
 func TestControllerBuildIsInjectedNotDiscovered(t *testing.T) {
 	measured := 0
-	digest := func() (string, error) {
+	locate := func() (string, error) { return "/controller/zenchron-engineering", nil }
+	digest := func(string) (string, error) {
 		measured++
 		return strings.Repeat("ab", 32), nil
 	}
-	build, err := buildProvenance(runtime.ControllerPreAdoptionBuild, "v0.1.0", "rev-1", "tree-1", digest)
+	// The resolution lives in the runtime now, because an activation proof
+	// needs this identity in process; the composition root passes the
+	// link-time declaration and presents what comes back.
+	self, err := runtime.ControllerIdentityFrom(runtime.ControllerDeclaration{
+		Kind: runtime.ControllerPreAdoptionBuild, Version: "v0.1.0",
+		SourceRevision: "rev-1", SourceTree: "tree-1",
+	}, locate, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
+	build := self.Build
 	want := runtime.ControllerBuild{
 		Kind:           runtime.ControllerPreAdoptionBuild,
 		Version:        "v0.1.0",
@@ -1934,10 +1942,12 @@ func TestControllerBuildIsInjectedNotDiscovered(t *testing.T) {
 	// A build with nothing injected claims nothing, and does not even measure
 	// the binary: an unattested controller has no claim to substantiate.
 	measured = 0
-	unattested, err := buildProvenance("", "v0.1.0", "", "", digest)
+	unattestedSelf, err := runtime.ControllerIdentityFrom(
+		runtime.ControllerDeclaration{Version: "v0.1.0"}, locate, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
+	unattested := unattestedSelf.Build
 	if unattested != (runtime.ControllerBuild{Kind: runtime.ControllerUnattested}) {
 		t.Fatalf("a build with no injected metadata claimed %+v", unattested)
 	}

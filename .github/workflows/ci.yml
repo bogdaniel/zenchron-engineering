@@ -36,4 +36,14 @@ jobs:
         run: GOOS=windows GOARCH=amd64 go build ./...
 
       - name: Test
-        run: go test ./...
+        # The runtime package runs about six minutes and grows with every
+        # slice, against Go's IMPLICIT ten-minute per-package default. That
+        # default turns a slow runner into a red required check for no protocol
+        # reason - it happened once already, and the re-run passed unchanged.
+        #
+        # The bound is deliberately generous rather than tight: its job is to
+        # catch a hang, not to police how long the suite takes. A timeout set
+        # close to the current duration would be a second, silent performance
+        # budget that fails as tests are added, which is the failure being
+        # fixed here.
+        run: go test -timeout 30m ./...

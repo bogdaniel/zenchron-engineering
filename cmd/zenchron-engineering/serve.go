@@ -60,9 +60,24 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	// The control endpoint is opened BEFORE any work is driven, so a second
-	// supervisor is refused before it starts competing for leases rather than
-	// after.
+	// THE CONTROLLER ROLE IS TAKEN FIRST, and it is what makes this process the
+	// controller. Binding the control socket used to serve that purpose - a
+	// second supervisor failed on the address - which made the COMMUNICATION
+	// PATH the ownership mechanism: transferring ownership would have meant
+	// transferring a socket, and a leftover socket file is a fact about a
+	// directory rather than about a process. The role is an exclusive advisory
+	// lock the kernel releases when its holder dies, so there is no stale state
+	// to interpret and nothing to clean up. See controller_role.go.
+	role, err := runtime.AcquireControllerRole(built.config.StateDir)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer func() { _ = role.Release() }()
+	built.role = role
+
+	// The control endpoint is opened before any work is driven, so an operator
+	// can reach a supervisor that is starting up. It proves nothing about
+	// ownership; the role above does that.
 	listener, err := runtime.ListenControl(built.config.StateDir)
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -96,6 +111,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 
 	fmt.Fprintf(stdout, "zenchron-engineering serve\n")
 	fmt.Fprintf(stdout, "  state directory   %s\n", built.config.StateDir)
+	fmt.Fprintf(stdout, "  controller role   %s\n", role.Path())
 	fmt.Fprintf(stdout, "  control endpoint  %s\n", listener.Path())
 	fmt.Fprintf(stdout, "  mechanism         %s\n", runtime.ControlEndpointMechanism)
 	fmt.Fprintf(stdout, "  agents            %s (default %s)\n", strings.Join(built.agents.IDs(), ", "), built.agents.Default())
@@ -277,6 +293,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	switch request.Command {
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
+	case runtime.ControlCommandControllerSnapshot:
+		// READ-ONLY, and one coherent observation rather than three reads: the
+		// role and the gate move together during a drain, so sampling them
+		// separately could report a pair that never existed.
+		return controlOK(c.controllerSnapshot(supervisor))
 	case runtime.ControlSubmit:
 		outcome, err := supervisor.Submit(ctx, request)
 		if err != nil {
@@ -1005,4 +1026,35 @@ func sortedIssues(issues []int) []int {
 	out := append([]int(nil), issues...)
 	sort.Ints(out)
 	return out
+}
+
+// controllerSnapshot is this process's answer about itself: which generation it
+// is, whether it still holds the controller role, and whether it is admitting
+// work.
+//
+// The role fact comes from EXERCISING the lease rather than from reading a
+// flag, which is the only honest way to answer it - there is deliberately no
+// Held(). An identity this process cannot establish leaves the identity empty
+// rather than guessed, and the status model reads an unpopulated field as
+// unknown.
+func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime.LiveControllerSnapshot {
+	snapshot := runtime.LiveControllerSnapshot{ObservedAt: time.Now().UTC()}
+	if self, err := controllerSelf(); err == nil {
+		snapshot.Identity = self
+	}
+	snapshot.Role = runtime.RoleNotHeld
+	if c.role != nil {
+		if err := c.role.WithAuthority(func() error { return nil }); err == nil {
+			snapshot.Role = runtime.RoleHeld
+		}
+	}
+	switch {
+	case supervisor == nil:
+		snapshot.WorkAdmission = runtime.AdmissionUnknown
+	case supervisor.AdmittingWork():
+		snapshot.WorkAdmission = runtime.AdmissionOpen
+	default:
+		snapshot.WorkAdmission = runtime.AdmissionClosed
+	}
+	return snapshot
 }
