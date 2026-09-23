@@ -41,12 +41,19 @@ func TestInspectSelfReportsOnlyItsOwnProvenance(t *testing.T) {
 	// An attested build reports the injected identity together with a digest
 	// measured from the running executable - which is what the adopted builder
 	// compares against what it asked for.
-	attested, err := buildProvenance(runtime.ControllerAdopted, "main-abc12345",
-		"abc1234500000000000000000000000000000000", "def4567800000000000000000000000000000000",
-		func() (string, error) { return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil })
+	attestedSelf, err := runtime.ControllerIdentityFrom(runtime.ControllerDeclaration{
+		Kind: runtime.ControllerAdopted, Version: "main-abc12345",
+		SourceRevision: "abc1234500000000000000000000000000000000",
+		SourceTree:     "def4567800000000000000000000000000000000",
+	},
+		func() (string, error) { return "/controller/zenchron-engineering", nil },
+		func(string) (string, error) {
+			return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
+	attested := attestedSelf.Build
 	if attested.Kind != runtime.ControllerAdopted || attested.BinarySHA256 == "" {
 		t.Fatalf("an attested build did not report a measured identity: %+v", attested)
 	}
