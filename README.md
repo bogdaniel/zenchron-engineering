@@ -375,6 +375,18 @@ re-checked by every client, with no TCP listener and no stored credential beside
 it. Drain, shutdown and stop-all are three different operations, and only the
 last one cancels runs.
 
+A serving controller REPLACES ITSELF when trusted main moves. It builds the
+successor through the same governed adopted build an operator would run,
+prepares the transition, starts that successor inert, stops taking on new work,
+waits for the work it already started to finish, and only then asks the
+successor whether it can continue every live run - because "can you read this
+journal" is a question only the code that would read it can answer. Currency is
+proven last, immediately before the role changes hands. A successor that
+refuses costs an update; the controller keeps serving. Nothing in that sequence
+is a deployment command, and an operator who wants none of it gets it: a
+controller with no governance credential, no published generation of its own or
+no adopted lineage says so on its startup banner and upgrades nothing.
+
 `autonomy agents` reports each configured worker: found, capabilities
 advertised, version, and the authentication state actually observed. It spends
 nothing, and an unobserved authentication mode is reported as `unknown` rather
