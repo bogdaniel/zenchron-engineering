@@ -34,6 +34,7 @@ type serviceFixture struct {
 	record    ControllerHandoff
 	self      ControllerSelfRecord
 	admission *fakeAdmission
+	service   *ControllerService
 }
 
 func newServiceFixture(t *testing.T) *serviceFixture {
