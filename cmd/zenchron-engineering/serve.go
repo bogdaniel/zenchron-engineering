@@ -60,9 +60,23 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	// The control endpoint is opened BEFORE any work is driven, so a second
-	// supervisor is refused before it starts competing for leases rather than
-	// after.
+	// THE CONTROLLER ROLE IS TAKEN FIRST, and it is what makes this process the
+	// controller. Binding the control socket used to serve that purpose - a
+	// second supervisor failed on the address - which made the COMMUNICATION
+	// PATH the ownership mechanism: transferring ownership would have meant
+	// transferring a socket, and a leftover socket file is a fact about a
+	// directory rather than about a process. The role is an exclusive advisory
+	// lock the kernel releases when its holder dies, so there is no stale state
+	// to interpret and nothing to clean up. See controller_role.go.
+	role, err := runtime.AcquireControllerRole(built.config.StateDir)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer func() { _ = role.Release() }()
+
+	// The control endpoint is opened before any work is driven, so an operator
+	// can reach a supervisor that is starting up. It proves nothing about
+	// ownership; the role above does that.
 	listener, err := runtime.ListenControl(built.config.StateDir)
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -96,6 +110,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 
 	fmt.Fprintf(stdout, "zenchron-engineering serve\n")
 	fmt.Fprintf(stdout, "  state directory   %s\n", built.config.StateDir)
+	fmt.Fprintf(stdout, "  controller role   %s\n", role.Path())
 	fmt.Fprintf(stdout, "  control endpoint  %s\n", listener.Path())
 	fmt.Fprintf(stdout, "  mechanism         %s\n", runtime.ControlEndpointMechanism)
 	fmt.Fprintf(stdout, "  agents            %s (default %s)\n", strings.Join(built.agents.IDs(), ", "), built.agents.Default())
