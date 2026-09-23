@@ -36,6 +36,13 @@ import (
 // dependency set, every external system is a seam and nothing is discovered
 // from ambient state.
 type SupervisorDependencies struct {
+	// Reconciler maintains this controller's own generation state, one attempt
+	// per pass. It is optional: a supervisor constructed without one does
+	// exactly what it always did. When present it is driven by the SAME tick
+	// that drives runs, because a second timer would be a second lifecycle -
+	// and the first thing it would get wrong is stopping at a different moment
+	// from the thing it maintains.
+	Reconciler *ControllerReconciler
 	// WorkAdmissionWithheld constructs the supervisor unable to take on work.
 	// It is how the successor half of a controller handoff holds the scheduler
 	// while it revalidates and proves itself: ownership is permission to
@@ -88,7 +95,11 @@ type SupervisorDependencies struct {
 
 // SupervisorReport is one tick's account of what the supervisor did.
 type SupervisorReport struct {
-	At time.Time `json:"at"`
+	// Reconciliation is what this pass did about the controller's own state,
+	// or why it did nothing. It rides the existing report rather than a new
+	// channel: an operator reading a tick should see the whole tick.
+	Reconciliation *ReconciliationAttempt `json:"reconciliation,omitempty"`
+	At             time.Time              `json:"at"`
 	// Driven is the runs whose driving FINISHED and was noticed by this pass.
 	// A run started here and finished here appears here, as it always did; a
 	// run whose provider spans several passes appears in the pass it finished
@@ -461,6 +472,15 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 		} else {
 			report.Discovery = &discovery
 		}
+	}
+	// CONTROLLER RECONCILIATION happens before any work is considered, and
+	// runs even while draining. Draining stops taking on WORK; it does not stop
+	// this controller from repairing a stale pointer or resuming an activation
+	// it already holds, and every operation underneath enforces its own
+	// authority regardless of what this loop asks for.
+	if s.deps.Reconciler != nil {
+		attempt := s.deps.Reconciler.Attempt(now)
+		report.Reconciliation = &attempt
 	}
 	// PLANS are reconciled BEFORE the run list is read, so a stage that became
 	// dependency-ready since the last tick gets its run created and then driven
