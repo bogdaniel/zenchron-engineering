@@ -99,9 +99,15 @@ type ControllerUpdaterPorts struct {
 // ControllerUpdater decides when to ask for a successor and reports where the
 // asking got to.
 type ControllerUpdater struct {
-	ports   ControllerUpdaterPorts
-	self    ControllerSelfRecord
-	request AdoptedBuildRequest
+	ports ControllerUpdaterPorts
+	// predecessor is the running controller's full binding: program identity,
+	// build and configuration digest. The successor is this value with ONLY
+	// the build replaced, because succession requires the controller id and
+	// the effective configuration to be unchanged - a successor assembled from
+	// a build alone would be refused by the very preflight this updater
+	// prepares for.
+	predecessor ControllerBinding
+	request     AdoptedBuildRequest
 
 	mu      sync.Mutex
 	current *ControllerUpdate
@@ -114,8 +120,8 @@ type ControllerUpdater struct {
 
 // NewControllerUpdater binds an updater to this controller's identity and the
 // build request the composition root configured.
-func NewControllerUpdater(self ControllerSelfRecord, request AdoptedBuildRequest, ports ControllerUpdaterPorts) *ControllerUpdater {
-	return &ControllerUpdater{self: self, request: request, ports: ports}
+func NewControllerUpdater(predecessor ControllerBinding, request AdoptedBuildRequest, ports ControllerUpdaterPorts) *ControllerUpdater {
+	return &ControllerUpdater{predecessor: predecessor, request: request, ports: ports}
 }
 
 // Attempt advances one update, without blocking.
@@ -133,6 +139,15 @@ func (u *ControllerUpdater) Attempt(ctx context.Context, now time.Time) Controll
 		// would mean interrupting a container to re-read a branch.
 		return u.progress(ctx, now)
 	}
+	if u.predecessor.Build == nil {
+		// An unattested controller has no lineage to succeed from, so there is
+		// no successor it could prepare. Refusing here is the same law the
+		// succession evaluation applies, stated before minutes of container
+		// time are spent discovering it.
+		u.current = &ControllerUpdate{State: UpdateRefused, EndedAt: now,
+			Detail: "this controller is not an adopted build, so it has no successor to prepare"}
+		return *u.current
+	}
 	observed, err := u.ports.ObserveTrustedMain(ctx)
 	if err != nil {
 		// THE CONTROLLER KEEPS SERVING. An unobservable trust root is a reason
@@ -140,7 +155,7 @@ func (u *ControllerUpdater) Attempt(ctx context.Context, now time.Time) Controll
 		u.current = &ControllerUpdate{State: UpdateObservationFailed, Detail: err.Error(), EndedAt: now}
 		return *u.current
 	}
-	if observed.Revision == u.self.Build.SourceRevision {
+	if observed.Revision == u.predecessor.Build.SourceRevision {
 		u.current = &ControllerUpdate{State: UpdateIdle, Subject: observed, EndedAt: now}
 		return *u.current
 	}
@@ -178,7 +193,11 @@ func (u *ControllerUpdater) settledFor(observed RevisionRecord, now time.Time) *
 		// Already built and validated. Building it again would produce the
 		// same artifact and waste minutes of container time.
 		return u.current
-	case UpdateRefused, UpdateSuperseded:
+	case UpdateRefused, UpdateSuperseded, UpdateObservationFailed:
+		// A post-build observation failure carries a subject and an artifact,
+		// so it earns the same wait: rebuilding the same revision on the next
+		// poll because a branch read failed once would spend minutes of
+		// container time to produce the artifact that already exists.
 		if now.Before(u.retryAfter) {
 			return u.current
 		}
@@ -194,28 +213,33 @@ func (u *ControllerUpdater) start(ctx context.Context, observed RevisionRecord, 
 	// PINNED. The build is told exactly which revision to produce, so it
 	// cannot quietly follow a branch that moves underneath it.
 	request.Revision = observed.Revision
-	subject := observed
+	subject, startedAt := observed, now
 	go func() {
 		provenance, err := u.ports.Build(ctx, request)
-		u.finish(ctx, subject, provenance, err)
+		// The goroutine carries everything it needs to describe the attempt it
+		// belongs to. Reaching back into the updater's mutable state to
+		// reconstruct that would be reading it without the lock the rest of
+		// this type takes.
+		u.finish(ctx, subject, startedAt, provenance, err)
 	}()
 	return *u.current
 }
 
 // finish validates what the build produced against the subject it was asked
 // for, and prepares the transition when it holds.
-func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, provenance AdoptedBuildProvenance, buildErr error) {
+func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, startedAt time.Time, provenance AdoptedBuildProvenance, buildErr error) {
 	settle := func(update ControllerUpdate) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		u.running = false
-		if update.State == UpdateRefused || update.State == UpdateSuperseded {
+		if update.State == UpdateRefused || update.State == UpdateSuperseded ||
+			update.State == UpdateObservationFailed {
 			u.retryAfter = update.EndedAt.Add(updateRetryInterval)
 		}
 		u.current = &update
 	}
 	now := time.Now().UTC()
-	base := ControllerUpdate{Subject: subject, StartedAt: u.startedAt(), EndedAt: now}
+	base := ControllerUpdate{Subject: subject, StartedAt: startedAt, EndedAt: now}
 
 	if buildErr != nil {
 		base.State, base.Detail = UpdateRefused, buildErr.Error()
@@ -233,6 +257,20 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 		settle(base)
 		return
 	}
+	// AND THE SUBJECT MUST HAVE BEEN TRUSTED MAIN AT PUBLICATION. The builder
+	// deliberately permits publishing an ANCESTOR of trusted main: it proves
+	// containment rather than currency, so a manual build of an older adopted
+	// commit is legitimate. For an updater it is not - a successor built from a
+	// commit that main had already moved past is superseded the moment it
+	// exists, and the provenance says so in a field this attempt would
+	// otherwise ignore.
+	if provenance.TrustedMain.Revision != subject.Revision || provenance.TrustedMain.Tree != subject.Tree {
+		base.State = UpdateSuperseded
+		base.Detail = fmt.Sprintf("trusted main was %s when this successor was published and it was built from %s",
+			shortSHA(provenance.TrustedMain.Revision), shortSHA(subject.Revision))
+		settle(base)
+		return
+	}
 	if !provenance.SelfProbe.Matched {
 		base.State = UpdateRefused
 		base.Detail = "the built controller did not report the generation it was built as"
@@ -241,10 +279,22 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 	}
 	base.Artifact = provenance.OutputPath
 
-	// Still trusted main? An observation that moved does not invalidate the
+	// STILL TRUSTED MAIN? An observation that moved does not invalidate the
 	// artifact - it is a perfectly good build of a commit that is no longer
 	// current - but it does mean this attempt has nothing to activate.
-	if observed, err := u.ports.ObserveTrustedMain(ctx); err == nil && observed.Revision != subject.Revision {
+	//
+	// AND AN OBSERVATION THAT COULD NOT BE MADE IS NOT A PASS. Falling through
+	// when the answer is unknown would make "ready" mean "nobody could say
+	// otherwise", which is the fail-open shape every other decision in this
+	// stack refuses. The artifact is kept and reported; it is not prepared.
+	observed, err := u.ports.ObserveTrustedMain(ctx)
+	switch {
+	case err != nil:
+		base.State = UpdateObservationFailed
+		base.Detail = "the successor was built and trusted main could not be re-observed to confirm it is current: " + err.Error()
+		settle(base)
+		return
+	case observed.Revision != subject.Revision || observed.Tree != subject.Tree:
 		base.State = UpdateSuperseded
 		base.Detail = fmt.Sprintf("trusted main is %s and this successor was built from %s",
 			shortSHA(observed.Revision), shortSHA(subject.Revision))
@@ -252,12 +302,16 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 		return
 	}
 
-	successor := ControllerBinding{
-		Controller: u.self.Build.Version, Build: &ControllerBuild{
-			Kind: ControllerAdopted, Version: provenance.Version,
-			SourceRevision: provenance.Source.Revision, SourceTree: provenance.Source.Tree,
-			BinarySHA256: provenance.BinarySHA256,
-		},
+	// ONLY THE BUILD CHANGES. Succession requires the controller id and the
+	// effective configuration to be identical, so the successor is this
+	// controller's own binding with a different build - not a binding
+	// assembled here, which would differ in exactly the members the preflight
+	// checks.
+	successor := u.predecessor
+	successor.Build = &ControllerBuild{
+		Kind: ControllerAdopted, Version: provenance.Version,
+		SourceRevision: provenance.Source.Revision, SourceTree: provenance.Source.Tree,
+		BinarySHA256: provenance.BinarySHA256,
 	}
 	prepared, err := u.ports.Prepare(ctx, successor, provenance.OutputPath)
 	if err != nil {
@@ -275,13 +329,6 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 	}
 	base.State = UpdateReady
 	settle(base)
-}
-
-func (u *ControllerUpdater) startedAt() time.Time {
-	if u.current == nil {
-		return time.Time{}
-	}
-	return u.current.StartedAt
 }
 
 // updateRetryInterval keeps a refused or superseded subject from being rebuilt

@@ -23,6 +23,7 @@ type updaterHarness struct {
 	prepareErr   error
 	preflightErr error
 	prepared     int
+	successor    ControllerBinding
 }
 
 func (h *updaterHarness) observe(context.Context) (RevisionRecord, error) {
@@ -52,19 +53,22 @@ func (h *updaterHarness) build(_ context.Context, request AdoptedBuildRequest) (
 	if produce != nil {
 		return produce(subject), nil
 	}
+	published := RevisionRecord{Revision: subject.Revision, Tree: "tree-" + shortSHA(subject.Revision)}
 	return AdoptedBuildProvenance{
 		Version:      "main-" + shortSHA(subject.Revision),
-		Source:       RevisionRecord{Revision: subject.Revision, Tree: "tree-" + shortSHA(subject.Revision)},
+		Source:       published,
+		TrustedMain:  published,
 		BinarySHA256: strings.Repeat("cd", 32),
 		OutputPath:   "/controller/main-" + shortSHA(subject.Revision) + "/zenchron-engineering",
 		SelfProbe:    SelfProbeRecord{Matched: true},
 	}, nil
 }
 
-func (h *updaterHarness) prepare(context.Context, ControllerBinding, string) (ControllerHandoff, error) {
+func (h *updaterHarness) prepare(_ context.Context, successor ControllerBinding, _ string) (ControllerHandoff, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.prepared++
+	h.successor = successor
 	if h.prepareErr != nil {
 		return ControllerHandoff{}, h.prepareErr
 	}
@@ -83,6 +87,16 @@ func (h *updaterHarness) buildCount() int {
 	return h.builds
 }
 
+// runningBinding is the controller this updater runs as: a program identity, a
+// build and a configuration digest. The successor must differ in exactly one of
+// the three.
+func runningBinding(build ControllerBuild) ControllerBinding {
+	return ControllerBinding{
+		Controller: "zenchron-engineering", Build: &build,
+		Config: ConfigDigest{Global: "config-a"},
+	}
+}
+
 const (
 	runningRevision = "1111111111111111111111111111111111111111"
 	movedRevision   = "2222222222222222222222222222222222222222"
@@ -93,7 +107,7 @@ func newUpdater(t *testing.T, harness *updaterHarness) *ControllerUpdater {
 	t.Helper()
 	running := attestedBuild(ControllerAdopted, runningRevision, "tree-a", strings.Repeat("ab", 32))
 	return NewControllerUpdater(
-		ControllerSelfRecord{Build: running, Measured: running.BinarySHA256},
+		runningBinding(running),
 		AdoptedBuildRequest{OutputRoot: t.TempDir()},
 		ControllerUpdaterPorts{
 			ObserveTrustedMain: harness.observe, Build: harness.build,
@@ -286,9 +300,8 @@ func TestAnArtifactThatIsNotTheBoundSubjectIsRefused(t *testing.T) {
 			}
 		}, "bound to"},
 		{"a controller that cannot prove what it is", func(subject RevisionRecord) AdoptedBuildProvenance {
-			return AdoptedBuildProvenance{
-				Source: RevisionRecord{Revision: subject.Revision, Tree: "tree-" + shortSHA(subject.Revision)},
-			}
+			published := RevisionRecord{Revision: subject.Revision, Tree: "tree-" + shortSHA(subject.Revision)}
+			return AdoptedBuildProvenance{Source: published, TrustedMain: published}
 		}, "did not report the generation"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -329,5 +342,87 @@ func TestAnIncompatibleSuccessorBlocksTheUpdateNotTheController(t *testing.T) {
 	}
 	if harness.buildCount() != 1 {
 		t.Fatalf("a blocked successor was rebuilt %d times", harness.buildCount())
+	}
+}
+
+// THE SUCCESSOR IS THIS CONTROLLER WITH A NEW BUILD, and differs in nothing
+// else. Succession requires the controller id and the effective configuration
+// to be unchanged, so a binding assembled from build fields alone would be
+// refused by the preflight it is prepared for - and refused for a reason that
+// has nothing to do with the two controllers.
+func TestTheSuccessorDiffersFromThePredecessorOnlyInItsBuild(t *testing.T) {
+	harness := &updaterHarness{trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-" + shortSHA(movedRevision)}}
+	updater := newUpdater(t, harness)
+	settle(t, updater, UpdateReady)
+
+	predecessor := runningBinding(attestedBuild(ControllerAdopted, runningRevision, "tree-a", strings.Repeat("ab", 32)))
+	harness.mu.Lock()
+	successor := harness.successor
+	harness.mu.Unlock()
+
+	if successor.Controller != predecessor.Controller {
+		t.Fatalf("controller id = %q, want the predecessor's %q", successor.Controller, predecessor.Controller)
+	}
+	if successor.Config != predecessor.Config {
+		t.Fatalf("config = %+v, want the predecessor's %+v", successor.Config, predecessor.Config)
+	}
+	if successor.Build == nil || *successor.Build == *predecessor.Build {
+		t.Fatalf("build = %+v, want the newly published one", successor.Build)
+	}
+	if successor.Build.SourceRevision != movedRevision {
+		t.Fatalf("successor built from %s, want the observed trusted main", shortSHA(successor.Build.SourceRevision))
+	}
+}
+
+// PUBLISHED FROM AN ANCESTOR IS NOT PUBLISHED FROM MAIN. The builder is allowed
+// to publish a commit that is merely CONTAINED in trusted main, which is right
+// for an operator pinning an older adopted revision and wrong for an updater:
+// such a successor is superseded the moment it exists, and the provenance says
+// so in a field a currency check that only compared Source would ignore.
+func TestASuccessorPublishedBehindTrustedMainIsSuperseded(t *testing.T) {
+	harness := &updaterHarness{
+		trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-" + shortSHA(movedRevision)},
+		produced: func(subject RevisionRecord) AdoptedBuildProvenance {
+			return AdoptedBuildProvenance{
+				Version:     "main-" + shortSHA(subject.Revision),
+				Source:      RevisionRecord{Revision: subject.Revision, Tree: "tree-" + shortSHA(subject.Revision)},
+				TrustedMain: RevisionRecord{Revision: movedAgain, Tree: "tree-" + shortSHA(movedAgain)},
+				SelfProbe:   SelfProbeRecord{Matched: true},
+			}
+		},
+	}
+	updater := newUpdater(t, harness)
+	superseded := settle(t, updater, UpdateSuperseded)
+	if !strings.Contains(superseded.Detail, shortSHA(movedAgain)) {
+		t.Fatalf("the operator is not told what main was at publication: %q", superseded.Detail)
+	}
+	if harness.prepared != 0 {
+		t.Fatal("a successor main had already moved past was prepared for handoff")
+	}
+}
+
+// AN UNANSWERABLE CURRENCY QUESTION IS NOT A PASS. If trusted main cannot be
+// re-observed after the build, "ready" would mean "nobody could say otherwise",
+// which is the fail-open shape the rest of this stack refuses. The artifact is
+// kept; the handoff is not prepared.
+func TestAnUnobservableTrustedMainAfterTheBuildRefusesToPrepare(t *testing.T) {
+	harness := &updaterHarness{trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-" + shortSHA(movedRevision)}}
+	harness.produced = func(subject RevisionRecord) AdoptedBuildProvenance {
+		harness.mu.Lock()
+		harness.observeErr = fmt.Errorf("the trusted-main observation could not be made")
+		harness.mu.Unlock()
+		published := RevisionRecord{Revision: subject.Revision, Tree: "tree-" + shortSHA(subject.Revision)}
+		return AdoptedBuildProvenance{
+			Version: "main-" + shortSHA(subject.Revision), Source: published,
+			TrustedMain: published, SelfProbe: SelfProbeRecord{Matched: true},
+		}
+	}
+	updater := newUpdater(t, harness)
+	failed := settle(t, updater, UpdateObservationFailed)
+	if !strings.Contains(failed.Detail, "could not be") {
+		t.Fatalf("the operator is not told the observation failed: %q", failed.Detail)
+	}
+	if harness.prepared != 0 {
+		t.Fatal("a successor whose currency is unknown was prepared for handoff")
 	}
 }
