@@ -234,6 +234,12 @@ func (s *ControllerService) RecoverActivated(handoffID string) (ControllerHandof
 	if record.Phase != HandoffActivated {
 		return record, fmt.Errorf("transition %s is at phase %q; recovery resumes an activation that already happened", handoffID, record.Phase)
 	}
+	// RESUMING A SUPERSEDED ACTIVATION IS NOT RECOVERY, it is a rollback
+	// nobody authorized. The transition must be the one that governs now, not
+	// merely one that governed once.
+	if err := governsNow(s.store, handoffID); err != nil {
+		return record, err
+	}
 	if err := s.self.ProvesGeneration(record.Successor.Binding); err != nil {
 		return record, fmt.Errorf("this process is not the activated generation: %w", err)
 	}
@@ -272,6 +278,12 @@ func (s *ControllerService) EnableWorkAdmission(handoffID string) error {
 		if record.Phase != HandoffActivated {
 			return &WorkAdmissionRefusedError{Reason: fmt.Sprintf(
 				"transition %s is at phase %q; service follows the durable activation", handoffID, record.Phase)}
+		}
+		// Service follows the activation that GOVERNS, not one that happened.
+		// Without this, a generation superseded an hour ago could open its own
+		// gate by pointing at the transition that once activated it.
+		if err := governsNow(s.store, handoffID); err != nil {
+			return &WorkAdmissionRefusedError{Reason: err.Error()}
 		}
 		successor, err := record.Successor.Binding.Digest()
 		if err != nil {

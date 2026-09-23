@@ -56,14 +56,27 @@ func generationFixture(t *testing.T) (root string, record ControllerHandoff, sel
 	return root, record, self
 }
 
-// fakeHandoffReader serves one record, or none.
+// fakeHandoffReader serves one record, or none. The record it serves is also
+// the activation that governs unless a case says otherwise, so a test about
+// something else does not have to set up currency.
 type fakeHandoffReader struct {
-	record ControllerHandoff
-	found  bool
+	record  ControllerHandoff
+	found   bool
+	current *ControllerHandoff
 }
 
 func (f fakeHandoffReader) ControllerHandoff(string) (ControllerHandoff, bool, error) {
 	return f.record, f.found, nil
+}
+
+func (f fakeHandoffReader) CurrentControllerActivation() (ControllerHandoff, bool, error) {
+	if f.current != nil {
+		return *f.current, true, nil
+	}
+	if f.found && f.record.Phase == HandoffActivated {
+		return f.record, true, nil
+	}
+	return ControllerHandoff{}, false, nil
 }
 
 // An attested build measures the running artifact exactly once; an unattested

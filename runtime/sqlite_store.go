@@ -261,6 +261,37 @@ CREATE TABLE controller_handoffs (
 	updated_unix_nano INTEGER NOT NULL,
 	document          TEXT NOT NULL
 );
+`, `
+-- WHICH ACTIVATION GOVERNS NOW, as one durable subject.
+--
+-- A handoff row records that a transition activated, and that fact is
+-- historical and permanent: H1 activated, and it will have activated forever.
+-- It does not answer whether H1 still governs, and the runtime had no place
+-- that did - so every authority-bearing path asked "is this transition
+-- activated", which a superseded one still truthfully answers yes to.
+--
+-- This table is that missing subject. Exactly one row, written in the SAME
+-- TRANSACTION as the activation it records, so there is no instant where a
+-- handoff is activated and the current pointer disagrees.
+CREATE TABLE controller_current_activation (
+	id                TEXT PRIMARY KEY CHECK (id = 'current'),
+	handoff_id        TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+
+-- A state directory written before this table existed carries activated
+-- handoffs and no pointer. The newest activated row is the only information
+-- the old schema holds about which of them governs, so it seeds the pointer
+-- once, here. Wall-clock order is not good enough to BE the authority rule -
+-- which is why it is not used after this - and it is the best evidence
+-- available about a past this schema did not record.
+INSERT INTO controller_current_activation (id, handoff_id, updated_unix_nano, document)
+SELECT 'current', id, updated_unix_nano, document
+  FROM controller_handoffs
+ WHERE phase = 'activated'
+ ORDER BY updated_unix_nano DESC, id ASC
+ LIMIT 1;
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

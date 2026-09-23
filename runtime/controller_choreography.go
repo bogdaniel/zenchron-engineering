@@ -219,6 +219,7 @@ type handoffStore interface {
 	handoffReader
 	ControllerHandoffs() ([]ControllerHandoff, error)
 	PutControllerHandoff(handoff ControllerHandoff, expected HandoffPhase) (bool, error)
+	ActivateControllerHandoff(handoff ControllerHandoff, expected HandoffPhase) (bool, error)
 }
 
 // HandoffPorts are the effects the protocol performs, supplied by whichever
@@ -264,9 +265,21 @@ func (p HandoffPorts) persist(record ControllerHandoff, to HandoffPhase) (Contro
 	if err != nil {
 		return record, err
 	}
-	wrote, err := p.Store.PutControllerHandoff(advanced, record.Phase)
-	if err != nil {
-		return record, err
+	// THE ACTIVATION COMMIT MOVES BOTH OR NEITHER. Reaching activated is the
+	// authority linearization point, and the pointer that says which
+	// activation governs is part of that point rather than a write that
+	// follows it: a crash between the two would leave a transition claiming to
+	// be activated while the pointer named another, with nothing able to say
+	// afterwards which was true.
+	var wrote bool
+	var err2 error
+	if to == HandoffActivated {
+		wrote, err2 = p.Store.ActivateControllerHandoff(advanced, record.Phase)
+	} else {
+		wrote, err2 = p.Store.PutControllerHandoff(advanced, record.Phase)
+	}
+	if err2 != nil {
+		return record, err2
 	}
 	if !wrote {
 		// ANOTHER PROCESS MOVED IT. The compare-and-set failing is not a
@@ -452,20 +465,31 @@ func RevalidateAcquiredHandoff(store handoffStore, record ControllerHandoff, sel
 	if err := self.ProvesGeneration(stored.Successor.Binding); err != nil {
 		return fmt.Errorf("this process is not the successor the record names: %w", err)
 	}
-	// A CONTRADICTORY ACTIVATION is another transition that already made some
-	// other generation authoritative. Continuing would produce two activated
-	// records and no way to say which is true.
-	others, err := store.ControllerHandoffs()
+	// THE CURRENT ACTIVATION MUST BE THE ONE THIS TRANSITION SUCCEEDS FROM.
+	//
+	// The previous form scanned every activated handoff and refused if any of
+	// them named a different generation - which is what an OLDER activation is
+	// supposed to do. G1->G2 followed by G2->G3 would have been refused on the
+	// strength of H1, the very record proving G2 legitimately became active.
+	// A second upgrade was therefore impossible, and the check was reading
+	// history as contradiction.
+	//
+	// What actually contradicts this transition is the PRESENT: if the
+	// activation that governs now is not the predecessor this transition
+	// succeeds from, somebody else activated in between and this one is
+	// proceeding from a world that has moved.
+	activation, found, err := store.CurrentControllerActivation()
 	if err != nil {
 		return err
 	}
-	for _, other := range others {
-		if other.ID == record.ID || other.Phase != HandoffActivated {
-			continue
+	if found {
+		governing, err := activation.Successor.Binding.Digest()
+		if err != nil {
+			return err
 		}
-		active, err := other.Successor.Binding.Digest()
-		if err != nil || active != current {
-			return fmt.Errorf("handoff %s already activated another generation", other.ID)
+		if governing != previous {
+			return fmt.Errorf("transition %s governs now and activated a generation this transition does not succeed from",
+				activation.ID)
 		}
 	}
 	// And the runs themselves: same heads, same replay, nothing new that was
