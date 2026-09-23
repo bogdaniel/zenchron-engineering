@@ -415,11 +415,7 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	if d.ControllerBuild.Attested() {
 		build = &d.ControllerBuild
 	}
-	controller, err := Digest(struct {
-		Controller string           `json:"controller"`
-		Build      *ControllerBuild `json:"build,omitempty"`
-		Config     ConfigDigest     `json:"config"`
-	}{d.ControllerID, build, d.ConfigDigest})
+	controller, err := ControllerBinding{Controller: d.ControllerID, Build: build, Config: d.ConfigDigest}.Digest()
 	if err != nil {
 		return nil, err
 	}
@@ -672,11 +668,8 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 			// the next slot, leaving this run exactly as it is.
 			continue
 		}
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		// A live generation keeps the agent it was created with. Adopting it
 		// under a different worker would be a silent provider handoff, which
@@ -705,6 +698,30 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// refuseUnlessSucceeded is the adoption half of the controller-change rule.
+//
+// Reconciling another controller's live work under this one is refused, and an
+// ADMITTED SUCCESSION is the one thing that makes this controller not another
+// one for this run: the journal already carries the proof, so adoption reads it
+// rather than repeating the evaluation. A run whose journal holds no such
+// admission is refused exactly as it was before #234.
+func (r *EngineeringRuntime) refuseUnlessSucceeded(runID string, existing EngineeringRun) error {
+	if existing.ControllerSHA256 == r.controller {
+		return nil
+	}
+	events, err := r.deps.Store.Events(runID)
+	// An unreadable journal admits nothing. The refusal below is the same one
+	// the caller would have received before, which is the safe answer for a
+	// state this process could not read.
+	if err == nil && ControllerSuccessionContinues(existing, events, r.controller) {
+		return nil
+	}
+	return &RunAdoptionRefusedError{
+		RunID: runID, Owner: existing.ControllerSHA256,
+		Detail: "adopting it would reconcile another controller's work under this one",
+	}
 }
 
 // repairAgentBinding restores a journalled agent assignment for a run whose row
@@ -1210,11 +1227,8 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		// the same id, so without this check the second one would adopt the
 		// first one's live work. StartIssueRun refuses exactly this, and a plan
 		// stage run is an ordinary run: it is refused here on the same terms.
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		if err := r.repairAgentBinding(runID, existing); err != nil {
 			return StartOutcome{}, err

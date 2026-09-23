@@ -206,7 +206,11 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
-		controllerChanged: run.ControllerSHA256 != r.controller,
+		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
+		// with #234 is that one specific transition can be converted from
+		// drift into an admitted succession by evidence in this run's own
+		// journal; everything without that evidence parks exactly as before.
+		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller),
 	}
 	for _, op := range state.succeeded(OpSourceObserve) {
 		var record sourceRecord
