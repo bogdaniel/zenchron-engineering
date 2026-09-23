@@ -623,7 +623,7 @@ func TestSecondInvocationAgainstAHeldStateDirIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A first invocation already owns this state directory.
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, runtime.NewRuntimeOwner())
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, runtime.NewRuntimeOwner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1655,7 +1655,7 @@ func TestEventsFollowObservesAConcurrentAppendWithoutTakingOwnership(t *testing.
 		t.Fatal(err)
 	}
 	// Somebody else already owns this state directory and is driving the run.
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, runtime.NewRuntimeOwner())
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, runtime.NewRuntimeOwner())
 	if err != nil {
 		t.Fatal(err)
 	}

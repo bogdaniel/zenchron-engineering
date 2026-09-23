@@ -10,7 +10,7 @@ package runtime
 // handoff: transferring ownership would mean transferring the socket, and a
 // stale socket file is a fact about a directory rather than about a process.
 //
-// OwnershipLock does not fill the gap either. Its path contains the owner
+// ControllerInstanceLock does not fill the gap either. Its path contains the owner
 // identity - host, pid, token - so two controllers take two different locks and
 // exclude nothing. It is a liveness probe for one instance, which is what it
 // was built to be.
@@ -35,6 +35,21 @@ import (
 // controllerRoleLockName is the single path the role is taken at. It is
 // deliberately not parameterised: a role lock whose path varied by caller would
 // be as exclusive as the callers agreed to be.
+//
+// THE PATHNAME IS A RESERVED PERSISTENT ANCHOR, and the inode behind it is part
+// of this protocol's durable substrate. Zenchron code must never unlink,
+// rename or replace it - not in Release, not in garbage collection, not in
+// cleanup. With advisory locks authority attaches to the INODE and not to the
+// name, so replacing the file while a controller holds it produces two
+// processes each correctly holding an exclusive lock on a different inode.
+// That is controller-root corruption rather than a recoverable ownership
+// transition, and nothing here tries to reconcile it.
+//
+// ENVIRONMENTAL ASSUMPTION: the controller root is on a filesystem with working
+// advisory lock semantics. That is true of ordinary local filesystems and is
+// not universally true of network ones, so moving a controller root onto a
+// network filesystem is a compatibility question to be answered before it is
+// done rather than an implicit assumption made here.
 const controllerRoleLockName = "controller-role"
 
 // ControllerRoleLock is the held role. The descriptor stays open for its
@@ -61,6 +76,14 @@ func AcquireControllerRole(stateDir string) (*ControllerRoleLock, error) {
 	path := ControllerRoleLockPath(stateDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("claiming the controller role: %w", err)
+	}
+	// A SYMLINK AT THE ANCHOR IS REFUSED RATHER THAN FOLLOWED. Following one
+	// would take the role on whatever inode it names, which is the split-inode
+	// failure by another route. This detects a misconfigured or tampered
+	// controller root; it is not a defence against a racing attacker, and does
+	// not pretend to be.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("claiming the controller role: %s is a symlink, and the role anchor must be a regular file", path)
 	}
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {

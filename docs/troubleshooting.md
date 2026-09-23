@@ -12,7 +12,7 @@ zenchron-engineering autonomy status RUN --text # one run, with a `next action` 
 zenchron-engineering autonomy events RUN        # the durable journal
 ```
 
-Doctor creates nothing, repairs nothing, and takes no ownership lock: a
+Doctor creates nothing, repairs nothing, and takes no controller-instance lock: a
 preflight that repaired what it measured could not report on it. It also runs
 when the operator configuration does not load, so a broken installation still
 gets an explanation.
@@ -182,7 +182,7 @@ zenchron-engineering autonomy shutdown          # stop it, cancelling nothing
 
 **`cannot take exclusive ownership of state dir <path>; another
 zenchron-engineering process may already be running against it`.** The OS
-advisory ownership lock is per process identity (host, pid, start token), so an
+advisory controller-instance lock is per process identity (host, pid, start token), so an
 ordinary read alongside a running `serve` does not collide. Seeing this means a
 process with the same identity holds it. Doctor's `state.lock` and
 `state.liveness` checks probe the same mechanism; `state.liveness` FAILs on a
