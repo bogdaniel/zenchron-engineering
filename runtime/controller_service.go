@@ -89,6 +89,23 @@ func StartControllerService(stateDir, controllerRoot string, store handoffStore,
 	}, nil
 }
 
+// BindControllerService builds a service around a role lease this process
+// ALREADY HOLDS.
+//
+// serve takes the controller role at startup, so a reconciliation loop running
+// inside it must not call StartControllerService: that would acquire a second
+// lease on the same role - failing, or worse, tempting somebody to special-case
+// the failure. There is one ownership path and this binds to it.
+//
+// It acquires nothing, so it cannot fail.
+func BindControllerService(stateDir, controllerRoot string, store handoffStore, self ControllerSelfRecord, lease *ControllerRoleLease, admission workAdmissionController) *ControllerService {
+	return &ControllerService{
+		stateDir: stateDir, controllerRoot: controllerRoot,
+		store: store, self: self, lease: lease, admission: admission,
+		now: func() time.Time { return time.Now().UTC() },
+	}
+}
+
 // ActivationExpectation is the EXACT transition an activation was authorized
 // against.
 //
