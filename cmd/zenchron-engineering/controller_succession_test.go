@@ -30,7 +30,11 @@ import (
 // boundary, and a shell does that with nothing else attached.
 func fakeSuccessorScript(t *testing.T, body string) (runtime.InertSuccessor, *exec.Cmd) {
 	t.Helper()
-	successor, err := spawnInertSuccessor("/bin/sh", "handoff-1", []string{"-c", body, "successor"})
+	// The inherited arguments deliberately already name a transition: that is
+	// what a predecessor's own command line looks like from the second
+	// generation on.
+	successor, err := spawnInertSuccessor("/bin/sh", "handoff-1",
+		[]string{"-c", body, "successor", successorFlag, "handoff-the-one-before"})
 	if err != nil {
 		t.Fatalf("HARNESS PRECONDITION: the fake successor could not be started: %v", err)
 	}
@@ -294,5 +298,59 @@ func TestASuccessorThatCannotDecideKeepsWaiting(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("the successor stopped waiting after a refusal: %v", err)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A SUCCESSOR IS STARTED FOR EXACTLY ONE TRANSITION, whatever the predecessor
+// was started for.
+//
+// Found live, on the third generation: the command line was
+//
+//	serve --successor-of handoff-A-B --successor-of handoff-B-C
+//
+// because the predecessor passes its own arguments through, and its own
+// arguments already name the transition that created it. One stale transition
+// accumulates per upgrade, forever, and the chain survives only because the
+// parser happens to take the last value.
+func TestASuccessorIsStartedForExactlyOneTransition(t *testing.T) {
+	inherited := []string{
+		"serve", "--repo", "acme/repo",
+		successorFlag, "handoff-two-upgrades-ago",
+		"--config", "/etc/zenchron.json",
+		successorFlag, "handoff-one-upgrade-ago",
+	}
+	kept := withoutSuccessorFlag(inherited)
+
+	for _, argument := range kept {
+		if argument == successorFlag || strings.HasPrefix(argument, "handoff-") {
+			t.Fatalf("a stale transition survived: %v", kept)
+		}
+	}
+	if strings.Join(kept, " ") != "serve --repo acme/repo --config /etc/zenchron.json" {
+		t.Fatalf("the operator's own arguments did not survive intact: %v", kept)
+	}
+}
+
+// AND THE PROCESS THAT IS ACTUALLY STARTED SEES ONE, which is the thing the
+// live defect was about: a unit test of the helper cannot see what exec was
+// handed.
+func TestTheSpawnedSuccessorReceivesOneTransition(t *testing.T) {
+	successor, command := fakeSuccessorScript(t, `printf 'identity %s\n' "$*" >&4`)
+	_ = command
+	spawned, ok := successor.(*spawnedSuccessor)
+	if !ok {
+		t.Fatalf("HARNESS PRECONDITION: %T", successor)
+	}
+	// fakeSuccessorScript starts /bin/sh -c <script> successor, so the flags
+	// under test are everything after the script's own name.
+	line, err := spawned.await(successorIdentityLine, 10*time.Second)
+	if err != nil {
+		t.Fatalf("the successor did not report its arguments: %v", err)
+	}
+	if occurrences := strings.Count(line, successorFlag); occurrences != 1 {
+		t.Fatalf("the successor was started with %d transitions: %q", occurrences, line)
+	}
+	if !strings.Contains(line, successorFlag+" handoff-1") {
+		t.Fatalf("the successor was not started for its own transition: %q", line)
 	}
 }

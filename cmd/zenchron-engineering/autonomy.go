@@ -1168,7 +1168,7 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Digest = args[1]
 		case "--assignments":
 			flags.Assignments = args[1]
-		case "--successor-of":
+		case successorFlag:
 			flags.SuccessorOf = args[1]
 		case "--revision":
 			revision, err := strconv.Atoi(args[1])
