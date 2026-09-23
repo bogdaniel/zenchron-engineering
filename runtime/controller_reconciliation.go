@@ -132,7 +132,7 @@ type WatcherObservation struct {
 // ClassifyReconciliation turns one observation into one intent.
 //
 // It is deterministic in its input and has no other inputs: the same
-// ControllerStatus always yields the same intent, which is what makes the
+// WatcherObservation always yields the same intent, which is what makes the
 // decision table reviewable before any executor exists.
 func ClassifyReconciliation(observation WatcherObservation) ReconciliationIntent {
 	status := observation.Status
