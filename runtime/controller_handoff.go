@@ -266,6 +266,22 @@ func PreflightControllerHandoff(store runReader, in HandoffPreflightInput) (Cont
 	return record, nil
 }
 
+// PrepareControllerSuccession is the preflight a live controller performs
+// before handing over, and it exists in this package because the ACTIVATION
+// ORACLE does.
+//
+// A composition root assembling the preflight input itself would have to leave
+// Activated nil - the type is not exported - and nil means "no transition is
+// known to have activated", which makes only a run's original creator eligible.
+// The first upgrade would work, the second would be refused for a reason that
+// has nothing to do with the two controllers, and the refusal would come from
+// the wiring rather than from the protocol. Supplying it here makes that
+// unrepresentable.
+func PrepareControllerSuccession(store *SQLiteOperationStore, in HandoffPreflightInput) (ControllerHandoff, error) {
+	in.Activated = storeTransitionActivated(store)
+	return PreflightControllerHandoff(store, in)
+}
+
 // RevalidateControllerHandoff re-reads every run the preflight decided about,
 // AFTER the successor holds the scheduler, and reports whether the decisions
 // still describe the state on disk.

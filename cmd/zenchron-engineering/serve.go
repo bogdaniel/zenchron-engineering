@@ -117,6 +117,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	if err := built.installControllerReconciler(supervisor, role); err != nil {
 		return runtime.ExitInvalid, err
 	}
+	// AUTOMATIC SUCCESSION IS PART OF SERVING TOO, for a controller that can
+	// succeed itself. A controller that cannot - unattested, unpublished, or
+	// without the credential that observes the trust root - serves exactly as
+	// before and says on the banner why it will not upgrade.
+	upgrading, err := built.installControllerUpgrade(supervisor, role, listener)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
 
 	// THE TRANSITION IS COMPLETED BEFORE ANY WORK IS DRIVEN. Acquiring the
 	// role made this process the controller; it does not make it the ACTIVATED
@@ -161,9 +169,21 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  agents            %s (default %s)\n", strings.Join(built.agents.IDs(), ", "), built.agents.Default())
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
+	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
 		_ = writeJSON(stdout, report)
+		// A SUPERSEDED CONTROLLER STOPS. The launch passed the point of no
+		// return, so this process has given up the role whatever happened
+		// next, and a supervisor that kept passing would be scheduling work it
+		// has no authority to schedule. Shutting down is the same unwind a
+		// signal performs: in-flight work is cancelled through the
+		// cancellation the providers honour, and no run is journalled as
+		// cancelled.
+		if report.Upgrade != nil && report.Upgrade.Superseded() {
+			fmt.Fprintf(stdout, "%s\n", report.Upgrade.Describe())
+			stopSignals()
+		}
 	})
 	if err != nil {
 		return runtime.ExitFailed, err

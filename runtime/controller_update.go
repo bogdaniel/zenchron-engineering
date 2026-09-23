@@ -94,6 +94,15 @@ type ControllerUpdaterPorts struct {
 	Preflight func(ControllerHandoff) error
 	// Prepare builds the prepared transition for a validated successor.
 	Prepare func(context.Context, ControllerBinding, string) (ControllerHandoff, error)
+	// Published reports a successor for this subject that is ALREADY on disk.
+	//
+	// It exists because version directories are immutable: a crash between
+	// publishing a successor and recording the transition leaves an artifact
+	// that a rebuild is refused from producing again, and an updater without
+	// this port would retry that refusal every ten minutes forever. Optional -
+	// nil means always build - and never a way to skip validation: what it
+	// returns is checked exactly as a fresh build's provenance is.
+	Published func(context.Context, RevisionRecord) (AdoptedBuildProvenance, bool, error)
 }
 
 // ControllerUpdater decides when to ask for a successor and reports where the
@@ -111,7 +120,11 @@ type ControllerUpdater struct {
 
 	mu      sync.Mutex
 	current *ControllerUpdate
-	running bool
+	// prepared is the record behind Current().Handoff. The id alone would make
+	// a launcher re-read a transition that is not yet durable - BeginHandoff
+	// is what writes it - so the value the preflight passed is kept.
+	prepared *ControllerHandoff
+	running  bool
 	// retryAfter keeps a refused subject from being rebuilt every tick. A
 	// governed build is minutes of container time; retrying it on a poll
 	// interval would be a denial of service against the operator's own machine.
@@ -215,7 +228,7 @@ func (u *ControllerUpdater) start(ctx context.Context, observed RevisionRecord, 
 	request.Revision = observed.Revision
 	subject, startedAt := observed, now
 	go func() {
-		provenance, err := u.ports.Build(ctx, request)
+		provenance, err := u.produce(ctx, request, subject)
 		// The goroutine carries everything it needs to describe the attempt it
 		// belongs to. Reaching back into the updater's mutable state to
 		// reconstruct that would be reading it without the lock the rest of
@@ -225,13 +238,35 @@ func (u *ControllerUpdater) start(ctx context.Context, observed RevisionRecord, 
 	return *u.current
 }
 
+// produce obtains the successor artifact: the one already published for this
+// subject, or a new build.
+//
+// A LOOKUP THAT FAILS DOES NOT FALL BACK TO BUILDING. Something is at the
+// version directory and it did not hold up; building would either be refused
+// by immutability or, worse, succeed against a path that has since changed.
+// Either way the answer is a refusal with the reason, not another attempt.
+func (u *ControllerUpdater) produce(ctx context.Context, request AdoptedBuildRequest, subject RevisionRecord) (AdoptedBuildProvenance, error) {
+	if u.ports.Published != nil {
+		published, found, err := u.ports.Published(ctx, subject)
+		if err != nil {
+			return AdoptedBuildProvenance{}, err
+		}
+		if found {
+			return published, nil
+		}
+	}
+	return u.ports.Build(ctx, request)
+}
+
 // finish validates what the build produced against the subject it was asked
 // for, and prepares the transition when it holds.
 func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, startedAt time.Time, provenance AdoptedBuildProvenance, buildErr error) {
+	var record *ControllerHandoff
 	settle := func(update ControllerUpdate) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		u.running = false
+		u.prepared = record
 		if update.State == UpdateRefused || update.State == UpdateSuperseded ||
 			update.State == UpdateObservationFailed {
 			u.retryAfter = update.EndedAt.Add(updateRetryInterval)
@@ -319,7 +354,7 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 		settle(base)
 		return
 	}
-	base.Handoff = prepared.ID
+	base.Handoff, record = prepared.ID, &prepared
 	if err := u.ports.Preflight(prepared); err != nil {
 		// A VALIDATED SUCCESSOR THE LIVE RUNS CANNOT MOVE TO. The controller
 		// keeps serving and the operator is told which runs are in the way.
@@ -348,6 +383,20 @@ func (u *ControllerUpdater) Current() (ControllerUpdate, bool) {
 		return ControllerUpdate{}, false
 	}
 	return *u.current, true
+}
+
+// Prepared is the transition behind a ready update, as the preflight left it.
+//
+// It reports false for every other state, so a caller cannot launch from a
+// record that was prepared for an update that has since been superseded,
+// refused or blocked.
+func (u *ControllerUpdater) Prepared() (ControllerHandoff, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.prepared == nil || u.current == nil || u.current.State != UpdateReady {
+		return ControllerHandoff{}, false
+	}
+	return *u.prepared, true
 }
 
 // Describe renders one update for a report line.

@@ -27,12 +27,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -345,4 +347,146 @@ func (c *composition) activateAsSuccessor(supervisor *runtime.Supervisor, role *
 		fmt.Fprintf(os.Stderr, "the stable entrypoint needs repair: %v\n", err)
 	}
 	return service.EnableWorkAdmission(handoffID)
+}
+
+// ---------------------------------------------------------------------------
+// The predecessor's half, continued: deciding there is a successor at all
+// ---------------------------------------------------------------------------
+
+// installControllerUpgrade wires the trusted-main updater and the launcher into
+// the supervisor that will drive them.
+//
+// IT IS OFF FOR A CONTROLLER THAT CANNOT SUCCEED ITSELF, and says so rather
+// than failing to start. An unattested build has no adopted lineage; a
+// controller whose own generation is not published has no record naming the
+// repository it came from; a missing governance credential means the trust root
+// cannot be observed, and following trusted main without it would be following
+// a branch under a gate nobody checked. None of those are reasons to refuse to
+// serve - they are reasons not to upgrade - so each returns a sentence for the
+// startup banner and leaves the supervisor unbound.
+func (c *composition) installControllerUpgrade(supervisor *runtime.Supervisor, role *runtime.ControllerRoleLease, listener *runtime.ControlListener) (string, error) {
+	self, err := controllerSelf()
+	if err != nil {
+		return "", fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	if self.Unattested {
+		return "off (this controller is an unattested build and has no adopted lineage to succeed)", nil
+	}
+	binding, err := c.controllerBinding()
+	if err != nil {
+		return "", err
+	}
+	// THE REPOSITORY COMES FROM THIS CONTROLLER'S OWN PROVENANCE, not from the
+	// repositories it governs. A controller upgrades from the source it was
+	// adopted from; the projects it works on are a different question, and
+	// deriving one from the other would let an enrolled repository decide
+	// which code becomes the next controller.
+	running := runtime.RevisionRecord{Revision: self.Build.SourceRevision, Tree: self.Build.SourceTree}
+	provenance, found, err := runtime.PublishedAdoptedController(controllerRoot(), running)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return fmt.Sprintf("off (this controller's generation %s is not published under %s, so its own provenance cannot be read)",
+			self.Build.Version, controllerRoot()), nil
+	}
+	repository, err := runtime.ParseGitHubRepo(provenance.Repository)
+	if err != nil {
+		return "", err
+	}
+	governance, err := governanceObserver(c.config.GitHub)
+	if err != nil {
+		return "off (the governance credential that observes the trust root is not configured: " + err.Error() + ")", nil
+	}
+	remote, err := runtime.GovernedRemote(repository.CloneURL())
+	if err != nil {
+		return "", err
+	}
+	source, err := runtime.EnsureControllerSource(c.config.StateDir, remote, c.credentials)
+	if err != nil {
+		return "", err
+	}
+	deps := runtime.AdoptedBuildDeps{Governance: governance, RefSHA: c.forge.RefSHA}
+	observe := func(ctx context.Context) (runtime.RevisionRecord, error) {
+		return runtime.ObserveTrustedMainRevision(ctx, deps, repository, source)
+	}
+	service := runtime.BindControllerService(
+		c.config.StateDir, controllerRoot(), c.store, self, role, supervisor)
+
+	updater := runtime.NewControllerUpdater(binding, runtime.AdoptedBuildRequest{
+		Repository:    repository,
+		RepositoryDir: source,
+		OutputRoot:    controllerRoot(),
+		Sandbox: runtime.DockerSandbox{
+			Image:    c.config.Assurance.Image,
+			Endpoint: runtime.DockerEndpoint{Host: c.config.Assurance.DockerHost},
+			StateDir: filepath.Join(c.config.StateDir, "artifacts", "docker-operations"),
+		},
+		DependencyCacheDir: c.config.Assurance.DependencyCacheDir,
+	}, runtime.ControllerUpdaterPorts{
+		ObserveTrustedMain: observe,
+		Build: func(ctx context.Context, request runtime.AdoptedBuildRequest) (runtime.AdoptedBuildProvenance, error) {
+			return runtime.BuildAdoptedController(ctx, request, deps, builderRecord())
+		},
+		Published: func(_ context.Context, subject runtime.RevisionRecord) (runtime.AdoptedBuildProvenance, bool, error) {
+			return runtime.PublishedAdoptedController(controllerRoot(), subject)
+		},
+		Prepare: func(_ context.Context, successor runtime.ControllerBinding, artifact string) (runtime.ControllerHandoff, error) {
+			return runtime.PrepareControllerSuccession(c.store, runtime.HandoffPreflightInput{
+				Predecessor: runtime.HandoffParty{Binding: binding, ArtifactPath: self.ExecutablePath},
+				Successor:   runtime.HandoffParty{Binding: successor, ArtifactPath: artifact},
+				TrustedMain: runtime.RevisionRecord{
+					Revision: successor.Build.SourceRevision, Tree: successor.Build.SourceTree},
+				IsAncestor: func(ancestor, descendant string) (bool, error) {
+					// Git answers, against the objects actually fetched. An
+					// exit status is the whole answer: there is no output to
+					// misread and no third outcome.
+					_, err := deps.Git(source, "merge-base", "--is-ancestor", ancestor, descendant)
+					return err == nil, nil
+				},
+				Now: time.Now().UTC(),
+			})
+		},
+		Preflight: func(record runtime.ControllerHandoff) error {
+			if !record.Compatible() {
+				return fmt.Errorf("%s", strings.Join(record.Blockers(), "; "))
+			}
+			return nil
+		},
+	})
+
+	launch := func(ctx context.Context, prepared runtime.ControllerHandoff, subject runtime.RevisionRecord) runtime.SuccessionLaunch {
+		return runtime.LaunchSuccession(ctx, prepared, subject, runtime.SuccessionPorts{
+			Spawn: func(artifact, handoffID string) (runtime.InertSuccessor, error) {
+				// THIS PROCESS'S OWN ARGUMENTS. The successor must resolve the
+				// same operator configuration, because succession requires the
+				// configuration digest to be unchanged.
+				return spawnInertSuccessor(artifact, handoffID, os.Args[1:])
+			},
+			ObserveTrustedMain: observe,
+			Begin: func(prepared runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+				return service.BeginSuccession(prepared, listener.Close)
+			},
+		})
+	}
+	if err := supervisor.BindControllerUpgrade(runtime.NewControllerUpgrade(updater, launch)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("on (following trusted main of %s)", repository), nil
+}
+
+// builderRecord is this controller's truthful account of itself as a builder.
+// A failed measurement is recorded as a failed measurement, never laundered
+// into "unattested", which would claim a deliberate absence of provenance where
+// there is a broken one.
+func builderRecord() runtime.BuilderRecord {
+	self, err := controllerBuild()
+	if err != nil {
+		return runtime.BuilderRecord{Kind: runtime.ControllerUnattested, ResolutionError: err.Error()}
+	}
+	record := runtime.BuilderRecord{Kind: self.Kind, Version: self.Version, SourceRevision: self.SourceRevision}
+	if record.Kind == "" {
+		record.Kind = runtime.ControllerUnattested
+	}
+	return record
 }

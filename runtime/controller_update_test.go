@@ -426,3 +426,62 @@ func TestAnUnobservableTrustedMainAfterTheBuildRefusesToPrepare(t *testing.T) {
 		t.Fatal("a successor whose currency is unknown was prepared for handoff")
 	}
 }
+
+// A SUCCESSOR ALREADY ON DISK IS NOT BUILT AGAIN.
+//
+// Version directories are immutable, so a crash between publishing a successor
+// and recording the transition leaves an artifact that a rebuild is refused
+// from producing - forever, on every poll. The published artifact is adopted
+// and validated exactly as a fresh build would be.
+func TestAPublishedSuccessorIsAdoptedInsteadOfRebuilt(t *testing.T) {
+	harness := &updaterHarness{trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-" + shortSHA(movedRevision)}}
+	published := RevisionRecord{Revision: movedRevision, Tree: "tree-" + shortSHA(movedRevision)}
+	updater := NewControllerUpdater(
+		runningBinding(attestedBuild(ControllerAdopted, runningRevision, "tree-a", strings.Repeat("ab", 32))),
+		AdoptedBuildRequest{OutputRoot: t.TempDir()},
+		ControllerUpdaterPorts{
+			ObserveTrustedMain: harness.observe, Build: harness.build,
+			Prepare: harness.prepare, Preflight: harness.preflight,
+			Published: func(_ context.Context, subject RevisionRecord) (AdoptedBuildProvenance, bool, error) {
+				return AdoptedBuildProvenance{
+					Version: "main-" + shortSHA(subject.Revision), Source: published,
+					TrustedMain: published, BinarySHA256: strings.Repeat("cd", 32),
+					OutputPath: "/controller/main-b/zenchron-engineering",
+					SelfProbe:  SelfProbeRecord{Matched: true},
+				}, true, nil
+			},
+		})
+
+	ready := settle(t, updater, UpdateReady)
+	if ready.Artifact != "/controller/main-b/zenchron-engineering" {
+		t.Fatalf("the published artifact was not adopted: %q", ready.Artifact)
+	}
+	if harness.buildCount() != 0 {
+		t.Fatalf("%d builds for a successor that was already published", harness.buildCount())
+	}
+}
+
+// A LOOKUP THAT FAILS DOES NOT FALL BACK TO BUILDING. Something is at the
+// version directory and it did not hold up; building would be refused by
+// immutability anyway, and the operator needs the first reason, not the second.
+func TestAnUnreadablePublishedDirectoryRefusesRatherThanRebuilds(t *testing.T) {
+	harness := &updaterHarness{trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-" + shortSHA(movedRevision)}}
+	updater := NewControllerUpdater(
+		runningBinding(attestedBuild(ControllerAdopted, runningRevision, "tree-a", strings.Repeat("ab", 32))),
+		AdoptedBuildRequest{OutputRoot: t.TempDir()},
+		ControllerUpdaterPorts{
+			ObserveTrustedMain: harness.observe, Build: harness.build,
+			Prepare: harness.prepare, Preflight: harness.preflight,
+			Published: func(context.Context, RevisionRecord) (AdoptedBuildProvenance, bool, error) {
+				return AdoptedBuildProvenance{}, false, fmt.Errorf("the version directory records binary aaaa and the file measures bbbb")
+			},
+		})
+
+	refused := settle(t, updater, UpdateRefused)
+	if !strings.Contains(refused.Detail, "the file measures") {
+		t.Fatalf("the operator is not told what did not hold up: %q", refused.Detail)
+	}
+	if harness.buildCount() != 0 {
+		t.Fatal("a failed lookup fell back to building")
+	}
+}

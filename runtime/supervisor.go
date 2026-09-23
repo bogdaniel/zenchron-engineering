@@ -92,7 +92,11 @@ type SupervisorReport struct {
 	// or why it did nothing. It rides the existing report rather than a new
 	// channel: an operator reading a tick should see the whole tick.
 	Reconciliation *ReconciliationAttempt `json:"reconciliation,omitempty"`
-	At             time.Time              `json:"at"`
+	// Upgrade is what this pass did about replacing this controller with the
+	// successor trusted main names. Its Superseded() is how serve learns that
+	// this process has given up the role and must stop.
+	Upgrade *ControllerUpgradeAttempt `json:"upgrade,omitempty"`
+	At      time.Time                 `json:"at"`
 	// Driven is the runs whose driving FINISHED and was noticed by this pass.
 	// A run started here and finished here appears here, as it always did; a
 	// run whose provider spans several passes appears in the pass it finished
@@ -170,6 +174,10 @@ type Supervisor struct {
 	// gate, and the reconciler needs the service. Binding once at startup
 	// resolves it without a second gate, a second lease or a factory callback.
 	reconciler *ControllerReconciler
+	// upgrade replaces this controller with the successor trusted main names.
+	// It is bound after construction for the same cycle as the reconciler: it
+	// reaches the controller service, which needs this supervisor's gate.
+	upgrade *ControllerUpgrade
 	// cursor is the rotation offset into the ACTIVE-run ring. It exists so a
 	// ceiling smaller than the active set is a rate limit rather than a fixed
 	// prefix; see admit.
@@ -381,6 +389,29 @@ func (s *Supervisor) BindControllerReconciler(reconciler *ControllerReconciler) 
 	return nil
 }
 
+// BindControllerUpgrade installs the trusted-main upgrade. Like the
+// reconciler it is STARTUP-ONLY and refuses replacement: a supervisor whose
+// upgrade path could be swapped while running would be a way to change which
+// controller replaces this one, at runtime, with nothing authorizing it.
+func (s *Supervisor) BindControllerUpgrade(upgrade *ControllerUpgrade) error {
+	if upgrade == nil {
+		return fmt.Errorf("a controller upgrade is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.upgrade != nil {
+		return fmt.Errorf("a controller upgrade is already bound to this supervisor")
+	}
+	s.upgrade = upgrade
+	return nil
+}
+
+func (s *Supervisor) controllerUpgrade() *ControllerUpgrade {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upgrade
+}
+
 func (s *Supervisor) controllerReconciler() *ControllerReconciler {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -506,6 +537,14 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	if reconciler := s.controllerReconciler(); reconciler != nil {
 		attempt := reconciler.Attempt(now)
 		report.Reconciliation = &attempt
+	}
+	// CONTROLLER UPGRADE, after reconciliation and before any work. A
+	// controller that is not in the state its own records describe repairs
+	// that first: handing the role to a successor is not the way to resolve a
+	// transition this process has not finished.
+	if upgrade := s.controllerUpgrade(); upgrade != nil {
+		attempt := upgrade.Attempt(ctx, now)
+		report.Upgrade = &attempt
 	}
 	// PLANS are reconciled BEFORE the run list is read, so a stage that became
 	// dependency-ready since the last tick gets its run created and then driven
