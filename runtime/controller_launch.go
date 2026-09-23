@@ -15,12 +15,49 @@ package runtime
 //	identify  it says which generation it is, and that must be the generation
 //	          the prepared record names - asked of the process, not of the
 //	          path it was started from
-//	recheck   trusted main is still the subject this successor was built for
+//	quiesce   intake is suspended and the work this controller started is
+//	          finished, so the durable head cannot move again
+//	evaluate  the SUCCESSOR decides whether it can continue every live run,
+//	          against that quiescent head, using its own code
+//	recheck   trusted main is STILL the subject this successor was built for,
+//	          asked last because that is where it has to be true
 //	--------- the point of no return ------------------------------------------
 //	begin     the predecessor stops admitting work and releases the role
 //	signal    the successor is told it may proceed
 //	activate  it acquires, revalidates, activates and opens service, and says
 //	          so - or says why not
+//
+// QUIESCENCE AND EVALUATION ARE ONE IDEA IN TWO STEPS. Compatibility is a
+// statement about a durable state, and a statement about a state that is still
+// moving is worth nothing: the predecessor's own run drivers are inside
+// providers and journal writes, and they would keep appending while the
+// successor was deciding, and after the role changed hands. So intake is
+// suspended, the drivers are allowed to finish, and only then is the question
+// asked - of the successor, because "can you read this journal" is only
+// meaningful asked of the code that would read it.
+//
+// THE ANSWER ARRIVES BEFORE ANYTHING IS GIVEN UP, which is the point. A
+// successor that has dropped an event type the predecessor understands refuses
+// here, intake resumes, and the controller keeps serving: an incompatible
+// successor costs an update. The revalidation the successor performs after
+// acquiring ownership stays exactly as it was and is now a race check on a
+// state nothing can have moved, rather than the first time anybody asked.
+//
+// CURRENCY IS PROVEN LAST, and that is an ordering law rather than a
+// preference. Quiescence waits for work this controller started, which is
+// bounded in tens of minutes, and the successor's evaluation replays every
+// live journal; trusted main can move through both. A check that happened
+// before them would be a statement about a branch as it was some time ago,
+// used to authorize a handover happening now. Whatever the point of no return
+// moves to, the last proof of currency moves with it.
+//
+// INTAKE COMES BACK ONLY BEFORE COMMITMENT. The hold is reversible precisely so
+// a refusal costs an update instead of a controller - and Committed is set
+// BEFORE Begin is attempted, because that operation can partially drain or
+// release and report failure either way. Releasing the hold afterwards would
+// have this process resume admitting work in the one state where it has
+// already decided it may not: uncertainty after commitment narrows authority
+// and never widens it.
 //
 // EVERYTHING EXPENSIVE HAPPENS BEFORE THE POINT OF NO RETURN, deliberately. A
 // successor that cannot start, cannot prove what it is, or is already stale
@@ -86,6 +123,8 @@ type SuccessionLaunch struct {
 	HandoffID string     `json:"handoff_id"`
 	Spawn     LaunchStep `json:"spawn"`
 	Identify  LaunchStep `json:"identify"`
+	Quiesce   LaunchStep `json:"quiesce"`
+	Evaluate  LaunchStep `json:"evaluate"`
 	Recheck   LaunchStep `json:"recheck"`
 	Begin     LaunchStep `json:"begin"`
 	Signal    LaunchStep `json:"signal"`
@@ -125,7 +164,7 @@ func (l SuccessionLaunch) Summary() string {
 }
 
 func (l SuccessionLaunch) firstRefusal() string {
-	for _, step := range []LaunchStep{l.Spawn, l.Identify, l.Recheck, l.Begin, l.Signal, l.Activate} {
+	for _, step := range []LaunchStep{l.Spawn, l.Identify, l.Quiesce, l.Evaluate, l.Recheck, l.Begin, l.Signal, l.Activate} {
 		if step.Outcome == StepRefused {
 			return step.Detail
 		}
@@ -146,7 +185,17 @@ type SuccessionPorts struct {
 	// because the role and the admission gate belong to that service and this
 	// file must not be able to reach either.
 	Begin func(prepared ControllerHandoff) (ControllerHandoff, error)
-	Now   func() time.Time
+	// Quiesce suspends intake and waits for the work this controller started,
+	// returning the one way to put intake back. It is called before the point
+	// of no return and its release runs on every refusal after it.
+	Quiesce func(ctx context.Context) (resume func(), err error)
+	// Evaluate asks the SUCCESSOR to decide the transition against the state
+	// as it now stands, and returns the record carrying its decisions. That
+	// record - not the predecessor's earlier screen of the same question - is
+	// what the transition is begun with, because the admissions written during
+	// the handover are the successor's own.
+	Evaluate func(ctx context.Context, prepared ControllerHandoff) (ControllerHandoff, error)
+	Now      func() time.Time
 }
 
 func (p SuccessionPorts) now() time.Time {
@@ -216,10 +265,54 @@ func LaunchSuccession(ctx context.Context, prepared ControllerHandoff, subject R
 	}
 	launch.Identify = LaunchStep{Outcome: StepSucceeded}
 
-	// STILL CURRENT? The build was validated against trusted main when it was
-	// produced, and time has passed. An observation that cannot be made fails
-	// closed for the same reason it does in the updater: "nobody could say
-	// otherwise" is not evidence of currency.
+	// NOTHING MAY APPEND WHILE THE SUCCESSOR DECIDES. Intake is suspended and
+	// the run drivers this controller started are allowed to finish, so the
+	// journal the successor is about to read is the journal it will inherit.
+	resume, err := ports.Quiesce(ctx)
+	if err != nil {
+		launch.Quiesce = stepRefused("the work this controller started could not be brought to a stop: %v", err)
+		return abandonAnd(successor, &launch.Quiesce, settle)
+	}
+	launch.Quiesce = LaunchStep{Outcome: StepSucceeded}
+	// INTAKE COMES BACK ON EVERY PRE-COMMITMENT EXIT AND ON NO OTHER. The flag
+	// is not a duplicate of launch.Committed for a reader's benefit: it is what
+	// makes the deferred release unreachable once this process has declared
+	// itself superseded, including on the paths where Begin failed so early
+	// that the gate it would have closed is still only held.
+	committed := false
+	defer func() {
+		if !committed {
+			resume()
+		}
+	}()
+
+	// THE SUCCESSOR DECIDES, NOT THIS PROCESS. A predecessor answering "can B
+	// read this journal" would be answering from its own decoders, which is
+	// the question nobody needs answered.
+	decided, err := ports.Evaluate(ctx, prepared)
+	if err != nil {
+		launch.Evaluate = stepRefused("the successor could not decide the transition: %v", err)
+		return abandonAnd(successor, &launch.Evaluate, settle)
+	}
+	if err := decidedMatches(prepared, decided); err != nil {
+		launch.Evaluate = stepRefused("the successor decided a different transition: %v", err)
+		return abandonAnd(successor, &launch.Evaluate, settle)
+	}
+	if !decided.Compatible() {
+		// AN INCOMPATIBLE SUCCESSOR COSTS AN UPDATE, NOT A CONTROLLER. Intake
+		// resumes, the successor is stopped, and this process keeps serving
+		// the runs it was already serving.
+		launch.Evaluate = stepRefused("the successor cannot continue every live run: %v", decided.Blockers())
+		return abandonAnd(successor, &launch.Evaluate, settle)
+	}
+	launch.Evaluate = LaunchStep{Outcome: StepSucceeded}
+
+	// STILL CURRENT, ASKED LAST. The build was validated against trusted main
+	// when it was produced, and everything since - the quiescence wait, the
+	// successor's replay of every live journal - takes time a branch can move
+	// in. An observation that cannot be made fails closed for the same reason
+	// it does in the updater: "nobody could say otherwise" is not evidence of
+	// currency.
 	observed, err := ports.ObserveTrustedMain(ctx)
 	switch {
 	case err != nil:
@@ -235,8 +328,9 @@ func LaunchSuccession(ctx context.Context, prepared ControllerHandoff, subject R
 	// ---------------------------------------------------------------------
 	// The point of no return.
 	// ---------------------------------------------------------------------
+	committed = true
 	launch.Committed = true
-	if _, err := ports.Begin(prepared); err != nil {
+	if _, err := ports.Begin(decided); err != nil {
 		launch.Begin = stepRefused("the predecessor's half of the transition did not complete: %v", err)
 		return settle()
 	}
@@ -255,6 +349,41 @@ func LaunchSuccession(ctx context.Context, prepared ControllerHandoff, subject R
 	launch.Activate = LaunchStep{Outcome: StepSucceeded}
 	launch.Served = true
 	return settle()
+}
+
+// decidedMatches requires the successor's record to be the transition it was
+// asked about.
+//
+// The successor is trusted to DECIDE compatibility and not to choose what it is
+// deciding about: a record naming other controllers, or at another phase, is
+// not an answer to this question, and beginning a transition from it would let
+// the successor nominate itself under a different binding than the one that was
+// identified and re-observed.
+func decidedMatches(asked, decided ControllerHandoff) error {
+	if decided.ID != asked.ID {
+		return fmt.Errorf("it decided transition %s and it was asked about %s", decided.ID, asked.ID)
+	}
+	if decided.Phase != HandoffPrepared {
+		return fmt.Errorf("it returned a record at phase %q", decided.Phase)
+	}
+	for _, party := range []struct {
+		name           string
+		asked, was     ControllerBinding
+		askedAt, wasAt string
+	}{
+		{"predecessor", asked.Predecessor.Binding, decided.Predecessor.Binding, asked.Predecessor.ArtifactPath, decided.Predecessor.ArtifactPath},
+		{"successor", asked.Successor.Binding, decided.Successor.Binding, asked.Successor.ArtifactPath, decided.Successor.ArtifactPath},
+	} {
+		expected, expectedErr := party.asked.Digest()
+		got, gotErr := party.was.Digest()
+		if expectedErr != nil || gotErr != nil || expected != got {
+			return fmt.Errorf("it names a different %s", party.name)
+		}
+		if party.askedAt != party.wasAt {
+			return fmt.Errorf("it names a different %s artifact: %s", party.name, party.wasAt)
+		}
+	}
+	return nil
 }
 
 // abandonAnd stops a successor that will not be used, before the point of no

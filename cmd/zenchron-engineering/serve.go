@@ -78,7 +78,11 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 		if err := handshake.announce(binding); err != nil {
 			return runtime.ExitInvalid, err
 		}
-		if err := handshake.awaitProceed(); err != nil {
+		// While it waits, it answers one question: can this build continue
+		// every live run? The predecessor asks once the state has stopped
+		// moving, and the answer is what decides whether the role changes
+		// hands at all.
+		if err := handshake.serveUntilProceed(built.decideSuccession); err != nil {
 			return runtime.ExitInvalid, err
 		}
 	}
@@ -115,6 +119,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	// this the loop exists and never runs, which is the same as not existing
 	// while looking like it does.
 	if err := built.installControllerReconciler(supervisor, role); err != nil {
+		return runtime.ExitInvalid, err
+	}
+	// AUTOMATIC SUCCESSION IS PART OF SERVING TOO, for a controller that can
+	// succeed itself. A controller that cannot - unattested, unpublished, or
+	// without the credential that observes the trust root - serves exactly as
+	// before and says on the banner why it will not upgrade.
+	upgrading, err := built.installControllerUpgrade(supervisor, role, listener)
+	if err != nil {
 		return runtime.ExitInvalid, err
 	}
 
@@ -161,9 +173,21 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  agents            %s (default %s)\n", strings.Join(built.agents.IDs(), ", "), built.agents.Default())
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
+	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
 		_ = writeJSON(stdout, report)
+		// A SUPERSEDED CONTROLLER STOPS. The launch passed the point of no
+		// return, so this process has given up the role whatever happened
+		// next, and a supervisor that kept passing would be scheduling work it
+		// has no authority to schedule. Shutting down is the same unwind a
+		// signal performs: in-flight work is cancelled through the
+		// cancellation the providers honour, and no run is journalled as
+		// cancelled.
+		if report.Upgrade != nil && report.Upgrade.Superseded() {
+			fmt.Fprintf(stdout, "%s\n", report.Upgrade.Describe())
+			stopSignals()
+		}
 	})
 	if err != nil {
 		return runtime.ExitFailed, err

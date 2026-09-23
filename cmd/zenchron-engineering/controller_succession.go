@@ -27,12 +27,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,6 +45,8 @@ import (
 // would be ceremony for three messages.
 const (
 	successorIdentityLine = "identity" // successor -> predecessor: what I am
+	successorEvaluateLine = "evaluate" // predecessor -> successor: decide this transition
+	successorDecidedLine  = "decided"  // successor -> predecessor: here is my decision
 	successorProceedLine  = "proceed"  // predecessor -> successor: the role is free
 	successorActiveLine   = "active"   // successor -> predecessor: I am serving
 	successorErrorLine    = "error"    // successor -> predecessor: and why not
@@ -58,6 +62,14 @@ const (
 	// activateTimeout covers acquisition, revalidation - which replays every
 	// live run's journal - activation and opening service.
 	activateTimeout = 15 * time.Minute
+	// evaluateTimeout covers the successor replaying every live run's journal
+	// under its own code, which is the same work revalidation does later.
+	evaluateTimeout = 15 * time.Minute
+	// quiesceTimeout bounds how long intake stays suspended waiting for the
+	// work this controller started. A provider invocation of tens of minutes
+	// is ordinary; a fleet that does not settle within this gives intake back
+	// and the next pass tries again.
+	quiesceTimeout = 30 * time.Minute
 )
 
 // The descriptors the successor reads and writes the handshake on. 0, 1 and 2
@@ -131,6 +143,27 @@ func (s *spawnedSuccessor) Identify() (runtime.ControllerBinding, error) {
 		return runtime.ControllerBinding{}, fmt.Errorf("the successor's identity could not be read: %w", err)
 	}
 	return binding, nil
+}
+
+// Evaluate asks the successor to decide the transition against the state as it
+// stands now, and returns the record carrying its decisions.
+func (s *spawnedSuccessor) Evaluate(prepared runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+	var decided runtime.ControllerHandoff
+	asked, err := json.Marshal(prepared)
+	if err != nil {
+		return decided, err
+	}
+	if _, err := io.WriteString(s.control, successorEvaluateLine+" "+string(asked)+"\n"); err != nil {
+		return decided, err
+	}
+	line, err := s.await(successorDecidedLine, evaluateTimeout)
+	if err != nil {
+		return decided, err
+	}
+	if err := json.Unmarshal([]byte(line), &decided); err != nil {
+		return decided, fmt.Errorf("the successor's decision could not be read: %w", err)
+	}
+	return decided, nil
 }
 
 // Proceed tells the successor the role has been released.
@@ -241,21 +274,53 @@ func (h *successorHandshake) announce(binding runtime.ControllerBinding) error {
 	return h.write(successorIdentityLine + " " + string(encoded))
 }
 
-// awaitProceed blocks until the predecessor says the role has been released.
+// serveUntilProceed answers the predecessor until it says the role has been
+// released.
 //
-// It requires the transition to be the one this process was started for. A
-// predecessor that signalled a different one is not a predecessor this process
-// has anything to do with.
-func (h *successorHandshake) awaitProceed() error {
-	line, err := h.control.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("the predecessor stopped before releasing the controller role: %w", err)
+// THE ONLY THING THIS PROCESS DOES BEFORE THAT IS READ. It decides the
+// transition - which is a read-only classification of the durable state, under
+// this build's own decoders and replay - and it waits. It takes no role, opens
+// no service and writes nothing, so a predecessor that abandons the attempt
+// here abandons a process that holds nothing.
+func (h *successorHandshake) serveUntilProceed(decide func(runtime.ControllerHandoff) (runtime.ControllerHandoff, error)) error {
+	for {
+		line, err := h.control.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("the predecessor stopped before releasing the controller role: %w", err)
+		}
+		verb, rest, _ := strings.Cut(strings.TrimSpace(line), " ")
+		switch verb {
+		case successorProceedLine:
+			// It must be the transition this process was started for. A
+			// predecessor signalling a different one is not a predecessor this
+			// process has anything to do with.
+			if rest != h.handoffID {
+				return fmt.Errorf("the predecessor released transition %s and this process is the successor for %s", rest, h.handoffID)
+			}
+			return nil
+		case successorEvaluateLine:
+			var asked runtime.ControllerHandoff
+			if err := json.Unmarshal([]byte(rest), &asked); err != nil {
+				h.fail(fmt.Errorf("the transition to decide could not be read: %w", err))
+				continue
+			}
+			decided, err := decide(asked)
+			if err != nil {
+				h.fail(err)
+				continue
+			}
+			encoded, err := json.Marshal(decided)
+			if err != nil {
+				h.fail(err)
+				continue
+			}
+			if err := h.write(successorDecidedLine + " " + string(encoded)); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("the predecessor said %q, which is not part of this handshake", strings.TrimSpace(line))
+		}
 	}
-	verb, id, _ := strings.Cut(strings.TrimSpace(line), " ")
-	if verb != successorProceedLine || id != h.handoffID {
-		return fmt.Errorf("the predecessor said %q and this process is the successor for transition %s", strings.TrimSpace(line), h.handoffID)
-	}
-	return nil
 }
 
 // active reports that this process is the activated generation and is serving.
@@ -337,4 +402,209 @@ func (c *composition) activateAsSuccessor(supervisor *runtime.Supervisor, role *
 		fmt.Fprintf(os.Stderr, "the stable entrypoint needs repair: %v\n", err)
 	}
 	return service.EnableWorkAdmission(handoffID)
+}
+
+// ---------------------------------------------------------------------------
+// The predecessor's half, continued: deciding there is a successor at all
+// ---------------------------------------------------------------------------
+
+// installControllerUpgrade wires the trusted-main updater and the launcher into
+// the supervisor that will drive them.
+//
+// IT IS OFF FOR A CONTROLLER THAT CANNOT SUCCEED ITSELF, and says so rather
+// than failing to start. An unattested build has no adopted lineage; a
+// controller whose own generation is not published has no record naming the
+// repository it came from; a missing governance credential means the trust root
+// cannot be observed, and following trusted main without it would be following
+// a branch under a gate nobody checked. None of those are reasons to refuse to
+// serve - they are reasons not to upgrade - so each returns a sentence for the
+// startup banner and leaves the supervisor unbound.
+func (c *composition) installControllerUpgrade(supervisor *runtime.Supervisor, role *runtime.ControllerRoleLease, listener *runtime.ControlListener) (string, error) {
+	self, err := controllerSelf()
+	if err != nil {
+		return "", fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	if self.Unattested {
+		return "off (this controller is an unattested build and has no adopted lineage to succeed)", nil
+	}
+	binding, err := c.controllerBinding()
+	if err != nil {
+		return "", err
+	}
+	// THE REPOSITORY COMES FROM THIS CONTROLLER'S OWN PROVENANCE, not from the
+	// repositories it governs. A controller upgrades from the source it was
+	// adopted from; the projects it works on are a different question, and
+	// deriving one from the other would let an enrolled repository decide
+	// which code becomes the next controller.
+	running := runtime.RevisionRecord{Revision: self.Build.SourceRevision, Tree: self.Build.SourceTree}
+	provenance, found, err := runtime.PublishedAdoptedController(controllerRoot(), running)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return fmt.Sprintf("off (this controller's generation %s is not published under %s, so its own provenance cannot be read)",
+			self.Build.Version, controllerRoot()), nil
+	}
+	repository, err := runtime.ParseGitHubRepo(provenance.Repository)
+	if err != nil {
+		return "", err
+	}
+	governance, err := governanceObserver(c.config.GitHub)
+	if err != nil {
+		return "off (the governance credential that observes the trust root is not configured: " + err.Error() + ")", nil
+	}
+	remote, err := runtime.GovernedRemote(repository.CloneURL())
+	if err != nil {
+		return "", err
+	}
+	source, err := runtime.EnsureControllerSource(c.config.StateDir, remote, c.credentials)
+	if err != nil {
+		return "", err
+	}
+	deps := runtime.AdoptedBuildDeps{Governance: governance, RefSHA: c.forge.RefSHA}
+	observe := func(ctx context.Context) (runtime.RevisionRecord, error) {
+		return runtime.ObserveTrustedMainRevision(ctx, deps, repository, source)
+	}
+	service := runtime.BindControllerService(
+		c.config.StateDir, controllerRoot(), c.store, self, role, supervisor)
+
+	updater := runtime.NewControllerUpdater(binding, runtime.AdoptedBuildRequest{
+		Repository:    repository,
+		RepositoryDir: source,
+		OutputRoot:    controllerRoot(),
+		Sandbox: runtime.DockerSandbox{
+			Image:    c.config.Assurance.Image,
+			Endpoint: runtime.DockerEndpoint{Host: c.config.Assurance.DockerHost},
+			StateDir: filepath.Join(c.config.StateDir, "artifacts", "docker-operations"),
+		},
+		DependencyCacheDir: c.config.Assurance.DependencyCacheDir,
+	}, runtime.ControllerUpdaterPorts{
+		ObserveTrustedMain: observe,
+		Build: func(ctx context.Context, request runtime.AdoptedBuildRequest) (runtime.AdoptedBuildProvenance, error) {
+			return runtime.BuildAdoptedController(ctx, request, deps, builderRecord())
+		},
+		Published: func(_ context.Context, subject runtime.RevisionRecord) (runtime.AdoptedBuildProvenance, bool, error) {
+			return runtime.PublishedAdoptedController(controllerRoot(), subject)
+		},
+		Prepare: func(_ context.Context, successor runtime.ControllerBinding, artifact string) (runtime.ControllerHandoff, error) {
+			return runtime.PrepareControllerSuccession(c.store, runtime.HandoffPreflightInput{
+				Predecessor: runtime.HandoffParty{Binding: binding, ArtifactPath: self.ExecutablePath},
+				Successor:   runtime.HandoffParty{Binding: successor, ArtifactPath: artifact},
+				TrustedMain: runtime.RevisionRecord{
+					Revision: successor.Build.SourceRevision, Tree: successor.Build.SourceTree},
+				IsAncestor: runtime.LocalGitAncestry(source),
+				Now:        time.Now().UTC(),
+			})
+		},
+		Preflight: func(record runtime.ControllerHandoff) error {
+			if !record.Compatible() {
+				return fmt.Errorf("%s", strings.Join(record.Blockers(), "; "))
+			}
+			return nil
+		},
+	})
+
+	launch := func(ctx context.Context, prepared runtime.ControllerHandoff, subject runtime.RevisionRecord) runtime.SuccessionLaunch {
+		// The successor process is created by Spawn and has to be reachable
+		// from Evaluate, which the launcher calls between two of its own
+		// steps. It is one process per launch, and the launcher's order is
+		// what guarantees the assignment happens before the use.
+		var successor runtime.InertSuccessor
+		return runtime.LaunchSuccession(ctx, prepared, subject, runtime.SuccessionPorts{
+			Spawn: func(artifact, handoffID string) (runtime.InertSuccessor, error) {
+				// THIS PROCESS'S OWN ARGUMENTS. The successor must resolve the
+				// same operator configuration, because succession requires the
+				// configuration digest to be unchanged.
+				spawned, err := spawnInertSuccessor(artifact, handoffID, os.Args[1:])
+				successor = spawned
+				return spawned, err
+			},
+			ObserveTrustedMain: observe,
+			Quiesce: func(ctx context.Context) (func(), error) {
+				return supervisor.QuiesceWorkForTransition(ctx, quiesceTimeout)
+			},
+			Evaluate: func(_ context.Context, prepared runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+				asking, ok := successor.(*spawnedSuccessor)
+				if !ok {
+					return runtime.ControllerHandoff{}, fmt.Errorf("there is no successor process to decide the transition")
+				}
+				return asking.Evaluate(prepared)
+			},
+			Begin: func(prepared runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+				return service.BeginSuccession(prepared, listener.Close)
+			},
+		})
+	}
+	if err := supervisor.BindControllerUpgrade(runtime.NewControllerUpgrade(updater, launch)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("on (following trusted main of %s)", repository), nil
+}
+
+// builderRecord is this controller's truthful account of itself as a builder.
+// A failed measurement is recorded as a failed measurement, never laundered
+// into "unattested", which would claim a deliberate absence of provenance where
+// there is a broken one.
+func builderRecord() runtime.BuilderRecord {
+	self, err := controllerBuild()
+	if err != nil {
+		return runtime.BuilderRecord{Kind: runtime.ControllerUnattested, ResolutionError: err.Error()}
+	}
+	record := runtime.BuilderRecord{Kind: self.Kind, Version: self.Version, SourceRevision: self.SourceRevision}
+	if record.Kind == "" {
+		record.Kind = runtime.ControllerUnattested
+	}
+	return record
+}
+
+// decideSuccession is the successor's own answer to whether it can continue
+// every live run, asked of the durable state as it stands.
+//
+// IT IS READ-ONLY AND IT IS THIS BUILD'S ANSWER. The predecessor screens the
+// same question earlier, from its own decoders, to avoid spending a container
+// build on a successor that obviously cannot take over - but a predecessor
+// cannot answer "can the successor replay this journal", and that is precisely
+// the dimension a controller upgrade can fail on. So the decision that crosses
+// the point of no return is made here, by the code that would do the reading,
+// against a head the predecessor has already stopped moving.
+func (c *composition) decideSuccession(asked runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+	self, err := controllerSelf()
+	if err != nil {
+		return runtime.ControllerHandoff{}, fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	binding, err := c.controllerBinding()
+	if err != nil {
+		return runtime.ControllerHandoff{}, err
+	}
+	// THE SUCCESSOR IS THIS PROCESS, not whatever the request says it is. A
+	// predecessor naming some other binding as the successor would be asking
+	// this process to decide on behalf of a controller it is not.
+	if err := self.ProvesGeneration(asked.Successor.Binding); err != nil {
+		return runtime.ControllerHandoff{}, fmt.Errorf("this process is not the successor the transition names: %w", err)
+	}
+	stated, err := asked.Successor.Binding.Digest()
+	if err != nil {
+		return runtime.ControllerHandoff{}, err
+	}
+	mine, err := binding.Digest()
+	if err != nil {
+		return runtime.ControllerHandoff{}, err
+	}
+	if stated != mine {
+		// The generations match and the bindings do not, which means the
+		// identity or the effective configuration differs - exactly the
+		// dimension succession requires to be unchanged, and exactly the one
+		// the predecessor cannot check on this process's behalf.
+		return runtime.ControllerHandoff{}, fmt.Errorf(
+			"this process binds as %s and the transition names %s; the controller identity or the effective configuration differs",
+			shortVersion(mine), shortVersion(stated))
+	}
+	return runtime.PrepareControllerSuccession(c.store, runtime.HandoffPreflightInput{
+		Predecessor: asked.Predecessor,
+		Successor:   runtime.HandoffParty{Binding: binding, ArtifactPath: asked.Successor.ArtifactPath},
+		TrustedMain: runtime.RevisionRecord{
+			Revision: binding.Build.SourceRevision, Tree: binding.Build.SourceTree},
+		IsAncestor: runtime.LocalGitAncestry(runtime.ControllerSourceDir(c.config.StateDir)),
+		Now:        time.Now().UTC(),
+	})
 }
