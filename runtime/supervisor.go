@@ -389,6 +389,53 @@ func (s *Supervisor) BindControllerReconciler(reconciler *ControllerReconciler) 
 	return nil
 }
 
+// QuiesceWorkForTransition suspends intake and waits until no work this
+// controller started can still append to a journal.
+//
+// IT IS THE PRECONDITION FOR GIVING UP THE ROLE, and it is two facts rather
+// than one. Closing intake stops runs being CREATED; it says nothing about the
+// goroutines already inside driveOne, which are in a provider, a workspace or a
+// journal write and will finish whatever the gate says. A predecessor that
+// released the role with those still running would have a successor activate
+// and serve while the previous controller was still writing durable state -
+// which is not a stale pointer or a lost update, it is two controllers
+// appending to one store.
+//
+// THE HOLD IS REVERSIBLE BECAUSE THIS HAPPENS BEFORE COMMITMENT. The successor
+// evaluates the quiescent head next and may refuse it; that must cost the
+// update rather than this controller's ability to serve. The returned release
+// puts intake back, and does nothing once the transition has closed the gate on
+// its way past the point of no return.
+//
+// It is bounded. A provider invocation of tens of minutes is ordinary, and an
+// unbounded wait would hold intake for as long as the slowest run in the
+// fleet - so a wait that does not settle gives intake back and lets the next
+// attempt try again, which converges: nothing new is admitted while a hold is
+// in place, so the in-flight set only shrinks.
+func (s *Supervisor) QuiesceWorkForTransition(ctx context.Context, within time.Duration) (func(), error) {
+	release, held := s.admission.hold("a controller transition is evaluating the state its successor would inherit")
+	if !held {
+		return nil, &WorkAdmissionRefusedError{Reason: "this controller is not admitting work, so it has no intake to suspend for a transition"}
+	}
+	quiet := make(chan struct{})
+	go func() {
+		s.driving.Wait()
+		close(quiet)
+	}()
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case <-quiet:
+		return release, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	case <-timer.C:
+		release()
+		return nil, fmt.Errorf("work this controller started was still running after %s, so the role was not given up", within)
+	}
+}
+
 // BindControllerUpgrade installs the trusted-main upgrade. Like the
 // reconciler it is STARTUP-ONLY and refuses replacement: a supervisor whose
 // upgrade path could be swapped while running would be a way to change which
@@ -505,6 +552,38 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
 		NextEligibleAt: now.Add(s.deps.PollInterval),
 	}
+	// THIS CONTROLLER'S OWN STATE COMES FIRST, AND OUTSIDE THE INTAKE SECTION.
+	//
+	// Both of these run even while draining - draining stops taking on WORK,
+	// not repairing a stale pointer or resuming an activation this process
+	// already holds - and neither may run underneath the admission section
+	// below. A transition SUSPENDS and then CLOSES intake, which takes the
+	// gate's lock exclusively; doing that from inside a section holding it for
+	// reading is a self-deadlock, and it is the kind that appears on the first
+	// real upgrade rather than in a test.
+	//
+	// Reconciliation before upgrade: a controller that is not in the state its
+	// own records describe repairs that first, because handing the role to a
+	// successor is not a way to resolve a transition this process has not
+	// finished.
+	if reconciler := s.controllerReconciler(); reconciler != nil {
+		attempt := reconciler.Attempt(now)
+		report.Reconciliation = &attempt
+	}
+	if upgrade := s.controllerUpgrade(); upgrade != nil {
+		attempt := upgrade.Attempt(ctx, now)
+		report.Upgrade = &attempt
+		if attempt.Superseded() {
+			// THE PASS ENDS HERE. This process has given up the role, so every
+			// remaining step - discovery, plans, enumerating runs, dispatching
+			// them - would be a controller scheduling work it no longer has
+			// the authority to schedule. Stopping structurally is worth more
+			// than stopping because a caller read the report and reacted.
+			report.Draining = true
+			s.collect(&report)
+			return report, nil
+		}
+	}
 	// INTAKE IS HELD OPEN ACROSS THE WHOLE SECTION. Discovery and plan
 	// reconciliation both CREATE runs, so checking the gate once and then
 	// creating work afterwards would be the defect this gate exists to close,
@@ -528,23 +607,6 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 		} else {
 			report.Discovery = &discovery
 		}
-	}
-	// CONTROLLER RECONCILIATION happens before any work is considered, and
-	// runs even while draining. Draining stops taking on WORK; it does not stop
-	// this controller from repairing a stale pointer or resuming an activation
-	// it already holds, and every operation underneath enforces its own
-	// authority regardless of what this loop asks for.
-	if reconciler := s.controllerReconciler(); reconciler != nil {
-		attempt := reconciler.Attempt(now)
-		report.Reconciliation = &attempt
-	}
-	// CONTROLLER UPGRADE, after reconciliation and before any work. A
-	// controller that is not in the state its own records describe repairs
-	// that first: handing the role to a successor is not the way to resolve a
-	// transition this process has not finished.
-	if upgrade := s.controllerUpgrade(); upgrade != nil {
-		attempt := upgrade.Attempt(ctx, now)
-		report.Upgrade = &attempt
 	}
 	// PLANS are reconciled BEFORE the run list is read, so a stage that became
 	// dependency-ready since the last tick gets its run created and then driven

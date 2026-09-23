@@ -31,6 +31,21 @@ package runtime
 // statement about the present rather than about the transition, and the whole
 // protocol reasons about it as the latter.
 //
+// HOLDING IS NOT CLOSING, and the difference is the whole reason both exist. A
+// transition has to reach a moment where the durable head cannot move - so the
+// successor can evaluate the state it would inherit, and so the predecessor's
+// own work cannot append after the role changes hands - and that moment comes
+// BEFORE the point of no return. Closing there would spend availability on a
+// transition that may still be refused: a successor that turns out to be
+// incompatible must cost an update, not a controller.
+//
+// So a hold suspends intake reversibly, and only forward: held becomes open
+// again when the transition is abandoned, or closed when it commits. It is not
+// a second draining state - a held gate reports exactly what a not-yet-
+// activated one reports, "withheld", because that is the same fact - and it
+// cannot be lifted by anything except the holder. EnableWorkAdmission refuses
+// against a held gate rather than racing the transition for it.
+//
 // WHAT THIS GATE IS NOT. It is not ownership - a controller can hold the
 // scheduler lock and be forbidden to serve - and it is not activation, which is
 // durable truth about which generation is active. This is the present
@@ -51,6 +66,9 @@ type workAdmissionState int
 const (
 	admissionPending workAdmissionState = iota
 	admissionOpen
+	// admissionHeld is intake suspended for a transition in progress. It is
+	// reversible, by the holder alone, and only until the transition commits.
+	admissionHeld
 	admissionClosed
 )
 
@@ -108,6 +126,36 @@ func (g *workAdmissionGate) close(reason string) {
 	g.state, g.reason = admissionClosed, reason
 }
 
+// hold suspends intake without closing it, and returns the one way to lift it.
+//
+// It reports false when the gate is not open, which is the honest answer for
+// every other state: a pending gate has nothing to suspend, a closed one is
+// past suspending, and a held one belongs to a transition already under way.
+// Taking the lock exclusively means a hold WAITS for admissions in progress,
+// exactly as a close does - returning while a run was being written down would
+// be a hold that did not hold.
+func (g *workAdmissionGate) hold(reason string) (release func(), held bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state != admissionOpen {
+		return nil, false
+	}
+	g.state, g.reason = admissionHeld, reason
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			// ONLY FROM HELD. A transition that committed closed the gate on
+			// its way past the point of no return, and a release arriving
+			// afterwards - from a deferred abandon, say - must not reopen it.
+			if g.state == admissionHeld {
+				g.state, g.reason = admissionOpen, ""
+			}
+		})
+	}, true
+}
+
 // open permits work. It refuses to reopen a closed gate, because a drained
 // controller resuming is not a state this protocol has a meaning for.
 func (g *workAdmissionGate) open() error {
@@ -115,6 +163,13 @@ func (g *workAdmissionGate) open() error {
 	defer g.mu.Unlock()
 	if g.state == admissionClosed {
 		return fmt.Errorf("work admission was closed (%s) and does not reopen", g.reason)
+	}
+	if g.state == admissionHeld {
+		// A transition owns this gate right now. Opening it would put the
+		// predecessor back to admitting work in the window its successor is
+		// evaluating - and the reconciler, which asks for exactly this when it
+		// sees a withheld gate, would be the thing that did it.
+		return fmt.Errorf("work admission is held (%s) and is not opened from outside the transition", g.reason)
 	}
 	g.state, g.reason = admissionOpen, ""
 	return nil

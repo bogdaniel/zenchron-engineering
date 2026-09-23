@@ -10,7 +10,11 @@ package main
 // silence looks like, and what happens to a successor that will not be used.
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -139,4 +143,156 @@ func TestAbandoningASuccessorStopsIt(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("the abandoned successor's process group is still alive")
+}
+
+// THE EVALUATION EXCHANGE, across the same process boundary.
+func TestTheSuccessorDecidesTheTransitionOverTheHandshake(t *testing.T) {
+	binding := announcedBinding(t)
+	successor, _ := fakeSuccessorScript(t, `
+		printf 'identity %s\n' '`+binding+`' >&4
+		read -r line <&3
+		case "$line" in
+			evaluate\ *) printf 'decided {"id":"handoff-1","phase":"prepared"}\n' >&4 ;;
+			*) printf 'error unexpected %s\n' "$line" >&4 ;;
+		esac`)
+	if _, err := successor.Identify(); err != nil {
+		t.Fatalf("HARNESS PRECONDITION: %v", err)
+	}
+	asking, ok := successor.(*spawnedSuccessor)
+	if !ok {
+		t.Fatalf("HARNESS PRECONDITION: %T", successor)
+	}
+
+	decided, err := asking.Evaluate(runtime.ControllerHandoff{ID: "handoff-1", Phase: runtime.HandoffPrepared})
+	if err != nil {
+		t.Fatalf("the successor did not decide the transition: %v", err)
+	}
+	if decided.ID != "handoff-1" || decided.Phase != runtime.HandoffPrepared {
+		t.Fatalf("the decision did not survive the pipe: %+v", decided)
+	}
+}
+
+// A SUCCESSOR THAT REFUSES TO DECIDE SAYS WHY, and the predecessor keeps that
+// reason rather than a timeout.
+func TestASuccessorThatCannotDecideSaysWhy(t *testing.T) {
+	binding := announcedBinding(t)
+	successor, _ := fakeSuccessorScript(t, `
+		printf 'identity %s\n' '`+binding+`' >&4
+		read -r line <&3
+		printf 'error event type "plan.stage.superseded" is not in this controller vocabulary\n' >&4`)
+	if _, err := successor.Identify(); err != nil {
+		t.Fatalf("HARNESS PRECONDITION: %v", err)
+	}
+	asking := successor.(*spawnedSuccessor)
+
+	_, err := asking.Evaluate(runtime.ControllerHandoff{ID: "handoff-1", Phase: runtime.HandoffPrepared})
+	if err == nil || !strings.Contains(err.Error(), "is not in this controller vocabulary") {
+		t.Fatalf("err = %v, want the successor's own reason", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The successor's side of the same loop
+// ---------------------------------------------------------------------------
+
+// handshakePair wires a successor handshake to a predecessor's two pipes,
+// without a process boundary: this exercises the successor's command loop,
+// which lives in this binary rather than in the child.
+func handshakePair(t *testing.T, handoffID string) (*successorHandshake, *os.File, *bufio.Reader) {
+	t.Helper()
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportRead, reportWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		controlWrite.Close()
+		reportRead.Close()
+	})
+	return &successorHandshake{
+		handoffID: handoffID, control: bufio.NewReader(controlRead), report: reportWrite,
+	}, controlWrite, bufio.NewReader(reportRead)
+}
+
+// THE SUCCESSOR ANSWERS EVALUATIONS AND THEN PROCEEDS, in that order and any
+// number of times.
+func TestTheSuccessorAnswersEvaluationsUntilItIsToldToProceed(t *testing.T) {
+	handshake, control, report := handshakePair(t, "handoff-1")
+	decisions := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- handshake.serveUntilProceed(func(asked runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+			decisions++
+			asked.Runs = []runtime.HandoffRunDecision{{RunID: "run-1", Result: "compatible"}}
+			return asked, nil
+		})
+	}()
+
+	if _, err := io.WriteString(control, `evaluate {"id":"handoff-1","phase":"prepared"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err := report.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, successorDecidedLine+" ") || !strings.Contains(line, "run-1") {
+		t.Fatalf("reply = %q, want the decision", strings.TrimSpace(line))
+	}
+	if _, err := io.WriteString(control, "proceed handoff-1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the successor did not proceed: %v", err)
+	}
+	if decisions != 1 {
+		t.Fatalf("%d decisions, want 1", decisions)
+	}
+}
+
+// A RELEASE OF SOMEBODY ELSE'S TRANSITION IS NOT A RELEASE OF THIS ONE.
+func TestTheSuccessorRefusesToProceedOnAnotherTransition(t *testing.T) {
+	handshake, control, _ := handshakePair(t, "handoff-1")
+	done := make(chan error, 1)
+	go func() {
+		done <- handshake.serveUntilProceed(func(runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+			return runtime.ControllerHandoff{}, nil
+		})
+	}()
+	if _, err := io.WriteString(control, "proceed handoff-somebody-else\n"); err != nil {
+		t.Fatal(err)
+	}
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "handoff-somebody-else") {
+		t.Fatalf("err = %v, want a refusal naming the transition that was released", err)
+	}
+}
+
+// A DECISION THAT CANNOT BE MADE IS REPORTED AND THE SUCCESSOR KEEPS WAITING.
+// It is the predecessor's transition to abandon, not the successor's.
+func TestASuccessorThatCannotDecideKeepsWaiting(t *testing.T) {
+	handshake, control, report := handshakePair(t, "handoff-1")
+	done := make(chan error, 1)
+	go func() {
+		done <- handshake.serveUntilProceed(func(runtime.ControllerHandoff) (runtime.ControllerHandoff, error) {
+			return runtime.ControllerHandoff{}, fmt.Errorf("the journal could not be replayed")
+		})
+	}()
+	if _, err := io.WriteString(control, `evaluate {"id":"handoff-1"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err := report.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(line, "the journal could not be replayed") {
+		t.Fatalf("reply = %q, want the reason", strings.TrimSpace(line))
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the successor stopped waiting after a refusal: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
 }

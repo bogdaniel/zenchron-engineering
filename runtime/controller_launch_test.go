@@ -42,8 +42,13 @@ type launchHarness struct {
 	trusted    RevisionRecord
 	observeErr error
 	beginErr   error
+	quiesceErr error
+	// decide is the successor's answer. nil means "the record it was asked
+	// about, unchanged and compatible".
+	decide func(ControllerHandoff) (ControllerHandoff, error)
 
-	spawned, began int
+	spawned, began, quiesced, resumed int
+	begunWith                         ControllerHandoff
 }
 
 func (h *launchHarness) ports() SuccessionPorts {
@@ -58,8 +63,22 @@ func (h *launchHarness) ports() SuccessionPorts {
 		ObserveTrustedMain: func(context.Context) (RevisionRecord, error) {
 			return h.trusted, h.observeErr
 		},
+		Quiesce: func(context.Context) (func(), error) {
+			if h.quiesceErr != nil {
+				return nil, h.quiesceErr
+			}
+			h.quiesced++
+			return func() { h.resumed++ }, nil
+		},
+		Evaluate: func(_ context.Context, prepared ControllerHandoff) (ControllerHandoff, error) {
+			if h.decide != nil {
+				return h.decide(prepared)
+			}
+			return prepared, nil
+		},
 		Begin: func(prepared ControllerHandoff) (ControllerHandoff, error) {
 			h.began++
+			h.begunWith = prepared
 			if h.beginErr != nil {
 				return prepared, h.beginErr
 			}
@@ -152,6 +171,35 @@ func TestARefusalBeforeThePointOfNoReturnKeepsThePredecessorServing(t *testing.T
 		{"trusted main has moved", func(h *launchHarness, _ *ControllerHandoff) {
 			h.trusted = RevisionRecord{Revision: strings.Repeat("d", 40), Tree: "tree-d"}
 		}, "trusted main is"},
+		{"the work this controller started will not stop", func(h *launchHarness, _ *ControllerHandoff) {
+			h.quiesceErr = fmt.Errorf("work this controller started was still running after 30m0s")
+		}, "could not be brought to a stop"},
+		{"the successor cannot decide", func(h *launchHarness, _ *ControllerHandoff) {
+			h.decide = func(ControllerHandoff) (ControllerHandoff, error) {
+				return ControllerHandoff{}, fmt.Errorf("the journal could not be read")
+			}
+		}, "could not decide the transition"},
+		{"the successor cannot continue a live run", func(h *launchHarness, _ *ControllerHandoff) {
+			h.decide = func(asked ControllerHandoff) (ControllerHandoff, error) {
+				asked.Runs = []HandoffRunDecision{{RunID: "run-x", Result: SuccessionRefused,
+					Refusals: []string{`state_vocabulary: event type "plan.stage.superseded" is not in this controller's vocabulary`},
+					Decision: ControllerSuccessionDecision{RunID: "run-x", Result: SuccessionRefused}}}
+				return asked, nil
+			}
+		}, "cannot continue every live run"},
+		{"the successor decided another transition", func(h *launchHarness, _ *ControllerHandoff) {
+			h.decide = func(asked ControllerHandoff) (ControllerHandoff, error) {
+				asked.ID = "handoff-somebody-else"
+				return asked, nil
+			}
+		}, "decided a different transition"},
+		{"the successor renamed itself", func(h *launchHarness, _ *ControllerHandoff) {
+			h.decide = func(asked ControllerHandoff) (ControllerHandoff, error) {
+				other := attestedBuild(ControllerAdopted, strings.Repeat("9", 40), "tree-9", strings.Repeat("99", 32))
+				asked.Successor.Binding.Build = &other
+				return asked, nil
+			}
+		}, "names a different successor"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness, record, subject := launchFixture(t)
@@ -171,6 +219,11 @@ func TestARefusalBeforeThePointOfNoReturnKeepsThePredecessorServing(t *testing.T
 			// A successor that was started and will not be used is stopped.
 			if harness.spawnErr == nil && harness.spawned == 1 && harness.successor.abandoned != 1 {
 				t.Fatalf("a spawned successor was abandoned %d times", harness.successor.abandoned)
+			}
+			// AND INTAKE COMES BACK. A refused transition costs an update; a
+			// controller left unable to admit work would have cost more.
+			if harness.quiesced != harness.resumed {
+				t.Fatalf("intake was suspended %d times and resumed %d", harness.quiesced, harness.resumed)
 			}
 			if harness.successor.proceeded != 0 {
 				t.Fatal("a successor that was refused was told to proceed")
@@ -218,5 +271,65 @@ func TestAfterTheDrainThePredecessorIsCommittedEvenWhenTheSuccessorFails(t *test
 				t.Fatal("the predecessor killed a successor after giving up the role")
 			}
 		})
+	}
+}
+
+// THE TRANSITION IS BEGUN WITH THE SUCCESSOR'S RECORD, not the predecessor's
+// screen of the same question.
+//
+// The admissions written during the handover come from record.Runs, and those
+// decisions are the successor's: it is the code that will read those journals.
+// Beginning from the predecessor's copy would write the predecessor's opinion
+// of whether the successor can read them.
+func TestTheTransitionIsBegunWithTheSuccessorsOwnDecisions(t *testing.T) {
+	harness, record, subject := launchFixture(t)
+	harness.decide = func(asked ControllerHandoff) (ControllerHandoff, error) {
+		asked.Runs = []HandoffRunDecision{{RunID: "run-live", Result: SuccessionCompatible,
+			EventCount: 7, Decision: ControllerSuccessionDecision{
+				RunID: "run-live", Result: SuccessionCompatible,
+				DurableReplay: SuccessionCheck{Passed: true, Detail: "the successor replayed 7 events"},
+			}}}
+		return asked, nil
+	}
+	launch := LaunchSuccession(context.Background(), record, subject, harness.ports())
+
+	if !launch.Served {
+		t.Fatalf("the transition did not complete: %+v", launch)
+	}
+	if len(harness.begunWith.Runs) != 1 || harness.begunWith.Runs[0].RunID != "run-live" {
+		t.Fatalf("the transition was begun with %d decision(s) and not the successor's", len(harness.begunWith.Runs))
+	}
+	if detail := harness.begunWith.Runs[0].Decision.DurableReplay.Detail; detail != "the successor replayed 7 events" {
+		t.Fatalf("the admitted decision is not the one the successor made: %q", detail)
+	}
+}
+
+// QUIESCENCE HAPPENS BEFORE THE SUCCESSOR DECIDES, and both happen before
+// anything is given up. The order is the guarantee: a decision made while the
+// predecessor's own work could still append would be a statement about a state
+// that no longer exists by the time it matters.
+func TestTheSuccessorDecidesOnlyAfterTheStateStopsMoving(t *testing.T) {
+	harness, record, subject := launchFixture(t)
+	var order []string
+	harness.decide = func(asked ControllerHandoff) (ControllerHandoff, error) {
+		order = append(order, "evaluate")
+		return asked, nil
+	}
+	ports := harness.ports()
+	quiesce, begin := ports.Quiesce, ports.Begin
+	ports.Quiesce = func(ctx context.Context) (func(), error) {
+		order = append(order, "quiesce")
+		return quiesce(ctx)
+	}
+	ports.Begin = func(prepared ControllerHandoff) (ControllerHandoff, error) {
+		order = append(order, "begin")
+		return begin(prepared)
+	}
+
+	if launch := LaunchSuccession(context.Background(), record, subject, ports); !launch.Served {
+		t.Fatalf("the transition did not complete: %+v", launch)
+	}
+	if strings.Join(order, ",") != "quiesce,evaluate,begin" {
+		t.Fatalf("order = %v, want the state to stop moving, then the successor to decide, then the handover", order)
 	}
 }

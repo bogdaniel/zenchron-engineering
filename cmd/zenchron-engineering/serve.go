@@ -78,7 +78,11 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 		if err := handshake.announce(binding); err != nil {
 			return runtime.ExitInvalid, err
 		}
-		if err := handshake.awaitProceed(); err != nil {
+		// While it waits, it answers one question: can this build continue
+		// every live run? The predecessor asks once the state has stopped
+		// moving, and the answer is what decides whether the role changes
+		// hands at all.
+		if err := handshake.serveUntilProceed(built.decideSuccession); err != nil {
 			return runtime.ExitInvalid, err
 		}
 	}
