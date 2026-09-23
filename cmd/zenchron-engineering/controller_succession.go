@@ -640,3 +640,30 @@ func (c *composition) decideSuccession(asked runtime.ControllerHandoff) (runtime
 		Now:        time.Now().UTC(),
 	})
 }
+
+// resolveInterruptedHandoff settles a transition this controller is the
+// recovery owner of, before it serves anything.
+//
+// A controller that cannot establish its own identity resolves nothing and
+// says so: every answer the resolver gives is a statement about which
+// generation this process is, and a process that does not know cannot be told.
+// That is reported rather than fatal - an unattested build still serves.
+func (c *composition) resolveInterruptedHandoff() (string, error) {
+	self, err := controllerSelf()
+	if err != nil {
+		return "not resolved (this controller cannot establish its own identity: " + err.Error() + ")", nil
+	}
+	binding, err := c.controllerBinding()
+	if err != nil {
+		return "not resolved (" + err.Error() + ")", nil
+	}
+	controller, err := binding.Digest()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := runtime.ResolveHandoffAtStartup(c.store, self, controller, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
+	return resolved.Describe(), nil
+}

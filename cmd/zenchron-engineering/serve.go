@@ -111,6 +111,17 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	}
 	defer listener.Close()
 
+	// AN INTERRUPTED TRANSITION IS RESOLVED BEFORE ANYTHING ELSE. A crash
+	// between a prepared transition and its activation leaves a durable record
+	// in flight, and a controller that came back and simply served left it
+	// there forever - which refuses every later attempt at the same transition
+	// and wedges automatic upgrades permanently. The resolver decides; this
+	// only asks it. See #288.
+	inflight, err := built.resolveInterruptedHandoff()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+
 	supervisor, err := built.supervisor(repositories, flags.SuccessorOf != "")
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -175,6 +186,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
 	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
+	fmt.Fprintf(stdout, "  transitions       %s\n", inflight)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
 		_ = writeJSON(stdout, report)
