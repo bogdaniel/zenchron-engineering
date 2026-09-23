@@ -48,6 +48,7 @@ package runtime
 
 import (
 	"fmt"
+	"time"
 )
 
 // ControllerBinding is the exact controller a run is bound to: the identity of
@@ -403,7 +404,11 @@ func alreadyAdmitted(events []EngineeringEvent, handoffID, successor string) boo
 // present question is answered. Merging the two would let an old activation
 // argue for a superseded controller.
 func (r *EngineeringRuntime) wasTransitionActivated() transitionActivated {
-	records, err := r.deps.Store.ControllerHandoffs()
+	return storeTransitionActivated(r.deps.Store)
+}
+
+func storeTransitionActivated(store *SQLiteOperationStore) transitionActivated {
+	records, err := store.ControllerHandoffs()
 	if err != nil {
 		// FAIL CLOSED. "I could not read which transitions activated" is not
 		// "none did" for authority purposes, but it is the only safe answer
@@ -434,6 +439,14 @@ func (r *EngineeringRuntime) wasTransitionActivated() transitionActivated {
 // repeated upgrade request is an ordinary condition and duplicate evidence of
 // one transition would make the chain ambiguous.
 func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision ControllerSuccessionDecision) error {
+	return admitControllerSuccession(r.deps.Store, runID, decision, r.deps.Clock.Now())
+}
+
+// admitControllerSuccession is the same admission without a full runtime. The
+// controller service holds a store and its own identity and nothing else, and
+// building an engine to append one event would mean constructing agents,
+// budgets and a forge adapter to write a governance record.
+func admitControllerSuccession(store *SQLiteOperationStore, runID string, decision ControllerSuccessionDecision, now time.Time) error {
 	if decision.Result != SuccessionCompatible {
 		return fmt.Errorf("a refused succession is not admitted: %v", decision.Refusals())
 	}
@@ -443,14 +456,14 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	if decision.HandoffID == "" {
 		return fmt.Errorf("a succession admission names the transition it was decided for")
 	}
-	run, ok, err := r.deps.Store.Run(runID)
+	run, ok, err := store.Run(runID)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return fmt.Errorf("unknown run %q", runID)
 	}
-	events, err := r.deps.Store.Events(runID)
+	events, err := store.Events(runID)
 	if err != nil {
 		return err
 	}
@@ -466,7 +479,7 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	if alreadyAdmitted(events, decision.HandoffID, successor) {
 		return nil
 	}
-	activated := r.wasTransitionActivated()
+	activated := storeTransitionActivated(store)
 	predecessor, err := decision.Predecessor.Digest()
 	if err != nil {
 		return err
@@ -481,14 +494,14 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	if err != nil {
 		return err
 	}
-	_, err = r.deps.Store.AppendEvent(EngineeringEvent{
+	_, err = store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
 		// Deterministic in the transition, so the same succession cannot be
 		// journalled twice even if two callers race past the check above.
 		ID:         fmt.Sprintf("%s-controller-succession-%s-%s", runID, shortSHA(successor), decision.HandoffID),
 		RunID:      runID,
 		Type:       EventControllerSuccessionAdmitted,
-		OccurredAt: r.deps.Clock.Now(),
+		OccurredAt: now,
 		Payload:    payload,
 	})
 	return err

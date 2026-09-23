@@ -378,10 +378,28 @@ func CompleteHandoff(ports HandoffPorts, id string) (ControllerHandoff, error) {
 	// control model entirely correct, which is why it is repair rather than
 	// part of the transition.
 	if _, err := ActivateControllerGeneration(ports.Store, record.ID, ports.Self, ports.ControllerRoot); err != nil {
-		return record, fmt.Errorf("the successor is active and its stable entrypoint needs repair: %w", err)
+		// TYPED, because the caller must be able to tell this apart from a
+		// failed transition. The successor IS active; what failed is a
+		// projection, and treating the two alike would let a symlink decide
+		// whether a controller may serve.
+		return record, &ProjectionRepairFailedError{HandoffID: record.ID, Cause: err}
 	}
 	return record, nil
 }
+
+// ProjectionRepairFailedError is an activation that succeeded with a stable
+// entrypoint that did not follow. Authority is established; the operator's
+// convenience path is stale and repairable.
+type ProjectionRepairFailedError struct {
+	HandoffID string
+	Cause     error
+}
+
+func (e *ProjectionRepairFailedError) Error() string {
+	return fmt.Sprintf("handoff %s activated and its stable entrypoint needs repair: %v", e.HandoffID, e.Cause)
+}
+
+func (e *ProjectionRepairFailedError) Unwrap() error { return e.Cause }
 
 // failBackToPredecessor is the failure law: a successor that acquired
 // ownership and could not prove the state it was handed admits nothing,
