@@ -34,7 +34,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
@@ -101,10 +100,10 @@ func spawnInertSuccessor(artifact, handoffID string, args []string) (runtime.Ine
 	command := exec.Command(artifact, append(append([]string{}, args...), "--successor-of", handoffID)...)
 	command.ExtraFiles = []*os.File{controlRead, reportWrite} // becomes fd 3 and fd 4
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
-	// A NEW PROCESS GROUP. The successor is about to outlive the process
-	// starting it, and a Ctrl-C meant for the predecessor's terminal must not
-	// reach a controller mid-activation.
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A NEW PROCESS GROUP, where the platform has them. The successor is about
+	// to outlive the process starting it, and a Ctrl-C meant for the
+	// predecessor's terminal must not reach a controller mid-activation.
+	configureSuccessorProcess(command)
 	if err := command.Start(); err != nil {
 		for _, file := range []*os.File{controlRead, controlWrite, reportRead, reportWrite} {
 			file.Close()
@@ -153,14 +152,7 @@ func (s *spawnedSuccessor) AwaitActive() error {
 // group rather than the process removes anything it started.
 func (s *spawnedSuccessor) Abandon() error {
 	defer s.close()
-	if s.command.Process == nil {
-		return nil
-	}
-	if err := syscall.Kill(-s.command.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		return err
-	}
-	_, err := s.command.Process.Wait()
-	return err
+	return killSuccessorProcessTree(s.command)
 }
 
 // await reads one reply and requires it to be the expected one.
