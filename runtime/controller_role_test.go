@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,9 +25,16 @@ func TestMain(m *testing.M) {
 		}
 		os.Stdout.WriteString("held\n")
 		_ = os.Stdout.Sync()
-		// Wait to be killed. The lock is deliberately not released: what this
-		// process exists to prove is that the kernel releases it anyway.
-		select {}
+		// Wait to be killed by blocking on stdin, which the parent holds open.
+		// NOT select{}: with no other goroutines that is a deadlock the Go
+		// runtime detects and panics on, so the holder would exit on its own
+		// and free the role while a test still believed it was held - a flaky
+		// harness that looks like a flaky lock.
+		//
+		// The lock is deliberately never released here: what this process
+		// exists to prove is that the kernel releases it anyway.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -41,10 +49,16 @@ func holdRoleInAnotherProcess(t *testing.T, stateDir string) *exec.Cmd {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The holder blocks reading this pipe, so it stays alive until the test
+	// kills it rather than until the Go runtime notices it has nothing to do.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 	ready := make([]byte, len("held\n"))
 	if _, err := stdout.Read(ready); err != nil {
 		t.Fatalf("the holder never reported taking the role: %v", err)
@@ -144,8 +158,10 @@ func TestControllerRoleTransfersOnlyAfterRelease(t *testing.T) {
 	if err := predecessor.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if predecessor.Held() {
-		t.Fatal("a released lock still reports itself held")
+	// A released lease authorizes nothing, and that is the only question
+	// worth asking about it: there is no Held() to consult.
+	if err := predecessor.WithAuthority(func() error { return nil }); err == nil {
+		t.Fatal("a released lease still authorized an operation")
 	}
 	successor, err := AcquireControllerRole(state)
 	if err != nil {
@@ -165,7 +181,7 @@ func TestOnlyOneAcquirerWinsARace(t *testing.T) {
 	var start sync.WaitGroup
 	var done sync.WaitGroup
 	start.Add(1)
-	won := make(chan *ControllerRoleLock, racers)
+	won := make(chan *ControllerRoleLease, racers)
 	for i := 0; i < racers; i++ {
 		done.Add(1)
 		go func() {
