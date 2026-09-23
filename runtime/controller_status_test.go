@@ -182,15 +182,23 @@ func TestDurableStateMovingDuringCollectionIsNotAViolation(t *testing.T) {
 	predecessor := ControllerSelfRecord{Build: predecessorBuild, Measured: predecessorBuild.BinarySHA256}
 
 	status, err := DescribeControllerStatus(fixture.store, fixture.root, func() (LiveControllerSnapshot, error) {
-		// A new transition settles while the live half is being observed.
+		// A new transition ACTIVATES while the live half is being observed.
+		// It has to activate rather than merely be written: what status reads
+		// is the activation that governs, so a row appearing elsewhere is not
+		// the durable state moving under the observation.
 		next := ControllerHandoff{
-			ID: "handoff-later", Phase: HandoffActivated,
+			ID: "handoff-later", Phase: HandoffRevalidated,
 			Predecessor:   fixture.record.Successor,
 			Successor:     fixture.record.Predecessor,
 			RecoveryOwner: "later", UpdatedAt: statusNow().Add(time.Minute),
 		}
 		if wrote, err := fixture.store.PutControllerHandoff(next, ""); err != nil || !wrote {
 			t.Fatalf("write the later transition: %v wrote=%v", err, wrote)
+		}
+		activated := next
+		activated.Phase = HandoffActivated
+		if wrote, err := fixture.store.ActivateControllerHandoff(activated, HandoffRevalidated); err != nil || !wrote {
+			t.Fatalf("activate the later transition: %v wrote=%v", err, wrote)
 		}
 		// Observed state that WOULD look like a violation against the old read.
 		return LiveControllerSnapshot{
