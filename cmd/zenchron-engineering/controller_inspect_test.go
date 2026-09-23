@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
@@ -126,5 +127,29 @@ func TestUsageNamesTheControllerCommands(t *testing.T) {
 		if !bytes.Contains([]byte(err.Error()), []byte(want)) {
 			t.Fatalf("usage does not mention %q: %v", want, err)
 		}
+	}
+}
+
+// THE IDENTITY IS THE PROGRAM, NOT THE BUILD.
+//
+// A run's ControllerBinding carries the identity and the build as separate
+// members, and succession requires the identity to be unchanged while the
+// build advances. An identity computed from the build version satisfied that
+// condition only when nothing had changed, which is the one case succession is
+// not for: every automated upgrade would have been refused for having upgraded.
+func TestTheControllerIdentityDoesNotMoveWithTheBuild(t *testing.T) {
+	original := version
+	t.Cleanup(func() { version = original })
+
+	version = "main-aaaaaaa"
+	first := controllerIdentity()
+	version = "main-bbbbbbb"
+	second := controllerIdentity()
+
+	if first != second {
+		t.Fatalf("the controller identity moved from %q to %q for a new build of the same program", first, second)
+	}
+	if strings.Contains(first, version) || strings.Contains(first, "main-") {
+		t.Fatalf("the controller identity %q still carries a build version", first)
 	}
 }

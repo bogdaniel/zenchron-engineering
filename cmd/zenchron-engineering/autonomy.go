@@ -759,7 +759,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Repository:        target,
 		Remote:            remote,
 		Credentials:       c.credentials,
-		ControllerID:      "zenchron-engineering/" + version,
+		ControllerID:      controllerIdentity(),
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
@@ -781,6 +781,27 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		OperatorMaxConcurrentRuns: ceiling,
 	})
 }
+
+// controllerIdentity is WHICH PROGRAM this is, and deliberately not which
+// build of it.
+//
+// It used to be "zenchron-engineering/" + version, which folded the build into
+// the identity - and the build is already a field of its own beside this one,
+// carrying the kind, the version, the source revision, the tree and the
+// measured binary. Saying it twice would be merely redundant if the two were
+// read the same way, and they are not: succession requires the controller
+// identity to be UNCHANGED between predecessor and successor, precisely so
+// that a new build of the same program can continue a run while a different
+// program cannot. An identity that moved with every build made that condition
+// unsatisfiable - every automated upgrade would have been refused with "the
+// controller identity changed", for the only kind of upgrade #234 exists to
+// perform.
+//
+// The cost is stated rather than hidden: this changes the ControllerSHA256 of
+// runs created by earlier builds, so runs live across this change park on
+// controller_changed exactly as they do across any other manual upgrade. From
+// here on they do not have to.
+func controllerIdentity() string { return "zenchron-engineering" }
 
 // feedbackPolicyFor adds the identity this runtime's own credential acts as in
 // THIS repository to the self-loop set.
