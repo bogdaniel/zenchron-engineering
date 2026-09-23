@@ -1,0 +1,340 @@
+package main
+
+// THE TWO HALVES OF A LIVE TRANSITION, as this process performs them.
+//
+// runtime/controller_launch.go owns the order and the point of no return. This
+// file owns only the transport: how a predecessor starts its successor, and how
+// a successor started that way waits, reports, and proves it is serving.
+//
+// THE HANDSHAKE IS NOT AUTHORITY. Nothing a process says over this pipe grants
+// it anything: the successor still acquires the role, still revalidates under
+// exclusive ownership, and still proves its own generation against the durable
+// record. The pipe answers one question the durable record cannot - "has the
+// predecessor let go yet" - and a successor that acted on it without the
+// checks below would be taking a process's word for who is in charge.
+//
+// IT IS A DEDICATED PAIR OF PIPES rather than stdio. The successor's stdout is
+// the operator's serve output, with a banner and a JSON report per pass, and a
+// protocol multiplexed onto that would be a parser waiting to misread a log
+// line. Descriptors 3 and 4 carry the handshake and nothing else.
+//
+// THE SUCCESSOR OUTLIVES THE PREDECESSOR, which is the one asymmetry worth
+// naming. It is started in its own process group so a signal aimed at the
+// predecessor's terminal does not reach the controller that replaced it, and
+// once it is serving it stops reading the pipe: the predecessor exits, the
+// descriptor closes, and nothing about that is an event for a process that is
+// now the controller.
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/runtime"
+)
+
+// The handshake vocabulary. One line each, because a length-prefixed framing
+// would be ceremony for three messages.
+const (
+	successorIdentityLine = "identity" // successor -> predecessor: what I am
+	successorProceedLine  = "proceed"  // predecessor -> successor: the role is free
+	successorActiveLine   = "active"   // successor -> predecessor: I am serving
+	successorErrorLine    = "error"    // successor -> predecessor: and why not
+)
+
+// Handshake bounds. They are generous and finite: a step that never answers
+// must eventually be a refusal, because the alternative is a predecessor that
+// waits forever holding a role it has already decided to give up.
+const (
+	// identifyTimeout covers process start, configuration load and self
+	// measurement.
+	identifyTimeout = 2 * time.Minute
+	// activateTimeout covers acquisition, revalidation - which replays every
+	// live run's journal - activation and opening service.
+	activateTimeout = 15 * time.Minute
+)
+
+// The descriptors the successor reads and writes the handshake on. 0, 1 and 2
+// stay exactly what they are for any other process.
+const (
+	successorControlFD = 3 // predecessor -> successor
+	successorReportFD  = 4 // successor -> predecessor
+)
+
+// ---------------------------------------------------------------------------
+// The predecessor's half: starting the successor
+// ---------------------------------------------------------------------------
+
+// spawnedSuccessor is a real successor process, inert until told otherwise.
+type spawnedSuccessor struct {
+	command *exec.Cmd
+	control io.WriteCloser
+	report  *bufio.Reader
+	closers []io.Closer
+}
+
+// spawnInertSuccessor starts the artifact the transition names.
+//
+// IT IS STARTED WITH THIS PROCESS'S OWN ARGUMENTS, plus the transition. That is
+// not a shortcut: the successor must resolve the SAME operator configuration,
+// because succession requires the effective configuration digest to be
+// unchanged, and reconstructing an equivalent command line is how two processes
+// come to disagree about which config file they read.
+func spawnInertSuccessor(artifact, handoffID string, args []string) (runtime.InertSuccessor, error) {
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	reportRead, reportWrite, err := os.Pipe()
+	if err != nil {
+		controlRead.Close()
+		controlWrite.Close()
+		return nil, err
+	}
+	command := exec.Command(artifact, append(append([]string{}, args...), "--successor-of", handoffID)...)
+	command.ExtraFiles = []*os.File{controlRead, reportWrite} // becomes fd 3 and fd 4
+	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	// A NEW PROCESS GROUP, where the platform has them. The successor is about
+	// to outlive the process starting it, and a Ctrl-C meant for the
+	// predecessor's terminal must not reach a controller mid-activation.
+	configureSuccessorProcess(command)
+	if err := command.Start(); err != nil {
+		for _, file := range []*os.File{controlRead, controlWrite, reportRead, reportWrite} {
+			file.Close()
+		}
+		return nil, err
+	}
+	// The child holds its own copies; this process must not keep the write end
+	// of the report pipe open, or a dead child would never look like EOF.
+	controlRead.Close()
+	reportWrite.Close()
+	return &spawnedSuccessor{
+		command: command, control: controlWrite, report: bufio.NewReader(reportRead),
+		closers: []io.Closer{controlWrite, reportRead},
+	}, nil
+}
+
+// Identify reads the generation the successor says it is.
+func (s *spawnedSuccessor) Identify() (runtime.ControllerBinding, error) {
+	line, err := s.await(successorIdentityLine, identifyTimeout)
+	if err != nil {
+		return runtime.ControllerBinding{}, err
+	}
+	var binding runtime.ControllerBinding
+	if err := json.Unmarshal([]byte(line), &binding); err != nil {
+		return runtime.ControllerBinding{}, fmt.Errorf("the successor's identity could not be read: %w", err)
+	}
+	return binding, nil
+}
+
+// Proceed tells the successor the role has been released.
+func (s *spawnedSuccessor) Proceed(handoffID string) error {
+	_, err := io.WriteString(s.control, successorProceedLine+" "+handoffID+"\n")
+	return err
+}
+
+// AwaitActive waits for the successor to prove it is serving.
+func (s *spawnedSuccessor) AwaitActive() error {
+	_, err := s.await(successorActiveLine, activateTimeout)
+	return err
+}
+
+// Abandon stops a successor that will not be used.
+//
+// It is only ever called before the point of no return, when the successor
+// holds no role, has written nothing and cannot be serving. Killing the process
+// group rather than the process removes anything it started.
+func (s *spawnedSuccessor) Abandon() error {
+	defer s.close()
+	return killSuccessorProcessTree(s.command)
+}
+
+// await reads one reply and requires it to be the expected one.
+//
+// A REFUSAL AND A SILENCE ARE DIFFERENT ANSWERS, and both are answers. The
+// successor reports its own failures as `error <reason>`, which is how a
+// predecessor learns WHY rather than that something did not happen.
+func (s *spawnedSuccessor) await(expected string, within time.Duration) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	lines := make(chan result, 1)
+	go func() {
+		line, err := s.report.ReadString('\n')
+		lines <- result{strings.TrimSpace(line), err}
+	}()
+	select {
+	case got := <-lines:
+		if got.err != nil && got.line == "" {
+			return "", fmt.Errorf("the successor stopped answering before it reported %q: %w", expected, got.err)
+		}
+		verb, rest, _ := strings.Cut(got.line, " ")
+		switch verb {
+		case expected:
+			return rest, nil
+		case successorErrorLine:
+			return "", fmt.Errorf("the successor refused: %s", rest)
+		default:
+			return "", fmt.Errorf("the successor answered %q where %q was expected", got.line, expected)
+		}
+	case <-time.After(within):
+		return "", fmt.Errorf("the successor did not report %q within %s", expected, within)
+	}
+}
+
+func (s *spawnedSuccessor) close() {
+	for _, closer := range s.closers {
+		_ = closer.Close()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The successor's half: waiting, then proving
+// ---------------------------------------------------------------------------
+
+// successorHandshake is this process's end of the pipes, when it was started as
+// somebody's successor.
+type successorHandshake struct {
+	handoffID string
+	control   *bufio.Reader
+	report    io.WriteCloser
+}
+
+// errNotStartedAsSuccessor is what `serve --successor-of` by hand looks like.
+var errNotStartedAsSuccessor = fmt.Errorf(
+	"--successor-of is the handshake a predecessor starts its successor through, and this process was not started that way")
+
+// openSuccessorHandshake fails when the descriptors are not there, which is
+// what running `serve --successor-of` by hand looks like. Refusing is right: a
+// successor with nobody to hand over to would wait forever, or worse, decide
+// on its own that it may proceed.
+func openSuccessorHandshake(handoffID string) (*successorHandshake, error) {
+	control := os.NewFile(successorControlFD, "successor-control")
+	report := os.NewFile(successorReportFD, "successor-report")
+	// os.NewFile wraps a descriptor without checking it, so the descriptors
+	// are STATTED rather than assumed: an unopened fd 3 produces a File whose
+	// every operation fails, and the honest place to discover that is here.
+	for _, file := range []*os.File{control, report} {
+		if file == nil {
+			return nil, errNotStartedAsSuccessor
+		}
+		if _, err := file.Stat(); err != nil {
+			return nil, errNotStartedAsSuccessor
+		}
+	}
+	return &successorHandshake{handoffID: handoffID, control: bufio.NewReader(control), report: report}, nil
+}
+
+// announce reports what this process is, measured rather than declared.
+func (h *successorHandshake) announce(binding runtime.ControllerBinding) error {
+	encoded, err := json.Marshal(binding)
+	if err != nil {
+		return err
+	}
+	return h.write(successorIdentityLine + " " + string(encoded))
+}
+
+// awaitProceed blocks until the predecessor says the role has been released.
+//
+// It requires the transition to be the one this process was started for. A
+// predecessor that signalled a different one is not a predecessor this process
+// has anything to do with.
+func (h *successorHandshake) awaitProceed() error {
+	line, err := h.control.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("the predecessor stopped before releasing the controller role: %w", err)
+	}
+	verb, id, _ := strings.Cut(strings.TrimSpace(line), " ")
+	if verb != successorProceedLine || id != h.handoffID {
+		return fmt.Errorf("the predecessor said %q and this process is the successor for transition %s", strings.TrimSpace(line), h.handoffID)
+	}
+	return nil
+}
+
+// active reports that this process is the activated generation and is serving.
+func (h *successorHandshake) active() error { return h.write(successorActiveLine + " " + h.handoffID) }
+
+// fail reports why this process is not serving, so the predecessor records a
+// reason instead of a timeout.
+func (h *successorHandshake) fail(cause error) { _ = h.write(successorErrorLine + " " + cause.Error()) }
+
+func (h *successorHandshake) write(line string) error {
+	_, err := io.WriteString(h.report, line+"\n")
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// The successor's half, continued: becoming the controller
+// ---------------------------------------------------------------------------
+
+// controllerBinding is what this process would be recorded as: which program,
+// which measured build, which effective configuration.
+//
+// It is the value a transition names its successor by, and this is the one
+// place it is composed for a live process - the same three members, from the
+// same sources, as the runtime binds a run to.
+func (c *composition) controllerBinding() (runtime.ControllerBinding, error) {
+	self, err := controllerSelf()
+	if err != nil {
+		return runtime.ControllerBinding{}, fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	if self.Unattested {
+		return runtime.ControllerBinding{}, fmt.Errorf("an unattested build has no adopted generation to succeed as")
+	}
+	build := self.Build
+	return runtime.ControllerBinding{
+		Controller: controllerIdentity(), Build: &build, Config: c.config.Digest,
+	}, nil
+}
+
+// activateAsSuccessor completes the successor's half of the transition.
+//
+// The two calls are separate because the protocol separates them: activation
+// establishes which generation is true, and opening service is a distinct,
+// separately authorized step against the durable record. Neither is decided
+// here - this reads the transition it was started for and asks.
+func (c *composition) activateAsSuccessor(supervisor *runtime.Supervisor, role *runtime.ControllerRoleLease, handoffID string) error {
+	self, err := controllerSelf()
+	if err != nil {
+		return fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	service := runtime.BindControllerService(
+		c.config.StateDir, controllerRoot(), c.store, self, role, supervisor)
+
+	record, found, err := c.store.ControllerHandoff(handoffID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("no transition %q is recorded, and a successor does not invent the transition it was started for", handoffID)
+	}
+	expect, err := runtime.Expect(record)
+	if err != nil {
+		return err
+	}
+	// NO ENDPOINT PROOF IS SUPPLIED, and the reason is that there is nothing
+	// here for one to establish. That port exists for the case where the
+	// process performing an activation is not the process at the endpoint; in
+	// this path they are the same process by construction, and it has already
+	// bound the socket - which it could only do because the predecessor had
+	// given it up. A challenge-echo against its own loopback would prove that
+	// this process is this process.
+	if _, err := service.ActivateSuccessor(expect, nil); err != nil {
+		// A projection that could not be repaired is reported and does not
+		// stop service: the successor IS active and an operator's stable path
+		// is stale. Every other error is a transition that did not happen.
+		var drift *runtime.ProjectionRepairFailedError
+		if !errors.As(err, &drift) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "the stable entrypoint needs repair: %v\n", err)
+	}
+	return service.EnableWorkAdmission(handoffID)
+}

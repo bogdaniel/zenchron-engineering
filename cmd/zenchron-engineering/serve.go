@@ -60,6 +60,29 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
+	// AS A SUCCESSOR, THIS PROCESS WAITS FIRST. It announces what it is,
+	// blocks until the predecessor says the role has been released, and only
+	// then does what every serve does. Nothing above this point took anything,
+	// which is what makes an abandoned successor free.
+	var handshake *successorHandshake
+	if flags.SuccessorOf != "" {
+		handshake, err = openSuccessorHandshake(flags.SuccessorOf)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		binding, err := built.controllerBinding()
+		if err != nil {
+			handshake.fail(err)
+			return runtime.ExitInvalid, err
+		}
+		if err := handshake.announce(binding); err != nil {
+			return runtime.ExitInvalid, err
+		}
+		if err := handshake.awaitProceed(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
+
 	// THE CONTROLLER ROLE IS TAKEN FIRST, and it is what makes this process the
 	// controller. Binding the control socket used to serve that purpose - a
 	// second supervisor failed on the address - which made the COMMUNICATION
@@ -84,7 +107,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	}
 	defer listener.Close()
 
-	supervisor, err := built.supervisor(repositories)
+	supervisor, err := built.supervisor(repositories, flags.SuccessorOf != "")
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
@@ -93,6 +116,21 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	// while looking like it does.
 	if err := built.installControllerReconciler(supervisor, role); err != nil {
 		return runtime.ExitInvalid, err
+	}
+
+	// THE TRANSITION IS COMPLETED BEFORE ANY WORK IS DRIVEN. Acquiring the
+	// role made this process the controller; it does not make it the ACTIVATED
+	// GENERATION, and until the durable record says so there is nothing it may
+	// serve. Every check that establishes it lives in the runtime and refuses
+	// on its own terms - this is the call, not the decision.
+	if handshake != nil {
+		if err := built.activateAsSuccessor(supervisor, role, flags.SuccessorOf); err != nil {
+			handshake.fail(err)
+			return runtime.ExitFailed, err
+		}
+		if err := handshake.active(); err != nil {
+			return runtime.ExitFailed, err
+		}
 	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -217,7 +255,7 @@ func (c *composition) governedRepositories(flags autonomyFlags) ([]runtime.GitHu
 // supervisor wires the persistent runtime. The forge is wrapped so every run
 // in one repository shares one observation stream instead of each polling
 // independently.
-func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Supervisor, error) {
+func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork bool) (*runtime.Supervisor, error) {
 	c.forge = runtime.NewMultiplexedForge(c.forge, runtime.RealClock{})
 	settings, err := c.config.WatchSettings()
 	if err != nil {
@@ -251,17 +289,22 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 		return nil, err
 	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
-		Store:             c.store,
-		Plans:             plans,
-		Clock:             runtime.RealClock{},
-		Owner:             c.owner,
-		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
-		StateDir:          c.config.StateDir,
-		Repositories:      repositories,
-		MaxConcurrentRuns: ceiling,
-		PollInterval:      settings.PollInterval,
-		Discovery:         discovery,
-		Agents:            c.agents,
+		Store: c.store,
+		// A SUCCESSOR STARTS SHUT. It admits work when the durable record says
+		// it is the activated generation and not a moment earlier; a
+		// supervisor that opened at construction would be serving beside the
+		// predecessor that has not yet let go.
+		WorkAdmissionWithheld: withholdWork,
+		Plans:                 plans,
+		Clock:                 runtime.RealClock{},
+		Owner:                 c.owner,
+		Liveness:              runtime.NewLockOwnerLiveness(c.config.StateDir),
+		StateDir:              c.config.StateDir,
+		Repositories:          repositories,
+		MaxConcurrentRuns:     ceiling,
+		PollInterval:          settings.PollInterval,
+		Discovery:             discovery,
+		Agents:                c.agents,
 		Runtime: func(repo runtime.GitHubRepo, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
 			return c.engineFor(runtime.RepositoryTarget{
 				Identity:      repo.String(),

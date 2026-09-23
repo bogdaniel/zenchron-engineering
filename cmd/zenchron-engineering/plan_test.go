@@ -404,7 +404,7 @@ func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T
 	// A real Supervisor too: an operator decision is applied under the same
 	// lock the plan reconciler holds, so the handler needs the supervisor that
 	// owns it rather than a stand-in.
-	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatalf("the supervisor could not be built: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestADelegatedDecisionRecordsTheRequester(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +572,7 @@ func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := supervisor.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +644,7 @@ func TestTheDelegatedPathDoesNotAssumeTheBaseBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(built.release)
-	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

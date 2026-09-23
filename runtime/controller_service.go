@@ -310,6 +310,51 @@ func (s *ControllerService) EnableWorkAdmission(handoffID string) error {
 	})
 }
 
+// BeginSuccession is the PREDECESSOR's half of a transition, performed under
+// this service's own role and admission gate.
+//
+// It exists so the launcher never touches either. BeginHandoff needs the drain
+// and the release as two separate effects with a durable write between them,
+// which DrainAndReleaseRole deliberately does not expose; assembling the ports
+// here keeps the one place that can give up this process's authority inside
+// the type that owns it.
+//
+// A FAILURE HERE IS NOT A ROLLBACK. The drain may have closed and the role may
+// already be gone when the last write fails, and this returns the record the
+// protocol reached so a caller can see how far it got - not so it can decide
+// to carry on.
+func (s *ControllerService) BeginSuccession(prepared ControllerHandoff, releaseEndpoint func() error) (ControllerHandoff, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.admission == nil {
+		return prepared, fmt.Errorf("this controller has no work-admission gate, so it cannot stop taking work")
+	}
+	ports := HandoffPorts{
+		Store: s.store, Self: s.self, ControllerRoot: s.controllerRoot, Now: s.now,
+		DrainWorkAdmission: func() error {
+			s.admission.Drain()
+			if s.admission.AdmittingWork() {
+				return fmt.Errorf("work admission did not close, so the controller role is not being released")
+			}
+			return nil
+		},
+		// OWNERSHIP IS THE ROLE AND THE ENDPOINT. The successor binds the same
+		// socket path, and a predecessor that released the role while still
+		// listening would make its own replacement unable to open the endpoint
+		// it must answer on - which would fail the transition after the point
+		// of no return, for a reason that is nobody's authority.
+		ReleaseOwnership: func() error {
+			if releaseEndpoint != nil {
+				if err := releaseEndpoint(); err != nil {
+					return fmt.Errorf("the control endpoint could not be given up: %w", err)
+				}
+			}
+			return s.lease.Release()
+		},
+	}
+	return BeginHandoff(ports, prepared)
+}
+
 // DrainAndReleaseRole is the ONLY way this service gives up the role.
 //
 // Closing admission first is not a convention the caller has to remember: a
