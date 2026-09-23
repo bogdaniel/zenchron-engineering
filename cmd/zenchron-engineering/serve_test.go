@@ -654,7 +654,7 @@ func TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant(t *testing.T) {
 		seedRun(t, built.store, fmt.Sprintf("run-issue-%d", issue), fmt.Sprintf("zenchron/seeded#%d", issue), now)
 	}
 
-	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

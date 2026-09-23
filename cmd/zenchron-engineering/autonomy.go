@@ -224,6 +224,13 @@ type autonomyFlags struct {
 	// Detached submits work to a running supervisor instead of driving it in
 	// this terminal. It is implied when a supervisor owns the state directory.
 	Detached bool
+	// SuccessorOf starts serve as the INERT SUCCESSOR of the named transition:
+	// it takes no role, opens no service and writes nothing until the
+	// predecessor that spawned it says the role has been released. It is not
+	// an operator flag - a person running it by hand gets a process waiting on
+	// a handshake nobody will perform - and it is the contract the predecessor
+	// starts the next generation through.
+	SuccessorOf string
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -1161,6 +1168,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Digest = args[1]
 		case "--assignments":
 			flags.Assignments = args[1]
+		case "--successor-of":
+			flags.SuccessorOf = args[1]
 		case "--revision":
 			revision, err := strconv.Atoi(args[1])
 			if err != nil || revision < 1 {
