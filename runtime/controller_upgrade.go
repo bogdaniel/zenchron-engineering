@@ -104,5 +104,11 @@ func (a ControllerUpgradeAttempt) Describe() string {
 	if a.Launch != nil {
 		return a.Launch.Summary()
 	}
+	// The states that need no explanation carry no detail, and an operator
+	// reading "idle: " has been shown a colon and told that something was
+	// omitted. Nothing was.
+	if a.Update.Detail == "" {
+		return string(a.Update.State)
+	}
 	return string(a.Update.State) + ": " + a.Update.Detail
 }
