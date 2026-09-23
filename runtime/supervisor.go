@@ -23,7 +23,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -37,10 +36,15 @@ import (
 // dependency set, every external system is a seam and nothing is discovered
 // from ambient state.
 type SupervisorDependencies struct {
-	Store    *SQLiteOperationStore
-	Clock    Clock
-	Owner    string
-	Liveness OwnerLiveness
+	// WorkAdmissionWithheld constructs the supervisor unable to take on work.
+	// It is how the successor half of a controller handoff holds the scheduler
+	// while it revalidates and proves itself: ownership is permission to
+	// perform the transition, and never permission to serve.
+	WorkAdmissionWithheld bool
+	Store                 *SQLiteOperationStore
+	Clock                 Clock
+	Owner                 string
+	Liveness              OwnerLiveness
 	// StateDir is the runtime state directory holding each run's workspace. The
 	// plan reconciler reads it ONLY to prove whether one upstream candidate
 	// contains another, in the producer's own clone. Absent, that relationship
@@ -150,8 +154,12 @@ type Supervisor struct {
 	// draining, where the rotation is, which runs are in flight and which
 	// outcomes have not been reported yet. Driving a run happens entirely
 	// outside it, so a slow run never blocks an operator command.
-	mu       sync.Mutex
-	draining bool
+	mu sync.Mutex
+	// admission is the work-admission gate. It replaced a draining flag that
+	// was read under mu and released before the run was created, which made
+	// "after the drain returns nothing new is admitted" false by construction.
+	// See work_admission.go.
+	admission *workAdmissionGate
 	// cursor is the rotation offset into the ACTIVE-run ring. It exists so a
 	// ceiling smaller than the active set is a rate limit rather than a fixed
 	// prefix; see admit.
@@ -226,7 +234,14 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// supervisor can never drive more runs at once than the operator
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
-	return &Supervisor{deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}}, nil
+	return &Supervisor{
+		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{},
+		// A supervisor admits work from the start unless it is the successor
+		// half of a handoff, which holds the scheduler while it proves itself
+		// and is opened by EnableWorkAdmission once the durable record says it
+		// is the active generation.
+		admission: newWorkAdmissionGate(!d.WorkAdmissionWithheld),
+	}, nil
 }
 
 // engine returns the engine for one repository worked by one agent, refusing a
@@ -309,12 +324,6 @@ func (s *Supervisor) governedRepository(identity string) (GitHubRepo, bool) {
 // durable run. It creates the run and returns immediately; the tick loop drives
 // it, which is what removes the driving terminal from the operator's workflow.
 func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartOutcome, error) {
-	s.mu.Lock()
-	draining := s.draining
-	s.mu.Unlock()
-	if draining {
-		return StartOutcome{}, errors.New("the supervisor is draining and is not accepting new work")
-	}
 	if request.Issue <= 0 {
 		return StartOutcome{}, fmt.Errorf("issue number must be positive, got %d", request.Issue)
 	}
@@ -330,7 +339,16 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	if request.NewGeneration {
 		mode = NewGeneration
 	}
-	return engine.StartIssueRun(ctx, request.Issue, mode)
+	// THE DECISION AND THE COMMIT UNDER ONE LOCK. Creating the run inside the
+	// gate is what makes a drain that has returned mean something: an
+	// admission either committed before the close or never happens.
+	var outcome StartOutcome
+	err = s.admission.admit(func() error {
+		created, startErr := engine.StartIssueRun(ctx, request.Issue, mode)
+		outcome = created
+		return startErr
+	})
+	return outcome, err
 }
 
 // Drain stops accepting and starting work while letting started work finish.
@@ -338,17 +356,14 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 // drain is an operator saying "wind this down", and un-draining silently would
 // make that instruction meaningless.
 func (s *Supervisor) Drain() {
-	s.mu.Lock()
-	s.draining = true
-	s.mu.Unlock()
+	// Closing waits for admissions already in progress, which is the point: a
+	// drain that returned while a run was being written down would be a drain
+	// that did not drain.
+	s.admission.close("the supervisor is draining and is not accepting new work")
 }
 
 // Draining reports the current lifecycle state.
-func (s *Supervisor) Draining() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.draining
-}
+func (s *Supervisor) Draining() bool { return s.admission.closed() }
 
 // StopAll is the one lifecycle action that actually CANCELS runs. It is
 // journalled per run through the same single cancellation path `stop RUN` uses,
@@ -422,6 +437,16 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	report := SupervisorReport{
 		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
 		NextEligibleAt: now.Add(s.deps.PollInterval),
+	}
+	// INTAKE IS HELD OPEN ACROSS THE WHOLE SECTION. Discovery and plan
+	// reconciliation both CREATE runs, so checking the gate once and then
+	// creating work afterwards would be the defect this gate exists to close,
+	// one layer up from Submit.
+	release, admissionErr := s.admission.section()
+	if admissionErr == nil {
+		defer release()
+	} else {
+		report.Draining = true
 	}
 	if s.deps.Discovery != nil && !report.Draining {
 		discovery, err := s.deps.Discovery.Tick(ctx)

@@ -325,13 +325,13 @@ func evaluateReplay(in ControllerSuccessionInput) SuccessionCheck {
 // the run currently stands is ignored rather than applied out of order - so a
 // stale decision recorded against an earlier generation cannot reattach a
 // controller the run has already succeeded past.
-// activatedHandoffs answers whether one transition reached activation. It is a
+// transitionActivated answers whether one transition reached activation. It is a
 // predicate rather than a store so the chain rule stays a pure function over
 // (run, journal, authority), and so a caller that has already read the handoff
 // table once does not read it again per run.
-type activatedHandoffs func(handoffID string) bool
+type transitionActivated func(handoffID string) bool
 
-func ControllerSuccessionContinues(run EngineeringRun, events []EngineeringEvent, controller string, activated activatedHandoffs) bool {
+func ControllerSuccessionContinues(run EngineeringRun, events []EngineeringEvent, controller string, activated transitionActivated) bool {
 	current := run.ControllerSHA256
 	if current == controller {
 		return true
@@ -392,10 +392,17 @@ func alreadyAdmitted(events []EngineeringEvent, handoffID, successor string) boo
 	return false
 }
 
-// activatedHandoffs reads which transitions this state directory records as
-// activated. It is the runtime's authority oracle for the chain rule, and it
-// reads the handoff table rather than anything live.
-func (r *EngineeringRuntime) activatedHandoffs() activatedHandoffs {
+// wasTransitionActivated reads which transitions this state directory records
+// as activated.
+//
+// IT IS A HISTORICAL ORACLE AND NOT A SERVICE ONE. "Did transition H activate"
+// stays true forever once it is true, which is exactly right for asking whether
+// a run was legitimately inherited. It says nothing about whether the generation
+// that inherited it may serve today: a later transition can have replaced that
+// generation entirely, and the supervisor's work-admission gate is where that
+// present question is answered. Merging the two would let an old activation
+// argue for a superseded controller.
+func (r *EngineeringRuntime) wasTransitionActivated() transitionActivated {
 	records, err := r.deps.Store.ControllerHandoffs()
 	if err != nil {
 		// FAIL CLOSED. "I could not read which transitions activated" is not
@@ -459,7 +466,7 @@ func (r *EngineeringRuntime) AdmitControllerSuccession(runID string, decision Co
 	if alreadyAdmitted(events, decision.HandoffID, successor) {
 		return nil
 	}
-	activated := r.activatedHandoffs()
+	activated := r.wasTransitionActivated()
 	predecessor, err := decision.Predecessor.Digest()
 	if err != nil {
 		return err
