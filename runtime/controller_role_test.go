@@ -18,6 +18,13 @@ import (
 const roleHolderEnv = "ZENCHRON_TEST_HOLD_CONTROLLER_ROLE"
 
 func TestMain(m *testing.M) {
+	// The crash suite's child controller. It is dispatched before anything
+	// else for the same reason the role holder is: this process is not running
+	// tests, it is being a controller for a parent that is.
+	if os.Getenv(controllerChildEnv) != "" {
+		runControllerChild()
+		return
+	}
 	if stateDir := os.Getenv(roleHolderEnv); stateDir != "" {
 		if _, err := AcquireControllerRole(stateDir); err != nil {
 			os.Stderr.WriteString("holder could not acquire: " + err.Error())
