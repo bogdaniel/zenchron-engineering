@@ -61,15 +61,24 @@ const (
 	// ReconcileRepairProjection asks for the existing projection repair. The
 	// target is never constructed here; it is read from the durable record.
 	ReconcileRepairProjection ReconciliationAction = "repair_projection"
-	// ReconcileRecoverActivated asks for the existing recovery path.
-	ReconcileRecoverActivated ReconciliationAction = "recover_activated"
+	// ReconcileResumeActivatedService asks for service to resume on a
+	// controller that is already durably activated and is not serving.
+	//
+	// It names the CONVERGENCE rather than one of the operations that reaches
+	// it, because RecoverActivated alone does not converge: it resumes the
+	// activation and deliberately leaves work admission closed, so an intent
+	// named after it would be satisfied by a call that changes nothing the
+	// classifier can observe, and would be emitted again on every pass.
+	// Composing the two already-authorized operations is the executor's job;
+	// naming the goal is this file's.
+	ReconcileResumeActivatedService ReconciliationAction = "resume_activated_service"
 )
 
 // Mutating reports whether an action asks for a change at all. It exists so a
 // test can state the metamorphic law - degrading a fact to unknown may remove
 // an action and may never add one - without enumerating actions.
 func (a ReconciliationAction) Mutating() bool {
-	return a == ReconcileRepairProjection || a == ReconcileRecoverActivated
+	return a == ReconcileRepairProjection || a == ReconcileResumeActivatedService
 }
 
 // Power orders actions by how much they attempt, so the law above is
@@ -78,7 +87,7 @@ func (a ReconciliationAction) Power() int {
 	switch a {
 	case ReconcileRepairProjection:
 		return 1
-	case ReconcileRecoverActivated:
+	case ReconcileResumeActivatedService:
 		return 2
 	default:
 		return 0
@@ -100,15 +109,38 @@ type ReconciliationIntent struct {
 	Generation *ControllerBuild `json:"generation,omitempty"`
 }
 
+// WatcherObservation is what the watcher classifies from: the operator-shaped
+// status, and THIS PROCESS's own identity.
+//
+// They are separate fields because they answer different questions and the
+// difference is the one #274 and #275 exist to protect. ControllerStatus's live
+// snapshot is collected through a transport the caller supplies, so it proves
+// that the process AT THAT ENDPOINT says it is some generation - not that the
+// watcher is. A classifier that read the endpoint's identity as its own would
+// be making precisely the substitution those slices removed, and would be
+// correct today only because RecoverActivated re-checks identity at the moment
+// of the call.
+//
+// So the watcher supplies its own identity as a fact, and recovery requires all
+// three to agree: this process is the durably active generation, the endpoint
+// observed is this same generation, and it is not admitting work.
+type WatcherObservation struct {
+	Status ControllerStatus     `json:"status"`
+	Self   ControllerSelfRecord `json:"self"`
+}
+
 // ClassifyReconciliation turns one observation into one intent.
 //
 // It is deterministic in its input and has no other inputs: the same
 // ControllerStatus always yields the same intent, which is what makes the
 // decision table reviewable before any executor exists.
-func ClassifyReconciliation(status ControllerStatus) ReconciliationIntent {
+func ClassifyReconciliation(observation WatcherObservation) ReconciliationIntent {
+	status := observation.Status
 	// 1. THE OBSERVATION ITSELF must be trustworthy before anything it
 	// contains is acted on.
 	switch status.DurableConsistency {
+	case DurableConsistent:
+		// The only verdict from which anything may be attempted.
 	case DurableUnstable:
 		return ReconciliationIntent{Action: ReconcileNone,
 			Reason: "the durable transition changed while the status was collected; a torn observation is not evidence"}
@@ -119,6 +151,14 @@ func ClassifyReconciliation(status ControllerStatus) ReconciliationIntent {
 	case DurableUnrecorded:
 		return ReconciliationIntent{Action: ReconcileNone,
 			Reason: "no activation is recorded, so there is no durable target to reconcile toward"}
+	default:
+		// A VERDICT THIS BUILD DOES NOT RECOGNISE. The zero value and any
+		// future member land here, and both mean the same thing: something
+		// said something this code cannot read. Falling through as though it
+		// were "consistent" would let an unrecognised value authorize a
+		// mutation, which is the rule this file states about itself.
+		return ReconciliationIntent{Action: ReconcileUnknown,
+			Reason: fmt.Sprintf("durable consistency %q is not a verdict this controller recognises", status.DurableConsistency)}
 	}
 	if status.Durable.Generation == nil {
 		return ReconciliationIntent{Action: ReconcileUnknown,
@@ -129,24 +169,33 @@ func ClassifyReconciliation(status ControllerStatus) ReconciliationIntent {
 	// it is the activated generation and is not serving. It never concludes
 	// that somebody else is dead, and an unreachable endpoint yields nothing
 	// at all - not death, not absence, not a free role.
-	if live := status.Live.Snapshot; status.Live.Reachable && live != nil {
-		if live.Identity.Build == *status.Durable.Generation {
-			switch live.WorkAdmission {
-			case AdmissionOpen:
-				// Serving. Only the projection could still be wrong.
-			case AdmissionUnknown:
-				return ReconciliationIntent{Action: ReconcileUnknown, HandoffID: status.Durable.HandoffID,
-					Generation: status.Durable.Generation,
-					Reason:     "the observed controller did not report whether it is admitting work"}
-			default:
-				return ReconciliationIntent{
-					Action: ReconcileRecoverActivated, HandoffID: status.Durable.HandoffID,
-					Generation: status.Durable.Generation,
-					Reason: fmt.Sprintf(
-						"this controller is the activated generation for %s and is not admitting work",
-						status.Durable.HandoffID),
-				}
+	live := status.Live.Snapshot
+	selfIsActive := !observation.Self.Unattested && observation.Self.Build == *status.Durable.Generation
+	observedIsSelf := status.Live.Reachable && live != nil && live.Identity.Build == observation.Self.Build
+	if selfIsActive && observedIsSelf {
+		switch live.WorkAdmission {
+		case AdmissionOpen:
+			// Serving. Only the projection could still be wrong.
+		case AdmissionUnknown:
+			return ReconciliationIntent{Action: ReconcileUnknown, HandoffID: status.Durable.HandoffID,
+				Generation: status.Durable.Generation,
+				Reason:     "the observed controller did not report whether it is admitting work"}
+		case AdmissionWithheld, AdmissionClosed:
+			return ReconciliationIntent{
+				Action: ReconcileResumeActivatedService, HandoffID: status.Durable.HandoffID,
+				Generation: status.Durable.Generation,
+				Reason: fmt.Sprintf(
+					"this controller is the activated generation for %s and is not admitting work",
+					status.Durable.HandoffID),
 			}
+		default:
+			// Unknown, and any state a future build might report. An
+			// unrecognised gate must never acquire recovery semantics by
+			// being the default arm of a switch.
+			return ReconciliationIntent{Action: ReconcileUnknown, HandoffID: status.Durable.HandoffID,
+				Generation: status.Durable.Generation,
+				Reason: fmt.Sprintf("work admission %q is not a state this controller recognises",
+					live.WorkAdmission)}
 		}
 	}
 

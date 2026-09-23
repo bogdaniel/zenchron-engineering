@@ -7,6 +7,16 @@ import (
 )
 
 // activeGeneration is the durably active generation in these fixtures.
+// watching is the default case: the watcher IS the durably active generation.
+// A test that cares about the difference supplies its own self.
+func watching(status ControllerStatus) WatcherObservation {
+	generation := activeGeneration()
+	return WatcherObservation{
+		Status: status,
+		Self:   ControllerSelfRecord{Build: generation, Measured: generation.BinarySHA256},
+	}
+}
+
 func activeGeneration() ControllerBuild {
 	return attestedBuild(ControllerAdopted, successorRevision, "tree-b", strings.Repeat("cd", 32))
 }
@@ -64,7 +74,7 @@ func TestReconciliationDecisionTable(t *testing.T) {
 		{"this process is the activated generation and is not serving", func(s *ControllerStatus) {
 			s.Live.Snapshot.WorkAdmission = AdmissionClosed
 			s.Serving = NotServing
-		}, ReconcileRecoverActivated, "not admitting work"},
+		}, ReconcileResumeActivatedService, "not admitting work"},
 		{"the observed controller did not report its admission", func(s *ControllerStatus) {
 			s.Live.Snapshot.WorkAdmission = AdmissionUnknown
 			s.Serving = ServingUnknown
@@ -88,7 +98,7 @@ func TestReconciliationDecisionTable(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(&status)
 			}
-			intent := ClassifyReconciliation(status)
+			intent := ClassifyReconciliation(watching(status))
 			if intent.Action != test.want {
 				t.Fatalf("action = %q, want %q (reason %q)", intent.Action, test.want, intent.Reason)
 			}
@@ -106,7 +116,7 @@ func TestReachabilityImpliesNothingAboutAuthority(t *testing.T) {
 	unreachable := observedStatus()
 	unreachable.Live = LiveObservation{Reachable: false, Detail: "connection refused", Source: FromLiveEndpoint}
 	unreachable.Serving = ServingUnknown
-	if intent := ClassifyReconciliation(unreachable); intent.Action.Mutating() {
+	if intent := ClassifyReconciliation(watching(unreachable)); intent.Action.Mutating() {
 		t.Fatalf("an unreachable endpoint produced %q", intent.Action)
 	}
 
@@ -115,7 +125,7 @@ func TestReachabilityImpliesNothingAboutAuthority(t *testing.T) {
 	silent.Live.Snapshot.Role = RoleUnknown
 	silent.Live.Snapshot.WorkAdmission = AdmissionUnknown
 	silent.Serving = ServingUnknown
-	if intent := ClassifyReconciliation(silent); intent.Action.Mutating() {
+	if intent := ClassifyReconciliation(watching(silent)); intent.Action.Mutating() {
 		t.Fatalf("a silent endpoint produced %q", intent.Action)
 	}
 }
@@ -131,7 +141,7 @@ func TestViolationIsRefusedEvenWhenARepairLooksObvious(t *testing.T) {
 	status.Projection.State = ProjectionDrift // a repair the watcher could "helpfully" attempt
 	status.DurableConsistency = DurableViolation
 
-	intent := ClassifyReconciliation(status)
+	intent := ClassifyReconciliation(watching(status))
 	if intent.Action != ReconcileRefuse {
 		t.Fatalf("action = %q, want refuse", intent.Action)
 	}
@@ -172,12 +182,12 @@ func TestUnknownFactsNeverIncreasePower(t *testing.T) {
 		"the projection becomes unknown": func(s *ControllerStatus) { s.Projection = ProjectionObservation{Source: FromStableEntrypoint} },
 	}
 	for baseName, base := range bases {
-		known := ClassifyReconciliation(base())
+		known := ClassifyReconciliation(watching(base()))
 		for degradationName, degrade := range degradations {
 			t.Run(baseName+", "+degradationName, func(t *testing.T) {
 				status := base()
 				degrade(&status)
-				degraded := ClassifyReconciliation(status)
+				degraded := ClassifyReconciliation(watching(status))
 				if degraded.Action.Power() > known.Action.Power() {
 					t.Fatalf("losing a fact raised the action from %q to %q", known.Action, degraded.Action)
 				}
@@ -191,14 +201,96 @@ func TestUnknownFactsNeverIncreasePower(t *testing.T) {
 func TestClassificationIsDeterministicAndPure(t *testing.T) {
 	status := observedStatus()
 	status.Projection.State = ProjectionDrift
-	first := ClassifyReconciliation(status)
+	first := ClassifyReconciliation(watching(status))
 	for i := 0; i < 32; i++ {
-		if again := ClassifyReconciliation(status); again != first {
+		if again := ClassifyReconciliation(watching(status)); again != first {
 			t.Fatalf("classification %d differed: %+v vs %+v", i, again, first)
 		}
 	}
 	// And it takes its subject from the record rather than constructing one.
 	if first.HandoffID != status.Durable.HandoffID || first.Generation != status.Durable.Generation {
 		t.Fatal("the intent named a subject the record did not")
+	}
+}
+
+// A VALUE THIS BUILD DOES NOT RECOGNISE IS NOT A SAFE ONE. The zero value and
+// any future member must fail closed rather than fall through the default arm
+// of a switch into whatever the last case happened to be.
+func TestUnrecognisedEnumValuesCannotAuthorizeAnything(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*ControllerStatus)
+	}{
+		{"a durable verdict from a future build", func(s *ControllerStatus) {
+			s.DurableConsistency = DurableConsistency("reconciling_with_quorum")
+			s.Projection.State = ProjectionDrift
+		}},
+		{"an empty durable verdict", func(s *ControllerStatus) {
+			s.DurableConsistency = DurableConsistency("")
+			s.Projection.State = ProjectionDrift
+		}},
+		{"an admission state from a future build", func(s *ControllerStatus) {
+			s.Live.Snapshot.WorkAdmission = WorkAdmissionState("quiescing")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status := observedStatus()
+			test.mutate(&status)
+			intent := ClassifyReconciliation(watching(status))
+			if intent.Action != ReconcileUnknown {
+				t.Fatalf("action = %q, want unknown", intent.Action)
+			}
+			if intent.Action.Mutating() {
+				t.Fatal("an unrecognised value authorized a mutation")
+			}
+			if !strings.Contains(intent.Reason, "recognises") {
+				t.Fatalf("reason %q does not say the value was unrecognised", intent.Reason)
+			}
+		})
+	}
+}
+
+// THE ENDPOINT'S IDENTITY IS NOT THIS PROCESS'S. A remote controller of the
+// right generation is not grounds for THIS controller to resume service.
+func TestAnotherProcessBeingTheActiveGenerationIsNotSelfObservation(t *testing.T) {
+	status := observedStatus()
+	status.Live.Snapshot.WorkAdmission = AdmissionClosed
+	status.Serving = NotServing
+
+	// The endpoint is the activated generation; the watcher is not.
+	stranger := attestedBuild(ControllerAdopted, predecessorRevision, "tree-a", strings.Repeat("ab", 32))
+	observation := WatcherObservation{
+		Status: status,
+		Self:   ControllerSelfRecord{Build: stranger, Measured: stranger.BinarySHA256},
+	}
+	if intent := ClassifyReconciliation(observation); intent.Action == ReconcileResumeActivatedService {
+		t.Fatal("a watcher of another generation asked to resume somebody else's service")
+	}
+
+	// And the reverse: this process IS the activated generation, but the
+	// endpoint observed is somebody else. Still not a self-observation.
+	elsewhere := observedStatus()
+	elsewhere.Live.Snapshot.Identity = ControllerSelfRecord{Build: stranger, Measured: stranger.BinarySHA256}
+	elsewhere.Live.Snapshot.WorkAdmission = AdmissionClosed
+	if intent := ClassifyReconciliation(watching(elsewhere)); intent.Action == ReconcileResumeActivatedService {
+		t.Fatal("an observation of another process was read as this process not serving")
+	}
+
+	// An unattested watcher can never match a generation either.
+	unattested := WatcherObservation{Status: status, Self: ControllerSelfRecord{Unattested: true}}
+	if intent := ClassifyReconciliation(unattested); intent.Action == ReconcileResumeActivatedService {
+		t.Fatal("an unattested process asked to resume an adopted generation's service")
+	}
+}
+
+// Self is the active generation, the endpoint is this process, and it did not
+// report its gate: unknown, not resume.
+func TestSelfActiveWithUnreportedAdmissionIsUnknown(t *testing.T) {
+	status := observedStatus()
+	status.Live.Snapshot.WorkAdmission = AdmissionUnknown
+	status.Serving = ServingUnknown
+	intent := ClassifyReconciliation(watching(status))
+	if intent.Action != ReconcileUnknown {
+		t.Fatalf("action = %q, want unknown", intent.Action)
 	}
 }
