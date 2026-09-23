@@ -166,6 +166,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	}()
 
 	fmt.Fprintf(stdout, "zenchron-engineering serve\n")
+	fmt.Fprintf(stdout, "  generation        %s\n", runningGeneration())
 	fmt.Fprintf(stdout, "  state directory   %s\n", built.config.StateDir)
 	fmt.Fprintf(stdout, "  controller role   %s\n", role.Path())
 	fmt.Fprintf(stdout, "  control endpoint  %s\n", listener.Path())
@@ -201,6 +202,28 @@ func repositoryNames(repositories []runtime.GitHubRepo) []string {
 		names = append(names, repo.String())
 	}
 	return names
+}
+
+// runningGeneration is which build is serving, for the startup banner.
+//
+// The banner named the role lock, the endpoint, the agents and the
+// repositories, and not the one thing that changes when a controller replaces
+// itself. An operator watching a succession could see everything about the
+// process except which generation it was.
+//
+// An identity that cannot be established is reported as such rather than
+// omitted: a missing line reads as "no generation", and the honest statement is
+// that this process could not measure itself.
+func runningGeneration() string {
+	self, err := controllerSelf()
+	switch {
+	case err != nil:
+		return "unknown (" + err.Error() + ")"
+	case self.Unattested:
+		return "unattested build"
+	default:
+		return fmt.Sprintf("%s (%s)", self.Build.Version, shortVersion(self.Build.SourceRevision))
+	}
 }
 
 // discoveryDescription states the intake policy plainly, because "an issue
