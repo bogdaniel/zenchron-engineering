@@ -146,6 +146,7 @@ const StableEntrypointName = "current"
 // interface because activation must be able to refuse from a read alone.
 type handoffReader interface {
 	ControllerHandoff(id string) (ControllerHandoff, bool, error)
+	currentActivationReader
 }
 
 // ActivateControllerGeneration points the stable entrypoint at the running
@@ -174,6 +175,12 @@ func ActivateControllerGeneration(store handoffReader, handoffID string, self Co
 	if record.Phase != HandoffActivated {
 		return "", fmt.Errorf("handoff %s is at phase %q; the stable entrypoint moves only after a durable activation",
 			handoffID, record.Phase)
+	}
+	// AND IT MUST STILL GOVERN. A historically activated transition is not a
+	// licence to repoint the entrypoint at the generation it once activated:
+	// that is how a superseded controller rolls the projection back to itself.
+	if err := governsNow(store, handoffID); err != nil {
+		return "", err
 	}
 	if err := self.ProvesGeneration(record.Successor.Binding); err != nil {
 		return "", fmt.Errorf("this process is not the activated generation: %w", err)

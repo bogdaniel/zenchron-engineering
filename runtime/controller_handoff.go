@@ -172,6 +172,10 @@ type HandoffPreflightInput struct {
 	Successor   HandoffParty
 	TrustedMain RevisionRecord
 	IsAncestor  func(ancestor, descendant string) (bool, error)
+	// Activated answers which transitions govern. It reaches the succession
+	// evaluation so the identity binding can ask where each run's chain
+	// currently stands rather than what its row records.
+	Activated transitionActivated
 	// Now stamps the record. It is a parameter because a durable record with a
 	// time nobody controls is a record a test cannot pin.
 	Now time.Time
@@ -239,7 +243,7 @@ func PreflightControllerHandoff(store runReader, in HandoffPreflightInput) (Cont
 		decision := EvaluateControllerSuccession(ControllerSuccessionInput{
 			Run: run, Events: events,
 			Predecessor: in.Predecessor.Binding, Successor: in.Successor.Binding,
-			TrustedMain: in.TrustedMain, IsAncestor: in.IsAncestor,
+			TrustedMain: in.TrustedMain, IsAncestor: in.IsAncestor, Activated: in.Activated,
 		})
 		// The decision is evidence FOR THIS TRANSITION and for no other, so it
 		// carries the transition's identity from the moment it is made.
@@ -477,4 +481,115 @@ func (s *SQLiteOperationStore) PutControllerHandoff(handoff ControllerHandoff, e
 	}
 	affected, err := result.RowsAffected()
 	return affected == 1, err
+}
+
+// ---------------------------------------------------------------------------
+// Which activation governs now
+// ---------------------------------------------------------------------------
+
+// CurrentControllerActivation reports the transition that presently governs, or
+// that none does.
+//
+// IT IS NOT "THE NEWEST ACTIVATED HANDOFF". A handoff row says a transition
+// activated once, which stays true forever; this says which activation is
+// authoritative at this moment. The two were the same question only while there
+// had been exactly one upgrade, and conflating them let a superseded generation
+// answer yes to "are you activated" and repoint the projection or open its own
+// gate.
+//
+// Ordering by wall clock would be a poor substitute: successive transitions are
+// performed by different processes, and "whoever wrote the later timestamp"
+// is not a property anybody should be able to influence. The pointer is written
+// transactionally with the activation instead.
+func (s *SQLiteOperationStore) CurrentControllerActivation() (ControllerHandoff, bool, error) {
+	var document string
+	switch err := s.db.QueryRow(
+		`SELECT document FROM controller_current_activation WHERE id = 'current'`).Scan(&document); err {
+	case nil:
+	case sql.ErrNoRows:
+		return ControllerHandoff{}, false, nil
+	default:
+		return ControllerHandoff{}, false, err
+	}
+	var handoff ControllerHandoff
+	err := decodeJSON([]byte(document), &handoff)
+	return handoff, err == nil, err
+}
+
+// ActivateControllerHandoff moves a transition to activated AND makes it the
+// current activation, in one durable commit.
+//
+// THE ATOMICITY IS THE POINT. Writing the phase and then the pointer would
+// leave a window in which a crash produces two durable truths - a transition
+// that says it activated and a pointer that says another one governs - and
+// nothing could later say which was right. One transaction means the
+// authority linearization point moves both or neither.
+func (s *SQLiteOperationStore) ActivateControllerHandoff(handoff ControllerHandoff, expected HandoffPhase) (bool, error) {
+	if handoff.Phase != HandoffActivated {
+		return false, fmt.Errorf("ActivateControllerHandoff records an activation, not phase %q", handoff.Phase)
+	}
+	if handoff.ID == "" || handoff.RecoveryOwner == "" {
+		return false, fmt.Errorf("a controller handoff records an id and the controller permitted to recover it")
+	}
+	document, err := CanonicalJSON(handoff)
+	if err != nil {
+		return false, err
+	}
+	stamp := handoff.UpdatedAt.UnixNano()
+	transaction, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = transaction.Rollback() }()
+
+	result, err := transaction.Exec(
+		`UPDATE controller_handoffs SET phase = ?, updated_unix_nano = ?, document = ? WHERE id = ? AND phase = ?`,
+		string(handoff.Phase), stamp, document, handoff.ID, string(expected))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected != 1 {
+		// The compare-and-set failed: this process's view of the transition is
+		// not the transition. Nothing is written, including the pointer.
+		return false, nil
+	}
+	if _, err := transaction.Exec(
+		`INSERT INTO controller_current_activation (id, handoff_id, updated_unix_nano, document)
+		 VALUES ('current', ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET handoff_id = excluded.handoff_id,
+		     updated_unix_nano = excluded.updated_unix_nano, document = excluded.document`,
+		handoff.ID, stamp, document); err != nil {
+		return false, err
+	}
+	return true, transaction.Commit()
+}
+
+// GovernsNow reports whether a transition is the one presently authoritative.
+//
+// Every authority-bearing operation asks this rather than asking whether a
+// transition ever activated. A historically activated transition answers false
+// once another has superseded it, which is the whole distinction.
+func governsNow(store currentActivationReader, handoffID string) error {
+	current, found, err := store.CurrentControllerActivation()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("no activation governs this state directory, so %s cannot be acted on as the current one", handoffID)
+	}
+	if current.ID != handoffID {
+		return fmt.Errorf("transition %s activated historically; %s is the activation that governs now",
+			handoffID, current.ID)
+	}
+	return nil
+}
+
+// currentActivationReader is the one question an authority-bearing operation
+// asks about currency.
+type currentActivationReader interface {
+	CurrentControllerActivation() (ControllerHandoff, bool, error)
 }

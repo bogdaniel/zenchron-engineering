@@ -185,6 +185,11 @@ type ControllerSuccessionInput struct {
 	// TrustedMain is the trusted-main state the successor was adopted at,
 	// taken from its own adopted-build provenance.
 	TrustedMain RevisionRecord
+	// Activated answers which transitions govern, so the identity binding
+	// below can ask where the run's succession chain CURRENTLY stands rather
+	// than what its row records. Nil means no transition is known to have
+	// activated, which makes only the creator eligible - the safe answer.
+	Activated transitionActivated
 	// IsAncestor answers the lineage question with Git, the same
 	// `merge-base --is-ancestor` the adopted build proves containment with. It
 	// is a seam so the refusals below are reachable without a repository.
@@ -222,8 +227,17 @@ func evaluateLineage(in ControllerSuccessionInput) SuccessionCheck {
 	if err != nil {
 		return refusedCheck("the stated predecessor identity could not be digested: %v", err)
 	}
-	if stated != in.Run.ControllerSHA256 {
-		return refusedCheck("the stated predecessor is not the controller run %s records", in.Run.ID)
+	// WHERE THE RUN STANDS, NOT WHAT ITS ROW SAYS. The row records the
+	// controller that CREATED the run and never changes - history is not
+	// rewritten - so after one succession the row names a generation two
+	// upgrades back. Comparing against it made a SECOND upgrade impossible:
+	// the second transition's predecessor is the first one's successor, which
+	// the row has never named.
+	//
+	// The chain is the current answer, and it is the same function every other
+	// caller uses to ask who may append to this run.
+	if !ControllerSuccessionContinues(in.Run, in.Events, stated, in.Activated) {
+		return refusedCheck("the stated predecessor is not the controller that currently continues run %s", in.Run.ID)
 	}
 	if !in.Predecessor.adopted() {
 		return refusedCheck("the predecessor is not an adopted build, so it has no lineage to succeed from")

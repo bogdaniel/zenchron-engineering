@@ -233,24 +233,27 @@ func DescribeControllerStatus(store handoffStore, controllerRoot string, observe
 }
 
 func describeDurableActive(store handoffStore) (DurableActive, error) {
-	records, err := store.ControllerHandoffs()
+	active := DurableActive{Source: FromActivationRecord}
+	// THE POINTER, not the newest activated row. Scanning for the most
+	// recently written activation answered "which transition activated last",
+	// which is a question about wall clocks and about which process wrote
+	// second. Which activation GOVERNS is a durable subject of its own.
+	current, found, err := store.CurrentControllerActivation()
 	if err != nil {
 		return DurableActive{}, err
 	}
-	active := DurableActive{Source: FromActivationRecord}
-	for _, record := range records {
-		if record.Phase != HandoffActivated {
-			continue
-		}
-		// ControllerHandoffs returns newest first, so the first activated
-		// record is the current one.
-		active.Generation = record.Successor.Binding.Build
-		active.HandoffID = record.ID
-		active.Phase = record.Phase
-		if record.Successor.ArtifactPath != "" {
-			active.ArtifactDir = filepath.Dir(record.Successor.ArtifactPath)
+	if found {
+		active.Generation = current.Successor.Binding.Build
+		active.HandoffID = current.ID
+		active.Phase = current.Phase
+		if current.Successor.ArtifactPath != "" {
+			active.ArtifactDir = filepath.Dir(current.Successor.ArtifactPath)
 		}
 		return active, nil
+	}
+	records, err := store.ControllerHandoffs()
+	if err != nil {
+		return DurableActive{}, err
 	}
 	// An unsettled transition is still worth naming: an operator whose upgrade
 	// is stuck needs to see which one.
