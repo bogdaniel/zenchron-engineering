@@ -43,6 +43,12 @@ import (
 
 // The handshake vocabulary. One line each, because a length-prefixed framing
 // would be ceremony for three messages.
+// successorFlag names the transition a successor was started for. It is a
+// constant because it has two consumers that must agree - the flag parser that
+// reads it and the spawn that writes it - and a literal in each is how the two
+// come to disagree.
+const successorFlag = "--successor-of"
+
 const (
 	successorIdentityLine = "identity" // successor -> predecessor: what I am
 	successorEvaluateLine = "evaluate" // predecessor -> successor: decide this transition
@@ -109,7 +115,7 @@ func spawnInertSuccessor(artifact, handoffID string, args []string) (runtime.Ine
 		controlWrite.Close()
 		return nil, err
 	}
-	command := exec.Command(artifact, append(append([]string{}, args...), "--successor-of", handoffID)...)
+	command := exec.Command(artifact, append(withoutSuccessorFlag(args), successorFlag, handoffID)...)
 	command.ExtraFiles = []*os.File{controlRead, reportWrite} // becomes fd 3 and fd 4
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
 	// A NEW PROCESS GROUP, where the platform has them. The successor is about
@@ -130,6 +136,32 @@ func spawnInertSuccessor(artifact, handoffID string, args []string) (runtime.Ine
 		command: command, control: controlWrite, report: bufio.NewReader(reportRead),
 		closers: []io.Closer{controlWrite, reportRead},
 	}, nil
+}
+
+// withoutSuccessorFlag removes every --successor-of pair from a command line.
+//
+// THE PREDECESSOR'S OWN ARGUMENTS INCLUDE ITS OWN TRANSITION. Passing them
+// through unchanged appends a second flag, and the generation after that a
+// third: the command line grows by one stale transition per upgrade, forever.
+// It happened to keep working only because the parser takes the last value,
+// which is an accident of how that switch is written rather than anything this
+// protocol states - and if it ever took the first, a successor would be started
+// against a transition that activated two upgrades ago, refuse, and wedge every
+// later upgrade.
+//
+// So the flag is stripped here rather than depended upon downstream. The
+// arguments a successor receives are the operator's arguments plus exactly one
+// transition: its own.
+func withoutSuccessorFlag(args []string) []string {
+	kept := make([]string, 0, len(args)+2)
+	for i := 0; i < len(args); i++ {
+		if args[i] == successorFlag {
+			i++ // and the transition id that belongs to it
+			continue
+		}
+		kept = append(kept, args[i])
+	}
+	return kept
 }
 
 // Identify reads the generation the successor says it is.
