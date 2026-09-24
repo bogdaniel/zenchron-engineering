@@ -505,18 +505,22 @@ func RevalidateAcquiredHandoff(store handoffStore, record ControllerHandoff, sel
 	// activation that governs now is not the predecessor this transition
 	// succeeds from, somebody else activated in between and this one is
 	// proceeding from a world that has moved.
-	activation, found, err := store.CurrentControllerActivation()
+	authority, found, err := store.CurrentControllerAuthority()
 	if err != nil {
 		return err
 	}
 	if found {
-		governing, err := activation.Successor.Binding.Digest()
+		// THE GOVERNING BINDING, however it came to govern. After an operator
+		// re-adoption the next transition succeeds from the re-adopted
+		// generation in exactly the way it would succeed from an activated
+		// one: this check asks what governs, not how it got there.
+		governing, err := authority.Binding.Digest()
 		if err != nil {
 			return err
 		}
 		if governing != previous {
-			return fmt.Errorf("transition %s governs now and activated a generation this transition does not succeed from",
-				activation.ID)
+			return fmt.Errorf("%s %s governs now and names a generation this transition does not succeed from",
+				authority.Kind, authority.Ref)
 		}
 	}
 	// And the runs themselves: same heads, same replay, nothing new that was

@@ -69,14 +69,18 @@ func (f fakeHandoffReader) ControllerHandoff(string) (ControllerHandoff, bool, e
 	return f.record, f.found, nil
 }
 
-func (f fakeHandoffReader) CurrentControllerActivation() (ControllerHandoff, bool, error) {
-	if f.current != nil {
-		return *f.current, true, nil
+func (f fakeHandoffReader) CurrentControllerAuthority() (ControllerAuthority, bool, error) {
+	governing := f.current
+	if governing == nil && f.found && f.record.Phase == HandoffActivated {
+		governing = &f.record
 	}
-	if f.found && f.record.Phase == HandoffActivated {
-		return f.record, true, nil
+	if governing == nil {
+		return ControllerAuthority{}, false, nil
 	}
-	return ControllerHandoff{}, false, nil
+	return ControllerAuthority{
+		Kind: AuthorityHandoffActivation, Ref: governing.ID,
+		Binding: governing.Successor.Binding, Artifact: governing.Successor.ArtifactPath,
+	}, true, nil
 }
 
 // An attested build measures the running artifact exactly once; an unattested

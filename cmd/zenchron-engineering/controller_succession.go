@@ -641,6 +641,60 @@ func (c *composition) decideSuccession(asked runtime.ControllerHandoff) (runtime
 	})
 }
 
+// refuseAConfigurationItCannotCross is the message the incident that created
+// `controller re-adopt` did not produce.
+//
+// A controller-effective configuration change means the governing authority and
+// this process bind differently, and ordinary succession cannot cross that -
+// correctly, because the configuration is part of what a controller is
+// authorized to continue under. What was missing was anyone saying so: the
+// operator got a digest comparison at identify, then parked runs, then a
+// startup resolution refusing its own transition, and no statement of the
+// cause.
+//
+// It refuses BEFORE serving, because a controller that serves here is one whose
+// every upgrade attempt will pass the point of no return and then fail.
+//
+// A configuration edited while a controller is already running stays a
+// non-event until a new process is composed. This is that composition.
+func (c *composition) refuseAConfigurationItCannotCross() error {
+	authority, found, err := c.store.CurrentControllerAuthority()
+	if err != nil || !found {
+		return err
+	}
+	binding, err := c.controllerBinding()
+	if err != nil {
+		// An unattested build has no binding to compare. It is refused
+		// elsewhere if it matters, and it is not refused here for a
+		// configuration question it cannot be asked.
+		return nil
+	}
+	return configurationBoundaryRefusal(authority, binding)
+}
+
+// configurationBoundaryRefusal is the comparison and the sentence, separated
+// from reading the state directory so the sentence itself can be tested.
+func configurationBoundaryRefusal(authority runtime.ControllerAuthority, binding runtime.ControllerBinding) error {
+	if authority.Binding.Config == binding.Config {
+		return nil
+	}
+	// SAME CONFIGURATION IS THE ONLY THING CHECKED HERE. A different BUILD is
+	// the ordinary state of a controller that is about to upgrade itself, and
+	// refusing it would refuse every normal start.
+	return fmt.Errorf(`controller-effective configuration changed
+
+governing config: %s
+current config:   %s
+
+ordinary succession cannot cross configuration identities.
+Stop all controller processes and run:
+
+    zenchron-engineering controller re-adopt --reason "..."
+
+or restore the previous configuration`,
+		shortVersion(authority.Binding.Config.Global), shortVersion(binding.Config.Global))
+}
+
 // resolveInterruptedHandoff settles a transition this controller is the
 // recovery owner of, before it serves anything.
 //
