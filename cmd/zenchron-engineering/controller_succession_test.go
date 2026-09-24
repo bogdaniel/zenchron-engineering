@@ -339,6 +339,129 @@ func TestASuccessorIsStartedForExactlyOneTransition(t *testing.T) {
 	}
 }
 
+// startupBanner builds a resolution for one transition between two adopted
+// generations, so a case differs from the healthy one in exactly the member it
+// is testing.
+func startupBanner(t *testing.T, phase runtime.HandoffPhase, recoveryOwner string) (runtime.StartupResolution, string) {
+	t.Helper()
+	predecessorBuild := runtime.ControllerBuild{
+		Kind: runtime.ControllerAdopted, Version: "main-aaaaaaa",
+		SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
+		BinarySHA256: strings.Repeat("ab", 32),
+	}
+	successorBuild := predecessorBuild
+	successorBuild.Version, successorBuild.SourceRevision = "main-bbbbbbb", strings.Repeat("c", 40)
+	config := runtime.ConfigDigest{Global: "global", Repository: "repository"}
+	successor := runtime.ControllerBinding{Controller: "zenchron-engineering", Build: &successorBuild, Config: config}
+	predecessor := runtime.ControllerBinding{Controller: "zenchron-engineering", Build: &predecessorBuild, Config: config}
+	mine, err := successor.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := predecessor.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := theirs
+	if recoveryOwner == "successor" {
+		owner = mine
+	}
+	return runtime.StartupResolution{Resolution: runtime.HandoffResolution{
+		Action: runtime.HandoffActionRefuse,
+		Record: &runtime.ControllerHandoff{
+			ID: "handoff-1", Phase: phase, RecoveryOwner: owner,
+			Predecessor: runtime.HandoffParty{Binding: predecessor},
+			Successor:   runtime.HandoffParty{Binding: successor},
+		},
+		Detail: "handoff handoff-1 names another controller as its recovery owner",
+	}}, mine
+}
+
+// A SUCCESSOR DOES NOT SETTLE ITS PREDECESSOR'S RECOVERY RECORD, but that
+// correct resolver refusal is also the ordinary path of every upgrade. Its
+// startup banner must name the transition this process is performing rather
+// than training an operator to ignore "refuse" on a healthy successor.
+func TestSuccessorStartupBannerDoesNotCallItsOwnTransitionARefusal(t *testing.T) {
+	resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+
+	got := describeStartupTransition(resolution, "handoff-1", mine)
+	if !strings.Contains(got, "performing transition handoff-1") {
+		t.Fatalf("banner = %q, want this successor's transition", got)
+	}
+	if strings.Contains(got, "refuse") {
+		t.Fatalf("banner = %q, want the resolver refusal kept out of the healthy successor projection", got)
+	}
+	if resolution.Resolution.Action != runtime.HandoffActionRefuse {
+		t.Fatalf("the display changed the resolver action to %q", resolution.Resolution.Action)
+	}
+}
+
+// THE SUPPRESSION IS THE ONE CASE, NOT THE ID.
+//
+// The same transition can be refused for reasons that have nothing to do with
+// recovery ownership, and every one of them must keep its label - a banner
+// that hid them would be worse than the one that cried refusal, because it
+// would be silent about the refusals that matter.
+func TestStartupBannerKeepsEveryOtherRefusalOnTheSameTransition(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		break_ func(*runtime.StartupResolution, string)
+	}{
+		{"this process is not the successor the record names", func(r *runtime.StartupResolution, _ string) {
+			other := *r.Resolution.Record.Successor.Binding.Build
+			other.BinarySHA256 = strings.Repeat("ef", 32)
+			r.Resolution.Record.Successor.Binding.Build = &other
+		}},
+		{"the successor binding will not digest", func(r *runtime.StartupResolution, _ string) {
+			r.Resolution.Record.Successor.Binding.Build = nil
+		}},
+		{"the record permits this process to recover, so the refusal is another one", func(r *runtime.StartupResolution, mine string) {
+			r.Resolution.Record.RecoveryOwner = mine
+			r.Resolution.Detail = "this process is not the successor generation: the running binary measures aaaa"
+		}},
+		{"the transition is past the phase a successor starts at", func(r *runtime.StartupResolution, _ string) {
+			r.Resolution.Record.Phase = runtime.HandoffSuccessorAcquired
+		}},
+		{"the resolver did not refuse", func(r *runtime.StartupResolution, _ string) {
+			r.Resolution.Action = runtime.HandoffActionContinueSuccessor
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+			test.break_(&resolution, mine)
+
+			got := describeStartupTransition(resolution, "handoff-1", mine)
+			if strings.Contains(got, "performing transition") {
+				t.Fatalf("banner = %q, want the resolver's own answer", got)
+			}
+			if !strings.Contains(got, string(resolution.Resolution.Action)) {
+				t.Fatalf("banner = %q, want one naming %q", got, resolution.Resolution.Action)
+			}
+		})
+	}
+}
+
+// A matching flag is the only presentation exception. An actual refusal must
+// remain visible when this process was not started for that record.
+func TestStartupBannerKeepsOtherTransitionRefusals(t *testing.T) {
+	resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+	resolution.Resolution.Record.ID = "handoff-somebody-else"
+
+	got := describeStartupTransition(resolution, "handoff-1", mine)
+	if !strings.HasPrefix(got, "refuse:") {
+		t.Fatalf("banner = %q, want the real refusal", got)
+	}
+}
+
+// AND A PROCESS THAT WAS NOT STARTED AS A SUCCESSOR SEES WHAT THE RESOLVER SAID.
+func TestStartupBannerIsUnchangedWithoutTheSuccessorFlag(t *testing.T) {
+	resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+
+	if got := describeStartupTransition(resolution, "", mine); !strings.HasPrefix(got, "refuse:") {
+		t.Fatalf("banner = %q, want the resolver's own answer", got)
+	}
+}
+
 // AND THE PROCESS THAT IS ACTUALLY STARTED SEES ONE, which is the thing the
 // live defect was about: a unit test of the helper cannot see what exec was
 // handed.
