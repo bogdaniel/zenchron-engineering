@@ -1128,6 +1128,8 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 			in.ProviderCredentialPath = firstConfigured(agent.CredentialPath, config.Provider.CredentialPath)
 		}
 	}
+	// Use the same separate credential and redirect-safe observer as adoption.
+	in.Governance, _ = governanceObserver(config.GitHub)
 	in.GitHubCredentialMode = config.GitHub.CredentialMode
 	in.DiscoveryLabel = config.Watch.Label
 	in.Credentials = githubCredentials(config.GitHub)
