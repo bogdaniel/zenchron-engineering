@@ -850,7 +850,17 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 		return BuildEnvironment{}, err
 	}
 
-	if _, err := sandbox.run(ctx, adoptedBuildArgs(spec)); err != nil {
+	// The container's own stderr is the only account of WHY the compiler
+	// refused - a read-only --output, a module missing from the offline
+	// cache, an image that cannot run - and the caller has no run journal to
+	// fall back on, since none exists yet. It is captured bounded (the
+	// executor already ran it through boundedBuffer) and sanitised the same
+	// way an assurance transcript is before it reaches an operator.
+	out, err := sandbox.run(ctx, adoptedBuildArgs(spec))
+	if err != nil {
+		if detail := sanitizedDetail(compilerFailureDetail(out)); detail != "" {
+			return BuildEnvironment{}, fmt.Errorf("%w: %s", err, detail)
+		}
 		return BuildEnvironment{}, err
 	}
 
@@ -898,6 +908,18 @@ func adoptedBuildArgs(spec AdoptedBuildSpec) []string {
 		"-ldflags", ldflags, "-o", "/out/"+filepath.Base(spec.Output), "./cmd/zenchron-engineering")
 }
 
+// compilerFailureDetail prefers stderr, since that is where `go build` writes
+// a compile failure, and falls back to stdout for a toolchain that used it
+// instead. It returns "" rather than the bare process error when the
+// container produced no output at all - a sandbox that never started has
+// nothing to add beyond what the caller's own error already says.
+func compilerFailureDetail(out CommandOutput) string {
+	if detail := strings.TrimSpace(string(out.Stderr)); detail != "" {
+		return detail
+	}
+	return strings.TrimSpace(string(out.Stdout))
+}
+
 // adoptedBuildToolchain records WHICH compiler ran, measured from the pinned
 // image rather than assumed from its tag.
 func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec AdoptedBuildSpec) (string, error) {
@@ -909,6 +931,13 @@ func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec Adop
 	probe.OperationID = "adopted-build-toolchain-" + spec.Revision
 	out, err := probe.run(ctx, args)
 	if err != nil {
+		// THE SAME LAW AS THE BUILD ITSELF. This phase's failure determines the
+		// sandbox result too - an image that cannot run, a platform mismatch, a
+		// daemon that refused - and "exit status 125" tells an operator none of
+		// it. There is no run journal to fall back on here either.
+		if detail := sanitizedDetail(compilerFailureDetail(out)); detail != "" {
+			return "", fmt.Errorf("the pinned build toolchain could not be identified: %w: %s", err, detail)
+		}
 		return "", fmt.Errorf("the pinned build toolchain could not be identified: %w", err)
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil
