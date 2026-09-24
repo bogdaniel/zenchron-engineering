@@ -31,6 +31,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1054,6 +1055,41 @@ func (c OperatorConfig) validate(path string) error {
 	case "", GitHubCredentialCLI:
 	default:
 		return refuse(fmt.Sprintf("github.governance_credential_mode must be %q, or absent to authorize no governance observation at all", GitHubCredentialCLI))
+	}
+	// github.endpoint feeds every GitHub consumer this configuration can
+	// authorize - the publication adapter, the App credential and the
+	// governance observer - and whichever credential the operator has
+	// configured is what will be sent to it. Checked here, once, so a
+	// malformed or non-https endpoint is refused at load time rather than only
+	// when whichever adapter happens to run first resolves its own credential
+	// and discovers it the hard way (#223).
+	if _, err := githubAPIRoot(c.GitHub.Endpoint); err != nil {
+		var authErr *GitHubAuthError
+		if errors.As(err, &authErr) {
+			return refuse(authErr.Detail)
+		}
+		return refuse(err.Error())
+	}
+	// AND https IS NOT ENOUGH. TLS protects the transport; it does not bind the
+	// credential to the forge it was issued for.
+	//
+	// The CLI credential is resolved from the governed repository identity,
+	// which is github.com throughout - GitHubRepo.CloneURL() says so, and
+	// `gh auth token` is asked without a hostname. A configuration naming
+	// https://attacker.example would pass every check above and then be handed
+	// the operator's token, because nothing downstream compares the host the
+	// credential belongs to against the host it is sent to.
+	//
+	// So the authority boundary refuses what the model cannot honour. This is
+	// deliberately NOT partial GitHub Enterprise support: real support means a
+	// repository host, an API endpoint host, `gh auth token --hostname`, and
+	// credential provenance that agree end to end. Until they do, an endpoint
+	// this product cannot bind a credential to is a configuration it will not
+	// accept.
+	if endpoint := strings.TrimSuffix(strings.TrimSpace(c.GitHub.Endpoint), "/"); endpoint != "" && endpoint != DefaultGitHubAPIEndpoint {
+		return refuse("github.endpoint is " + strconv.Quote(endpoint) +
+			"; custom GitHub API endpoints are not supported by the current github.com-bound repository and credential model, so this configuration may name " +
+			strconv.Quote(DefaultGitHubAPIEndpoint) + " or nothing at all")
 	}
 	for _, bound := range []struct {
 		name  string

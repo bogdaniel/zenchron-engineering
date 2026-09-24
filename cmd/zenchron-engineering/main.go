@@ -86,6 +86,9 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 2 && args[0] == "controller" && args[1] == "build-adopted" {
 		return controllerBuildAdopted(args[2:], autonomyOverrides{}, stdout)
 	}
+	if len(args) >= 2 && args[0] == "controller" && args[1] == "re-adopt" {
+		return controllerReadopt(args[2:], autonomyOverrides{}, stdout)
+	}
 	// The brokered Git decision of #241. It is dispatched first and separately
 	// because it is not an operator command: a provider's shim execs it, its
 	// exit status is the Git exit status the provider must see, and its output
@@ -118,7 +121,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|controller re-adopt --reason <text>|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
 }
 
 func parseModelFlags(args []string) ([]string, error) {
