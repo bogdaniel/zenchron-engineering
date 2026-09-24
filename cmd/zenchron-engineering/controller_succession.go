@@ -665,20 +665,55 @@ func (c *composition) resolveInterruptedHandoff(successorOf string) (string, err
 	if err != nil {
 		return "", err
 	}
-	return describeStartupTransition(resolved, successorOf), nil
+	return describeStartupTransition(resolved, successorOf, controller), nil
 }
 
-// describeStartupTransition projects a startup-resolution result onto the
-// serve banner. A successor can legitimately find its own transition while it
-// is still owned for recovery by its predecessor. The resolver correctly
-// refuses to settle that record; the banner must not label the normal
-// successor path as a refusal.
+// describeStartupTransition projects a startup-resolution result onto the serve
+// banner. A successor legitimately finds its own transition still owned for
+// recovery by its predecessor: the record moves that ownership at acquisition,
+// and this process has not acquired yet. The resolver correctly refuses to
+// settle it, and the banner must not label the normal successor path as a
+// refusal - an operator who sees "refuse" on every successor startup stops
+// reading the line, which is where a real refusal would hide.
 //
-// This changes presentation only. The resolver result, including its refusal,
-// remains the input to all settlement behaviour.
-func describeStartupTransition(resolved runtime.StartupResolution, successorOf string) string {
-	if successorOf != "" && resolved.Resolution.Record != nil && resolved.Resolution.Record.ID == successorOf {
-		return fmt.Sprintf("performing transition %s (%s)", successorOf, resolved.Resolution.Detail)
+// IT SUPPRESSES ONE CASE, AND IDENTIFIES IT POSITIVELY. Matching the
+// transition id alone is not enough: the same record can be refused for
+// reasons that have nothing to do with recovery ownership - a binding that
+// will not digest, a process that is not the generation the record names - and
+// those must keep their label. So all four of these must hold, and any one of
+// them failing falls through to what the resolver said:
+//
+//	the transition is the one this process was started for
+//	the resolver refused it
+//	the record is at the phase a successor finds before it acquires
+//	this process IS the successor the record names, and the record does not
+//	permit it to recover - which is precisely the refusal being relabelled
+//
+// PRESENTATION ONLY. Nothing here settles, decides or re-resolves anything: the
+// resolver's answer is unchanged and remains the input to every behaviour.
+func describeStartupTransition(resolved runtime.StartupResolution, successorOf, controller string) string {
+	record := resolved.Resolution.Record
+	switch {
+	case successorOf == "" || record == nil || record.ID != successorOf:
+		return resolved.Describe()
+	case resolved.Resolution.Action != runtime.HandoffActionRefuse:
+		return resolved.Describe()
+	case record.Phase != runtime.HandoffOwnershipReleased:
+		// Before acquisition and after it are different situations, and only
+		// this one is the normal successor startup.
+		return resolved.Describe()
 	}
-	return resolved.Describe()
+	successor, err := record.Successor.Binding.Digest()
+	if err != nil || successor != controller {
+		// A record naming somebody else, or one that will not digest, is
+		// refused for a reason this process must not paint over.
+		return resolved.Describe()
+	}
+	if record.MayRecover(controller) {
+		// The record DOES permit this process to recover, so the refusal came
+		// from somewhere else - a generation it cannot prove, say - and that
+		// is a refusal an operator needs to see.
+		return resolved.Describe()
+	}
+	return fmt.Sprintf("performing transition %s (its predecessor remains the recovery owner until this process activates)", successorOf)
 }
