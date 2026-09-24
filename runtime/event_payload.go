@@ -39,6 +39,12 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
+	EventReviewContinuationGranted: payloadSchema(func(p ReviewContinuationGrant) error {
+		if p.ActiveBaseline < 0 || p.Allowance <= 0 || p.Allowance > 30*time.Minute {
+			return errors.New("invalid review continuation envelope")
+		}
+		return required("feedback_digest", p.FeedbackDigest)
+	}),
 	// A succession admission is the only event that changes which controller
 	// may append the NEXT one, so its payload is validated rather than trusted:
 	// a decision that is not settled compatible, or that names neither party,

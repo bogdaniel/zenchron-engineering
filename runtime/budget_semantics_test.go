@@ -403,3 +403,41 @@ func TestOperationElapsedRetainsFinishedConsumption(t *testing.T) {
 		t.Fatalf("finished elapsed=%s", got)
 	}
 }
+
+func TestAcceptedReviewBudgetExhaustionUsesPersistedContinuation(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	for _, consumed := range []bool{false, true} {
+		t.Run(fmt.Sprint("consumed=", consumed), func(t *testing.T) {
+			observed, _ := json.Marshal(FeedbackObservedPayload{FeedbackDecision: FeedbackDecision{Key: "review:123", Admitted: true}})
+			events := []EngineeringEvent{{Type: EventFeedbackObserved, OccurredAt: start.Add(time.Minute), Payload: observed}}
+			if consumed {
+				payload, _ := json.Marshal(FeedbackConsumedPayload{Keys: []string{"review:123"}})
+				events = append(events, EngineeringEvent{Type: EventFeedbackConsumed, OccurredAt: start.Add(2 * time.Minute), Payload: payload})
+			}
+			clock := &steppingClock{at: start.Add(35 * time.Minute)}
+			state := conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, events)
+			if disposition, reason := state.conditions(); disposition != Waiting || reason != ReasonReviewBudgetExhausted {
+				t.Fatalf("accepted review abandoned: %s/%s", disposition, reason)
+			}
+			state.events = append(state.events, waitEvent(clock.at, ReasonReviewBudgetExhausted))
+			clock.at = start.Add(24 * time.Hour)
+			state = conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, state.events)
+			if state.activeElapsed(clock.at) != 35*time.Minute {
+				t.Fatal("budget wait spent idle time")
+			}
+			if state.feedbackState().Consumed["review:123"] != consumed {
+				t.Fatal("budget wait changed delivery identity")
+			}
+			state.run.Budgets = &RunBudgets{WallLimit: 30 * time.Minute}
+			state.rt.deps.Budgets.WallLimit = time.Hour
+			if _, reason := state.conditions(); reason != ReasonReviewBudgetExhausted {
+				t.Fatal("live configuration widened the persisted budget")
+			}
+			grant, _ := json.Marshal(ReviewContinuationGrant{ActiveBaseline: 35 * time.Minute, Allowance: 30 * time.Minute, FeedbackDigest: "digest"})
+			state.events = append(state.events, EngineeringEvent{Type: EventReviewContinuationGranted, OccurredAt: clock.at, Payload: grant})
+			if _, reason := state.conditions(); reason == ReasonReviewBudgetExhausted {
+				t.Fatal("durable continuation did not release the wait")
+			}
+		})
+	}
+}

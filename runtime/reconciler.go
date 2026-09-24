@@ -363,10 +363,15 @@ func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epo
 // stages that depend on it can proceed while the run itself waits for review.
 const ReasonGoalStateReached = "goal_state_reached"
 
+// ReasonReviewBudgetExhausted retains accepted review work after its finite
+// continuation allowance is spent. Delivery does not imply remediation was published.
+const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
+
 var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
+	ReasonReviewBudgetExhausted:     true,
 	"awaiting_authority":            true,
 	"authority_blocked":             true,
 	"authority_unknown":             true,
@@ -774,8 +779,17 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
+	reviewDelivered := false
 	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
-		return Failed, "run_wall_budget_exhausted"
+		if len(s.outstandingReviewKeys()) > 0 {
+			if s.reviewContinuationRemaining(now) <= 0 {
+				return Waiting, ReasonReviewBudgetExhausted
+			}
+		} else if s.reviewContinuationDelivered() {
+			reviewDelivered = true
+		} else {
+			return Failed, "run_wall_budget_exhausted"
+		}
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
 		return Failed, "run_lifecycle_deadline_exhausted"
@@ -830,6 +844,9 @@ func (s *runState) conditions() (Disposition, string) {
 		if disposition, reason, outstanding := AuthorityDisposition(decision.Status); outstanding {
 			return disposition, reason
 		}
+	}
+	if reviewDelivered {
+		return Waiting, ReasonGoalStateReached
 	}
 	return Active, ""
 }
@@ -1457,8 +1474,11 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
+		if err := r.grantReviewContinuation(state); err != nil {
+			return Outcome{}, err
+		}
 		live, reason := state.conditions()
-		if terminalDisposition(live) {
+		if terminalDisposition(live) || reason == ReasonReviewBudgetExhausted {
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()

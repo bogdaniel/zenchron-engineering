@@ -251,7 +251,11 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	// runtime would still grant it nearly its whole budget - provenance
 	// disagreeing with the semantics it exists to carry forward.
 	elapsed := state.activeElapsed(r.deps.Clock.Now())
-	wall := int64((budgets.WallLimit - elapsed) / time.Second)
+	remainingWall := budgets.WallLimit - elapsed
+	if len(state.outstandingReviewKeys()) > 0 && remainingWall < 0 {
+		remainingWall = state.reviewContinuationRemaining(r.deps.Clock.Now())
+	}
+	wall := int64(remainingWall / time.Second)
 	if wall < 0 {
 		wall = 0
 	}
