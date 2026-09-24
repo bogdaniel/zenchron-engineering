@@ -541,6 +541,41 @@ func TestGitHubRESTAdapterRefusesUnsafeRefsAndSHAs(t *testing.T) {
 	}
 }
 
+// refusingRESTCredential fails the test if it is ever asked to resolve a
+// credential - used to prove an endpoint is rejected before a secret is
+// even requested, not merely before it is sent.
+type refusingRESTCredential struct{ t *testing.T }
+
+func (c refusingRESTCredential) Credential(RemoteIdentity) (string, string, error) {
+	c.t.Fatal("the credential was resolved for an endpoint that should have been refused first")
+	return "", "", nil
+}
+
+// TestGitHubRESTAdapterRefusesANonHTTPSEndpoint pins #223 on the publication
+// path: github.endpoint feeds this adapter too, and a refused endpoint must
+// never cause the credential to be resolved, let alone sent.
+func TestGitHubRESTAdapterRefusesANonHTTPSEndpoint(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plaintext http":   "http://api.example.com",
+		"a non-web scheme": "ftp://api.example.com",
+		"no scheme at all": "api.example.com",
+		"a bare path":      "/api/v3",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			doer := &fakeGitHubDoer{}
+			adapter := GitHubRESTAdapter{HTTP: doer, Endpoint: endpoint, Credentials: refusingRESTCredential{t: t}}
+			_, err := adapter.Issue(context.Background(), testRepo, 7)
+			var authErr *GitHubAuthError
+			if !errors.As(err, &authErr) {
+				t.Fatalf("expected a typed refusal, got %v", err)
+			}
+			if len(doer.requests) != 0 {
+				t.Fatalf("a refused endpoint was still contacted: %v", doer.requests)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RefSHA: absent vs unknown
 // ---------------------------------------------------------------------------

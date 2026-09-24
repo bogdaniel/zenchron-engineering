@@ -110,6 +110,42 @@ func TestOperatorConfigRefusesUnpinnedAssuranceImage(t *testing.T) {
 	}
 }
 
+// TestOperatorConfigRefusesANonHTTPSGitHubEndpoint pins #223: github.endpoint
+// feeds every GitHub consumer this configuration can authorize, so a bad
+// endpoint is refused once at load time rather than only when whichever
+// adapter happens to run first resolves its own credential against it.
+func TestOperatorConfigRefusesANonHTTPSGitHubEndpoint(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plaintext http":   "http://api.example.com",
+		"a non-web scheme": "ftp://api.example.com",
+		"no scheme at all": "api.example.com",
+		"a bare path":      "/api/v3",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := strings.Replace(operatorConfigJSON(dir),
+				`"github": {"credential_mode": "github-cli"}`,
+				`"github": {"credential_mode": "github-cli", "endpoint": "`+endpoint+`"}`, 1)
+			path := writeFile(t, filepath.Join(dir, "config.json"), body)
+			err := requireConfigError(t, second(LoadOperatorConfig(path)))
+			if !strings.Contains(err.Detail, "github.endpoint") {
+				t.Fatalf("unexpected detail %q", err.Detail)
+			}
+		})
+	}
+
+	t.Run("an https endpoint is accepted", func(t *testing.T) {
+		dir := t.TempDir()
+		body := strings.Replace(operatorConfigJSON(dir),
+			`"github": {"credential_mode": "github-cli"}`,
+			`"github": {"credential_mode": "github-cli", "endpoint": "https://ghe.example.com/api/v3"}`, 1)
+		path := writeFile(t, filepath.Join(dir, "config.json"), body)
+		if _, _, err := LoadOperatorConfig(path); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 // Authority. Everything below is the boundary between the two layers.
 
 func TestRepositoryConfigCannotSupplyCredentials(t *testing.T) {

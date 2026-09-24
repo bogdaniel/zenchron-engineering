@@ -1055,6 +1055,20 @@ func (c OperatorConfig) validate(path string) error {
 	default:
 		return refuse(fmt.Sprintf("github.governance_credential_mode must be %q, or absent to authorize no governance observation at all", GitHubCredentialCLI))
 	}
+	// github.endpoint feeds every GitHub consumer this configuration can
+	// authorize - the publication adapter, the App credential and the
+	// governance observer - and whichever credential the operator has
+	// configured is what will be sent to it. Checked here, once, so a
+	// malformed or non-https endpoint is refused at load time rather than only
+	// when whichever adapter happens to run first resolves its own credential
+	// and discovers it the hard way (#223).
+	if _, err := githubAPIRoot(c.GitHub.Endpoint); err != nil {
+		var authErr *GitHubAuthError
+		if errors.As(err, &authErr) {
+			return refuse(authErr.Detail)
+		}
+		return refuse(err.Error())
+	}
 	for _, bound := range []struct {
 		name  string
 		value int

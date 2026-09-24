@@ -39,16 +39,38 @@ type GitHubRESTAdapter struct {
 
 var _ GitHubAdapter = GitHubRESTAdapter{}
 
-func (a GitHubRESTAdapter) root() string { return githubAPIRoot(a.Endpoint) }
+func (a GitHubRESTAdapter) root() (string, error) { return githubAPIRoot(a.Endpoint) }
 
-// githubAPIRoot resolves the API root from a configured endpoint. It is shared
-// with the GitHub App credential, which talks to the same host for the two
-// endpoints that mint an installation token and name the App.
-func githubAPIRoot(endpoint string) string {
+// githubAPIRoot resolves the API root from a configured endpoint and refuses
+// to carry a credential over anything but TLS to a named host. It is shared by
+// every GitHub consumer - this adapter's publication credential, the GitHub
+// App credential that mints an installation token, and the governance
+// observer - because github.endpoint is one operator-set field feeding all
+// three, and none of them may send a credential to an endpoint that is not at
+// least an https URL naming a host. (#223: an unvalidated github.endpoint was
+// survivable while only a single-installation App token could reach it; it
+// stopped being survivable once the operator's own broader-scoped credentials
+// started reaching it too, so every path that resolves this field is checked
+// here rather than only the one that changed.)
+func githubAPIRoot(endpoint string) (string, error) {
 	if endpoint == "" {
-		return "https://api.github.com"
+		return "https://api.github.com", nil
 	}
-	return strings.TrimSuffix(endpoint, "/")
+	root := strings.TrimSuffix(endpoint, "/")
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return "", &GitHubAuthError{Detail: "the configured github.endpoint is not a usable URL"}
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		// The scheme is named because an operator has to be able to fix it;
+		// nothing else about the endpoint is quoted back.
+		return "", &GitHubAuthError{Detail: "github.endpoint uses scheme " + strconv.Quote(parsed.Scheme) +
+			"; a credential is only ever carried over https"}
+	}
+	if parsed.Host == "" {
+		return "", &GitHubAuthError{Detail: "github.endpoint names no host"}
+	}
+	return root, nil
 }
 
 // token resolves the credential for exactly this repository. Every failure is
@@ -109,11 +131,18 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 	if a.HTTP == nil {
 		return 0, nil, nil, fmt.Errorf("github adapter has no HTTP transport")
 	}
+	// The endpoint is checked before the credential is resolved, exactly as the
+	// governance observer checks its own: a refused endpoint should never cause
+	// a secret to be asked for, let alone held in a local variable next to it.
+	root, err := a.root()
+	if err != nil {
+		return 0, nil, nil, err
+	}
 	secret, err := a.token(repo)
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	target := a.root() + path
+	target := root + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
