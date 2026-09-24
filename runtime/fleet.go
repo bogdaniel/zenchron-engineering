@@ -61,9 +61,10 @@ type RunSummary struct {
 	// nothing were happening. The durable disposition is right and is not
 	// changed for display; this is the fact the display was missing.
 	//
-	// It is taken from the operation's ActiveSince, which the scheduler clears
-	// whenever nothing is executing, so it is also false for the opposite
-	// error: an `active` run whose last operation finished.
+	// IT COMES FROM THE OPERATION ROWS, not from the reduced journal. See
+	// executingNow: the first version of this read the snapshot's ActiveSince
+	// and reported twenty runs executing on a fleet running two, including
+	// runs that had completed hours earlier.
 	Executing bool `json:"executing,omitempty"`
 	// Elapsed is wall time since the run was created.
 	Elapsed time.Duration `json:"elapsed"`
@@ -353,8 +354,8 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	summary.Attempts = projection.Attempts
 	if operation, ok := state.currentOperation(); ok {
 		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
-		summary.Executing = operation.ActiveSince != nil
 	}
+	summary.Executing = executingNow(store, run.ID)
 	if pr := projection.PullRequest; pr != nil {
 		summary.PullRequest, summary.PRState = pr.Number, pr.State
 	}
@@ -498,4 +499,33 @@ func (s *runState) workerIdentity(stateDir string) WorkerIdentity {
 		identity.Workspace = dir
 	}
 	return identity
+}
+
+// executingNow reports whether any operation of this run is executing.
+//
+// IT ASKS THE OPERATION ROWS. The scheduler owns those: it sets ActiveSince
+// when an attempt begins and clears it when the attempt ends, so "running with
+// an active attempt" is exactly what a worker occupying a slot looks like.
+//
+// The reduced journal is NOT the same answer, and the difference shipped. The
+// snapshot rebuilt from events leaves ActiveSince set on operations that ended
+// - the end is recorded as a later event rather than as a mutation of that
+// field - so reading it there reported every run that had ever started an
+// attempt as executing: twenty of them on a fleet running two, several
+// completed hours earlier. The rows said two, correctly, the whole time.
+//
+// A store that cannot answer yields false. Not knowing is not executing, and
+// the cost of the honest answer here is a row that understates activity for
+// one poll rather than a header that cannot be believed.
+func executingNow(store *SQLiteOperationStore, runID string) bool {
+	operations, err := store.Operations(runID)
+	if err != nil {
+		return false
+	}
+	for _, operation := range operations {
+		if operation.State == Running && operation.ActiveSince != nil {
+			return true
+		}
+	}
+	return false
 }
