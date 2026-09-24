@@ -66,17 +66,17 @@ const (
 // BenchmarkRecord is one leverage observation: one case, run in one mode, with
 // the human-supervision measurement #66 requires.
 type BenchmarkRecord struct {
-	SchemaVersion  string                 `json:"schema_version"`
-	ID             string                 `json:"id"`
-	Benchmark      string                 `json:"benchmark"`
-	CorpusVersion  string                 `json:"corpus_version"`
-	Mode           BenchmarkMode          `json:"mode"`
-	RecordedAt     string                 `json:"recorded_at"`
-	Case           BenchmarkCase          `json:"case"`
-	Subject        BenchmarkSubject       `json:"subject"`
-	Measured       BenchmarkMeasured      `json:"measured"`
-	Outcome        BenchmarkOutcome       `json:"outcome"`
-	Concurrency    *BenchmarkConcurrency  `json:"concurrency,omitempty"`
+	SchemaVersion  string                  `json:"schema_version"`
+	ID             string                  `json:"id"`
+	Benchmark      string                  `json:"benchmark"`
+	CorpusVersion  string                  `json:"corpus_version"`
+	Mode           BenchmarkMode           `json:"mode"`
+	RecordedAt     string                  `json:"recorded_at"`
+	Case           BenchmarkCase           `json:"case"`
+	Subject        BenchmarkSubject        `json:"subject"`
+	Measured       BenchmarkMeasured       `json:"measured"`
+	Outcome        BenchmarkOutcome        `json:"outcome"`
+	Concurrency    *BenchmarkConcurrency   `json:"concurrency,omitempty"`
 	Interpretation BenchmarkInterpretation `json:"interpretation"`
 }
 
@@ -91,9 +91,9 @@ type BenchmarkCase struct {
 // BenchmarkSubject binds a record to the exact repository state and the
 // agents that acted on it, in whichever mode produced the record.
 type BenchmarkSubject struct {
-	Repository        string              `json:"repository"`
-	BaseRevision       string              `json:"base_revision"`
-	CandidateRevision *string             `json:"candidate_revision,omitempty"`
+	Repository        string               `json:"repository"`
+	BaseRevision      string               `json:"base_revision"`
+	CandidateRevision *string              `json:"candidate_revision,omitempty"`
 	Controller        *BenchmarkController `json:"controller,omitempty"`
 	Agents            []BenchmarkAgent     `json:"agents"`
 }
@@ -146,26 +146,26 @@ type BenchmarkCost struct {
 // BenchmarkOutcome is what the case actually produced, including the
 // secondary metrics #66 asks to report alongside the primary leverage ratio.
 type BenchmarkOutcome struct {
-	Result                  BenchmarkResult `json:"result"`
-	Artifact                *string         `json:"artifact,omitempty"`
-	ReviewCycles             *int            `json:"review_cycles,omitempty"`
-	FirstPassAccepted        *bool           `json:"first_pass_accepted,omitempty"`
-	RemediationCount         *int            `json:"remediation_count,omitempty"`
-	EscapedDefects           *int            `json:"escaped_defects,omitempty"`
-	FalseBlocks              *int            `json:"false_blocks,omitempty"`
-	AuthorityPrecision       *float64        `json:"authority_precision,omitempty"`
-	AuthorityRecall          *float64        `json:"authority_recall,omitempty"`
-	GroundTruthAvailable      bool            `json:"ground_truth_available"`
+	Result               BenchmarkResult `json:"result"`
+	Artifact             *string         `json:"artifact,omitempty"`
+	ReviewCycles         *int            `json:"review_cycles,omitempty"`
+	FirstPassAccepted    *bool           `json:"first_pass_accepted,omitempty"`
+	RemediationCount     *int            `json:"remediation_count,omitempty"`
+	EscapedDefects       *int            `json:"escaped_defects,omitempty"`
+	FalseBlocks          *int            `json:"false_blocks,omitempty"`
+	AuthorityPrecision   *float64        `json:"authority_precision,omitempty"`
+	AuthorityRecall      *float64        `json:"authority_recall,omitempty"`
+	GroundTruthAvailable bool            `json:"ground_truth_available"`
 }
 
 // BenchmarkConcurrency is present only for cases run as part of a concurrent
 // cohort; it carries the parallelism-proof measurements #66 asks for.
 type BenchmarkConcurrency struct {
 	ConcurrentWith                     []string `json:"concurrent_with"`
-	OverlapWallSeconds                  *float64 `json:"overlap_wall_seconds,omitempty"`
-	HumanAttentionDuringOverlapMinutes  *float64 `json:"human_attention_during_overlap_minutes,omitempty"`
-	CrossTaskBlocking                   *bool    `json:"cross_task_blocking,omitempty"`
-	ManualMessageShuttling              *bool    `json:"manual_message_shuttling,omitempty"`
+	OverlapWallSeconds                 *float64 `json:"overlap_wall_seconds,omitempty"`
+	HumanAttentionDuringOverlapMinutes *float64 `json:"human_attention_during_overlap_minutes,omitempty"`
+	CrossTaskBlocking                  *bool    `json:"cross_task_blocking,omitempty"`
+	ManualMessageShuttling             *bool    `json:"manual_message_shuttling,omitempty"`
 }
 
 // BenchmarkInterpretation states in words what the record does and does not
