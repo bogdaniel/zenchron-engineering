@@ -873,8 +873,16 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 // generations of the same issue never share a branch.
 func candidateBranch(runID string) string { return "zenchron/" + runID }
 
+// terminalDispositions is shared with the durable acquisition guard.
+var terminalDispositions = [...]Disposition{Completed, Failed, Cancelled}
+
 func terminalDisposition(d Disposition) bool {
-	return d == Completed || d == Failed || d == Cancelled
+	for _, terminal := range terminalDispositions {
+		if d == terminal {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

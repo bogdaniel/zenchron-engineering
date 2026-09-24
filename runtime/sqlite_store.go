@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -506,14 +507,20 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
+	args := []any{string(document), op.ID, expected, op.RunID}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
+	}
+	args = append(args, op.RunID, maxRuns)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
-		       AND json_extract(runs.document, '$.disposition') IN ('completed', 'failed', 'cancelled'))
+		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
-		string(document), op.ID, expected, op.RunID, op.RunID, maxRuns)
+		args...)
 	if err != nil {
 		return 0, false, err
 	}
