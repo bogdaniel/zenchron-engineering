@@ -134,16 +134,63 @@ func TestOperatorConfigRefusesANonHTTPSGitHubEndpoint(t *testing.T) {
 		})
 	}
 
-	t.Run("an https endpoint is accepted", func(t *testing.T) {
+	// AND https IS NOT ENOUGH. TLS protects the transport; it does not bind the
+	// credential to the forge it was issued for. The CLI credential is
+	// resolved from a repository identity that is github.com throughout, so a
+	// well-formed endpoint elsewhere would simply be handed the operator's
+	// token - which is the half of #223 a scheme check does not address.
+	t.Run("refuse an https endpoint this model cannot bind a credential to", func(t *testing.T) {
 		dir := t.TempDir()
 		body := strings.Replace(operatorConfigJSON(dir),
 			`"github": {"credential_mode": "github-cli"}`,
 			`"github": {"credential_mode": "github-cli", "endpoint": "https://ghe.example.com/api/v3"}`, 1)
 		path := writeFile(t, filepath.Join(dir, "config.json"), body)
-		if _, _, err := LoadOperatorConfig(path); err != nil {
-			t.Fatal(err)
+		err := requireConfigError(t, second(LoadOperatorConfig(path)))
+		for _, want := range []string{"custom GitHub API endpoints are not supported", "github.com-bound"} {
+			if !strings.Contains(err.Detail, want) {
+				t.Fatalf("detail %q does not explain why, naming %q", err.Detail, want)
+			}
 		}
 	})
+
+	// The one endpoint the model can honour is accepted, stated or not, so an
+	// operator who writes it explicitly is not refused for agreeing.
+	for name, endpoint := range map[string]string{
+		"the default, stated":               DefaultGitHubAPIEndpoint,
+		"the default with a trailing slash": DefaultGitHubAPIEndpoint + "/",
+	} {
+		t.Run("accept "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := strings.Replace(operatorConfigJSON(dir),
+				`"github": {"credential_mode": "github-cli"}`,
+				`"github": {"credential_mode": "github-cli", "endpoint": "`+endpoint+`"}`, 1)
+			path := writeFile(t, filepath.Join(dir, "config.json"), body)
+			if _, _, err := LoadOperatorConfig(path); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// AND THE GENERIC CHECK STAYS, because a directly constructed adapter - in a
+// test, or in a future composition - still has to refuse carrying a credential
+// over anything but https to a named host.
+func TestTheAPIRootRefusesAnythingButHTTPSToAHost(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plaintext http": "http://api.github.com",
+		"no scheme":      "api.github.com",
+		"no host":        "https://",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			if _, err := githubAPIRoot(endpoint); err == nil {
+				t.Fatalf("%q was accepted as an API root", endpoint)
+			}
+		})
+	}
+	root, err := githubAPIRoot("")
+	if err != nil || root != DefaultGitHubAPIEndpoint {
+		t.Fatalf("root = %q err = %v, want the default", root, err)
+	}
 }
 
 // Authority. Everything below is the boundary between the two layers.

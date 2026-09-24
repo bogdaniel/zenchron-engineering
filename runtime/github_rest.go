@@ -37,6 +37,12 @@ type GitHubRESTAdapter struct {
 	Credentials CredentialProvider
 }
 
+// DefaultGitHubAPIEndpoint is the API root every consumer uses when the
+// operator names none, and - because the repository identity and the CLI
+// credential are both bound to github.com - the only one an operator
+// configuration may name. See OperatorConfig.validate.
+const DefaultGitHubAPIEndpoint = "https://api.github.com"
+
 var _ GitHubAdapter = GitHubRESTAdapter{}
 
 func (a GitHubRESTAdapter) root() (string, error) { return githubAPIRoot(a.Endpoint) }
@@ -54,7 +60,7 @@ func (a GitHubRESTAdapter) root() (string, error) { return githubAPIRoot(a.Endpo
 // here rather than only the one that changed.)
 func githubAPIRoot(endpoint string) (string, error) {
 	if endpoint == "" {
-		return "https://api.github.com", nil
+		return DefaultGitHubAPIEndpoint, nil
 	}
 	root := strings.TrimSuffix(endpoint, "/")
 	parsed, err := url.Parse(root)
