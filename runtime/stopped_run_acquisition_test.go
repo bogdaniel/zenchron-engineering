@@ -6,9 +6,57 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestSQLiteAcquisitionMatchesTerminalDisposition(t *testing.T) {
+	dispositions := append([]Disposition{Active, Waiting}, terminalDispositions[:]...)
+	for _, disposition := range dispositions {
+		t.Run(string(disposition), func(t *testing.T) {
+			_, writer, acquirer := openPair(t)
+			run := newJournalRun("run-a")
+			if err := writer.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			// JSON decodes UTC timestamps with time.UTC; use the same location
+			// so the full-operation comparison also matches after persistence.
+			now := time.Unix(100, 0).UTC()
+			scheduler := Scheduler{Store: acquirer, Clock: &fakeClock{now: now}, Owner: "driver", LeaseDuration: time.Minute, Liveness: alwaysAlive()}
+			planned := planFor(t, scheduler, run.ID, 1)
+			op, revision, found, err := acquirer.Operation(planned.ID)
+			if err != nil || !found {
+				t.Fatal(err, found)
+			}
+			// Commit the disposition after the driver reads its operation.
+			run.Disposition = disposition
+			if err := writer.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			leased := leasedAt(op, "driver", now)
+			gotRevision, acquired, err := acquirer.AcquireOperation(leased, revision, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAcquired := !terminalDisposition(disposition)
+			if acquired != wantAcquired {
+				t.Fatalf("disposition %q: acquired=%v, want %v", disposition, acquired, wantAcquired)
+			}
+			stored, storedRevision, found, err := acquirer.Operation(op.ID)
+			if err != nil || !found {
+				t.Fatal(err, found)
+			}
+			wantOp, wantRevision, wantResult := op, revision, int64(0)
+			if wantAcquired {
+				wantOp, wantRevision, wantResult = leased, revision+1, revision+1
+			}
+			if !reflect.DeepEqual(stored, wantOp) || storedRevision != wantRevision || gotRevision != wantResult {
+				t.Fatalf("acquisition persisted unexpected operation or revision: op=%+v revision=%d result=%d", stored, storedRevision, gotRevision)
+			}
+		})
+	}
+}
 
 // stopAtAcquisition forces the ONE interleaving that matters, deterministically
 // rather than by timing: the operator's stop commits in full - the run document
