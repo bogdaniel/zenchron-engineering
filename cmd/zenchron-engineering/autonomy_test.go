@@ -611,6 +611,7 @@ func TestDoctorAnswersEveryCapability(t *testing.T) {
 		{"provider.isolation", runtime.DoctorFail},
 		{"assurance.verifier_sandbox", runtime.DoctorFail},
 		{"github.credential", runtime.DoctorFail},
+		{"github.governance", runtime.DoctorFail},
 		{"governance.publication_scope", runtime.DoctorWarn},
 	} {
 		check, ok := report.Check(want.id)
