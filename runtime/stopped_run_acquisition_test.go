@@ -313,6 +313,69 @@ func TestAStaleSettleNeverOverwritesAStopInFlight(t *testing.T) {
 	}
 }
 
+// TestRecordDispositionPreReadGuardSkipsAnAlreadyCancelledRun isolates the
+// guard at the very top of recordDisposition, separately from the mid-write
+// race TestAStaleSettleNeverOverwritesAStopInFlight covers: here the stop has
+// already landed and fully committed BEFORE recordDisposition is even called,
+// so the caller is simply holding an in-memory state read before the stop -
+// exactly what a losing pass in TestAStopAtAcquisitionNeverExecutesTheWorkItStopped
+// does, just driven directly instead of through a contrived interleaving.
+//
+// Without the guard, the append below still happens: state.snapshot's
+// disposition and reason are stale, so the change check on its own would
+// write run.waiting straight after run.cancelled into the journal. PutRun's
+// own condition still refuses to move the run document off cancelled, so
+// nothing durable about the RUN drifts either way - but the hash chain gains
+// an event that was never true, and nothing else in this suite reads the
+// event count closely enough to notice. That is the whole gap: the guard is
+// real, the mutation is observable, and until now nothing observed it.
+func TestRecordDispositionPreReadGuardSkipsAnAlreadyCancelledRun(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	if _, err := f.runtime.Reconcile(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := f.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The stop commits in full here - there is no race left to win or lose by
+	// the time recordDisposition is called below.
+	if _, err := CancelRun(f.store, f.runtime.scheduler, f.clock.Now(), runID, "operator/stop"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A reason no production path ever writes, so the change check that
+	// gates the append would fire on it if the pre-read guard did not return
+	// first.
+	if err := f.runtime.recordDisposition(state, Waiting, "stale_after_stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := f.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("recordDisposition appended %d event(s) to the journal of a run the operator had already stopped", len(after)-len(before))
+	}
+	if state.run.Disposition != Cancelled {
+		t.Fatalf("the caller went on believing the run was %q", state.run.Disposition)
+	}
+	document, found, err := f.store.Run(runID)
+	if err != nil || !found {
+		t.Fatal(err, found)
+	}
+	if document.Disposition != Cancelled {
+		t.Fatalf("the run document was left %q", document.Disposition)
+	}
+}
+
 // TestSQLiteAStoppedRunDocumentIsNeverReplaced states the durable rule on its
 // own. PutRun is the only update path a run row has, so one condition there is
 // the whole guarantee - and it has to be IN the statement, because the writer
