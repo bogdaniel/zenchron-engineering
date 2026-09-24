@@ -515,3 +515,47 @@ func processGroupRunning(pgid int) bool {
 	}
 	return false
 }
+
+// THE MESSAGE THE INCIDENT DID NOT PRODUCE.
+//
+// A controller-effective configuration change left an operator with a digest
+// comparison at identify, then parked runs, then a startup resolution refusing
+// the controller's own transition - and no statement of the cause. A cold start
+// under a configuration the governing authority does not share now says what
+// happened and what to do about it.
+func TestAColdStartRefusesAConfigurationItCannotCross(t *testing.T) {
+	governing := runtime.ControllerAuthority{
+		Kind: runtime.AuthorityHandoffActivation, Ref: "handoff-1",
+		Binding: runtime.ControllerBinding{
+			Controller: "zenchron-engineering",
+			Config:     runtime.ConfigDigest{Global: "e98501e36872629e00623d19083919b79e9673297f8122aa26c8193bd5119954"},
+		},
+	}
+	current := runtime.ControllerBinding{
+		Controller: "zenchron-engineering",
+		Config:     runtime.ConfigDigest{Global: "b37ef994e090199c47deaba63f5d48fc5b1597ca61459ba7d05ced0ef0e2dd5c"},
+	}
+
+	err := configurationBoundaryRefusal(governing, current)
+	if err == nil {
+		t.Fatal("a cold start under a different configuration was permitted")
+	}
+	for _, want := range []string{
+		"controller-effective configuration changed",
+		"e98501e3", "b37ef994",
+		"controller re-adopt",
+		"restore the previous configuration",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not mention %q:\n%s", want, err)
+		}
+	}
+	// A DIFFERENT BUILD IS NOT A DIFFERENT CONFIGURATION. Refusing that would
+	// refuse every ordinary start of a controller about to upgrade itself.
+	sameConfig := current
+	sameConfig.Build = &runtime.ControllerBuild{Version: "main-later"}
+	governing.Binding.Config = current.Config
+	if err := configurationBoundaryRefusal(governing, sameConfig); err != nil {
+		t.Fatalf("a start under the same configuration was refused: %v", err)
+	}
+}

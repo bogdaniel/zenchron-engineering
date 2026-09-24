@@ -581,6 +581,25 @@ func (s *SQLiteOperationStore) ActivateControllerHandoff(handoff ControllerHando
 		handoff.ID, stamp, document); err != nil {
 		return false, err
 	}
+	// AND THE SAME MOVE IN THE SUBJECT THAT CAN ALSO NAME A RE-ADOPTION. Both
+	// rows are written here so no instant exists where an activation has
+	// happened and present authority disagrees; the older row stays because it
+	// is what an earlier binary reads, and it can never diverge from this one.
+	authority, err := CanonicalJSON(ControllerAuthority{
+		Kind: AuthorityHandoffActivation, Ref: handoff.ID, Binding: handoff.Successor.Binding,
+		Artifact: handoff.Successor.ArtifactPath,
+	})
+	if err != nil {
+		return false, err
+	}
+	if _, err := transaction.Exec(
+		`INSERT INTO controller_current_authority (id, kind, ref, updated_unix_nano, document)
+		 VALUES ('current', ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, ref = excluded.ref,
+		     updated_unix_nano = excluded.updated_unix_nano, document = excluded.document`,
+		string(AuthorityHandoffActivation), handoff.ID, stamp, authority); err != nil {
+		return false, err
+	}
 	return true, transaction.Commit()
 }
 
@@ -589,23 +608,28 @@ func (s *SQLiteOperationStore) ActivateControllerHandoff(handoff ControllerHando
 // Every authority-bearing operation asks this rather than asking whether a
 // transition ever activated. A historically activated transition answers false
 // once another has superseded it, which is the whole distinction.
-func governsNow(store currentActivationReader, handoffID string) error {
-	current, found, err := store.CurrentControllerActivation()
+func governsNow(store currentAuthorityReader, handoffID string) error {
+	current, found, err := store.CurrentControllerAuthority()
 	if err != nil {
 		return err
 	}
 	if !found {
-		return fmt.Errorf("no activation governs this state directory, so %s cannot be acted on as the current one", handoffID)
+		return fmt.Errorf("no controller authority governs this state directory, so %s cannot be acted on as the current one", handoffID)
 	}
-	if current.ID != handoffID {
-		return fmt.Errorf("transition %s activated historically; %s is the activation that governs now",
-			handoffID, current.ID)
+	// AN OPERATOR RE-ADOPTION IS NOT THIS TRANSITION, and saying so plainly
+	// matters more than the comparison: a generation that activated before a
+	// re-adoption must not keep repointing the projection or opening its own
+	// gate on the strength of the transition that once made it current.
+	if current.Kind != AuthorityHandoffActivation || current.Ref != handoffID {
+		return fmt.Errorf("transition %s activated historically; %s %s is the authority that governs now",
+			handoffID, current.Kind, current.Ref)
 	}
 	return nil
 }
 
-// currentActivationReader is the one question an authority-bearing operation
-// asks about currency.
-type currentActivationReader interface {
-	CurrentControllerActivation() (ControllerHandoff, bool, error)
+// currentAuthorityReader is the one question an authority-bearing operation
+// asks about currency. It asks for the governing BINDING and not for a
+// transition, because authority no longer necessarily came from one.
+type currentAuthorityReader interface {
+	CurrentControllerAuthority() (ControllerAuthority, bool, error)
 }
