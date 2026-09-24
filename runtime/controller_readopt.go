@@ -39,6 +39,7 @@ package runtime
 
 import (
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -58,9 +59,15 @@ type ReadoptionRequest struct {
 	// Binding is what this controller binds as under the configuration now in
 	// effect: identity, build and effective configuration digest.
 	Binding ControllerBinding
-	// TrustedMain is trusted main as observed right now.
-	TrustedMain RevisionRecord
-	Now         time.Time
+	// ObserveTrustedMain is asked for trusted main ONCE, immediately before
+	// the authority commit. It is a port rather than a snapshot because the
+	// preflight below replays every live run's journal, which takes as long as
+	// it takes: a revision observed before that is a fact about a branch as it
+	// was, used to authorize a governing root established now.
+	//
+	// The recovery path never calls it. See ReadoptController.
+	ObserveTrustedMain func() (RevisionRecord, error)
+	Now                time.Time
 }
 
 // readoptionStore is everything this operation reads and writes.
@@ -91,6 +98,9 @@ func refuseReadoption(format string, args ...any) error {
 // acquired. It is exercised rather than trusted: every durable write happens
 // inside the authority section.
 func ReadoptController(store readoptionStore, lease *ControllerRoleLease, request ReadoptionRequest) (ControllerReadoption, error) {
+	// WHAT THIS EXECUTABLE IS. Proven first because every path needs it, and
+	// because it asks nothing of anybody: the running bytes, the published
+	// record beside them, and the file they are.
 	if err := validateReadoption(request); err != nil {
 		return ControllerReadoption{}, err
 	}
@@ -98,11 +108,48 @@ func ReadoptController(store readoptionStore, lease *ControllerRoleLease, reques
 	if err != nil {
 		return ControllerReadoption{}, err
 	}
+
+	// RECOVERY BEFORE DECISION, and it asks the forge nothing.
+	//
+	// If a re-adoption of this exact binding already governs, there is no
+	// adoption decision left to make: it was made and committed, and what
+	// remains is a local projection. Requiring trusted main to be unchanged
+	// here - or reachable at all - would make the crash guarantee conditional
+	// on a branch that moves and a forge that can be down, which is precisely
+	// the window this recovery exists for.
+	if hadPrevious && previous.Kind == AuthorityOperatorReadoption {
+		same, err := sameBinding(previous.Binding, request.Binding)
+		if err != nil {
+			return ControllerReadoption{}, err
+		}
+		if same {
+			return existingReadoption(store, previous.Ref)
+		}
+	}
+
+	// A NEW BOUNDARY FROM HERE. Everything below decides whether one may be
+	// established, and nothing below is reached by a retry.
 	if err := refuseUnresolvedTransitions(store); err != nil {
 		return ControllerReadoption{}, err
 	}
 	if err := refuseStrandedRuns(store, request.Binding, hadPrevious, previous); err != nil {
 		return ControllerReadoption{}, err
+	}
+
+	// CURRENCY IS PROVEN LAST, immediately before the commit. Scanning and
+	// replaying every live run takes real time, and a governing root is the
+	// code the forge attests NOW rather than when this command started.
+	if request.ObserveTrustedMain == nil {
+		return ControllerReadoption{}, refuseReadoption("no trusted-main observation was supplied, and currency is never assumed")
+	}
+	trusted, err := request.ObserveTrustedMain()
+	if err != nil {
+		return ControllerReadoption{}, refuseReadoption("trusted main could not be observed, so this generation cannot be shown to be it: %v", err)
+	}
+	if trusted.Revision != request.Provenance.Source.Revision || trusted.Tree != request.Provenance.Source.Tree {
+		return ControllerReadoption{}, refuseReadoption(
+			"trusted main is %s and this generation was built from %s; re-adopt the generation trusted main names",
+			shortSHA(trusted.Revision), shortSHA(request.Provenance.Source.Revision))
 	}
 
 	readoption := ControllerReadoption{
@@ -120,20 +167,6 @@ func ReadoptController(store readoptionStore, lease *ControllerRoleLease, reques
 		expected = &previous
 		readoption.Previous = &previous
 		readoption.PreviousConfig = previous.Binding.Config
-	}
-
-	// ALREADY DONE IS DONE. A crash between the authority commit and the
-	// projection repair leaves an authority that already names this binding,
-	// and re-running must converge on it rather than manufacture a second
-	// authority event for the same boundary.
-	if hadPrevious && previous.Kind == AuthorityOperatorReadoption {
-		same, err := sameBinding(previous.Binding, request.Binding)
-		if err != nil {
-			return ControllerReadoption{}, err
-		}
-		if same {
-			return existingReadoption(store, previous.Ref)
-		}
 	}
 
 	var committed bool
@@ -178,12 +211,28 @@ func validateReadoption(request ReadoptionRequest) error {
 		return refuseReadoption("this executable measures %s and its published provenance records %s",
 			shortSHA(request.Self.Measured), shortSHA(request.Provenance.BinarySHA256))
 	}
-	// AND IT MUST BE TRUSTED MAIN NOW. A governing root is the code the forge
-	// currently attests, not the code that was trusted when it was built.
-	if request.TrustedMain.Revision != request.Provenance.Source.Revision ||
-		request.TrustedMain.Tree != request.Provenance.Source.Tree {
-		return refuseReadoption("trusted main is %s and this generation was built from %s; re-adopt the generation trusted main names",
-			shortSHA(request.TrustedMain.Revision), shortSHA(request.Provenance.Source.Revision))
+	// AND IT MUST BE THE PUBLISHED ARTIFACT ITSELF, not a binary that merely
+	// measures the same.
+	//
+	// Every check above is satisfied by a copy: same bytes, same build, same
+	// provenance file read from the immutable directory. A copy in /tmp would
+	// therefore have re-adopted itself and pointed the stable entrypoint
+	// outside the adopted-controller root, at a file nothing governs and
+	// anything can replace. The identity that matters is the FILE, so it is
+	// compared as one - which lets current/zenchron-engineering resolve to the
+	// canonical binary and refuses a duplicate of it.
+	running, err := os.Stat(request.Self.ExecutablePath)
+	if err != nil {
+		return refuseReadoption("the running executable %s could not be examined: %v", request.Self.ExecutablePath, err)
+	}
+	published, err := os.Stat(request.Provenance.OutputPath)
+	if err != nil {
+		return refuseReadoption("the published artifact %s could not be examined: %v", request.Provenance.OutputPath, err)
+	}
+	if !os.SameFile(running, published) {
+		return refuseReadoption(
+			"this process is running %s, which is not the published artifact %s; re-adopt the immutable generation itself",
+			request.Self.ExecutablePath, request.Provenance.OutputPath)
 	}
 	return nil
 }
@@ -220,6 +269,19 @@ func refuseStrandedRuns(store readoptionStore, binding ControllerBinding, hadPre
 	if err != nil {
 		return err
 	}
+	// THE ACTIVATION ORACLE, OR EVERY INHERITED RUN LOOKS STRANDED.
+	//
+	// A run reaches its current controller through succession admissions in
+	// its own journal, and each of those means anything only if the transition
+	// it was admitted for activated. Passing nil says "no authority oracle, no
+	// succession" - the safe answer where none can be supplied, and the wrong
+	// one here, because it makes every legitimately inherited run incompatible
+	// and refuses a re-adoption that should proceed. It is #282's lesson in a
+	// new place.
+	activated, err := activatedTransitions(store)
+	if err != nil {
+		return err
+	}
 	for _, run := range runs {
 		if terminalDisposition(run.Disposition) {
 			continue
@@ -231,7 +293,7 @@ func refuseStrandedRuns(store readoptionStore, binding ControllerBinding, hadPre
 		// The same question every other caller asks: may THIS controller
 		// append to THIS run. A run created under the new binding answers yes
 		// and is untouched by the boundary.
-		if ControllerSuccessionContinues(run, events, governing, nil) {
+		if ControllerSuccessionContinues(run, events, governing, activated) {
 			continue
 		}
 		detail := "no controller authority governs yet"
@@ -260,14 +322,19 @@ func existingReadoption(store readoptionStore, id string) (ControllerReadoption,
 		"authority names re-adoption %s and no such record exists", id)
 }
 
-// readoptionID is deterministic in the binding and the instant, so a retry that
-// re-reads the same authority addresses the same record.
+// readoptionID names one re-adoption of one binding at one instant.
+//
+// It carries the WHOLE binding digest. Eight hex characters are enough to read
+// and not enough to be an identity: two different bindings sharing a prefix
+// would address one record, and the store would then be asked to reconcile two
+// authority events that are not the same event. The full digest costs nothing
+// and removes the question.
 func readoptionID(binding ControllerBinding, now time.Time) string {
 	digest, err := binding.Digest()
-	if err != nil || len(digest) < 8 {
-		return fmt.Sprintf("readopt-%d", now.UnixNano())
+	if err != nil {
+		return fmt.Sprintf("readopt-unbindable-%d", now.UTC().UnixNano())
 	}
-	return fmt.Sprintf("readopt-%s-%d", digest[:8], now.UTC().Unix())
+	return fmt.Sprintf("readopt-%s-%d", digest, now.UTC().UnixNano())
 }
 
 // sameBinding compares two bindings by the digest every other caller compares.
@@ -281,4 +348,26 @@ func sameBinding(left, right ControllerBinding) (bool, error) {
 		return false, err
 	}
 	return leftDigest == rightDigest, nil
+}
+
+// activatedTransitions answers which transitions activated, from the durable
+// records.
+//
+// It is the same question storeTransitionActivated answers for a concrete
+// SQLite store, asked through the narrow interface this operation reads
+// everything else through - and it is history rather than present authority:
+// an admission is evidence for a succession the control model adopted, and a
+// transition that activated and was later superseded still adopted it.
+func activatedTransitions(store readoptionStore) (transitionActivated, error) {
+	records, err := store.ControllerHandoffs()
+	if err != nil {
+		return nil, err
+	}
+	activated := make(map[string]bool, len(records))
+	for _, record := range records {
+		if record.Phase == HandoffActivated {
+			activated[record.ID] = true
+		}
+	}
+	return func(handoffID string) bool { return activated[handoffID] }, nil
 }

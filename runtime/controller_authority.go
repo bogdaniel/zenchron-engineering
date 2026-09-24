@@ -161,7 +161,11 @@ func (s *SQLiteOperationStore) ReadoptController(readoption ControllerReadoption
 	}
 	authority := ControllerAuthority{
 		Kind: AuthorityOperatorReadoption, Ref: readoption.ID, Binding: readoption.Binding,
-		Artifact: readoption.Self.ExecutablePath,
+		// THE PUBLISHED ARTIFACT, not the path this process was invoked
+		// through. They are proven to be the same file; the canonical one is
+		// what the stable entrypoint must name, because it is the one the
+		// immutability law protects.
+		Artifact: readoption.Provenance.OutputPath,
 	}
 	record, err := CanonicalJSON(readoption)
 	if err != nil {
@@ -213,9 +217,26 @@ func (s *SQLiteOperationStore) ReadoptController(readoption ControllerReadoption
 		return false, nil
 	}
 
-	if _, err := transaction.Exec(
-		`INSERT INTO controller_readoptions (id, recorded_unix_nano, document) VALUES (?, ?, ?)
-		 ON CONFLICT(id) DO NOTHING`, readoption.ID, stamp, record); err != nil {
+	// AN EXISTING RECORD UNDER THIS ID IS VERIFIED, NOT IGNORED. Doing nothing
+	// on conflict would let a different authority event inherit an identity
+	// that is already taken and then move present authority to it, with the
+	// stored record describing something else entirely. Identical is
+	// idempotent; anything else is a refusal.
+	var existing sql.NullString
+	switch err := transaction.QueryRow(
+		`SELECT document FROM controller_readoptions WHERE id = ?`, readoption.ID).Scan(&existing); err {
+	case nil, sql.ErrNoRows:
+	default:
+		return false, err
+	}
+	if existing.Valid {
+		if existing.String != string(record) {
+			return false, fmt.Errorf(
+				"re-adoption %s is already recorded and describes a different event", readoption.ID)
+		}
+	} else if _, err := transaction.Exec(
+		`INSERT INTO controller_readoptions (id, recorded_unix_nano, document) VALUES (?, ?, ?)`,
+		readoption.ID, stamp, record); err != nil {
 		return false, err
 	}
 	if _, err := transaction.Exec(

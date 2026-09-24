@@ -7,6 +7,7 @@ package runtime
 // afterwards with no special path.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,17 +25,22 @@ func readoptionFixture(t *testing.T) (*choreography, ReadoptionRequest) {
 		Controller: "zenchron-engineering", Build: &c.self.Build,
 		Config: ConfigDigest{Global: "config-after-the-change"},
 	}
+	trusted := RevisionRecord{Revision: c.self.Build.SourceRevision, Tree: c.self.Build.SourceTree}
 	return c, ReadoptionRequest{
 		Reason:   "the operator changed the default agent to claude",
 		Operator: RecordedOperator{ID: "operator-1", Provenance: ProvenanceLocalUnverified},
 		Self:     c.self,
 		Provenance: AdoptedBuildProvenance{
 			Kind: ControllerAdopted, BinarySHA256: c.self.Measured,
-			Source: RevisionRecord{Revision: c.self.Build.SourceRevision, Tree: c.self.Build.SourceTree},
+			Source: trusted,
+			// The fixture's successor artifact is a real file in a real
+			// generation directory, which is what the canonical-artifact proof
+			// compares the running executable against.
+			OutputPath: c.record.Successor.ArtifactPath,
 		},
-		Binding:     binding,
-		TrustedMain: RevisionRecord{Revision: c.self.Build.SourceRevision, Tree: c.self.Build.SourceTree},
-		Now:         time.Unix(1700001000, 0).UTC(),
+		Binding:            binding,
+		ObserveTrustedMain: func() (RevisionRecord, error) { return trusted, nil },
+		Now:                time.Unix(1700001000, 0).UTC(),
 	}
 }
 
@@ -229,8 +235,27 @@ func TestAReadoptionRefusesWhatItCannotSanction(t *testing.T) {
 			r.Provenance.BinarySHA256 = strings.Repeat("99", 32)
 		}, "published provenance records"},
 		{"a generation trusted main has moved past", func(_ *choreography, r *ReadoptionRequest) {
-			r.TrustedMain = RevisionRecord{Revision: strings.Repeat("9", 40), Tree: strings.Repeat("8", 40)}
+			r.ObserveTrustedMain = func() (RevisionRecord, error) {
+				return RevisionRecord{Revision: strings.Repeat("9", 40), Tree: strings.Repeat("8", 40)}, nil
+			}
 		}, "re-adopt the generation trusted main names"},
+		{"trusted main that cannot be observed at all", func(_ *choreography, r *ReadoptionRequest) {
+			r.ObserveTrustedMain = func() (RevisionRecord, error) {
+				return RevisionRecord{}, fmt.Errorf("the forge did not answer")
+			}
+		}, "trusted main could not be observed"},
+		{"a binary that is not the published artifact", func(c *choreography, r *ReadoptionRequest) {
+			// Byte-identical, same build, same provenance - a copy.
+			copied := filepath.Join(t.TempDir(), "zenchron-engineering")
+			body, err := os.ReadFile(r.Provenance.OutputPath)
+			if err != nil {
+				c.t.Fatal(err)
+			}
+			if err := os.WriteFile(copied, body, 0o700); err != nil {
+				c.t.Fatal(err)
+			}
+			r.Self.ExecutablePath = copied
+		}, "not the published artifact"},
 		{"a transition still in flight", func(c *choreography, _ *ReadoptionRequest) {
 			if _, err := BeginHandoff(c.predecessorPorts(), c.record); err != nil {
 				c.t.Fatal(err)
@@ -363,5 +388,209 @@ func TestAfterReadoptionTheControllerStatusIsConsistent(t *testing.T) {
 	}
 	if status.Projection.State != ProjectionCurrent {
 		t.Fatalf("projection = %q, want the entrypoint following the new authority", status.Projection.State)
+	}
+}
+
+// THE STABLE PATH IS A LEGITIMATE WAY TO INVOKE THE CANONICAL BINARY.
+//
+// The artifact proof is about file identity, not about the string an operator
+// typed: current/zenchron-engineering resolves to the published artifact and is
+// exactly how they are told to run the controller.
+func TestAReadoptionThroughTheStableEntrypointIsAccepted(t *testing.T) {
+	c, request := readoptionFixture(t)
+	settleLiveRuns(t, c, request.Now)
+	pointer := filepath.Join(c.root, StableEntrypointName)
+	if err := os.Symlink(filepath.Dir(request.Provenance.OutputPath), pointer); err != nil {
+		t.Fatal(err)
+	}
+	request.Self.ExecutablePath = filepath.Join(pointer, filepath.Base(request.Provenance.OutputPath))
+
+	readoption, err := ReadoptController(c.store, readoptionLease(t, c), request)
+	if err != nil {
+		t.Fatalf("an invocation through the stable entrypoint was refused: %v", err)
+	}
+	// AND THE CANONICAL PATH IS WHAT GOVERNS. The authority must not name the
+	// pointer that was used to reach it: a symlink is a projection, and one
+	// that named itself would be a governing root defined in terms of a
+	// repairable convenience.
+	authority, _, err := c.store.CurrentControllerAuthority()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.Artifact != request.Provenance.OutputPath {
+		t.Fatalf("authority names %s, want the published artifact %s", authority.Artifact, request.Provenance.OutputPath)
+	}
+	if readoption.Provenance.OutputPath != request.Provenance.OutputPath {
+		t.Fatal("the record does not name the published artifact")
+	}
+}
+
+// AN INHERITED RUN IS NOT A STRANDED ONE.
+//
+// A run reaches its current controller through succession admissions in its own
+// journal, and each means something only if its transition activated. Without
+// that oracle every legitimately inherited run reads as incompatible and
+// refuses a re-adoption that should proceed - #282's lesson in a new place.
+func TestAReadoptionAcceptsARunInheritedThroughAnActivatedSuccession(t *testing.T) {
+	c, request := readoptionFixture(t)
+	lease := readoptionLease(t, c)
+
+	// THE HANDOVER IS DRIVEN THROUGH THE REAL SERVICE, because the admissions
+	// are the point: the choreography fixture's AdmitSuccession port is a fake
+	// that records a run id, and a run with no admissions in its journal
+	// cannot demonstrate that the oracle is consulted.
+	if _, err := BeginHandoff(c.predecessorPorts(), c.record); err != nil {
+		t.Fatal(err)
+	}
+	service := BindControllerService(c.state, c.root, c.store, c.self, lease, newFakeAdmission())
+	expect, err := Expect(c.stored())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ActivateSuccessor(expect, nil); err != nil {
+		t.Fatalf("HARNESS PRECONDITION: the handover failed: %v", err)
+	}
+
+	runs, err := c.store.Runs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inherited := 0
+	for _, run := range runs {
+		if terminalDisposition(run.Disposition) {
+			continue
+		}
+		events, err := c.store.Events(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Type == EventControllerSuccessionAdmitted {
+				inherited++
+				break
+			}
+		}
+	}
+	if inherited == 0 {
+		t.Fatal("HARNESS PRECONDITION: no live run was inherited through an admission")
+	}
+
+	// THE BINDING BEING RE-ADOPTED IS EXACTLY THE ONE THAT INHERITED THE RUN.
+	//
+	// That is the other legitimate use of this operation: establishing a new
+	// adopted root with the configuration unchanged, after a chain that cannot
+	// continue itself. A CHANGED configuration is a different question, and
+	// such a run is stranded by it - correctly, because the configuration is
+	// part of the binding an admission names.
+	request.Binding = c.record.Successor.Binding
+	if _, err := ReadoptController(c.store, lease, request); err != nil {
+		t.Fatalf("a run inherited through an activated succession blocked the re-adoption: %v", err)
+	}
+}
+
+// AND AN ADMISSION WHOSE TRANSITION NEVER ACTIVATED STILL GRANTS NOTHING.
+func TestAReadoptionIgnoresAnAdmissionWhoseTransitionFailed(t *testing.T) {
+	c, request := readoptionFixture(t)
+	if _, err := BeginHandoff(c.predecessorPorts(), c.record); err != nil {
+		t.Fatal(err)
+	}
+	// The successor acquires, writes its admissions, and then fails back: the
+	// evidence exists in the journal and the occasion never happened.
+	ports := c.successorPorts()
+	ports.ProveControlEndpoint = func() error { return fmt.Errorf("the control endpoint did not answer") }
+	if _, err := CompleteHandoff(ports, c.record.ID); err == nil {
+		t.Fatal("HARNESS PRECONDITION: the transition completed")
+	}
+	if stored := c.stored(); stored.Phase == HandoffActivated {
+		t.Fatalf("HARNESS PRECONDITION: phase %q", stored.Phase)
+	}
+
+	_, err := ReadoptController(c.store, readoptionLease(t, c), request)
+	if err == nil {
+		t.Fatal("a run was carried on the strength of an admission whose transition never activated")
+	}
+	if !strings.Contains(err.Error(), "cannot continue it") && !strings.Contains(err.Error(), "in flight") {
+		t.Fatalf("err = %v, want the run or the transition to block it", err)
+	}
+}
+
+// CURRENCY MOVING DURING THE PREFLIGHT IS CAUGHT, AND NOTHING IS WRITTEN.
+//
+// The preflight replays every live run's journal, which takes as long as it
+// takes. A revision observed before that is a fact about a branch as it was.
+func TestTrustedMainMovingDuringThePreflightWritesNothing(t *testing.T) {
+	c, request := readoptionFixture(t)
+	settleLiveRuns(t, c, request.Now)
+	request.ObserveTrustedMain = func() (RevisionRecord, error) {
+		// By the time currency is proven, somebody has merged.
+		return RevisionRecord{Revision: strings.Repeat("7", 40), Tree: strings.Repeat("6", 40)}, nil
+	}
+
+	if _, err := ReadoptController(c.store, readoptionLease(t, c), request); err == nil {
+		t.Fatal("a generation trusted main had moved past became the governing root")
+	}
+	if _, found, _ := c.store.CurrentControllerAuthority(); found {
+		t.Fatal("authority moved for a re-adoption that was refused")
+	}
+	readoptions, err := c.store.ControllerReadoptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readoptions) != 0 {
+		t.Fatalf("%d re-adoption records were written by a refused operation", len(readoptions))
+	}
+}
+
+// THE CRASH GUARANTEE, WITHOUT THE FORGE.
+//
+// Authority is committed and the process dies before the projection is
+// repaired. Trusted main then moves and governance goes away. Re-running the
+// same binary must still repair the pointer, because there is no adoption
+// decision left to make - it was made, and it is durable.
+func TestAnAlreadyCommittedReadoptionRepairsWithoutObservingTrustedMain(t *testing.T) {
+	c, request := readoptionFixture(t)
+	settleLiveRuns(t, c, request.Now)
+	lease := readoptionLease(t, c)
+	first, err := ReadoptController(c.store, lease, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The process died here: authority durable, no projection.
+	pointer := filepath.Join(c.root, StableEntrypointName)
+	if _, err := os.Lstat(pointer); err == nil {
+		t.Fatal("HARNESS PRECONDITION: the projection already exists")
+	}
+
+	// Main has moved and the forge is unreachable. Neither is asked.
+	observed := 0
+	request.ObserveTrustedMain = func() (RevisionRecord, error) {
+		observed++
+		return RevisionRecord{}, fmt.Errorf("the governance credential is unavailable")
+	}
+	request.Now = request.Now.Add(time.Hour)
+
+	again, err := ReadoptController(c.store, lease, request)
+	if err != nil {
+		t.Fatalf("the committed re-adoption could not be recovered: %v", err)
+	}
+	if observed != 0 {
+		t.Fatal("the recovery path asked the forge, which is exactly what it must not depend on")
+	}
+	if again.ID != first.ID {
+		t.Fatalf("recovery recorded a second authority event: %s then %s", first.ID, again.ID)
+	}
+	if _, err := ActivateReadoptedGeneration(c.store, c.self, c.root); err != nil {
+		t.Fatalf("the projection could not be repaired: %v", err)
+	}
+	target, err := os.Readlink(pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != filepath.Dir(request.Provenance.OutputPath) {
+		t.Fatalf("the stable entrypoint points at %s", target)
+	}
+	readoptions, err := c.store.ControllerReadoptions()
+	if err != nil || len(readoptions) != 1 {
+		t.Fatalf("%d re-adoption records after recovery: %v", len(readoptions), err)
 	}
 }

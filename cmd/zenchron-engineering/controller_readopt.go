@@ -79,14 +79,20 @@ func controllerReadopt(args []string, overrides autonomyOverrides, stdout io.Wri
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	trustedMain, err := built.observeTrustedMain(context.Background(), repository)
-	if err != nil {
-		return runtime.ExitFailed, err
-	}
 
+	// THE OBSERVATION IS A PORT, AND IT IS NOT CALLED HERE.
+	//
+	// The runtime asks for trusted main once, immediately before the authority
+	// commit - and never on the recovery path, where a re-adoption of this
+	// binding already governs and the only thing left is a local projection.
+	// Observing it here would put the forge back in front of that recovery,
+	// which is the window it exists for.
 	readoption, err := runtime.ReadoptController(built.store, lease, runtime.ReadoptionRequest{
 		Reason: reason, Operator: operator, Self: self, Provenance: provenance,
-		Binding: binding, TrustedMain: trustedMain, Now: time.Now().UTC(),
+		Binding: binding, Now: time.Now().UTC(),
+		ObserveTrustedMain: func() (runtime.RevisionRecord, error) {
+			return built.observeTrustedMain(context.Background(), repository)
+		},
 	})
 	if err != nil {
 		return runtime.ExitInvalid, err
