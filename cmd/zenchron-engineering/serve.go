@@ -117,7 +117,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	// there forever - which refuses every later attempt at the same transition
 	// and wedges automatic upgrades permanently. The resolver decides; this
 	// only asks it. See #288.
-	inflight, err := built.resolveInterruptedHandoff()
+	inflight, err := built.resolveInterruptedHandoff(flags.SuccessorOf)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}

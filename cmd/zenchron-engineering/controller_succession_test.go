@@ -331,6 +331,44 @@ func TestASuccessorIsStartedForExactlyOneTransition(t *testing.T) {
 	}
 }
 
+// A SUCCESSOR DOES NOT SETTLE ITS PREDECESSOR'S RECOVERY RECORD, but that
+// correct resolver refusal is also the ordinary path of every upgrade. Its
+// startup banner must name the transition this process is performing rather
+// than training an operator to ignore "refuse" on a healthy successor.
+func TestSuccessorStartupBannerDoesNotCallItsOwnTransitionARefusal(t *testing.T) {
+	resolution := runtime.StartupResolution{Resolution: runtime.HandoffResolution{
+		Action: runtime.HandoffActionRefuse,
+		Record: &runtime.ControllerHandoff{ID: "handoff-1"},
+		Detail: "handoff handoff-1 names another controller as its recovery owner",
+	}}
+
+	got := describeStartupTransition(resolution, "handoff-1")
+	if !strings.Contains(got, "performing transition handoff-1") {
+		t.Fatalf("banner = %q, want this successor's transition", got)
+	}
+	if strings.Contains(got, "refuse") {
+		t.Fatalf("banner = %q, want the resolver refusal kept out of the healthy successor projection", got)
+	}
+	if resolution.Resolution.Action != runtime.HandoffActionRefuse {
+		t.Fatalf("the display changed the resolver action to %q", resolution.Resolution.Action)
+	}
+}
+
+// A matching flag is the only presentation exception. An actual refusal must
+// remain visible when this process was not started for that record.
+func TestStartupBannerKeepsOtherTransitionRefusals(t *testing.T) {
+	resolution := runtime.StartupResolution{Resolution: runtime.HandoffResolution{
+		Action: runtime.HandoffActionRefuse,
+		Record: &runtime.ControllerHandoff{ID: "handoff-somebody-else"},
+		Detail: "handoff handoff-somebody-else names another controller as its recovery owner",
+	}}
+
+	got := describeStartupTransition(resolution, "handoff-1")
+	if !strings.HasPrefix(got, "refuse:") {
+		t.Fatalf("banner = %q, want the real refusal", got)
+	}
+}
+
 // AND THE PROCESS THAT IS ACTUALLY STARTED SEES ONE, which is the thing the
 // live defect was about: a unit test of the helper cannot see what exec was
 // handed.

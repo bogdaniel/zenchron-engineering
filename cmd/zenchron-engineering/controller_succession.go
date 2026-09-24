@@ -648,7 +648,7 @@ func (c *composition) decideSuccession(asked runtime.ControllerHandoff) (runtime
 // says so: every answer the resolver gives is a statement about which
 // generation this process is, and a process that does not know cannot be told.
 // That is reported rather than fatal - an unattested build still serves.
-func (c *composition) resolveInterruptedHandoff() (string, error) {
+func (c *composition) resolveInterruptedHandoff(successorOf string) (string, error) {
 	self, err := controllerSelf()
 	if err != nil {
 		return "not resolved (this controller cannot establish its own identity: " + err.Error() + ")", nil
@@ -665,5 +665,20 @@ func (c *composition) resolveInterruptedHandoff() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolved.Describe(), nil
+	return describeStartupTransition(resolved, successorOf), nil
+}
+
+// describeStartupTransition projects a startup-resolution result onto the
+// serve banner. A successor can legitimately find its own transition while it
+// is still owned for recovery by its predecessor. The resolver correctly
+// refuses to settle that record; the banner must not label the normal
+// successor path as a refusal.
+//
+// This changes presentation only. The resolver result, including its refusal,
+// remains the input to all settlement behaviour.
+func describeStartupTransition(resolved runtime.StartupResolution, successorOf string) string {
+	if successorOf != "" && resolved.Resolution.Record != nil && resolved.Resolution.Record.ID == successorOf {
+		return fmt.Sprintf("performing transition %s (%s)", successorOf, resolved.Resolution.Detail)
+	}
+	return resolved.Describe()
 }
