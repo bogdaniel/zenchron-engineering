@@ -117,6 +117,17 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	// there forever - which refuses every later attempt at the same transition
 	// and wedges automatic upgrades permanently. The resolver decides; this
 	// only asks it. See #288.
+	// A CONFIGURATION THIS CONTROLLER CANNOT CROSS IS REFUSED BEFORE SERVING.
+	// Serving here would mean every upgrade attempt passes the point of no
+	// return and then fails, which is how the incident that created
+	// `controller re-adopt` presented. A successor started by its predecessor
+	// is exempt: it was composed by a process that already checked, and the
+	// transition it is performing is the answer.
+	if flags.SuccessorOf == "" {
+		if err := built.refuseAConfigurationItCannotCross(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	inflight, err := built.resolveInterruptedHandoff(flags.SuccessorOf)
 	if err != nil {
 		return runtime.ExitInvalid, err

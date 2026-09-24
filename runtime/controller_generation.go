@@ -146,7 +146,7 @@ const StableEntrypointName = "current"
 // interface because activation must be able to refuse from a read alone.
 type handoffReader interface {
 	ControllerHandoff(id string) (ControllerHandoff, bool, error)
-	currentActivationReader
+	currentAuthorityReader
 }
 
 // ActivateControllerGeneration points the stable entrypoint at the running
@@ -290,4 +290,47 @@ func DescribeControllerGeneration(self ControllerSelfRecord, controllerRoot stri
 		}
 	}
 	return status
+}
+
+// ActivateReadoptedGeneration points the stable entrypoint at the generation an
+// operator re-adopted.
+//
+// It is the same projection repair ActivateControllerGeneration performs, with
+// the same laws and the same order, asking the authority subject instead of a
+// handoff: authority did not come from one, and there is no record to look the
+// artifact up in.
+//
+// IT IS IDEMPOTENT, which is what makes a crash between the authority commit
+// and this call recoverable. Re-running the re-adoption reaches here again and
+// replaces a pointer that may already be correct with the same pointer.
+func ActivateReadoptedGeneration(store currentAuthorityReader, self ControllerSelfRecord, controllerRoot string) (string, error) {
+	authority, found, err := store.CurrentControllerAuthority()
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("no controller authority governs this state directory, and the stable entrypoint follows authority")
+	}
+	if authority.Kind != AuthorityOperatorReadoption {
+		return "", fmt.Errorf("authority came from %s %s; the projection for an activated transition is repaired through its record",
+			authority.Kind, authority.Ref)
+	}
+	// AND IT MUST BE THIS PROCESS. A pointer repair is the one place a
+	// generation says "I am what governs", so it proves it rather than
+	// asserting it.
+	if err := self.ProvesGeneration(authority.Binding); err != nil {
+		return "", fmt.Errorf("this process is not the re-adopted generation: %w", err)
+	}
+	artifact := authority.Artifact
+	if artifact == "" {
+		return "", fmt.Errorf("re-adoption %s records no artifact to point at", authority.Ref)
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		return "", fmt.Errorf("the re-adopted artifact %s is not readable: %w", artifact, err)
+	}
+	pointer := filepath.Join(controllerRoot, StableEntrypointName)
+	if err := replaceSymlinkAtomically(filepath.Dir(artifact), pointer); err != nil {
+		return "", err
+	}
+	return filepath.Join(pointer, filepath.Base(artifact)), nil
 }
