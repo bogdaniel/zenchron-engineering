@@ -191,6 +191,9 @@ func (s *ControllerService) ActivateSuccessor(expect ActivationExpectation, prov
 		proveEndpoint = func() error { return nil }
 	}
 
+	// releaseRequested records that the protocol asked for ownership back. See
+	// ReleaseOwnership below for why it cannot simply be given back there.
+	releaseRequested := false
 	ports := HandoffPorts{
 		Store: s.store, Self: s.self, ControllerRoot: s.controllerRoot, Now: s.now,
 		// THE ROLE IS NOT REACQUIRED. This process already holds it and has
@@ -201,7 +204,26 @@ func (s *ControllerService) ActivateSuccessor(expect ActivationExpectation, prov
 		AcquireOwnership: func() error {
 			return s.lease.WithAuthority(func() error { return nil })
 		},
-		ReleaseOwnership: func() error { return s.lease.Release() },
+		// THE RELEASE CANNOT RUN INSIDE THE AUTHORITY SECTION.
+		//
+		// WithAuthority holds the lease's read side for the whole commit and
+		// Release takes its write side, so a failure path that releases from
+		// inside the section blocks on itself. Go reports that as
+		// "all goroutines are asleep - deadlock!" and kills the process - after
+		// the point of no return, with the predecessor already gone, which is
+		// the worst moment this system has.
+		//
+		// It was invisible for as long as it existed because every test of the
+		// failure path supplied a FAKE ReleaseOwnership that cleared a string.
+		// The port is the seam, so the fake was reasonable; what it could not
+		// exercise is the one implementation that had to serialise against the
+		// section it was called from.
+		//
+		// The protocol's failure law is unchanged - a successor that cannot
+		// prove what it was handed gives ownership back - and WHERE that
+		// happens is this composition's business. It happens as the next
+		// statement after the section, with nothing in between.
+		ReleaseOwnership: func() error { releaseRequested = true; return nil },
 		AdmitSuccession: func(runID string, decision ControllerSuccessionDecision) error {
 			return s.admitSuccession(runID, decision)
 		},
@@ -216,6 +238,14 @@ func (s *ControllerService) ActivateSuccessor(expect ActivationExpectation, prov
 		return nil
 	}); err != nil {
 		return stored, err
+	}
+	if releaseRequested {
+		if releaseErr := s.lease.Release(); releaseErr != nil {
+			if completion == nil {
+				return activated, fmt.Errorf("ownership could not be released: %w", releaseErr)
+			}
+			return activated, fmt.Errorf("%w (and ownership could not be released: %v)", completion, releaseErr)
+		}
 	}
 	return activated, completion
 }

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -351,5 +352,82 @@ func TestServiceCannotOpenWithoutTheRole(t *testing.T) {
 	}
 	if service.AdmittingWork() {
 		t.Fatal("service opened without the controller role")
+	}
+}
+
+// A FAIL-BACK MUST NOT DEADLOCK THE PROCESS THAT PERFORMS IT.
+//
+// CompleteHandoff runs inside the lease's authority section, which holds its
+// read side; giving ownership back takes the write side. Releasing from inside
+// therefore blocked on itself, Go reported "all goroutines are asleep -
+// deadlock!", and the process died - after the point of no return, with the
+// predecessor already gone and the stable entrypoint still naming it.
+//
+// It survived every existing test of this path because they supply a FAKE
+// ReleaseOwnership that clears a string. This one drives a REAL
+// ControllerRoleLease through ControllerService, which is the only arrangement
+// where the two sides of that lock meet.
+func TestAFailedRevalidationReleasesTheRealRoleWithoutDeadlocking(t *testing.T) {
+	c := newChoreography(t)
+	if _, err := BeginHandoff(c.predecessorPorts(), c.record); err != nil {
+		t.Fatal(err)
+	}
+	// The durable head moves after the preflight decided about it, which is
+	// what revalidation exists to catch - and it catches it AFTER ownership
+	// has transferred, which is the case that used to be fatal.
+	runs, err := c.store.Runs()
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("HARNESS PRECONDITION: the fixture has no live run: %v", err)
+	}
+	before, err := c.store.Events(runs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.fixture.runtime.Reconcile(context.Background(), runs[0].ID); err != nil {
+		t.Fatalf("HARNESS PRECONDITION: %v", err)
+	}
+	after, err := c.store.Events(runs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) == len(before) {
+		t.Fatal("HARNESS PRECONDITION: the durable head did not move, so revalidation has nothing to refuse")
+	}
+
+	lease, err := AcquireControllerRole(c.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Release() }()
+	service := BindControllerService(c.state, c.root, c.store, c.self, lease, newFakeAdmission())
+	stored := c.stored()
+	expect, err := Expect(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type outcome struct{ err error }
+	done := make(chan outcome, 1)
+	go func() {
+		_, activateErr := service.ActivateSuccessor(expect, nil)
+		done <- outcome{activateErr}
+	}()
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatal("a successor whose revalidation failed reported the transition activated")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the fail-back deadlocked: releasing the role from inside the authority section blocks on itself")
+	}
+
+	// AND THE ROLE IS ACTUALLY GONE. The protocol's failure law is that a
+	// successor which cannot prove what it was handed gives ownership back, and
+	// moving where that happens must not quietly stop it happening.
+	if err := lease.WithAuthority(func() error { return nil }); err == nil {
+		t.Fatal("the failed successor is still holding the controller role")
+	}
+	if settled := c.stored(); settled.Phase != HandoffFailed {
+		t.Fatalf("phase = %q, want the transition settled back to the predecessor", settled.Phase)
 	}
 }
