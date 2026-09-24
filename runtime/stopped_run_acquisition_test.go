@@ -20,7 +20,9 @@ func TestSQLiteAcquisitionMatchesTerminalDisposition(t *testing.T) {
 			if err := writer.PutRun(run); err != nil {
 				t.Fatal(err)
 			}
-			now := time.Unix(100, 0)
+			// JSON decodes UTC timestamps with time.UTC; use the same location
+			// so the full-operation comparison also matches after persistence.
+			now := time.Unix(100, 0).UTC()
 			scheduler := Scheduler{Store: acquirer, Clock: &fakeClock{now: now}, Owner: "driver", LeaseDuration: time.Minute, Liveness: alwaysAlive()}
 			planned := planFor(t, scheduler, run.ID, 1)
 			op, revision, found, err := acquirer.Operation(planned.ID)
