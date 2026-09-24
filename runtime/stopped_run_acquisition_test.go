@@ -330,6 +330,35 @@ func TestAStaleSettleNeverOverwritesAStopInFlight(t *testing.T) {
 // event count closely enough to notice. That is the whole gap: the guard is
 // real, the mutation is observable, and until now nothing observed it.
 func TestRecordDispositionPreReadGuardSkipsAnAlreadyCancelledRun(t *testing.T) {
+	// POSITIVE CONTROL. The exact same call, on a run nobody stopped, must
+	// append exactly one event. Without this half, a recordDisposition that
+	// appended nothing under every circumstance would pass the guard
+	// assertion below for the wrong reason - the test would pin the absence
+	// of an event rather than the guard that is supposed to cause it.
+	control := newPhase8Fixture(t)
+	controlRunID := control.start()
+	if _, err := control.runtime.Reconcile(context.Background(), controlRunID); err != nil {
+		t.Fatal(err)
+	}
+	controlState, err := control.runtime.load(controlRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlBefore, err := control.store.Events(controlRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.runtime.recordDisposition(controlState, Waiting, "stale_after_stop"); err != nil {
+		t.Fatal(err)
+	}
+	controlAfter, err := control.store.Events(controlRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(controlAfter) - len(controlBefore); got != 1 {
+		t.Fatalf("recordDisposition appended %d event(s) on a run nobody stopped; want exactly 1", got)
+	}
+
 	f := newPhase8Fixture(t)
 	runID := f.start()
 	if _, err := f.runtime.Reconcile(context.Background(), runID); err != nil {
