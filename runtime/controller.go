@@ -978,13 +978,18 @@ type StatusReport struct {
 	Goal          string             `json:"goal"`
 	Source        SourceIdentity     `json:"source"`
 	Controller    ControllerIdentity `json:"controller"`
-	Phase         Phase              `json:"phase"`
-	Disposition   Disposition        `json:"disposition"`
-	Reason        string             `json:"reason,omitempty"`
-	Base          Ref                `json:"base"`
-	Candidate     Candidate          `json:"candidate"`
-	Contract      Ref                `json:"contract"`
-	Operation     *OperationStatus   `json:"operation,omitempty"`
+	// Worker is which execution agent owns this run, from the journalled
+	// binding rather than from today's configuration. It is here because an
+	// operator reading one run should not have to switch to the fleet view to
+	// learn who is doing the work.
+	Worker      WorkerIdentity   `json:"worker"`
+	Phase       Phase            `json:"phase"`
+	Disposition Disposition      `json:"disposition"`
+	Reason      string           `json:"reason,omitempty"`
+	Base        Ref              `json:"base"`
+	Candidate   Candidate        `json:"candidate"`
+	Contract    Ref              `json:"contract"`
+	Operation   *OperationStatus `json:"operation,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	Now       time.Time `json:"now"`
@@ -1026,6 +1031,24 @@ type StatusReport struct {
 	StateSHA256              string     `json:"state_sha256"`
 }
 
+// WorkerIdentity is the execution agent a run is bound to.
+//
+// MODEL IS WHAT THE PROVIDER EXPOSES, and empty is a truthful answer rather
+// than a gap to fill in. An agent whose CLI selects its own model does not
+// report one, and inventing a plausible name - or quietly omitting the field
+// so a reader assumes the default - would claim knowledge nobody has. The
+// renderer prints "unknown" for it, which is the same discipline `autonomy
+// agents` already applies to an unobservable authentication mode.
+type WorkerIdentity struct {
+	Agent        string    `json:"agent,omitempty"`
+	ProviderKind string    `json:"provider_kind,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	TrustMode    TrustMode `json:"trust_mode,omitempty"`
+	// Workspace is the runtime-owned candidate clone, so an operator can open
+	// what the worker is editing without going through the database.
+	Workspace string `json:"workspace,omitempty"`
+}
+
 // Status replays the run and reports it. It performs no network call and no
 // side effect, so it is safe to read a run another process is driving.
 func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
@@ -1046,6 +1069,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ConfigDigest: r.deps.ConfigDigest,
 			Changed:      state.controllerChanged,
 		},
+		Worker:                state.workerIdentity(r.deps.StateDir),
 		Phase:                 state.phase(),
 		Disposition:           state.snapshot.Disposition,
 		Reason:                state.snapshot.Reason,

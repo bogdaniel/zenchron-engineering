@@ -778,7 +778,10 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	if fleet.SupervisorRunning {
 		supervisor = "running"
 	}
-	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d active\n\n", supervisor, fleet.Active, fleet.Capacity)
+	// The ceiling bounds workers, not runs, so the two counts are printed as
+	// the two facts they are rather than as one ratio that is true of neither.
+	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal\n\n", fleet.Active)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",
@@ -828,8 +831,19 @@ func issueLabel(run runtime.RunSummary) string {
 	return fmt.Sprintf("#%d", run.Issue)
 }
 
+// stateLabel is the durable disposition plus what is happening under it.
+//
+// THE OPERATION IS SHOWN WHEN IT IS RUNNING, whatever the disposition says. A
+// run parked on review keeps the disposition `waiting` while its worker
+// answers that review, and a row that showed only the disposition described
+// eight minutes of a provider working as an idle run. The disposition is not
+// rewritten for the display; the display stopped omitting the other half.
+//
+// It also stops claiming the opposite. The previous rule appended the
+// operation for any `active` run, including one whose last operation had
+// already finished.
 func stateLabel(run runtime.RunSummary) string {
-	if run.Disposition == runtime.Active && run.Operation != "" {
+	if run.Executing && run.Operation != "" {
 		return string(run.Disposition) + ":" + run.Operation
 	}
 	return string(run.Disposition)
