@@ -292,6 +292,47 @@ SELECT 'current', id, updated_unix_nano, document
  WHERE phase = 'activated'
  ORDER BY updated_unix_nano DESC, id ASC
  LIMIT 1;
+`, `
+-- WHAT GOVERNS NOW, WITHOUT ASSUMING A HANDOFF PUT IT THERE.
+--
+-- controller_current_activation can only name an activated transition, and for
+-- as long as that was the only way authority could be established it was the
+-- whole truth. It is not: a controller-effective configuration change cannot
+-- cross an ordinary succession - the successor binding differs in exactly the
+-- member evaluateConfiguration requires to be unchanged - so a state directory
+-- whose configuration moved had no way to establish a new governing root. The
+-- old activation stayed current, every upgrade was correctly refused, and the
+-- directory sat in INVARIANT_VIOLATION with no in-protocol way out.
+--
+-- So present authority becomes its own subject, and it records HOW it was
+-- established. An operator re-adoption is not an activation and is never
+-- written as one: no handoff is fabricated, and controller_handoffs remains
+-- exactly the history it was.
+CREATE TABLE controller_readoptions (
+	id                 TEXT PRIMARY KEY,
+	recorded_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+
+CREATE TABLE controller_current_authority (
+	id                TEXT PRIMARY KEY CHECK (id = 'current'),
+	kind              TEXT NOT NULL,
+	ref               TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+
+-- The existing pointer is RESTATED, not reinterpreted. Whatever activation
+-- governed a moment before this migration governs a moment after it, under the
+-- name the new subject uses for it, carrying the binding that activation
+-- already named as its successor.
+INSERT INTO controller_current_authority (id, kind, ref, updated_unix_nano, document)
+SELECT 'current', 'handoff_activation', handoff_id, updated_unix_nano,
+       json_object('kind', 'handoff_activation', 'ref', handoff_id,
+                   'binding', json(json_extract(document, '$.successor.binding')),
+                   'artifact', json_extract(document, '$.successor.artifact_path'))
+  FROM controller_current_activation
+ WHERE id = 'current';
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
