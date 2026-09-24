@@ -645,6 +645,16 @@ func attemptNumbers(attempts []int) string {
 	return strings.Join(parts, ",")
 }
 
+// orUnknown renders a fact the provider does not expose as unknown rather than
+// as absent. A missing line reads as "the default", which is a claim; "unknown"
+// is what is actually true of a CLI that selects its own model.
+func orUnknown(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return value
+}
+
 // renderStatusText is the human projection over the SAME structure the JSON
 // carries. It adds no field and hides no refusal.
 func renderStatusText(stdout io.Writer, view statusView) error {
@@ -666,6 +676,18 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		build.Kind, build.Version, short(build.SourceRevision), short(build.SourceTree), short(build.BinarySHA256)))
 	line("controller config", fmt.Sprintf("global=%s repository=%s",
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
+	// WHO IS DOING THE WORK, in the view an operator opens to ask about one
+	// run. The JSON has carried the binding for a while and the text did not,
+	// so answering "which worker owns this" meant switching output formats.
+	if worker := view.Worker; worker.Agent != "" {
+		line("agent", worker.Agent)
+		line("provider", worker.ProviderKind)
+		line("model", orUnknown(worker.Model))
+		line("trust", worker.TrustMode)
+	}
+	if view.Worker.Workspace != "" {
+		line("workspace", view.Worker.Workspace)
+	}
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
 	line("phase", view.Phase)
 	line("active consumed", view.ActiveElapsed)

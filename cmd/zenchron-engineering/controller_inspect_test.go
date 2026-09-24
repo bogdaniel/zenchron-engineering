@@ -153,3 +153,20 @@ func TestTheControllerIdentityDoesNotMoveWithTheBuild(t *testing.T) {
 		t.Fatalf("the controller identity %q still carries a build version", first)
 	}
 }
+
+// A FACT THE PROVIDER DOES NOT EXPOSE IS UNKNOWN, NOT ABSENT.
+//
+// Codex CLI selects its own model and reports none; Claude Code reports
+// "sonnet". Both are truthful. Omitting the line for the first would let a
+// reader assume a default, which is a claim nobody made.
+func TestAnUnexposedModelRendersAsUnknown(t *testing.T) {
+	if got := orUnknown(""); got != "unknown" {
+		t.Fatalf("model = %q, want %q", got, "unknown")
+	}
+	if got := orUnknown("   "); got != "unknown" {
+		t.Fatalf("whitespace is not a model: %q", got)
+	}
+	if got := orUnknown("sonnet"); got != "sonnet" {
+		t.Fatalf("model = %q, want what the provider reported", got)
+	}
+}
