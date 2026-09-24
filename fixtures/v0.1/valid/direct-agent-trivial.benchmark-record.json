@@ -1,0 +1,62 @@
+{
+  "schema_version": "0.1",
+  "id": "bench-direct-agent-trivial-001",
+  "benchmark": "zenchron-leverage",
+  "corpus_version": "leverage-corpus-v1",
+  "mode": "direct_agent",
+  "recorded_at": "2026-09-20T09:00:00Z",
+  "case": {
+    "id": "trivial-docs-fixture-case",
+    "class": "trivial/documentation",
+    "source": null,
+    "acceptance": "the change is a fixture, not a real observation"
+  },
+  "subject": {
+    "repository": "bogdaniel/zenchron-engineering",
+    "base_revision": "0000000000000000000000000000000000000a",
+    "candidate_revision": "0000000000000000000000000000000000000b",
+    "agents": [
+      {
+        "stage_id": null,
+        "role": "implementer",
+        "agent_id": "claude",
+        "provider_kind": "claude_code",
+        "vendor_family": "anthropic",
+        "model": null,
+        "trust_mode": null
+      }
+    ]
+  },
+  "measured": {
+    "active_operator_minutes": 14,
+    "relay_actions": 3,
+    "workaround_interventions": 0,
+    "authority_interventions": 1,
+    "task_selection_minutes": 2,
+    "review_minutes": 5,
+    "provider_wait_minutes": 6,
+    "wall_seconds_total": 1200,
+    "cost": {
+      "known": false,
+      "currency": null,
+      "amount": null,
+      "reason": "subscription CLI reports no per-task cost"
+    }
+  },
+  "outcome": {
+    "result": "accepted",
+    "artifact": null,
+    "review_cycles": 1,
+    "first_pass_accepted": true,
+    "remediation_count": 0,
+    "escaped_defects": 0,
+    "false_blocks": 0,
+    "authority_precision": null,
+    "authority_recall": null,
+    "ground_truth_available": false
+  },
+  "interpretation": {
+    "leverage_claim": "none",
+    "note": "fixture record used only to validate the benchmark-record schema"
+  }
+}

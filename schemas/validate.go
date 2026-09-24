@@ -17,6 +17,12 @@ const (
 	EngineeringWorkContract = "engineering-work-contract"
 	EvidenceBundle          = "evidence-bundle"
 	ProjectModel            = "project-model"
+	// BenchmarkRecord is not a kernel contract: it never flows through policy,
+	// evidence or authority. It is a measurement artifact #66 defines, and it
+	// follows this same discipline for the reason the planning artifacts do -
+	// one schema, valid and invalid fixtures, one validation path - rather than
+	// inventing a second metrics model beside this one.
+	BenchmarkRecord = "benchmark-record"
 	// The M2 planning artifacts. They follow exactly the same discipline as
 	// the kernel contracts above - one schema, valid and invalid fixtures, one
 	// validation path - because a second validation framework beside this one
@@ -64,6 +70,7 @@ func mustCompile() map[string]*jsonschema.Schema {
 		InstructionPack,
 		PlanRevisionProposal,
 		PlanningVocabulary,
+		BenchmarkRecord,
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()

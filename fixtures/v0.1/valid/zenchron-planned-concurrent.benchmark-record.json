@@ -1,0 +1,82 @@
+{
+  "schema_version": "0.1",
+  "id": "bench-zenchron-planned-concurrent-001",
+  "benchmark": "zenchron-leverage",
+  "corpus_version": "leverage-corpus-v1",
+  "mode": "zenchron_planned",
+  "recorded_at": "2026-09-21T10:30:00Z",
+  "case": {
+    "id": "concurrent-cohort-fixture-case",
+    "class": "multi-task concurrent cohort",
+    "source": "https://github.com/bogdaniel/zenchron-engineering/issues/66",
+    "acceptance": "two unrelated tasks run to acceptance concurrently under one operator"
+  },
+  "subject": {
+    "repository": "bogdaniel/zenchron-engineering",
+    "base_revision": "1111111111111111111111111111111111111a",
+    "candidate_revision": "1111111111111111111111111111111111111b",
+    "controller": {
+      "kind": "adopted",
+      "note": "fixture only"
+    },
+    "agents": [
+      {
+        "stage_id": "implementation",
+        "role": "implementer",
+        "agent_id": "codex",
+        "provider_kind": "codex_cli",
+        "vendor_family": "openai",
+        "model": null,
+        "trust_mode": null
+      },
+      {
+        "stage_id": "review",
+        "role": "reviewer",
+        "agent_id": "claude",
+        "provider_kind": "claude_code",
+        "vendor_family": "anthropic",
+        "model": null,
+        "trust_mode": null
+      }
+    ]
+  },
+  "measured": {
+    "active_operator_minutes": 9,
+    "relay_actions": 0,
+    "workaround_interventions": 0,
+    "authority_interventions": 1,
+    "task_selection_minutes": 1,
+    "review_minutes": 6,
+    "provider_wait_minutes": 40,
+    "wall_seconds_total": 3600,
+    "cost": {
+      "known": true,
+      "currency": "USD",
+      "amount": 0.42,
+      "reason": "metered API usage reported by the provider"
+    }
+  },
+  "outcome": {
+    "result": "accepted_for_review",
+    "artifact": "https://github.com/bogdaniel/zenchron-engineering/pull/1",
+    "review_cycles": 1,
+    "first_pass_accepted": true,
+    "remediation_count": 0,
+    "escaped_defects": 0,
+    "false_blocks": 0,
+    "authority_precision": 1.0,
+    "authority_recall": 1.0,
+    "ground_truth_available": true
+  },
+  "concurrency": {
+    "concurrent_with": ["other-fixture-case-id"],
+    "overlap_wall_seconds": 2400,
+    "human_attention_during_overlap_minutes": 3,
+    "cross_task_blocking": false,
+    "manual_message_shuttling": false
+  },
+  "interpretation": {
+    "leverage_claim": "none",
+    "note": "fixture record used only to validate the benchmark-record schema"
+  }
+}
