@@ -198,8 +198,13 @@ func TestFeedbackDeliveryIsBoundedAndOnce(t *testing.T) {
 // feedbackFixture drives a run to publication and returns it with the forge
 // scripted for feedback.
 func feedbackFixture(t *testing.T) (*phase8Fixture, string) {
+	return feedbackFixtureWithWallLimit(t, time.Hour)
+}
+
+func feedbackFixtureWithWallLimit(t *testing.T, limit time.Duration) (*phase8Fixture, string) {
 	t.Helper()
 	fixture := newPhase8Fixture(t)
+	fixture.deps.Budgets.WallLimit = limit
 	fixture.deps.Feedback = FeedbackPolicy{SelfLogins: []string{"zenchron-runtime"}}
 	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	fixture.runtime = fixture.newRuntime(fixture.deps)

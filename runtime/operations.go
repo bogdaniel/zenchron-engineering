@@ -723,6 +723,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// first stand in for the second.
 	ctx = withProviderProgressRecorder(ctx,
 		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, key) })
+	// A continuation is bounded independently of the original operation.
+	// The absolute deadline also makes a spent (zero) allowance fail closed.
+	if _, granted := state.reviewContinuationGrant(); granted {
+		now := r.deps.Clock.Now()
+		deadline := now.Add(state.reviewContinuationRemaining(now))
+		if operation.Deadline == nil || deadline.Before(*operation.Deadline) {
+			operation.Deadline = &deadline
+		}
+	}
 	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
 		ReviewerResultPath: reviewerResultPath,
 		ScratchDir:         scratchDir,
@@ -846,6 +855,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// candidate - so it is asked here, in the same predicate, rather than in a
 	// cancellation check of its own. See executionAuthorityRevoked.
 	revoked, revokeErr := r.executionAuthorityRevoked(operation)
+	if _, granted := state.reviewContinuationGrant(); granted {
+		now := r.deps.Clock.Now()
+		if state.reviewContinuationRemaining(now) <= 0 || (operation.Deadline != nil && !now.Before(*operation.Deadline)) {
+			revoked = FailureExecutionDeadlineExceeded
+		}
+	}
 	if revokeErr != nil {
 		return failed(revokeErr)
 	}
@@ -988,7 +1003,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// the second: one blank README line, produced after eight failed
 			// patch attempts and an exhausted iteration budget, was committed
 			// and sent to assurance as if the objective had been addressed.
-			Checkpoint: record.Mutated && continuationEligible(execErr),
+			Checkpoint: record.Mutated && (continuationEligible(execErr) ||
+				(class == FailureProviderNoProgress && len(state.outstandingReviewKeys()) > 0)),
 		}
 		// A producer that left real work behind did its bounded job, so the
 		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
@@ -1215,10 +1231,16 @@ func (s *runState) findings() []Finding {
 // authority is wait-aware because the counter it comes from only advances while
 // an attempt is actually executing.
 func executionWallBound(state *runState, operation RunOperation) time.Duration {
-	if operation.WallBudget <= 0 {
-		return state.budgets().WallLimit
+	bound := state.budgets().WallLimit
+	if operation.WallBudget > 0 {
+		bound = OperationRemaining(operation, state.rt.deps.Clock.Now())
 	}
-	return OperationRemaining(operation, state.rt.deps.Clock.Now())
+	if _, granted := state.reviewContinuationGrant(); granted {
+		if remaining := state.reviewContinuationRemaining(state.rt.deps.Clock.Now()); remaining < bound {
+			bound = remaining
+		}
+	}
+	return bound
 }
 
 // assuranceFinding renders ONE failed verification for the producer that has to

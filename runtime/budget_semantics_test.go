@@ -404,7 +404,7 @@ func TestOperationElapsedRetainsFinishedConsumption(t *testing.T) {
 	}
 }
 
-func TestAcceptedReviewBudgetExhaustionIsResumable(t *testing.T) {
+func TestAcceptedReviewBudgetExhaustionUsesPersistedContinuation(t *testing.T) {
 	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	for _, consumed := range []bool{false, true} {
 		t.Run(fmt.Sprint("consumed=", consumed), func(t *testing.T) {
@@ -428,9 +428,15 @@ func TestAcceptedReviewBudgetExhaustionIsResumable(t *testing.T) {
 			if state.feedbackState().Consumed["review:123"] != consumed {
 				t.Fatal("budget wait changed delivery identity")
 			}
+			state.run.Budgets = &RunBudgets{WallLimit: 30 * time.Minute}
 			state.rt.deps.Budgets.WallLimit = time.Hour
+			if _, reason := state.conditions(); reason != ReasonReviewBudgetExhausted {
+				t.Fatal("live configuration widened the persisted budget")
+			}
+			grant, _ := json.Marshal(ReviewContinuationGrant{ActiveBaseline: 35 * time.Minute, Allowance: 30 * time.Minute, FeedbackDigest: "digest"})
+			state.events = append(state.events, EngineeringEvent{Type: EventReviewContinuationGranted, OccurredAt: clock.at, Payload: grant})
 			if _, reason := state.conditions(); reason == ReasonReviewBudgetExhausted {
-				t.Fatal("additional budget did not release the wait")
+				t.Fatal("durable continuation did not release the wait")
 			}
 		})
 	}

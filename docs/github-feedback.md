@@ -391,12 +391,21 @@ It cannot:
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
 
-Accepted review work that exhausts the active wall budget parks in
-`waiting/review_wall_budget_exhausted`. This includes feedback already consumed
-by a worker: delivery is not proof that remediation was published. The run and
-candidate workspace remain available, and feedback retains its original keys
-and delivery records. Runtime status exposes this wait; it does not post a
-forge comment. An operator must raise the effective wall budget above consumed
-active time and resume the same run. Idle time in this wait does not consume
-that grant. No budget is reset automatically and other attempt bounds still
-apply. Runs without admitted feedback retain the terminal wall-budget policy.
+Accepted review work that exhausts the original active wall budget receives
+one journaled continuation envelope for the same run and candidate workspace.
+The allowance is the smaller of the effective original wall limit and 30 minutes,
+measured from the grant's active-time baseline. This does not widen the persisted
+creation budget. Restarting or admitting more comments cannot renew the grant;
+all accepted reviews share it. Other attempt bounds continue to apply.
+
+Delivery does not discharge the obligation. Consumed feedback remains outstanding
+through interrupted work and checkpoints until successful governed PR publication.
+A completed no-change response can discharge its delivered feedback against the
+same already-published subject.
+The original feedback identities and delivery records remain available throughout.
+Historical, discharged feedback does not exempt unrelated work from wall limits.
+
+If the continuation is also exhausted, the run retains its workspace and obligation
+in `waiting/review_wall_budget_exhausted`, visible through runtime status. It does
+not automatically post a forge comment or grant further compute. Raising live
+configuration does not override a persisted creation budget or replenish this grant.

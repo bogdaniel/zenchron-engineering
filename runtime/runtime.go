@@ -83,7 +83,8 @@ const (
 	// an exact invocation. It is a separate event from admission so a crash
 	// between observing a review and acting on it can neither lose it nor
 	// deliver it twice.
-	EventFeedbackConsumed = "feedback.consumed"
+	EventFeedbackConsumed          = "feedback.consumed"
+	EventReviewContinuationGranted = "review.continuation_granted"
 	// EventFeedbackPublicationIdentity binds the account the runtime publishes
 	// as. The self-loop guard refuses feedback authored by that identity, so
 	// the binding has to be durable: a credential rotated while `serve` is
@@ -231,7 +232,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
+var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
