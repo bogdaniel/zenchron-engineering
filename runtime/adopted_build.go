@@ -931,6 +931,13 @@ func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec Adop
 	probe.OperationID = "adopted-build-toolchain-" + spec.Revision
 	out, err := probe.run(ctx, args)
 	if err != nil {
+		// THE SAME LAW AS THE BUILD ITSELF. This phase's failure determines the
+		// sandbox result too - an image that cannot run, a platform mismatch, a
+		// daemon that refused - and "exit status 125" tells an operator none of
+		// it. There is no run journal to fall back on here either.
+		if detail := sanitizedDetail(compilerFailureDetail(out)); detail != "" {
+			return "", fmt.Errorf("the pinned build toolchain could not be identified: %w: %s", err, detail)
+		}
 		return "", fmt.Errorf("the pinned build toolchain could not be identified: %w", err)
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil

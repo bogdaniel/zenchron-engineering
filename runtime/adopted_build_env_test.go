@@ -190,3 +190,24 @@ func TestRunAdoptedBuildSurfacesCompilerStderr(t *testing.T) {
 		t.Fatalf("the underlying process error was dropped from the refusal: %v", err)
 	}
 }
+
+// EVERY DOCKER PHASE WHOSE FAILURE DETERMINES THE RESULT, not only the build.
+//
+// The toolchain probe runs the same pinned image and its failure refuses the
+// adopted build just as finally: an image that cannot run, a platform
+// mismatch, a daemon that said no. Reporting "exit status 125" and discarding
+// what the daemon actually said is the defect this issue is about, one call up.
+func TestTheToolchainProbePreservesItsDiagnostic(t *testing.T) {
+	detail := compilerFailureDetail(CommandOutput{
+		Stderr: []byte("docker: no matching manifest for linux/arm64 in the manifest list entries\n"),
+	})
+	if !strings.Contains(detail, "no matching manifest") {
+		t.Fatalf("the probe's own account was discarded: %q", detail)
+	}
+	if got := compilerFailureDetail(CommandOutput{Stdout: []byte("go version go1.25.14\n")}); got != "go version go1.25.14" {
+		t.Fatalf("stdout is not used when stderr is silent: %q", got)
+	}
+	if got := compilerFailureDetail(CommandOutput{}); got != "" {
+		t.Fatalf("a sandbox that produced nothing invented %q", got)
+	}
+}
