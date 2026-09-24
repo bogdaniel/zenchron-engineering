@@ -240,6 +240,19 @@ const adoptedBuildSchemaVersion = "adopted-build/1"
 func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, deps AdoptedBuildDeps, self BuilderRecord) (AdoptedBuildProvenance, error) {
 	deps = deps.withDefaults()
 	var out AdoptedBuildProvenance
+	// The operator-supplied output root is resolved to an absolute host path
+	// HERE, once, at the boundary where the request is accepted - not at each
+	// site that later reads request.OutputRoot. A relative root is only
+	// meaningful relative to this process's working directory; the staging
+	// directory built from it is handed to Docker as a bind-mount source, and
+	// the daemon does not share that working directory. Resolving once here
+	// means a later mount cannot reintroduce the defect by reading the
+	// unresolved field.
+	resolvedOutput, err := filepath.Abs(request.OutputRoot)
+	if err != nil {
+		return out, fmt.Errorf("the output root %q could not be resolved to an absolute path: %w", request.OutputRoot, err)
+	}
+	request.OutputRoot = resolvedOutput
 	// The production dependencies have no honest default: guessing a forge or
 	// a ref observer would be inventing the trust root. Missing ones are a
 	// typed refusal, never a panic.
