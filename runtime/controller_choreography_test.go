@@ -13,7 +13,10 @@ import (
 // observable and every step interruptible. Two real processes cannot be crashed
 // deterministically between two durable writes; this can.
 type choreography struct {
-	t          *testing.T
+	t *testing.T
+	// fixture is retained so a test can move the durable head the preflight
+	// decided about, which is what revalidation exists to catch.
+	fixture    *phase8Fixture
 	store      *SQLiteOperationStore
 	state      string
 	root       string
@@ -134,7 +137,7 @@ func newChoreography(t *testing.T) *choreography {
 		t.Fatalf("preflight refused: %v", record.Blockers())
 	}
 	return &choreography{
-		t: t, store: fixture.store, state: fixture.stateDir, root: root, record: record, owner: "predecessor",
+		t: t, fixture: fixture, store: fixture.store, state: fixture.stateDir, root: root, record: record, owner: "predecessor",
 		self:       ControllerSelfRecord{Build: successorBuild, ExecutablePath: successor.ArtifactPath, Measured: successorBuild.BinarySHA256},
 		predecesor: ControllerSelfRecord{Build: predecessorBuild, ExecutablePath: predecessor.ArtifactPath, Measured: predecessorBuild.BinarySHA256},
 	}

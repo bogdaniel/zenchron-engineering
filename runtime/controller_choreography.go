@@ -311,7 +311,34 @@ func BeginHandoff(ports HandoffPorts, prepared ControllerHandoff) (ControllerHan
 		return prepared, err
 	}
 	if !wrote {
-		return prepared, fmt.Errorf("handoff %s is already recorded; resolve it before starting another", prepared.ID)
+		// A SETTLED ATTEMPT AT THIS TRANSITION IS RE-ADDRESSED, NOT AVOIDED.
+		//
+		// The id is deterministic in the two controllers precisely so that a
+		// retried transition between the same pair addresses the same record
+		// instead of accumulating one per attempt. Without this, the first
+		// attempt that failed - a crash resolved at startup, a successor that
+		// could not prove itself - would make every later attempt between
+		// those two generations refuse for the rest of the record's life,
+		// which is the deterministic id defeating its own purpose.
+		//
+		// It is conditional on FAILED. A record in any live phase belongs to a
+		// transition that is still happening, and this refuses exactly as it
+		// did before. What is superseded is the settled record's detail; the
+		// failure was reported when it happened, in the supervisor report and
+		// on the startup banner that settled it.
+		settled, found, readErr := ports.Store.ControllerHandoff(prepared.ID)
+		if readErr != nil {
+			return prepared, readErr
+		}
+		if !found || settled.Phase != HandoffFailed {
+			return prepared, fmt.Errorf("handoff %s is already recorded; resolve it before starting another", prepared.ID)
+		}
+		if wrote, err = ports.Store.PutControllerHandoff(prepared, HandoffFailed); err != nil {
+			return prepared, err
+		}
+		if !wrote {
+			return prepared, fmt.Errorf("handoff %s changed while a new attempt at it was being recorded", prepared.ID)
+		}
 	}
 	if err := ports.DrainWorkAdmission(); err != nil {
 		return prepared, fmt.Errorf("the predecessor could not stop admitting work: %w", err)
@@ -478,18 +505,22 @@ func RevalidateAcquiredHandoff(store handoffStore, record ControllerHandoff, sel
 	// activation that governs now is not the predecessor this transition
 	// succeeds from, somebody else activated in between and this one is
 	// proceeding from a world that has moved.
-	activation, found, err := store.CurrentControllerActivation()
+	authority, found, err := store.CurrentControllerAuthority()
 	if err != nil {
 		return err
 	}
 	if found {
-		governing, err := activation.Successor.Binding.Digest()
+		// THE GOVERNING BINDING, however it came to govern. After an operator
+		// re-adoption the next transition succeeds from the re-adopted
+		// generation in exactly the way it would succeed from an activated
+		// one: this check asks what governs, not how it got there.
+		governing, err := authority.Binding.Digest()
 		if err != nil {
 			return err
 		}
 		if governing != previous {
-			return fmt.Errorf("transition %s governs now and activated a generation this transition does not succeed from",
-				activation.ID)
+			return fmt.Errorf("%s %s governs now and names a generation this transition does not succeed from",
+				authority.Kind, authority.Ref)
 		}
 	}
 	// And the runs themselves: same heads, same replay, nothing new that was

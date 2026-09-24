@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -292,6 +293,47 @@ SELECT 'current', id, updated_unix_nano, document
  WHERE phase = 'activated'
  ORDER BY updated_unix_nano DESC, id ASC
  LIMIT 1;
+`, `
+-- WHAT GOVERNS NOW, WITHOUT ASSUMING A HANDOFF PUT IT THERE.
+--
+-- controller_current_activation can only name an activated transition, and for
+-- as long as that was the only way authority could be established it was the
+-- whole truth. It is not: a controller-effective configuration change cannot
+-- cross an ordinary succession - the successor binding differs in exactly the
+-- member evaluateConfiguration requires to be unchanged - so a state directory
+-- whose configuration moved had no way to establish a new governing root. The
+-- old activation stayed current, every upgrade was correctly refused, and the
+-- directory sat in INVARIANT_VIOLATION with no in-protocol way out.
+--
+-- So present authority becomes its own subject, and it records HOW it was
+-- established. An operator re-adoption is not an activation and is never
+-- written as one: no handoff is fabricated, and controller_handoffs remains
+-- exactly the history it was.
+CREATE TABLE controller_readoptions (
+	id                 TEXT PRIMARY KEY,
+	recorded_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+
+CREATE TABLE controller_current_authority (
+	id                TEXT PRIMARY KEY CHECK (id = 'current'),
+	kind              TEXT NOT NULL,
+	ref               TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+
+-- The existing pointer is RESTATED, not reinterpreted. Whatever activation
+-- governed a moment before this migration governs a moment after it, under the
+-- name the new subject uses for it, carrying the binding that activation
+-- already named as its successor.
+INSERT INTO controller_current_authority (id, kind, ref, updated_unix_nano, document)
+SELECT 'current', 'handoff_activation', handoff_id, updated_unix_nano,
+       json_object('kind', 'handoff_activation', 'ref', handoff_id,
+                   'binding', json(json_extract(document, '$.successor.binding')),
+                   'artifact', json_extract(document, '$.successor.artifact_path'))
+  FROM controller_current_activation
+ WHERE id = 'current';
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -506,14 +548,20 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
+	args := []any{string(document), op.ID, expected, op.RunID}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
+	}
+	args = append(args, op.RunID, maxRuns)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
-		       AND json_extract(runs.document, '$.disposition') IN ('completed', 'failed', 'cancelled'))
+		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
-		string(document), op.ID, expected, op.RunID, op.RunID, maxRuns)
+		args...)
 	if err != nil {
 		return 0, false, err
 	}

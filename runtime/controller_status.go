@@ -144,8 +144,15 @@ type DurableActive struct {
 	// NAME instead would be comparing a convention - build-adopted happens to
 	// name generation directories after their version - and a convention is not
 	// a fact the record asserts.
-	ArtifactDir string     `json:"artifact_dir,omitempty"`
-	Source      Provenance `json:"source"`
+	ArtifactDir string `json:"artifact_dir,omitempty"`
+	// Authority is how the governing generation came to govern: an activated
+	// transition, or an operator re-adoption. An operator reading a state
+	// directory has to be able to tell those apart, and a succession that
+	// follows a re-adoption is an ordinary one - the distinction is history,
+	// not a branch in the protocol.
+	Authority    ControllerAuthorityKind `json:"authority,omitempty"`
+	AuthorityRef string                  `json:"authority_ref,omitempty"`
+	Source       Provenance              `json:"source"`
 }
 
 // ProjectionObservation is the stable entrypoint, and only that.
@@ -238,16 +245,18 @@ func describeDurableActive(store handoffStore) (DurableActive, error) {
 	// recently written activation answered "which transition activated last",
 	// which is a question about wall clocks and about which process wrote
 	// second. Which activation GOVERNS is a durable subject of its own.
-	current, found, err := store.CurrentControllerActivation()
+	current, found, err := store.CurrentControllerAuthority()
 	if err != nil {
 		return DurableActive{}, err
 	}
 	if found {
-		active.Generation = current.Successor.Binding.Build
-		active.HandoffID = current.ID
-		active.Phase = current.Phase
-		if current.Successor.ArtifactPath != "" {
-			active.ArtifactDir = filepath.Dir(current.Successor.ArtifactPath)
+		active.Generation = current.Binding.Build
+		active.Authority, active.AuthorityRef = current.Kind, current.Ref
+		if current.Kind == AuthorityHandoffActivation {
+			active.HandoffID, active.Phase = current.Ref, HandoffActivated
+		}
+		if current.Artifact != "" {
+			active.ArtifactDir = filepath.Dir(current.Artifact)
 		}
 		return active, nil
 	}

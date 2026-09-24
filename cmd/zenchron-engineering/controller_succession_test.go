@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -137,16 +138,23 @@ func TestAbandoningASuccessorStopsIt(t *testing.T) {
 	if err := successor.Abandon(); err != nil {
 		t.Fatalf("the successor could not be abandoned: %v", err)
 	}
-	// The process is gone rather than merely unreferenced: signalling a live
-	// process group succeeds, and this must not.
+	// NOTHING IN THE GROUP IS STILL RUNNING.
+	//
+	// Not "the group id cannot be signalled", which is a different and weaker
+	// question: a killed process whose exit status nobody has collected stays
+	// signallable as a zombie, and its group with it. That happens wherever
+	// orphans are not reaped - the container the selfhost harness verifies
+	// candidates in, for one - and it made this test report a successor that
+	// had in fact been stopped. What the abandon must achieve is that no
+	// process from it can still execute.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(-command.Process.Pid, 0); err == syscall.ESRCH {
+		if !processGroupRunning(command.Process.Pid) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the abandoned successor's process group is still alive")
+	t.Fatal("the abandoned successor's process group is still running")
 }
 
 // THE EVALUATION EXCHANGE, across the same process boundary.
@@ -331,6 +339,129 @@ func TestASuccessorIsStartedForExactlyOneTransition(t *testing.T) {
 	}
 }
 
+// startupBanner builds a resolution for one transition between two adopted
+// generations, so a case differs from the healthy one in exactly the member it
+// is testing.
+func startupBanner(t *testing.T, phase runtime.HandoffPhase, recoveryOwner string) (runtime.StartupResolution, string) {
+	t.Helper()
+	predecessorBuild := runtime.ControllerBuild{
+		Kind: runtime.ControllerAdopted, Version: "main-aaaaaaa",
+		SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
+		BinarySHA256: strings.Repeat("ab", 32),
+	}
+	successorBuild := predecessorBuild
+	successorBuild.Version, successorBuild.SourceRevision = "main-bbbbbbb", strings.Repeat("c", 40)
+	config := runtime.ConfigDigest{Global: "global", Repository: "repository"}
+	successor := runtime.ControllerBinding{Controller: "zenchron-engineering", Build: &successorBuild, Config: config}
+	predecessor := runtime.ControllerBinding{Controller: "zenchron-engineering", Build: &predecessorBuild, Config: config}
+	mine, err := successor.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := predecessor.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := theirs
+	if recoveryOwner == "successor" {
+		owner = mine
+	}
+	return runtime.StartupResolution{Resolution: runtime.HandoffResolution{
+		Action: runtime.HandoffActionRefuse,
+		Record: &runtime.ControllerHandoff{
+			ID: "handoff-1", Phase: phase, RecoveryOwner: owner,
+			Predecessor: runtime.HandoffParty{Binding: predecessor},
+			Successor:   runtime.HandoffParty{Binding: successor},
+		},
+		Detail: "handoff handoff-1 names another controller as its recovery owner",
+	}}, mine
+}
+
+// A SUCCESSOR DOES NOT SETTLE ITS PREDECESSOR'S RECOVERY RECORD, but that
+// correct resolver refusal is also the ordinary path of every upgrade. Its
+// startup banner must name the transition this process is performing rather
+// than training an operator to ignore "refuse" on a healthy successor.
+func TestSuccessorStartupBannerDoesNotCallItsOwnTransitionARefusal(t *testing.T) {
+	resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+
+	got := describeStartupTransition(resolution, "handoff-1", mine)
+	if !strings.Contains(got, "performing transition handoff-1") {
+		t.Fatalf("banner = %q, want this successor's transition", got)
+	}
+	if strings.Contains(got, "refuse") {
+		t.Fatalf("banner = %q, want the resolver refusal kept out of the healthy successor projection", got)
+	}
+	if resolution.Resolution.Action != runtime.HandoffActionRefuse {
+		t.Fatalf("the display changed the resolver action to %q", resolution.Resolution.Action)
+	}
+}
+
+// THE SUPPRESSION IS THE ONE CASE, NOT THE ID.
+//
+// The same transition can be refused for reasons that have nothing to do with
+// recovery ownership, and every one of them must keep its label - a banner
+// that hid them would be worse than the one that cried refusal, because it
+// would be silent about the refusals that matter.
+func TestStartupBannerKeepsEveryOtherRefusalOnTheSameTransition(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		break_ func(*runtime.StartupResolution, string)
+	}{
+		{"this process is not the successor the record names", func(r *runtime.StartupResolution, _ string) {
+			other := *r.Resolution.Record.Successor.Binding.Build
+			other.BinarySHA256 = strings.Repeat("ef", 32)
+			r.Resolution.Record.Successor.Binding.Build = &other
+		}},
+		{"the successor binding will not digest", func(r *runtime.StartupResolution, _ string) {
+			r.Resolution.Record.Successor.Binding.Build = nil
+		}},
+		{"the record permits this process to recover, so the refusal is another one", func(r *runtime.StartupResolution, mine string) {
+			r.Resolution.Record.RecoveryOwner = mine
+			r.Resolution.Detail = "this process is not the successor generation: the running binary measures aaaa"
+		}},
+		{"the transition is past the phase a successor starts at", func(r *runtime.StartupResolution, _ string) {
+			r.Resolution.Record.Phase = runtime.HandoffSuccessorAcquired
+		}},
+		{"the resolver did not refuse", func(r *runtime.StartupResolution, _ string) {
+			r.Resolution.Action = runtime.HandoffActionContinueSuccessor
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+			test.break_(&resolution, mine)
+
+			got := describeStartupTransition(resolution, "handoff-1", mine)
+			if strings.Contains(got, "performing transition") {
+				t.Fatalf("banner = %q, want the resolver's own answer", got)
+			}
+			if !strings.Contains(got, string(resolution.Resolution.Action)) {
+				t.Fatalf("banner = %q, want one naming %q", got, resolution.Resolution.Action)
+			}
+		})
+	}
+}
+
+// A matching flag is the only presentation exception. An actual refusal must
+// remain visible when this process was not started for that record.
+func TestStartupBannerKeepsOtherTransitionRefusals(t *testing.T) {
+	resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+	resolution.Resolution.Record.ID = "handoff-somebody-else"
+
+	got := describeStartupTransition(resolution, "handoff-1", mine)
+	if !strings.HasPrefix(got, "refuse:") {
+		t.Fatalf("banner = %q, want the real refusal", got)
+	}
+}
+
+// AND A PROCESS THAT WAS NOT STARTED AS A SUCCESSOR SEES WHAT THE RESOLVER SAID.
+func TestStartupBannerIsUnchangedWithoutTheSuccessorFlag(t *testing.T) {
+	resolution, mine := startupBanner(t, runtime.HandoffOwnershipReleased, "predecessor")
+
+	if got := describeStartupTransition(resolution, "", mine); !strings.HasPrefix(got, "refuse:") {
+		t.Fatalf("banner = %q, want the resolver's own answer", got)
+	}
+}
+
 // AND THE PROCESS THAT IS ACTUALLY STARTED SEES ONE, which is the thing the
 // live defect was about: a unit test of the helper cannot see what exec was
 // handed.
@@ -352,5 +483,79 @@ func TestTheSpawnedSuccessorReceivesOneTransition(t *testing.T) {
 	}
 	if !strings.Contains(line, successorFlag+" handoff-1") {
 		t.Fatalf("the successor was not started for its own transition: %q", line)
+	}
+}
+
+// processGroupRunning reports whether any process in a group is still
+// executing. A group whose only members are zombies is not.
+func processGroupRunning(pgid int) bool {
+	if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
+		return false
+	}
+	// EVERY PROCESS, FILTERED HERE. `ps -g` selects by session on Linux and by
+	// process group on macOS, so asking ps to do the filtering is asking two
+	// different questions depending on the host; listing pgid and state and
+	// matching in Go asks one.
+	listing, err := exec.Command("sh", "-c", "ps -e -o pgid=,state=").Output()
+	if err != nil {
+		// ps could not say, and the signal probe said the group exists.
+		// Believing the stricter answer is the fail-closed direction for a
+		// test asserting that something was stopped.
+		return true
+	}
+	group := strconv.Itoa(pgid)
+	for _, line := range strings.Split(string(listing), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != group {
+			continue
+		}
+		if !strings.HasPrefix(fields[1], "Z") {
+			return true
+		}
+	}
+	return false
+}
+
+// THE MESSAGE THE INCIDENT DID NOT PRODUCE.
+//
+// A controller-effective configuration change left an operator with a digest
+// comparison at identify, then parked runs, then a startup resolution refusing
+// the controller's own transition - and no statement of the cause. A cold start
+// under a configuration the governing authority does not share now says what
+// happened and what to do about it.
+func TestAColdStartRefusesAConfigurationItCannotCross(t *testing.T) {
+	governing := runtime.ControllerAuthority{
+		Kind: runtime.AuthorityHandoffActivation, Ref: "handoff-1",
+		Binding: runtime.ControllerBinding{
+			Controller: "zenchron-engineering",
+			Config:     runtime.ConfigDigest{Global: "e98501e36872629e00623d19083919b79e9673297f8122aa26c8193bd5119954"},
+		},
+	}
+	current := runtime.ControllerBinding{
+		Controller: "zenchron-engineering",
+		Config:     runtime.ConfigDigest{Global: "b37ef994e090199c47deaba63f5d48fc5b1597ca61459ba7d05ced0ef0e2dd5c"},
+	}
+
+	err := configurationBoundaryRefusal(governing, current)
+	if err == nil {
+		t.Fatal("a cold start under a different configuration was permitted")
+	}
+	for _, want := range []string{
+		"controller-effective configuration changed",
+		"e98501e3", "b37ef994",
+		"controller re-adopt",
+		"restore the previous configuration",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not mention %q:\n%s", want, err)
+		}
+	}
+	// A DIFFERENT BUILD IS NOT A DIFFERENT CONFIGURATION. Refusing that would
+	// refuse every ordinary start of a controller about to upgrade itself.
+	sameConfig := current
+	sameConfig.Build = &runtime.ControllerBuild{Version: "main-later"}
+	governing.Binding.Config = current.Config
+	if err := configurationBoundaryRefusal(governing, sameConfig); err != nil {
+		t.Fatalf("a start under the same configuration was refused: %v", err)
 	}
 }
