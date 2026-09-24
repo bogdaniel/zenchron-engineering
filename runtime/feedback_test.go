@@ -584,3 +584,41 @@ func TestAPermanentPermissionFailureIsReportedNotDeferred(t *testing.T) {
 		})
 	}
 }
+
+func TestOverBudgetReviewRetainsRunAndPendingFeedback(t *testing.T) {
+	fixture, runID := feedbackFixture(t)
+	number := fixture.state(runID).projection.PullRequest.Number
+	fixture.forge.ConversationComments[number] = []GitHubComment{{
+		ID: 9501, Author: GitHubActor{Login: "maintainer", ID: 7},
+		Body: UntrustedText("please finish the remediation"), CreatedAt: fixture.clock.Now(),
+	}}
+	observation, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Admitted != 1 {
+		t.Fatalf("not admitted: %+v", observation)
+	}
+	before := fixture.state(runID)
+	pending := before.pendingFeedbackKeys()
+	candidate := before.projection.CandidateRevision
+	requests := len(fixture.provider.requests)
+	for i := 0; i < 2; i++ {
+		fixture.runtime.deps.Budgets.WallLimit = time.Nanosecond
+		outcome := fixture.reconcile(runID)
+		if outcome.Disposition != Waiting || outcome.Reason != ReasonReviewBudgetExhausted {
+			t.Fatalf("outcome: %+v", outcome)
+		}
+		reopen(t, fixture)
+	}
+	after := fixture.state(runID)
+	if len(fixture.provider.requests) != requests {
+		t.Fatal("exhausted run invoked provider")
+	}
+	if after.projection.CandidateRevision != candidate {
+		t.Fatal("candidate changed while parked")
+	}
+	if got := after.pendingFeedbackKeys(); len(got) != 1 || len(pending) != 1 || got[0] != pending[0] {
+		t.Fatalf("pending identity lost: %v -> %v", pending, got)
+	}
+}

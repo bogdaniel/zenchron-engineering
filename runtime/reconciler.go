@@ -363,10 +363,15 @@ func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epo
 // stages that depend on it can proceed while the run itself waits for review.
 const ReasonGoalStateReached = "goal_state_reached"
 
+// ReasonReviewBudgetExhausted retains accepted review work until an operator
+// grants more budget. Delivery does not imply remediation was published.
+const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
+
 var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
+	ReasonReviewBudgetExhausted:     true,
 	"awaiting_authority":            true,
 	"authority_blocked":             true,
 	"authority_unknown":             true,
@@ -775,6 +780,11 @@ func (s *runState) conditions() (Disposition, string) {
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
 	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
+		for _, decision := range s.feedbackState().Admitted {
+			if decision.Admitted {
+				return Waiting, ReasonReviewBudgetExhausted
+			}
+		}
 		return Failed, "run_wall_budget_exhausted"
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
@@ -1458,7 +1468,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			return r.settle(state, Failed, "invariant_violation")
 		}
 		live, reason := state.conditions()
-		if terminalDisposition(live) {
+		if terminalDisposition(live) || reason == ReasonReviewBudgetExhausted {
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()

@@ -390,3 +390,13 @@ It cannot:
 - [troubleshooting.md](troubleshooting.md) — "my comment never reached the worker"
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
+
+Accepted review work that exhausts the active wall budget parks in
+`waiting/review_wall_budget_exhausted`. This includes feedback already consumed
+by a worker: delivery is not proof that remediation was published. The run and
+candidate workspace remain available, and feedback retains its original keys
+and delivery records. Runtime status exposes this wait; it does not post a
+forge comment. An operator must raise the effective wall budget above consumed
+active time and resume the same run. Idle time in this wait does not consume
+that grant. No budget is reset automatically and other attempt bounds still
+apply. Runs without admitted feedback retain the terminal wall-budget policy.
