@@ -18,7 +18,8 @@ import (
 // is the ONE path that validates one.
 type Contract interface {
 	ProjectModel | EngineeringFact | EngineeringPolicy | EngineeringWorkContract | EvidenceBundle | AuthorityDecision |
-		InstructionPack | ContextPolicy | AgentProfile | EngineeringPlanTemplate | EngineeringPlan | AgentAssignment | PlanRevisionProposal
+		InstructionPack | ContextPolicy | AgentProfile | EngineeringPlanTemplate | EngineeringPlan | AgentAssignment | PlanRevisionProposal |
+		BenchmarkRecord
 }
 
 // DuplicateMemberError reports an ambiguous JSON object member. Path is the
@@ -100,6 +101,8 @@ func schemaName[T Contract]() string {
 		return schemas.AgentAssignment
 	case PlanRevisionProposal:
 		return schemas.PlanRevisionProposal
+	case BenchmarkRecord:
+		return schemas.BenchmarkRecord
 	default:
 		panic("unreachable contract type")
 	}
