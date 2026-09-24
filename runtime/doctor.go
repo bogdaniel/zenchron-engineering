@@ -113,6 +113,9 @@ type DoctorInput struct {
 	// GitHub is the forge adapter. Nil means no read-only forge check is safe
 	// to make, which is reported as WARN, not PASS.
 	GitHub GitHubAdapter
+	// Governance is the separately authorized, read-only adoption observer.
+	// It is never derived from the publication adapter or credential.
+	Governance ForgeGovernance
 	// DiscoveryLabel is the opt-in label. Empty means DefaultDiscoveryLabel.
 	DiscoveryLabel string
 	// GitHubCredentialMode is the operator's declared mode.
@@ -355,7 +358,7 @@ func doctorStateLock(in DoctorInput) DoctorCheck {
 	if strings.TrimSpace(in.StateDir) == "" {
 		return fail(doctorGroupState, id, "no state directory is configured, so the ownership lock cannot be taken")
 	}
-	lock, err := AcquireOwnershipLock(in.StateDir, NewRuntimeOwner())
+	lock, err := AcquireControllerInstanceLock(in.StateDir, NewRuntimeOwner())
 	if err != nil {
 		return fail(doctorGroupState, id, "the runtime ownership lock could not be taken: "+err.Error()+"; another process may already own this state directory")
 	}
@@ -375,7 +378,7 @@ func doctorStateLiveness(in DoctorInput) DoctorCheck {
 		return fail(doctorGroupState, id, "no state directory is configured, so owner liveness has no evidence to read")
 	}
 	owner := NewRuntimeOwner()
-	lock, err := AcquireOwnershipLock(in.StateDir, owner)
+	lock, err := AcquireControllerInstanceLock(in.StateDir, owner)
 	if err != nil {
 		return fail(doctorGroupState, id, "owner liveness could not be probed because the ownership lock could not be taken: "+err.Error())
 	}
@@ -884,7 +887,37 @@ const doctorGroupGitHub = "github"
 func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 	credential := doctorGitHubCredential(in)
 	identity, rate := doctorGitHubRead(ctx, in, credential)
-	return []DoctorCheck{credential, doctorPublicationIdentity(ctx, in), identity, rate}
+	return []DoctorCheck{credential, doctorPublicationIdentity(ctx, in), doctorGitHubGovernance(ctx, in), identity, rate}
+}
+
+// doctorGitHubGovernance probes disclosure, not whether repository policy is
+// sufficient for adoption. Raw adapter errors and provenance details are never
+// reported: they can contain credential or response data.
+func doctorGitHubGovernance(ctx context.Context, in DoctorInput) DoctorCheck {
+	const id = "github.governance"
+	if in.Governance == nil {
+		return fail("github", id, "no governance observer is configured; set github.governance_credential_mode to github-cli for controller build-adopted; serve does not require it")
+	}
+	if in.Governance.GovernanceProvenance().Role != CredentialRoleGovernance {
+		return fail("github", id, "the observer does not identify as governance-observation; configure a separate governance credential")
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return warn("github", id, "governance visibility was not probed; select a valid repository with --repo owner/name")
+	}
+	rulesets, err := in.Governance.Rulesets(ctx, repo)
+	if err != nil {
+		return fail("github", id, "governance observation failed; verify the configured governance credential resolves and can read repository rulesets and bypass_actors")
+	}
+	if len(rulesets) == 0 {
+		return warn("github", id, "governance read succeeded but no rulesets were returned; bypass_actors visibility remains unverified")
+	}
+	for _, ruleset := range rulesets {
+		if !ruleset.BypassActorsKnown {
+			return fail("github", id, "governance credential cannot disclose bypass_actors for every ruleset; authorize an identity with governance visibility before controller build-adopted")
+		}
+	}
+	return pass("github", id, "governance credential resolved and disclosed rulesets including bypass_actors; adoption policy is validated by controller build-adopted")
 }
 
 // doctorViewer resolves the account the runtime publishes as, when the adapter

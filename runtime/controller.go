@@ -415,11 +415,7 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	if d.ControllerBuild.Attested() {
 		build = &d.ControllerBuild
 	}
-	controller, err := Digest(struct {
-		Controller string           `json:"controller"`
-		Build      *ControllerBuild `json:"build,omitempty"`
-		Config     ConfigDigest     `json:"config"`
-	}{d.ControllerID, build, d.ConfigDigest})
+	controller, err := ControllerBinding{Controller: d.ControllerID, Build: build, Config: d.ConfigDigest}.Digest()
 	if err != nil {
 		return nil, err
 	}
@@ -672,11 +668,8 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 			// the next slot, leaving this run exactly as it is.
 			continue
 		}
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		// A live generation keeps the agent it was created with. Adopting it
 		// under a different worker would be a silent provider handoff, which
@@ -705,6 +698,30 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// refuseUnlessSucceeded is the adoption half of the controller-change rule.
+//
+// Reconciling another controller's live work under this one is refused, and an
+// ADMITTED SUCCESSION is the one thing that makes this controller not another
+// one for this run: the journal already carries the proof, so adoption reads it
+// rather than repeating the evaluation. A run whose journal holds no such
+// admission is refused exactly as it was before #234.
+func (r *EngineeringRuntime) refuseUnlessSucceeded(runID string, existing EngineeringRun) error {
+	if existing.ControllerSHA256 == r.controller {
+		return nil
+	}
+	events, err := r.deps.Store.Events(runID)
+	// An unreadable journal admits nothing. The refusal below is the same one
+	// the caller would have received before, which is the safe answer for a
+	// state this process could not read.
+	if err == nil && ControllerSuccessionContinues(existing, events, r.controller, r.wasTransitionActivated()) {
+		return nil
+	}
+	return &RunAdoptionRefusedError{
+		RunID: runID, Owner: existing.ControllerSHA256,
+		Detail: "adopting it would reconcile another controller's work under this one",
+	}
 }
 
 // repairAgentBinding restores a journalled agent assignment for a run whose row
@@ -856,8 +873,16 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 // generations of the same issue never share a branch.
 func candidateBranch(runID string) string { return "zenchron/" + runID }
 
+// terminalDispositions is shared with the durable acquisition guard.
+var terminalDispositions = [...]Disposition{Completed, Failed, Cancelled}
+
 func terminalDisposition(d Disposition) bool {
-	return d == Completed || d == Failed || d == Cancelled
+	for _, terminal := range terminalDispositions {
+		if d == terminal {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -961,13 +986,18 @@ type StatusReport struct {
 	Goal          string             `json:"goal"`
 	Source        SourceIdentity     `json:"source"`
 	Controller    ControllerIdentity `json:"controller"`
-	Phase         Phase              `json:"phase"`
-	Disposition   Disposition        `json:"disposition"`
-	Reason        string             `json:"reason,omitempty"`
-	Base          Ref                `json:"base"`
-	Candidate     Candidate          `json:"candidate"`
-	Contract      Ref                `json:"contract"`
-	Operation     *OperationStatus   `json:"operation,omitempty"`
+	// Worker is which execution agent owns this run, from the journalled
+	// binding rather than from today's configuration. It is here because an
+	// operator reading one run should not have to switch to the fleet view to
+	// learn who is doing the work.
+	Worker      WorkerIdentity   `json:"worker"`
+	Phase       Phase            `json:"phase"`
+	Disposition Disposition      `json:"disposition"`
+	Reason      string           `json:"reason,omitempty"`
+	Base        Ref              `json:"base"`
+	Candidate   Candidate        `json:"candidate"`
+	Contract    Ref              `json:"contract"`
+	Operation   *OperationStatus `json:"operation,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	Now       time.Time `json:"now"`
@@ -1009,6 +1039,24 @@ type StatusReport struct {
 	StateSHA256              string     `json:"state_sha256"`
 }
 
+// WorkerIdentity is the execution agent a run is bound to.
+//
+// MODEL IS WHAT THE PROVIDER EXPOSES, and empty is a truthful answer rather
+// than a gap to fill in. An agent whose CLI selects its own model does not
+// report one, and inventing a plausible name - or quietly omitting the field
+// so a reader assumes the default - would claim knowledge nobody has. The
+// renderer prints "unknown" for it, which is the same discipline `autonomy
+// agents` already applies to an unobservable authentication mode.
+type WorkerIdentity struct {
+	Agent        string    `json:"agent,omitempty"`
+	ProviderKind string    `json:"provider_kind,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	TrustMode    TrustMode `json:"trust_mode,omitempty"`
+	// Workspace is the runtime-owned candidate clone, so an operator can open
+	// what the worker is editing without going through the database.
+	Workspace string `json:"workspace,omitempty"`
+}
+
 // Status replays the run and reports it. It performs no network call and no
 // side effect, so it is safe to read a run another process is driving.
 func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
@@ -1029,6 +1077,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ConfigDigest: r.deps.ConfigDigest,
 			Changed:      state.controllerChanged,
 		},
+		Worker:                state.workerIdentity(r.deps.StateDir),
 		Phase:                 state.phase(),
 		Disposition:           state.snapshot.Disposition,
 		Reason:                state.snapshot.Reason,
@@ -1210,11 +1259,8 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		// the same id, so without this check the second one would adopt the
 		// first one's live work. StartIssueRun refuses exactly this, and a plan
 		// stage run is an ordinary run: it is refused here on the same terms.
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		if err := r.repairAgentBinding(runID, existing); err != nil {
 			return StartOutcome{}, err

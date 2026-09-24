@@ -240,6 +240,19 @@ const adoptedBuildSchemaVersion = "adopted-build/1"
 func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, deps AdoptedBuildDeps, self BuilderRecord) (AdoptedBuildProvenance, error) {
 	deps = deps.withDefaults()
 	var out AdoptedBuildProvenance
+	// The operator-supplied output root is resolved to an absolute host path
+	// HERE, once, at the boundary where the request is accepted - not at each
+	// site that later reads request.OutputRoot. A relative root is only
+	// meaningful relative to this process's working directory; the staging
+	// directory built from it is handed to Docker as a bind-mount source, and
+	// the daemon does not share that working directory. Resolving once here
+	// means a later mount cannot reintroduce the defect by reading the
+	// unresolved field.
+	resolvedOutput, err := filepath.Abs(request.OutputRoot)
+	if err != nil {
+		return out, fmt.Errorf("the output root %q could not be resolved to an absolute path: %w", request.OutputRoot, err)
+	}
+	request.OutputRoot = resolvedOutput
 	// The production dependencies have no honest default: guessing a forge or
 	// a ref observer would be inventing the trust root. Missing ones are a
 	// typed refusal, never a panic.
@@ -326,7 +339,7 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	// same-filesystem atomic rename rather than a copy that can half-finish.
 	version := strings.TrimSpace(request.Version)
 	if version == "" {
-		version = "main-" + shortSHA(source)
+		version = AdoptedVersionName(source)
 	}
 	final := filepath.Join(request.OutputRoot, version)
 	if err := os.MkdirAll(request.OutputRoot, 0700); err != nil {
@@ -461,6 +474,42 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 }
 
 // observeTrustRoot reads the gate and refuses anything that is not one.
+// ObserveTrustedMainRevision answers what trusted main IS right now: the
+// revision the forge reports for the governed branch, and the tree recomputed
+// from a local clone that has been made to hold it.
+//
+// THE TRUST ROOT IS CHECKED FIRST, exactly as a build checks it. An updater
+// that followed the branch without it would be following whatever main says
+// under a gate that may have been removed this morning, and would discover
+// that only after spending minutes of container time being refused.
+//
+// The tree is recomputed rather than reported, for the same reason the build
+// recomputes it: a revision is what the forge says, and a tree is what the
+// object actually contains.
+func ObserveTrustedMainRevision(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, repositoryDir string) (RevisionRecord, error) {
+	deps = deps.withDefaults()
+	if deps.Governance == nil || deps.RefSHA == nil {
+		return RevisionRecord{}, fmt.Errorf("the trust root and trusted main cannot be observed, so no revision may be called trusted")
+	}
+	policy := DefaultTrustPolicy()
+	if _, err := observeTrustRoot(ctx, deps, repo, policy); err != nil {
+		return RevisionRecord{}, err
+	}
+	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
+	revision, err := observeTrustedMain(ctx, deps, repo, branch)
+	if err != nil {
+		return RevisionRecord{}, err
+	}
+	if err := deps.Fetch(repositoryDir, revision, branch); err != nil {
+		return RevisionRecord{}, fmt.Errorf("the trusted revision could not be fetched: %w", err)
+	}
+	tree, err := revisionTree(deps, repositoryDir, revision)
+	if err != nil {
+		return RevisionRecord{}, err
+	}
+	return RevisionRecord{Revision: revision, Tree: tree}, nil
+}
+
 func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy TrustPolicy) (TrustedMainRuleset, error) {
 	rulesets, err := deps.Governance.Rulesets(ctx, repo)
 	if err != nil {

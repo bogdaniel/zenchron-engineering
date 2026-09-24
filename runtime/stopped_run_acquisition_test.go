@@ -6,9 +6,57 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestSQLiteAcquisitionMatchesTerminalDisposition(t *testing.T) {
+	dispositions := append([]Disposition{Active, Waiting}, terminalDispositions[:]...)
+	for _, disposition := range dispositions {
+		t.Run(string(disposition), func(t *testing.T) {
+			_, writer, acquirer := openPair(t)
+			run := newJournalRun("run-a")
+			if err := writer.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			// JSON decodes UTC timestamps with time.UTC; use the same location
+			// so the full-operation comparison also matches after persistence.
+			now := time.Unix(100, 0).UTC()
+			scheduler := Scheduler{Store: acquirer, Clock: &fakeClock{now: now}, Owner: "driver", LeaseDuration: time.Minute, Liveness: alwaysAlive()}
+			planned := planFor(t, scheduler, run.ID, 1)
+			op, revision, found, err := acquirer.Operation(planned.ID)
+			if err != nil || !found {
+				t.Fatal(err, found)
+			}
+			// Commit the disposition after the driver reads its operation.
+			run.Disposition = disposition
+			if err := writer.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			leased := leasedAt(op, "driver", now)
+			gotRevision, acquired, err := acquirer.AcquireOperation(leased, revision, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAcquired := !terminalDisposition(disposition)
+			if acquired != wantAcquired {
+				t.Fatalf("disposition %q: acquired=%v, want %v", disposition, acquired, wantAcquired)
+			}
+			stored, storedRevision, found, err := acquirer.Operation(op.ID)
+			if err != nil || !found {
+				t.Fatal(err, found)
+			}
+			wantOp, wantRevision, wantResult := op, revision, int64(0)
+			if wantAcquired {
+				wantOp, wantRevision, wantResult = leased, revision+1, revision+1
+			}
+			if !reflect.DeepEqual(stored, wantOp) || storedRevision != wantRevision || gotRevision != wantResult {
+				t.Fatalf("acquisition persisted unexpected operation or revision: op=%+v revision=%d result=%d", stored, storedRevision, gotRevision)
+			}
+		})
+	}
+}
 
 // stopAtAcquisition forces the ONE interleaving that matters, deterministically
 // rather than by timing: the operator's stop commits in full - the run document
@@ -310,6 +358,98 @@ func TestAStaleSettleNeverOverwritesAStopInFlight(t *testing.T) {
 				t.Fatalf("a pass that lost the stop race still leased %q, which is a Start away from the provider", leased.ID)
 			}
 		})
+	}
+}
+
+// TestRecordDispositionPreReadGuardSkipsAnAlreadyCancelledRun isolates the
+// guard at the very top of recordDisposition, separately from the mid-write
+// race TestAStaleSettleNeverOverwritesAStopInFlight covers: here the stop has
+// already landed and fully committed BEFORE recordDisposition is even called,
+// so the caller is simply holding an in-memory state read before the stop -
+// exactly what a losing pass in TestAStopAtAcquisitionNeverExecutesTheWorkItStopped
+// does, just driven directly instead of through a contrived interleaving.
+//
+// Without the guard, the append below still happens: state.snapshot's
+// disposition and reason are stale, so the change check on its own would
+// write run.waiting straight after run.cancelled into the journal. PutRun's
+// own condition still refuses to move the run document off cancelled, so
+// nothing durable about the RUN drifts either way - but the hash chain gains
+// an event that was never true, and nothing else in this suite reads the
+// event count closely enough to notice. That is the whole gap: the guard is
+// real, the mutation is observable, and until now nothing observed it.
+func TestRecordDispositionPreReadGuardSkipsAnAlreadyCancelledRun(t *testing.T) {
+	// POSITIVE CONTROL. The exact same call, on a run nobody stopped, must
+	// append exactly one event. Without this half, a recordDisposition that
+	// appended nothing under every circumstance would pass the guard
+	// assertion below for the wrong reason - the test would pin the absence
+	// of an event rather than the guard that is supposed to cause it.
+	control := newPhase8Fixture(t)
+	controlRunID := control.start()
+	if _, err := control.runtime.Reconcile(context.Background(), controlRunID); err != nil {
+		t.Fatal(err)
+	}
+	controlState, err := control.runtime.load(controlRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlBefore, err := control.store.Events(controlRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.runtime.recordDisposition(controlState, Waiting, "stale_after_stop"); err != nil {
+		t.Fatal(err)
+	}
+	controlAfter, err := control.store.Events(controlRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(controlAfter) - len(controlBefore); got != 1 {
+		t.Fatalf("recordDisposition appended %d event(s) on a run nobody stopped; want exactly 1", got)
+	}
+
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	if _, err := f.runtime.Reconcile(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := f.runtime.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The stop commits in full here - there is no race left to win or lose by
+	// the time recordDisposition is called below.
+	if _, err := CancelRun(f.store, f.runtime.scheduler, f.clock.Now(), runID, "operator/stop"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A reason no production path ever writes, so the change check that
+	// gates the append would fire on it if the pre-read guard did not return
+	// first.
+	if err := f.runtime.recordDisposition(state, Waiting, "stale_after_stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := f.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("recordDisposition appended %d event(s) to the journal of a run the operator had already stopped", len(after)-len(before))
+	}
+	if state.run.Disposition != Cancelled {
+		t.Fatalf("the caller went on believing the run was %q", state.run.Disposition)
+	}
+	document, found, err := f.store.Run(runID)
+	if err != nil || !found {
+		t.Fatal(err, found)
+	}
+	if document.Disposition != Cancelled {
+		t.Fatalf("the run document was left %q", document.Disposition)
 	}
 }
 

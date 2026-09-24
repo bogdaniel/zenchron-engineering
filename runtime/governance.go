@@ -57,7 +57,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -183,33 +182,18 @@ type GitHubGovernanceObserver struct {
 
 var _ ForgeGovernance = GitHubGovernanceObserver{}
 
-// governanceAPIRoot resolves the API root and refuses to carry a credential
-// over anything but TLS.
+// governanceAPIRoot resolves the API root for the governance observer.
 //
-// githubAPIRoot, which it wraps, accepts whatever github.endpoint says,
-// including an http:// URL. That was survivable while the only thing sent
-// there was a GitHub App installation token scoped to one installation. It is
-// not survivable now: the governance credential is the OPERATOR's, it is
-// broader than the App's by construction, and this change is what causes it to
-// reach that endpoint at all. The blast radius is new even though the
-// unvalidated endpoint is not, so the governance path validates its own root
-// here rather than waiting for the general repair. #223 holds the rest.
+// It used to carry its own scheme/host check because githubAPIRoot did not:
+// github.endpoint went unvalidated, which was survivable while the only thing
+// reaching a configured endpoint was a GitHub App installation token scoped to
+// one installation, and stopped being survivable once the governance
+// credential - the operator's own, broader by construction - started reaching
+// it too. githubAPIRoot now carries that same check for every consumer
+// (#223), so this is a thin wrapper kept for the governance path's call site
+// and its own name in error paths.
 func governanceAPIRoot(endpoint string) (string, error) {
-	root := githubAPIRoot(endpoint)
-	parsed, err := url.Parse(root)
-	if err != nil {
-		return "", &GitHubAuthError{Detail: "the configured governance endpoint is not a usable URL"}
-	}
-	if !strings.EqualFold(parsed.Scheme, "https") {
-		// The scheme is named because an operator has to be able to fix it;
-		// nothing else about the endpoint is quoted back.
-		return "", &GitHubAuthError{Detail: "the governance endpoint uses scheme " + strconv.Quote(parsed.Scheme) +
-			"; a governance credential is only ever carried over https"}
-	}
-	if parsed.Host == "" {
-		return "", &GitHubAuthError{Detail: "the configured governance endpoint names no host"}
-	}
-	return root, nil
+	return githubAPIRoot(endpoint)
 }
 
 // maxGovernanceRedirects is the hop ceiling this package re-imposes. Setting

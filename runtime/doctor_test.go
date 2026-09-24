@@ -301,6 +301,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// fixture detail to paper over, which is why the healthy fixture is the
 		// configuration that does not have it.
 		GitHubCredentialMode: GitHubCredentialToken,
+		Governance:           doctorGovernanceObserver{rulesets: []TrustedMainRuleset{{BypassActorsKnown: true}}},
 		// ...and it can also say who the HUMAN is, through the operator's own
 		// `gh` login. Doctor compares the two accounts: a separate credential
 		// that turns out to be the same account is the collision it exists to
@@ -402,7 +403,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
 		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache", "assurance.semantic",
 		"assurance.dependency_preparation",
-		"github.credential", "github.publication_identity", "github.identity", "github.rate_limit",
+		"github.credential", "github.publication_identity", "github.governance", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",

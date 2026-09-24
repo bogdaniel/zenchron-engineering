@@ -190,6 +190,47 @@ func TestAdoptedBuildProvesBeforeItBuilds(t *testing.T) {
 	}
 }
 
+// TestAdoptedBuildResolvesARelativeOutputRoot is the regression for the defect
+// where a relative --output was used verbatim to build the staging directory,
+// which was then handed to Docker as a bind-mount source. The daemon does not
+// share the controller's working directory, so a relative mount source is
+// refused by Docker even though the same path resolves locally. A path that is
+// already absolute, or one that merely starts with "./", would not exercise
+// this: the request here is genuinely relative, resolved only by the
+// controller's own working directory.
+func TestAdoptedBuildResolvesARelativeOutputRoot(t *testing.T) {
+	f := newAdoptedFixture(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	request := f.request(t)
+	request.OutputRoot = "bin"
+
+	got, err := BuildAdoptedController(context.Background(), request, f.deps, BuilderRecord{})
+	if err != nil {
+		t.Fatalf("the build with a relative output root was refused: %v", err)
+	}
+
+	wantRoot := filepath.Join(cwd, "bin")
+	if !filepath.IsAbs(got.OutputPath) || !strings.HasPrefix(got.OutputPath, wantRoot+string(filepath.Separator)) {
+		t.Fatalf("output path = %q, want an absolute path under %q", got.OutputPath, wantRoot)
+	}
+	if len(f.built) != 1 {
+		t.Fatalf("built %d times", len(f.built))
+	}
+	// This is the exact value that becomes the Docker bind-mount source
+	// (`--mount=type=bind,src=<dir(spec.Output)>,dst=/out`): if it is not
+	// absolute here, the daemon refuses the mount regardless of what the
+	// provenance later claims.
+	mountSource := filepath.Dir(f.built[0].Output)
+	if !filepath.IsAbs(mountSource) {
+		t.Fatalf("the bind-mount source %q is not absolute", mountSource)
+	}
+	if !strings.HasPrefix(mountSource, wantRoot) {
+		t.Fatalf("the bind-mount source %q is not under the resolved output root %q", mountSource, wantRoot)
+	}
+}
+
 // TestAdoptedBuildAcceptsAnEarlierContainedRevision: pinning an older adopted
 // commit is legitimate, because containment - not recency - is what adoption
 // means.

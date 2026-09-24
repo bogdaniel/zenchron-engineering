@@ -97,7 +97,7 @@ func brokerGitFrom(t *testing.T, cwd, candidateDir, scratchDir, refusalLog strin
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, args, &stdout, &stderr)
+	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, GitOriginAnchor{}, args, &stdout, &stderr)
 	if brokerErr != nil {
 		t.Fatalf("broker %v: %v", args, brokerErr)
 	}
@@ -120,7 +120,7 @@ func brokerGitAnswer(t *testing.T, cwd, candidateDir, scratchDir, refusalLog str
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, args, &stdout, &stderr)
+	code, brokerErr := BrokerGitCommand(candidateDir, scratchDir, refusalLog, GitOriginAnchor{}, args, &stdout, &stderr)
 	if brokerErr != nil {
 		t.Fatalf("broker %v: %v", args, brokerErr)
 	}

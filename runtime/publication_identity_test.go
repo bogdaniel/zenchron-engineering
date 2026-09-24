@@ -665,6 +665,33 @@ func assertAppAssertion(t *testing.T, assertion string, key *rsa.PrivateKey, app
 	}
 }
 
+// TestAGitHubAppRefusesANonHTTPSEndpoint pins #223 on the App path:
+// github.endpoint also feeds this credential, and the JWT assertion signed
+// from the operator's private key must never be placed in a request to a
+// refused endpoint.
+func TestAGitHubAppRefusesANonHTTPSEndpoint(t *testing.T) {
+	path, _ := appKeyFile(t, 0o600)
+	for name, endpoint := range map[string]string{
+		"plaintext http":   "http://api.example.com",
+		"a non-web scheme": "ftp://api.example.com",
+		"no scheme at all": "api.example.com",
+		"a bare path":      "/api/v3",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			doer := &appDoer{slug: "zenchron-engineering", expiry: time.Now().Add(time.Hour)}
+			credential := &GitHubAppCredential{AppID: 11, InstallationID: 22, PrivateKeyPath: path, HTTP: doer, Endpoint: endpoint}
+			_, _, err := credential.Credential(governedRemoteIdentity(t))
+			var authErr *GitHubAuthError
+			if !errors.As(err, &authErr) {
+				t.Fatalf("expected a typed refusal, got %v", err)
+			}
+			if len(doer.paths) != 0 {
+				t.Fatalf("a refused endpoint was still contacted: %v", doer.paths)
+			}
+		})
+	}
+}
+
 // TestAGitHubAppPrivateKeyIsOwnerOnly. The key is stronger than the token file
 // it replaces: a token another local account can read is one publication
 // identity, and a KEY another local account can read is the App itself, on

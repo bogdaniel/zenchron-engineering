@@ -351,6 +351,35 @@ made from the argv, which cannot change. Dirtiness is still *observed*, so the
 diagnostic and the durable record can say what was at stake, but it cannot
 change the answer.
 
+### Who asked
+
+A refusal names the operation, the resource and, since #259, the actor that
+directly originated it:
+
+```text
+model_tool           the model's own tool call
+provider_runtime     the provider's machinery — repository probing, checkpointing, restore
+zenchron_runtime     this controller
+workload_subprocess  a program running inside the workload — a test binary, a build system
+unknown              the runtime could not establish it
+```
+
+The origin is derived from execution topology — the distance between the broker
+and the controller process that prepared the guard — and never from the shape of
+the command. Reading intent out of argv is how a run's 63 refusals were first
+reported as model stubbornness when the model had issued none of them: 51 came
+from the candidate's own test binaries and the rest from the provider probing
+its repository.
+
+Two properties make the answer usable. **Causation is not provenance**: a model
+that runs `go test ./...` causes the test binaries that follow, and the commits
+those binaries attempt are recorded as `workload_subprocess`, never promoted to
+`model_tool` because a model-originated process is somewhere in their ancestry.
+And **the origin changes no decision** — it is recorded beside an answer that was
+already given, an `unknown` origin is never more permissive than a known one, and
+a provider kind whose topology has not been measured yields `workload_subprocess`
+or `unknown` rather than a guess at the model.
+
 ### Why an absolute path does not get around it
 
 Two mechanisms, and the second is the one that matters. The guard directory is

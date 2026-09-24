@@ -266,7 +266,7 @@ identity is durable and caller-owned while sequence, chain links, and state
 digests are allocated inside the append transaction, so a watch controller
 holding a run's lease and an operator command holding none can write the same
 journal concurrently without colliding and without a gap. Owner liveness is
-the OS advisory ownership lock, held for a runtime instance's whole lifetime
+the OS advisory controller-instance lock, held for a runtime instance's whole lifetime
 and released by the kernel on death; a lock file is never liveness evidence,
 and a platform that cannot decide reports the owner alive so takeover is
 blocked rather than guessed.
@@ -374,6 +374,18 @@ owner-only state directory, owner-only itself, checked before creation and
 re-checked by every client, with no TCP listener and no stored credential beside
 it. Drain, shutdown and stop-all are three different operations, and only the
 last one cancels runs.
+
+A serving controller REPLACES ITSELF when trusted main moves. It builds the
+successor through the same governed adopted build an operator would run,
+prepares the transition, starts that successor inert, stops taking on new work,
+waits for the work it already started to finish, and only then asks the
+successor whether it can continue every live run - because "can you read this
+journal" is a question only the code that would read it can answer. Currency is
+proven last, immediately before the role changes hands. A successor that
+refuses costs an update; the controller keeps serving. Nothing in that sequence
+is a deployment command, and an operator who wants none of it gets it: a
+controller with no governance credential, no published generation of its own or
+no adopted lineage says so on its startup banner and upgrades nothing.
 
 `autonomy agents` reports each configured worker: found, capabilities
 advertised, version, and the authentication state actually observed. It spends

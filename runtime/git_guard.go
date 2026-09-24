@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -92,7 +93,7 @@ func GitGuardDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
 // composition root chose which binary is the controller, and a boundary that
 // resolved its own enforcer from the environment would be enforcing with
 // whatever the environment supplied.
-func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir, scratchDir string, broker []string) (*GitGuard, error) {
+func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir, scratchDir string, broker []string, providerKind string) (*GitGuard, error) {
 	if len(broker) == 0 || strings.TrimSpace(broker[0]) == "" {
 		return nil, fmt.Errorf("a brokered Git guard requires the controller's own broker command")
 	}
@@ -126,7 +127,13 @@ func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir,
 	if err := os.RemoveAll(guard.SentinelGitDir); err != nil {
 		return nil, err
 	}
-	if err := writeGitShim(filepath.Join(bin, "git"), candidateDir, scratchDir, guard.RefusalLog, broker); err != nil {
+	// THE ORIGIN ANCHOR IS THIS CONTROLLER'S OWN IDENTITY, taken here because
+	// here is the last moment it is unambiguous: the guard is prepared by the
+	// process that will spawn the provider, so the pid written into the shim
+	// is the one every later invocation is measured against. Reading it inside
+	// the broker would name the broker.
+	anchor := GitOriginAnchor{ControllerPID: os.Getpid(), ToolCallDepth: ToolCallDepthFor(providerKind)}
+	if err := writeGitShim(filepath.Join(bin, "git"), candidateDir, scratchDir, guard.RefusalLog, broker, anchor); err != nil {
 		return nil, err
 	}
 	return guard, nil
@@ -138,7 +145,7 @@ func PrepareGitGuard(stateDir string, attempt ExecutionAttemptRef, candidateDir,
 // decide is already decided in Go: it forwards the argv to the broker with the
 // candidate workspace and the record it must write. Putting any classification
 // here would put part of the law in a file no test reads.
-func writeGitShim(path, candidateDir, scratchDir, refusalLog string, broker []string) error {
+func writeGitShim(path, candidateDir, scratchDir, refusalLog string, broker []string, anchor GitOriginAnchor) error {
 	quoted := make([]string, 0, len(broker)+4)
 	for _, part := range broker {
 		quoted = append(quoted, shellSingleQuoted(part))
@@ -150,7 +157,18 @@ func writeGitShim(path, candidateDir, scratchDir, refusalLog string, broker []st
 	if strings.TrimSpace(scratchDir) != "" {
 		quoted = append(quoted, "--scratch", shellSingleQuoted(scratchDir))
 	}
-	quoted = append(quoted, "--refusal-log", shellSingleQuoted(refusalLog), "--")
+	quoted = append(quoted, "--refusal-log", shellSingleQuoted(refusalLog))
+	// The actor anchor, runtime-owned like everything else on this line. A
+	// depth is emitted only for a provider kind whose topology was measured;
+	// its absence is what keeps an unmeasured provider from ever being read as
+	// the model. See git_origin.go.
+	if anchor.ControllerPID > 0 {
+		quoted = append(quoted, "--controller-pid", shellSingleQuoted(strconv.Itoa(anchor.ControllerPID)))
+	}
+	if anchor.ToolCallDepth > 0 {
+		quoted = append(quoted, "--tool-call-depth", shellSingleQuoted(strconv.Itoa(anchor.ToolCallDepth)))
+	}
+	quoted = append(quoted, "--")
 	script := "#!/bin/sh\n" +
 		"# Runtime-owned. Zenchron brokers candidate Git; see issue #241.\n" +
 		"exec " + strings.Join(quoted, " ") + " \"$@\"\n"
@@ -232,7 +250,7 @@ func (p CLIAgentProvider) prepareGitGuard(request ExecutionRequest) (*GitGuard, 
 	if strings.TrimSpace(p.StateDir) == "" || len(p.GitBroker) == 0 {
 		return nil, nil
 	}
-	guard, err := PrepareGitGuard(p.StateDir, request.AttemptRef(), request.CandidateDir, request.ScratchDir, p.GitBroker)
+	guard, err := PrepareGitGuard(p.StateDir, request.AttemptRef(), request.CandidateDir, request.ScratchDir, p.GitBroker, p.Agent.Kind)
 	if err != nil {
 		// A CONFIGURED GUARD THAT COULD NOT BE MATERIALIZED IS THE SAME FACT
 		// as one that could not be resolved: this controller cannot enforce
@@ -269,6 +287,12 @@ func lastProviderGitRefusal(result ExecutionResult) string {
 	}
 	last := refusals[len(refusals)-1]
 	rendered := last.Operation
+	// WHO ASKED, on the line an operator actually reads. The count alone sent
+	// three published conclusions to the wrong actor; a shape without an actor
+	// is the same record with better formatting.
+	if origin := last.Origin; origin != "" {
+		rendered += " [origin=" + string(origin) + "]"
+	}
 	if last.DirtyCount > 0 {
 		rendered += fmt.Sprintf(" (%d dirty candidate path(s) preserved)", last.DirtyCount)
 	}

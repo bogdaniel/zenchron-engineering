@@ -23,7 +23,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -37,10 +36,15 @@ import (
 // dependency set, every external system is a seam and nothing is discovered
 // from ambient state.
 type SupervisorDependencies struct {
-	Store    *SQLiteOperationStore
-	Clock    Clock
-	Owner    string
-	Liveness OwnerLiveness
+	// WorkAdmissionWithheld constructs the supervisor unable to take on work.
+	// It is how the successor half of a controller handoff holds the scheduler
+	// while it revalidates and proves itself: ownership is permission to
+	// perform the transition, and never permission to serve.
+	WorkAdmissionWithheld bool
+	Store                 *SQLiteOperationStore
+	Clock                 Clock
+	Owner                 string
+	Liveness              OwnerLiveness
 	// StateDir is the runtime state directory holding each run's workspace. The
 	// plan reconciler reads it ONLY to prove whether one upstream candidate
 	// contains another, in the producer's own clone. Absent, that relationship
@@ -84,7 +88,15 @@ type SupervisorDependencies struct {
 
 // SupervisorReport is one tick's account of what the supervisor did.
 type SupervisorReport struct {
-	At time.Time `json:"at"`
+	// Reconciliation is what this pass did about the controller's own state,
+	// or why it did nothing. It rides the existing report rather than a new
+	// channel: an operator reading a tick should see the whole tick.
+	Reconciliation *ReconciliationAttempt `json:"reconciliation,omitempty"`
+	// Upgrade is what this pass did about replacing this controller with the
+	// successor trusted main names. Its Superseded() is how serve learns that
+	// this process has given up the role and must stop.
+	Upgrade *ControllerUpgradeAttempt `json:"upgrade,omitempty"`
+	At      time.Time                 `json:"at"`
 	// Driven is the runs whose driving FINISHED and was noticed by this pass.
 	// A run started here and finished here appears here, as it always did; a
 	// run whose provider spans several passes appears in the pass it finished
@@ -150,8 +162,22 @@ type Supervisor struct {
 	// draining, where the rotation is, which runs are in flight and which
 	// outcomes have not been reported yet. Driving a run happens entirely
 	// outside it, so a slow run never blocks an operator command.
-	mu       sync.Mutex
-	draining bool
+	mu sync.Mutex
+	// admission is the work-admission gate. It replaced a draining flag that
+	// was read under mu and released before the run was created, which made
+	// "after the drain returns nothing new is admitted" false by construction.
+	// See work_admission.go.
+	admission *workAdmissionGate
+	// reconciler maintains this controller's own generation state, one attempt
+	// per pass. It is bound AFTER construction because the cycle is real: the
+	// supervisor owns the admission gate, the controller service needs that
+	// gate, and the reconciler needs the service. Binding once at startup
+	// resolves it without a second gate, a second lease or a factory callback.
+	reconciler *ControllerReconciler
+	// upgrade replaces this controller with the successor trusted main names.
+	// It is bound after construction for the same cycle as the reconciler: it
+	// reaches the controller service, which needs this supervisor's gate.
+	upgrade *ControllerUpgrade
 	// cursor is the rotation offset into the ACTIVE-run ring. It exists so a
 	// ceiling smaller than the active set is a rate limit rather than a fixed
 	// prefix; see admit.
@@ -226,7 +252,14 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// supervisor can never drive more runs at once than the operator
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
-	return &Supervisor{deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}}, nil
+	return &Supervisor{
+		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{},
+		// A supervisor admits work from the start unless it is the successor
+		// half of a handoff, which holds the scheduler while it proves itself
+		// and is opened by EnableWorkAdmission once the durable record says it
+		// is the active generation.
+		admission: newWorkAdmissionGate(!d.WorkAdmissionWithheld),
+	}, nil
 }
 
 // engine returns the engine for one repository worked by one agent, refusing a
@@ -309,12 +342,6 @@ func (s *Supervisor) governedRepository(identity string) (GitHubRepo, bool) {
 // durable run. It creates the run and returns immediately; the tick loop drives
 // it, which is what removes the driving terminal from the operator's workflow.
 func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartOutcome, error) {
-	s.mu.Lock()
-	draining := s.draining
-	s.mu.Unlock()
-	if draining {
-		return StartOutcome{}, errors.New("the supervisor is draining and is not accepting new work")
-	}
 	if request.Issue <= 0 {
 		return StartOutcome{}, fmt.Errorf("issue number must be positive, got %d", request.Issue)
 	}
@@ -330,7 +357,112 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	if request.NewGeneration {
 		mode = NewGeneration
 	}
-	return engine.StartIssueRun(ctx, request.Issue, mode)
+	// THE DECISION AND THE COMMIT UNDER ONE LOCK. Creating the run inside the
+	// gate is what makes a drain that has returned mean something: an
+	// admission either committed before the close or never happens.
+	var outcome StartOutcome
+	err = s.admission.admit(func() error {
+		created, startErr := engine.StartIssueRun(ctx, request.Issue, mode)
+		outcome = created
+		return startErr
+	})
+	return outcome, err
+}
+
+// BindControllerReconciler installs the controller-maintenance loop. It is
+// STARTUP-ONLY and refuses replacement.
+//
+// The refusal is the point. A supervisor whose reconciler could be swapped
+// while running would be a mechanism for changing controller semantics at
+// runtime, which is a governance surface nobody asked for and nothing
+// authorizes. Binding once is composition; rebinding would be policy.
+func (s *Supervisor) BindControllerReconciler(reconciler *ControllerReconciler) error {
+	if reconciler == nil {
+		return fmt.Errorf("a controller reconciler is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reconciler != nil {
+		return fmt.Errorf("a controller reconciler is already bound to this supervisor")
+	}
+	s.reconciler = reconciler
+	return nil
+}
+
+// QuiesceWorkForTransition suspends intake and waits until no work this
+// controller started can still append to a journal.
+//
+// IT IS THE PRECONDITION FOR GIVING UP THE ROLE, and it is two facts rather
+// than one. Closing intake stops runs being CREATED; it says nothing about the
+// goroutines already inside driveOne, which are in a provider, a workspace or a
+// journal write and will finish whatever the gate says. A predecessor that
+// released the role with those still running would have a successor activate
+// and serve while the previous controller was still writing durable state -
+// which is not a stale pointer or a lost update, it is two controllers
+// appending to one store.
+//
+// THE HOLD IS REVERSIBLE BECAUSE THIS HAPPENS BEFORE COMMITMENT. The successor
+// evaluates the quiescent head next and may refuse it; that must cost the
+// update rather than this controller's ability to serve. The returned release
+// puts intake back, and does nothing once the transition has closed the gate on
+// its way past the point of no return.
+//
+// It is bounded. A provider invocation of tens of minutes is ordinary, and an
+// unbounded wait would hold intake for as long as the slowest run in the
+// fleet - so a wait that does not settle gives intake back and lets the next
+// attempt try again, which converges: nothing new is admitted while a hold is
+// in place, so the in-flight set only shrinks.
+func (s *Supervisor) QuiesceWorkForTransition(ctx context.Context, within time.Duration) (func(), error) {
+	release, held := s.admission.hold("a controller transition is evaluating the state its successor would inherit")
+	if !held {
+		return nil, &WorkAdmissionRefusedError{Reason: "this controller is not admitting work, so it has no intake to suspend for a transition"}
+	}
+	quiet := make(chan struct{})
+	go func() {
+		s.driving.Wait()
+		close(quiet)
+	}()
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case <-quiet:
+		return release, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	case <-timer.C:
+		release()
+		return nil, fmt.Errorf("work this controller started was still running after %s, so the role was not given up", within)
+	}
+}
+
+// BindControllerUpgrade installs the trusted-main upgrade. Like the
+// reconciler it is STARTUP-ONLY and refuses replacement: a supervisor whose
+// upgrade path could be swapped while running would be a way to change which
+// controller replaces this one, at runtime, with nothing authorizing it.
+func (s *Supervisor) BindControllerUpgrade(upgrade *ControllerUpgrade) error {
+	if upgrade == nil {
+		return fmt.Errorf("a controller upgrade is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.upgrade != nil {
+		return fmt.Errorf("a controller upgrade is already bound to this supervisor")
+	}
+	s.upgrade = upgrade
+	return nil
+}
+
+func (s *Supervisor) controllerUpgrade() *ControllerUpgrade {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upgrade
+}
+
+func (s *Supervisor) controllerReconciler() *ControllerReconciler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reconciler
 }
 
 // Drain stops accepting and starting work while letting started work finish.
@@ -338,17 +470,14 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 // drain is an operator saying "wind this down", and un-draining silently would
 // make that instruction meaningless.
 func (s *Supervisor) Drain() {
-	s.mu.Lock()
-	s.draining = true
-	s.mu.Unlock()
+	// Closing waits for admissions already in progress, which is the point: a
+	// drain that returned while a run was being written down would be a drain
+	// that did not drain.
+	s.admission.close("the supervisor is draining and is not accepting new work")
 }
 
 // Draining reports the current lifecycle state.
-func (s *Supervisor) Draining() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.draining
-}
+func (s *Supervisor) Draining() bool { return s.admission.closed() }
 
 // StopAll is the one lifecycle action that actually CANCELS runs. It is
 // journalled per run through the same single cancellation path `stop RUN` uses,
@@ -422,6 +551,48 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	report := SupervisorReport{
 		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
 		NextEligibleAt: now.Add(s.deps.PollInterval),
+	}
+	// THIS CONTROLLER'S OWN STATE COMES FIRST, AND OUTSIDE THE INTAKE SECTION.
+	//
+	// Both of these run even while draining - draining stops taking on WORK,
+	// not repairing a stale pointer or resuming an activation this process
+	// already holds - and neither may run underneath the admission section
+	// below. A transition SUSPENDS and then CLOSES intake, which takes the
+	// gate's lock exclusively; doing that from inside a section holding it for
+	// reading is a self-deadlock, and it is the kind that appears on the first
+	// real upgrade rather than in a test.
+	//
+	// Reconciliation before upgrade: a controller that is not in the state its
+	// own records describe repairs that first, because handing the role to a
+	// successor is not a way to resolve a transition this process has not
+	// finished.
+	if reconciler := s.controllerReconciler(); reconciler != nil {
+		attempt := reconciler.Attempt(now)
+		report.Reconciliation = &attempt
+	}
+	if upgrade := s.controllerUpgrade(); upgrade != nil {
+		attempt := upgrade.Attempt(ctx, now)
+		report.Upgrade = &attempt
+		if attempt.Superseded() {
+			// THE PASS ENDS HERE. This process has given up the role, so every
+			// remaining step - discovery, plans, enumerating runs, dispatching
+			// them - would be a controller scheduling work it no longer has
+			// the authority to schedule. Stopping structurally is worth more
+			// than stopping because a caller read the report and reacted.
+			report.Draining = true
+			s.collect(&report)
+			return report, nil
+		}
+	}
+	// INTAKE IS HELD OPEN ACROSS THE WHOLE SECTION. Discovery and plan
+	// reconciliation both CREATE runs, so checking the gate once and then
+	// creating work afterwards would be the defect this gate exists to close,
+	// one layer up from Submit.
+	release, admissionErr := s.admission.section()
+	if admissionErr == nil {
+		defer release()
+	} else {
+		report.Draining = true
 	}
 	if s.deps.Discovery != nil && !report.Draining {
 		discovery, err := s.deps.Discovery.Tick(ctx)

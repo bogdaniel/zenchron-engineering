@@ -654,7 +654,7 @@ func TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant(t *testing.T) {
 		seedRun(t, built.store, fmt.Sprintf("run-issue-%d", issue), fmt.Sprintf("zenchron/seeded#%d", issue), now)
 	}
 
-	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,5 +682,40 @@ func retire(t *testing.T, store *runtime.SQLiteOperationStore, runID string) {
 	run.Disposition = runtime.Failed
 	if err := store.PutRun(run); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// AN EXECUTING RUN LOOKS EXECUTING, WHATEVER ITS DISPOSITION SAYS.
+//
+// A run parked on review keeps the disposition `waiting` while its worker
+// answers that review. The row used to show only the disposition, so eight
+// minutes of a provider working looked exactly like a run nobody had touched.
+func TestTheFleetRowShowsAnOperationThatIsRunning(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  runtime.RunSummary
+		want string
+	}{
+		{"a remediation under a waiting disposition", runtime.RunSummary{
+			Disposition: runtime.Waiting, Reason: "goal_state_reached",
+			Operation: "execution.invoke", Executing: true,
+		}, "waiting:execution.invoke"},
+		{"an ordinary active invocation", runtime.RunSummary{
+			Disposition: runtime.Active, Operation: "execution.invoke", Executing: true,
+		}, "active:execution.invoke"},
+		// THE OPPOSITE ERROR, which the previous rule made: an active run whose
+		// last operation has finished is not executing it.
+		{"an active run between operations", runtime.RunSummary{
+			Disposition: runtime.Active, Operation: "assurance.go", Executing: false,
+		}, "active"},
+		{"a parked run with nothing running", runtime.RunSummary{
+			Disposition: runtime.Waiting, Reason: "goal_state_reached", Operation: "assurance.go",
+		}, "waiting"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stateLabel(test.run); got != test.want {
+				t.Fatalf("state = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

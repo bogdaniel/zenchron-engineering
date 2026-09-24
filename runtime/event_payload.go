@@ -39,6 +39,25 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
+	// A succession admission is the only event that changes which controller
+	// may append the NEXT one, so its payload is validated rather than trusted:
+	// a decision that is not settled compatible, or that names neither party,
+	// admits nothing and must not reach the journal in a readable-looking form.
+	EventControllerSuccessionAdmitted: payloadSchema(func(p ControllerSuccessionDecision) error {
+		if p.Result != SuccessionCompatible {
+			return fmt.Errorf("a succession admission records a compatible decision, got %q", p.Result)
+		}
+		if _, err := p.Predecessor.Digest(); err != nil {
+			return fmt.Errorf("the admitted predecessor identity is not digestible: %w", err)
+		}
+		if _, err := p.Successor.Digest(); err != nil {
+			return fmt.Errorf("the admitted successor identity is not digestible: %w", err)
+		}
+		for _, refusal := range p.Refusals() {
+			return fmt.Errorf("a compatible decision carries no refusal, got %s", refusal)
+		}
+		return errors.Join(required("run_id", p.RunID), required("handoff_id", p.HandoffID))
+	}),
 	// run.created carries the creating controller's provenance (ControllerBuild)
 	// when the build is attested. It is optional because an unattested build
 	// records no claim, and strict because a recorded claim must be complete.

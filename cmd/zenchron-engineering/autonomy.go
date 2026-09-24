@@ -224,6 +224,13 @@ type autonomyFlags struct {
 	// Detached submits work to a running supervisor instead of driving it in
 	// this terminal. It is implied when a supervisor owns the state directory.
 	Detached bool
+	// SuccessorOf starts serve as the INERT SUCCESSOR of the named transition:
+	// it takes no role, opens no service and writes nothing until the
+	// predecessor that spawned it says the role has been released. It is not
+	// an operator flag - a person running it by hand gets a process waiting on
+	// a handshake nobody will perform - and it is the contract the predecessor
+	// starts the next generation through.
+	SuccessorOf string
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -557,6 +564,10 @@ type composition struct {
 	assurance   runtime.AssuranceProvider
 	semantic    runtime.AssuranceProvider
 	build       runtime.ControllerBuild
+	// role is this process's controller-role capability when it is serving. It
+	// is held rather than queried: the snapshot answers "do I own the role" by
+	// exercising it, because there is deliberately no way to ask.
+	role *runtime.ControllerRoleLease
 	// agents is the operator's registry, and agent is the one this invocation
 	// resolved. Both are here because the two are different questions: which
 	// workers exist, and which one this command is driving.
@@ -620,7 +631,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	// also refuses a second invocation that would share this identity, and
 	// releasing it on shutdown is how a watcher gives ownership back.
 	owner := runtime.NewRuntimeOwner()
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, owner)
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, owner)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot take exclusive ownership of state dir %s; another zenchron-engineering process may already be running against it: %w", config.StateDir, err)
@@ -755,7 +766,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Repository:        target,
 		Remote:            remote,
 		Credentials:       c.credentials,
-		ControllerID:      "zenchron-engineering/" + version,
+		ControllerID:      controllerIdentity(),
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
@@ -777,6 +788,27 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		OperatorMaxConcurrentRuns: ceiling,
 	})
 }
+
+// controllerIdentity is WHICH PROGRAM this is, and deliberately not which
+// build of it.
+//
+// It used to be "zenchron-engineering/" + version, which folded the build into
+// the identity - and the build is already a field of its own beside this one,
+// carrying the kind, the version, the source revision, the tree and the
+// measured binary. Saying it twice would be merely redundant if the two were
+// read the same way, and they are not: succession requires the controller
+// identity to be UNCHANGED between predecessor and successor, precisely so
+// that a new build of the same program can continue a run while a different
+// program cannot. An identity that moved with every build made that condition
+// unsatisfiable - every automated upgrade would have been refused with "the
+// controller identity changed", for the only kind of upgrade #234 exists to
+// perform.
+//
+// The cost is stated rather than hidden: this changes the ControllerSHA256 of
+// runs created by earlier builds, so runs live across this change park on
+// controller_changed exactly as they do across any other manual upgrade. From
+// here on they do not have to.
+func controllerIdentity() string { return "zenchron-engineering" }
 
 // feedbackPolicyFor adds the identity this runtime's own credential acts as in
 // THIS repository to the self-loop set.
@@ -1136,6 +1168,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Digest = args[1]
 		case "--assignments":
 			flags.Assignments = args[1]
+		case successorFlag:
+			flags.SuccessorOf = args[1]
 		case "--revision":
 			revision, err := strconv.Atoi(args[1])
 			if err != nil || revision < 1 {
