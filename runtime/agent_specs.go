@@ -7,11 +7,13 @@ import (
 
 // The native-CLI catalogue: one spec per supported coding CLI.
 //
-// This file is where provider-specific knowledge is allowed to live, and it is
-// the ONLY place it lives. Adding another CLI means adding one spec here, one
-// kind in agents.go, one branch in the composition root's factory, and tests.
-// Nothing in the scheduler, the reconciler, the kernel, the authority
-// evaluator, Git or the forge adapter learns the new provider's name.
+// Provider-specific knowledge is owned by the provider adapter/spec layer: this
+// catalogue, plus the provider files a spec field wires in - claude_stream.go
+// holds Claude Code's stream-json parser, selected by claudeSpec.ProgressMode
+// (#322). Adding another CLI means adding one spec here, one kind in agents.go,
+// one branch in the composition root's factory, and tests. Nothing in the
+// scheduler, the reconciler, the kernel, the authority evaluator, Git or the
+// forge adapter learns the new provider's name or its event vocabulary.
 //
 // Every spec states the flags this runtime depends on TWICE, on purpose: once
 // in Probes, which requires the installed CLI to advertise them, and once in
@@ -221,6 +223,7 @@ var claudeSpec = cliAgentSpec{
 	HomeEnv:                         "CLAUDE_CONFIG_DIR",
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
+	ProgressMode:                    progressStructuredClaudeEvents,
 	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},

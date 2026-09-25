@@ -40,6 +40,10 @@ type inactivityCLI struct {
 
 func (c *inactivityCLI) LookPath(string) error { return nil }
 
+// observesStdout: Run delegates to OSCommandExecutor.Run, which feeds the
+// stream, so this double honours the observer by delegation.
+func (c *inactivityCLI) observesStdout() {}
+
 func (c *inactivityCLI) Output(_ context.Context, _ string, args []string, _ string, _ []string, _ time.Duration) (CommandOutput, error) {
 	if len(args) == 1 && args[0] == "--version" {
 		return CommandOutput{Stdout: []byte("1.2.3\n")}, nil

@@ -20,7 +20,10 @@ package runtime
 //
 // WHAT COUNTS AS PROGRESS, and deliberately what does not:
 //
-//   - bytes arriving on the child's stdout or stderr: progress.
+//   - bytes arriving on the child's stdout or stderr: progress, for the
+//     byte_output adapters (Codex, Gemini, Qwen). Claude Code is supervised by
+//     its structured stream-json events instead, and its raw bytes are not
+//     progress at all; see claude_stream.go (#322).
 //   - the child process existing: NOT progress. That is the defect.
 //   - a scheduler lease heartbeat: NOT progress. It proves a controller is
 //     alive, which is a different claim from the work advancing.
@@ -170,6 +173,10 @@ type inactivityWatch struct {
 	stopped   chan struct{}
 	closeQuit sync.Once
 
+	// stream is the structured progress oracle, when the provider has one
+	// (#322). It is set before the watcher starts and is only read after.
+	stream *claudeStream
+
 	mu         sync.Mutex
 	recordedAt time.Duration
 	// finished records that the PROCESS COMPLETED FIRST. It is read and
@@ -201,12 +208,30 @@ func (w *inactivityWatch) progress(n int) {
 	if w == nil || n <= 0 {
 		return
 	}
-	elapsed := time.Since(w.start)
-	w.last.Store(int64(elapsed))
-	total := w.bytes.Add(int64(n))
-	if w.policy.record == nil {
+	w.touch()
+	// The KEY is the cumulative byte count, so the durable record advances
+	// only when the provider actually said something new. That is the same
+	// rule the scheduler's progress fingerprint already applies, and it is
+	// what keeps "progress" from meaning "we asked again".
+	w.record("", w.bytes.Add(int64(n)))
+}
+
+// touch refreshes the in-memory window. It is what every recognized progress
+// signal does, on every signal.
+func (w *inactivityWatch) touch() {
+	if w == nil {
 		return
 	}
+	w.last.Store(int64(time.Since(w.start)))
+}
+
+// record makes the progress count durable, at most once per quarter window.
+// The key is prefix+count, so it changes only when the count does.
+func (w *inactivityWatch) record(prefix string, count int64) {
+	if w == nil || w.policy.record == nil {
+		return
+	}
+	elapsed := time.Since(w.start)
 	w.mu.Lock()
 	due := w.recordedAt == 0 || elapsed-w.recordedAt >= w.policy.limit/4
 	if due {
@@ -214,11 +239,7 @@ func (w *inactivityWatch) progress(n int) {
 	}
 	w.mu.Unlock()
 	if due {
-		// The KEY is the cumulative byte count, so the durable record advances
-		// only when the provider actually said something new. That is the same
-		// rule the scheduler's progress fingerprint already applies, and it is
-		// what keeps "progress" from meaning "we asked again".
-		w.policy.record(strconv.FormatInt(total, 10))
+		w.policy.record(prefix + strconv.FormatInt(count, 10))
 	}
 }
 
@@ -271,16 +292,26 @@ func (w *inactivityWatch) watchUntilComplete() func() {
 }
 
 // expire cancels the invocation unless the process already completed, and
-// reports whether it did.
+// reports whether the watcher is done.
 //
 // The check and the cancel are ONE critical section. Checking outside it would
 // reintroduce the race in a smaller window rather than removing it: stop could
 // set finished between the check and the cancel, and the caller would then be
 // classifying a cause that was published after completion was recorded.
+//
+// It declines, and the watcher looks again, when a structured stream holds a
+// main-thread tool open (#322: a long `go test` is not a stall; the absolute
+// deadline still bounds it) or when progress landed after the watcher measured.
+// The open-tool check comes FIRST: the stream closes a tool and refreshes the
+// window in one step under its own lock, so once it reports nothing open,
+// silent() already reflects the refresh that closed it.
 func (w *inactivityWatch) expire() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.finished {
+		return true
+	}
+	if w.stream.holdsOpenTool() || w.silent() < w.policy.limit {
 		return false
 	}
 	w.policy.cancel(ErrProviderInactive)
@@ -312,8 +343,13 @@ func (w *inactivityWatch) watch() {
 		}
 		remaining := w.policy.limit - w.silent()
 		if remaining <= 0 {
-			w.expire()
-			return
+			if w.expire() {
+				return
+			}
+			// Held by an open tool, or refreshed meanwhile: measure again.
+			if remaining = w.policy.limit - w.silent(); remaining <= 0 {
+				remaining = w.policy.limit
+			}
 		}
 		timer := time.NewTimer(remaining)
 		select {
