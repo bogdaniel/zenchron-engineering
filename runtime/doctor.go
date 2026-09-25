@@ -171,6 +171,20 @@ type DoctorInput struct {
 	// failure as a deliberate design choice.
 	ControllerBuild      ControllerBuild
 	ControllerBuildError error
+
+	// ControllerRoot is where adopted generations and the "current" stable
+	// projection live - the same value `controller status`, `controller
+	// build-adopted` and succession itself already use. The entrypoint checks
+	// read it to know what a canonical PATH entry must point at; it names no
+	// authority of its own.
+	ControllerRoot string
+	// EntrypointPathEnv is the operator's shell PATH, read once at the
+	// composition boundary rather than inside the check, so a diagnosis is
+	// reproducible from a value a test can set directly. This is the one
+	// place Doctor deliberately reads ambient state: the question being asked
+	// is what a real shell would resolve, and answering it from anything else
+	// would not be answering that question.
+	EntrypointPathEnv string
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -186,6 +200,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
 	checks = append(checks, doctorController(in))
+	checks = append(checks, doctorEntrypoint(in)...)
 	checks = append(checks, doctorAgents(in)...)
 	checks = append(checks, doctorControlEndpoint(in))
 	checks = append(checks, doctorStateStorage(in))
@@ -266,6 +281,79 @@ func doctorController(in DoctorInput) DoctorCheck {
 	}
 	return pass(doctorGroupController, id, detail+
 		". Its source is adopted, which is a fact established by external merge and never by the runtime itself")
+}
+
+// ---------------------------------------------------------------------------
+// PATH entrypoint
+// ---------------------------------------------------------------------------
+
+const doctorGroupInstall = "install"
+
+// doctorEntrypoint answers #319: is there ONE canonical local install, and
+// does the operator's shell actually reach it?
+//
+// It never mutates anything - `controller install` is the one place that
+// does - and it never guesses which of several PATH entries an operator
+// meant. A stale copy earlier on PATH is reported as exactly that, even when
+// a canonical entrypoint also exists further along: the shell would resolve
+// the stale one, and a report that looked past it to the healthy entry
+// further down would be a green diagnosis of a broken installation.
+func doctorEntrypoint(in DoctorInput) []DoctorCheck {
+	return []DoctorCheck{doctorEntrypointCanonical(in), doctorEntrypointShadowing(in)}
+}
+
+// doctorEntrypointCanonical states the canonical public entrypoint path, the
+// path the shell actually resolves, the adopted target it should reach, and
+// whether it does.
+func doctorEntrypointCanonical(in DoctorInput) DoctorCheck {
+	const id = "install.entrypoint"
+	if strings.TrimSpace(in.ControllerRoot) == "" {
+		return warn(doctorGroupInstall, id, "no controller root is configured, so the canonical PATH entrypoint cannot be diagnosed")
+	}
+	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot)
+	if diagnosis.Winner == nil {
+		return warn(doctorGroupInstall, id, fmt.Sprintf(
+			"no %s is on PATH; the canonical entrypoint would be a symlink to %s. Run `controller install` to establish it",
+			EntrypointExecutableName, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.Canonical {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the %s that resolves on PATH is %s, and it is not the canonical entrypoint: %s. Canonical target: %s. Run `controller install` to replace the resolved entry with a symlink to it",
+			EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.Detail, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.ReachesAdopted {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the canonical entrypoint %s does not reach the adopted target %s: %s",
+			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
+	}
+	return pass(doctorGroupInstall, id, fmt.Sprintf(
+		"the %s that resolves on PATH (%s) is the canonical entrypoint and reaches the adopted target %s",
+		EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.CanonicalTarget))
+}
+
+// doctorEntrypointShadowing names every PATH entry other than the one that
+// wins, so a stale or duplicate copy is visible even when it happens not to
+// be the one the shell currently resolves.
+func doctorEntrypointShadowing(in DoctorInput) DoctorCheck {
+	const id = "install.path_shadowing"
+	if strings.TrimSpace(in.ControllerRoot) == "" {
+		return warn(doctorGroupInstall, id, "no controller root is configured, so PATH shadowing cannot be diagnosed")
+	}
+	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot)
+	if diagnosis.Winner == nil {
+		return pass(doctorGroupInstall, id, fmt.Sprintf("no %s is on PATH at all, so there is nothing to shadow", EntrypointExecutableName))
+	}
+	shadowed := diagnosis.Shadowed()
+	if len(shadowed) == 0 {
+		return pass(doctorGroupInstall, id, fmt.Sprintf("%s appears at exactly one place on PATH (%s)", EntrypointExecutableName, diagnosis.Winner.Path))
+	}
+	paths := make([]string, len(shadowed))
+	for i, candidate := range shadowed {
+		paths[i] = candidate.Path
+	}
+	return warn(doctorGroupInstall, id, fmt.Sprintf(
+		"%s also exists later on PATH at %s, shadowed by the resolved %s; remove the stale entries so they cannot be reached by a different PATH order",
+		EntrypointExecutableName, strings.Join(paths, ", "), diagnosis.Winner.Path))
 }
 
 // ---------------------------------------------------------------------------
