@@ -68,8 +68,18 @@ type EntrypointDiagnosis struct {
 	// generation) and false while Canonical is true ("current" itself is
 	// broken).
 	ReachesAdopted bool
-	// Detail explains a false Canonical or ReachesAdopted. Empty means
-	// nothing needs explaining.
+	// AuthorityConsistent reports whether the durable controller authority -
+	// the same subject governsNow and describeProjection already consult, and
+	// the one thing this file must never re-derive a second opinion of - agrees
+	// that CanonicalTarget's "current" pointer names the generation presently
+	// governing. False means the projection is a repairable pointer that has
+	// drifted from authority: filesystem readability of "current" is not
+	// proof of what it should point at, so a caller must refuse rather than
+	// treat the projection as healthy. Repairing it is the existing controller
+	// law's job (re-adoption, succession) and never this file's.
+	AuthorityConsistent bool
+	// Detail explains a false Canonical, ReachesAdopted or AuthorityConsistent.
+	// Empty means nothing needs explaining.
 	Detail string
 }
 
@@ -114,30 +124,38 @@ func DiscoverEntrypointCandidates(pathValue string) []EntrypointCandidate {
 
 // DiagnoseEntrypoint answers what a shell would resolve right now for
 // pathValue, and whether that resolution is the canonical chain through
-// <controllerRoot>/current. It changes nothing: every fact is read from the
-// filesystem an operator's own shell would read.
-func DiagnoseEntrypoint(pathValue, controllerRoot string) EntrypointDiagnosis {
+// <controllerRoot>/current AND whether that chain agrees with durable
+// controller authority. It changes nothing: every filesystem fact is read
+// from what an operator's own shell would read, and the authority fact is
+// read from the same subject governsNow and describeProjection already
+// consult - never re-derived from the projection itself.
+func DiagnoseEntrypoint(pathValue, controllerRoot string, authority currentAuthorityReader) EntrypointDiagnosis {
 	diagnosis := EntrypointDiagnosis{
 		CanonicalTarget: filepath.Join(controllerRoot, StableEntrypointName, EntrypointExecutableName),
 		Candidates:      DiscoverEntrypointCandidates(pathValue),
+	}
+	if consistent, detail := entrypointAuthorityConsistency(controllerRoot, authority); consistent {
+		diagnosis.AuthorityConsistent = true
+	} else {
+		diagnosis.Detail = appendDetail(diagnosis.Detail, detail)
 	}
 	if len(diagnosis.Candidates) > 0 {
 		winner := diagnosis.Candidates[0]
 		diagnosis.Winner = &winner
 	}
 	if diagnosis.Winner == nil {
-		diagnosis.Detail = fmt.Sprintf("no %s was found on PATH", EntrypointExecutableName)
+		diagnosis.Detail = appendDetail(diagnosis.Detail, fmt.Sprintf("no %s was found on PATH", EntrypointExecutableName))
 		return diagnosis
 	}
 
 	link, err := os.Readlink(diagnosis.Winner.Path)
 	switch {
 	case err != nil:
-		diagnosis.Detail = fmt.Sprintf("%s is not a symlink; it is a detached copy, not the canonical entrypoint", diagnosis.Winner.Path)
+		diagnosis.Detail = appendDetail(diagnosis.Detail, fmt.Sprintf("%s is not a symlink; it is a detached copy, not the canonical entrypoint", diagnosis.Winner.Path))
 	case filepath.Clean(resolveRelative(link, diagnosis.Winner.Dir)) == filepath.Clean(diagnosis.CanonicalTarget):
 		diagnosis.Canonical = true
 	default:
-		diagnosis.Detail = fmt.Sprintf("%s is a symlink to %s, not the canonical %s", diagnosis.Winner.Path, link, diagnosis.CanonicalTarget)
+		diagnosis.Detail = appendDetail(diagnosis.Detail, fmt.Sprintf("%s is a symlink to %s, not the canonical %s", diagnosis.Winner.Path, link, diagnosis.CanonicalTarget))
 	}
 
 	resolvedWinner, winnerErr := filepath.EvalSymlinks(diagnosis.Winner.Path)
@@ -153,6 +171,48 @@ func DiagnoseEntrypoint(pathValue, controllerRoot string) EntrypointDiagnosis {
 		diagnosis.Detail = appendDetail(diagnosis.Detail, fmt.Sprintf("%s resolves to %s, which is not the adopted %s", diagnosis.Winner.Path, resolvedWinner, resolvedCanonical))
 	}
 	return diagnosis
+}
+
+// entrypointAuthorityConsistency answers the one question InstallCanonicalEntrypoint
+// must ask before it ever trusts "current": does durable controller authority
+// agree that the generation behind it is the one presently governing?
+//
+// It is the SAME comparison describeProjection already makes for `controller
+// status` - the pointer's raw, unresolved readlink target against
+// filepath.Dir(authority.Artifact) - because durable authority decides truth
+// and "current" is only a repairable projection of it. A second, differently
+// shaped comparison here would be a second authority mechanism, which #319
+// explicitly must not create.
+//
+// No authority recorded yet is consistent, not inconsistent: a state
+// directory that has never completed a transition has nothing for the
+// projection to disagree with, and reporting drift would invent a comparison
+// that does not exist. A nil authority reader, by contrast, means the caller
+// never wired one up, so the question could not be asked at all - that fails
+// closed rather than silently skipping the check.
+func entrypointAuthorityConsistency(controllerRoot string, authority currentAuthorityReader) (consistent bool, detail string) {
+	if authority == nil {
+		return false, "no durable controller authority was consulted, so the \"current\" projection could not be proven to name the generation that actually governs"
+	}
+	current, found, err := authority.CurrentControllerAuthority()
+	if err != nil {
+		return false, "durable controller authority could not be read: " + err.Error()
+	}
+	if !found || strings.TrimSpace(current.Artifact) == "" {
+		return true, ""
+	}
+	pointer := filepath.Join(controllerRoot, StableEntrypointName)
+	target, err := os.Readlink(pointer)
+	if err != nil {
+		return false, fmt.Sprintf("%s could not be read to compare against durable authority: %s", pointer, err.Error())
+	}
+	governs := filepath.Dir(current.Artifact)
+	if target != governs {
+		return false, fmt.Sprintf(
+			"%s points at %s, but durable controller authority (%s %s) says %s governs; repair this through the existing controller authority (re-adoption or succession), not by installing over it",
+			pointer, target, current.Kind, current.Ref, governs)
+	}
+	return true, ""
 }
 
 // resolveRelative joins a symlink's own target against the directory holding
@@ -212,8 +272,20 @@ type EntrypointInstallResult struct {
 // occurrences on PATH are reported by DiagnoseEntrypoint's Shadowed, not
 // silently modified, because guessing which of several stale copies to erase
 // is exactly the silent behaviour #319 refuses.
-func InstallCanonicalEntrypoint(pathValue, binDir, controllerRoot string) (EntrypointInstallResult, error) {
-	diagnosis := DiagnoseEntrypoint(pathValue, controllerRoot)
+//
+// It refuses rather than installs when "current" has drifted from durable
+// controller authority (DiagnoseEntrypoint's AuthorityConsistent). A drifted
+// projection is readable - os.Stat on it succeeds - but readable is not the
+// same fact as authoritative, and blessing it as the public entrypoint would
+// be exactly the silent trust #319's review refused. The fix for drift is the
+// existing controller law (re-adoption, succession), never a repair
+// performed here.
+func InstallCanonicalEntrypoint(pathValue, binDir, controllerRoot string, authority currentAuthorityReader) (EntrypointInstallResult, error) {
+	diagnosis := DiagnoseEntrypoint(pathValue, controllerRoot, authority)
+	if !diagnosis.AuthorityConsistent {
+		return EntrypointInstallResult{}, fmt.Errorf(
+			"the canonical target %s cannot be trusted: %s", diagnosis.CanonicalTarget, diagnosis.Detail)
+	}
 	target := diagnosis.CanonicalTarget
 	if _, err := os.Stat(target); err != nil {
 		return EntrypointInstallResult{}, fmt.Errorf(
