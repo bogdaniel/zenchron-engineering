@@ -304,3 +304,47 @@ func TestInstallCanonicalEntrypointNeverModifiesShadowedEntries(t *testing.T) {
 		t.Fatalf("a shadowed entry other than the winner must never be modified: %q, %v", content, err)
 	}
 }
+
+// A FAILED INSTALL MUST NOT DELETE THE OPERATOR'S COMMAND.
+//
+// The migration used to rename the existing entry away and only then install
+// the replacement, so a failure in the second step left the public PATH
+// location empty: an install that breaks the very command it was asked to fix.
+// replaceSymlinkAtomically guarantees a reader sees old-or-new, and that is
+// only worth something while the old one is still there.
+func TestAFailedInstallLeavesTheExistingEntrypointInPlace(t *testing.T) {
+	root := t.TempDir()
+	entrypointFixture(t, root)
+	binDir := t.TempDir()
+
+	// A stale detached copy already on PATH: exactly what #319 migrates.
+	link := filepath.Join(binDir, EntrypointExecutableName)
+	if err := os.WriteFile(link, []byte("stale copy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The install cannot complete: the directory admits no new entries, so
+	// staging the replacement link fails.
+	if err := os.Chmod(binDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(binDir, 0o700) })
+
+	if _, err := InstallCanonicalEntrypoint(binDir, "", root, entrypointFakeAuthority{found: false}); err == nil {
+		t.Fatal("the install reported success against a directory it cannot write")
+	}
+
+	// THE COMMAND IS STILL THERE, and it is still the operator's original.
+	_ = os.Chmod(binDir, 0o700)
+	body, err := os.ReadFile(link)
+	if err != nil {
+		t.Fatalf("a failed install removed the operator's command: %v", err)
+	}
+	if string(body) != "stale copy" {
+		t.Fatalf("the surviving command is %q, not what was there before", body)
+	}
+	// And no half-finished migration is left beside it for the next attempt
+	// to trip over.
+	if _, err := os.Lstat(link + ".pre-canonical"); err == nil {
+		t.Fatal("a failed install left a retirement copy behind")
+	}
+}

@@ -321,16 +321,55 @@ func InstallCanonicalEntrypoint(pathValue, binDir, controllerRoot string, author
 		if err != nil {
 			return EntrypointInstallResult{}, err
 		}
-		if err := os.Rename(link, retired); err != nil {
+		// THE OPERATOR'S COMMAND IS NEVER ABSENT, not even for an instant.
+		//
+		// Renaming the existing entry away first and then installing the new
+		// link would leave the public PATH location EMPTY if the second step
+		// failed - a failed install that deletes the working command, which is
+		// worse than not installing at all. replaceSymlinkAtomically exists so
+		// a reader sees old-or-new and never nothing, and that guarantee is
+		// only worth anything if the old one is still there to be seen.
+		//
+		// So the old artifact is preserved BESIDE itself first and the public
+		// path is replaced atomically afterwards. A hard link keeps a detached
+		// binary without copying it; a symlink is recreated by value.
+		if err := preserveRetiredEntry(link, existing, retired); err != nil {
 			return EntrypointInstallResult{}, fmt.Errorf("the existing %s could not be retired: %w", link, err)
 		}
+		if err := replaceSymlinkAtomically(target, link); err != nil {
+			// The public path still holds what it held before. Remove the
+			// retirement copy so a later attempt is not confused by a
+			// half-finished migration.
+			_ = os.Remove(retired)
+			return EntrypointInstallResult{}, err
+		}
 		result.RetiredPath = retired
+		return result, nil
 	}
 
 	if err := replaceSymlinkAtomically(target, link); err != nil {
 		return EntrypointInstallResult{}, err
 	}
 	return result, nil
+}
+
+// preserveRetiredEntry copies the existing entrypoint to retired WITHOUT
+// disturbing the original.
+//
+// A symlink is recreated by value rather than followed, so what is kept is the
+// operator's previous pointer rather than a second name for its target. A
+// regular file is hard-linked, which keeps a detached binary - typically tens
+// of megabytes - without copying its bytes and without depending on the
+// original surviving the replacement that follows.
+func preserveRetiredEntry(link string, existing os.FileInfo, retired string) error {
+	if existing.Mode()&os.ModeSymlink != 0 {
+		previous, err := os.Readlink(link)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(previous, retired)
+	}
+	return os.Link(link, retired)
 }
 
 // retiredSiblingPath names an unused ".pre-canonical" sibling of link, so a
