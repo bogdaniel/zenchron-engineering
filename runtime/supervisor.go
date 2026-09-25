@@ -80,10 +80,11 @@ type SupervisorDependencies struct {
 	Discovery *WatchController
 	// Agents is the registry a control request resolves an agent id against.
 	Agents AgentRegistry
-	// AgentProber builds the readiness probe an explicit Submit agent selection
-	// is checked against, so a configured-but-uninvocable agent is refused with
-	// the same reason `doctor` already reports for it rather than accepted and
-	// left to fail deep inside the run it starts. Nil disables the check.
+	// AgentProber builds the readiness probe a Submit agent selection - default
+	// or explicit, Submit only ever creates work - is checked against, so a
+	// configured-but-uninvocable agent is refused with the same reason `doctor`
+	// already reports for it rather than accepted and left to fail deep inside
+	// the run it starts. Nil disables the check.
 	AgentProber func(ResolvedAgent) AgentProber
 	// Plans is the plan lifecycle service, or the zero value when no plan has
 	// ever been proposed. It is what the plan reconciler resolves assignments
@@ -358,10 +359,13 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	if err != nil {
 		return StartOutcome{}, err
 	}
-	// Only an EXPLICIT selection is checked: a request naming no agent resolves
-	// the operator's default, and a submission must keep working even when that
-	// default happens to be uninstalled, exactly as it does today.
-	if strings.TrimSpace(request.Agent) != "" && s.deps.AgentProber != nil {
+	// Submit ONLY creates work, unlike the shared composition an operator's
+	// read-only commands (status, watch, resume) are also built through. There
+	// is no "leave the default alone" case here: whether the id came from
+	// --agent or from the operator's configured default, it is a configured
+	// selection this call is about to act on, and it is checked the same way
+	// either time.
+	if s.deps.AgentProber != nil {
 		if err := RefuseUnlessInvocable(ctx, agent, s.deps.AgentProber(agent)); err != nil {
 			return StartOutcome{}, err
 		}

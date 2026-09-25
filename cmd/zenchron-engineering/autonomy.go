@@ -416,6 +416,19 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		if built != nil && runtime.SupervisorRunning(built.config.StateDir) {
 			return submitToSupervisor(built, flags, issue, stdout)
 		}
+		// This process is about to create the run itself, through built.agent -
+		// the operator's default when --agent named nothing. newComposition only
+		// probed an EXPLICIT --agent, on purpose, because it is shared by
+		// status/resume/watch and those must keep working over an uninstalled
+		// default. This is not one of those: it is the boundary that creates
+		// work, so the configured selection - default or explicit - is checked
+		// here the same way submitToSupervisor's target is.
+		if built != nil {
+			prober := runtime.AgentProberFor(built.agent, built.artifacts, operatorHome())
+			if err := runtime.RefuseUnlessInvocable(ctx, built.agent, prober); err != nil {
+				return runtime.ExitInvalid, err
+			}
+		}
 		outcome, err := engine.StartIssueRun(ctx, issue, mode)
 		if err != nil {
 			return exitFor(err, runtime.ExitFailed), err
