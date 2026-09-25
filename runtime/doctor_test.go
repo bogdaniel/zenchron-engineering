@@ -196,14 +196,16 @@ func doctorGovernanceFixture(grantAtUnknown bool) (domain.ProjectModel, domain.E
 
 type doctorFixture struct {
 	t          *testing.T
-	root       string
-	stateDir   string
-	cacheDir   string
-	repoRoot   string
-	configPath string
-	credential string
-	toolDir    string
-	input      DoctorInput
+	root           string
+	stateDir       string
+	cacheDir       string
+	repoRoot       string
+	configPath     string
+	credential     string
+	toolDir        string
+	controllerRoot string
+	entrypointBin  string
+	input          DoctorInput
 }
 
 // newDoctorFixture builds a fully healthy environment. Each test then breaks
@@ -216,12 +218,14 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		root:       root,
 		stateDir:   filepath.Join(root, "state"),
 		cacheDir:   filepath.Join(root, "cache"),
-		repoRoot:   filepath.Join(root, "repo"),
-		configPath: filepath.Join(root, "config.json"),
-		credential: filepath.Join(root, "provider-credential"),
-		toolDir:    filepath.Join(root, "toolchain"),
+		repoRoot:       filepath.Join(root, "repo"),
+		configPath:     filepath.Join(root, "config.json"),
+		credential:     filepath.Join(root, "provider-credential"),
+		toolDir:        filepath.Join(root, "toolchain"),
+		controllerRoot: filepath.Join(root, "controller"),
+		entrypointBin:  filepath.Join(root, "bin"),
 	}
-	for _, dir := range []string{f.stateDir, f.cacheDir, f.repoRoot, f.toolDir} {
+	for _, dir := range []string{f.stateDir, f.cacheDir, f.repoRoot, f.toolDir, f.entrypointBin} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -243,6 +247,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	}
 	f.writeOperatorConfig(nil)
 	f.writeRepositoryConfig(`{"budgets":{"wall_limit_seconds":300}}`)
+	f.installCanonicalEntrypoint()
 
 	model, policy := doctorGovernanceFixture(true)
 	executor := doctorExecutor{available: true}
@@ -311,8 +316,39 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		RepositoryRoot:     f.repoRoot,
 		ProjectModel:       model,
 		Policy:             policy,
+		// A healthy environment has the ONE canonical PATH entrypoint (#319):
+		// a symlink chain through controllerRoot/current down to the adopted
+		// generation, and nothing else on PATH shadowing it.
+		ControllerRoot:    f.controllerRoot,
+		EntrypointPathEnv: f.entrypointBin,
 	}
 	return f
+}
+
+// installCanonicalEntrypoint builds the real #319 chain the healthy fixture
+// needs: an adopted generation under f.controllerRoot, the "current" stable
+// pointer aimed at it, and a single PATH entry (f.entrypointBin) holding a
+// symlink through "current" - exactly what `controller install` establishes
+// and DiagnoseEntrypoint must recognize as canonical.
+func (f *doctorFixture) installCanonicalEntrypoint() {
+	f.t.Helper()
+	generation := filepath.Join(f.controllerRoot, "main-fixture")
+	if err := os.MkdirAll(generation, 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	binary := filepath.Join(generation, EntrypointExecutableName)
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	current := filepath.Join(f.controllerRoot, StableEntrypointName)
+	if err := os.Symlink(generation, current); err != nil {
+		f.t.Fatal(err)
+	}
+	canonicalTarget := filepath.Join(current, EntrypointExecutableName)
+	entry := filepath.Join(f.entrypointBin, EntrypointExecutableName)
+	if err := os.Symlink(canonicalTarget, entry); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func (f *doctorFixture) writeOperatorConfig(mutate func(map[string]any)) {
@@ -407,6 +443,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",
+		"install.entrypoint", "install.path_shadowing",
 		"agent.openai", "agents.usable", "provider.toolchain",
 		"supervisor.endpoint", "state.storage",
 	}
