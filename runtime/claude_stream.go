@@ -32,7 +32,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 )
 
 // The progress oracles an adapter's inactivity bound can be supervised by.
@@ -335,4 +337,63 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
 	}
+}
+
+// MinProviderInactivitySeconds is the smallest provider inactivity window the
+// configuration accepts.
+//
+// Claude's own background-wait ceiling is derived from the window as three
+// quarters of it (claudeBackgroundWaitEnv), and ten seconds is where the
+// quarter left for Claude to give up, emit its result and exit is still whole
+// seconds rather than a race with the runtime's own bound.
+const MinProviderInactivitySeconds = 10
+
+// claudeBackgroundWaitEnv sets CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS strictly
+// below the configured per-attempt inactivity window.
+//
+// Claude's default ceiling for idle waiting on background subagents is
+// 600000ms - exactly the runtime's default window - so the two timers raced.
+// Three quarters of the window keeps the provider's own wait inside the
+// runtime's bound and tightens with it. It is a provider-internal cap, not
+// progress and not authority, and support for it is not help-probeable, so it
+// is best effort and live acceptance is its evidence.
+//
+// Zero would mean "wait without limit" to Claude, so a window too small to
+// yield a positive millisecond value is refused rather than emitted. Config
+// validation keeps that from ever being reached in practice.
+func claudeBackgroundWaitEnv(window time.Duration) ([]string, error) {
+	if window <= 0 {
+		return nil, nil
+	}
+	ceiling := (window * 3 / 4).Milliseconds()
+	if ceiling < 1 {
+		return nil, fmt.Errorf("provider inactivity window %s is too small to derive a positive Claude background-wait ceiling below it", window)
+	}
+	return []string{fmt.Sprintf("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=%d", ceiling)}, nil
+}
+
+// withInvocationEnv appends a spec's invocation-only variables to the
+// allowlisted environment. A variable that would replace one the allowlist
+// already set (PATH, HOME, the Git guard) or that is shaped like a credential
+// is refused: the hook is for non-secret provider controls and nothing else.
+func withInvocationEnv(env, extra []string) ([]string, error) {
+	present := map[string]bool{}
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		present[key] = true
+	}
+	for _, entry := range extra {
+		key, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
+			if strings.Contains(upper, secret) {
+				return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
+			}
+		}
+		if key == "" || present[key] {
+			return nil, fmt.Errorf("refused invocation environment variable %q: it would replace the runtime's own environment", key)
+		}
+		present[key] = true
+	}
+	return append(append([]string(nil), env...), extra...), nil
 }

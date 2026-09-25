@@ -621,6 +621,73 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// A (continued). The invocation-only background-wait ceiling
+// ---------------------------------------------------------------------------
+
+func TestClaudeBackgroundWaitCeilingSitsInsideTheWindow(t *testing.T) {
+	envOf := func(call recordedCommand) string {
+		for _, entry := range call.env {
+			if strings.HasPrefix(entry, "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=") {
+				return entry
+			}
+		}
+		return ""
+	}
+	for window, want := range map[time.Duration]string{
+		10 * time.Minute: "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=450000",
+		time.Minute:      "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=45000", // tightening tightens it
+		0:                "",                                           // no bound, Claude's own default
+	} {
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		request.Budgets.InactivityLimit = window
+		if _, err := provider.Execute(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		if got := envOf(fake.execution(t)); got != want {
+			t.Fatalf("window %s: env %q, want %q", window, got, want)
+		}
+		for _, call := range fake.calls {
+			if last := call.args[len(call.args)-1]; (last == "--help" || last == "--version") && envOf(call) != "" {
+				t.Fatalf("a probe inherited the invocation-only env: %v", call.args)
+			}
+		}
+	}
+	// A window with no positive millisecond below it refuses, never emits 0.
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	request.Budgets.InactivityLimit = time.Millisecond
+	if _, err := provider.Execute(context.Background(), request); err == nil {
+		t.Fatal("an impossible window dispatched Claude")
+	}
+	for _, call := range fake.calls {
+		if last := call.args[len(call.args)-1]; last != "--help" && last != "--version" {
+			t.Fatalf("Claude ran with an underivable ceiling: %v", call.args)
+		}
+	}
+	// Other providers get no invocation env at all.
+	codex, codexRequest, codexFake := agentFixture(t, AgentKindCodexCLI)
+	codexRequest.Budgets.InactivityLimit = 10 * time.Minute
+	if _, err := codex.Execute(context.Background(), codexRequest); err != nil {
+		t.Fatal(err)
+	}
+	if envOf(codexFake.execution(t)) != "" {
+		t.Fatal("codex received Claude's invocation env")
+	}
+}
+
+func TestTheInvocationEnvHookCannotCarryCredentialsOrReplaceTheAllowlist(t *testing.T) {
+	base := []string{"PATH=/bin", "HOME=/home/op"}
+	for _, entry := range []string{"ANTHROPIC_API_KEY=x", "CLAUDE_CODE_OAUTH_TOKEN=x", "GH_TOKEN=x", "PATH=/evil", "HOME=/elsewhere"} {
+		if _, err := withInvocationEnv(base, []string{entry}); err == nil {
+			t.Errorf("%s was accepted", entry)
+		}
+	}
+	got, err := withInvocationEnv(base, []string{"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=1"})
+	if err != nil || len(got) != 3 {
+		t.Fatalf("a non-secret control was refused: %v %v", got, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // J. Restart / re-adoption
 // ---------------------------------------------------------------------------
 
@@ -676,4 +743,42 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 	if consumed < 44*time.Minute || remaining > 16*time.Minute {
 		t.Fatalf("after four abandoned attempts consumed %s, remaining %s", consumed, remaining)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Configuration: the named minimum, at load and in doctor
+// ---------------------------------------------------------------------------
+
+func TestTheProviderInactivityMinimumIsRefusedBeforeAnyRun(t *testing.T) {
+	operator := OperatorConfig{
+		StateDir: "/state", ProjectModelPath: "/m.json", PolicyPath: "/p.json",
+		Assurance: AssuranceConfig{Image: "sha256:" + strings.Repeat("a", 64)},
+		Agents:    map[string]AgentConfig{"claude": {Kind: AgentKindClaudeCode, TrustMode: string(TrustOperatorTrusted)}},
+		GitHub:    GitHubConfig{CredentialMode: GitHubCredentialNone},
+		Budgets: BudgetConfig{
+			WallLimitSeconds: 1800, MaxExecutionAttempts: 2, MaxRemediationAttempts: 2, MaxAssuranceAttempts: 2,
+			ProviderInactivitySeconds: MinProviderInactivitySeconds - 1,
+		},
+	}
+	if err := operator.validate("/config.json"); err == nil || !strings.Contains(err.Error(), "minimum 10") {
+		t.Fatalf("a window below the minimum loaded: %v", err)
+	}
+	operator.Budgets.ProviderInactivitySeconds = MinProviderInactivitySeconds
+	if err := operator.validate("/config.json"); err != nil {
+		t.Fatalf("the minimum itself was refused: %v", err)
+	}
+	tiny := MinProviderInactivitySeconds - 1
+	if _, err := operator.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{ProviderInactivitySeconds: &tiny}}); err == nil {
+		t.Fatal("a repository tightened below the minimum")
+	}
+	// Every accepted window derives a positive ceiling strictly inside it.
+	if env, err := claudeBackgroundWaitEnv(MinProviderInactivitySeconds * time.Second); err != nil || len(env) != 1 {
+		t.Fatalf("the minimum window did not derive a ceiling: %v %v", env, err)
+	}
+
+	f := newDoctorFixture(t)
+	f.writeOperatorConfig(func(config map[string]any) {
+		config["budgets"].(map[string]any)["provider_inactivity_seconds"] = 5
+	})
+	requireCheck(t, f.run(), "config.global", DoctorFail, "is 5, below the minimum 10")
 }

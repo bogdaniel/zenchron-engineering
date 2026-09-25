@@ -36,6 +36,12 @@ import (
 // silently meaning "Zenchron billed my Anthropic API account". The runtime does
 // not claim to know which plan ultimately paid - see AuthModeUnknown - only
 // that it substituted no credential of its own.
+//
+// A spec MAY contribute narrowly approved, non-secret invocation variables
+// through InvocationEnv - Claude's CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is the
+// one today - applied to the main invocation only, never to probes. API-key
+// and credential variables remain forbidden, always: withInvocationEnv refuses
+// any credential-shaped name and any name the allowlist already sets.
 
 // diagnosticSignal maps one RECOGNIZED provider diagnostic onto a typed
 // failure class. Matching is case-insensitive substring containment over the
@@ -224,6 +230,7 @@ var claudeSpec = cliAgentSpec{
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
 	ProgressMode:                    progressStructuredClaudeEvents,
+	InvocationEnv:                   claudeBackgroundWaitEnv,
 	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},

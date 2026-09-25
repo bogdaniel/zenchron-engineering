@@ -233,6 +233,11 @@ type cliAgentSpec struct {
 	// events instead (#322, claude_stream.go), which requires an executor that
 	// tees stdout to the parser and a per-physical-attempt window.
 	ProgressMode string
+	// InvocationEnv returns non-secret provider controls for the MAIN
+	// invocation only, from the per-attempt inactivity window it runs under.
+	// Probes never receive them, and withInvocationEnv refuses any credential-
+	// shaped name or any name the allowlisted environment already sets.
+	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
@@ -1075,7 +1080,19 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		buildArgs, permissionMode, sandboxMode = spec.ReadOnly.Args, spec.ReadOnly.Mode, spec.ReadOnly.Sandbox
 	}
 	args := buildArgs(invocation)
+	// The provider's invocation-only controls, derived from the per-attempt
+	// window and refused - before any process - if they cannot be derived or
+	// would reach past the environment allowlist.
 	env := p.env(spec, home)
+	if spec.InvocationEnv != nil {
+		extra, err := spec.InvocationEnv(request.Budgets.InactivityLimit)
+		if err == nil {
+			env, err = withInvocationEnv(env, extra)
+		}
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+	}
 	progressMode := spec.ProgressMode
 	if progressMode == "" {
 		progressMode = progressByteOutput
