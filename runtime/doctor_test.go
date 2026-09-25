@@ -195,7 +195,7 @@ func doctorGovernanceFixture(grantAtUnknown bool) (domain.ProjectModel, domain.E
 }
 
 type doctorFixture struct {
-	t          *testing.T
+	t              *testing.T
 	root           string
 	stateDir       string
 	cacheDir       string
@@ -214,10 +214,10 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	t.Helper()
 	root := t.TempDir()
 	f := &doctorFixture{
-		t:          t,
-		root:       root,
-		stateDir:   filepath.Join(root, "state"),
-		cacheDir:   filepath.Join(root, "cache"),
+		t:              t,
+		root:           root,
+		stateDir:       filepath.Join(root, "state"),
+		cacheDir:       filepath.Join(root, "cache"),
 		repoRoot:       filepath.Join(root, "repo"),
 		configPath:     filepath.Join(root, "config.json"),
 		credential:     filepath.Join(root, "provider-credential"),
