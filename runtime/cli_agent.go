@@ -432,6 +432,13 @@ func (p CLIAgentProvider) Isolation() ProviderIsolation {
 	return isolation
 }
 
+// inactivityPerAttempt reports whether this adapter's inactivity window is per
+// physical process; see dispatchInactivityWindow.
+func (p CLIAgentProvider) inactivityPerAttempt() bool {
+	spec, err := p.spec()
+	return err == nil && spec.ProgressMode == progressStructuredClaudeEvents
+}
+
 // home resolves the directory holding the CLI's own authentication state.
 func (p CLIAgentProvider) home() (string, error) {
 	home := strings.TrimSpace(p.Agent.Home)

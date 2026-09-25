@@ -619,3 +619,61 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// J. Restart / re-adoption
+// ---------------------------------------------------------------------------
+
+func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t *testing.T) {
+	const window = 10 * time.Minute
+	claude := CLIAgentProvider{Agent: ResolvedAgent{Kind: AgentKindClaudeCode}}
+	codex := CLIAgentProvider{Agent: ResolvedAgent{Kind: AgentKindCodexCLI}}
+	scheduler, clock := deadlineScheduler(t)
+	planned, _, err := scheduler.Plan(RunOperation{
+		RunID: "run-claude", Kind: OpExecutionInvoke, IdempotencyKey: "invoke-claude",
+		MaxAttempts: 8, WallBudget: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.Next(planned.RunID); err != nil {
+		t.Fatal(err)
+	}
+	op, err := scheduler.Start(planned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Structured activity advances durable progress, qualified by attempt.
+	recorded, err := scheduler.RecordProviderProgress(op.ID, fmt.Sprintf("%d:%d", op.AttemptIdentity, 1))
+	if err != nil || recorded.LastProgressAt == nil || !recorded.LastProgressAt.Equal(clock.Now()) {
+		t.Fatalf("structured progress did not advance durably: %+v %v", recorded, err)
+	}
+	consumed, remaining, identity := op.ConsumedExecution, OperationRemaining(op, clock.Now()), op.AttemptIdentity
+	for cycle := 1; cycle <= 4; cycle++ {
+		// Eleven silent minutes: longer than the whole window.
+		clock.advance(11 * time.Minute)
+		abandonExecution(t, scheduler, op.ID)
+		if op, err = scheduler.Start(op.ID); err != nil {
+			t.Fatal(err)
+		}
+		now := clock.Now()
+		// A FRESH physical Claude attempt is not refused over its dead
+		// predecessor's stale progress; codex keeps today's semantics.
+		if got := dispatchInactivityWindow(window, op, now, claude); got != window {
+			t.Fatalf("cycle %d: Claude's fresh attempt got %s, want its full %s window", cycle, got, window)
+		}
+		if got := dispatchInactivityWindow(window, op, now, codex); got != 0 {
+			t.Fatalf("cycle %d: codex's abandoned silence was forgiven: %s", cycle, got)
+		}
+		// Monotonic facts across succession.
+		if op.ConsumedExecution < consumed || OperationRemaining(op, now) > remaining || op.AttemptIdentity <= identity {
+			t.Fatalf("cycle %d: consumed %s (was %s), remaining %s (was %s), identity %d (was %d)",
+				cycle, op.ConsumedExecution, consumed, OperationRemaining(op, now), remaining, op.AttemptIdentity, identity)
+		}
+		consumed, remaining, identity = op.ConsumedExecution, OperationRemaining(op, now), op.AttemptIdentity
+	}
+	// Succession converges: 44 of 60 minutes are charged, not refunded.
+	if consumed < 44*time.Minute || remaining > 16*time.Minute {
+		t.Fatalf("after four abandoned attempts consumed %s, remaining %s", consumed, remaining)
+	}
+}

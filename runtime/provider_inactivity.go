@@ -388,6 +388,30 @@ func ProviderInactivityRemaining(limit time.Duration, op RunOperation, now time.
 	return 0
 }
 
+// perAttemptInactivityProvider is implemented by a provider whose inactivity
+// window belongs to ONE physical process rather than to the operation.
+type perAttemptInactivityProvider interface{ inactivityPerAttempt() bool }
+
+// dispatchInactivityWindow is the no-progress window the next physical
+// invocation of op is dispatched with.
+//
+// For a byte_output provider it is ProviderInactivityRemaining, unchanged: an
+// abandoned attempt's silence carries into its successor, so a bouncing
+// supervisor cannot make silence free.
+//
+// A structured_claude_events provider gets the full window per physical attempt
+// (#322). Its durable progress is throttled evidence about a dead process's
+// event stream, and misreading that as silence of the NEW process refused a
+// valid attempt before Claude even started. Repeated succession is still
+// finite: the orphaned interval stays charged to the wall budget, the attempt
+// identity advances, and neither is ever refunded.
+func dispatchInactivityWindow(limit time.Duration, op RunOperation, now time.Time, provider ExecutionProvider) time.Duration {
+	if perAttempt, ok := provider.(perAttemptInactivityProvider); ok && limit > 0 && perAttempt.inactivityPerAttempt() {
+		return limit
+	}
+	return ProviderInactivityRemaining(limit, op, now)
+}
+
 // ProviderSilence is how long op has gone without recognized progress, or zero
 // when nothing has been recorded. It is observation for status, never a bound.
 func ProviderSilence(op RunOperation, now time.Time) time.Duration {
