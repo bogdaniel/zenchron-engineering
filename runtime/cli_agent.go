@@ -556,18 +556,44 @@ type cliFlagChoice struct{ Flag, Value string }
 // - the text from the flag name up to the next flag or blank line - so a
 // mention of the word elsewhere in the help output proves nothing about the
 // flag this adapter is about to pass.
+//
+// Only an occurrence that OPENS a help row counts (#322). Claude Code's help
+// mentions `--output-format=stream-json` inside the descriptions of three other
+// options before it reaches the --output-format row itself, so matching the
+// first occurrence anywhere accepted `stream-json` from a sentence about a
+// different flag - and the structured-progress probe would have passed against
+// a binary whose --output-format no longer offered it.
 func advertisesChoice(advertised, flag, value string) bool {
 	for offset := 0; ; {
 		index := strings.Index(advertised[offset:], flag)
 		if index < 0 {
 			return false
 		}
-		start := offset + index + len(flag)
-		if advertisesToken(flagDescription(advertised[start:]), value) {
+		at := offset + index
+		start := at + len(flag)
+		if opensHelpRow(advertised, at, flag) && advertisesToken(flagDescription(advertised[start:]), value) {
 			return true
 		}
 		offset = start
 	}
+}
+
+// opensHelpRow reports whether the flag at index `at` is the option a help row
+// describes: it sits in the option column - at most six columns of indentation,
+// which covers commander's two and clap's two or six - optionally after a short
+// alias such as `-c, `, and it is neither the prefix of a longer flag nor the
+// `--flag=value` spelling prose uses. A wrapped description line is indented
+// much deeper, and the real Claude help wraps one onto a line that begins
+// `--output-format=stream-json)`.
+func opensHelpRow(text string, at int, flag string) bool {
+	lineStart := strings.LastIndexByte(text[:at], '\n') + 1
+	prefix := strings.TrimLeft(text[lineStart:at], " ")
+	indent := at - lineStart - len(prefix)
+	if len(prefix) == 4 && prefix[0] == '-' && wordCharacter(prefix, 1) && prefix[2:] == ", " {
+		prefix = ""
+	}
+	end := at + len(flag)
+	return prefix == "" && indent <= 6 && !wordCharacter(text, end) && (end >= len(text) || text[end] != '=')
 }
 
 // flagDescription is the run of help text belonging to one flag: everything up
