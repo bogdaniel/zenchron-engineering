@@ -298,19 +298,44 @@ const doctorGroupInstall = "install"
 // a canonical entrypoint also exists further along: the shell would resolve
 // the stale one, and a report that looked past it to the healthy entry
 // further down would be a green diagnosis of a broken installation.
+//
+// The diagnosis is computed once, against the SAME durable controller
+// authority `controller status` and `controller install` already consult,
+// and handed to both checks below: two independently-opened stores could in
+// principle observe two different moments of the same database, which is
+// exactly the kind of second opinion #319 must not introduce.
 func doctorEntrypoint(in DoctorInput) []DoctorCheck {
-	return []DoctorCheck{doctorEntrypointCanonical(in), doctorEntrypointShadowing(in)}
+	if strings.TrimSpace(in.ControllerRoot) == "" {
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", "no controller root is configured, so the canonical PATH entrypoint cannot be diagnosed"),
+			warn(doctorGroupInstall, "install.path_shadowing", "no controller root is configured, so PATH shadowing cannot be diagnosed"),
+		}
+	}
+	if strings.TrimSpace(in.StateDir) == "" {
+		reason := "no state directory is configured, so durable controller authority cannot be consulted to diagnose the PATH entrypoint"
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", reason),
+			warn(doctorGroupInstall, "install.path_shadowing", reason),
+		}
+	}
+	store, err := OpenSQLiteOperationStore(in.StateDir)
+	if err != nil {
+		reason := "the runtime database could not be opened to diagnose the PATH entrypoint: " + err.Error()
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", reason),
+			warn(doctorGroupInstall, "install.path_shadowing", reason),
+		}
+	}
+	defer store.Close()
+	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot, store)
+	return []DoctorCheck{doctorEntrypointCanonical(diagnosis), doctorEntrypointShadowing(diagnosis)}
 }
 
 // doctorEntrypointCanonical states the canonical public entrypoint path, the
 // path the shell actually resolves, the adopted target it should reach, and
 // whether it does.
-func doctorEntrypointCanonical(in DoctorInput) DoctorCheck {
+func doctorEntrypointCanonical(diagnosis EntrypointDiagnosis) DoctorCheck {
 	const id = "install.entrypoint"
-	if strings.TrimSpace(in.ControllerRoot) == "" {
-		return warn(doctorGroupInstall, id, "no controller root is configured, so the canonical PATH entrypoint cannot be diagnosed")
-	}
-	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot)
 	if diagnosis.Winner == nil {
 		return warn(doctorGroupInstall, id, fmt.Sprintf(
 			"no %s is on PATH; the canonical entrypoint would be a symlink to %s. Run `controller install` to establish it",
@@ -320,6 +345,11 @@ func doctorEntrypointCanonical(in DoctorInput) DoctorCheck {
 		return fail(doctorGroupInstall, id, fmt.Sprintf(
 			"the %s that resolves on PATH is %s, and it is not the canonical entrypoint: %s. Canonical target: %s. Run `controller install` to replace the resolved entry with a symlink to it",
 			EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.Detail, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.AuthorityConsistent {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the canonical entrypoint %s is a symlink through %s, but that pointer has drifted from durable controller authority: %s",
+			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
 	}
 	if !diagnosis.ReachesAdopted {
 		return fail(doctorGroupInstall, id, fmt.Sprintf(
@@ -334,12 +364,8 @@ func doctorEntrypointCanonical(in DoctorInput) DoctorCheck {
 // doctorEntrypointShadowing names every PATH entry other than the one that
 // wins, so a stale or duplicate copy is visible even when it happens not to
 // be the one the shell currently resolves.
-func doctorEntrypointShadowing(in DoctorInput) DoctorCheck {
+func doctorEntrypointShadowing(diagnosis EntrypointDiagnosis) DoctorCheck {
 	const id = "install.path_shadowing"
-	if strings.TrimSpace(in.ControllerRoot) == "" {
-		return warn(doctorGroupInstall, id, "no controller root is configured, so PATH shadowing cannot be diagnosed")
-	}
-	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot)
 	if diagnosis.Winner == nil {
 		return pass(doctorGroupInstall, id, fmt.Sprintf("no %s is on PATH at all, so there is nothing to shadow", EntrypointExecutableName))
 	}

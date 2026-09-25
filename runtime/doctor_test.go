@@ -753,6 +753,59 @@ func TestDoctorWarnsWhenThePredictedContractCannotCompile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// PATH entrypoint (#319)
+// ---------------------------------------------------------------------------
+
+func TestDoctorWarnsWhenNoEntrypointIsOnPath(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.input.EntrypointPathEnv = t.TempDir()
+	requireCheck(t, f.run(), "install.entrypoint", DoctorWarn, "controller install")
+}
+
+func TestDoctorFailsWhenTheResolvedEntrypointIsADetachedCopy(t *testing.T) {
+	f := newDoctorFixture(t)
+	entry := filepath.Join(f.entrypointBin, EntrypointExecutableName)
+	if err := os.Remove(entry); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte("stale copy"), 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	requireCheck(t, f.run(), "install.entrypoint", DoctorFail, "not the canonical entrypoint")
+}
+
+// A stale executable earlier on PATH must win the diagnosis, not a healthy
+// one that happens to sit further along - exactly the case #319 says must
+// never render as a green installation.
+func TestDoctorFailsAndWarnsWhenAStaleEntrypointShadowsTheCanonicalOne(t *testing.T) {
+	f := newDoctorFixture(t)
+	staleDir := f.t.TempDir()
+	stale := filepath.Join(staleDir, EntrypointExecutableName)
+	if err := os.WriteFile(stale, []byte("stale copy"), 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	f.input.EntrypointPathEnv = staleDir + string(os.PathListSeparator) + f.entrypointBin
+
+	report := f.run()
+	requireCheck(t, report, "install.entrypoint", DoctorFail, stale)
+	requireCheck(t, report, "install.path_shadowing", DoctorWarn, filepath.Join(f.entrypointBin, EntrypointExecutableName))
+}
+
+func TestDoctorWarnsOnMissingControllerRootOrStateDir(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.input.ControllerRoot = ""
+	report := f.run()
+	requireCheck(t, report, "install.entrypoint", DoctorWarn, "controller root")
+	requireCheck(t, report, "install.path_shadowing", DoctorWarn, "controller root")
+
+	f = newDoctorFixture(t)
+	f.input.StateDir = ""
+	report = f.run()
+	requireCheck(t, report, "install.entrypoint", DoctorWarn, "state directory")
+	requireCheck(t, report, "install.path_shadowing", DoctorWarn, "state directory")
+}
+
+// ---------------------------------------------------------------------------
 // No secrets
 // ---------------------------------------------------------------------------
 

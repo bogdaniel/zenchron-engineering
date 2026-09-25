@@ -24,7 +24,7 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-const installUsage = `usage: zenchron-engineering controller install [--bin-dir <dir>]
+const installUsage = `usage: zenchron-engineering controller install [--bin-dir <dir>] [--config <path>]
 
 Establish the one canonical PATH entrypoint: a symlink that resolves through
 ~/.zenchron-adopted-controller/current to whichever generation
@@ -36,7 +36,7 @@ location is converted in place; a previous occupant is renamed with a
 on PATH yet, the entrypoint is created under --bin-dir (default ~/.local/bin).`
 
 func controllerInstall(args []string, stdout io.Writer) (int, error) {
-	binDir, err := parseInstallFlags(args)
+	binDir, config, err := parseInstallFlags(args)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
@@ -50,7 +50,25 @@ func controllerInstall(args []string, stdout io.Writer) (int, error) {
 	pathEnv := os.Getenv("PATH")
 	root := controllerRoot()
 
-	result, err := runtime.InstallCanonicalEntrypoint(pathEnv, binDir, root)
+	// The durable authority this installs a projection of is read through the
+	// SAME store `controller status` and succession already use: a second,
+	// differently-sourced opinion here would be the second authority
+	// mechanism #319 explicitly refuses.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	loaded, err := runtime.LoadConfig(config, cwd)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	store, err := runtime.OpenSQLiteOperationStore(loaded.StateDir)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	defer store.Close()
+
+	result, err := runtime.InstallCanonicalEntrypoint(pathEnv, binDir, root, store)
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -70,7 +88,7 @@ func controllerInstall(args []string, stdout io.Writer) (int, error) {
 			filepath.Dir(result.Path), filepath.Dir(result.Path))
 	}
 
-	diagnosis := runtime.DiagnoseEntrypoint(pathEnv, root)
+	diagnosis := runtime.DiagnoseEntrypoint(pathEnv, root, store)
 	if shadowed := diagnosis.Shadowed(); len(shadowed) > 0 {
 		fmt.Fprintf(stdout, "\nshadowed entries still on PATH (not modified):\n")
 		for _, candidate := range shadowed {
@@ -81,21 +99,28 @@ func controllerInstall(args []string, stdout io.Writer) (int, error) {
 	return runtime.ExitCompleted, nil
 }
 
-func parseInstallFlags(args []string) (string, error) {
-	var binDir string
+func parseInstallFlags(args []string) (binDir, config string, err error) {
 	for len(args) > 0 {
 		switch args[0] {
 		case "--bin-dir":
 			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
-				return "", fmt.Errorf("--bin-dir requires a non-empty path\n\n%s", installUsage)
+				return "", "", fmt.Errorf("--bin-dir requires a non-empty path\n\n%s", installUsage)
 			}
 			if binDir != "" {
-				return "", fmt.Errorf("--bin-dir was given more than once\n\n%s", installUsage)
+				return "", "", fmt.Errorf("--bin-dir was given more than once\n\n%s", installUsage)
 			}
 			binDir, args = args[1], args[2:]
+		case "--config":
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+				return "", "", fmt.Errorf("--config requires a non-empty path\n\n%s", installUsage)
+			}
+			if config != "" {
+				return "", "", fmt.Errorf("--config was given more than once\n\n%s", installUsage)
+			}
+			config, args = args[1], args[2:]
 		default:
-			return "", fmt.Errorf("controller install does not accept %q; it takes --bin-dir\n\n%s", args[0], installUsage)
+			return "", "", fmt.Errorf("controller install does not accept %q; it takes --bin-dir and --config\n\n%s", args[0], installUsage)
 		}
 	}
-	return binDir, nil
+	return binDir, config, nil
 }
