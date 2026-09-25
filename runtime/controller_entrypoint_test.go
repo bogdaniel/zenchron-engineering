@@ -8,7 +8,8 @@ import (
 
 // entrypointFakeAuthority serves the one fact entrypointAuthorityConsistency
 // asks for: what durable controller authority presently governs. found=false
-// models a state directory that has never completed a transition.
+// models a state directory that has never completed a transition, which is a
+// state no projection may be blessed in.
 type entrypointFakeAuthority struct {
 	authority ControllerAuthority
 	found     bool
@@ -38,6 +39,25 @@ func entrypointFixture(t *testing.T, root string) (generation, canonicalTarget s
 		t.Fatal(err)
 	}
 	return generation, filepath.Join(current, EntrypointExecutableName)
+}
+
+// entrypointAdoptedAuthority is the durable authority a healthy chain must
+// have behind it: a governing binding that names the fixture generation's
+// executable AND attests the digest that executable actually measures. A test
+// that passed found=false instead would be asserting that a symlink alone can
+// make something the public command.
+func entrypointAdoptedAuthority(t *testing.T, generation string) entrypointFakeAuthority {
+	t.Helper()
+	artifact := filepath.Join(generation, EntrypointExecutableName)
+	measured, err := measureExecutable(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entrypointFakeAuthority{found: true, authority: ControllerAuthority{
+		Kind: AuthorityHandoffActivation, Ref: "handoff-1", Artifact: artifact,
+		Binding: ControllerBinding{Controller: "main", Build: &ControllerBuild{
+			Kind: ControllerAdopted, BinarySHA256: measured}},
+	}}
 }
 
 func TestDiscoverEntrypointCandidatesFindsEachPathDirAtMostOnce(t *testing.T) {
@@ -70,14 +90,14 @@ func TestDiscoverEntrypointCandidatesFindsEachPathDirAtMostOnce(t *testing.T) {
 
 func TestDiagnoseEntrypointRecognizesTheCanonicalChain(t *testing.T) {
 	root := t.TempDir()
-	_, canonicalTarget := entrypointFixture(t, root)
+	generation, canonicalTarget := entrypointFixture(t, root)
 	binDir := t.TempDir()
 	entry := filepath.Join(binDir, EntrypointExecutableName)
 	if err := os.Symlink(canonicalTarget, entry); err != nil {
 		t.Fatal(err)
 	}
 
-	diagnosis := DiagnoseEntrypoint(binDir, root, entrypointFakeAuthority{found: false})
+	diagnosis := DiagnoseEntrypoint(binDir, root, entrypointAdoptedAuthority(t, generation))
 	if diagnosis.Winner == nil || diagnosis.Winner.Path != entry {
 		t.Fatalf("winner = %+v, want %s", diagnosis.Winner, entry)
 	}
@@ -97,14 +117,14 @@ func TestDiagnoseEntrypointRecognizesTheCanonicalChain(t *testing.T) {
 
 func TestDiagnoseEntrypointReportsADetachedCopyAsNotCanonical(t *testing.T) {
 	root := t.TempDir()
-	entrypointFixture(t, root)
+	generation, _ := entrypointFixture(t, root)
 	binDir := t.TempDir()
 	entry := filepath.Join(binDir, EntrypointExecutableName)
 	if err := os.WriteFile(entry, []byte("stale binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
-	diagnosis := DiagnoseEntrypoint(binDir, root, entrypointFakeAuthority{found: false})
+	diagnosis := DiagnoseEntrypoint(binDir, root, entrypointAdoptedAuthority(t, generation))
 	if diagnosis.Canonical {
 		t.Fatalf("a detached copy must not diagnose as canonical")
 	}
@@ -175,10 +195,10 @@ func TestEntrypointDiagnosisShadowedNamesEveryOtherCandidate(t *testing.T) {
 
 func TestInstallCanonicalEntrypointCreatesAFreshLinkWhenNothingIsOnPath(t *testing.T) {
 	root := t.TempDir()
-	_, canonicalTarget := entrypointFixture(t, root)
+	generation, canonicalTarget := entrypointFixture(t, root)
 	binDir := filepath.Join(t.TempDir(), "bin")
 
-	result, err := InstallCanonicalEntrypoint("", binDir, root, entrypointFakeAuthority{found: false})
+	result, err := InstallCanonicalEntrypoint("", binDir, root, entrypointAdoptedAuthority(t, generation))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,14 +220,14 @@ func TestInstallCanonicalEntrypointCreatesAFreshLinkWhenNothingIsOnPath(t *testi
 
 func TestInstallCanonicalEntrypointMigratesADetachedStaleBinaryInPlace(t *testing.T) {
 	root := t.TempDir()
-	_, canonicalTarget := entrypointFixture(t, root)
+	generation, canonicalTarget := entrypointFixture(t, root)
 	binDir := t.TempDir()
 	stale := filepath.Join(binDir, EntrypointExecutableName)
 	if err := os.WriteFile(stale, []byte("stale binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := InstallCanonicalEntrypoint(binDir, "/unused-bin-dir", root, entrypointFakeAuthority{found: false})
+	result, err := InstallCanonicalEntrypoint(binDir, "/unused-bin-dir", root, entrypointAdoptedAuthority(t, generation))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,14 +252,14 @@ func TestInstallCanonicalEntrypointMigratesADetachedStaleBinaryInPlace(t *testin
 
 func TestInstallCanonicalEntrypointIsANoopWhenAlreadyCanonical(t *testing.T) {
 	root := t.TempDir()
-	_, canonicalTarget := entrypointFixture(t, root)
+	generation, canonicalTarget := entrypointFixture(t, root)
 	binDir := t.TempDir()
 	entry := filepath.Join(binDir, EntrypointExecutableName)
 	if err := os.Symlink(canonicalTarget, entry); err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := InstallCanonicalEntrypoint(binDir, "", root, entrypointFakeAuthority{found: false})
+	result, err := InstallCanonicalEntrypoint(binDir, "", root, entrypointAdoptedAuthority(t, generation))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +299,7 @@ func TestInstallCanonicalEntrypointRefusesWhenNoGenerationIsAdopted(t *testing.T
 
 func TestInstallCanonicalEntrypointNeverModifiesShadowedEntries(t *testing.T) {
 	root := t.TempDir()
-	_, canonicalTarget := entrypointFixture(t, root)
+	generation, canonicalTarget := entrypointFixture(t, root)
 	winningDir := t.TempDir()
 	shadowedDir := t.TempDir()
 	stale := filepath.Join(winningDir, EntrypointExecutableName)
@@ -292,7 +312,7 @@ func TestInstallCanonicalEntrypointNeverModifiesShadowedEntries(t *testing.T) {
 	}
 	pathValue := winningDir + string(os.PathListSeparator) + shadowedDir
 
-	if _, err := InstallCanonicalEntrypoint(pathValue, "", root, entrypointFakeAuthority{found: false}); err != nil {
+	if _, err := InstallCanonicalEntrypoint(pathValue, "", root, entrypointAdoptedAuthority(t, generation)); err != nil {
 		t.Fatal(err)
 	}
 	link, err := os.Readlink(stale)
@@ -314,7 +334,7 @@ func TestInstallCanonicalEntrypointNeverModifiesShadowedEntries(t *testing.T) {
 // only worth something while the old one is still there.
 func TestAFailedInstallLeavesTheExistingEntrypointInPlace(t *testing.T) {
 	root := t.TempDir()
-	entrypointFixture(t, root)
+	generation, _ := entrypointFixture(t, root)
 	binDir := t.TempDir()
 
 	// A stale detached copy already on PATH: exactly what #319 migrates.
@@ -329,7 +349,7 @@ func TestAFailedInstallLeavesTheExistingEntrypointInPlace(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(binDir, 0o700) })
 
-	if _, err := InstallCanonicalEntrypoint(binDir, "", root, entrypointFakeAuthority{found: false}); err == nil {
+	if _, err := InstallCanonicalEntrypoint(binDir, "", root, entrypointAdoptedAuthority(t, generation)); err == nil {
 		t.Fatal("the install reported success against a directory it cannot write")
 	}
 
@@ -347,4 +367,165 @@ func TestAFailedInstallLeavesTheExistingEntrypointInPlace(t *testing.T) {
 	if _, err := os.Lstat(link + ".pre-canonical"); err == nil {
 		t.Fatal("a failed install left a retirement copy behind")
 	}
+}
+
+// NOTHING GOVERNS UNTIL SOMETHING DURABLE SAYS SO.
+//
+// "current" is moved only after an activation or a re-adoption, so a readable
+// pointer in a state directory that has never completed a transition is a
+// pointer nobody sanctioned. Blessing it would be taking authority from a
+// filesystem symlink alone.
+func TestDiagnoseEntrypointRefusesWhenNoDurableAuthorityGoverns(t *testing.T) {
+	root := t.TempDir()
+	_, canonicalTarget := entrypointFixture(t, root)
+	binDir := t.TempDir()
+	if err := os.Symlink(canonicalTarget, filepath.Join(binDir, EntrypointExecutableName)); err != nil {
+		t.Fatal(err)
+	}
+
+	diagnosis := DiagnoseEntrypoint(binDir, root, entrypointFakeAuthority{found: false})
+	// The chain itself is intact - this is not a broken symlink - and that is
+	// exactly the point: intact is not adopted.
+	if !diagnosis.Canonical || !diagnosis.ReachesAdopted {
+		t.Fatalf("the fixture chain must still be canonical and resolve: %+v", diagnosis)
+	}
+	if diagnosis.AuthorityConsistent {
+		t.Fatal("a state directory with no durable authority must not be authority-consistent")
+	}
+	if diagnosis.Detail == "" {
+		t.Fatal("a refusal must explain itself")
+	}
+	if _, err := InstallCanonicalEntrypoint(binDir, "", root, entrypointFakeAuthority{found: false}); err == nil {
+		t.Fatal("installing against no durable authority must be refused")
+	}
+}
+
+// THE PATH IS NOT THE ARTIFACT.
+//
+// Durable authority and "current" agree on where the governing generation
+// lives, and the executable sitting there is not the one that was adopted.
+// Every path comparison passes; the measurement is what catches it.
+func TestDiagnoseEntrypointRefusesAReplacedAdoptedExecutable(t *testing.T) {
+	root := t.TempDir()
+	generation, canonicalTarget := entrypointFixture(t, root)
+	authority := entrypointAdoptedAuthority(t, generation)
+	binDir := t.TempDir()
+	if err := os.Symlink(canonicalTarget, filepath.Join(binDir, EntrypointExecutableName)); err != nil {
+		t.Fatal(err)
+	}
+	// Same path, different bytes.
+	if err := os.WriteFile(filepath.Join(generation, EntrypointExecutableName), []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	diagnosis := DiagnoseEntrypoint(binDir, root, authority)
+	if diagnosis.AuthorityConsistent {
+		t.Fatal("an executable that does not measure as the attested build must not be authority-consistent")
+	}
+	if _, err := InstallCanonicalEntrypoint(binDir, "", root, authority); err == nil {
+		t.Fatal("installing a replaced adopted executable as the public command must be refused")
+	}
+}
+
+// AN AUTHORITY THAT ATTESTS NO BUILD CANNOT SUPPORT THE PROOF, so it is
+// refused rather than excused. There is no path on which a missing digest
+// means "assume it matches".
+func TestDiagnoseEntrypointRefusesAnAuthorityWithNoAttestedBuild(t *testing.T) {
+	root := t.TempDir()
+	generation, _ := entrypointFixture(t, root)
+	unattested := entrypointFakeAuthority{found: true, authority: ControllerAuthority{
+		Kind: AuthorityHandoffActivation, Ref: "handoff-1",
+		Artifact: filepath.Join(generation, EntrypointExecutableName),
+	}}
+
+	diagnosis := DiagnoseEntrypoint("", root, unattested)
+	if diagnosis.AuthorityConsistent {
+		t.Fatal("an authority with no attested build must not be authority-consistent")
+	}
+}
+
+// THE ACCEPTANCE #319 ASKS FOR: adopted A becomes adopted B, and the operator's
+// command follows without being reinstalled, copied or touched.
+func TestTheCanonicalEntrypointFollowsSuccessionWithoutBeingReinstalled(t *testing.T) {
+	root := t.TempDir()
+	generationA, _ := entrypointFixture(t, root)
+	binDir := filepath.Join(t.TempDir(), "bin")
+
+	installed, err := InstallCanonicalEntrypoint("", binDir, root, entrypointAdoptedAuthority(t, generationA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(installed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != evalPath(t, filepath.Join(generationA, EntrypointExecutableName)) {
+		t.Fatalf("the fresh entrypoint resolves %s, want generation A", resolved)
+	}
+	before, err := os.Lstat(installed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Succession advances: a new immutable generation, and the SAME "current"
+	// projection moved onto it by the existing controller law. Nothing on PATH
+	// is touched.
+	generationB := filepath.Join(root, "main-bbbbbbbb")
+	if err := os.MkdirAll(generationB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(generationB, EntrypointExecutableName), []byte("#!/bin/sh\n# B\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceSymlinkAtomically(generationB, filepath.Join(root, StableEntrypointName)); err != nil {
+		t.Fatal(err)
+	}
+	authorityB := entrypointAdoptedAuthority(t, generationB)
+
+	// The unchanged public entry now reaches B.
+	resolved, err = filepath.EvalSymlinks(installed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != evalPath(t, filepath.Join(generationB, EntrypointExecutableName)) {
+		t.Fatalf("after succession the public entrypoint resolves %s, want generation B", resolved)
+	}
+	after, err := os.Lstat(installed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("the public PATH entry was replaced rather than followed")
+	}
+	// Both immutable generations are exactly as they were: succession moved a
+	// pointer, it did not copy a binary over anything.
+	a, err := os.ReadFile(filepath.Join(generationA, EntrypointExecutableName))
+	if err != nil || string(a) != "#!/bin/sh\n" {
+		t.Fatalf("generation A was disturbed: %q, %v", a, err)
+	}
+	b, err := os.ReadFile(filepath.Join(generationB, EntrypointExecutableName))
+	if err != nil || string(b) != "#!/bin/sh\n# B\n" {
+		t.Fatalf("generation B was disturbed: %q, %v", b, err)
+	}
+	// And a second install has nothing to do: no reinstall is part of the
+	// upgrade path.
+	again, err := InstallCanonicalEntrypoint(binDir, "", root, authorityB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.AlreadyCanonical || again.RetiredPath != "" {
+		t.Fatalf("following succession must need no reinstall: %+v", again)
+	}
+}
+
+// evalPath resolves a path the way EvalSymlinks does, so a comparison is about
+// which file was reached rather than about the temp directory's own symlinks
+// (/var -> /private/var on darwin).
+func evalPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }

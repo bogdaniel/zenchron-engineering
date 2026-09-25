@@ -349,6 +349,34 @@ func (f *doctorFixture) installCanonicalEntrypoint() {
 	if err := os.Symlink(canonicalTarget, entry); err != nil {
 		f.t.Fatal(err)
 	}
+	// AND THE CHAIN IS ADOPTED, not merely present. A "current" pointer with
+	// no durable authority behind it is a symlink nobody sanctioned, which the
+	// installer refuses and doctor reports - so the healthy fixture records
+	// the authority that makes this generation the governing one, exactly as
+	// adoption or succession would.
+	store, err := OpenSQLiteOperationStore(f.stateDir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	measured, err := measureExecutable(binary)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	moved, err := store.ReadoptController(ControllerReadoption{
+		ID: "readoption-fixture",
+		Binding: ControllerBinding{Controller: "main", Build: &ControllerBuild{
+			Kind: ControllerAdopted, BinarySHA256: measured}},
+		Provenance: AdoptedBuildProvenance{OutputPath: binary, BinarySHA256: measured},
+		Reason:     "the healthy fixture adopts the generation its entrypoint points at",
+		RecordedAt: time.Now(),
+	}, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if !moved {
+		f.t.Fatal("the fixture could not establish durable controller authority")
+	}
 }
 
 func (f *doctorFixture) writeOperatorConfig(mutate func(map[string]any)) {

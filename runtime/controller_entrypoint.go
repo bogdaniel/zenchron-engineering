@@ -184,12 +184,21 @@ func DiagnoseEntrypoint(pathValue, controllerRoot string, authority currentAutho
 // shaped comparison here would be a second authority mechanism, which #319
 // explicitly must not create.
 //
-// No authority recorded yet is consistent, not inconsistent: a state
-// directory that has never completed a transition has nothing for the
-// projection to disagree with, and reporting drift would invent a comparison
-// that does not exist. A nil authority reader, by contrast, means the caller
-// never wired one up, so the question could not be asked at all - that fails
-// closed rather than silently skipping the check.
+// NO AUTHORITY RECORDED YET IS A REFUSAL, not a pass. "current" is moved only
+// after an activation or a re-adoption has established durable authority, so a
+// readable "current" in a state directory that has never completed a
+// transition is a pointer nothing sanctioned. Treating it as healthy would
+// take authority from a filesystem symlink alone, which is the one thing #319
+// forbids. A nil authority reader fails closed for the adjacent reason: the
+// caller never wired one up, so the question could not be asked at all.
+//
+// AND THE PATH IS NOT THE ARTIFACT. Agreement on where the generation lives
+// proves nothing about what now sits there: a replaced or modified executable
+// at the same path satisfies every comparison above. The executable reached
+// THROUGH the projection is therefore measured against the digest the
+// governing binding attests, using the same measurement the adopted-build law
+// already performs on publication. An authority that states no attested build
+// cannot support that proof, so it is refused rather than excused.
 func entrypointAuthorityConsistency(controllerRoot string, authority currentAuthorityReader) (consistent bool, detail string) {
 	if authority == nil {
 		return false, "no durable controller authority was consulted, so the \"current\" projection could not be proven to name the generation that actually governs"
@@ -198,10 +207,17 @@ func entrypointAuthorityConsistency(controllerRoot string, authority currentAuth
 	if err != nil {
 		return false, "durable controller authority could not be read: " + err.Error()
 	}
-	if !found || strings.TrimSpace(current.Artifact) == "" {
-		return true, ""
-	}
 	pointer := filepath.Join(controllerRoot, StableEntrypointName)
+	if !found {
+		return false, fmt.Sprintf(
+			"no durable controller authority governs this state directory, so %s names a generation nothing has adopted; adopt a controller (`controller build-adopted`) or re-adopt one before treating it as the public entrypoint",
+			pointer)
+	}
+	if strings.TrimSpace(current.Artifact) == "" {
+		return false, fmt.Sprintf(
+			"durable controller authority (%s %s) names no artifact, so there is nothing %s can be proven to point at",
+			current.Kind, current.Ref, pointer)
+	}
 	target, err := os.Readlink(pointer)
 	if err != nil {
 		return false, fmt.Sprintf("%s could not be read to compare against durable authority: %s", pointer, err.Error())
@@ -211,6 +227,34 @@ func entrypointAuthorityConsistency(controllerRoot string, authority currentAuth
 		return false, fmt.Sprintf(
 			"%s points at %s, but durable controller authority (%s %s) says %s governs; repair this through the existing controller authority (re-adoption or succession), not by installing over it",
 			pointer, target, current.Kind, current.Ref, governs)
+	}
+	return entrypointArtifactIntegrity(pointer, current)
+}
+
+// entrypointArtifactIntegrity proves the executable reached through the
+// projection is the one the governing binding attests, byte for byte.
+//
+// It measures THROUGH the pointer rather than at the recorded artifact path,
+// even though the two are proven equal above: the chain a shell traverses is
+// the thing being blessed, and measuring it is what makes the proof about the
+// public entrypoint rather than about a path that happens to match.
+func entrypointArtifactIntegrity(pointer string, current ControllerAuthority) (consistent bool, detail string) {
+	build := current.Binding.Build
+	if build == nil || !isSHA256Hex(build.BinarySHA256) {
+		return false, fmt.Sprintf(
+			"durable controller authority (%s %s) attests no build digest, so the executable behind %s cannot be proven to be the adopted one",
+			current.Kind, current.Ref, pointer)
+	}
+	reached := filepath.Join(pointer, filepath.Base(current.Artifact))
+	measured, err := measureExecutable(reached)
+	if err != nil {
+		return false, fmt.Sprintf(
+			"the executable reached through %s could not be measured against durable authority: %s", pointer, err.Error())
+	}
+	if measured != build.BinarySHA256 {
+		return false, fmt.Sprintf(
+			"%s reaches an executable measuring %s, and durable controller authority (%s %s) attests %s; the adopted artifact has been replaced or modified, and this will not make it the public command",
+			pointer, shortSHA(measured), current.Kind, current.Ref, shortSHA(build.BinarySHA256))
 	}
 	return true, ""
 }

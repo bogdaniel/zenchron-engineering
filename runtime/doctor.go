@@ -348,7 +348,7 @@ func doctorEntrypointCanonical(diagnosis EntrypointDiagnosis) DoctorCheck {
 	}
 	if !diagnosis.AuthorityConsistent {
 		return fail(doctorGroupInstall, id, fmt.Sprintf(
-			"the canonical entrypoint %s is a symlink through %s, but that pointer has drifted from durable controller authority: %s",
+			"the canonical entrypoint %s is a symlink through %s, and durable controller authority does not support it: %s",
 			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
 	}
 	if !diagnosis.ReachesAdopted {
