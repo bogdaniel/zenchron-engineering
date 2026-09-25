@@ -7,6 +7,8 @@ package runtime
 // requirements.
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -100,5 +102,69 @@ func TestAChoiceMustBelongToTheFlagsOwnHelpRow(t *testing.T) {
 	// A longer flag sharing the prefix is not the flag.
 	if advertisesChoice("  --output-format-extra <f>  (choices: \"stream-json\")\n", "--output-format", "stream-json") {
 		t.Fatal("a longer flag was mistaken for --output-format")
+	}
+}
+
+// TestClaudeRunsTheStructuredProtocolInBothModes: --print with stream-json and
+// --verbose on the editing AND the plan invocation, no partial-token streaming,
+// no --bare, and every existing constraint still passed.
+func TestClaudeRunsTheStructuredProtocolInBothModes(t *testing.T) {
+	for name, plan := range map[string]bool{"mutating": false, "plan": true} {
+		t.Run(name, func(t *testing.T) {
+			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+			request.RequiredTools = []string{"go"}
+			request.ScratchDir = t.TempDir()
+			if plan {
+				request = planningRequest(request)
+			}
+			if _, err := provider.Execute(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			args := " " + strings.Join(fake.execution(t).args, " ") + " "
+			want := []string{" --print ", " --output-format stream-json ", " --verbose ", " --safe-mode ", " --model test-model "}
+			if plan {
+				want = append(want, " --permission-mode plan ")
+			} else {
+				want = append(want, " --permission-mode acceptEdits ", " --add-dir ", " --allowedTools Bash(go *) ")
+			}
+			for _, flag := range want {
+				if !strings.Contains(args, flag) {
+					t.Errorf("argv lacks %q: %s", flag, args)
+				}
+			}
+			for _, forbidden := range []string{"--include-partial-messages", "--bare"} {
+				if strings.Contains(args, forbidden) {
+					t.Errorf("argv carries %q: %s", forbidden, args)
+				}
+			}
+		})
+	}
+}
+
+// TestClaudeWithoutTheStructuredProtocolIsUnavailable: a binary that does not
+// advertise stream-json on --output-format, or --verbose, is refused; it is
+// never run in text mode supervised by byte silence.
+func TestClaudeWithoutTheStructuredProtocolIsUnavailable(t *testing.T) {
+	for name, degrade := range map[string]func(string) string{
+		"no stream-json choice": func(help string) string { return strings.Replace(help, `, "stream-json")`, ")", 1) },
+		"no --verbose":          func(help string) string { return strings.Replace(help, "--verbose", "--loud", 1) },
+		"no --output-format":    func(help string) string { return strings.Replace(help, "--output-format", "--format", 1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+			if degraded := degrade(fake.help); degraded == fake.help {
+				t.Fatal("the degradation did not apply, so this proves nothing")
+			} else {
+				fake.help = degraded
+			}
+			if _, err := provider.Execute(context.Background(), request); !errors.Is(err, ErrSandboxUnavailable) {
+				t.Fatalf("want a fail-closed capability refusal, got %v", err)
+			}
+			for _, call := range fake.calls {
+				if last := call.args[len(call.args)-1]; last != "--help" && last != "--version" {
+					t.Fatalf("a refused Claude still started: %v", call.args)
+				}
+			}
+		})
 	}
 }

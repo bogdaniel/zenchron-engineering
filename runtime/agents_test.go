@@ -105,6 +105,8 @@ const capableHelp = `Options:
       --permission-mode <MODE>
       --approval-mode <MODE>    (choices: default, auto-edit, plan, yolo)
       --safe-mode
+      --output-format <format>  (choices: "text", "json", "stream-json")
+      --verbose
       --extensions <NAME>
   -m, --model <MODEL>
       --permission-mode <mode>  (choices: "acceptEdits", "bypassPermissions", "plan")
