@@ -161,7 +161,8 @@ lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
                             optional, absent by default
 
 provider_inactivity_seconds bounds how long ONE provider invocation may go
-                            without producing output; finite always
+                            without recognized provider progress;
+                            finite always
 ```
 
 The third bound is the stall detector, and the run wall budget is not. A
