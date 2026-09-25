@@ -676,6 +676,17 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		release()
 		return nil, err
 	}
+	// Only an EXPLICIT --agent is checked here. The operator's default is left
+	// alone: a command that names no agent (status, resume, watch...) must keep
+	// working even when the default happens to be uninstalled, exactly as it
+	// does today.
+	if strings.TrimSpace(flags.Agent) != "" {
+		prober := runtime.AgentProberFor(agent, artifacts, operatorHome())
+		if err := runtime.RefuseUnlessInvocable(context.Background(), agent, prober); err != nil {
+			release()
+			return nil, err
+		}
+	}
 	feedback, err := config.FeedbackPolicy()
 	if err != nil {
 		release()
