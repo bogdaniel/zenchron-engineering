@@ -375,6 +375,9 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		PollInterval:          settings.PollInterval,
 		Discovery:             discovery,
 		Agents:                c.agents,
+		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
+			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
+		},
 		Runtime: func(repo runtime.GitHubRepo, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
 			return c.engineFor(runtime.RepositoryTarget{
 				Identity:      repo.String(),

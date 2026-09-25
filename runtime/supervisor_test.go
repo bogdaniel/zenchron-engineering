@@ -726,6 +726,89 @@ func TestSupervisorAcceptsASubmissionForAnyConfiguredAgent(t *testing.T) {
 	}
 }
 
+// stubAgentProber answers a fixed AgentReadiness, standing in for a real
+// executable-on-PATH probe so this test can force "codex is configured but
+// unusable" without actually depending on what is installed on the machine
+// running it.
+type stubAgentProber struct{ readiness AgentReadiness }
+
+func (p stubAgentProber) Probe(context.Context) AgentReadiness { return p.readiness }
+
+// TestSubmitRefusesAnUnusableAgentWhetherDefaultOrExplicit is #63's follow-up,
+// #303: the control-endpoint intake `handleControl` hands every ControlSubmit
+// straight to Submit, so this is the same surface `autonomy run issue N`
+// reaches once a supervisor is running. A configured agent this process
+// cannot invoke must be refused here exactly as the direct CLI path refuses
+// it - for an EXPLICIT selection and, just as importantly, for a request that
+// names no agent at all and therefore resolves the operator's own default.
+// Neither shape may create a run and silently fail deeper inside it.
+func TestSubmitRefusesAnUnusableAgentWhetherDefaultOrExplicit(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t) // default_agent: "codex"
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unusable := AgentReadiness{Available: false, Detail: "executable codex was not found on PATH"}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 2,
+		PollInterval: time.Minute, Agents: registry,
+		AgentProber: func(agent ResolvedAgent) AgentProber {
+			if agent.ID == "codex" {
+				return stubAgentProber{readiness: unusable}
+			}
+			return stubAgentProber{readiness: AgentReadiness{Available: true}}
+		},
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, request := range map[string]ControlRequest{
+		"explicit selection": {Repository: "acme/repo", Issue: phase8Issue + 14, Agent: "codex"},
+		"default selection":  {Repository: "acme/repo", Issue: phase8Issue + 15},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := supervisor.Submit(context.Background(), request)
+			if err == nil {
+				t.Fatal("a configured-but-uninvocable agent was admitted")
+			}
+			var refused *AgentUnusableError
+			if !errors.As(err, &refused) {
+				t.Fatalf("the refusal was not AgentUnusableError: %v", err)
+			}
+			if refused.ID != "codex" || refused.Reason != unusable.Detail {
+				t.Fatalf("the refusal did not carry doctor's own reason: %#v", refused)
+			}
+		})
+	}
+	// The still-usable agent is unaffected: this is a per-agent readiness
+	// check, not a blanket refusal of the whole supervisor.
+	fixture.forge.Issues[phase8Issue+16] = GitHubIssue{
+		Number: phase8Issue + 16, URL: "https://github.com/acme/repo/issues/3",
+		Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+	}
+	if _, err := supervisor.Submit(context.Background(), ControlRequest{
+		Repository: "acme/repo", Issue: phase8Issue + 16, Agent: "claude",
+	}); err != nil {
+		t.Fatalf("a usable agent was refused alongside the unusable one: %v", err)
+	}
+	// Both refusals above must have created nothing: only the claude submission
+	// - the one call that was actually admitted - may be sitting in the store.
+	runs, err := fixture.store.Runs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("a refused submission created a run: %#v", runs)
+	}
+}
+
 // TestEveryActiveRunGetsATurnUnderACeiling is the fairness rule. A run is
 // non-terminal for its whole lifetime, not only while it is inside Reconcile,
 // so selecting a fixed age-ordered prefix would make a ceiling of one mean "the
