@@ -618,3 +618,16 @@ func (p OpenAIProvider) call(ctx context.Context, key string, body []byte) (open
 	}
 	return decoded, httpResponse.StatusCode, raw, nil
 }
+
+// MissingTools probes the same pinned container and PATH used by brokered commands.
+// Names are positional arguments, never interpolated into shell source.
+func (p OpenAIProvider) MissingTools(ctx context.Context, required []string) []string {
+	var missing []string
+	for _, name := range required {
+		_, err := p.Broker.Sandbox.probeToolchain(ctx, `command -v "$1"`, []string{name})
+		if err != nil {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
