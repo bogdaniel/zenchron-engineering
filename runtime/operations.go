@@ -724,7 +724,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// different claim from the work moving, and #238 is the cost of letting the
 	// first stand in for the second.
 	ctx = withProviderProgressRecorder(ctx,
-		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, key) })
+		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, key) })
 	// A continuation is bounded independently of the original operation.
 	// The absolute deadline also makes a spent (zero) allowance fail closed.
 	if _, granted := state.reviewContinuationGrant(); granted {

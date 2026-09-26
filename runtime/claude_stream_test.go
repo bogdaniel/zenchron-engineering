@@ -711,7 +711,7 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		t.Fatal(err)
 	}
 	// Structured activity advances durable progress, qualified by attempt.
-	recorded, err := scheduler.RecordProviderProgress(op.ID, fmt.Sprintf("%d:%d", op.AttemptIdentity, 1))
+	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, fmt.Sprintf("%d:%d", op.AttemptIdentity, 1))
 	if err != nil || recorded.LastProgressAt == nil || !recorded.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("structured progress did not advance durably: %+v %v", recorded, err)
 	}
@@ -884,15 +884,15 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	}
 }
 
-// The field that decides success is REQUIRED and typed: a drifted or missing
-// is_error, or a missing subtype, is not a valid final result, so exit 0
-// fails closed rather than reading the zero value as success.
+// The field that decides success is REQUIRED and typed: a drifted, missing or
+// null is_error is not a valid final result, so exit 0 fails closed rather
+// than reading the zero value as success.
 func TestARequiredResultFieldCannotFailOpen(t *testing.T) {
 	for name, line := range map[string]string{
 		"is_error as a string":                `{"type":"result","subtype":"error_during_execution","is_error":"true"}`,
 		"is_error drifts after another drift": `{"type":"result","subtype":"success","permission_denials":{},"is_error":"false"}`,
 		"is_error missing":                    `{"type":"result","subtype":"success"}`,
-		"subtype as a number":                 `{"type":"result","subtype":7,"is_error":false}`,
+		"is_error null":                       `{"type":"result","subtype":"success","is_error":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			stream := newClaudeStream(1)
@@ -910,20 +910,47 @@ func TestARequiredResultFieldCannotFailOpen(t *testing.T) {
 	}
 }
 
-// A durable write that lands after the operation settled is ignored.
-func TestLateProviderProgressCannotStampASettledOperation(t *testing.T) {
+// A durable write is bound to the physical attempt that observed it: a late
+// attempt-1 write lands neither on the settled row nor on attempt 2 running on
+// the same row, and attempt 2's own write still does.
+func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 	scheduler, clock := deadlineScheduler(t)
-	op := plannedExecution(t, scheduler, 30*time.Minute)
-	settled, err := scheduler.Finish(op.ID, Succeeded)
+	first := plannedExecution(t, scheduler, 30*time.Minute)
+	settled, err := scheduler.Finish(first.ID, OperationFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock.advance(time.Minute)
-	late, err := scheduler.RecordProviderProgress(op.ID, "1:9")
+	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:9")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if late.NoProgressKey == "1:9" || !late.LastProgressAt.Equal(*settled.LastProgressAt) {
-		t.Fatalf("a late write stamped a settled operation: key %q at %v", late.NoProgressKey, late.LastProgressAt)
+		t.Fatalf("a late write stamped the settled row: key %q at %v", late.NoProgressKey, late.LastProgressAt)
+	}
+	if _, err := scheduler.Next(first.RunID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := scheduler.Start(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.State != Running || second.AttemptIdentity == first.AttemptIdentity {
+		t.Fatalf("attempt 2 is not running on a new identity: %+v", second)
+	}
+	clock.advance(time.Minute)
+	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.NoProgressKey != second.NoProgressKey || !late.LastProgressAt.Equal(*second.LastProgressAt) {
+		t.Fatalf("attempt 1's late write stamped attempt 2: key %q at %v", late.NoProgressKey, late.LastProgressAt)
+	}
+	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, "2:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.NoProgressKey != "2:1" || !own.LastProgressAt.Equal(clock.Now()) {
+		t.Fatalf("attempt 2's own write did not land: key %q at %v", own.NoProgressKey, own.LastProgressAt)
 	}
 }
