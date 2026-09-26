@@ -153,6 +153,13 @@ which would be misleading under the same name, and misleading on exactly the
 machines where nobody would think to check. Where an installed CLI exposes no
 trustworthy credential artifact, the answer stays `unknown`.
 
+On macOS, Claude Code stores its credentials in the login Keychain rather than
+`~/.claude/.credentials.json`. The adapter does not observe the Keychain or infer
+a session from a Keychain entry, so it reports `auth_mode: unknown` even when the
+CLI is authenticated and works. Here, `unknown` does **not** mean unauthenticated
+and does not block the agent: `ready` is decided by the executable and its
+advertised capabilities, independently of the authentication observation.
+
 ## Readiness
 
 ```bash
@@ -167,8 +174,9 @@ gemini       gemini_cli     operator_trusted  no     -                        un
 qwen         qwen_cli       operator_trusted  no     -                        unknown              executable qwen was not found on PATH
 ```
 
-Nothing here spends money. Readiness is an executable being found, capabilities
-being advertised, a version being printed and a credential file existing. A
+Nothing here spends money. Readiness requires an executable to be found and the
+required capabilities to be advertised. Version and authentication observations
+are reported alongside readiness; a credential file is not required to be ready. A
 paid call is never made to prove a worker exists, and `ready` therefore means
 "can be invoked", not "has budget" — account state is only observable by making
 a paid request.
