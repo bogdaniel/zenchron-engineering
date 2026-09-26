@@ -312,7 +312,7 @@ func TestSelfhostResolvesRuntimeBeforeMutation(t *testing.T) {
 	commands := newFakeCommands(t)
 	commands.goUnavailable = true
 	commands.dockerUnavailable = true
-	err := selfhostIssue("4", commands, &strings.Builder{})
+	err := selfhostIssueWithModels("4", nil, commands, &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "install Go 1.25 or Docker") {
 		t.Fatalf("error = %v", err)
 	}
