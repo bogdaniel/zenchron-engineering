@@ -1,14 +1,19 @@
 package runtime
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // The native-CLI catalogue: one spec per supported coding CLI.
 //
-// This file is where provider-specific knowledge is allowed to live, and it is
-// the ONLY place it lives. Adding another CLI means adding one spec here, one
-// kind in agents.go, one branch in the composition root's factory, and tests.
-// Nothing in the scheduler, the reconciler, the kernel, the authority
-// evaluator, Git or the forge adapter learns the new provider's name.
+// Provider-specific knowledge is owned by the provider adapter/spec layer: this
+// catalogue, plus the provider files a spec field wires in - claude_stream.go
+// holds Claude Code's stream-json parser, selected by claudeSpec.ProgressMode
+// (#322). Adding another CLI means adding one spec here, one kind in agents.go,
+// one branch in the composition root's factory, and tests. Nothing in the
+// scheduler, the reconciler, the kernel, the authority evaluator, Git or the
+// forge adapter learns the new provider's name or its event vocabulary.
 //
 // Every spec states the flags this runtime depends on TWICE, on purpose: once
 // in Probes, which requires the installed CLI to advertise them, and once in
@@ -31,6 +36,12 @@ import "strings"
 // silently meaning "Zenchron billed my Anthropic API account". The runtime does
 // not claim to know which plan ultimately paid - see AuthModeUnknown - only
 // that it substituted no credential of its own.
+//
+// A spec MAY contribute narrowly approved, non-secret invocation variables
+// through InvocationEnv - Claude's CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is the
+// one today - applied to the main invocation only, never to probes. API-key
+// and credential variables remain forbidden, always: withInvocationEnv refuses
+// any credential-shaped name and any name the allowlist already sets.
 
 // diagnosticSignal maps one RECOGNIZED provider diagnostic onto a typed
 // failure class. Matching is case-insensitive substring containment over the
@@ -53,6 +64,39 @@ var sharedAgentSignals = []diagnosticSignal{
 	{"rate limit exceeded", FailureProviderRateLimited},
 	{"rate_limit_exceeded", FailureProviderRateLimited},
 	{"too many requests", FailureProviderRateLimited},
+	// THE ENDPOINT SAYING IT IS UNAVAILABLE. These are HTTP's own status
+	// phrases, so they belong here rather than in any vendor's list, and they
+	// are the gateway statuses only: a 500 is the provider failing at a
+	// request, which says nothing about reachability, and classifying it as
+	// unavailable would park a run on a wait no operator can clear.
+	{"502 bad gateway", FailureProviderUnavailable},
+	{"503 service unavailable", FailureProviderUnavailable},
+	{"504 gateway timeout", FailureProviderUnavailable},
+}
+
+// nodeTransportSignals are the connectivity diagnostics a Node-based CLI emits,
+// which is three of the four adapters here: Claude Code, Gemini and Qwen Code
+// all surface libuv/undici errno strings when the host cannot reach their
+// endpoint.
+//
+// They are errno TOKENS, not prose, which is what keeps this from being a
+// substring swamp: ENOTFOUND is emitted by the resolver and means the name did
+// not resolve, and no amount of ordinary model output contains it. Deliberately
+// absent are ETIMEDOUT and undici's bare "fetch failed": the first is
+// indistinguishable from a slow provider, and the second wraps every transport
+// outcome including ones that are not connectivity at all.
+//
+// Silence is NOT here, and that is the boundary #238 draws: a host with no
+// network that says nothing is FailureProviderNoProgress, and only a provider
+// that NAMES its transport failure reaches FailureProviderUnavailable.
+var nodeTransportSignals = []diagnosticSignal{
+	{"getaddrinfo enotfound", FailureProviderUnavailable},
+	{"getaddrinfo eai_again", FailureProviderUnavailable},
+	{"econnrefused", FailureProviderUnavailable},
+	{"econnreset", FailureProviderUnavailable},
+	{"enetunreach", FailureProviderUnavailable},
+	{"ehostunreach", FailureProviderUnavailable},
+	{"enetdown", FailureProviderUnavailable},
 }
 
 // codexSpec drives the installed Codex CLI.
@@ -86,6 +130,17 @@ var codexSpec = cliAgentSpec{
 		// was revoked. Please log out and sign in again."
 		{"refresh token was revoked", FailureProviderAccountUnavailable},
 		{"please log out and sign in again", FailureProviderAccountUnavailable},
+		// CODEX CANNOT REACH ITS ENDPOINT. Codex is a Rust binary over
+		// reqwest/hyper, so its connectivity vocabulary is that stack's rather
+		// than Node's: a resolver failure is reported as "dns error", and a
+		// transport that never completed as "error sending request". Both are
+		// statements that no exchange happened, which is what separates them
+		// from a provider that answered badly.
+		{"dns error", FailureProviderUnavailable},
+		{"error sending request", FailureProviderUnavailable},
+		{"connection refused", FailureProviderUnavailable},
+		{"connection reset by peer", FailureProviderUnavailable},
+		{"network is unreachable", FailureProviderUnavailable},
 	},
 	Args: func(i cliInvocation) []string {
 		sandbox := "workspace-write"
@@ -95,6 +150,10 @@ var codexSpec = cliAgentSpec{
 		args := []string{"--ask-for-approval", "never", "exec", "--sandbox", sandbox, "--ignore-user-config"}
 		if !i.Bypass {
 			args = append(args, "-c", "sandbox_workspace_write.network_access=false")
+			if i.ScratchDir != "" {
+				roots, _ := json.Marshal([]string{i.ScratchDir})
+				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(roots))
+			}
 		}
 		args = append(args, "-c", "project_doc_max_bytes=0")
 		if i.Model() != "" {
@@ -145,25 +204,43 @@ var codexSpec = cliAgentSpec{
 // --bare is deliberately never passed: it switches Claude Code onto strict
 // API-key authentication, which would turn a supervised subscription session
 // into metered API billing.
+//
+// --output-format stream-json --verbose makes Claude's agent loop observable
+// as newline-delimited JSON events, which is what supervises it (#322; see
+// claude_stream.go). Both the editing and the plan invocation use it.
+// --include-partial-messages is deliberately absent: token deltas add a line
+// per token without being stronger evidence that the work advanced, so one
+// long single content block can still go unobserved until it completes - the
+// residual risk #322 accepts.
 var claudeSpec = cliAgentSpec{
 	Probes: []cliHelpProbe{
-		{Args: []string{"--help"}, Required: []string{"--print", "--permission-mode", "--model", "--safe-mode"}},
+		// --output-format stream-json and --verbose are what make Claude's own
+		// agent loop observable (#322). The installed CLI refuses stream-json
+		// under --print without --verbose, so both are required: a binary
+		// that lacks either is unavailable rather than silently supervised by
+		// byte silence again.
+		{
+			Args: []string{"--help"}, Required: []string{"--print", "--permission-mode", "--model", "--safe-mode", "--output-format", "--verbose"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--output-format", Value: "stream-json"}},
+		},
 	},
 	VersionArgs:                     []string{"--version"},
 	AuthStatePaths:                  []string{".claude/.credentials.json"},
 	HomeEnv:                         "CLAUDE_CONFIG_DIR",
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
-	Signals: []diagnosticSignal{
+	ProgressMode:                    progressStructuredClaudeEvents,
+	InvocationEnv:                   claudeBackgroundWaitEnv,
+	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},
-	},
+	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "acceptEdits"
 		if i.Bypass {
 			mode = "bypassPermissions"
 		}
-		args := []string{"--print", "--permission-mode", mode, "--safe-mode"}
+		args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", mode, "--safe-mode"}
 		if i.Model() != "" {
 			args = append(args, "--model", i.Model())
 		}
@@ -182,6 +259,9 @@ var claudeSpec = cliAgentSpec{
 		// goes in. --allowedTools names exactly the executables the contract
 		// already requires. Neither is a bypass, neither is arbitrary shell
 		// authority, and a stage that needs neither is given neither.
+		if i.ScratchDir != "" {
+			args = append(args, "--add-dir", i.ScratchDir)
+		}
 		if i.ResultDir != "" {
 			args = append(args, "--add-dir", i.ResultDir)
 		}
@@ -206,7 +286,7 @@ var claudeSpec = cliAgentSpec{
 		},
 		Mode: "plan",
 		Args: func(i cliInvocation) []string {
-			args := []string{"--print", "--permission-mode", "plan", "--safe-mode"}
+			args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--safe-mode"}
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}
@@ -240,10 +320,10 @@ var geminiSpec = cliAgentSpec{
 	VersionArgs:    []string{"--version"},
 	AuthStatePaths: []string{".gemini/oauth_creds.json"},
 	Permission:     cliPermissionModes{Safe: "auto_edit", Bypass: "yolo"},
-	Signals: []diagnosticSignal{
+	Signals: append([]diagnosticSignal{
 		{"resource_exhausted", FailureProviderQuota},
 		{"quota exceeded", FailureProviderQuota},
-	},
+	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "auto_edit"
 		if i.Bypass {
@@ -287,10 +367,10 @@ var qwenSpec = cliAgentSpec{
 	HomeEnv:                         "QWEN_HOME",
 	Permission:                      cliPermissionModes{Safe: "auto-edit", Bypass: "yolo"},
 	SuppressesWorkspaceInstructions: true,
-	Signals: []diagnosticSignal{
+	Signals: append([]diagnosticSignal{
 		{"resource_exhausted", FailureProviderQuota},
 		{"quota exceeded", FailureProviderQuota},
-	},
+	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "auto-edit"
 		if i.Bypass {
@@ -371,6 +451,22 @@ func claudePromptArg(args []string, prompt string) []string {
 // worker to run `go test` does not also allow it to run anything else.
 func claudeAllowedTools(i cliInvocation) []string {
 	var allowed []string
+	// GIT IS DELIBERATELY NOT GRANTED HERE, and that absence is the #241
+	// answer for this provider rather than a gap in it.
+	//
+	// The first draft of the brokered boundary added `Bash(git *)` so that a
+	// bare `git` - which resolves to the runtime's broker - would be the only
+	// Git Claude could invoke. That is structurally true and it was still
+	// wrong: this allowlist is derived from the invocation's own obligations,
+	// so adding a standing grant would have widened the worker's command
+	// surface to CREATE the capability the broker then has to guard, and it
+	// broke the law that a stage needing neither a directory nor a tool is
+	// given neither. #241 excludes permission widening explicitly.
+	//
+	// So Claude reaches Git only where a contract already obliges it, and then
+	// only through the broker, because the guard directory is first on the
+	// worker's search path and the brokered sentinel answers every other
+	// spelling. The boundary does not rest on this file.
 	if i.ResultDir != "" {
 		// The typed result is WRITTEN, which needs the Write tool; --add-dir
 		// above is what bounds where it may be written to.

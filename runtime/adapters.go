@@ -28,9 +28,16 @@ type ExecutionRequest struct {
 	// controller has no durable name it alone may reconcile, and recovery would
 	// have to guess by prefix or label.
 	OperationID string
-	// Attempt is the scheduler's attempt number for OperationID. The scheduler
-	// increments it when it starts the operation, so it is a fact the runtime
-	// already owns; a provider must never invent, default, or carry it over.
+	// Attempt is the PHYSICAL invocation number for OperationID: which try of
+	// this operation this particular provider call is. The runtime derives it
+	// from its own monotonic invocation count and the evidence already stored,
+	// so it is a fact the runtime owns; a provider must never invent, default,
+	// or carry it over.
+	//
+	// It is not the operation's budget attempt. That one is refunded when a
+	// provider condition routes to an external wait, so it can move backwards -
+	// and an identity that moves backwards points at a transcript that already
+	// exists.
 	//
 	// Together with RunID and OperationID it is the complete identity of ONE
 	// invocation, and therefore of the forensic transcript that invocation
@@ -226,6 +233,26 @@ type ProviderBudget struct {
 	MaxTokens     *int64
 	MaxCostMicros *int64
 	WallLimit     time.Duration
+	// InactivityLimit is how long this ONE invocation may go without producing
+	// observable output before the runtime terminates it.
+	//
+	// It sits beside WallLimit because it is the same kind of statement - a
+	// bound this invocation runs under - and because every caller that states
+	// one has to state the other in the same place. It is not a share of
+	// WallLimit and does not reduce it: a provider that keeps talking is still
+	// stopped by the total bound, and a provider that goes quiet is stopped by
+	// this one long before the total bound would notice. Zero means no
+	// inactivity bound, which is what a caller predating this budget gets.
+	InactivityLimit time.Duration
+	// InactivityWindow is the CONFIGURED per-attempt window InactivityLimit was
+	// derived from. The two differ when a byte_output successor inherits only
+	// the remainder. A provider control derived from the window - Claude's
+	// background-wait ceiling (#322) - reads this one, so a shrunken remainder
+	// can never silently shrink it. Zero means the caller stated no separate
+	// window, and InactivityLimit is then the configured window itself: the
+	// planner (supervisor.go) and any caller passing the configured limit
+	// directly rely on that, so zero must stay legal.
+	InactivityWindow time.Duration
 }
 type ExecutionResult struct {
 	ProviderID, Model, AuthMode string
@@ -492,28 +519,71 @@ type EvidenceBinding struct {
 // ScanCandidateForCredentialValues before a producer is admitted,
 // RedactCredentialValues on every model-visible tool result, and the commit
 // gate in CandidateWorkspace.Commit. See credential_boundary.go.
+//
+// It is the COMPOSITION of the two halves below, for a caller whose observed
+// paths are exactly the paths it is about to commit - a brokered tool write is
+// one, because the one path it names is the one path it writes. A caller that
+// observes more than it commits must ask the two halves separately, so that a
+// path it has already decided not to commit cannot veto the paths it does. See
+// CandidateWorkspace.Commit.
 func GuardCandidate(root string, paths []string, maxBytes int64) error {
+	if err := GuardCandidatePathShape(root, paths); err != nil {
+		return err
+	}
+	return GuardCandidateCommitContent(root, paths, maxBytes)
+}
+
+// GuardCandidatePathShape is the half that protects the RUNTIME from a path,
+// and it applies to every path the workspace reported.
+//
+// Normalization, traversal, absolute paths and symlinked leaves are questions
+// about what the runtime is about to touch on this filesystem - it joins these
+// names onto the workspace root and stats them - so they are asked about
+// anything observed, committed or not.
+func GuardCandidatePathShape(root string, paths []string) error {
+	for _, p := range paths {
+		normalized, err := normalizedCandidatePath(p)
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink candidate path %q", normalized)
+		}
+	}
+	return nil
+}
+
+// GuardCandidateCommitContent is the half that protects the COMMIT, and it
+// applies only to the paths that will be in it.
+//
+// The sensitive-name refusal and the size ceiling are both statements about the
+// object the runtime is about to publish. Asking them of a path the runtime has
+// already decided it cannot carry lets that path veto a commit it is not in:
+// an inherited scratch repository called `.env` is not a credential in the
+// candidate, and its bytes are not candidate bytes, because neither reaches the
+// tree. The gates are unchanged for everything that does reach it.
+func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
 	var total int64
 	for _, p := range paths {
-		normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{p}, PathsKnown: true})
-		if err != nil || filepath.IsAbs(p) || len(normalized.Paths) != 1 {
-			return fmt.Errorf("unsafe candidate path %q", p)
+		normalized, err := normalizedCandidatePath(p)
+		if err != nil {
+			return err
 		}
-		p = normalized.Paths[0]
 		// Credential-file SHAPES, not substrings. The predicate here used to
 		// match "secret", "private" and "credential" anywhere in a base name,
 		// which made secret_scanner.go, private_key_parser.go and
 		// credential_policy.go permanently unopenable by the engineering
 		// system that has to maintain them.
-		if sensitiveCredentialFilename(filepath.Base(p)) {
-			return fmt.Errorf("sensitive candidate path %q", p)
+		if sensitiveCredentialFilename(filepath.Base(normalized)) {
+			return fmt.Errorf("sensitive candidate path %q", normalized)
 		}
-		info, err := os.Lstat(filepath.Join(root, p))
+		info, err := os.Lstat(filepath.Join(root, normalized))
 		if err != nil {
 			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink candidate path %q", p)
 		}
 		total += info.Size()
 		if maxBytes > 0 && total > maxBytes {
@@ -521,6 +591,14 @@ func GuardCandidate(root string, paths []string, maxBytes int64) error {
 		}
 	}
 	return nil
+}
+
+func normalizedCandidatePath(p string) (string, error) {
+	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{p}, PathsKnown: true})
+	if err != nil || filepath.IsAbs(p) || len(normalized.Paths) != 1 {
+		return "", fmt.Errorf("unsafe candidate path %q", p)
+	}
+	return normalized.Paths[0], nil
 }
 
 // VerificationSurfaceChanged identifies candidate-controlled verifier inputs.
@@ -590,6 +668,44 @@ const (
 	// configured concurrency is above what that account tolerates - and an
 	// operator cannot see that difference through one merged class.
 	FailureProviderRateLimited FailureClass = "provider_rate_limited"
+	// FailureProviderNoProgress is a provider invocation the runtime ended
+	// because it produced no output for the whole configured inactivity
+	// window.
+	//
+	// It is not a quota, not an account condition, and not a verdict about the
+	// work: nothing external refused anything, and the process was alive the
+	// entire time. That liveness is exactly what made it invisible - the run
+	// that exposed it charged 8h55m of an active-work budget to a coding CLI
+	// that had lost its network, and the run wall budget was what eventually
+	// noticed.
+	//
+	// It routes to a bounded RETRY rather than a wait. A stall is a runtime
+	// bound reached, like FailureExecutionIncomplete, and the condition may
+	// well be gone by the next attempt - but it is bounded by the execution
+	// attempt ceiling and the silent interval is still charged to the wall
+	// budget, so a provider that always stalls exhausts its attempts in
+	// minutes instead of consuming the day. It is deliberately NOT
+	// continuation-eligible: silence is not interrupted work waiting to be
+	// resumed, and a retry inherits no observations from it.
+	FailureProviderNoProgress FailureClass = "provider_no_progress"
+	// FailureProviderUnavailable is the provider's TRANSPORT being gone, named
+	// by the provider's own diagnostic: DNS did not resolve, the connection was
+	// refused or reset, or the endpoint answered that it is unavailable.
+	//
+	// It is a recognized statement, never an inference from silence. Silence
+	// is FailureProviderNoProgress; only an explicit diagnostic reaches here,
+	// because guessing "offline" from an arbitrary substring is how a provider
+	// bug becomes a permanent wait. It is separate from
+	// FailureProviderAccountUnavailable - the credential is fine and there is
+	// nothing for an operator to repair in their account - and separate from
+	// FailureTransientProvider, which is that provider's own capacity rather
+	// than the host's ability to reach it at all.
+	//
+	// It routes to a bounded external WAIT under the existing #83 accounting:
+	// a host with no network is not performing engineering work, so the
+	// interval must not be charged to the active-work budget, and the same run
+	// continues once connectivity returns.
+	FailureProviderUnavailable FailureClass = "provider_unavailable"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -619,6 +735,20 @@ const (
 	// may be perfect - it is a statement that the authority to produce it had
 	// already ended.
 	FailureExecutionDeadlineExceeded FailureClass = "execution_deadline_exceeded"
+
+	// FailureRunCancelled is the SAME revocation arriving from the other
+	// direction: a provider that returned after the operator stopped the run.
+	//
+	// It sits beside the deadline class deliberately, and routes the same way,
+	// because it is the same statement - the authority to turn this result into
+	// a candidate had already ended - and not a statement about the work, which
+	// may be perfect. What differs is only the cause and when it is knowable: a
+	// deadline can be recognised only once the attempt ends, while cancellation
+	// exists before it begins and is therefore ALSO refused at acquisition,
+	// where it prevents the invocation rather than discarding its result. This
+	// class is what remains for an attempt that was legitimately acquired and
+	// then outlived the stop.
+	FailureRunCancelled FailureClass = "run_cancelled"
 	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
 	// being there: the configured image resolves no toolchain, the
 	// operator-provisioned dependency cache is missing or empty, or the exact
@@ -681,11 +811,27 @@ const (
 	// clears it is removing the material from what the run is about, which is
 	// a different subject and therefore a different run.
 	FailureCandidateCredentialMaterial FailureClass = "candidate_credential_material"
-	FailureGovernanceMismatch          FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity          FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict     FailureClass = "base_integration_conflict"
-	FailureFlaky                       FailureClass = "flaky_verification"
-	FailureUnknown                     FailureClass = "unknown"
+	// FailureCandidateGuardUnavailable is the controller unable to install its
+	// own #241 boundary: the composition requires the brokered Git guard and
+	// could not resolve the executable that enforces it.
+	//
+	// It is NOT a provider failure and must not be reported as one. Nothing
+	// about the worker, the work, the provider's account or the network is
+	// wrong; the runtime cannot enforce a law it holds itself to, so it
+	// performs no execution at all. It is detected BEFORE dispatch, so no
+	// invocation is spent and no candidate is touched.
+	//
+	// It waits rather than stopping: an operator repairs the controller
+	// installation and the same run continues against the same candidate.
+	// Terminalizing a run because the controller could not name its own
+	// executable would destroy work over a condition that is entirely local
+	// and entirely fixable.
+	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
+	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
+	FailureFlaky                     FailureClass = "flaky_verification"
+	FailureUnknown                   FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -722,18 +868,22 @@ func RouteFailure(c FailureClass) FailureRoute {
 	// budget is what makes it terminal; being unrouted never should have.
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
-	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete:
+	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
+		FailureProviderNoProgress:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
 		return RouteRestore
-	// Stopping is the point: there is no time left to route anywhere.
-	case FailureExecutionDeadlineExceeded:
+	// Stopping is the point: there is no authority left to route anywhere. The
+	// deadline has passed or the operator has stopped the run, and in both
+	// cases a retry would inherit exactly the revocation that ended this one.
+	case FailureExecutionDeadlineExceeded, FailureRunCancelled:
 		return RouteStop
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
-		FailureStateStorageExhausted, FailureControllerShutdown:
+		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
+		FailureCandidateGuardUnavailable:
 		return RouteWait
 	default:
 		return RouteStop

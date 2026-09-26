@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,10 +113,100 @@ func TestUnknownAgentIsRefusedWithTheRealNames(t *testing.T) {
 		t.Fatalf("exit code %d, want %d", code, runtime.ExitInvalid)
 	}
 	var unknown *runtime.UnknownAgentError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("a mistyped id was not reported as UnknownAgentError: %v", err)
+	}
 	if !strings.Contains(err.Error(), "codex") {
 		t.Fatalf("the refusal does not name the configured agents: %v", err)
 	}
-	_ = unknown
+	// A typo is not a configured agent that merely cannot be invoked: it must
+	// never be described the way #303's AgentUnusableError is, which would send
+	// the operator to install a CLI for an id that was never configured.
+	if strings.Contains(err.Error(), "configured but") {
+		t.Fatalf("a mistyped id was described as configured: %v", err)
+	}
+}
+
+// TestRunIssueRefusesAConfiguredButUnusableAgent is #303's explicit path: an
+// id an operator names with --agent that IS configured, but whose executable
+// is not on PATH, is refused with AgentUnusableError - not accepted and left
+// to fail deep inside a run with no explanation - and no run is created for
+// it to retry into. This drives `autonomy run issue N` directly, with no
+// supervisor to hand the request to.
+func TestRunIssueRefusesAConfiguredButUnusableAgent(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git",
+		agentsConfig(map[string]any{
+			"codex": map[string]any{"kind": "codex_cli", "trust_mode": "operator_trusted", "command": "codex-not-installed-303"},
+		}, "codex"))
+	t.Chdir(dir)
+
+	code, err := autonomy([]string{"run", "issue", "7", "--agent", "codex", "--config", configPath}, offlineOverrides(), &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("an agent with no installed executable was accepted")
+	}
+	if code != runtime.ExitInvalid {
+		t.Fatalf("exit code %d, want %d", code, runtime.ExitInvalid)
+	}
+	var unusable *runtime.AgentUnusableError
+	if !errors.As(err, &unusable) {
+		t.Fatalf("the refusal was not AgentUnusableError: %v", err)
+	}
+	if unusable.ID != "codex" || !strings.Contains(unusable.Reason, "PATH") {
+		t.Fatalf("the refusal did not name the real reason: %#v", unusable)
+	}
+	assertNoNewRunCreated(t, dir, configPath)
+}
+
+// TestRunIssueRefusesAnUnusableDefaultAgent is #303's second half, raised on
+// review: an operator who names no --agent at all still selects a configured
+// agent - the operator's default - and that selection is refused the same
+// way an explicit one is, rather than admitted and failing deeper inside the
+// run it starts.
+func TestRunIssueRefusesAnUnusableDefaultAgent(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git",
+		agentsConfig(map[string]any{
+			"codex": map[string]any{"kind": "codex_cli", "trust_mode": "operator_trusted", "command": "codex-not-installed-303"},
+		}, "codex"))
+	t.Chdir(dir)
+
+	code, err := autonomy([]string{"run", "issue", "7", "--config", configPath}, offlineOverrides(), &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("a default agent with no installed executable was accepted")
+	}
+	if code != runtime.ExitInvalid {
+		t.Fatalf("exit code %d, want %d", code, runtime.ExitInvalid)
+	}
+	var unusable *runtime.AgentUnusableError
+	if !errors.As(err, &unusable) {
+		t.Fatalf("the refusal was not AgentUnusableError: %v", err)
+	}
+	if unusable.ID != "codex" || !strings.Contains(unusable.Reason, "PATH") {
+		t.Fatalf("the refusal did not name the real reason: %#v", unusable)
+	}
+	assertNoNewRunCreated(t, dir, configPath)
+}
+
+// assertNoNewRunCreated confirms a refused submission left only the run
+// seededWorkspace itself created - a refusal must never leave an orphaned run
+// behind for an operator to find later.
+func assertNoNewRunCreated(t *testing.T, dir, configPath string) {
+	t.Helper()
+	config, err := runtime.LoadConfig(configPath, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runtime.OpenSQLiteOperationStore(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runs, err := store.Runs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != "run-seeded" {
+		t.Fatalf("a refused submission created a run: %#v", runs)
+	}
 }
 
 // TestRepositoryConfigurationCannotNameAnAgent keeps worker selection operator
@@ -654,7 +745,7 @@ func TestASupervisorAtATwoRunCeilingRunsTwoRunsAtTheSameInstant(t *testing.T) {
 		seedRun(t, built.store, fmt.Sprintf("run-issue-%d", issue), fmt.Sprintf("zenchron/seeded#%d", issue), now)
 	}
 
-	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}})
+	driver, err := built.supervisor([]runtime.GitHubRepo{{Owner: "zenchron", Name: "seeded"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,5 +773,40 @@ func retire(t *testing.T, store *runtime.SQLiteOperationStore, runID string) {
 	run.Disposition = runtime.Failed
 	if err := store.PutRun(run); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// AN EXECUTING RUN LOOKS EXECUTING, WHATEVER ITS DISPOSITION SAYS.
+//
+// A run parked on review keeps the disposition `waiting` while its worker
+// answers that review. The row used to show only the disposition, so eight
+// minutes of a provider working looked exactly like a run nobody had touched.
+func TestTheFleetRowShowsAnOperationThatIsRunning(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  runtime.RunSummary
+		want string
+	}{
+		{"a remediation under a waiting disposition", runtime.RunSummary{
+			Disposition: runtime.Waiting, Reason: "goal_state_reached",
+			Operation: "execution.invoke", Executing: true,
+		}, "waiting:execution.invoke"},
+		{"an ordinary active invocation", runtime.RunSummary{
+			Disposition: runtime.Active, Operation: "execution.invoke", Executing: true,
+		}, "active:execution.invoke"},
+		// THE OPPOSITE ERROR, which the previous rule made: an active run whose
+		// last operation has finished is not executing it.
+		{"an active run between operations", runtime.RunSummary{
+			Disposition: runtime.Active, Operation: "assurance.go", Executing: false,
+		}, "active"},
+		{"a parked run with nothing running", runtime.RunSummary{
+			Disposition: runtime.Waiting, Reason: "goal_state_reached", Operation: "assurance.go",
+		}, "waiting"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stateLabel(test.run); got != test.want {
+				t.Fatalf("state = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

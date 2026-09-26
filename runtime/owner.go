@@ -54,7 +54,7 @@ func NewProcessOwnerLiveness() ProcessOwnerLiveness {
 }
 
 // NewLockOwnerLiveness proves death from the OS ownership lock held by every
-// runtime instance that called AcquireOwnershipLock with the same state dir.
+// runtime instance that called AcquireControllerInstanceLock with the same state dir.
 func NewLockOwnerLiveness(stateDir string) ProcessOwnerLiveness {
 	return ProcessOwnerLiveness{Host: ownerHost(), StateDir: stateDir}
 }
@@ -107,20 +107,26 @@ func processExists(pid int) bool {
 	return !errors.Is(process.Signal(syscall.Signal(0)), syscall.ESRCH)
 }
 
-// OwnershipLock is the OS advisory lock a runtime instance holds for its whole
+// ControllerInstanceLock is the OS advisory lock a runtime instance holds for its whole
 // lifetime. Hold it before recording any lease and release it on shutdown; a
 // crash releases it automatically, which is what turns "the lock is acquirable"
 // into proof that the recorded owner is gone.
-type OwnershipLock struct {
+type ControllerInstanceLock struct {
 	path string
 	file *os.File
 }
 
-// AcquireOwnershipLock claims ownership for this instance and keeps the
+// AcquireControllerInstanceLock claims THIS INSTANCE's identity and keeps the
 // descriptor open until Release. It fails when another live process already
-// holds the same owner identity, so it is also the startup guard against two
+// holds the same owner identity, so it is the startup guard against two
 // runtimes sharing one identity.
-func AcquireOwnershipLock(stateDir, owner string) (*OwnershipLock, error) {
+//
+// IT IS NOT THE CONTROLLER ROLE, and its previous name - ownership - invited
+// exactly that reading. The path contains the owner identity (host, pid,
+// token), so two different controllers take two different locks and exclude
+// each other from nothing. What answers "do I own the controller role" is
+// ControllerRoleLock, at one well-known path; see controller_role.go.
+func AcquireControllerInstanceLock(stateDir, owner string) (*ControllerInstanceLock, error) {
 	file, err := openOwnerLockFile(stateDir, owner)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring runtime ownership lock for %q: %w", owner, err)
@@ -133,12 +139,12 @@ func AcquireOwnershipLock(stateDir, owner string) (*OwnershipLock, error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("acquiring runtime ownership lock for %q: %w", owner, err)
 	}
-	return &OwnershipLock{path: ownerLockPath(stateDir, owner), file: file}, nil
+	return &ControllerInstanceLock{path: ownerLockPath(stateDir, owner), file: file}, nil
 }
 
 // Path reports the lock file, for diagnosis only. Its existence is never
 // evidence of anything.
-func (l *OwnershipLock) Path() string {
+func (l *ControllerInstanceLock) Path() string {
 	if l == nil {
 		return ""
 	}
@@ -148,7 +154,7 @@ func (l *OwnershipLock) Path() string {
 // Release is idempotent and nil-safe so a shutdown path can defer it
 // unconditionally. Closing the descriptor is what drops the kernel lock;
 // removing the file afterwards is hygiene, not correctness.
-func (l *OwnershipLock) Release() error {
+func (l *ControllerInstanceLock) Release() error {
 	if l == nil || l.file == nil {
 		return nil
 	}

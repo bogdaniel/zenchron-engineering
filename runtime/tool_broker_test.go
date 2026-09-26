@@ -12,6 +12,19 @@ import (
 	"testing"
 )
 
+// resolvedPath canonicalizes a path so an assertion is about WHICH directory is
+// named rather than which spelling of it the test happened to hold: the runtime
+// resolves the paths it reports, while t.TempDir() hands a test the /var form of
+// what macOS resolves to /private/var. Distinct directories stay distinct.
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", path, err)
+	}
+	return resolved
+}
+
 // toolBrokerFixture builds a candidate git workspace plus an out-of-workspace
 // tree reachable only through a symlink, which is the escape a read or search
 // must refuse.
@@ -229,10 +242,7 @@ func TestBrokeredCommandIsNetworkDisabledAndMountsOnlyTheCandidate(t *testing.T)
 	}
 	// Runtime state, the controller checkout, and other runs are absent because
 	// the candidate workspace is the only thing bound into the container.
-	candidate, err := filepath.EvalSymlinks(broker.CandidateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	candidate := resolvedPath(t, broker.CandidateDir)
 	if len(mounts) != 1 || mounts[0] != "type=bind,src="+candidate+",dst=/candidate" {
 		t.Fatalf("brokered command received more than the candidate workspace: %#v", mounts)
 	}

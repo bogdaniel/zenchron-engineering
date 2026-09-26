@@ -104,7 +104,7 @@ func (m *watchMatrix) peer(t *testing.T, name, owner string) *watchPeer {
 	peer := &watchPeer{name: name, owner: owner, store: store}
 	if owner == "" {
 		peer.owner = fmt.Sprintf("%s/%d/watch-matrix-%s", ownerHost(), os.Getpid(), name)
-		lock, err := AcquireOwnershipLock(m.stateDir, peer.owner)
+		lock, err := AcquireControllerInstanceLock(m.stateDir, peer.owner)
 		if err != nil {
 			t.Fatal(err)
 		}
