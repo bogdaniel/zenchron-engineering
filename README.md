@@ -508,21 +508,21 @@ and working tree remain unchanged. The durable handoff records the successful
 model, authentication-mode class, and attempt count, never credentials.
 
 Go-backed bootstrap operations resolve one runtime before repository mutation:
-a compatible local Go installation is preferred, with automatic toolchain
-downloads disabled. Otherwise Docker is used only when its daemon is reachable
-and the repository-derived `golang:<line>` image already exists locally, where
-`<line>` is the compatibility line (major.minor) of the `go.mod` go directive
-rather than its literal text. Rewriting `go 1.25` to `go 1.25.0` is therefore
-a formatting change and does not change the operator precondition. An exact
-toolchain requirement, should one ever be introduced, is represented
-separately from the compatibility line. Bootstrap never pulls that image
-implicitly; at execution the resolved image is pinned to its immutable image
-identity, and that exact identity is what provenance records. Docker Go
-commands use an unprivileged container with only the repository mounted. The
-container has outbound network access so Go can resolve the non-vendored
-modules pinned by `go.mod` and `go.sum`; no host credentials or environment
-are forwarded. Go's home, module, and build caches live in an isolated
-writable tmpfs that is discarded after each command.
+Docker is required, even when compatible local Go is installed. Candidate
+code never runs directly on the operator host. The daemon must be reachable
+and the repository-derived `golang:<line>` image must already exist locally,
+where `<line>` is the major.minor compatibility line from `go.mod`.
+Bootstrap never pulls images implicitly; execution and provenance use the
+resolved immutable image identity.
+
+Prepare that image with the dependencies pinned by the trusted base's
+`go.mod` and `go.sum` in `/go/pkg/mod` before running selfhost. Dependency
+changes require explicitly preparing an updated image. Missing dependencies
+fail verification: candidate execution cannot download modules or toolchains.
+Go commands run with networking disabled, a read-only root filesystem and
+repository mount, dropped capabilities, and no host credential or environment
+forwarding. HOME and build state use an ephemeral writable tmpfs; the prepared
+module cache stays read-only in the image.
 
 Before either `selfhost issue` executes Codex or `selfhost resume` publishes an
 interrupted candidate, selfhost writes a preflight diagnostic identifying the
