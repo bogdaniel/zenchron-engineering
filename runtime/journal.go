@@ -40,6 +40,18 @@ const (
 // binding. The durable document is canonical (RFC 8785) so equal run state is
 // byte-equal. The journal cursor is deliberately not a column: replay derives
 // it from the events, so it can never disagree with them.
+//
+// A CANCELLED row is never replaced by a document saying anything else, and
+// that condition is part of the statement rather than a check above it. PutRun
+// is the only update path a run row has - ClaimRun is the insert, and the two
+// callers are CancelRun and recordDisposition - so one WHERE here is the whole
+// rule. A pass decides its disposition from a snapshot read at the start of
+// that pass and CancelRun commits from another goroutine, so re-reading first
+// and writing second is a race a driver loses by writing `waiting` over the
+// operator's stop: the run returns to the supervisor's active set, and the
+// acquisition statement, which consults exactly this row, starts allowing work
+// again. Refusing is silent on purpose - the caller re-reads on its next
+// settle and adopts the cancellation, and replay never believed otherwise.
 func (s *SQLiteOperationStore) PutRun(run EngineeringRun) error {
 	if run.ID == "" {
 		return fmt.Errorf("run id is required")
@@ -56,7 +68,9 @@ func (s *SQLiteOperationStore) PutRun(run EngineeringRun) error {
 			candidate_branch = excluded.candidate_branch, candidate_revision = excluded.candidate_revision,
 			candidate_tree = excluded.candidate_tree,
 			controller_sha256 = excluded.controller_sha256,
-			document = excluded.document`,
+			document = excluded.document
+		WHERE json_extract(runs.document, '$.disposition') <> 'cancelled'
+		   OR json_extract(excluded.document, '$.disposition') = 'cancelled'`,
 		run.ID, run.Repository, run.Base.ID, run.Base.Revision, run.Contract.ID, run.Contract.Revision,
 		run.Candidate.Branch, run.Candidate.Revision, run.Candidate.Tree, run.ControllerSHA256,
 		run.CreatedAt.UnixNano(), string(document))

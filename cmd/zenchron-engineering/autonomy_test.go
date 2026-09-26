@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -87,6 +88,20 @@ func runCLI(t *testing.T, dir string, args ...string) (int, string) {
 
 // runCLIEnv is the same re-exec with extra environment, which is how the
 // offline helper's boundaries are selected for one case.
+// requireResolvableLocalAccount states a prerequisite that used to be
+// inherited: a local OS account this process can resolve.
+//
+// It is needed only where an identity cannot come from configuration. Every
+// other test states one, because a test that is not about identity resolution
+// should not be able to fail for the machine it runs on - which is how the
+// harness's own container verification came to refuse every candidate.
+func requireResolvableLocalAccount(t *testing.T) {
+	t.Helper()
+	if _, err := user.Current(); err != nil {
+		t.Skipf("no local OS account is resolvable here, and this path resolves identity from the account rather than from configuration: %v", err)
+	}
+}
+
 func runCLIEnv(t *testing.T, dir string, env []string, args ...string) (int, string) {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=ZenchronCLIHelperNoTest")
@@ -384,7 +399,22 @@ func seededWorkspace(t *testing.T, origin string, tweaks ...func(map[string]any)
 		"assurance":          map[string]any{"image": "sha256:" + strings.Repeat("0", 64)},
 		"provider":           map[string]any{"kind": "openai", "model": "gpt-5", "credential_path": filepath.Join(support, "key")},
 		"github":             map[string]any{"credential_mode": "none"},
-		"budgets":            map[string]any{"wall_limit_seconds": 600, "max_execution_attempts": 2, "max_remediation_attempts": 2, "max_assurance_attempts": 2},
+		// THE OPERATOR IDENTITY IS STATED, NOT INHERITED FROM THE HOST.
+		//
+		// Commands that record a human decision resolve an operator identity,
+		// and without a configured one that resolution falls back to the local
+		// account name. These tests are not about identity resolution - they
+		// are about authorize, refresh and exit statuses - so inheriting it
+		// made them depend on the machine having a resolvable account. They
+		// passed on a developer's laptop and failed in the container the
+		// harness verifies in, where there is no local account, which is how
+		// `selfhost` came to be unable to publish anything at all.
+		//
+		// The policy itself is unchanged and still fails closed; that is
+		// proven directly, against both branches, in
+		// TestResolveOperatorFailsClosedInsteadOfRecordingAnAnonymousIdentity.
+		"operator": map[string]any{"id": "operator-fixture"},
+		"budgets":  map[string]any{"wall_limit_seconds": 600, "max_execution_attempts": 2, "max_remediation_attempts": 2, "max_assurance_attempts": 2},
 	}
 	for _, tweak := range tweaks {
 		tweak(config)
@@ -581,6 +611,7 @@ func TestDoctorAnswersEveryCapability(t *testing.T) {
 		{"provider.isolation", runtime.DoctorFail},
 		{"assurance.verifier_sandbox", runtime.DoctorFail},
 		{"github.credential", runtime.DoctorFail},
+		{"github.governance", runtime.DoctorFail},
 		{"governance.publication_scope", runtime.DoctorWarn},
 	} {
 		check, ok := report.Check(want.id)
@@ -623,7 +654,7 @@ func TestSecondInvocationAgainstAHeldStateDirIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A first invocation already owns this state directory.
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, runtime.NewRuntimeOwner())
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, runtime.NewRuntimeOwner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1312,6 +1343,9 @@ func TestStatusShowsTheExactPendingAuthorityRequest(t *testing.T) {
 //  2. a resolved operator identity was attached, with its provenance;
 //  3. what is reported is the RE-EVALUATED status, not a state assignment.
 func TestAuthorizeRecordsEvidenceAndReportsTheReEvaluation(t *testing.T) {
+	// An injected runtime has no configuration layer, so the operator
+	// identity comes from the local account. See requireResolvableLocalAccount.
+	requireResolvableLocalAccount(t)
 	request := pendingRequest("run-1")
 	engine := &scriptedRuntime{
 		runID:   "run-1",
@@ -1366,6 +1400,9 @@ func TestAuthorizeRecordsEvidenceAndReportsTheReEvaluation(t *testing.T) {
 // is NOT the current one must never be silently retargeted at the current
 // binding by the CLI pinning a digest the operator did not name.
 func TestStaleAuthorizeIsRefusedWithItsOwnStatus(t *testing.T) {
+	// An injected runtime has no configuration layer, so the operator
+	// identity comes from the local account. See requireResolvableLocalAccount.
+	requireResolvableLocalAccount(t)
 	request := pendingRequest("run-1")
 	engine := &scriptedRuntime{
 		runID:   "run-1",
@@ -1655,7 +1692,7 @@ func TestEventsFollowObservesAConcurrentAppendWithoutTakingOwnership(t *testing.
 		t.Fatal(err)
 	}
 	// Somebody else already owns this state directory and is driving the run.
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, runtime.NewRuntimeOwner())
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, runtime.NewRuntimeOwner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1758,7 +1795,15 @@ func TestGCDryRunEqualsTheRealPlanAndPreservesActiveRuns(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(path, "file.go"), []byte("package main\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		workspaces[id] = path
+		// GC reports the canonical path, while this test holds the spelling
+		// t.TempDir() returned - on macOS /var/... against /private/var/... for
+		// one directory. Resolve here, while the directory still exists, because
+		// the eligible one is asserted on again after gc has deleted it.
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspaces[id] = resolved
 	}
 
 	var planned bytes.Buffer
@@ -1775,6 +1820,16 @@ func TestGCDryRunEqualsTheRealPlanAndPreservesActiveRuns(t *testing.T) {
 	}
 	if !containsWorkspace(plan.Retained, workspaces["run-still-going"]) {
 		t.Fatalf("an active run's workspace was judged eligible: %+v", plan)
+	}
+	// The two workspaces are siblings under one state directory, so each must be
+	// absent from the other's list. This is what keeps the comparison above from
+	// degenerating into "some path under the temp root": resolving the spelling
+	// must not resolve away which run a workspace belongs to.
+	if containsWorkspace(plan.Eligible, workspaces["run-still-going"]) {
+		t.Fatalf("an active run's workspace was judged eligible: %+v", plan.Eligible)
+	}
+	if containsWorkspace(plan.Retained, workspaces[terminalRun]) {
+		t.Fatalf("the terminal run's workspace was retained: %+v", plan.Retained)
 	}
 
 	var executed bytes.Buffer
@@ -1859,6 +1914,14 @@ func TestOperatorExitStatusIsTheRealProcessStatus(t *testing.T) {
 		}
 	})
 	t.Run("refused authorization", func(t *testing.T) {
+		// THIS SUBTEST DRIVES AN INJECTED RUNTIME, and that path deliberately
+		// resolves the operator identity against an EMPTY configuration - see
+		// operatorIdentity - so the configured identity above cannot reach it
+		// and the local account has to resolve. That fail-closed behaviour is
+		// the product's and stays; what was wrong was inheriting the
+		// prerequisite from the host instead of stating it. A container whose
+		// uid has no passwd entry cannot meet it.
+		requireResolvableLocalAccount(t)
 		env := []string{"ZENCHRON_CLI_OFFLINE=1", "ZENCHRON_CLI_STALE_AUTHORIZE=1"}
 		code, out := runCLIEnv(t, dir, env, "autonomy", "authorize", "run-scripted", "authreq-old", "--approve", "--config", configPath)
 		if code != exitAuthorityRefused {
@@ -1892,14 +1955,22 @@ func TestOperatorExitStatusIsTheRealProcessStatus(t *testing.T) {
 // real ldflags build, and without hashing whatever binary is running the test.
 func TestControllerBuildIsInjectedNotDiscovered(t *testing.T) {
 	measured := 0
-	digest := func() (string, error) {
+	locate := func() (string, error) { return "/controller/zenchron-engineering", nil }
+	digest := func(string) (string, error) {
 		measured++
 		return strings.Repeat("ab", 32), nil
 	}
-	build, err := buildProvenance(runtime.ControllerPreAdoptionBuild, "v0.1.0", "rev-1", "tree-1", digest)
+	// The resolution lives in the runtime now, because an activation proof
+	// needs this identity in process; the composition root passes the
+	// link-time declaration and presents what comes back.
+	self, err := runtime.ControllerIdentityFrom(runtime.ControllerDeclaration{
+		Kind: runtime.ControllerPreAdoptionBuild, Version: "v0.1.0",
+		SourceRevision: "rev-1", SourceTree: "tree-1",
+	}, locate, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
+	build := self.Build
 	want := runtime.ControllerBuild{
 		Kind:           runtime.ControllerPreAdoptionBuild,
 		Version:        "v0.1.0",
@@ -1916,10 +1987,12 @@ func TestControllerBuildIsInjectedNotDiscovered(t *testing.T) {
 	// A build with nothing injected claims nothing, and does not even measure
 	// the binary: an unattested controller has no claim to substantiate.
 	measured = 0
-	unattested, err := buildProvenance("", "v0.1.0", "", "", digest)
+	unattestedSelf, err := runtime.ControllerIdentityFrom(
+		runtime.ControllerDeclaration{Version: "v0.1.0"}, locate, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
+	unattested := unattestedSelf.Build
 	if unattested != (runtime.ControllerBuild{Kind: runtime.ControllerUnattested}) {
 		t.Fatalf("a build with no injected metadata claimed %+v", unattested)
 	}

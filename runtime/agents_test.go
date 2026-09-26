@@ -48,13 +48,29 @@ func (f *fakeAgentExecutor) Run(ctx context.Context, name string, args []string,
 		<-ctx.Done()
 		return CommandOutput{}, ctx.Err()
 	}
+	var out CommandOutput
 	if len(f.outputs) > 0 {
-		out := f.outputs[0]
+		out = f.outputs[0]
 		f.outputs = f.outputs[1:]
-		return out, f.err
 	}
-	return CommandOutput{}, f.err
+	// A structured-protocol CLI that answers with nothing else still ends its
+	// stream with a successful final result, and the stream sees what the
+	// transcript sees.
+	if stream := claudeStreamFrom(ctx); stream != nil {
+		if len(out.Stdout) == 0 && f.err == nil {
+			out.Stdout = []byte(claudeSuccessResult)
+		}
+		_, _ = stream.Write(out.Stdout)
+	}
+	return out, f.err
 }
+
+// observesStdout: Run feeds the context-carried stream, as the real executor
+// does.
+func (f *fakeAgentExecutor) observesStdout() {}
+
+// claudeSuccessResult is the final line of a successful stream-json run.
+const claudeSuccessResult = `{"type":"result","subtype":"success","is_error":false,"result":"done","permission_denials":[]}` + "\n"
 
 func (f *fakeAgentExecutor) Output(_ context.Context, name string, args []string, dir string, env []string, _ time.Duration) (CommandOutput, error) {
 	f.record(name, args, dir, env)
@@ -105,6 +121,8 @@ const capableHelp = `Options:
       --permission-mode <MODE>
       --approval-mode <MODE>    (choices: default, auto-edit, plan, yolo)
       --safe-mode
+      --output-format <format>  (choices: "text", "json", "stream-json")
+      --verbose
       --extensions <NAME>
   -m, --model <MODEL>
       --permission-mode <mode>  (choices: "acceptEdits", "bypassPermissions", "plan")
@@ -618,7 +636,13 @@ func TestAgentFailureClassificationIsRecognizedOrUnknown(t *testing.T) {
 	} {
 		provider, request, fake := agentFixture(t, AgentKindCodexCLI)
 		fake.err = errors.New("cli exited non-zero")
-		fake.outputs = []CommandOutput{{Stdout: []byte(tc.diagnostic), ExitCode: 1}}
+		// THE DIAGNOSTIC IS ON STDERR, which is where a CLI states its own
+		// terminal condition and the only surface a typed provider condition
+		// may be read from. Stdout is the session rendering - model text and
+		// tool output - and putting it there would be asserting that untrusted
+		// content can classify a run; see terminalDiagnostic and
+		// TestSessionOutputCannotCreateAnExternalProviderWait.
+		fake.outputs = []CommandOutput{{Stderr: []byte(tc.diagnostic), ExitCode: 1}}
 		result, err := provider.Execute(context.Background(), request)
 		if err == nil {
 			t.Fatalf("provider failure was not surfaced for %q", tc.diagnostic)
@@ -793,13 +817,13 @@ func TestARevokedSignInWaitsForTheOperatorInsteadOfKillingTheRun(t *testing.T) {
 		"ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
 		"Failed to refresh token: Your access token could not be refreshed because your REFRESH TOKEN WAS REVOKED.",
 	} {
-		if got := classifyAgentFailure(codexSpec, nil, []byte(diagnostic)); got != FailureProviderAccountUnavailable {
+		if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(diagnostic))); got != FailureProviderAccountUnavailable {
 			t.Fatalf("a revoked sign-in classified as %q, want %q: %s", got, FailureProviderAccountUnavailable, diagnostic)
 		}
 	}
 	// A quota refusal stays a quota refusal: the two are different operator
 	// actions - wait for the window, versus sign in again.
-	if got := classifyAgentFailure(codexSpec, nil, []byte("You've hit your usage limit.")); got != FailureProviderQuota {
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte("You've hit your usage limit."))); got != FailureProviderQuota {
 		t.Fatalf("a quota refusal classified as %q", got)
 	}
 }

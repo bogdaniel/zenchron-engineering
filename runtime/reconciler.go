@@ -136,6 +136,26 @@ type mutationResult struct {
 	PathCount    int          `json:"path_count"`
 	FailureClass FailureClass `json:"failure_class,omitempty"`
 	ProviderID   string       `json:"provider_id,omitempty"`
+	// ProviderExecuted records that this attempt actually reached a worker, as
+	// opposed to being refused before any execution began. It is the difference
+	// between an external condition that cost nothing and one that cost twenty
+	// minutes of provider work before it appeared, and only the first may be
+	// refunded to the run's execution budget.
+	ProviderExecuted bool `json:"provider_executed,omitempty"`
+	// DiscardRefusals is how many destructive Git operations the runtime
+	// refused during this invocation, and DiscardRefused is the bounded shape
+	// of the most recent one.
+	//
+	// They are OBSERVATION and not failure: a provider that reached for a
+	// destructive recovery, was refused, and then did the work properly
+	// succeeded - and the refusal is still the most interesting thing that
+	// happened, because it is where expensive reasoning was nearly lost. That
+	// is why it is recorded here rather than becoming a FailureClass: the
+	// runtime knows exactly what it refused, so #241's rule against reporting
+	// it as quota, unavailability, a stall or an unknown is satisfied by it
+	// not being a failure at all.
+	DiscardRefusals int    `json:"discard_refusals,omitempty"`
+	DiscardRefused  string `json:"discard_refused,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -188,7 +208,11 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
-		controllerChanged: run.ControllerSHA256 != r.controller,
+		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
+		// with #234 is that one specific transition can be converted from
+		// drift into an admitted succession by evidence in this run's own
+		// journal; everything without that evidence parks exactly as before.
+		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller, r.wasTransitionActivated()),
 	}
 	for _, op := range state.succeeded(OpSourceObserve) {
 		var record sourceRecord
@@ -341,10 +365,15 @@ func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epo
 // stages that depend on it can proceed while the run itself waits for review.
 const ReasonGoalStateReached = "goal_state_reached"
 
+// ReasonReviewBudgetExhausted retains accepted review work after its finite
+// continuation allowance is spent. Delivery does not imply remediation was published.
+const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
+
 var externalWaitReasons = map[string]bool{
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
+	ReasonReviewBudgetExhausted:     true,
 	"awaiting_authority":            true,
 	"authority_blocked":             true,
 	"authority_unknown":             true,
@@ -355,11 +384,20 @@ var externalWaitReasons = map[string]bool{
 	// Rate limiting is the other capacity wait. It is the provider declining to
 	// be asked yet, not the runtime working, and leaving it out charged an
 	// operator for their provider's backoff.
-	"execution_provider_rate_limited":  true,
+	"execution_provider_rate_limited": true,
+	// The host cannot reach the provider at all. A machine with no network is
+	// not performing engineering work, and #238's whole defect was charging
+	// exactly this interval to the active-work budget - so leaving it out here
+	// would fix the detection and keep the accounting lie.
+	"execution_provider_unavailable":   true,
 	"assurance_dependency_unavailable": true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
+	// The controller could not install the brokered candidate-Git boundary, so
+	// it performed no execution at all. Nothing is running and an operator has
+	// to repair the installation.
+	"candidate_guard_unavailable": true,
 	// The controller stopped. The run is not working, and it is waiting for a
 	// supervisor to exist again rather than for anything it can do itself.
 	"controller_shutdown":  true,
@@ -743,8 +781,17 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
+	reviewDelivered := false
 	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
-		return Failed, "run_wall_budget_exhausted"
+		if len(s.outstandingReviewKeys()) > 0 {
+			if s.reviewContinuationRemaining(now) <= 0 {
+				return Waiting, ReasonReviewBudgetExhausted
+			}
+		} else if s.reviewContinuationDelivered() {
+			reviewDelivered = true
+		} else {
+			return Failed, "run_wall_budget_exhausted"
+		}
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
 		return Failed, "run_lifecycle_deadline_exhausted"
@@ -799,6 +846,9 @@ func (s *runState) conditions() (Disposition, string) {
 		if disposition, reason, outstanding := AuthorityDisposition(decision.Status); outstanding {
 			return disposition, reason
 		}
+	}
+	if reviewDelivered {
+		return Waiting, ReasonGoalStateReached
 	}
 	return Active, ""
 }
@@ -872,6 +922,14 @@ func (s *runState) budgets() RunBudgets {
 	}
 	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
 		budgets.MaxExecutionAttempts = attempts
+	}
+	// The no-progress window narrows the same way, and for the same reason: a
+	// run persisted under a tighter window keeps it. It narrows ONLY - a run
+	// created before this budget existed carries no window at all, and reading
+	// its absence as a bound of zero would hand exactly those runs the
+	// unbounded behaviour this budget exists to remove.
+	if window := s.run.Budgets.ProviderInactivityLimit; window > 0 && window < budgets.ProviderInactivityLimit {
+		budgets.ProviderInactivityLimit = window
 	}
 	return budgets
 }
@@ -1418,8 +1476,11 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
+		if err := r.grantReviewContinuation(state); err != nil {
+			return Outcome{}, err
+		}
 		live, reason := state.conditions()
-		if terminalDisposition(live) {
+		if terminalDisposition(live) || reason == ReasonReviewBudgetExhausted {
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()
@@ -1515,7 +1576,11 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		IdempotencyKey:   operationKey(desired.kind, desired.key),
 		MaxAttempts:      desired.maxAttempts,
 		InputStateSHA256: state.snapshot.StateSHA256,
-		WallBudget:       r.deps.Budgets.WallLimit,
+		// The RUN's effective budget, not the raw operator default. A plan
+		// stage that tightened its run's wall budget was previously ignored
+		// here, so the operation was planned against a ceiling the run itself
+		// had already narrowed.
+		WallBudget: state.budgets().WallLimit,
 	})
 	if err != nil {
 		return false, Outcome{}, err
@@ -1635,7 +1700,12 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
-		if _, err := r.scheduler.RestoreAttempt(started.ID); err != nil {
+		// The ATTEMPT is always given back - observing an external refusal is
+		// not work. The execution TIME is given back only when no execution
+		// happened: a provider that reasoned for twenty minutes and only then
+		// met a rate limit did that work, and refunding it would let a run
+		// exceed a budget the operator set by repeatedly hitting the same wall.
+		if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
 			return false, Outcome{}, err
 		}
 		outcome, err := r.settle(state, Waiting, waitReason(class))
@@ -1666,6 +1736,18 @@ func reattemptable(route FailureRoute) bool {
 // only when it routes to a wait. It reads the same one shared field lastFailure
 // does, so this is not an execution.invoke special case: any handler that
 // records a wait-routed class settles the run into that wait.
+// providerExecuted reports whether the attempt recorded in this result actually
+// reached a worker. An unreadable or absent result is treated as HAVING
+// executed: refunding budget is the generous direction, and guessing generously
+// about an unknown is how a bounded budget stops being one.
+func providerExecuted(raw json.RawMessage) bool {
+	var result mutationResult
+	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
+		return true
+	}
+	return result.ProviderExecuted
+}
+
 func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
 	var result mutationResult
 	if len(raw) == 0 || decodeJSON(raw, &result) != nil || result.FailureClass == "" {
@@ -1688,10 +1770,18 @@ var waitReasons = map[FailureClass]string{
 	// action differs: a quota comes back on the provider's own schedule, while
 	// repeated rate limiting means the configured concurrency is above what
 	// that account tolerates.
-	FailureProviderQuota:         "execution_provider_quota",
-	FailureProviderRateLimited:   "execution_provider_rate_limited",
+	FailureProviderQuota:       "execution_provider_quota",
+	FailureProviderRateLimited: "execution_provider_rate_limited",
+	// The host cannot REACH the provider. It is reported separately from the
+	// two capacity waits and from the account prerequisite because the
+	// operator action is different again: nothing is spent, nothing is
+	// revoked, and what has to change is connectivity.
+	FailureProviderUnavailable:   "execution_provider_unavailable",
 	FailureStateStorageExhausted: "state_storage_exhausted",
-	FailureControllerShutdown:    "controller_shutdown",
+	// The controller cannot install its own candidate-Git boundary. An
+	// operator repairs the installation; nothing about the work is wrong.
+	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
+	FailureControllerShutdown:        "controller_shutdown",
 }
 
 func waitReason(class FailureClass) string {
@@ -1746,6 +1836,33 @@ func newEventID(runID string) string { return runID + "-" + rand.Text() }
 // not grow the journal; the run document is always refreshed, so a later
 // resume sees the current identity bindings without replaying.
 func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disposition, reason string) error {
+	// A run the operator has already STOPPED is never settled onto anything
+	// else. Every disposition this pass could record was derived from a
+	// snapshot read at the start of the pass, and CancelRun writes from another
+	// goroutine entirely - the control endpoint's stop-all runs concurrently
+	// with the tick that is driving this run. Recording the stale answer
+	// appended run.waiting after run.cancelled and wrote the run document back
+	// to waiting, which returned the run to the supervisor's active set and
+	// handed the work the operator stopped straight back to the next tick.
+	//
+	// The re-read is not the guarantee - PutRun's own condition is, and it
+	// refuses to replace a cancelled row whatever this pass decided. What the
+	// re-read buys is the COMMON case: a stop that has already landed stops
+	// this pass from appending a junk run.waiting or run.failed to the hash
+	// chain at all, which the write below cannot do anything about because the
+	// append comes first. A stop that lands between this read and that write
+	// is caught by the condition, and adopted straight afterwards.
+	if disposition != Cancelled {
+		live, found, err := r.deps.Store.Run(state.run.ID)
+		if err != nil {
+			return err
+		}
+		if found && live.Disposition == Cancelled {
+			state.run = live
+			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
+			return nil
+		}
+	}
 	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason {
 		eventType, ok := dispositionEvents[disposition]
 		if !ok {
@@ -1768,7 +1885,28 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 	run.Contract = state.projection.Contract
 	run.UpdatedAt = r.deps.Clock.Now()
 	state.run = run
-	return r.deps.Store.PutRun(run)
+	if err := r.deps.Store.PutRun(run); err != nil {
+		return err
+	}
+	// ADOPT WHAT THE ROW ACTUALLY SAYS. The write above is conditional and
+	// refuses silently, so a stop that won the race leaves this pass holding a
+	// disposition the database never accepted. Nothing durable is wrong at that
+	// point - the row and replay both say cancelled, and the acquisition
+	// statement reads the row - but the pass would go on to REPORT `waiting`
+	// for a run the operator stopped, which is the one thing its caller acts
+	// on. One read is cheaper than an operator who believes their stop is still
+	// pending.
+	if disposition != Cancelled {
+		live, found, err := r.deps.Store.Run(run.ID)
+		if err != nil {
+			return err
+		}
+		if found && live.Disposition == Cancelled {
+			state.run = live
+			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
+		}
+	}
+	return nil
 }
 
 var dispositionEvents = map[Disposition]string{
@@ -1782,5 +1920,8 @@ func (r *EngineeringRuntime) settle(state *runState, disposition Disposition, re
 	if err := r.recordDisposition(state, disposition, reason); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{RunID: state.run.ID, Disposition: disposition, Reason: reason}, nil
+	// Reported from what was RECORDED, not from what was asked for: a pass
+	// settling on stale state over a stopped run records the stop instead, and
+	// the operator's caller has to be told the run is cancelled.
+	return Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
 }
