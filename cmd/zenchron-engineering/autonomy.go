@@ -131,9 +131,14 @@ type watchController interface {
 // every field nil and the real components are built from configuration; a nil
 // field is never a silent fallback to something weaker.
 type autonomyOverrides struct {
-	GitHub    runtime.GitHubAdapter
-	Provider  runtime.ExecutionProvider
-	Assurance runtime.AssuranceProvider
+	GitHub runtime.GitHubAdapter
+	// Governance is the read-only governance observer. It is its own field
+	// rather than a capability discovered on GitHub, because the whole point
+	// of the seam is that the publication adapter is not the thing that
+	// answers governance questions.
+	Governance runtime.ForgeGovernance
+	Provider   runtime.ExecutionProvider
+	Assurance  runtime.AssuranceProvider
 	// SemanticAssurance replaces the independent semantic producer, so a test
 	// can model a configuration with or without one.
 	SemanticAssurance runtime.AssuranceProvider
@@ -219,6 +224,13 @@ type autonomyFlags struct {
 	// Detached submits work to a running supervisor instead of driving it in
 	// this terminal. It is implied when a supervisor owns the state directory.
 	Detached bool
+	// SuccessorOf starts serve as the INERT SUCCESSOR of the named transition:
+	// it takes no role, opens no service and writes nothing until the
+	// predecessor that spawned it says the role has been released. It is not
+	// an operator flag - a person running it by hand gets a process waiting on
+	// a handshake nobody will perform - and it is the contract the predecessor
+	// starts the next generation through.
+	SuccessorOf string
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -404,6 +416,19 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		if built != nil && runtime.SupervisorRunning(built.config.StateDir) {
 			return submitToSupervisor(built, flags, issue, stdout)
 		}
+		// This process is about to create the run itself, through built.agent -
+		// the operator's default when --agent named nothing. newComposition only
+		// probed an EXPLICIT --agent, on purpose, because it is shared by
+		// status/resume/watch and those must keep working over an uninstalled
+		// default. This is not one of those: it is the boundary that creates
+		// work, so the configured selection - default or explicit - is checked
+		// here the same way submitToSupervisor's target is.
+		if built != nil {
+			prober := runtime.AgentProberFor(built.agent, built.artifacts, operatorHome())
+			if err := runtime.RefuseUnlessInvocable(ctx, built.agent, prober); err != nil {
+				return runtime.ExitInvalid, err
+			}
+		}
 		outcome, err := engine.StartIssueRun(ctx, issue, mode)
 		if err != nil {
 			return exitFor(err, runtime.ExitFailed), err
@@ -552,6 +577,10 @@ type composition struct {
 	assurance   runtime.AssuranceProvider
 	semantic    runtime.AssuranceProvider
 	build       runtime.ControllerBuild
+	// role is this process's controller-role capability when it is serving. It
+	// is held rather than queried: the snapshot answers "do I own the role" by
+	// exercising it, because there is deliberately no way to ask.
+	role *runtime.ControllerRoleLease
 	// agents is the operator's registry, and agent is the one this invocation
 	// resolved. Both are here because the two are different questions: which
 	// workers exist, and which one this command is driving.
@@ -615,7 +644,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	// also refuses a second invocation that would share this identity, and
 	// releasing it on shutdown is how a watcher gives ownership back.
 	owner := runtime.NewRuntimeOwner()
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, owner)
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, owner)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot take exclusive ownership of state dir %s; another zenchron-engineering process may already be running against it: %w", config.StateDir, err)
@@ -640,7 +669,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations"),
 	}
 
-	credentials := githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
+	credentials := githubCredentials(config.GitHub)
 	forge := overrides.GitHub
 	if forge == nil {
 		forge = runtime.GitHubRESTAdapter{
@@ -659,6 +688,17 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	if err != nil {
 		release()
 		return nil, err
+	}
+	// Only an EXPLICIT --agent is checked here. The operator's default is left
+	// alone: a command that names no agent (status, resume, watch...) must keep
+	// working even when the default happens to be uninstalled, exactly as it
+	// does today.
+	if strings.TrimSpace(flags.Agent) != "" {
+		prober := runtime.AgentProberFor(agent, artifacts, operatorHome())
+		if err := runtime.RefuseUnlessInvocable(context.Background(), agent, prober); err != nil {
+			release()
+			return nil, err
+		}
 	}
 	feedback, err := config.FeedbackPolicy()
 	if err != nil {
@@ -724,6 +764,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 	if !c.providerInjected {
 		provider = executionProvider(c.config, agent, c.artifacts, c.sandbox, c.permissionBypass)
 	}
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
 		Agent:             agent,
@@ -746,12 +790,49 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Repository:        target,
 		Remote:            remote,
 		Credentials:       c.credentials,
-		ControllerID:      "zenchron-engineering/" + version,
+		ControllerID:      controllerIdentity(),
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
+		// The scheduler is the one place the ceiling is ENFORCED: its
+		// acquisition counts every run holding an operation across the whole
+		// durable store, which is what makes the bound hold between processes
+		// as well as inside one. Everything else that knows the number - the
+		// supervisor's goroutine bound, the watch capacity probe, the fleet
+		// view - is a cheap early exit in front of it.
+		//
+		// Which is why leaving this unset was not a missing second enforcer but
+		// a missing number: the supervisor admitted two runs against the
+		// configured ceiling while the scheduler refused the second against the
+		// default of one, and the operator saw "Workers: 2 / 2 active" over
+		// work that was serialising. It comes from maxConcurrentRuns() for the
+		// same reason the supervisor and the fleet view do - one resolution of
+		// the operator's configuration, so advertised and enforced cannot be
+		// different numbers.
+		OperatorMaxConcurrentRuns: ceiling,
 	})
 }
+
+// controllerIdentity is WHICH PROGRAM this is, and deliberately not which
+// build of it.
+//
+// It used to be "zenchron-engineering/" + version, which folded the build into
+// the identity - and the build is already a field of its own beside this one,
+// carrying the kind, the version, the source revision, the tree and the
+// measured binary. Saying it twice would be merely redundant if the two were
+// read the same way, and they are not: succession requires the controller
+// identity to be UNCHANGED between predecessor and successor, precisely so
+// that a new build of the same program can continue a run while a different
+// program cannot. An identity that moved with every build made that condition
+// unsatisfiable - every automated upgrade would have been refused with "the
+// controller identity changed", for the only kind of upgrade #234 exists to
+// perform.
+//
+// The cost is stated rather than hidden: this changes the ControllerSHA256 of
+// runs created by earlier builds, so runs live across this change park on
+// controller_changed exactly as they do across any other manual upgrade. From
+// here on they do not have to.
+func controllerIdentity() string { return "zenchron-engineering" }
 
 // feedbackPolicyFor adds the identity this runtime's own credential acts as in
 // THIS repository to the self-loop set.
@@ -839,17 +920,52 @@ func operatorHome() string {
 	return os.Getenv("HOME")
 }
 
-func githubCredentials(mode string, tokenPath string) runtime.CredentialProvider {
-	switch mode {
+func githubCredentials(config runtime.GitHubConfig) runtime.CredentialProvider {
+	switch config.CredentialMode {
 	case runtime.GitHubCredentialCLI:
 		return runtime.GitHubCLICredential{}
 	case runtime.GitHubCredentialToken:
 		// A publication identity of the runtime's own, so the operator stays a
 		// distinct actor whose review is admissible feedback.
-		return runtime.GitHubTokenFileCredential{Path: tokenPath}
+		return runtime.GitHubTokenFileCredential{Path: config.TokenPath}
+	case runtime.GitHubCredentialApp:
+		// The same separation, from a machine identity rather than a second
+		// account: the installation token is minted here and re-minted before
+		// it expires, and the private key never leaves this process.
+		return &runtime.GitHubAppCredential{
+			AppID:          config.AppID,
+			InstallationID: config.InstallationID,
+			PrivateKeyPath: config.PrivateKeyPath,
+			HTTP:           &http.Client{Timeout: 30 * time.Second},
+			Endpoint:       config.Endpoint,
+		}
 	}
 	// Nil is the documented "github_auth_required" state, not anonymous access.
 	return nil
+}
+
+// githubGovernanceCredential selects the identity that READS governance facts.
+//
+// It is a separate selector from githubCredentials, reading a separate
+// configuration member, and its return type is not a CredentialProvider. That
+// is what makes the two roles unmixable here rather than merely unmixed: the
+// publication path cannot be handed what this returns, and the governance path
+// cannot be handed what githubCredentials returns, and neither mistake compiles.
+//
+// An unconfigured governance mode is a refusal, not a fallback to the
+// publication credential. The publication credential's silence about a
+// ruleset's bypass actors is the absence of an observation, and treating it as
+// the observation "there are none" is exactly the failure #219 exists to
+// prevent.
+func githubGovernanceCredential(config runtime.GitHubConfig) (runtime.GovernanceCredential, error) {
+	switch strings.TrimSpace(config.GovernanceCredentialMode) {
+	case runtime.GitHubCredentialCLI:
+		return runtime.GitHubCLIGovernanceCredential(), nil
+	}
+	return nil, fmt.Errorf("no governance credential is authorized, so the adoption trust root cannot be observed: "+
+		"set github.governance_credential_mode to %q. The publication credential is not used for this: "+
+		"GitHub does not disclose a ruleset's bypass actors to a GitHub App installation token, and an undisclosed "+
+		"bypass is not the same as no bypass", runtime.GitHubCredentialCLI)
 }
 
 // semanticAssuranceProvider builds the INDEPENDENT semantic acceptance
@@ -932,6 +1048,22 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// resolve offline exactly what the verifier resolves.
 			Toolchain:          config.Toolchain,
 			DependencyCacheDir: config.Assurance.DependencyCacheDir,
+			// THE BROKERED GIT BOUNDARY of #241. The state root is where the
+			// guard is materialized; the broker argv is this controller's own
+			// executable, so the binary that enforces the boundary is the
+			// binary the operator is running and not whatever a search path
+			// resolved. A controller that cannot name its own executable
+			// prepares no guard and says so in provenance rather than
+			// pretending to one.
+			StateDir:  config.StateDir,
+			GitBroker: gitBrokerCommand(),
+			// AND IT IS REQUIRED HERE. This is the production composition: it
+			// always intends the boundary, so a broker it could not resolve is
+			// a controller that cannot enforce #241 rather than a composition
+			// that chose not to. Requiring it converts that into a typed
+			// pre-dispatch refusal instead of an unguarded worker, which is
+			// the difference between an honest absence and a silent one.
+			RequireGitGuard: true,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{
@@ -1060,6 +1192,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Digest = args[1]
 		case "--assignments":
 			flags.Assignments = args[1]
+		case successorFlag:
+			flags.SuccessorOf = args[1]
 		case "--revision":
 			revision, err := strconv.Atoi(args[1])
 			if err != nil || revision < 1 {

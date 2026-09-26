@@ -168,6 +168,22 @@ type RunBudgets struct {
 	MaxProviderInvocations int `json:"max_provider_invocations,omitempty"`
 	MaxRemediationAttempts int `json:"max_remediation_attempts"`
 	MaxAssuranceAttempts   int `json:"max_assurance_attempts"`
+	// ProviderInactivityLimit bounds how long ONE provider invocation may go
+	// without producing observable output. It is a THIRD dimension beside
+	// WallLimit, which bounds active work, and LifecycleDeadline, which bounds
+	// calendar time - and it exists because neither of those can tell a
+	// provider that is reasoning from one whose host lost its network an hour
+	// ago. A live subprocess is not evidence of progress.
+	//
+	// It is persisted with the run and narrows the configured bound exactly as
+	// WallLimit does, so a run created under a tighter window keeps it and a
+	// restart reconstructs the same bound rather than minting a fresh default.
+	//
+	// omitempty, and absent means no bound: a run persisted before this budget
+	// existed was never judged by it, and its identity is derived from its
+	// canonical document, so an added zero would re-identify every historical
+	// run. New runs always carry one - see RunBudgets.defaults.
+	ProviderInactivityLimit time.Duration `json:"provider_inactivity_limit,omitempty"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -399,11 +415,7 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	if d.ControllerBuild.Attested() {
 		build = &d.ControllerBuild
 	}
-	controller, err := Digest(struct {
-		Controller string           `json:"controller"`
-		Build      *ControllerBuild `json:"build,omitempty"`
-		Config     ConfigDigest     `json:"config"`
-	}{d.ControllerID, build, d.ConfigDigest})
+	controller, err := ControllerBinding{Controller: d.ControllerID, Build: build, Config: d.ConfigDigest}.Digest()
 	if err != nil {
 		return nil, err
 	}
@@ -436,6 +448,14 @@ func (b RunBudgets) defaults() RunBudgets {
 	}
 	if b.MaxAssuranceAttempts <= 0 {
 		b.MaxAssuranceAttempts = 2
+	}
+	// FINITE, ALWAYS, for a new run. The configuration layer already resolves
+	// an absent member, so this only catches a runtime constructed without
+	// going through it - a test, an embedder - and it is defaulted rather than
+	// left at zero because zero means "this provider may stall forever", which
+	// is the condition #238 exists to remove.
+	if b.ProviderInactivityLimit <= 0 {
+		b.ProviderInactivityLimit = DefaultProviderInactivitySeconds * time.Second
 	}
 	return b
 }
@@ -648,11 +668,8 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 			// the next slot, leaving this run exactly as it is.
 			continue
 		}
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		// A live generation keeps the agent it was created with. Adopting it
 		// under a different worker would be a silent provider handoff, which
@@ -681,6 +698,30 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// refuseUnlessSucceeded is the adoption half of the controller-change rule.
+//
+// Reconciling another controller's live work under this one is refused, and an
+// ADMITTED SUCCESSION is the one thing that makes this controller not another
+// one for this run: the journal already carries the proof, so adoption reads it
+// rather than repeating the evaluation. A run whose journal holds no such
+// admission is refused exactly as it was before #234.
+func (r *EngineeringRuntime) refuseUnlessSucceeded(runID string, existing EngineeringRun) error {
+	if existing.ControllerSHA256 == r.controller {
+		return nil
+	}
+	events, err := r.deps.Store.Events(runID)
+	// An unreadable journal admits nothing. The refusal below is the same one
+	// the caller would have received before, which is the safe answer for a
+	// state this process could not read.
+	if err == nil && ControllerSuccessionContinues(existing, events, r.controller, r.wasTransitionActivated()) {
+		return nil
+	}
+	return &RunAdoptionRefusedError{
+		RunID: runID, Owner: existing.ControllerSHA256,
+		Detail: "adopting it would reconcile another controller's work under this one",
+	}
 }
 
 // repairAgentBinding restores a journalled agent assignment for a run whose row
@@ -832,8 +873,16 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 // generations of the same issue never share a branch.
 func candidateBranch(runID string) string { return "zenchron/" + runID }
 
+// terminalDispositions is shared with the durable acquisition guard.
+var terminalDispositions = [...]Disposition{Completed, Failed, Cancelled}
+
 func terminalDisposition(d Disposition) bool {
-	return d == Completed || d == Failed || d == Cancelled
+	for _, terminal := range terminalDispositions {
+		if d == terminal {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -881,9 +930,28 @@ type OperationStatus struct {
 	State       OperationState `json:"state"`
 	Attempt     int            `json:"attempt"`
 	MaxAttempts int            `json:"max_attempts"`
-	StartedAt   *time.Time     `json:"started_at,omitempty"`
-	HeartbeatAt *time.Time     `json:"heartbeat_at,omitempty"`
-	Elapsed     time.Duration  `json:"elapsed"`
+	// AttemptIdentity is the physical attempt identity this operation has
+	// allocated. It is reported alongside Attempt because the two legitimately
+	// disagree: a provider condition that routes to an external wait refunds the
+	// attempt and does not unhappen the try. Without it, an operator reading
+	// "attempt 1/2" after two provider calls has no way to tell a refunded wait
+	// from a stuck scheduler.
+	AttemptIdentity int           `json:"attempt_identity,omitempty"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	HeartbeatAt     *time.Time    `json:"heartbeat_at,omitempty"`
+	Elapsed         time.Duration `json:"elapsed"`
+	// LastProgressAt is when this operation last produced RECOGNIZED progress -
+	// for a provider invocation, when output last arrived. It is reported
+	// beside HeartbeatAt because the two are different claims and #238 was
+	// exactly the cost of confusing them: a heartbeat says a controller is
+	// alive, this says the work moved.
+	LastProgressAt *time.Time `json:"last_progress_at,omitempty"`
+	// SilentFor is how long it has been since that progress, and
+	// InactivityLimit is the window it is measured against. Together they are
+	// the answer to "is this provider thinking or is it dead", which an
+	// operator previously could not get from status at all.
+	SilentFor       time.Duration `json:"silent_for,omitempty"`
+	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
 }
 
 // SourceIdentity is the pinned, untrusted source the run answers. The title
@@ -918,17 +986,25 @@ type StatusReport struct {
 	Goal          string             `json:"goal"`
 	Source        SourceIdentity     `json:"source"`
 	Controller    ControllerIdentity `json:"controller"`
-	Phase         Phase              `json:"phase"`
-	Disposition   Disposition        `json:"disposition"`
-	Reason        string             `json:"reason,omitempty"`
-	Base          Ref                `json:"base"`
-	Candidate     Candidate          `json:"candidate"`
-	Contract      Ref                `json:"contract"`
-	Operation     *OperationStatus   `json:"operation,omitempty"`
+	// Worker is which execution agent owns this run, from the journalled
+	// binding rather than from today's configuration. It is here because an
+	// operator reading one run should not have to switch to the fleet view to
+	// learn who is doing the work.
+	Worker      WorkerIdentity   `json:"worker"`
+	Phase       Phase            `json:"phase"`
+	Disposition Disposition      `json:"disposition"`
+	Reason      string           `json:"reason,omitempty"`
+	Base        Ref              `json:"base"`
+	Candidate   Candidate        `json:"candidate"`
+	Contract    Ref              `json:"contract"`
+	Operation   *OperationStatus `json:"operation,omitempty"`
 
-	CreatedAt time.Time     `json:"created_at"`
-	Now       time.Time     `json:"now"`
-	Elapsed   time.Duration `json:"elapsed"`
+	CreatedAt time.Time `json:"created_at"`
+	Now       time.Time `json:"now"`
+	// Elapsed is lifecycle age, retained for JSON compatibility.
+	Elapsed             time.Duration `json:"elapsed"`
+	ActiveElapsed       time.Duration `json:"active_elapsed"`
+	ExternalWaitElapsed time.Duration `json:"external_wait_elapsed"`
 
 	Evidence             []Ref                   `json:"evidence,omitempty"`
 	Assurance            *AssuranceObservation   `json:"assurance,omitempty"`
@@ -950,8 +1026,35 @@ type StatusReport struct {
 	// runtime bound dropped. It names attempt numbers and byte counts only;
 	// the observations themselves stay in the local-only attempt artifacts.
 	ExecutionPriorContext *PriorAttemptObservations `json:"execution_prior_attempt_context,omitempty"`
-	Budgets               RunBudgets                `json:"budgets"`
-	StateSHA256           string                    `json:"state_sha256"`
+	// CandidateDiscardRefusals is how many destructive Git operations the
+	// runtime refused for this run's latest execution attempt, and
+	// CandidateDiscardRefused is the bounded shape of the most recent one.
+	//
+	// It is projected because an operator reading a run that took two provider
+	// attempts deserves to know that one of them tried to erase the other's
+	// work. It is not a failure and it is deliberately not rendered as one.
+	CandidateDiscardRefusals int        `json:"candidate_discard_refusals,omitempty"`
+	CandidateDiscardRefused  string     `json:"candidate_discard_refused,omitempty"`
+	Budgets                  RunBudgets `json:"budgets"`
+	StateSHA256              string     `json:"state_sha256"`
+}
+
+// WorkerIdentity is the execution agent a run is bound to.
+//
+// MODEL IS WHAT THE PROVIDER EXPOSES, and empty is a truthful answer rather
+// than a gap to fill in. An agent whose CLI selects its own model does not
+// report one, and inventing a plausible name - or quietly omitting the field
+// so a reader assumes the default - would claim knowledge nobody has. The
+// renderer prints "unknown" for it, which is the same discipline `autonomy
+// agents` already applies to an unobservable authentication mode.
+type WorkerIdentity struct {
+	Agent        string    `json:"agent,omitempty"`
+	ProviderKind string    `json:"provider_kind,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	TrustMode    TrustMode `json:"trust_mode,omitempty"`
+	// Workspace is the runtime-owned candidate clone, so an operator can open
+	// what the worker is editing without going through the database.
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // Status replays the run and reports it. It performs no network call and no
@@ -974,6 +1077,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ConfigDigest: r.deps.ConfigDigest,
 			Changed:      state.controllerChanged,
 		},
+		Worker:                state.workerIdentity(r.deps.StateDir),
 		Phase:                 state.phase(),
 		Disposition:           state.snapshot.Disposition,
 		Reason:                state.snapshot.Reason,
@@ -983,6 +1087,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		CreatedAt:             state.run.CreatedAt,
 		Now:                   now,
 		Elapsed:               now.Sub(state.run.CreatedAt),
+		ActiveElapsed:         state.activeElapsed(now),
+		ExternalWaitElapsed:   now.Sub(state.run.CreatedAt) - state.activeElapsed(now),
 		Evidence:              state.projection.EvidenceBundles,
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,
@@ -992,6 +1098,9 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		PublicationAuthority:  publicationAuthorityOf(state),
 		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,
 		ExecutionPriorContext: state.projection.ExecutionPriorContext,
+
+		CandidateDiscardRefusals: state.projection.CandidateDiscardRefusals,
+		CandidateDiscardRefused:  state.projection.CandidateDiscardRefused,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{
@@ -1021,8 +1130,11 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 	if op, ok := state.currentOperation(); ok {
 		status := OperationStatus{
 			ID: op.ID, Kind: op.Kind, State: op.State,
-			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts,
-			StartedAt: op.StartedAt, Elapsed: OperationElapsed(op, now),
+			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts, AttemptIdentity: op.AttemptIdentity,
+			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
+			LastProgressAt:  op.LastProgressAt,
+			SilentFor:       ProviderSilence(op, now),
+			InactivityLimit: state.budgets().ProviderInactivityLimit,
 		}
 		if op.Lease != nil {
 			heartbeat := op.Lease.HeartbeatAt
@@ -1031,6 +1143,31 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		report.Operation = &status
 	}
 	return report, nil
+}
+
+// The journal's after payload is written before Scheduler.Finish and older
+// payloads still carry ActiveSince. Bound that projection by the durable after
+// timestamp, without changing the scheduler's budget counter or journal bytes.
+func statusOperationElapsed(op RunOperation, events []EngineeringEvent, now time.Time) time.Duration {
+	end := now
+	var before time.Time
+	for _, event := range events {
+		if event.OperationID != op.ID {
+			continue
+		}
+		switch event.Type {
+		case EventOperationBefore:
+			before = event.OccurredAt
+			end = now
+		case EventOperationAfter:
+			end = event.OccurredAt
+		}
+	}
+	// Journals predating the active counter still have before/after boundaries.
+	if op.ActiveSince == nil && op.ConsumedExecution == 0 && !before.IsZero() {
+		op.ActiveSince = &before
+	}
+	return OperationElapsed(op, end)
 }
 
 func publicationAuthorityOf(state *runState) *PublicationAuthority {
@@ -1122,11 +1259,8 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		// the same id, so without this check the second one would adopt the
 		// first one's live work. StartIssueRun refuses exactly this, and a plan
 		// stage run is an ordinary run: it is refused here on the same terms.
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		if err := r.repairAgentBinding(runID, existing); err != nil {
 			return StartOutcome{}, err

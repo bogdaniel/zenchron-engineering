@@ -347,9 +347,12 @@ things a reviewer or operator should know before relying on them.
   admitted by WHO wrote it, which is what makes admission robust against what it
   says. With `github.credential_mode: "github-cli"` the runtime publishes as the
   operator, so the guard that refuses runtime-authored feedback refuses the
-  operator's reviews too and the loop cannot run. `credential_mode: "token"`
-  gives the runtime its own identity - a GitHub App installation token or a
-  dedicated account - and `autonomy doctor` names the collision when it exists.
+  operator's reviews too and the loop cannot run. `credential_mode: "github-app"`
+  gives the runtime a MACHINE identity - the runtime mints the installation token
+  from the App key, re-mints it before it expires, and publishes as
+  `<slug>[bot]` - and `credential_mode: "token"` does the same with a dedicated
+  account's token. `autonomy doctor` resolves both the publication identity and
+  the operator's own login and names the collision when they are one account.
   The guard itself is unchanged: an operator's own login is never admitted as an
   exception.
 - **Gemini CLI and Qwen CLI are not live-qualified.** Neither is installed on

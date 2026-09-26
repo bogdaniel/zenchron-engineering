@@ -75,7 +75,7 @@ Cancellation is a common process-control request shared by future provider and
 assurance adapters. Run/operation wall limits, attempts, and no-progress keys
 are persisted operational state.
 
-Owner liveness is evidenced by an OS advisory ownership lock held for a
+Owner liveness is evidenced by an OS advisory controller-instance lock held for a
 runtime instance's entire lifetime under the state directory and released by
 the kernel when that process dies, which is the only evidence that survives a
 hard crash. A lock FILE is never liveness evidence: its presence proves
@@ -536,7 +536,7 @@ the report - a credential is proven RESOLVABLE and the resolved value stays
 in a local variable - and the provider credential path is inspected, never
 read. The preflight does not repair what it measures, so a missing state
 directory is reported rather than created, and it does not hold what it
-diagnoses: the store is opened and closed, and the ownership lock is taken
+diagnoses: the store is opened and closed, and the controller-instance lock is taken
 and released, by the checks themselves. Owner liveness is probed as evidence
 while the lock is held, and a platform that cannot decide whether the lock is
 held is a FAIL, because without crash-safe evidence a dead owner could never
@@ -574,7 +574,7 @@ is not a runtime owner identity; and anything resolving outside the canonical
 state directory or reached through a symlink leaving it. What may become
 eligible after retention: the candidate workspace of a completed, cancelled,
 or failed run, its detached assurance checkouts, its raw local-only
-transcripts, and the ownership lock of a provably dead runtime. Sanitized
+transcripts, and the controller-instance lock of a provably dead runtime. Sanitized
 artifacts are deliberately kept, because they are the durable explainable
 derivative and they are small. The retention window is operator authority for
 the same reason a budget ceiling is - a repository that could shorten it
