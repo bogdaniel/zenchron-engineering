@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -2077,7 +2078,11 @@ func (r *EngineeringRuntime) observeGitHub(ctx context.Context, state *runState,
 	}
 	// An unexpected external head is recorded and never overwritten.
 	if recorded := state.projection.CandidateRevision; recorded != "" && head != recorded && state.projection.ObservedExternalHead == "" {
-		if _, ancestorErr := r.ancestorOfCandidate(state, head); ancestorErr != nil {
+		ancestor, ancestorErr := r.ancestorOfCandidate(state, head)
+		if ancestorErr != nil {
+			return failed(ancestorErr)
+		}
+		if !ancestor {
 			produced.events = append(produced.events, journalEntry{
 				Type:    EventCandidateExternalChanged,
 				Payload: CandidateExternalChangedPayload{ExpectedRevision: recorded, ObservedRevision: head},
@@ -2129,6 +2134,10 @@ func (r *EngineeringRuntime) ancestorOfCandidate(state *runState, head string) (
 		return false, err
 	}
 	if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", head, state.projection.CandidateRevision); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

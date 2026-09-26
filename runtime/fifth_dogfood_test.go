@@ -317,6 +317,18 @@ func TestPreparationNamesWhatWasMissing(t *testing.T) {
 			out:  CommandOutput{ExitCode: 1, Stderr: []byte("module lookup disabled by GOPROXY=off")},
 			want: PrerequisiteModule,
 		},
+		"module not found": {
+			out:  CommandOutput{ExitCode: 1, Stderr: []byte("go: module example.com/x: not found")},
+			want: PrerequisiteModule,
+		},
+		"module lookup not found": {
+			out:  CommandOutput{ExitCode: 1, Stderr: []byte("example.com/x: not found: module lookup disabled by GOPROXY=off")},
+			want: PrerequisiteModule,
+		},
+		"cache file missing": {
+			out:  CommandOutput{ExitCode: 1, Stderr: []byte("open /cache/file: no such file or directory")},
+			want: PrerequisiteCache,
+		},
 		"cache unusable": {
 			out:  CommandOutput{ExitCode: 1, Stderr: []byte("go: permission denied writing /cache")},
 			want: PrerequisiteCache,
