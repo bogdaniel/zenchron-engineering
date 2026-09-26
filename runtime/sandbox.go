@@ -181,6 +181,7 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	//
 	// It also guarantees nothing is still writing into the buffers read below.
 	stopWatch()
+	stream.detach()
 	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
 	// Read after the run: Start happens inside, and a process that never
 	// started truthfully reports no pid.

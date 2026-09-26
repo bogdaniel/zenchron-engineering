@@ -234,7 +234,8 @@ type cliAgentSpec struct {
 	// tees stdout to the parser and a per-physical-attempt window.
 	ProgressMode string
 	// InvocationEnv returns non-secret provider controls for the MAIN
-	// invocation only, from the per-attempt inactivity window it runs under.
+	// invocation only, from the CONFIGURED per-attempt inactivity window
+	// (ProviderBudget.InactivityWindow), never from a remainder.
 	// Probes never receive them, and withInvocationEnv refuses any credential-
 	// shaped name or any name the allowlisted environment already sets.
 	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
@@ -1085,7 +1086,11 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// would reach past the environment allowlist.
 	env := p.env(spec, home)
 	if spec.InvocationEnv != nil {
-		extra, err := spec.InvocationEnv(request.Budgets.InactivityLimit)
+		window := request.Budgets.InactivityWindow
+		if window <= 0 {
+			window = request.Budgets.InactivityLimit
+		}
+		extra, err := spec.InvocationEnv(window)
 		if err == nil {
 			env, err = withInvocationEnv(env, extra)
 		}
@@ -1287,8 +1292,14 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// result says is_error failed however it exited. Both fail closed, narrowed
 	// only by a typed condition the stream stated - never by result prose.
 	if streamed.Failed {
+		recognized := streamed.Condition
+		if recognized == FailureUnknown {
+			// The same best-effort legacy surface the failure path above uses:
+			// a usage limit may be stated only on stderr, never as a typed field.
+			recognized = classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
+		}
 		result.Outcome = OperationFailed
-		result.Failure = &ProviderFailure{Classification: streamed.Condition, RawDiagnosticRef: artifacts[0].Path}
+		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
 	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.

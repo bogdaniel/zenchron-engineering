@@ -779,7 +779,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			WallLimit: executionWallBound(state, operation),
 			// The no-progress window, carried beside the total bound so the
 			// adapter applies one policy rather than two.
-			InactivityLimit: inactivityRemaining,
+			InactivityLimit:  inactivityRemaining,
+			InactivityWindow: inactivityLimit,
 		},
 		// The same authority as an instant, so the process bound and the
 		// provenance record cannot describe different realities.

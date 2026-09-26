@@ -782,3 +782,104 @@ func TestTheProviderInactivityMinimumIsRefusedBeforeAnyRun(t *testing.T) {
 	})
 	requireCheck(t, f.run(), "config.global", DoctorFail, "is 5, below the minimum 10")
 }
+
+// ---------------------------------------------------------------------------
+// PR #323 review
+// ---------------------------------------------------------------------------
+
+// A final result with no trailing newline is still the final result.
+func TestAFinalResultWithoutATrailingNewlineIsParsed(t *testing.T) {
+	provider, request := claudeProcess(t, "printf '%s' '"+claudeResult(false, "success", 0)+"'\n")
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil || result.Outcome != Succeeded {
+		t.Fatalf("an unterminated final result failed the run: %v %#v", err, result.Failure)
+	}
+}
+
+// A drifted field type keeps the event; only a syntax error is an anomaly.
+func TestAFieldTypeDriftDoesNotDiscardTheResult(t *testing.T) {
+	stream := newClaudeStream(1)
+	feed(stream, `{"type":"result","subtype":"success","is_error":false,"permission_denials":{"count":2}}`)
+	got := stream.outcome(true)
+	if got.Failed || got.Anomalies != 0 {
+		t.Fatalf("outcome = %+v, want the result kept despite the drifted field", got)
+	}
+}
+
+// The final result closes every turn, so a clean run reports nothing open.
+func TestTheFinalResultClearsOpenTools(t *testing.T) {
+	stream := newClaudeStream(1)
+	feed(stream, claudeAssistant("M1", "", claudeToolUse("X")), claudeResult(false, "success", 0))
+	if got := stream.outcome(true); got.OpenTools != 0 || got.Failed {
+		t.Fatalf("outcome = %+v, want a clean success with nothing open", got)
+	}
+}
+
+// Exit 0 with is_error still reads the legacy stderr surface.
+func TestAZeroExitErrorResultStillReadsTheLegacyStderrSignal(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.outputs = []CommandOutput{{
+		Stdout: []byte(claudeResult(true, "success", 0) + "\n"),
+		Stderr: []byte("Claude AI usage limit reached\n"),
+	}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failure == nil || result.Failure.Classification != FailureProviderQuota {
+		t.Fatalf("failure = %#v, want the stderr quota signal", result.Failure)
+	}
+}
+
+// The background-wait ceiling comes from the CONFIGURED window, not from a
+// remainder the request happens to carry.
+func TestTheBackgroundWaitCeilingIgnoresARemainingWindow(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	request.Budgets.InactivityLimit = 30 * time.Second
+	request.Budgets.InactivityWindow = 10 * time.Minute
+	if _, err := provider.Execute(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range fake.execution(t).env {
+		if entry == "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=450000" {
+			return
+		}
+	}
+	t.Fatalf("env %v does not carry the ceiling of the configured 10m window", fake.execution(t).env)
+}
+
+// A durable progress write that never returns cannot hold Claude's stdout.
+func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
+	provider, request := claudeProcess(t, emit(
+		claudeAssistant("m1", "", claudeText), claudeAssistant("m2", "", claudeText), claudeResult(false, "success", 0)))
+	recorded, release := make(chan string, 1), make(chan struct{})
+	defer close(release)
+	ctx := withProviderProgressRecorder(context.Background(), func(key string) {
+		select {
+		case recorded <- key:
+		default:
+		}
+		<-release
+	})
+	done := make(chan ExecutionResult, 1)
+	go func() {
+		result, _ := provider.Execute(ctx, request)
+		done <- result
+	}()
+	select {
+	case key := <-recorded:
+		if !strings.HasPrefix(key, "1:") {
+			t.Fatalf("durable key %q is not attempt-qualified", key)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the recorder was never called")
+	}
+	select {
+	case result := <-done:
+		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != 2 {
+			t.Fatalf("outcome %q with %d events", result.Outcome, result.Invocation.StructuredEvents)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a blocked durable write held the invocation")
+	}
+}

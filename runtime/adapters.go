@@ -244,6 +244,13 @@ type ProviderBudget struct {
 	// this one long before the total bound would notice. Zero means no
 	// inactivity bound, which is what a caller predating this budget gets.
 	InactivityLimit time.Duration
+	// InactivityWindow is the CONFIGURED per-attempt window InactivityLimit was
+	// derived from. The two differ when a byte_output successor inherits only
+	// the remainder. A provider control derived from the window - Claude's
+	// background-wait ceiling (#322) - reads this one, so a shrunken remainder
+	// can never silently shrink it. Zero means the caller stated no separate
+	// window, and InactivityLimit is then the configured window itself.
+	InactivityWindow time.Duration
 }
 type ExecutionResult struct {
 	ProviderID, Model, AuthMode string
