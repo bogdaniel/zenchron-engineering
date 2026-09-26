@@ -182,6 +182,14 @@ abandoned interval in full. An attempt that was settled — observed, journalled
 and classified — does get a fresh window, because that is what a bounded retry
 is; the attempt ceiling is what ends it.
 
+Claude Code is the exception. Its window is measured by its own structured
+events, which belong to one physical process, so each new physical Claude
+attempt — after a restart too — gets the full window. What stays cumulative
+across restarts for it is the execution budget, which still charges every
+abandoned interval, and the attempt identity, which still advances; those are
+what keep repeated restarts finite. See
+[configuration.md](configuration.md#budgets).
+
 An explicit connectivity diagnostic is `provider_unavailable` instead, and waits
 without spending the active-work budget — but only when the CLI itself said so.
 A typed provider condition is read from the **terminal diagnostic surface**: the
