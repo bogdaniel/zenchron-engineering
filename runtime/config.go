@@ -984,6 +984,11 @@ func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 
 func (c OperatorConfig) validate(path string) error {
 	refuse := func(detail string) error { return &ConfigError{Path: path, Detail: detail} }
+	for i, dir := range c.Toolchain.Path {
+		if strings.TrimSpace(dir) == "" {
+			return refuse(fmt.Sprintf("toolchain.path[%d] must not be empty or whitespace-only", i))
+		}
+	}
 	for _, required := range []struct{ name, value string }{
 		{"state_dir", c.StateDir},
 		{"project_model_path", c.ProjectModelPath},
