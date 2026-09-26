@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/benchmark-record.schema.json",
+  "title": "BenchmarkRecord v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "benchmark", "corpus_version", "mode", "recorded_at", "case", "subject", "measured", "outcome", "interpretation"],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "id": { "$ref": "#/$defs/non_empty_string" },
+    "benchmark": { "$ref": "#/$defs/non_empty_string" },
+    "corpus_version": { "$ref": "#/$defs/non_empty_string" },
+    "mode": { "enum": ["direct_agent", "zenchron_explicit", "zenchron_planned"] },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "case": { "$ref": "#/$defs/case" },
+    "subject": { "$ref": "#/$defs/subject" },
+    "measured": { "$ref": "#/$defs/measured" },
+    "outcome": { "$ref": "#/$defs/outcome" },
+    "concurrency": { "$ref": "#/$defs/concurrency" },
+    "interpretation": { "$ref": "#/$defs/interpretation" }
+  },
+  "$defs": {
+    "non_empty_string": { "type": "string", "minLength": 1 },
+    "nullable_string": { "type": ["string", "null"] },
+    "nullable_number": { "type": ["number", "null"] },
+    "nullable_integer": { "type": ["integer", "null"] },
+    "nullable_boolean": { "type": ["boolean", "null"] },
+    "non_negative_number": { "type": "number", "minimum": 0 },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "class", "acceptance"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "class": {
+          "enum": [
+            "trivial/documentation",
+            "normal behavioral change",
+            "API/business-rule work",
+            "security-sensitive change",
+            "hidden/material scope expansion",
+            "failing tests/remediation",
+            "review-feedback correction",
+            "provider transient/quota wait",
+            "base-drift/conflict case",
+            "multi-task concurrent cohort"
+          ]
+        },
+        "source": { "$ref": "#/$defs/nullable_string" },
+        "acceptance": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "base_revision", "agents"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/non_empty_string" },
+        "base_revision": { "$ref": "#/$defs/non_empty_string" },
+        "candidate_revision": { "$ref": "#/$defs/nullable_string" },
+        "controller": { "$ref": "#/$defs/controller" },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/agent" }
+        }
+      }
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/non_empty_string" },
+        "note": { "$ref": "#/$defs/nullable_string" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "provider_kind", "vendor_family"],
+      "properties": {
+        "stage_id": { "$ref": "#/$defs/nullable_string" },
+        "role": { "$ref": "#/$defs/nullable_string" },
+        "agent_id": { "$ref": "#/$defs/non_empty_string" },
+        "provider_kind": { "$ref": "#/$defs/non_empty_string" },
+        "vendor_family": { "$ref": "#/$defs/non_empty_string" },
+        "model": { "$ref": "#/$defs/nullable_string" },
+        "trust_mode": { "$ref": "#/$defs/nullable_string" }
+      }
+    },
+    "measured": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active_operator_minutes", "cost"],
+      "properties": {
+        "active_operator_minutes": { "$ref": "#/$defs/nullable_number" },
+        "relay_actions": { "$ref": "#/$defs/nullable_integer" },
+        "workaround_interventions": { "$ref": "#/$defs/nullable_integer" },
+        "authority_interventions": { "$ref": "#/$defs/nullable_integer" },
+        "task_selection_minutes": { "$ref": "#/$defs/nullable_number" },
+        "review_minutes": { "$ref": "#/$defs/nullable_number" },
+        "provider_wait_minutes": { "$ref": "#/$defs/nullable_number" },
+        "wall_seconds_total": { "$ref": "#/$defs/nullable_number" },
+        "cost": { "$ref": "#/$defs/cost" }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["known"],
+      "properties": {
+        "known": { "type": "boolean" },
+        "currency": { "$ref": "#/$defs/nullable_string" },
+        "amount": { "$ref": "#/$defs/nullable_number" },
+        "reason": { "$ref": "#/$defs/nullable_string" }
+      },
+      "if": {
+        "properties": { "known": { "const": true } },
+        "required": ["known"]
+      },
+      "then": { "required": ["currency", "amount"] }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "ground_truth_available"],
+      "properties": {
+        "result": { "enum": ["accepted", "accepted_for_review", "rejected", "abandoned", "invalidated"] },
+        "artifact": { "$ref": "#/$defs/nullable_string" },
+        "review_cycles": { "$ref": "#/$defs/nullable_integer" },
+        "first_pass_accepted": { "$ref": "#/$defs/nullable_boolean" },
+        "remediation_count": { "$ref": "#/$defs/nullable_integer" },
+        "escaped_defects": { "$ref": "#/$defs/nullable_integer" },
+        "false_blocks": { "$ref": "#/$defs/nullable_integer" },
+        "authority_precision": { "$ref": "#/$defs/nullable_number" },
+        "authority_recall": { "$ref": "#/$defs/nullable_number" },
+        "ground_truth_available": { "type": "boolean" }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["concurrent_with"],
+      "properties": {
+        "concurrent_with": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" },
+          "uniqueItems": true
+        },
+        "overlap_wall_seconds": { "$ref": "#/$defs/nullable_number" },
+        "human_attention_during_overlap_minutes": { "$ref": "#/$defs/nullable_number" },
+        "cross_task_blocking": { "$ref": "#/$defs/nullable_boolean" },
+        "manual_message_shuttling": { "$ref": "#/$defs/nullable_boolean" }
+      }
+    },
+    "interpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leverage_claim", "note"],
+      "properties": {
+        "leverage_claim": { "$ref": "#/$defs/non_empty_string" },
+        "note": { "$ref": "#/$defs/non_empty_string" }
+      }
+    }
+  }
+}

@@ -236,6 +236,8 @@ func roundTripFixture(t *testing.T, name string, data []byte) {
 		roundTrip[domain.AgentAssignment](t, data)
 	case strings.HasSuffix(name, ".plan-revision-proposal.json"):
 		roundTrip[domain.PlanRevisionProposal](t, data)
+	case strings.HasSuffix(name, ".benchmark-record.json"):
+		roundTrip[domain.BenchmarkRecord](t, data)
 	default:
 		t.Fatalf("fixture %s has no contract suffix", name)
 	}
@@ -307,6 +309,9 @@ func decodeFixture(name string, data []byte) error {
 		return err
 	case strings.HasSuffix(name, ".plan-revision-proposal.json"):
 		_, err := domain.Decode[domain.PlanRevisionProposal](data)
+		return err
+	case strings.HasSuffix(name, ".benchmark-record.json"):
+		_, err := domain.Decode[domain.BenchmarkRecord](data)
 		return err
 	default:
 		return fmt.Errorf("fixture %s has no contract suffix", name)

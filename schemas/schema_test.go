@@ -30,6 +30,7 @@ var fixtureSchemas = map[string]string{
 	"engineering-plan-template": "engineering-plan-template.schema.json",
 	"instruction-pack":          "instruction-pack.schema.json",
 	"plan-revision-proposal":    "plan-revision-proposal.schema.json",
+	"benchmark-record":          "benchmark-record.schema.json",
 }
 
 type invalidExpectation struct {
@@ -83,6 +84,9 @@ var invalidExpectations = map[string]invalidExpectation{
 	"agent-workflow-obligation.engineering-policy.json": {"/rules/RULE-001/effect/engineering_requirements/roles/0", "additionalProperties"},
 	// A gate is not an agent stage. Only `agent` stages become EngineeringRuns.
 	"agent-gate-requirement.engineering-work-contract.json": {"/plan_requirements/gates/0/kind", "enum"},
+	// A benchmark case class comes from the #66 corpus catalogue; a record
+	// cannot invent its own class any more than a plan can invent a role.
+	"unknown-class.benchmark-record.json": {"/case/class", "enum"},
 }
 
 func TestSchemasCompile(t *testing.T) {
