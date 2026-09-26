@@ -514,7 +514,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// It is a CAPABILITY question only. A resolvable tool is one the worker may
 	// run; nothing here grants permission to run anything else, and the list is
 	// operator-owned precisely so a repository cannot extend it.
-	if missing := r.missingWorkerTools(); len(missing) > 0 {
+	if missing := r.missingWorkerTools(ctx); len(missing) > 0 {
 		return effect{
 			state:  OperationFailed,
 			result: mutationResult{FailureClass: FailureToolchainUnavailable},
@@ -622,6 +622,48 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
+	//
+	// It is NOT operation.Attempt. That is the budget counter, and a provider
+	// condition that routes to an external wait gives it back - which is right
+	// for a ceiling and wrong for an identity, because the transcript filed
+	// under it is create-once. A run that met a usage limit and was resumed
+	// addressed the first invocation's transcript slot and was refused by the
+	// evidence store, so the recoverable wait #87 promises could never resume.
+	//
+	// Two durable facts decide it and the later one wins. Invocations is the
+	// monotonic count the scheduler advanced when it started this invocation,
+	// journalled before the provider is reached. NextAttempt is what the
+	// evidence itself says is free, and it is what carries an operation written
+	// before this counter existed - including one already stranded - past the
+	// slot it is stuck on. Taking the maximum keeps both honest: the identity
+	// never goes backwards, and never lands on evidence that exists.
+	physicalAttempt := operation.AttemptIdentity
+	if physicalAttempt < 1 {
+		physicalAttempt = 1
+	}
+	if free := r.deps.Artifacts.NextAttempt(r.deps.Agent.ID, ExecutionAttemptRef{
+		RunID: state.run.ID, OperationID: operation.ID, Attempt: 1,
+	}); free > physicalAttempt {
+		// THE EVIDENCE IS AHEAD, so the identity this invocation will use is
+		// higher than the one on the durable record - and it has to be written
+		// down BEFORE the provider is dispatched. A crash after dispatch and
+		// before the transcript exists would otherwise leave the record behind
+		// and the slot still free, and the next invocation would select the same
+		// identity: two physical invocations sharing one immutable slot, which
+		// is the defect this change exists to prevent, moved one crash later.
+		//
+		// Fails closed. An identity this runtime cannot commit to owning is one
+		// it must not let a provider write under.
+		reserved, err := r.scheduler.ReserveAttemptIdentity(operation.ID, free)
+		if err != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureUnknown},
+				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureUnknown, ExecutionResult{}, err),
+			}}
+		}
+		physicalAttempt = reserved.AttemptIdentity
+	}
 	// THE REVIEWER RESULT SLOT, prepared before the invocation and only for a
 	// stage whose role produces a verdict. An implementer is given no path at
 	// all, so it has nowhere to write one: the authority is carried by the
@@ -629,7 +671,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	reviewerResultPath := ""
 	if stage.producesVerdict() {
 		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
-			RunID: state.run.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 		})
 		if err != nil {
 			return effect{state: OperationFailed, result: executionRecord{
@@ -643,13 +685,54 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// binary that command links, and the default temporary location is noexec
 	// inside this runtime's own sandbox.
 	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, ExecutionAttemptRef{
-		RunID: state.run.ID, OperationID: operation.ID, Attempt: operation.Attempt,
+		RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 	})
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureUnknown},
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
+	}
+	// THE NO-PROGRESS WINDOW THIS INVOCATION GETS: the run's PERSISTED bound
+	// less the silence already durably recorded against this operation.
+	//
+	// Deriving it from the operation row rather than from a stopwatch is what
+	// makes it survive a restart, and it is why the recorder below exists at
+	// all: a controller that died mid-invocation must hand its successor the
+	// remainder, not a fresh envelope. A provider whose window is per physical
+	// attempt (#322, structured Claude) gets its full window instead; see
+	// dispatchInactivityWindow for why that stays finite.
+	inactivityLimit := state.budgets().ProviderInactivityLimit
+	inactivityRemaining := dispatchInactivityWindow(inactivityLimit, operation, r.deps.Clock.Now(), r.deps.Provider)
+	// EXHAUSTED MEANS REFUSED, NOT UNBOUNDED. A zero window is how "no bound
+	// was configured" is spelled downstream, so dispatching with one would
+	// silently restore the pre-#238 behaviour for exactly the operation that
+	// has already been silent for its whole window. There is nothing left to
+	// spend, so nothing is started.
+	if inactivityLimit > 0 && inactivityRemaining <= 0 {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
+			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
+				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound before this invocation could start",
+					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit)),
+		}}
+	}
+	// Observed progress is written back to the operation row, so "silent for"
+	// in status is a durable observation about the WORK rather than the age of
+	// the attempt. It goes through the scheduler's narrow progress transition,
+	// never through the lease heartbeat: a controller being alive is a
+	// different claim from the work moving, and #238 is the cost of letting the
+	// first stand in for the second.
+	ctx = withProviderProgressRecorder(ctx,
+		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, key) })
+	// A continuation is bounded independently of the original operation.
+	// The absolute deadline also makes a spent (zero) allowance fail closed.
+	if _, granted := state.reviewContinuationGrant(); granted {
+		now := r.deps.Clock.Now()
+		deadline := now.Add(state.reviewContinuationRemaining(now))
+		if operation.Deadline == nil || deadline.Before(*operation.Deadline) {
+			operation.Deadline = &deadline
+		}
 	}
 	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
 		ReviewerResultPath: reviewerResultPath,
@@ -660,10 +743,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// removed before the next, so one identity per invocation is exact
 		// rather than merely unique.
 		OperationID: operation.ID,
-		// The scheduler incremented this when it started the operation, so it
-		// is the real attempt this invocation IS - never a provider-local
-		// default. It is what makes this attempt's transcript addressable.
-		Attempt:               operation.Attempt,
+		// The PHYSICAL invocation this is, derived above from the scheduler's
+		// monotonic count and the evidence already on disk - never the budget
+		// attempt, which a refunded external wait moves backwards, and never a
+		// provider-local default. It is what makes this invocation's transcript
+		// addressable, and addressable exactly once.
+		Attempt:               physicalAttempt,
 		PriorAttemptFailure:   priorFailure,
 		RunID:                 state.run.ID,
 		SourceSnapshot:        Ref{ID: sourceSnapshotID(state), Revision: state.source.Digest},
@@ -685,16 +770,43 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Purpose:             purpose,
 		Findings:            findings,
 		Feedback:            feedback,
-		Budgets:             ProviderBudget{WallLimit: state.budgets().WallLimit},
+		// WHAT IS LEFT, not what was configured. The bound comes from the
+		// operation's durable deadline, so a second attempt inherits the time
+		// the first one did not spend instead of being handed the whole
+		// envelope again. An operation with no deadline falls back to the run
+		// budget, which is what it had before deadlines existed.
+		Budgets: ProviderBudget{
+			WallLimit: executionWallBound(state, operation),
+			// The no-progress window, carried beside the total bound so the
+			// adapter applies one policy rather than two.
+			InactivityLimit:  inactivityRemaining,
+			InactivityWindow: inactivityLimit,
+		},
+		// The same authority as an instant, so the process bound and the
+		// provenance record cannot describe different realities.
+		Deadline: operation.Deadline,
 	}))
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
 	}
-	paths, pathErr := changedPaths(workspace.Dir)
+	paths, pathErr := candidateChangedPaths(workspace.Dir)
 	if pathErr != nil {
 		return failed(pathErr)
 	}
-	record := mutationResult{Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID}
+	record := mutationResult{
+		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
+		// WHAT THE #241 BOUNDARY REFUSED, folded into durable operation state
+		// so status can say it without re-reading a provider transcript. The
+		// most recent operation's shape is kept and the rest are counted: the
+		// count is what says a provider tried repeatedly, and the shape is
+		// what an operator needs to recognise which command it was.
+		DiscardRefusals: len(providerGitRefusals(result)),
+		DiscardRefused:  lastProviderGitRefusal(result),
+		// Invocation provenance is written only after the process returns, so
+		// it is the honest signal for "this attempt reached a worker" - the
+		// same signal the feedback-delivery record below relies on.
+		ProviderExecuted: execErr == nil || result.Invocation != nil,
+	}
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := []journalEntry{{
 		Type: EventCandidateChanged,
@@ -726,7 +838,36 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// by the lifecycle. Its stage stays unsettled, the run retries or
 	// terminalizes under its existing bounds, and the next successful invocation
 	// writes into a freshly emptied slot.
-	if execErr == nil && result.Failure == nil {
+	// AUTHORITY ENDS AT THE DEADLINE, WHATEVER THE ADAPTER REPORTS.
+	//
+	// A provider that ignored cancellation, outlived its bound and then
+	// returned success is an unfinished invocation contributing a finished
+	// answer - the same law the gate below already enforces for a cancelled or
+	// failed one. It is checked separately because it is the case where nothing
+	// went wrong as far as the adapter can see, which is exactly why a timing
+	// defect would otherwise become an authority defect: a result produced
+	// without authority would be admitted as governed candidate output.
+	//
+	// The candidate.changed observation above is still journalled. It is true,
+	// and an operator reading the run should see that a producer mutated the
+	// workspace. What does not happen is execution.completed, which is what
+	// makes a subject eligible to become a committed candidate.
+	//
+	// ONE GATE, SEVERAL REVOCATION CAUSES. An operator's stop revokes exactly
+	// what a passed deadline revokes - the authority to turn this result into a
+	// candidate - so it is asked here, in the same predicate, rather than in a
+	// cancellation check of its own. See executionAuthorityRevoked.
+	revoked, revokeErr := r.executionAuthorityRevoked(operation)
+	if _, granted := state.reviewContinuationGrant(); granted {
+		now := r.deps.Clock.Now()
+		if state.reviewContinuationRemaining(now) <= 0 || (operation.Deadline != nil && !now.Before(*operation.Deadline)) {
+			revoked = FailureExecutionDeadlineExceeded
+		}
+	}
+	if revokeErr != nil {
+		return failed(revokeErr)
+	}
+	if execErr == nil && result.Failure == nil && revoked == "" {
 		// Admission happens in the RUNTIME, against the frozen assignment -
 		// never in the adapter, which only read a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
@@ -734,7 +875,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// claim look identical to an honest silence.
 		if result.Review != nil {
 			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
+				var refusal *ReviewerResultRefusedError
+				if errors.As(admitErr, &refusal) {
+					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
+				}
 				return effect{state: OperationFailed, result: executionRecord{
+					ReviewRefusal:  refusal,
 					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
 					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
 				}}
@@ -792,10 +938,38 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 	}
 	produced := effect{result: executionRecord{mutationResult: record, PriorContext: result.PriorContext}, state: Succeeded, events: events}
+	// An invocation that outlived its deadline FAILS the operation, even though
+	// the adapter reported success and the workspace may hold good work. The
+	// events assembled above are carried: what the producer did is true and is
+	// journalled. What is refused is calling it a completed execution.
+	if revoked != "" && execErr == nil && result.Failure == nil {
+		detail := fmt.Errorf("the provider returned after its execution deadline %s", operation.Deadline.UTC().Format(time.RFC3339))
+		if revoked == FailureRunCancelled {
+			detail = fmt.Errorf("the provider returned after the run was stopped")
+		}
+		record.FailureClass = revoked
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic:     r.executionDiagnostic(execStageProviderResult, revoked, result, detail),
+			},
+		}
+	}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
 		if result.Failure != nil {
 			class = result.Failure.Classification
+		}
+		// THE RUNTIME'S OWN PRE-DISPATCH REFUSALS ARE NOT PROVIDER FAULTS. A
+		// controller that could not install its candidate-Git boundary invoked
+		// nothing and touched nothing, so reporting it as an unknown provider
+		// failure would send an operator to look at their worker for a problem
+		// in their controller installation.
+		if guarded, ok := candidateGuardFailureClass(execErr); ok {
+			class = guarded
 		}
 		record.FailureClass = class
 		// One of the runtime's OWN bounds ended the invocation: that is
@@ -837,7 +1011,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// the second: one blank README line, produced after eight failed
 			// patch attempts and an exhausted iteration budget, was committed
 			// and sent to assurance as if the objective had been addressed.
-			Checkpoint: record.Mutated && continuationEligible(execErr),
+			Checkpoint: record.Mutated && (continuationEligible(execErr) ||
+				(class == FailureProviderNoProgress && len(state.outstandingReviewKeys()) > 0)),
 		}
 		// A producer that left real work behind did its bounded job, so the
 		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
@@ -910,7 +1085,8 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 // restarted runtime needs to name a root cause without the process-local error.
 type executionRecord struct {
 	mutationResult
-	Diagnostic *ExecutionDiagnostic `json:"diagnostic,omitempty"`
+	Diagnostic    *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
+	ReviewRefusal *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
 	// PriorContext explains the prior-attempt observations this invocation
 	// inherited, or is absent when it inherited none. It records WHICH earlier
 	// attempts were supplied rather than a copy of what they said, so a replay
@@ -923,12 +1099,15 @@ type executionRecord struct {
 	Checkpoint bool `json:"checkpoint,omitempty"`
 }
 
-// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Everything in it is
-// bounded to one payload field, and the message is redacted with the same
-// redactor that guards transcript artifacts, so no API key, Authorization
-// header, forge token, or raw provider body can become a durable row. Bulk
-// material stays in the artifact store; ArtifactRef names it when one exists,
-// and is absent when no provider interaction produced one.
+// ExecutionDiagnostic is CLASSIFICATION AND IDENTITY ONLY. Every free-form
+// text field is bounded to one payload field, and the message is redacted
+// with the same redactor that guards transcript artifacts, so no API key,
+// Authorization header, forge token, or raw provider body can become a
+// durable row. Bulk material stays in the artifact store; ArtifactRef names
+// it when one exists, and is absent when no provider interaction produced
+// one. ArtifactRef is a runtime-constructed path rather than provider text,
+// so it is exempt from the bound: it needs no redaction, and truncating a
+// locator only breaks the one thing it is for.
 type ExecutionDiagnostic struct {
 	Stage              string       `json:"stage"`
 	FailureClass       FailureClass `json:"failure_class,omitempty"`
@@ -976,10 +1155,17 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		diagnostic.HTTPStatus, diagnostic.ProviderErrorCode = stop.Status, boundedDetail(stop.Code)
 		diagnostic.ProviderErrorParam = boundedDetail(stop.Param)
 	}
+	// ArtifactRef is a filesystem path the runtime itself constructed, not
+	// narrative provider text - it carries no secret and needs no redaction.
+	// boundedDetail exists to cap free-form text at a byte offset; run a path
+	// through it and the cut lands mid-component (mid commit sha, mid run ID)
+	// with no indication anything was removed. A truncated locator does not
+	// degrade gracefully like truncated prose does: it just stops resolving.
+	// The path is left whole so an operator can open exactly what is printed.
 	if result.Failure != nil && result.Failure.RawDiagnosticRef != "" {
-		diagnostic.ArtifactRef = boundedDetail(result.Failure.RawDiagnosticRef)
+		diagnostic.ArtifactRef = result.Failure.RawDiagnosticRef
 	} else if len(result.Artifacts) > 0 {
-		diagnostic.ArtifactRef = boundedDetail(result.Artifacts[0].Path)
+		diagnostic.ArtifactRef = result.Artifacts[0].Path
 	}
 	return diagnostic
 }
@@ -1017,6 +1203,18 @@ func (r *EngineeringRuntime) restoreCandidate(workspace *CandidateWorkspace, cau
 // a bounded signature, so a review comment cannot become an instruction.
 func (s *runState) findings() []Finding {
 	var findings []Finding
+	// Only the latest execution can supply a refusal; a later success clears it.
+	ops := sortOperations(mapValues(s.snapshot.Operations))
+	for i := len(ops) - 1; i >= 0; i-- {
+		if ops[i].Kind != OpExecutionInvoke || len(ops[i].Result) == 0 {
+			continue
+		}
+		var record executionRecord
+		if decodeJSON(ops[i].Result, &record) == nil && record.FailureClass == FailureVerification && record.ReviewRefusal != nil {
+			findings = append(findings, Finding{Classification: FailureVerification, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
+		}
+		break
+	}
 	if a := s.projection.Assurance; a != nil && !a.Stale && !a.Passed {
 		findings = append(findings, s.assuranceFinding(*a))
 	}
@@ -1043,6 +1241,27 @@ func (s *runState) findings() []Finding {
 		}
 	}
 	return findings
+}
+
+// executionWallBound is how long THIS invocation may run: the operation's
+// REMAINING active-execution authority.
+//
+// An earlier attempt at this subtracted wall-clock time from a fixed instant,
+// which charged external waiting to the execution budget and turned the
+// provider-account wait into a terminal failure on its second tick. Remaining
+// authority is wait-aware because the counter it comes from only advances while
+// an attempt is actually executing.
+func executionWallBound(state *runState, operation RunOperation) time.Duration {
+	bound := state.budgets().WallLimit
+	if operation.WallBudget > 0 {
+		bound = OperationRemaining(operation, state.rt.deps.Clock.Now())
+	}
+	if _, granted := state.reviewContinuationGrant(); granted {
+		if remaining := state.reviewContinuationRemaining(state.rt.deps.Clock.Now()); remaining < bound {
+			bound = remaining
+		}
+	}
+	return bound
 }
 
 // assuranceFinding renders ONE failed verification for the producer that has to
@@ -1147,7 +1366,7 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 	if err := (LocalGofmt{}).Format(ctx, workspace.Dir, goPaths); err != nil {
 		return failed(err)
 	}
-	changed, err := changedPaths(workspace.Dir)
+	changed, err := candidateChangedPaths(workspace.Dir)
 	if err != nil {
 		return failed(err)
 	}
@@ -1159,10 +1378,11 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 // ---------------------------------------------------------------------------
 
 type commitRecord struct {
-	Commit         string `json:"commit"`
-	Tree           string `json:"tree"`
-	PathCount      int    `json:"path_count"`
-	MetadataDigest string `json:"metadata_digest,omitempty"`
+	Commit         string   `json:"commit"`
+	Tree           string   `json:"tree"`
+	PathCount      int      `json:"path_count"`
+	MetadataDigest string   `json:"metadata_digest,omitempty"`
+	ExcludedPaths  []string `json:"excluded_paths,omitempty"`
 }
 
 // commitCandidate is the only place a candidate change becomes a commit. It
@@ -1227,11 +1447,12 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 		state: Succeeded,
 		// The commit succeeded and the workspace refreshed its own baseline;
 		// journalling it here is what makes the new baseline durable.
-		result: commitRecord{result.Commit, result.Tree, len(result.Paths), workspace.TrustedMetadata},
+		result: commitRecord{result.Commit, result.Tree, len(result.Paths), workspace.TrustedMetadata, result.Excluded},
 		events: []journalEntry{
 			{Type: commitEvent, Payload: CandidateCommittedPayload{
 				Commit: result.Commit, Tree: result.Tree,
 				PathCount: len(result.Paths), PathsDigest: pathsDigest(result.Paths),
+				ExcludedPaths: result.Excluded,
 			}},
 			{Type: EventReassessmentCompleted, Payload: ReassessmentCompletedPayload{
 				Material:                next.Reassessment.Material,
@@ -2409,18 +2630,16 @@ func (r *EngineeringRuntime) frozenInstructions(assignment domain.AgentAssignmen
 	return instructions, nil
 }
 
-// missingWorkerTools is the operator-declared required tools this runtime's
-// brokered execution environment cannot resolve.
-//
-// It answers for the ENVIRONMENT rather than for a particular provider: every
-// worker this runtime dispatches gets the same brokered search path, so the
-// answer is the same for all of them and does not need an invocation to find
-// out. An operator who declared no toolchain gets no refusals, exactly as
-// before.
-func (r *EngineeringRuntime) missingWorkerTools() []string {
+// missingWorkerTools resolves requirements in the selected provider's execution environment.
+func (r *EngineeringRuntime) missingWorkerTools(ctx context.Context) []string {
 	toolchain := r.deps.Toolchain
 	if len(toolchain.RequiredTools) == 0 {
 		return nil
+	}
+	if provider, ok := r.deps.Provider.(interface {
+		MissingTools(context.Context, []string) []string
+	}); ok {
+		return provider.MissingTools(ctx, toolchain.RequiredTools)
 	}
 	return CLIAgentProvider{Toolchain: toolchain}.missingTools()
 }
@@ -2434,7 +2653,7 @@ func (r *EngineeringRuntime) missingWorkerTools() []string {
 // hash chain would make a plan's state digest depend on work it does not own.
 //
 // The event identity is derived from the plan revision, the stage, the exact
-// candidate AND the attempt, so:
+// candidate, generation, operation AND the attempt, so:
 //
 //   - the same result admitted twice is ONE event, which is what makes a
 //     retried operation idempotent rather than duplicating a verdict;
@@ -2444,6 +2663,15 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	binding := state.run.Plan
 	if binding == nil || stage.assignment == nil {
 		return &ReviewerResultRefusedError{Detail: "a reviewer result was produced by a run that is not bound to a plan stage"}
+	}
+	snapshot, err := r.deps.Store.ReplayPlan(binding.PlanID)
+	if err != nil {
+		return err
+	}
+	for _, retired := range snapshot.RetiredRuns {
+		if retired == state.run.ID {
+			return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the reviewer run has been retired"}
+		}
 	}
 	plan, found, err := r.deps.Store.PlanRevision(binding.PlanID, binding.Revision)
 	if err != nil {
@@ -2479,8 +2707,8 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	}
 	event := EngineeringEvent{
 		SchemaVersion: SchemaVersion,
-		ID: fmt.Sprintf("plan-stage-reviewed-%s-r%d-%s-%s-%d",
-			binding.PlanID, binding.Revision, binding.StageID, short12(payload.Candidate), operation.Attempt),
+		ID: fmt.Sprintf("plan-stage-reviewed-%s-r%d-%s-g%d-%s-%s-%d",
+			binding.PlanID, binding.Revision, binding.StageID, binding.Generation, payload.Candidate, operation.ID, operation.Attempt),
 		PlanID: binding.PlanID, Type: EventPlanStageReviewed,
 		OccurredAt: r.deps.Clock.Now(), Payload: document,
 	}
@@ -2511,4 +2739,46 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 		return err
 	}
 	return nil
+}
+
+// executionAuthorityRevoked reports WHY this attempt's result may not be
+// admitted, or "" when it may be. It is the single admission gate, and it has
+// several causes rather than one check per cause.
+//
+// #140 established the distinction it protects: TRUTH is not AUTHORITY. A
+// producer that mutated the workspace did mutate it, and hiding that would make
+// the journal less honest - so the mutation events are written whatever this
+// returns, and what is withheld is only execution.completed, the fact that
+// makes a subject eligible to be committed, pushed and published.
+//
+// An operator's stop revokes exactly that, so it is asked here and not in a
+// cancellation check of its own. The two causes are NOT interchangeable
+// underneath, and only one of them could ever live here alone:
+//
+//   - A DEADLINE is a fact about the attempt, knowable only once the attempt
+//     ends. There is nowhere earlier it could be enforced, because until the
+//     provider returns nobody knows it overran.
+//   - CANCELLATION is a fact about the RUN, and it exists before the attempt
+//     begins. So it is primarily enforced at ACQUISITION, inside the durable
+//     count-and-lease statement, where it prevents the invocation instead of
+//     discarding its result - which is strictly stronger than anything this
+//     gate can do. What reaches here is only the attempt that was legitimately
+//     leased and then outlived the stop.
+//
+// The run is re-read DURABLY rather than taken from the pass's snapshot. That
+// is the whole point of the gate: a pass that began before the stop holds
+// exactly the stale authority this must not trust, and the boundary at which a
+// material effect becomes admissible is where durable authority is consulted.
+func (r *EngineeringRuntime) executionAuthorityRevoked(operation RunOperation) (FailureClass, error) {
+	if OperationExpired(operation, r.deps.Clock.Now()) {
+		return FailureExecutionDeadlineExceeded, nil
+	}
+	run, found, err := r.deps.Store.Run(operation.RunID)
+	if err != nil {
+		return "", err
+	}
+	if found && run.Disposition == Cancelled {
+		return FailureRunCancelled, nil
+	}
+	return "", nil
 }

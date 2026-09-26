@@ -251,7 +251,11 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	// runtime would still grant it nearly its whole budget - provenance
 	// disagreeing with the semantics it exists to carry forward.
 	elapsed := state.activeElapsed(r.deps.Clock.Now())
-	wall := int64((budgets.WallLimit - elapsed) / time.Second)
+	remainingWall := budgets.WallLimit - elapsed
+	if len(state.outstandingReviewKeys()) > 0 && remainingWall < 0 {
+		remainingWall = state.reviewContinuationRemaining(r.deps.Clock.Now())
+	}
+	wall := int64(remainingWall / time.Second)
 	if wall < 0 {
 		wall = 0
 	}
@@ -358,6 +362,34 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 	return record, &AgentHandoffRefusedError{Record: record}
 }
 
+// CANCELLATION IS MONOTONIC, AND THAT IS THE WHOLE RULE.
+//
+// A run's disposition has exactly TWO durable representations: the journal,
+// which is the authority, and the run row, which is a cache of it. Cancellation
+// is the one disposition no pass can re-derive - every other one is recomputed
+// from state on the next load, so a stale write of it is self-correcting, while
+// a stale write over a stop is not. So each representation refuses to leave
+// `cancelled`, and that is two conditions rather than a growing pile: Reduce
+// ignores a later run.waiting or run.failed, and PutRun's statement refuses to
+// replace a cancelled row. They are the same rule counted once per
+// representation, and the count is bounded by the representations.
+//
+// Everything downstream READS one of those two and needs no rule of its own.
+// AcquireOperation consults the run row inside its own compare-and-set, which
+// is where cancellation and reconciliation become one order; Supervisor.Tick
+// consults the row to build its active set; validate consults replay. The lease
+// that statement grants is the single capability every material action is
+// behind - handle has exactly one call site, immediately after Start, and Start
+// accepts only what AcquireOperation leased - so refusing the lease is refusing
+// the provider, the candidate mutation, the commit, the push and the
+// publication in one place rather than in five.
+//
+// What this does NOT do is interrupt an attempt already under way. An operation
+// leased and started before the stop runs to completion: nothing on the
+// executing path re-reads the run, and ending it early is cooperative
+// cancellation, a different mechanism from a durable condition. That boundary
+// is stated again where each condition lives.
+//
 // CancelRun records durable operator cancellation intent for one run and stops
 // its scheduling. It lives here, in the runtime, because two callers need
 // exactly one cancellation path: the `stop RUN` command and the supervisor's
@@ -372,12 +404,40 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 //  2. the run document is settled as cancelled, which is what stops the
 //     scheduler from handing this run out again.
 //  3. every operation the store still believes is active has cancellation
-//     REQUESTED on it through the scheduler's existing mechanism, which the
-//     runtime already honours. No second cancellation mechanism is introduced,
-//     and no lease another process owns is written out from under it.
+//     requested on it through the scheduler's existing mechanism, which the
+//     runtime already honours, and is then finished as cancelled. No second
+//     cancellation mechanism is introduced. A lease another process owns IS
+//     written out from under it, deliberately: the run it belongs to is
+//     terminal, so that process may not continue the operation either, and
+//     leaving the lease standing is what kept a stopped run's concurrency slot
+//     for the rest of the database's life.
+//
+// The ORDER of 2 and 3 is load-bearing and not merely tidy. A driver that is
+// already inside Reconcile decided everything about this pass from a snapshot
+// read before any of this, and nothing serializes it against a stop: the
+// supervisor's tick drives runs on their own goroutines while the control
+// endpoint answers stop-all on another. Writing the run document first is what
+// splits every concurrent acquisition cleanly in two. One that reached the
+// durable acquisition before this write is leased, and the scan below sees it
+// leased and finishes it; one that arrives after this write is refused by the
+// acquisition statement itself, which will not lease an operation whose run is
+// terminal. There is no third case FOR AN ACQUISITION, because the run document
+// and the acquisition are the same database.
+//
+// That is the boundary, and it is narrower than "stop means stop". What this
+// prevents is work being TAKEN UP after the stop; it does not interrupt an
+// attempt that has already begun. An operation acquired and started before the
+// run document was written executes to completion: Start, the operation.before
+// append and handle re-read nothing, and CancelRequested has no reader on the
+// executing path at all - Next's eligibility filter is its only one.
+// Interrupting a started attempt is cooperative cancellation, which is a
+// different mechanism and is not built here.
 //
 // It is idempotent: cancelling an already cancelled run appends nothing and
-// reports the same answer.
+// reports the same answer. It is also REPEATABLE, which is not the same thing:
+// a second stop still finishes whatever operations the first one left active,
+// because a stop whose later writes failed is exactly the case an operator
+// retries.
 func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, runID, reason string) (Outcome, error) {
 	run, found, err := store.Run(runID)
 	if err != nil {
@@ -387,33 +447,44 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 		return Outcome{}, fmt.Errorf("unknown run %q", runID)
 	}
 	outcome := Outcome{RunID: runID, Disposition: Cancelled, Reason: reason}
+	// An ALREADY cancelled run appends nothing and keeps the reason it was
+	// cancelled for - but it still falls through to the operations below.
+	//
+	// Returning here was the idempotence, and it made cancellation unretryable
+	// at the only point where retrying it matters. Every write in this function
+	// can fail on its own: a Finish that loses three compare-and-set attempts,
+	// or a busy database past its timeout, leaves a cancelled run still holding
+	// a leased operation, and stopping it again - the one thing an operator
+	// would try - short-circuited on the disposition it had already written and
+	// repaired nothing. It is also the state every database already carrying
+	// this defect is in, and those are healed by the same fall-through.
 	if run.Disposition == Cancelled {
 		outcome.Reason = run.Reason
-		return outcome, nil
-	}
-	payload, err := json.Marshal(struct {
-		Reason string `json:"reason,omitempty"`
-	}{reason})
-	if err != nil {
-		return Outcome{}, err
-	}
-	if _, err := store.AppendEvent(EngineeringEvent{
-		SchemaVersion: SchemaVersion,
-		// The operator's stated reason belongs in the PAYLOAD, where it is
-		// bounded, and not in the durable identity. `stop-all --reason <text>`
-		// and the control endpoint both carry arbitrary operator text, and an
-		// event id is a primary key that is read back forever.
-		ID:         fmt.Sprintf("%s-cancelled-%d", runID, now.UnixNano()),
-		RunID:      runID,
-		Type:       EventRunCancelled,
-		OccurredAt: now,
-		Payload:    payload,
-	}); err != nil {
-		return Outcome{}, err
-	}
-	run.Disposition, run.Reason, run.UpdatedAt = Cancelled, reason, now
-	if err := store.PutRun(run); err != nil {
-		return Outcome{}, err
+	} else {
+		payload, err := json.Marshal(struct {
+			Reason string `json:"reason,omitempty"`
+		}{reason})
+		if err != nil {
+			return Outcome{}, err
+		}
+		if _, err := store.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion,
+			// The operator's stated reason belongs in the PAYLOAD, where it is
+			// bounded, and not in the durable identity. `stop-all --reason
+			// <text>` and the control endpoint both carry arbitrary operator
+			// text, and an event id is a primary key that is read back forever.
+			ID:         fmt.Sprintf("%s-cancelled-%d", runID, now.UnixNano()),
+			RunID:      runID,
+			Type:       EventRunCancelled,
+			OccurredAt: now,
+			Payload:    payload,
+		}); err != nil {
+			return Outcome{}, err
+		}
+		run.Disposition, run.Reason, run.UpdatedAt = Cancelled, reason, now
+		if err := store.PutRun(run); err != nil {
+			return Outcome{}, err
+		}
 	}
 	operations, err := store.Operations(runID)
 	if err != nil {
@@ -423,8 +494,29 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 		if op.State != Leased && op.State != Running {
 			continue
 		}
+		// Cancellation is REQUESTED first, so a driver that is mid-flight on
+		// this operation right now still sees the operator's intent, and then
+		// the operation is FINISHED, because stopping a run has to give back
+		// what the run was holding.
+		//
+		// Requesting alone made the loss permanent. The run-driving slot is the
+		// durable lease, and the lease is released by whoever finishes the
+		// operation - but the run is terminal now, the validator refuses every
+		// operation on a terminal run, and Next skips an operation with
+		// cancellation requested, so no pass of this run will ever reach it
+		// again. The flag had no reader left and the slot had no releaser,
+		// which is why a stopped run went on refusing a sibling forever.
 		if _, err := scheduler.RequestCancel(op.ID); err != nil {
 			return Outcome{}, err
+		}
+		if _, err := scheduler.Finish(op.ID, OperationCancelled); err != nil {
+			// A driver that finished it first between those two writes has
+			// already released the slot, which is the whole point. Anything
+			// else is a real failure.
+			stored, _, found, readErr := store.Operation(op.ID)
+			if readErr != nil || !found || stored.State == Leased || stored.State == Running {
+				return Outcome{}, err
+			}
 		}
 	}
 	return outcome, nil

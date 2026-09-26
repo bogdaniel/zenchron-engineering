@@ -368,10 +368,39 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		return ExecutionResult{}, err
 	}
 	maxIterations, maxToolCalls, noProgressLimit, timeout := p.bounds()
-	if request.Budgets.WallLimit > 0 && request.Budgets.WallLimit < timeout {
-		timeout = request.Budgets.WallLimit
+	// THE INSTANT WINS, exactly as it does on the CLI path. Three sources can
+	// bound this invocation and the EARLIEST of them is the only honest answer:
+	// the provider's own default, a wall limit stated as a duration, and the
+	// operation's durable deadline.
+	//
+	// Reading only the duration was a hole with the shape of the defect this
+	// repair exists to close. `executionWallBound` returns the operation's
+	// REMAINING authority, and remaining clamps to zero when it is spent - so
+	// `WallLimit == 0` says both "no budget was stated" and "no authority is
+	// left", and a `> 0` guard reads the second as the first. An operation that
+	// had already run out of time therefore fell back to the provider's own
+	// ten-minute default and spent it on inference and brokered tool calls.
+	now := time.Now()
+	bound := now.Add(timeout)
+	if limit := request.Budgets.WallLimit; limit > 0 && now.Add(limit).Before(bound) {
+		bound = now.Add(limit)
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	if request.Deadline != nil && request.Deadline.Before(bound) {
+		bound = *request.Deadline
+	}
+	// Refused BEFORE any inference request, for the same reason an unenforceable
+	// cost ceiling is: an invocation whose authority has already ended does not
+	// get to spend a cheaper-looking amount of it. A context that is born
+	// expired would arrive at the same place by failing the first exchange, but
+	// it would arrive there as a transport error rather than as the typed fact
+	// that this operation is out of time.
+	if !bound.After(now) {
+		return ExecutionResult{}, &ProviderStopError{
+			Reason: StopDeadlineExceeded,
+			Detail: "the operation's execution authority ended before this invocation began; refusing before any provider inference",
+		}
+	}
+	ctx, cancel := context.WithDeadline(ctx, bound)
 	defer cancel()
 
 	surface := ToolSurface{Broker: p.Broker, MaxResultBytes: p.MaxResultBytes}
@@ -588,4 +617,17 @@ func (p OpenAIProvider) call(ctx context.Context, key string, body []byte) (open
 		return decoded, httpResponse.StatusCode, raw, fmt.Errorf("provider error %s", decoded.Error.Type)
 	}
 	return decoded, httpResponse.StatusCode, raw, nil
+}
+
+// MissingTools probes the same pinned container and PATH used by brokered commands.
+// Names are positional arguments, never interpolated into shell source.
+func (p OpenAIProvider) MissingTools(ctx context.Context, required []string) []string {
+	var missing []string
+	for _, name := range required {
+		_, err := p.Broker.Sandbox.probeToolchain(ctx, `command -v "$1"`, []string{name})
+		if err != nil {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }

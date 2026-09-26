@@ -214,6 +214,11 @@ observed auth mode and how it was observed
 whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
 the security-relevant argv, with the prompt replaced by its digest
+the inactivity window and the progress mode that measured it
+  (byte_output, or structured_claude_events)
+for Claude Code: accepted structured progress events, main-thread tool calls
+  still open at exit, permission denials in the final result, and malformed
+  or oversized stream lines - counts only, never provider text
 ```
 
 The prompt is excluded from the durable record and referenced by digest: it
@@ -226,6 +231,26 @@ Codex, Claude Code and Qwen expose a flag that keeps a candidate repository's ow
 not. Where it is false the runtime-owned trusted instruction text still frames
 everything in the workspace as data, but the adapter cannot prove the file was
 never read, so it does not claim to.
+
+### Claude Code runs the structured protocol
+
+Claude Code is invoked with `--print --output-format stream-json --verbose`, in
+both its editing and its `plan` mode, and without `--include-partial-messages`
+or `--bare`. Every one of those flags is probed against the installed binary
+first - `stream-json` must be a choice of `--output-format` itself, not a word
+in another option's description - and a CLI that does not advertise them is
+unavailable rather than run in text mode. `--safe-mode` is probed the same way:
+it is a capability of the installed CLI even where the public CLI reference
+does not list it. The structured events are what supervise the inactivity bound
+(see [configuration.md](configuration.md)), so an executor that cannot tee
+stdout to the parser is refused before Claude runs. A run that exits 0 without
+a final `result`, or with `is_error`, fails closed.
+
+The invocation also receives `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`, three
+quarters of the configured inactivity window, so Claude's own background wait
+gives up first. It is the one non-secret variable a spec adds to the
+allowlisted environment; it is not help-probeable, so whether the installed CLI
+honours it is live-acceptance evidence rather than a proven capability.
 
 ## Choosing an agent for a run
 
@@ -294,3 +319,143 @@ provider's name.
 - [`supervisor.md`](supervisor.md) — what drives them
 - [`configuration.md`](configuration.md) — the full configuration surface
 - [`../ROADMAP.md`](../ROADMAP.md) — agents versus future engineering roles
+
+## Candidate Git is brokered
+
+A provider may create and modify candidate work. It has **no authority to
+destructively discard it**.
+
+That law exists because of a measured cost. During live dogfood a coding CLI
+twice reached for habitual recovery — `git checkout -- <path>` against a dirty
+runtime-owned candidate workspace — and erased its own uncommitted
+implementation edits. No governed candidate commit was lost, because the runtime
+owns those; what was lost was the expensive part, the reasoning already
+performed, and the worker then spent more subscription capacity reconstructing
+it.
+
+Every native CLI invocation therefore runs under a brokered Git boundary:
+
+```text
+provider runs git
+      ↓
+runtime-owned shim, first on the worker search path
+      ↓
+classify the argv
+      ↓
+discard family  → refused, recorded, diagnostic to the provider
+everything else → executed as the real git
+```
+
+The refused family is the operations whose purpose or effect is to throw
+uncommitted work away: `checkout`, `switch`, `restore`, `clean`,
+`reset --hard`/`--merge`, `stash` (push/save/clear/drop), forced `git rm`,
+`checkout-index`, `sparse-checkout`, `worktree`, `read-tree -u`, and
+`submodule deinit`. Read-only and ordinary engineering Git — `status`, `diff`,
+`log`, `show`, `add`, `apply`, `commit` — is passed through untouched. This is a
+destruction guard, not a Git allowlist.
+
+**Aliases are resolved before classification.** A worker could otherwise author
+its own bypass out of two permitted commands — `git config alias.co checkout`,
+then `git co -- file` — because real Git expands aliases *after* the broker has
+authorized the verb it was spelled with, and a checked-out `.git/config` can
+carry one too. The lookup runs under the same configuration the execution will
+use, including leading `-c`/`-C` options, so `git -c alias.x=reset\ --hard x` is
+resolved too. Chains are followed, cycles, shell aliases (`!…`), malformed
+values and expansions that will not terminate all **fail closed** — "I could not
+tell what this would do" is not "this is safe", and nothing executes alias
+content to find out what it means. An alias whose name collides with a real Git
+command is ignored, exactly as Git ignores it, so `git status` is never refused
+because a config file once mentioned it. A resolved command is executed in its
+resolved form, so the lookup and the execution cannot disagree.
+
+**A destructive command is refused whether or not the workspace is dirty.** That
+is the smaller law and the stronger one: permitting it on an observably clean
+tree would require checking dirtiness and then executing, which is a race the
+provider's own process can win by writing a file in between. The decision is
+made from the argv, which cannot change. Dirtiness is still *observed*, so the
+diagnostic and the durable record can say what was at stake, but it cannot
+change the answer.
+
+### Who asked
+
+A refusal names the operation, the resource and, since #259, the actor that
+directly originated it:
+
+```text
+model_tool           the model's own tool call
+provider_runtime     the provider's machinery — repository probing, checkpointing, restore
+zenchron_runtime     this controller
+workload_subprocess  a program running inside the workload — a test binary, a build system
+unknown              the runtime could not establish it
+```
+
+The origin is derived from execution topology — the distance between the broker
+and the controller process that prepared the guard — and never from the shape of
+the command. Reading intent out of argv is how a run's 63 refusals were first
+reported as model stubbornness when the model had issued none of them: 51 came
+from the candidate's own test binaries and the rest from the provider probing
+its repository.
+
+Two properties make the answer usable. **Causation is not provenance**: a model
+that runs `go test ./...` causes the test binaries that follow, and the commits
+those binaries attempt are recorded as `workload_subprocess`, never promoted to
+`model_tool` because a model-originated process is somewhere in their ancestry.
+And **the origin changes no decision** — it is recorded beside an answer that was
+already given, an `unknown` origin is never more permissive than a known one, and
+a provider kind whose topology has not been measured yields `workload_subprocess`
+or `unknown` rather than a guess at the model.
+
+### Why an absolute path does not get around it
+
+Two mechanisms, and the second is the one that matters. The guard directory is
+first on the worker's search path, so a bare `git` — what a model types —
+resolves to the broker. And the worker's environment carries a brokered
+`GIT_DIR` naming a path that is not a repository, so Git performs no discovery
+at all: `/usr/bin/git reset --hard`, `sh -c '/usr/bin/git clean -fd'` and
+`command /usr/bin/git restore .` fail, naming the brokered path in Git's own
+error. The shim is the one caller that clears the sentinel.
+
+**What is not claimed.** These workers are `operator_trusted`: they run under
+the operator's own account. A worker that deliberately sets out to defeat the
+runtime can both go around the name *and* clear the variable — `unset GIT_DIR;
+/usr/bin/git reset --hard` reaches the repository. No in-process mechanism
+closes that while one account owns both sides; it is the same residual this
+trust mode already names, and it is why `RequireProtectedIsolation` refuses
+these adapters for protected work. What is closed is the whole of the observed
+failure: habitual destructive recovery, in every spelling that does not
+dismantle the runtime's own environment.
+
+**A controller that cannot install the boundary dispatches nothing.** The
+production composition always intends the guard, so a broker executable it
+cannot resolve is a controller unable to enforce its own law rather than a
+composition that chose not to. That is refused before the capability probe and
+before any process, as `candidate_guard_unavailable` — a typed wait an operator
+clears by repairing the installation, never a provider fault, because nothing
+about the worker, the work, the account or the network is wrong. A deliberately
+unguarded composition — a unit test, a probe, an embedder driving one
+invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
+
+The boundary grants the worker no new command surface. It adds no tool to any
+provider's allowlist, so a stage that was obliged nothing is still obliged
+nothing.
+
+### What an operator sees
+
+A refusal is an **observation, not a failure** — the invocation that carried it
+may well have succeeded, which is the case worth reporting, because it is where
+expensive reasoning was nearly lost and was not. `autonomy status` prints it
+separately from any execution diagnostic:
+
+```text
+candidate discard refused   1 destructive Git operation(s) refused; dirty candidate work preserved: git checkout -- <1 operand(s)> (2 dirty candidate path(s) preserved)
+```
+
+It is never reported as provider quota, unavailability, a stall, an assurance
+failure or an unknown: the runtime knew exactly what it refused.
+
+The runtime's own candidate Git is unaffected. `RepositoryGitRunner` and
+`GitRunner` build their environment from scratch and resolve Git from their own
+trusted search path, so they never see the guard's path or its sentinel —
+candidate creation, inspection, staging, runtime-owned commits, branches and
+authorized pushes all behave exactly as before. The restriction is on the
+execution provider's authority, not on Zenchron's candidate machinery.

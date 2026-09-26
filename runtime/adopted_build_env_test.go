@@ -2,8 +2,12 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAdoptedBuildEnvironmentIsStatedNotInherited is defect W.
@@ -114,5 +118,96 @@ func TestAdoptedBuildRefusesAnUnpinnedEnvironment(t *testing.T) {
 				t.Fatalf("refusal does not explain %q: %v", tc.says, err)
 			}
 		})
+	}
+}
+
+// dockerLifecycleExecutor models a well-behaved daemon through the whole
+// create/start/inspect/wait/rm sequence runContainer drives, and fails only
+// the Nth `docker start --attach`, with the compiler's own stderr attached -
+// exactly what a real `go build` failure looks like once the container has
+// actually run. failOnStart counts container starts across the WHOLE build,
+// which includes the toolchain probe runAdoptedBuild issues before compiling.
+type dockerLifecycleExecutor struct {
+	failOnStart int
+	starts      int
+	stderr      string
+}
+
+func (f *dockerLifecycleExecutor) LookPath(string) error { return nil }
+
+func (f *dockerLifecycleExecutor) Run(_ context.Context, _ string, args []string, _ string, _ []string, _ time.Duration) (CommandOutput, error) {
+	if len(args) >= 2 && args[0] == "start" && args[1] == "--attach" {
+		f.starts++
+		if f.starts == f.failOnStart {
+			return CommandOutput{Stderr: []byte(f.stderr)}, errors.New("exit status 1")
+		}
+	}
+	return CommandOutput{}, nil
+}
+
+func (f *dockerLifecycleExecutor) Output(_ context.Context, _ string, args []string, _ string, _ []string, _ time.Duration) (CommandOutput, error) {
+	if len(args) >= 5 && args[len(args)-5] == "image" && args[len(args)-4] == "inspect" {
+		return CommandOutput{Stdout: []byte(args[len(args)-1] + "\n")}, nil
+	}
+	if len(args) >= 4 && args[len(args)-4] == "inspect" && args[len(args)-3] == "--format" && args[len(args)-2] == "{{.State.Running}}" {
+		return CommandOutput{Stdout: []byte("false\n")}, nil
+	}
+	return CommandOutput{Stdout: []byte("daemon-test-id\n")}, nil
+}
+
+// TestRunAdoptedBuildSurfacesCompilerStderr is the fix for the deferred
+// finding: a deterministic build failure used to collapse to the bare
+// `exit status 1` runContainer's own error carries, with the compiler's own
+// explanation - captured in CommandOutput.Stderr all along - discarded. An
+// operator refused with no cause guesses instead of reading the reason.
+func TestRunAdoptedBuildSurfacesCompilerStderr(t *testing.T) {
+	cache := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cache, "module.info"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	const compilerStderr = "./cmd/zenchron-engineering/main.go:12:2: undefined: doesNotExist\n"
+	fake := &dockerLifecycleExecutor{
+		// The toolchain probe (`go version`) is the first container started;
+		// the build itself is the second, and that is the one made to fail.
+		failOnStart: 2,
+		stderr:      compilerStderr,
+	}
+	spec := AdoptedBuildSpec{
+		SourceDir: t.TempDir(), Output: filepath.Join(t.TempDir(), "zenchron-engineering"),
+		GOOS: "linux", GOARCH: "amd64", Kind: ControllerAdopted, Version: "v",
+		Revision: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40),
+		Sandbox:  DockerSandbox{Image: "sha256:pinned", Executor: fake, StateDir: t.TempDir()},
+		CacheDir: cache,
+	}
+	_, err := runAdoptedBuild(context.Background(), spec)
+	if err == nil {
+		t.Fatal("a failed compile was reported as a success")
+	}
+	if !strings.Contains(err.Error(), "undefined: doesNotExist") {
+		t.Fatalf("the compiler's own stderr did not reach the refusal: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("the underlying process error was dropped from the refusal: %v", err)
+	}
+}
+
+// EVERY DOCKER PHASE WHOSE FAILURE DETERMINES THE RESULT, not only the build.
+//
+// The toolchain probe runs the same pinned image and its failure refuses the
+// adopted build just as finally: an image that cannot run, a platform
+// mismatch, a daemon that said no. Reporting "exit status 125" and discarding
+// what the daemon actually said is the defect this issue is about, one call up.
+func TestTheToolchainProbePreservesItsDiagnostic(t *testing.T) {
+	detail := compilerFailureDetail(CommandOutput{
+		Stderr: []byte("docker: no matching manifest for linux/arm64 in the manifest list entries\n"),
+	})
+	if !strings.Contains(detail, "no matching manifest") {
+		t.Fatalf("the probe's own account was discarded: %q", detail)
+	}
+	if got := compilerFailureDetail(CommandOutput{Stdout: []byte("go version go1.25.14\n")}); got != "go version go1.25.14" {
+		t.Fatalf("stdout is not used when stderr is silent: %q", got)
+	}
+	if got := compilerFailureDetail(CommandOutput{}); got != "" {
+		t.Fatalf("a sandbox that produced nothing invented %q", got)
 	}
 }

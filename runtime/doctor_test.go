@@ -122,6 +122,18 @@ type doctorForge struct {
 	// than inferring distinctness from the credential mode, so a fixture that
 	// leaves it empty models an environment that cannot answer the question.
 	viewer GitHubActor
+	// permission is what every actor holds on the repository. Doctor asks for
+	// the OPERATOR's, because a publication identity distinct from the human is
+	// only half of a working review loop; the other half is that the human
+	// clears the admission threshold.
+	permission GitHubPermission
+}
+
+func (f doctorForge) RepositoryPermission(context.Context, GitHubRepo, string) (GitHubPermission, error) {
+	if f.permission == "" {
+		return PermissionUnresolved, &GitHubAuthError{Detail: "no permission configured"}
+	}
+	return f.permission, nil
 }
 
 func (f doctorForge) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
@@ -183,15 +195,17 @@ func doctorGovernanceFixture(grantAtUnknown bool) (domain.ProjectModel, domain.E
 }
 
 type doctorFixture struct {
-	t          *testing.T
-	root       string
-	stateDir   string
-	cacheDir   string
-	repoRoot   string
-	configPath string
-	credential string
-	toolDir    string
-	input      DoctorInput
+	t              *testing.T
+	root           string
+	stateDir       string
+	cacheDir       string
+	repoRoot       string
+	configPath     string
+	credential     string
+	toolDir        string
+	controllerRoot string
+	entrypointBin  string
+	input          DoctorInput
 }
 
 // newDoctorFixture builds a fully healthy environment. Each test then breaks
@@ -200,16 +214,18 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	t.Helper()
 	root := t.TempDir()
 	f := &doctorFixture{
-		t:          t,
-		root:       root,
-		stateDir:   filepath.Join(root, "state"),
-		cacheDir:   filepath.Join(root, "cache"),
-		repoRoot:   filepath.Join(root, "repo"),
-		configPath: filepath.Join(root, "config.json"),
-		credential: filepath.Join(root, "provider-credential"),
-		toolDir:    filepath.Join(root, "toolchain"),
+		t:              t,
+		root:           root,
+		stateDir:       filepath.Join(root, "state"),
+		cacheDir:       filepath.Join(root, "cache"),
+		repoRoot:       filepath.Join(root, "repo"),
+		configPath:     filepath.Join(root, "config.json"),
+		credential:     filepath.Join(root, "provider-credential"),
+		toolDir:        filepath.Join(root, "toolchain"),
+		controllerRoot: filepath.Join(root, "controller"),
+		entrypointBin:  filepath.Join(root, "bin"),
 	}
-	for _, dir := range []string{f.stateDir, f.cacheDir, f.repoRoot, f.toolDir} {
+	for _, dir := range []string{f.stateDir, f.cacheDir, f.repoRoot, f.toolDir, f.entrypointBin} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -231,6 +247,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	}
 	f.writeOperatorConfig(nil)
 	f.writeRepositoryConfig(`{"budgets":{"wall_limit_seconds":300}}`)
+	f.installCanonicalEntrypoint()
 
 	model, policy := doctorGovernanceFixture(true)
 	executor := doctorExecutor{available: true}
@@ -275,7 +292,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// A healthy environment can also say WHO it publishes as: doctor reports
 		// the resolved account rather than inferring distinctness from the
 		// credential mode, so the fixture has to supply one.
-		GitHub: doctorForge{viewer: GitHubActor{Login: "zenchron-runtime", ID: 4242}, result: DiscoveryResult{
+		GitHub: doctorForge{viewer: GitHubActor{Login: "zenchron-runtime", ID: 4242}, permission: PermissionAdmin, result: DiscoveryResult{
 			Repo:      GitHubRepo{Owner: "acme", Name: "widgets"},
 			Label:     DefaultDiscoveryLabel,
 			Pages:     1,
@@ -289,12 +306,77 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// fixture detail to paper over, which is why the healthy fixture is the
 		// configuration that does not have it.
 		GitHubCredentialMode: GitHubCredentialToken,
-		OperatorConfigPath:   f.configPath,
-		RepositoryRoot:       f.repoRoot,
-		ProjectModel:         model,
-		Policy:               policy,
+		Governance:           doctorGovernanceObserver{rulesets: []TrustedMainRuleset{{BypassActorsKnown: true}}},
+		// ...and it can also say who the HUMAN is, through the operator's own
+		// `gh` login. Doctor compares the two accounts: a separate credential
+		// that turns out to be the same account is the collision it exists to
+		// report, and it cannot see that from one half.
+		OperatorGitHub:     doctorForge{viewer: GitHubActor{Login: "bogdaniel", ID: 7}},
+		OperatorConfigPath: f.configPath,
+		RepositoryRoot:     f.repoRoot,
+		ProjectModel:       model,
+		Policy:             policy,
+		// A healthy environment has the ONE canonical PATH entrypoint (#319):
+		// a symlink chain through controllerRoot/current down to the adopted
+		// generation, and nothing else on PATH shadowing it.
+		ControllerRoot:    f.controllerRoot,
+		EntrypointPathEnv: f.entrypointBin,
 	}
 	return f
+}
+
+// installCanonicalEntrypoint builds the real #319 chain the healthy fixture
+// needs: an adopted generation under f.controllerRoot, the "current" stable
+// pointer aimed at it, and a single PATH entry (f.entrypointBin) holding a
+// symlink through "current" - exactly what `controller install` establishes
+// and DiagnoseEntrypoint must recognize as canonical.
+func (f *doctorFixture) installCanonicalEntrypoint() {
+	f.t.Helper()
+	generation := filepath.Join(f.controllerRoot, "main-fixture")
+	if err := os.MkdirAll(generation, 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	binary := filepath.Join(generation, EntrypointExecutableName)
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	current := filepath.Join(f.controllerRoot, StableEntrypointName)
+	if err := os.Symlink(generation, current); err != nil {
+		f.t.Fatal(err)
+	}
+	canonicalTarget := filepath.Join(current, EntrypointExecutableName)
+	entry := filepath.Join(f.entrypointBin, EntrypointExecutableName)
+	if err := os.Symlink(canonicalTarget, entry); err != nil {
+		f.t.Fatal(err)
+	}
+	// AND THE CHAIN IS ADOPTED, not merely present. A "current" pointer with
+	// no durable authority behind it is a symlink nobody sanctioned, which the
+	// installer refuses and doctor reports - so the healthy fixture records
+	// the authority that makes this generation the governing one, exactly as
+	// adoption or succession would.
+	store, err := OpenSQLiteOperationStore(f.stateDir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	measured, err := measureExecutable(binary)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	moved, err := store.ReadoptController(ControllerReadoption{
+		ID: "readoption-fixture",
+		Binding: ControllerBinding{Controller: "main", Build: &ControllerBuild{
+			Kind: ControllerAdopted, BinarySHA256: measured}},
+		Provenance: AdoptedBuildProvenance{OutputPath: binary, BinarySHA256: measured},
+		Reason:     "the healthy fixture adopts the generation its entrypoint points at",
+		RecordedAt: time.Now(),
+	}, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if !moved {
+		f.t.Fatal("the fixture could not establish durable controller authority")
+	}
 }
 
 func (f *doctorFixture) writeOperatorConfig(mutate func(map[string]any)) {
@@ -385,10 +467,11 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
 		"assurance.boundaries", "assurance.toolchain", "assurance.dependency_cache", "assurance.semantic",
 		"assurance.dependency_preparation",
-		"github.credential", "github.publication_identity", "github.identity", "github.rate_limit",
+		"github.credential", "github.publication_identity", "github.governance", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
 		"controller.build",
+		"install.entrypoint", "install.path_shadowing",
 		"agent.openai", "agents.usable", "provider.toolchain",
 		"supervisor.endpoint", "state.storage",
 	}
@@ -695,6 +778,59 @@ func TestDoctorWarnsWhenThePredictedContractCannotCompile(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.input.ProjectModel = domain.ProjectModel{}
 	requireCheck(t, f.run(), "governance.publication_scope", DoctorWarn, "could not be compiled")
+}
+
+// ---------------------------------------------------------------------------
+// PATH entrypoint (#319)
+// ---------------------------------------------------------------------------
+
+func TestDoctorWarnsWhenNoEntrypointIsOnPath(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.input.EntrypointPathEnv = t.TempDir()
+	requireCheck(t, f.run(), "install.entrypoint", DoctorWarn, "controller install")
+}
+
+func TestDoctorFailsWhenTheResolvedEntrypointIsADetachedCopy(t *testing.T) {
+	f := newDoctorFixture(t)
+	entry := filepath.Join(f.entrypointBin, EntrypointExecutableName)
+	if err := os.Remove(entry); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte("stale copy"), 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	requireCheck(t, f.run(), "install.entrypoint", DoctorFail, "not the canonical entrypoint")
+}
+
+// A stale executable earlier on PATH must win the diagnosis, not a healthy
+// one that happens to sit further along - exactly the case #319 says must
+// never render as a green installation.
+func TestDoctorFailsAndWarnsWhenAStaleEntrypointShadowsTheCanonicalOne(t *testing.T) {
+	f := newDoctorFixture(t)
+	staleDir := f.t.TempDir()
+	stale := filepath.Join(staleDir, EntrypointExecutableName)
+	if err := os.WriteFile(stale, []byte("stale copy"), 0o700); err != nil {
+		f.t.Fatal(err)
+	}
+	f.input.EntrypointPathEnv = staleDir + string(os.PathListSeparator) + f.entrypointBin
+
+	report := f.run()
+	requireCheck(t, report, "install.entrypoint", DoctorFail, stale)
+	requireCheck(t, report, "install.path_shadowing", DoctorWarn, filepath.Join(f.entrypointBin, EntrypointExecutableName))
+}
+
+func TestDoctorWarnsOnMissingControllerRootOrStateDir(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.input.ControllerRoot = ""
+	report := f.run()
+	requireCheck(t, report, "install.entrypoint", DoctorWarn, "controller root")
+	requireCheck(t, report, "install.path_shadowing", DoctorWarn, "controller root")
+
+	f = newDoctorFixture(t)
+	f.input.StateDir = ""
+	report = f.run()
+	requireCheck(t, report, "install.entrypoint", DoctorWarn, "state directory")
+	requireCheck(t, report, "install.path_shadowing", DoctorWarn, "state directory")
 }
 
 // ---------------------------------------------------------------------------

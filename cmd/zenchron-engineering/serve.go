@@ -60,18 +60,111 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
-	// The control endpoint is opened BEFORE any work is driven, so a second
-	// supervisor is refused before it starts competing for leases rather than
-	// after.
+	// AS A SUCCESSOR, THIS PROCESS WAITS FIRST. It announces what it is,
+	// blocks until the predecessor says the role has been released, and only
+	// then does what every serve does. Nothing above this point took anything,
+	// which is what makes an abandoned successor free.
+	var handshake *successorHandshake
+	if flags.SuccessorOf != "" {
+		handshake, err = openSuccessorHandshake(flags.SuccessorOf)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		binding, err := built.controllerBinding()
+		if err != nil {
+			handshake.fail(err)
+			return runtime.ExitInvalid, err
+		}
+		if err := handshake.announce(binding); err != nil {
+			return runtime.ExitInvalid, err
+		}
+		// While it waits, it answers one question: can this build continue
+		// every live run? The predecessor asks once the state has stopped
+		// moving, and the answer is what decides whether the role changes
+		// hands at all.
+		if err := handshake.serveUntilProceed(built.decideSuccession); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
+
+	// THE CONTROLLER ROLE IS TAKEN FIRST, and it is what makes this process the
+	// controller. Binding the control socket used to serve that purpose - a
+	// second supervisor failed on the address - which made the COMMUNICATION
+	// PATH the ownership mechanism: transferring ownership would have meant
+	// transferring a socket, and a leftover socket file is a fact about a
+	// directory rather than about a process. The role is an exclusive advisory
+	// lock the kernel releases when its holder dies, so there is no stale state
+	// to interpret and nothing to clean up. See controller_role.go.
+	role, err := runtime.AcquireControllerRole(built.config.StateDir)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer func() { _ = role.Release() }()
+	built.role = role
+
+	// The control endpoint is opened before any work is driven, so an operator
+	// can reach a supervisor that is starting up. It proves nothing about
+	// ownership; the role above does that.
 	listener, err := runtime.ListenControl(built.config.StateDir)
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
 	defer listener.Close()
 
-	supervisor, err := built.supervisor(repositories)
+	// AN INTERRUPTED TRANSITION IS RESOLVED BEFORE ANYTHING ELSE. A crash
+	// between a prepared transition and its activation leaves a durable record
+	// in flight, and a controller that came back and simply served left it
+	// there forever - which refuses every later attempt at the same transition
+	// and wedges automatic upgrades permanently. The resolver decides; this
+	// only asks it. See #288.
+	// A CONFIGURATION THIS CONTROLLER CANNOT CROSS IS REFUSED BEFORE SERVING.
+	// Serving here would mean every upgrade attempt passes the point of no
+	// return and then fails, which is how the incident that created
+	// `controller re-adopt` presented. A successor started by its predecessor
+	// is exempt: it was composed by a process that already checked, and the
+	// transition it is performing is the answer.
+	if flags.SuccessorOf == "" {
+		if err := built.refuseAConfigurationItCannotCross(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
+	inflight, err := built.resolveInterruptedHandoff(flags.SuccessorOf)
 	if err != nil {
 		return runtime.ExitInvalid, err
+	}
+
+	supervisor, err := built.supervisor(repositories, flags.SuccessorOf != "")
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	// CONTROLLER MAINTENANCE IS PART OF SERVING, not an optional extra. Without
+	// this the loop exists and never runs, which is the same as not existing
+	// while looking like it does.
+	if err := built.installControllerReconciler(supervisor, role); err != nil {
+		return runtime.ExitInvalid, err
+	}
+	// AUTOMATIC SUCCESSION IS PART OF SERVING TOO, for a controller that can
+	// succeed itself. A controller that cannot - unattested, unpublished, or
+	// without the credential that observes the trust root - serves exactly as
+	// before and says on the banner why it will not upgrade.
+	upgrading, err := built.installControllerUpgrade(supervisor, role, listener)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+
+	// THE TRANSITION IS COMPLETED BEFORE ANY WORK IS DRIVEN. Acquiring the
+	// role made this process the controller; it does not make it the ACTIVATED
+	// GENERATION, and until the durable record says so there is nothing it may
+	// serve. Every check that establishes it lives in the runtime and refuses
+	// on its own terms - this is the call, not the decision.
+	if handshake != nil {
+		if err := built.activateAsSuccessor(supervisor, role, flags.SuccessorOf); err != nil {
+			handshake.fail(err)
+			return runtime.ExitFailed, err
+		}
+		if err := handshake.active(); err != nil {
+			return runtime.ExitFailed, err
+		}
 	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -95,15 +188,30 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	}()
 
 	fmt.Fprintf(stdout, "zenchron-engineering serve\n")
+	fmt.Fprintf(stdout, "  generation        %s\n", runningGeneration())
 	fmt.Fprintf(stdout, "  state directory   %s\n", built.config.StateDir)
+	fmt.Fprintf(stdout, "  controller role   %s\n", role.Path())
 	fmt.Fprintf(stdout, "  control endpoint  %s\n", listener.Path())
 	fmt.Fprintf(stdout, "  mechanism         %s\n", runtime.ControlEndpointMechanism)
 	fmt.Fprintf(stdout, "  agents            %s (default %s)\n", strings.Join(built.agents.IDs(), ", "), built.agents.Default())
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
+	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
+	fmt.Fprintf(stdout, "  transitions       %s\n", inflight)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
 		_ = writeJSON(stdout, report)
+		// A SUPERSEDED CONTROLLER STOPS. The launch passed the point of no
+		// return, so this process has given up the role whatever happened
+		// next, and a supervisor that kept passing would be scheduling work it
+		// has no authority to schedule. Shutting down is the same unwind a
+		// signal performs: in-flight work is cancelled through the
+		// cancellation the providers honour, and no run is journalled as
+		// cancelled.
+		if report.Upgrade != nil && report.Upgrade.Superseded() {
+			fmt.Fprintf(stdout, "%s\n", report.Upgrade.Describe())
+			stopSignals()
+		}
 	})
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -117,6 +225,28 @@ func repositoryNames(repositories []runtime.GitHubRepo) []string {
 		names = append(names, repo.String())
 	}
 	return names
+}
+
+// runningGeneration is which build is serving, for the startup banner.
+//
+// The banner named the role lock, the endpoint, the agents and the
+// repositories, and not the one thing that changes when a controller replaces
+// itself. An operator watching a succession could see everything about the
+// process except which generation it was.
+//
+// An identity that cannot be established is reported as such rather than
+// omitted: a missing line reads as "no generation", and the honest statement is
+// that this process could not measure itself.
+func runningGeneration() string {
+	self, err := controllerSelf()
+	switch {
+	case err != nil:
+		return "unknown (" + err.Error() + ")"
+	case self.Unattested:
+		return "unattested build"
+	default:
+		return fmt.Sprintf("%s (%s)", self.Build.Version, shortVersion(self.Build.SourceRevision))
+	}
 }
 
 // discoveryDescription states the intake policy plainly, because "an issue
@@ -195,7 +325,7 @@ func (c *composition) governedRepositories(flags autonomyFlags) ([]runtime.GitHu
 // supervisor wires the persistent runtime. The forge is wrapped so every run
 // in one repository shares one observation stream instead of each polling
 // independently.
-func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Supervisor, error) {
+func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork bool) (*runtime.Supervisor, error) {
 	c.forge = runtime.NewMultiplexedForge(c.forge, runtime.RealClock{})
 	settings, err := c.config.WatchSettings()
 	if err != nil {
@@ -224,18 +354,30 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo) (*runtime.Su
 	if err != nil {
 		return nil, err
 	}
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
-		Store:             c.store,
-		Plans:             plans,
-		Clock:             runtime.RealClock{},
-		Owner:             c.owner,
-		Liveness:          runtime.NewLockOwnerLiveness(c.config.StateDir),
-		StateDir:          c.config.StateDir,
-		Repositories:      repositories,
-		MaxConcurrentRuns: settings.MaxConcurrentRuns,
-		PollInterval:      settings.PollInterval,
-		Discovery:         discovery,
-		Agents:            c.agents,
+		Store: c.store,
+		// A SUCCESSOR STARTS SHUT. It admits work when the durable record says
+		// it is the activated generation and not a moment earlier; a
+		// supervisor that opened at construction would be serving beside the
+		// predecessor that has not yet let go.
+		WorkAdmissionWithheld: withholdWork,
+		Plans:                 plans,
+		Clock:                 runtime.RealClock{},
+		Owner:                 c.owner,
+		Liveness:              runtime.NewLockOwnerLiveness(c.config.StateDir),
+		StateDir:              c.config.StateDir,
+		Repositories:          repositories,
+		MaxConcurrentRuns:     ceiling,
+		PollInterval:          settings.PollInterval,
+		Discovery:             discovery,
+		Agents:                c.agents,
+		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
+			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
+		},
 		Runtime: func(repo runtime.GitHubRepo, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
 			return c.engineFor(runtime.RepositoryTarget{
 				Identity:      repo.String(),
@@ -273,6 +415,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	switch request.Command {
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
+	case runtime.ControlCommandControllerSnapshot:
+		// READ-ONLY, and one coherent observation rather than three reads: the
+		// role and the gate move together during a drain, so sampling them
+		// separately could report a pair that never existed.
+		return controlOK(c.controllerSnapshot(supervisor))
 	case runtime.ControlSubmit:
 		outcome, err := supervisor.Submit(ctx, request)
 		if err != nil {
@@ -280,7 +427,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		}
 		return controlOK(outcome)
 	case runtime.ControlStatus:
-		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, c.maxConcurrentRuns(), time.Now().UTC())
+		ceiling, err := c.maxConcurrentRuns()
+		if err != nil {
+			return controlError(err)
+		}
+		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, time.Now().UTC())
 		if err != nil {
 			return controlError(err)
 		}
@@ -525,12 +676,23 @@ func controlError(err error) runtime.ControlResponse {
 	return runtime.ControlResponse{Error: err.Error()}
 }
 
-func (c *composition) maxConcurrentRuns() int {
+// maxConcurrentRuns is the operator's effective run ceiling, resolved in ONE
+// place. The supervisor bounds its goroutines by it, the fleet view advertises
+// it, and every engine the composition builds enforces it durably through its
+// scheduler; reading it from three different derivations is how the advertised
+// number and the enforced number came to disagree.
+//
+// It returns the resolution error rather than a fallback. Unresolvable watch
+// settings are refused by operator validation before any of these callers runs,
+// so the branch is unreachable today - but every one of them is in a position
+// to report the error, and a function four callers now trust to state the
+// ceiling must not be able to invent one.
+func (c *composition) maxConcurrentRuns() (int, error) {
 	settings, err := c.config.WatchSettings()
 	if err != nil {
-		return 1
+		return 0, err
 	}
-	return settings.MaxConcurrentRuns
+	return settings.MaxConcurrentRuns, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -611,7 +773,11 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	}
 	defer built.release()
 
-	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, built.maxConcurrentRuns(), time.Now().UTC())
+	ceiling, err := built.maxConcurrentRuns()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, time.Now().UTC())
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -626,7 +792,10 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	if fleet.SupervisorRunning {
 		supervisor = "running"
 	}
-	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d active\n\n", supervisor, fleet.Active, fleet.Capacity)
+	// The ceiling bounds workers, not runs, so the two counts are printed as
+	// the two facts they are rather than as one ratio that is true of neither.
+	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal\n\n", fleet.Active)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",
@@ -676,8 +845,19 @@ func issueLabel(run runtime.RunSummary) string {
 	return fmt.Sprintf("#%d", run.Issue)
 }
 
+// stateLabel is the durable disposition plus what is happening under it.
+//
+// THE OPERATION IS SHOWN WHEN IT IS RUNNING, whatever the disposition says. A
+// run parked on review keeps the disposition `waiting` while its worker
+// answers that review, and a row that showed only the disposition described
+// eight minutes of a provider working as an idle run. The disposition is not
+// rewritten for the display; the display stopped omitting the other half.
+//
+// It also stops claiming the opposite. The previous rule appended the
+// operation for any `active` run, including one whose last operation had
+// already finished.
 func stateLabel(run runtime.RunSummary) string {
-	if run.Disposition == runtime.Active && run.Operation != "" {
+	if run.Executing && run.Operation != "" {
 		return string(run.Disposition) + ":" + run.Operation
 	}
 	return string(run.Disposition)
@@ -982,4 +1162,63 @@ func sortedIssues(issues []int) []int {
 	out := append([]int(nil), issues...)
 	sort.Ints(out)
 	return out
+}
+
+// installControllerReconciler wires the controller-maintenance loop into the
+// supervisor that will drive it.
+//
+// IT RESOLVES A REAL CYCLE. The supervisor owns the work-admission gate, the
+// controller service needs that gate to open service, and the reconciler needs
+// the service - so the service cannot be built before the supervisor exists.
+// Binding once after construction is the smallest resolution: no second gate,
+// no second lease, no factory callback.
+//
+// The role lease passed here is the one serve already holds. Nothing in this
+// path acquires ownership.
+func (c *composition) installControllerReconciler(supervisor *runtime.Supervisor, role *runtime.ControllerRoleLease) error {
+	self, err := controllerSelf()
+	if err != nil {
+		return fmt.Errorf("this controller cannot establish its own identity: %w", err)
+	}
+	service := runtime.BindControllerService(
+		c.config.StateDir, controllerRoot(), c.store, self, role, supervisor)
+	// The observation is this process asking ITSELF, directly. An operator's
+	// status command crosses a socket to ask the same question; a controller
+	// maintaining itself has no reason to.
+	observe := func() (runtime.LiveControllerSnapshot, error) {
+		return c.controllerSnapshot(supervisor), nil
+	}
+	return supervisor.BindControllerReconciler(
+		runtime.NewControllerReconciler(service, c.store, controllerRoot(), self, observe))
+}
+
+// controllerSnapshot is this process's answer about itself: which generation it
+// is, whether it still holds the controller role, and whether it is admitting
+// work.
+//
+// The role fact comes from EXERCISING the lease rather than from reading a
+// flag, which is the only honest way to answer it - there is deliberately no
+// Held(). An identity this process cannot establish leaves the identity empty
+// rather than guessed, and the status model reads an unpopulated field as
+// unknown.
+func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime.LiveControllerSnapshot {
+	snapshot := runtime.LiveControllerSnapshot{ObservedAt: time.Now().UTC()}
+	if self, err := controllerSelf(); err == nil {
+		snapshot.Identity = self
+	}
+	snapshot.Role = runtime.RoleNotHeld
+	if c.role != nil {
+		if err := c.role.WithAuthority(func() error { return nil }); err == nil {
+			snapshot.Role = runtime.RoleHeld
+		}
+	}
+	switch {
+	case supervisor == nil:
+		snapshot.WorkAdmission = runtime.AdmissionUnknown
+	case supervisor.AdmittingWork():
+		snapshot.WorkAdmission = runtime.AdmissionOpen
+	default:
+		snapshot.WorkAdmission = runtime.AdmissionClosed
+	}
+	return snapshot
 }

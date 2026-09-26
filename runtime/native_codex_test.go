@@ -252,7 +252,10 @@ func TestNativeCodexRetriesOnlyRecognizedTransientCapacity(t *testing.T) {
 	} {
 		provider, request, fake := nativeCodexFixture(t)
 		fake.err = errors.New("codex exited non-zero")
-		fake.outputs = []CommandOutput{{Stdout: []byte(tc.diagnostic), ExitCode: 1}}
+		// On stderr, the CLI's own diagnostic stream: a typed condition is read
+		// only from there. The secret below is still carried through the
+		// artifact path, which is what this test is actually about.
+		fake.outputs = []CommandOutput{{Stderr: []byte(tc.diagnostic), ExitCode: 1}}
 		result, err := provider.Execute(context.Background(), request)
 		if err == nil {
 			t.Fatalf("provider failure was not surfaced for %q", tc.diagnostic)
