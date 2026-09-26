@@ -1375,7 +1375,7 @@ func doctorAgents(in DoctorInput) []DoctorCheck {
 		return []DoctorCheck{warn(doctorGroupAgents, "agents.configured",
 			"no named execution agents were resolved, so per-agent readiness was not evaluated. "+
 				"A configuration written before the agent registry existed is diagnosed by the provider checks instead; "+
-				"add an `agents` registry to name the coding CLIs you have installed")}
+				"add an `agents` registry to name the coding CLIs you have installed"), doctorWorkerToolchain(in)}
 	}
 	checks := make([]DoctorCheck, 0, len(in.Agents)+1)
 	usable := 0
