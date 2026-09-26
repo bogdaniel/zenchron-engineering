@@ -302,12 +302,16 @@ func (s *claudeStream) handle(line []byte) {
 			s.retry, s.retrySeq = claudeRetryClass(event), s.seq
 		}
 	case "result":
-		// A result without a typed boolean is_error is not a VALID final
-		// result, so it can never make an exit 0 succeed: it is an anomaly, and
-		// the run fails closed for want of a valid one. Missing, drifted and
-		// null all qualify - null decodes into a *bool as nil, not an error.
+		// A result without a typed boolean is_error AND a typed string subtype
+		// - the two terminal inputs #322 names - is not a VALID final result,
+		// so it can never make an exit 0 succeed: it is an anomaly, and the run
+		// fails closed for want of a valid one. Missing, drifted and null all
+		// qualify: null decodes into a *bool as nil, and the decoder leaves a
+		// missing, null or drifted string subtype empty. The subtype selects no
+		// failure class - error_during_execution and error_max_turns stay
+		// FailureUnknown unless a typed retry condition narrows them.
 		var isError *bool
-		if json.Unmarshal(event.IsError, &isError) != nil || isError == nil {
+		if json.Unmarshal(event.IsError, &isError) != nil || isError == nil || event.Subtype == "" {
 			s.anomalies++
 			return
 		}

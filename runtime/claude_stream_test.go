@@ -884,15 +884,18 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	}
 }
 
-// The field that decides success is REQUIRED and typed: a drifted, missing or
-// null is_error is not a valid final result, so exit 0 fails closed rather
-// than reading the zero value as success.
+// The terminal inputs are REQUIRED and typed: a drifted, missing or null
+// is_error or subtype is not a valid final result, so exit 0 fails closed
+// rather than reading a zero value as success.
 func TestARequiredResultFieldCannotFailOpen(t *testing.T) {
 	for name, line := range map[string]string{
 		"is_error as a string":                `{"type":"result","subtype":"error_during_execution","is_error":"true"}`,
 		"is_error drifts after another drift": `{"type":"result","subtype":"success","permission_denials":{},"is_error":"false"}`,
 		"is_error missing":                    `{"type":"result","subtype":"success"}`,
 		"is_error null":                       `{"type":"result","subtype":"success","is_error":null}`,
+		"subtype as a number":                 `{"type":"result","subtype":7,"is_error":false}`,
+		"subtype missing":                     `{"type":"result","is_error":false}`,
+		"subtype null":                        `{"type":"result","subtype":null,"is_error":false}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			stream := newClaudeStream(1)
@@ -952,5 +955,19 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 	}
 	if own.NoProgressKey != "2:1" || !own.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("attempt 2's own write did not land: key %q at %v", own.NoProgressKey, own.LastProgressAt)
+	}
+}
+
+// error_max_turns is a typed terminal subtype with no narrower class: an
+// is_error result carrying it fails closed as unknown, with no retry invented.
+func TestErrorMaxTurnsFailsClosedAsUnknown(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.outputs = []CommandOutput{{Stdout: []byte(claudeResult(true, "error_max_turns", 0) + "\n")}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != FailureUnknown {
+		t.Fatalf("error_max_turns ended %q with %#v, want a fail-closed unknown", result.Outcome, result.Failure)
 	}
 }
