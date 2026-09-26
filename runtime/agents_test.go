@@ -48,13 +48,29 @@ func (f *fakeAgentExecutor) Run(ctx context.Context, name string, args []string,
 		<-ctx.Done()
 		return CommandOutput{}, ctx.Err()
 	}
+	var out CommandOutput
 	if len(f.outputs) > 0 {
-		out := f.outputs[0]
+		out = f.outputs[0]
 		f.outputs = f.outputs[1:]
-		return out, f.err
 	}
-	return CommandOutput{}, f.err
+	// A structured-protocol CLI that answers with nothing else still ends its
+	// stream with a successful final result, and the stream sees what the
+	// transcript sees.
+	if stream := claudeStreamFrom(ctx); stream != nil {
+		if len(out.Stdout) == 0 && f.err == nil {
+			out.Stdout = []byte(claudeSuccessResult)
+		}
+		_, _ = stream.Write(out.Stdout)
+	}
+	return out, f.err
 }
+
+// observesStdout: Run feeds the context-carried stream, as the real executor
+// does.
+func (f *fakeAgentExecutor) observesStdout() {}
+
+// claudeSuccessResult is the final line of a successful stream-json run.
+const claudeSuccessResult = `{"type":"result","subtype":"success","is_error":false,"result":"done","permission_denials":[]}` + "\n"
 
 func (f *fakeAgentExecutor) Output(_ context.Context, name string, args []string, dir string, env []string, _ time.Duration) (CommandOutput, error) {
 	f.record(name, args, dir, env)
@@ -105,6 +121,8 @@ const capableHelp = `Options:
       --permission-mode <MODE>
       --approval-mode <MODE>    (choices: default, auto-edit, plan, yolo)
       --safe-mode
+      --output-format <format>  (choices: "text", "json", "stream-json")
+      --verbose
       --extensions <NAME>
   -m, --model <MODEL>
       --permission-mode <mode>  (choices: "acceptEdits", "bypassPermissions", "plan")

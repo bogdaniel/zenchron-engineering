@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -48,6 +49,10 @@ type CommandExecutor interface {
 type OSCommandExecutor struct{}
 
 func (OSCommandExecutor) LookPath(name string) error { _, err := exec.LookPath(name); return err }
+
+// observesStdout declares that Run tees stdout into a context-carried
+// claudeStream; see stdoutObservingExecutor.
+func (OSCommandExecutor) observesStdout() {}
 
 // maxCapturedProcessBytes bounds what one child process stream can make this
 // controller hold. A provider is a subprocess whose output volume nothing here
@@ -149,9 +154,22 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	// whole group, forced kill after the grace period - rather than adding a
 	// second way to end a child.
 	watch := armInactivityWatch(ctx)
-	out := &boundedBuffer{limit: maxCapturedProcessBytes, observe: watch.progress}
-	errOut := &boundedBuffer{limit: maxCapturedProcessBytes, observe: watch.progress}
+	observe := watch.progress
+	// A STRUCTURED STREAM REPLACES BYTE COUNTING (#322). Stdout is teed into
+	// the provider's parser BEFORE the bounded capture, so the parser sees the
+	// whole stream even after the transcript stops retaining it, and neither
+	// stream's raw bytes refresh the bound: only events the parser accepts do.
+	stream := claudeStreamFrom(ctx)
+	stream.attach(watch)
+	if stream != nil {
+		observe = nil
+	}
+	out := &boundedBuffer{limit: maxCapturedProcessBytes, observe: observe}
+	errOut := &boundedBuffer{limit: maxCapturedProcessBytes, observe: observe}
 	cmd.Stdout, cmd.Stderr = out, errOut
+	if stream != nil {
+		cmd.Stdout = io.MultiWriter(stream, out)
+	}
 	stopWatch := watch.watchUntilComplete()
 	err := runBoundedProcess(ctx, cmd, grace)
 	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the
@@ -163,6 +181,7 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	//
 	// It also guarantees nothing is still writing into the buffers read below.
 	stopWatch()
+	stream.detach()
 	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
 	// Read after the run: Start happens inside, and a process that never
 	// started truthfully reports no pid.

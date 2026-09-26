@@ -214,6 +214,11 @@ observed auth mode and how it was observed
 whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
 the security-relevant argv, with the prompt replaced by its digest
+the inactivity window and the progress mode that measured it
+  (byte_output, or structured_claude_events)
+for Claude Code: accepted structured progress events, main-thread tool calls
+  still open at exit, permission denials in the final result, and malformed
+  or oversized stream lines - counts only, never provider text
 ```
 
 The prompt is excluded from the durable record and referenced by digest: it
@@ -226,6 +231,26 @@ Codex, Claude Code and Qwen expose a flag that keeps a candidate repository's ow
 not. Where it is false the runtime-owned trusted instruction text still frames
 everything in the workspace as data, but the adapter cannot prove the file was
 never read, so it does not claim to.
+
+### Claude Code runs the structured protocol
+
+Claude Code is invoked with `--print --output-format stream-json --verbose`, in
+both its editing and its `plan` mode, and without `--include-partial-messages`
+or `--bare`. Every one of those flags is probed against the installed binary
+first - `stream-json` must be a choice of `--output-format` itself, not a word
+in another option's description - and a CLI that does not advertise them is
+unavailable rather than run in text mode. `--safe-mode` is probed the same way:
+it is a capability of the installed CLI even where the public CLI reference
+does not list it. The structured events are what supervise the inactivity bound
+(see [configuration.md](configuration.md)), so an executor that cannot tee
+stdout to the parser is refused before Claude runs. A run that exits 0 without
+a final `result`, or with `is_error`, fails closed.
+
+The invocation also receives `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`, three
+quarters of the configured inactivity window, so Claude's own background wait
+gives up first. It is the one non-secret variable a spec adds to the
+allowlisted environment; it is not help-probeable, so whether the installed CLI
+honours it is live-acceptance evidence rather than a proven capability.
 
 ## Choosing an agent for a run
 

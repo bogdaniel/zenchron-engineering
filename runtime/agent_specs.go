@@ -7,11 +7,13 @@ import (
 
 // The native-CLI catalogue: one spec per supported coding CLI.
 //
-// This file is where provider-specific knowledge is allowed to live, and it is
-// the ONLY place it lives. Adding another CLI means adding one spec here, one
-// kind in agents.go, one branch in the composition root's factory, and tests.
-// Nothing in the scheduler, the reconciler, the kernel, the authority
-// evaluator, Git or the forge adapter learns the new provider's name.
+// Provider-specific knowledge is owned by the provider adapter/spec layer: this
+// catalogue, plus the provider files a spec field wires in - claude_stream.go
+// holds Claude Code's stream-json parser, selected by claudeSpec.ProgressMode
+// (#322). Adding another CLI means adding one spec here, one kind in agents.go,
+// one branch in the composition root's factory, and tests. Nothing in the
+// scheduler, the reconciler, the kernel, the authority evaluator, Git or the
+// forge adapter learns the new provider's name or its event vocabulary.
 //
 // Every spec states the flags this runtime depends on TWICE, on purpose: once
 // in Probes, which requires the installed CLI to advertise them, and once in
@@ -34,6 +36,12 @@ import (
 // silently meaning "Zenchron billed my Anthropic API account". The runtime does
 // not claim to know which plan ultimately paid - see AuthModeUnknown - only
 // that it substituted no credential of its own.
+//
+// A spec MAY contribute narrowly approved, non-secret invocation variables
+// through InvocationEnv - Claude's CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is the
+// one today - applied to the main invocation only, never to probes. API-key
+// and credential variables remain forbidden, always: withInvocationEnv refuses
+// any credential-shaped name and any name the allowlist already sets.
 
 // diagnosticSignal maps one RECOGNIZED provider diagnostic onto a typed
 // failure class. Matching is case-insensitive substring containment over the
@@ -196,15 +204,33 @@ var codexSpec = cliAgentSpec{
 // --bare is deliberately never passed: it switches Claude Code onto strict
 // API-key authentication, which would turn a supervised subscription session
 // into metered API billing.
+//
+// --output-format stream-json --verbose makes Claude's agent loop observable
+// as newline-delimited JSON events, which is what supervises it (#322; see
+// claude_stream.go). Both the editing and the plan invocation use it.
+// --include-partial-messages is deliberately absent: token deltas add a line
+// per token without being stronger evidence that the work advanced, so one
+// long single content block can still go unobserved until it completes - the
+// residual risk #322 accepts.
 var claudeSpec = cliAgentSpec{
 	Probes: []cliHelpProbe{
-		{Args: []string{"--help"}, Required: []string{"--print", "--permission-mode", "--model", "--safe-mode"}},
+		// --output-format stream-json and --verbose are what make Claude's own
+		// agent loop observable (#322). The installed CLI refuses stream-json
+		// under --print without --verbose, so both are required: a binary
+		// that lacks either is unavailable rather than silently supervised by
+		// byte silence again.
+		{
+			Args: []string{"--help"}, Required: []string{"--print", "--permission-mode", "--model", "--safe-mode", "--output-format", "--verbose"},
+			RequiredChoices: []cliFlagChoice{{Flag: "--output-format", Value: "stream-json"}},
+		},
 	},
 	VersionArgs:                     []string{"--version"},
 	AuthStatePaths:                  []string{".claude/.credentials.json"},
 	HomeEnv:                         "CLAUDE_CONFIG_DIR",
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
+	ProgressMode:                    progressStructuredClaudeEvents,
+	InvocationEnv:                   claudeBackgroundWaitEnv,
 	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},
@@ -214,7 +240,7 @@ var claudeSpec = cliAgentSpec{
 		if i.Bypass {
 			mode = "bypassPermissions"
 		}
-		args := []string{"--print", "--permission-mode", mode, "--safe-mode"}
+		args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", mode, "--safe-mode"}
 		if i.Model() != "" {
 			args = append(args, "--model", i.Model())
 		}
@@ -260,7 +286,7 @@ var claudeSpec = cliAgentSpec{
 		},
 		Mode: "plan",
 		Args: func(i cliInvocation) []string {
-			args := []string{"--print", "--permission-mode", "plan", "--safe-mode"}
+			args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--safe-mode"}
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}

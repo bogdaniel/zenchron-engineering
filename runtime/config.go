@@ -419,7 +419,9 @@ type BudgetConfig struct {
 	MaxRemediationAttempts    int  `json:"max_remediation_attempts"`
 	MaxAssuranceAttempts      int  `json:"max_assurance_attempts"`
 	// ProviderInactivitySeconds bounds how long ONE provider invocation may go
-	// without producing output. It is a third bound beside wall_limit_seconds,
+	// without recognized provider progress (output bytes, or Claude's
+	// structured events; see claude_stream.go). A stated value must be at least
+	// MinProviderInactivitySeconds. It is a third bound beside wall_limit_seconds,
 	// which bounds the work, and lifecycle_deadline_seconds, which bounds the
 	// calendar: a provider subprocess being alive is not evidence that the
 	// invocation is moving, and without this the run wall budget was the thing
@@ -434,6 +436,17 @@ type BudgetConfig struct {
 	// read as absent, like lifecycle_deadline_seconds, and a negative value is
 	// refused.
 	ProviderInactivitySeconds int `json:"provider_inactivity_seconds,omitempty"`
+}
+
+// checkProviderInactivityMinimum refuses a stated window below
+// MinProviderInactivitySeconds, naming the value and the minimum, so the
+// operator hears it from config loading and doctor rather than from a refused
+// dispatch. Zero stays "absent".
+func checkProviderInactivityMinimum(seconds int) string {
+	if seconds > 0 && seconds < MinProviderInactivitySeconds {
+		return fmt.Sprintf("budgets.provider_inactivity_seconds is %d, below the minimum %d: a provider's own background-wait ceiling must fit strictly inside the window", seconds, MinProviderInactivitySeconds)
+	}
+	return ""
 }
 
 // DefaultMaxExecutionContinuations is the M1 continuation depth for a new run.
@@ -824,6 +837,11 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		if *proposal.proposed < 1 {
 			return OperatorConfig{}, &ConfigError{Detail: fmt.Sprintf("%s must be at least 1", proposal.name)}
 		}
+		if proposal.name == "budgets.provider_inactivity_seconds" {
+			if err := checkProviderInactivityMinimum(*proposal.proposed); err != "" {
+				return OperatorConfig{}, &ConfigError{Detail: err}
+			}
+		}
 		if *proposal.proposed > *proposal.ceiling {
 			return OperatorConfig{}, &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten %s: %d exceeds the operator bound %d", proposal.name, *proposal.proposed, *proposal.ceiling)}
 		}
@@ -1129,6 +1147,9 @@ func (c OperatorConfig) validate(path string) error {
 	// inactivity bound". A negative value is still a mistake.
 	if c.Budgets.ProviderInactivitySeconds < 0 {
 		return refuse("budgets.provider_inactivity_seconds must not be negative")
+	}
+	if err := checkProviderInactivityMinimum(c.Budgets.ProviderInactivitySeconds); err != "" {
+		return refuse(err)
 	}
 	if d := c.Budgets.LifecycleDeadlineSeconds; d > 0 && d < c.Budgets.WallLimitSeconds {
 		return refuse(fmt.Sprintf(

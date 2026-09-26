@@ -699,9 +699,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// Deriving it from the operation row rather than from a stopwatch is what
 	// makes it survive a restart, and it is why the recorder below exists at
 	// all: a controller that died mid-invocation must hand its successor the
-	// remainder, not a fresh envelope.
+	// remainder, not a fresh envelope. A provider whose window is per physical
+	// attempt (#322, structured Claude) gets its full window instead; see
+	// dispatchInactivityWindow for why that stays finite.
 	inactivityLimit := state.budgets().ProviderInactivityLimit
-	inactivityRemaining := ProviderInactivityRemaining(inactivityLimit, operation, r.deps.Clock.Now())
+	inactivityRemaining := dispatchInactivityWindow(inactivityLimit, operation, r.deps.Clock.Now(), r.deps.Provider)
 	// EXHAUSTED MEANS REFUSED, NOT UNBOUNDED. A zero window is how "no bound
 	// was configured" is spelled downstream, so dispatching with one would
 	// silently restore the pre-#238 behaviour for exactly the operation that
@@ -722,7 +724,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// different claim from the work moving, and #238 is the cost of letting the
 	// first stand in for the second.
 	ctx = withProviderProgressRecorder(ctx,
-		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, key) })
+		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, key) })
 	// A continuation is bounded independently of the original operation.
 	// The absolute deadline also makes a spent (zero) allowance fail closed.
 	if _, granted := state.reviewContinuationGrant(); granted {
@@ -777,7 +779,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			WallLimit: executionWallBound(state, operation),
 			// The no-progress window, carried beside the total bound so the
 			// adapter applies one policy rather than two.
-			InactivityLimit: inactivityRemaining,
+			InactivityLimit:  inactivityRemaining,
+			InactivityWindow: inactivityLimit,
 		},
 		// The same authority as an instant, so the process bound and the
 		// provenance record cannot describe different realities.

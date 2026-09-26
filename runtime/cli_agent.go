@@ -227,6 +227,18 @@ type cliAgentSpec struct {
 	// the runtime to run it in its ordinary editing mode and hope. There is no
 	// permissive fallback anywhere on that path.
 	ReadOnly *cliReadOnlyMode
+	// ProgressMode is the oracle that supervises this CLI's inactivity bound.
+	// Empty is progressByteOutput: any stdout or stderr byte refreshes it.
+	// progressStructuredClaudeEvents supervises it from Claude's stream-json
+	// events instead (#322, claude_stream.go), which requires an executor that
+	// tees stdout to the parser and a per-physical-attempt window.
+	ProgressMode string
+	// InvocationEnv returns non-secret provider controls for the MAIN
+	// invocation only, from the CONFIGURED per-attempt inactivity window
+	// (ProviderBudget.InactivityWindow), never from a remainder.
+	// Probes never receive them, and withInvocationEnv refuses any credential-
+	// shaped name or any name the allowlisted environment already sets.
+	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
@@ -426,6 +438,13 @@ func (p CLIAgentProvider) Isolation() ProviderIsolation {
 	return isolation
 }
 
+// inactivityPerAttempt reports whether this adapter's inactivity window is per
+// physical process; see dispatchInactivityWindow.
+func (p CLIAgentProvider) inactivityPerAttempt() bool {
+	spec, err := p.spec()
+	return err == nil && spec.ProgressMode == progressStructuredClaudeEvents
+}
+
 // home resolves the directory holding the CLI's own authentication state.
 func (p CLIAgentProvider) home() (string, error) {
 	home := strings.TrimSpace(p.Agent.Home)
@@ -503,6 +522,14 @@ func (p CLIAgentProvider) probe(ctx context.Context, spec cliAgentSpec, home str
 	if executor.LookPath(p.command()) != nil {
 		return ErrSandboxUnavailable
 	}
+	// A structured progress oracle needs an executor that feeds it. One that
+	// does not would run the provider, observe zero events, and report a
+	// working session as provider_no_progress - so it is refused first.
+	if spec.ProgressMode == progressStructuredClaudeEvents {
+		if _, ok := executor.(stdoutObservingExecutor); !ok {
+			return fmt.Errorf("%w: executor %T does not observe stdout, which structured progress supervision requires", ErrSandboxUnavailable, executor)
+		}
+	}
 	env := p.env(spec, home)
 	for _, capability := range spec.Probes {
 		if err := p.probeCapability(ctx, capability, env); err != nil {
@@ -556,18 +583,44 @@ type cliFlagChoice struct{ Flag, Value string }
 // - the text from the flag name up to the next flag or blank line - so a
 // mention of the word elsewhere in the help output proves nothing about the
 // flag this adapter is about to pass.
+//
+// Only an occurrence that OPENS a help row counts (#322). Claude Code's help
+// mentions `--output-format=stream-json` inside the descriptions of three other
+// options before it reaches the --output-format row itself, so matching the
+// first occurrence anywhere accepted `stream-json` from a sentence about a
+// different flag - and the structured-progress probe would have passed against
+// a binary whose --output-format no longer offered it.
 func advertisesChoice(advertised, flag, value string) bool {
 	for offset := 0; ; {
 		index := strings.Index(advertised[offset:], flag)
 		if index < 0 {
 			return false
 		}
-		start := offset + index + len(flag)
-		if advertisesToken(flagDescription(advertised[start:]), value) {
+		at := offset + index
+		start := at + len(flag)
+		if opensHelpRow(advertised, at, flag) && advertisesToken(flagDescription(advertised[start:]), value) {
 			return true
 		}
 		offset = start
 	}
+}
+
+// opensHelpRow reports whether the flag at index `at` is the option a help row
+// describes: it sits in the option column - at most six columns of indentation,
+// which covers commander's two and clap's two or six - optionally after a short
+// alias such as `-c, `, and it is neither the prefix of a longer flag nor the
+// `--flag=value` spelling prose uses. A wrapped description line is indented
+// much deeper, and the real Claude help wraps one onto a line that begins
+// `--output-format=stream-json)`.
+func opensHelpRow(text string, at int, flag string) bool {
+	lineStart := strings.LastIndexByte(text[:at], '\n') + 1
+	prefix := strings.TrimLeft(text[lineStart:at], " ")
+	indent := at - lineStart - len(prefix)
+	if len(prefix) == 4 && prefix[0] == '-' && wordCharacter(prefix, 1) && prefix[2:] == ", " {
+		prefix = ""
+	}
+	end := at + len(flag)
+	return prefix == "" && indent <= 6 && !wordCharacter(text, end) && (end >= len(text) || text[end] != '=')
 }
 
 // flagDescription is the run of help text belonging to one flag: everything up
@@ -823,7 +876,7 @@ type InvocationProvenance struct {
 	OverranDeadline bool          `json:"overran_deadline,omitempty"`
 	// TerminationCause is why the process stopped: it returned on its own, the
 	// runtime ended it at the deadline, or the runtime ended it because it had
-	// produced no output for the whole inactivity window.
+	// produced no recognized progress for the whole inactivity window.
 	TerminationCause string `json:"termination_cause,omitempty"`
 	// InactivityLimit is the no-progress window this invocation ran under, and
 	// zero when none was in force. It is recorded beside the deadline because
@@ -831,6 +884,19 @@ type InvocationProvenance struct {
 	// operator reading a stalled invocation needs to know which window it was
 	// measured against.
 	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
+	// ProgressMode is the oracle that measured progress against that window:
+	// byte_output, or structured_claude_events (#322).
+	ProgressMode string `json:"progress_mode,omitempty"`
+	// Bounded observations from a structured stream, recorded so an
+	// inactivity termination explains itself without the raw transcript: how
+	// many events counted as progress, how many main-thread tool calls were
+	// still open when the process ended, how many permission denials the final
+	// result listed, and how many lines were malformed or oversized. They are
+	// diagnostics, never authority, and carry no provider text.
+	StructuredEvents  int64 `json:"structured_progress_events,omitempty"`
+	OpenToolsAtExit   int   `json:"open_tools_at_exit,omitempty"`
+	PermissionDenials int   `json:"permission_denials,omitempty"`
+	ProtocolAnomalies int   `json:"protocol_anomalies,omitempty"`
 	// ProcessID is the pid - and, because every bounded process is started with
 	// Setpgid, the process-GROUP id - the runtime owned.
 	ProcessID int `json:"process_id,omitempty"`
@@ -1015,6 +1081,27 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		buildArgs, permissionMode, sandboxMode = spec.ReadOnly.Args, spec.ReadOnly.Mode, spec.ReadOnly.Sandbox
 	}
 	args := buildArgs(invocation)
+	// The provider's invocation-only controls, derived from the per-attempt
+	// window and refused - before any process - if they cannot be derived or
+	// would reach past the environment allowlist.
+	env := p.env(spec, home)
+	if spec.InvocationEnv != nil {
+		window := request.Budgets.InactivityWindow
+		if window <= 0 {
+			window = request.Budgets.InactivityLimit
+		}
+		extra, err := spec.InvocationEnv(window)
+		if err == nil {
+			env, err = withInvocationEnv(env, extra)
+		}
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+	}
+	progressMode := spec.ProgressMode
+	if progressMode == "" {
+		progressMode = progressByteOutput
+	}
 	authMode, authSource := p.observeAuthMode(spec, home)
 	provenance := InvocationProvenance{
 		AgentID: p.Agent.ID, ProviderKind: p.Agent.Kind, TrustMode: p.Agent.TrustMode,
@@ -1025,6 +1112,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
 		Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
 		PromptSHA256:                    promptDigest(invocation.Prompt),
+		ProgressMode:                    progressMode,
 	}
 	// The invocation's WALL BOUND is applied here, where the process actually
 	// runs. It was carried all the way into the request and read by nobody on
@@ -1065,9 +1153,24 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	var stream *claudeStream
+	if progressMode == progressStructuredClaudeEvents {
+		stream = newClaudeStream(request.Attempt)
+		ctx = withClaudeStream(ctx, stream)
+	}
 	startedAt := time.Now()
-	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, p.env(spec, home), p.grace())
+	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()
+	// WHAT THE STRUCTURED STREAM ESTABLISHED, read once the process returned.
+	// A final result is required only of a process that exited 0.
+	streamed := claudeStreamOutcome{Condition: FailureUnknown}
+	if stream != nil {
+		streamed = stream.outcome(runErr == nil && ctx.Err() == nil)
+		provenance.StructuredEvents = streamed.Accepted
+		provenance.OpenToolsAtExit = streamed.OpenTools
+		provenance.PermissionDenials = streamed.PermissionDenials
+		provenance.ProtocolAnomalies = streamed.Anomalies
+	}
 	// WHAT THIS INVOCATION ACTUALLY DID WITH ITS AUTHORITY. Recorded whether it
 	// respected the bound or not: the case worth explaining later is precisely
 	// the one where nothing looked wrong.
@@ -1121,7 +1224,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// narrow terminal surface. FailureUnknown here means the CLI named
 		// nothing this runtime recognizes, which is the fail-closed answer and
 		// the one the runtime's own bounds below are allowed to replace.
-		recognized := classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
+		recognized := streamed.Condition
+		if recognized == FailureUnknown {
+			recognized = classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
+		}
 		result.Failure = &ProviderFailure{
 			Classification:   recognized,
 			RawDiagnosticRef: artifacts[0].Path,
@@ -1180,6 +1286,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// overwrite the real reason it died - a timeout reported as a broken
 		// protocol is a worse diagnosis than either fact alone.
 		return result, runErr
+	}
+	// A ZERO EXIT IS NOT SUCCESS BY ITSELF under the structured protocol: a run
+	// that never delivered its final result broke the protocol, and one whose
+	// result says is_error failed however it exited. Both fail closed, narrowed
+	// only by a typed condition the stream stated - never by result prose.
+	if streamed.Failed {
+		recognized := streamed.Condition
+		if recognized == FailureUnknown {
+			// The same best-effort legacy surface the failure path above uses:
+			// a usage limit may be stated only on stderr, never as a typed field.
+			recognized = classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
+		}
+		result.Outcome = OperationFailed
+		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
+		return result, nil
 	}
 	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.
 	//

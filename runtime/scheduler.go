@@ -585,9 +585,20 @@ func (s Scheduler) Heartbeat(id string) (RunOperation, error) {
 // finished operation is not an error: the process this records for may outlive
 // the lease it was started under, and losing a progress note is not a reason to
 // fail an invocation that is working.
-func (s Scheduler) RecordProviderProgress(id, key string) (RunOperation, error) {
+//
+// It is BOUND to the physical attempt that observed it: the write lands only
+// while the row is running THAT attempt. The Claude recorder is deliberately
+// never joined (#322), so a delayed write from attempt N can arrive after N
+// settled, or after N+1 started on the same row - and either would durably
+// claim progress a different process made. (An operation leased before the
+// identity counter existed carries 0 here while its dispatch was clamped to 1,
+// so it misses its durable stamps until it settles; that is the only cost.)
+func (s Scheduler) RecordProviderProgress(id string, attempt int, key string) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
 		if key == "" || key == op.NoProgressKey {
+			return nil
+		}
+		if op.State != Running || op.AttemptIdentity != attempt {
 			return nil
 		}
 		op.NoProgressKey = key

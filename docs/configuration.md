@@ -168,18 +168,40 @@ resources: attempts retry one execution binding, continuations are successive
 pieces of productive work.
 
 `provider_inactivity_seconds` bounds how long ONE provider invocation may go
-without producing output. It is a third dimension: `wall_limit_seconds` bounds
+without recognized provider progress. It is a third dimension: `wall_limit_seconds` bounds
 the work, `lifecycle_deadline_seconds` bounds the calendar, and this bounds
 SILENCE. It exists because a live subprocess is not evidence of progress — a
 laptop that loses its network keeps a coding CLI alive and quiet, and without
 this bound the run-wide wall budget was what eventually noticed, eight hours and
 fifty-five minutes later. It may be absent, and absent resolves to 600; an
-explicit 0 is read as absent, and a negative value is refused. There is
+explicit 0 is read as absent, a negative value is refused, and a stated value
+below 10 is refused at load and reported by `autonomy doctor` (Claude Code's own
+background-wait ceiling is set to three quarters of the window and needs room
+inside it; see below). There is
 deliberately no value that disables it: an unattended CLI worker with no
 inactivity bound is the configuration this budget exists to prevent.
 
-Progress means output arriving from the child process. It deliberately does not
-mean the process existing, a scheduler lease heartbeat, or a clock tick. A CLI
+Recognized progress is provider-specific:
+
+- bytes arriving from the child process, for the Codex, Gemini and Qwen
+  adapters;
+- structured assistant and tool events for Claude Code, which runs with
+  `--output-format stream-json --verbose`. An `assistant` message carrying a
+  content block, or a `user` message carrying a `tool_result`, refreshes the
+  window. Raw stdout or stderr bytes, `system` events (including `api_retry`),
+  the final `result` and unknown events do not. While a main-thread tool call
+  is open - a long `go test`, say - the inactivity kill is suspended, but the
+  absolute deadline is not, so a tool that hangs is still ended by it. Each
+  physical Claude attempt gets the full window; the wall budget and the attempt
+  ceiling are what bound repeated restarts. Claude's own
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is set to three quarters of the
+  configured window, so its background-subagent wait gives up before the
+  runtime's bound does. One residual gap is accepted: without partial-message
+  streaming, a single very long assistant content block produces no event until
+  it completes and can still reach the bound.
+
+It deliberately does not mean the process existing, a scheduler lease
+heartbeat, or a clock tick. A CLI
 that is legitimately thinking in silence is why the bound is a window of minutes
 rather than an immediate failure, and why reaching it is a bounded retry rather
 than a terminal failure. An invocation the policy terminates is recorded as
@@ -187,8 +209,11 @@ than a terminal failure. An invocation the policy terminates is recorded as
 diagnostic is `provider_unavailable` and waits instead, without spending the
 active-work budget. Silence is never classified as offline, and neither is
 anything a worker merely wrote: a typed provider condition is read only from the
-bounded tail of the CLI's own diagnostic stream, never from the session output
-a model and its tools control.
+bounded tail of the CLI's own diagnostic stream, or - for Claude Code - from the
+typed fields of its stream-json events (`api_retry.error`, `error_status`,
+`no_response`, the final `result`'s `is_error` and `subtype`), never from the
+session output a model and its tools control. A retry condition counts only if
+no accepted progress followed it.
 
 ### Concurrency and polling
 
@@ -224,7 +249,7 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
-| `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without producing output before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. | 600 |
+| `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
 | `operator.id` | The identity a run is recorded as having been authorized by. It is provenance, not authentication: nothing here is signed and no challenge was issued. | the local account name |
@@ -248,7 +273,7 @@ May name:
 | `budgets.max_execution_continuations` | at least 1, at or below the operator value |
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
-| `budgets.provider_inactivity_seconds` | at least 1, at or below the operator value |
+| `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 

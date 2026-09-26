@@ -474,7 +474,7 @@ func TestRecognizedProgressAdvancesDurablyAndRepetitionDoesNot(t *testing.T) {
 	started := *op.LastProgressAt
 
 	clock.advance(time.Minute)
-	moved, err := scheduler.RecordProviderProgress(op.ID, "512")
+	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestRecognizedProgressAdvancesDurablyAndRepetitionDoesNot(t *testing.T) {
 	// alive - must not refresh the window.
 	advanced := *moved.LastProgressAt
 	clock.advance(time.Minute)
-	same, err := scheduler.RecordProviderProgress(op.ID, "512")
+	same, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
 
 	// Real provider output, recorded durably, opens the window where it should.
 	clock.advance(time.Minute)
-	if _, err := scheduler.RecordProviderProgress(op.ID, "512"); err != nil {
+	if _, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512"); err != nil {
 		t.Fatal(err)
 	}
 	observed, _, _, err := scheduler.Store.Operation(op.ID)
@@ -731,7 +731,7 @@ func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
 
 	// AND REAL OUTPUT STILL DOES BOTH. The narrowing must not have made the
 	// durable record unreachable.
-	moved, err := scheduler.RecordProviderProgress(op.ID, "1024")
+	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "1024")
 	if err != nil {
 		t.Fatal(err)
 	}
