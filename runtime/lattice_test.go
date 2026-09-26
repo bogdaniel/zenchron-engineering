@@ -107,6 +107,21 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// the in-repo layer names no credential member, so a repository cannot
 		// point the runtime at a different identity to publish as.
 		"github.token_path",
+		// The GitHub App publication identity. The App id and the installation
+		// id are public identifiers and the third member is a PATH; the key
+		// itself never appears in configuration. All three are operator
+		// authority for token_path's reason: a repository that could name them
+		// would be choosing the identity the runtime publishes as.
+		"github.app_id",
+		"github.installation_id",
+		"github.private_key_path",
+		// The identity that READS governance facts, which is deliberately not
+		// the one that publishes: GitHub does not disclose a ruleset's bypass
+		// actors to a GitHub App installation token. Operator authority for
+		// exactly the reason the publication members are - a repository that
+		// could name the governance identity would be choosing who is allowed
+		// to tell the runtime whether its own trust root has a bypass.
+		"github.governance_credential_mode",
 		"github.endpoint",
 		"budgets.wall_limit_seconds",
 		// A total-elapsed bound, separate from the execution budget. Operator
@@ -117,6 +132,12 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
+		// The provider no-progress window: a THIRD budget dimension beside the
+		// active-work limit and the calendar deadline, and the one #238 was
+		// missing. It is a bound, not a capability, and it is tightenable -
+		// asking for a shorter window is a narrowing, so a repository may name
+		// it and appears below.
+		"budgets.provider_inactivity_seconds",
 		"watch.repositories",
 		// The brokered worker execution environment. Both members are
 		// CAPABILITY statements and neither is an unsafe override: the path
@@ -217,6 +238,7 @@ func TestRepositoryLayerReachesOnlyTightenableBounds(t *testing.T) {
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
+		"budgets.provider_inactivity_seconds",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
 	})
@@ -352,6 +374,12 @@ func TestTightenLatticePerDimension(t *testing.T) {
 			`{"budgets": {"max_assurance_attempts": 3}}`,
 			`{"budgets": {"max_assurance_attempts": 0}}`,
 			func(_ *testing.T, c Config) int { return c.Budgets.MaxAssuranceAttempts },
+		},
+		{
+			"budgets.provider_inactivity_seconds", `{"budgets": {"provider_inactivity_seconds": 120}}`, 120,
+			`{"budgets": {"provider_inactivity_seconds": 601}}`,
+			`{"budgets": {"provider_inactivity_seconds": 0}}`,
+			func(_ *testing.T, c Config) int { return c.Budgets.ProviderInactivitySeconds },
 		},
 		{
 			// Inverted: tighter is a LONGER interval.

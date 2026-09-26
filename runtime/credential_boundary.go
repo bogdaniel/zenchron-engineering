@@ -184,6 +184,10 @@ const credentialScanFileLimit = 16 << 20
 // It walks the workspace rather than asking Git, because the producer's mount
 // shows the working tree: tracked files, untracked files and anything a
 // previous invocation left behind are all equally visible to candidate.run.
+// The admission subject is deliberately conservative: all candidate source,
+// including ignored and untracked paths. Runtime-owned validation scratch is
+// disjoint from this root, so it cannot enter admission, changed-path evidence,
+// or the runtime commit. No cache-looking pathname exempts candidate content.
 // Runtime-owned Git metadata is excluded - it is masked inside the sandbox and
 // is not candidate content.
 //
@@ -253,8 +257,11 @@ func scanPathsForCredentialValues(root string, paths []string) error {
 		info, err := os.Lstat(full)
 		if err != nil {
 			// A deleted path has no content to inspect. Deletion is not how a
-			// credential enters a tree.
-			continue
+			// credential enters a tree. Other stat failures are inconclusive.
+			if os.IsNotExist(err) {
+				continue
+			}
+			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "changed path is unreadable"}
 		}
 		if !info.Mode().IsRegular() {
 			continue

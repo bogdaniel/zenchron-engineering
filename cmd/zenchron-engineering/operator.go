@@ -645,6 +645,16 @@ func attemptNumbers(attempts []int) string {
 	return strings.Join(parts, ",")
 }
 
+// orUnknown renders a fact the provider does not expose as unknown rather than
+// as absent. A missing line reads as "the default", which is a claim; "unknown"
+// is what is actually true of a CLI that selects its own model.
+func orUnknown(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return value
+}
+
 // renderStatusText is the human projection over the SAME structure the JSON
 // carries. It adds no field and hides no refusal.
 func renderStatusText(stdout io.Writer, view statusView) error {
@@ -666,14 +676,52 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		build.Kind, build.Version, short(build.SourceRevision), short(build.SourceTree), short(build.BinarySHA256)))
 	line("controller config", fmt.Sprintf("global=%s repository=%s",
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
+	// WHO IS DOING THE WORK, in the view an operator opens to ask about one
+	// run. The JSON has carried the binding for a while and the text did not,
+	// so answering "which worker owns this" meant switching output formats.
+	if worker := view.Worker; worker.Agent != "" {
+		line("agent", worker.Agent)
+		line("provider", worker.ProviderKind)
+		line("model", orUnknown(worker.Model))
+		line("trust", worker.TrustMode)
+	}
+	if view.Worker.Workspace != "" {
+		line("workspace", view.Worker.Workspace)
+	}
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
 	line("phase", view.Phase)
+	line("active consumed", view.ActiveElapsed)
+	line("external wait", view.ExternalWaitElapsed)
+	line("lifecycle age", view.Elapsed)
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))
 	line("candidate", fmt.Sprintf("%s rev=%s tree=%s", view.Candidate.Branch, short(view.Candidate.Revision), short(view.Candidate.Tree)))
 	line("contract", view.Contract.ID+"@"+view.Contract.Revision)
 	if view.Operation != nil {
-		line("operation", fmt.Sprintf("%s %s attempt %d/%d elapsed %s",
-			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed))
+		operation := fmt.Sprintf("%s %s attempt %d/%d active consumed %s",
+			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed)
+		// The provider invocation count is shown only when it disagrees with
+		// the attempt, which is exactly when an operator needs it: a refunded
+		// external wait leaves more invocations behind than attempts spent, and
+		// the two numbers reading differently is the explanation rather than a
+		// contradiction.
+		if view.Operation.AttemptIdentity > view.Operation.Attempt {
+			operation += fmt.Sprintf(" attempt identity %d", view.Operation.AttemptIdentity)
+		}
+		line("operation", operation)
+		// WHETHER THE WORK IS MOVING, which is a different question from
+		// whether the operation is leased and was previously unanswerable from
+		// status. The two numbers are printed together on purpose: a silence of
+		// four minutes means nothing without the window it is measured
+		// against, and reading the pair is how an operator tells a provider
+		// that is thinking from one whose host lost its network.
+		if limit := view.Operation.InactivityLimit; limit > 0 {
+			progress := "none recorded"
+			if view.Operation.LastProgressAt != nil {
+				progress = view.Operation.LastProgressAt.UTC().Format(time.RFC3339)
+			}
+			line("progress", fmt.Sprintf("last %s silent %s inactivity limit %s",
+				progress, view.Operation.SilentFor, limit))
+		}
 	}
 	if view.Lease != nil {
 		heartbeat := "never"
@@ -723,11 +771,32 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("execution prior context", fmt.Sprintf("attempt=%d supplied=%s omitted=%s truncated=%s bytes=%d digest=%s",
 			c.Attempt, attemptNumbers(c.Supplied), attemptNumbers(c.Omitted), attemptNumbers(c.Truncated), c.Bytes, short(c.Digest)))
 	}
+	// WHAT THE RUNTIME REFUSED ON THE PROVIDER'S BEHALF. It is printed ABOVE
+	// the execution diagnostic and separately from it, because it is not a
+	// failure: the invocation that carried it may well have succeeded, and
+	// where it did, this line is the only place an operator learns that the
+	// worker tried to erase its own uncommitted work and was stopped.
+	if n := view.CandidateDiscardRefusals; n > 0 {
+		line("candidate discard refused", fmt.Sprintf(
+			"%d destructive Git operation(s) refused; dirty candidate work preserved: %s",
+			n, view.CandidateDiscardRefused))
+	}
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
 			d.Stage, d.FailureClass, d.Route, d.Code))
-		if d.FailureClass == runtime.FailureProviderAccountUnavailable {
+		switch d.FailureClass {
+		case runtime.FailureProviderAccountUnavailable:
 			failure = "provider account unavailable (" + failure + ")"
+		// The three provider conditions an operator most needs kept apart, and
+		// the ones #238 collapsed into hours of apparent active work. A stall
+		// is a live process that stopped moving; unavailable is a host that
+		// cannot reach the provider; quota is an allowance that will come back.
+		case runtime.FailureProviderNoProgress:
+			failure = "provider stalled: terminated by the inactivity policy (" + failure + ")"
+		case runtime.FailureProviderUnavailable:
+			failure = "provider unavailable: the host could not reach the provider (" + failure + ")"
+		case runtime.FailureProviderQuota:
+			failure = "provider quota exhausted (" + failure + ")"
 		}
 		line("execution failure", failure)
 		line("execution provider", strings.TrimSpace(fmt.Sprintf("%s model=%s", d.ProviderKind, d.Model)))
@@ -1033,6 +1102,11 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		Codex:              runtime.NativeCodexProvider{},
 		GitHub:             overrides.GitHub,
 		Provider:           overrides.Provider,
+		// The canonical PATH entrypoint and its shadowing are diagnosed
+		// against the SAME controller root every adoption/succession path
+		// uses, and the SAME PATH a real shell would resolve.
+		ControllerRoot:    controllerRoot(),
+		EntrypointPathEnv: os.Getenv("PATH"),
 	}
 	// The running binary's own provenance. A resolution failure is carried
 	// through as itself rather than discarded: doctor must be able to say "I
@@ -1081,9 +1155,26 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 			in.ProviderCredentialPath = firstConfigured(agent.CredentialPath, config.Provider.CredentialPath)
 		}
 	}
+	// Use the same separate credential and redirect-safe observer as adoption.
+	in.Governance, _ = governanceObserver(config.GitHub)
 	in.GitHubCredentialMode = config.GitHub.CredentialMode
 	in.DiscoveryLabel = config.Watch.Label
-	in.Credentials = githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
+	in.Credentials = githubCredentials(config.GitHub)
+	if policy, err := config.FeedbackPolicy(); err == nil {
+		in.Feedback = policy
+	}
+	// The OPERATOR's own identity, resolved through the operator's own `gh`
+	// login rather than through the publication credential. Doctor compares the
+	// two: a publication identity is only a fix for the review loop when it is
+	// a DIFFERENT account from the person writing the reviews, and the runtime
+	// cannot say that from the mode alone.
+	if config.GitHub.CredentialMode == runtime.GitHubCredentialToken || config.GitHub.CredentialMode == runtime.GitHubCredentialApp {
+		in.OperatorGitHub = runtime.GitHubRESTAdapter{
+			HTTP:        &http.Client{Timeout: 30 * time.Second},
+			Endpoint:    config.GitHub.Endpoint,
+			Credentials: runtime.GitHubCLICredential{},
+		}
+	}
 	if in.Provider == nil {
 		if registry, err := config.AgentRegistry(); err == nil {
 			if agent, err := registry.Agent(""); err == nil {

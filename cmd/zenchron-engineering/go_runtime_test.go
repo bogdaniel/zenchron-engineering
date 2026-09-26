@@ -17,10 +17,11 @@ func TestResolveGoRuntime(t *testing.T) {
 		wantError   string
 		wantVersion string
 	}{
-		{"compatible local Go", &runtimeCommands{goVersion: "go version go1.25.3 linux/amd64", dockerAvailable: true, dockerRunning: true, imageAvailable: true}, localGoRuntime, "", "1.25.3"},
+		{"compatible local Go", &runtimeCommands{goVersion: "go version go1.25.3 linux/amd64", dockerAvailable: true, dockerRunning: true, imageAvailable: true}, dockerGoRuntime, "", "1.25"},
 		{"local absent Docker running", &runtimeCommands{dockerAvailable: true, dockerRunning: true, imageAvailable: true}, dockerGoRuntime, "", "1.25"},
 		{"local incompatible Docker running", &runtimeCommands{goVersion: "go version go1.24.9 linux/amd64", dockerAvailable: true, dockerRunning: true, imageAvailable: true}, dockerGoRuntime, "", "1.25"},
-		{"neither available", &runtimeCommands{}, "", "install Go 1.25 or Docker", ""},
+		{"local only", &runtimeCommands{goVersion: "go version go1.25.3 linux/amd64"}, "", "install Docker", ""},
+		{"neither available", &runtimeCommands{}, "", "install Docker", ""},
 		{"Docker stopped", &runtimeCommands{dockerAvailable: true}, "", "Docker must be started", ""},
 		{"image absent", &runtimeCommands{dockerAvailable: true, dockerRunning: true}, "", "docker pull golang:1.25", ""},
 	}
@@ -45,17 +46,17 @@ func TestResolveGoRuntime(t *testing.T) {
 	}
 }
 
-func TestResolveGoRuntimePrefersLocalGo(t *testing.T) {
+func TestResolveGoRuntimeRequiresDockerEvenWithLocalGo(t *testing.T) {
 	commands := &runtimeCommands{goVersion: "go version go1.26.0 linux/amd64", dockerAvailable: true, dockerRunning: true, imageAvailable: true}
 	runtime, err := resolveGoRuntime(writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n"), commands)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.kind != localGoRuntime {
-		t.Fatalf("kind = %q, want local", runtime.kind)
+	if runtime.kind != dockerGoRuntime {
+		t.Fatalf("kind = %q, want docker", runtime.kind)
 	}
-	if slices.Contains(commands.calls, "docker info --format {{.ServerVersion}}") {
-		t.Fatal("Docker must not be inspected when local Go is compatible")
+	if !slices.Contains(commands.calls, "docker info --format {{.ServerVersion}}") {
+		t.Fatal("Docker must be inspected even when local Go is compatible")
 	}
 }
 
@@ -72,13 +73,21 @@ func TestGoRuntimeRunsDockerWithBoundedDerivedCommand(t *testing.T) {
 	call := commands.calls[len(commands.calls)-1]
 	for _, want := range []string{
 		"docker run --rm",
-		"--network bridge",
+		"--network none",
+		"--pull never",
+		"--read-only",
+		"--cap-drop ALL",
+		"--security-opt no-new-privileges",
 		"--tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777",
-		"--mount type=bind,src=" + root + ",dst=/workspace",
+		"--mount type=bind,src=" + root + ",dst=/workspace,readonly",
 		"--workdir /workspace",
+		"--env GOTOOLCHAIN=local",
+		"--env GOPROXY=off",
+		"--env GOSUMDB=off",
+		"--env GOFLAGS=-mod=readonly",
 		"--env HOME=/tmp/zenchron-home",
 		"--env GOPATH=/tmp/zenchron-go",
-		"--env GOMODCACHE=/tmp/zenchron-go/pkg/mod",
+		"--env GOMODCACHE=/go/pkg/mod",
 		"--env GOCACHE=/tmp/zenchron-go-build",
 		"sha256:test-image go test ./...",
 	} {
@@ -86,7 +95,7 @@ func TestGoRuntimeRunsDockerWithBoundedDerivedCommand(t *testing.T) {
 			t.Errorf("Docker command missing %q:\n%s", want, call)
 		}
 	}
-	for _, forbidden := range []string{"--privileged", "/var/run/docker.sock", "--network none"} {
+	for _, forbidden := range []string{"--privileged", "/var/run/docker.sock", "--network bridge"} {
 		if strings.Contains(call, forbidden) {
 			t.Errorf("Docker command contains forbidden %q:\n%s", forbidden, call)
 		}
@@ -192,43 +201,40 @@ func TestVerifyBootstrapChecksRejectsUnformattedNewGoFile(t *testing.T) {
 	}
 }
 
-func TestDockerGoRuntimeCanResolveRepositoryModules(t *testing.T) {
-	goMod, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(goMod), "github.com/santhosh-tekuri/jsonschema/v6") {
-		t.Fatal("regression requires this repository to declare a non-vendored external module")
-	}
-	if _, err := os.Stat(filepath.Join("..", "..", "vendor")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("regression requires no vendor directory; stat error = %v", err)
-	}
-
+func TestDockerGoRuntimeDoesNotForwardOperatorCredentials(t *testing.T) {
+	t.Setenv("GH_TOKEN", "operator-token-sentinel")
+	t.Setenv("HOME", "/operator-home-sentinel")
 	commands := &runtimeCommands{}
-	runtime := goRuntime{dockerGoRuntime, "1.25", "sha256:test-image", filepath.Join("..", ".."), commands}
-	if err := runtime.Run("vet", "./..."); err != nil {
-		t.Fatal(err)
-	}
-	call := commands.calls[len(commands.calls)-1]
-	if !strings.Contains(call, "--network bridge") {
-		t.Fatalf("non-vendored module resolution requires network access:\n%s", call)
-	}
-	if !strings.Contains(call, "--env GOMODCACHE=/tmp/zenchron-go/pkg/mod") {
-		t.Fatalf("module resolution requires a writable module cache:\n%s", call)
-	}
-}
-
-func TestGoRuntimeDisablesAutomaticLocalToolchainDownload(t *testing.T) {
-	commands := &runtimeCommands{goVersion: "go version go1.25.1 test/arch"}
-	runtime, err := resolveGoRuntime(writeGoMod(t, "module example.test/runtime\n\ngo 1.25\n"), commands)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := goRuntime{dockerGoRuntime, "1.25", "sha256:test-image", "/candidate", commands}
 	if err := runtime.Run("test", "./..."); err != nil {
 		t.Fatal(err)
 	}
-	if got := commands.calls[len(commands.calls)-1]; got != "GOTOOLCHAIN=local go test ./..." {
-		t.Fatalf("local Go command = %q", got)
+	if _, err := runtime.OutputTool("gofmt", "-l", "."); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range commands.calls {
+		for _, forbidden := range []string{"operator-token-sentinel", "/operator-home-sentinel", "GH_TOKEN", "--env-file", "docker.sock"} {
+			if strings.Contains(call, forbidden) {
+				t.Fatalf("operator material forwarded: %s", call)
+			}
+		}
+		if strings.Count(call, "--mount ") != 1 || !strings.Contains(call, "src=/candidate,dst=/workspace,readonly") {
+			t.Fatalf("unexpected host mounts: %s", call)
+		}
+	}
+}
+
+func TestGoRuntimeRejectsLocalExecution(t *testing.T) {
+	commands := &runtimeCommands{}
+	runtime := goRuntime{kind: localGoRuntime, commands: commands}
+	if err := runtime.Run("test", "./..."); err == nil {
+		t.Fatal("local candidate execution must fail closed")
+	}
+	if _, err := runtime.OutputTool("gofmt", "-l", "."); err == nil {
+		t.Fatal("local output execution must fail closed")
+	}
+	if len(commands.calls) != 0 {
+		t.Fatalf("host commands executed: %v", commands.calls)
 	}
 }
 
@@ -313,7 +319,7 @@ func TestSelfhostResolvesRuntimeBeforeMutation(t *testing.T) {
 	commands.goUnavailable = true
 	commands.dockerUnavailable = true
 	err := selfhostIssue("4", commands, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "install Go 1.25 or Docker") {
+	if err == nil || !strings.Contains(err.Error(), "install Docker") {
 		t.Fatalf("error = %v", err)
 	}
 	for _, call := range commands.calls {

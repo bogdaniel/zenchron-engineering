@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,89 @@ func TestOperatorConfigRefusesUnpinnedAssuranceImage(t *testing.T) {
 	err := requireConfigError(t, second(LoadOperatorConfig(path)))
 	if !strings.Contains(err.Detail, "assurance.image") {
 		t.Fatalf("unexpected detail %q", err.Detail)
+	}
+}
+
+// TestOperatorConfigRefusesANonHTTPSGitHubEndpoint pins #223: github.endpoint
+// feeds every GitHub consumer this configuration can authorize, so a bad
+// endpoint is refused once at load time rather than only when whichever
+// adapter happens to run first resolves its own credential against it.
+func TestOperatorConfigRefusesANonHTTPSGitHubEndpoint(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plaintext http":   "http://api.example.com",
+		"a non-web scheme": "ftp://api.example.com",
+		"no scheme at all": "api.example.com",
+		"a bare path":      "/api/v3",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := strings.Replace(operatorConfigJSON(dir),
+				`"github": {"credential_mode": "github-cli"}`,
+				`"github": {"credential_mode": "github-cli", "endpoint": "`+endpoint+`"}`, 1)
+			path := writeFile(t, filepath.Join(dir, "config.json"), body)
+			err := requireConfigError(t, second(LoadOperatorConfig(path)))
+			if !strings.Contains(err.Detail, "github.endpoint") {
+				t.Fatalf("unexpected detail %q", err.Detail)
+			}
+		})
+	}
+
+	// AND https IS NOT ENOUGH. TLS protects the transport; it does not bind the
+	// credential to the forge it was issued for. The CLI credential is
+	// resolved from a repository identity that is github.com throughout, so a
+	// well-formed endpoint elsewhere would simply be handed the operator's
+	// token - which is the half of #223 a scheme check does not address.
+	t.Run("refuse an https endpoint this model cannot bind a credential to", func(t *testing.T) {
+		dir := t.TempDir()
+		body := strings.Replace(operatorConfigJSON(dir),
+			`"github": {"credential_mode": "github-cli"}`,
+			`"github": {"credential_mode": "github-cli", "endpoint": "https://ghe.example.com/api/v3"}`, 1)
+		path := writeFile(t, filepath.Join(dir, "config.json"), body)
+		err := requireConfigError(t, second(LoadOperatorConfig(path)))
+		for _, want := range []string{"custom GitHub API endpoints are not supported", "github.com-bound"} {
+			if !strings.Contains(err.Detail, want) {
+				t.Fatalf("detail %q does not explain why, naming %q", err.Detail, want)
+			}
+		}
+	})
+
+	// The one endpoint the model can honour is accepted, stated or not, so an
+	// operator who writes it explicitly is not refused for agreeing.
+	for name, endpoint := range map[string]string{
+		"the default, stated":               DefaultGitHubAPIEndpoint,
+		"the default with a trailing slash": DefaultGitHubAPIEndpoint + "/",
+	} {
+		t.Run("accept "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			body := strings.Replace(operatorConfigJSON(dir),
+				`"github": {"credential_mode": "github-cli"}`,
+				`"github": {"credential_mode": "github-cli", "endpoint": "`+endpoint+`"}`, 1)
+			path := writeFile(t, filepath.Join(dir, "config.json"), body)
+			if _, _, err := LoadOperatorConfig(path); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// AND THE GENERIC CHECK STAYS, because a directly constructed adapter - in a
+// test, or in a future composition - still has to refuse carrying a credential
+// over anything but https to a named host.
+func TestTheAPIRootRefusesAnythingButHTTPSToAHost(t *testing.T) {
+	for name, endpoint := range map[string]string{
+		"plaintext http": "http://api.github.com",
+		"no scheme":      "api.github.com",
+		"no host":        "https://",
+	} {
+		t.Run("refuse "+name, func(t *testing.T) {
+			if _, err := githubAPIRoot(endpoint); err == nil {
+				t.Fatalf("%q was accepted as an API root", endpoint)
+			}
+		})
+	}
+	root, err := githubAPIRoot("")
+	if err != nil || root != DefaultGitHubAPIEndpoint {
+		t.Fatalf("root = %q err = %v, want the default", root, err)
 	}
 }
 
@@ -233,6 +317,49 @@ func TestRepositoryConfigCannotRaiseACeiling(t *testing.T) {
 	}
 	if configErr.Path == "" {
 		t.Fatal("the refusal must name the repository file")
+	}
+}
+
+// TestTheSupervisorBoundClampsARepositoryWatchProposal closes the one
+// combination the tighten lattice does not reach.
+//
+// TestTightenLatticePerDimension and
+// TestRepositoryConfigCannotRaiseWatchFrequencyOrConcurrency already prove that
+// a repository may only tighten watch.max_concurrent_runs, but both state the
+// operator bound as watch.max_concurrent_runs too. supervisor.max_concurrent_runs
+// is the member the documentation tells an operator to set, WatchSettings takes
+// the stricter of the two, and the resolved answer is now what every engine's
+// scheduler enforces durably - so an operator who states only the supervisor
+// bound must still bound the repository.
+func TestTheSupervisorBoundClampsARepositoryWatchProposal(t *testing.T) {
+	operatorAt := func(t *testing.T, ceiling int) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "config.json"), strings.Replace(operatorConfigJSON(dir), "{\n",
+			fmt.Sprintf("{\n\t\"supervisor\": {\"max_concurrent_runs\": %d},\n", ceiling), 1))
+		return dir
+	}
+
+	dir := operatorAt(t, 2)
+	writeFile(t, filepath.Join(dir, RepositoryConfigFile), `{"watch": {"max_concurrent_runs": 3}}`)
+	configErr := requireConfigError(t, second2(LoadConfig(filepath.Join(dir, "config.json"), dir)))
+	if !strings.Contains(configErr.Detail, "only tighten watch.max_concurrent_runs") ||
+		!strings.Contains(configErr.Detail, "operator bound 2") {
+		t.Fatalf("expected a refusal naming the supervisor bound it exceeded, got %q", configErr.Detail)
+	}
+
+	dir = operatorAt(t, 2)
+	writeFile(t, filepath.Join(dir, RepositoryConfigFile), `{"watch": {"max_concurrent_runs": 1}}`)
+	config, err := LoadConfig(filepath.Join(dir, "config.json"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.WatchSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.MaxConcurrentRuns != 1 {
+		t.Fatalf("the repository tightened to 1 and the effective ceiling is %d", settings.MaxConcurrentRuns)
 	}
 }
 
