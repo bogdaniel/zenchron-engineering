@@ -69,6 +69,8 @@ type PlanStageProjection struct {
 	StageID string         `json:"stage_id"`
 	State   PlanStageState `json:"state"`
 	Reason  string         `json:"reason,omitempty"`
+	// BlockedBy is a read-time diagnostic, never a lifecycle outcome.
+	BlockedBy []PlanDependencyBlocker `json:"blocked_by,omitempty"`
 	// The assignment freeze. These are the identities that will have performed
 	// the work, and editing a profile afterwards cannot change them.
 	AssignmentID   string                 `json:"assignment_id,omitempty"`
