@@ -726,6 +726,89 @@ func TestSupervisorAcceptsASubmissionForAnyConfiguredAgent(t *testing.T) {
 	}
 }
 
+// stubAgentProber answers a fixed AgentReadiness, standing in for a real
+// executable-on-PATH probe so this test can force "codex is configured but
+// unusable" without actually depending on what is installed on the machine
+// running it.
+type stubAgentProber struct{ readiness AgentReadiness }
+
+func (p stubAgentProber) Probe(context.Context) AgentReadiness { return p.readiness }
+
+// TestSubmitRefusesAnUnusableAgentWhetherDefaultOrExplicit is #63's follow-up,
+// #303: the control-endpoint intake `handleControl` hands every ControlSubmit
+// straight to Submit, so this is the same surface `autonomy run issue N`
+// reaches once a supervisor is running. A configured agent this process
+// cannot invoke must be refused here exactly as the direct CLI path refuses
+// it - for an EXPLICIT selection and, just as importantly, for a request that
+// names no agent at all and therefore resolves the operator's own default.
+// Neither shape may create a run and silently fail deeper inside it.
+func TestSubmitRefusesAnUnusableAgentWhetherDefaultOrExplicit(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	registry := supervisorRegistry(t) // default_agent: "codex"
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unusable := AgentReadiness{Available: false, Detail: "executable codex was not found on PATH"}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 2,
+		PollInterval: time.Minute, Agents: registry,
+		AgentProber: func(agent ResolvedAgent) AgentProber {
+			if agent.ID == "codex" {
+				return stubAgentProber{readiness: unusable}
+			}
+			return stubAgentProber{readiness: AgentReadiness{Available: true}}
+		},
+		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
+			deps := fixture.deps
+			deps.Agent, deps.Agents = agent, registry
+			return NewEngineeringRuntime(deps)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, request := range map[string]ControlRequest{
+		"explicit selection": {Repository: "acme/repo", Issue: phase8Issue + 14, Agent: "codex"},
+		"default selection":  {Repository: "acme/repo", Issue: phase8Issue + 15},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := supervisor.Submit(context.Background(), request)
+			if err == nil {
+				t.Fatal("a configured-but-uninvocable agent was admitted")
+			}
+			var refused *AgentUnusableError
+			if !errors.As(err, &refused) {
+				t.Fatalf("the refusal was not AgentUnusableError: %v", err)
+			}
+			if refused.ID != "codex" || refused.Reason != unusable.Detail {
+				t.Fatalf("the refusal did not carry doctor's own reason: %#v", refused)
+			}
+		})
+	}
+	// The still-usable agent is unaffected: this is a per-agent readiness
+	// check, not a blanket refusal of the whole supervisor.
+	fixture.forge.Issues[phase8Issue+16] = GitHubIssue{
+		Number: phase8Issue + 16, URL: "https://github.com/acme/repo/issues/3",
+		Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+	}
+	if _, err := supervisor.Submit(context.Background(), ControlRequest{
+		Repository: "acme/repo", Issue: phase8Issue + 16, Agent: "claude",
+	}); err != nil {
+		t.Fatalf("a usable agent was refused alongside the unusable one: %v", err)
+	}
+	// Both refusals above must have created nothing: only the claude submission
+	// - the one call that was actually admitted - may be sitting in the store.
+	runs, err := fixture.store.Runs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("a refused submission created a run: %#v", runs)
+	}
+}
+
 // TestEveryActiveRunGetsATurnUnderACeiling is the fairness rule. A run is
 // non-terminal for its whole lifetime, not only while it is inside Reconcile,
 // so selecting a fixed age-ordered prefix would make a ceiling of one mean "the
@@ -1963,4 +2046,297 @@ func TestThePlanLockIsReleasedAcrossAProviderCall(t *testing.T) {
 		t.Fatal("a decision could not take the plan lock while a provider call was in flight")
 	}
 	supervisor.plansMu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// A tick is a scheduling pass, not a unit of work
+// ---------------------------------------------------------------------------
+
+// heldForge is the ordinary forge double with ONE issue's read held open. It is
+// the deterministic stand-in for a provider that takes half an hour: the run
+// that reaches it is inside driveOne and has not returned, which is the only
+// property the test below needs of it.
+//
+// The hold is OUTSIDE the double's own mutex, for the same reason the overlap
+// gate in the serve tests keeps it there: a test that parked one run while
+// holding the double's lock would have serialised the other by accident and
+// could only ever have observed one run.
+type heldForge struct {
+	GitHubAdapter
+	issue   int
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *heldForge) Issue(ctx context.Context, repo GitHubRepo, number int) (GitHubIssue, error) {
+	issue, err := f.GitHubAdapter.Issue(ctx, repo, number)
+	if number == f.issue {
+		f.once.Do(func() { close(f.entered) })
+		<-f.release
+	}
+	return issue, err
+}
+
+// operationsForRun counts the durable operations one run has planned, which is
+// how the store answers "has this run started its own work" without the test
+// knowing anything about how the supervisor is built.
+func operationsForRun(t *testing.T, store *SQLiteOperationStore, runID string) int {
+	t.Helper()
+	operations, err := store.AllOperations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, operation := range operations {
+		if operation.RunID == runID {
+			count++
+		}
+	}
+	return count
+}
+
+// TestARunSubmittedWhileAnotherIsExecutingStartsWithoutWaitingForIt is the
+// operator claim of #63 reduced to the smallest thing that can fail: start a
+// second task while the first is running, and the second begins.
+//
+// It is the regression for #202. Live on candidate b6f2c09 - which already had
+// the ceiling repair of #170 - one tick was logged in seventeen minutes while
+// claude ran for 27m46s, and a run submitted at 09:14:38 sat at run.created for
+// 20m18s before beginning candidate.create two minutes after that provider
+// returned, with a free slot beside it the whole time. Admission was
+// tick-granular and a tick was as long as its slowest run.
+//
+// It asserts nothing about goroutines. A test that watched the supervisor spawn
+// one would pass against a fleet that still admitted nothing, so what is
+// measured is the durable fact the operator actually waited on: the submitted
+// run planning an operation of its own while the first run is provably still
+// inside its call.
+func TestARunSubmittedWhileAnotherIsExecutingStartsWithoutWaitingForIt(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	second := phase8Issue + 30
+	fixture.forge.Issues[second] = GitHubIssue{
+		Number: second, URL: "https://github.com/acme/repo/issues/71",
+		Title: "the task an operator starts second", Body: "body",
+		State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+	}
+	// The long run is created BEFORE the forge is held, so what gets parked is
+	// the supervisor driving it rather than the act of creating it.
+	long := fixture.start()
+
+	gate := &heldForge{
+		GitHubAdapter: fixture.forge, issue: phase8Issue,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseLong := func() { releaseOnce.Do(func() { close(gate.release) }) }
+	t.Cleanup(releaseLong)
+	fixture.deps.GitHub = gate
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A REAL clock, deliberately: the fixture's stepping clock sits at a fixed
+	// instant unrelated to now, and the loop's next pass is scheduled against
+	// wall time. The engine keeps the fixture clock, which is what governs
+	// anything durable.
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: RealClock{}, Owner: "owner-1",
+		StateDir: fixture.stateDir, Repositories: []GitHubRepo{repo},
+		MaxConcurrentRuns: 2, PollInterval: time.Second, Agents: supervisorRegistry(t),
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The operator's own loop, not a hand-driven tick: what failed was the loop
+	// being unable to make a pass while one was still driving.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop := make(chan error, 1)
+	go func() { loop <- supervisor.Run(ctx, nil) }()
+
+	select {
+	case <-gate.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("run %s never reached the held call, so there is nothing for a second run to wait behind", long)
+	}
+
+	// An operator starts a second task while the first is still executing.
+	started, err := supervisor.Submit(ctx, ControlRequest{Repository: "acme/repo", Issue: second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Counted from AFTER submission, so what is proven is the supervisor
+	// admitting the run rather than the submission planning something itself.
+	before := operationsForRun(t, fixture.store, started.RunID)
+
+	deadline := time.Now().Add(30 * time.Second)
+	for operationsForRun(t, fixture.store, started.RunID) <= before {
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s was submitted with a free slot under a ceiling of two and started no work of its own "+
+				"while run %s was still inside its call: admission is bounded by the slowest run rather than by capacity",
+				started.RunID, long)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Shutdown still DRAINS. Work now outlives the pass that started it, so the
+	// loop returning before that work unwound would let `serve` exit on top of
+	// a live provider - which is the one thing shutdown is defined not to do.
+	cancel()
+	select {
+	case <-loop:
+		t.Fatalf("shutdown returned while run %s was still executing; in-flight work was abandoned", long)
+	case <-time.After(2 * time.Second):
+	}
+	releaseLong()
+	select {
+	case err := <-loop:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatalf("shutdown never finished draining run %s", long)
+	}
+}
+
+// TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots is the fairness rule at
+// the one place it is decided, driven directly so it is deterministic and
+// costs nothing.
+//
+// It exists because the rule had no test that could see it. Once driving
+// outlived the pass that started it, the fleet the supervisor chooses from
+// changes size every pass by exactly the in-flight set - and a cursor that
+// indexed that changing subset rather than the active ring is the same mistake
+// as walking a list while deleting from it. The same integer named a different
+// run each pass and settled into a cycle that never landed on one of them:
+// four runs at a ceiling of two, with the durations below, started run-02 zero
+// times in two hundred passes while every pass had room and gave it to a
+// sibling. Nothing here is adversarial - stable per-run durations are what an
+// ordinary mixed fleet of pollers and executors looks like.
+func TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots(t *testing.T) {
+	supervisor := &Supervisor{
+		deps:     SupervisorDependencies{MaxConcurrentRuns: 2},
+		inflight: map[string]struct{}{},
+	}
+	active := []EngineeringRun{{ID: "run-00"}, {ID: "run-01"}, {ID: "run-02"}, {ID: "run-03"}}
+	// How many passes each run stays in flight: two return within the pass that
+	// started them, two execute across several.
+	passesInFlight := map[string]int{"run-00": 1, "run-01": 2, "run-02": 1, "run-03": 3}
+
+	remaining, started := map[string]int{}, map[string]int{}
+	for pass := 0; pass < 200; pass++ {
+		for id := range remaining {
+			if remaining[id]--; remaining[id] <= 0 {
+				delete(remaining, id)
+				delete(supervisor.inflight, id)
+			}
+		}
+		for _, run := range supervisor.admit(active) {
+			remaining[run.ID] = passesInFlight[run.ID]
+			started[run.ID]++
+		}
+		if len(supervisor.inflight) > supervisor.deps.MaxConcurrentRuns {
+			t.Fatalf("pass %d admitted past the ceiling: %d in flight", pass, len(supervisor.inflight))
+		}
+	}
+	for _, run := range active {
+		if started[run.ID] == 0 {
+			t.Fatalf("%s was never started in 200 passes while its siblings started %v: "+
+				"a pass with room handed it to somebody else every time", run.ID, started)
+		}
+	}
+}
+
+// TestEveryActiveRunGetsATurnWhileAnotherIsExecuting is the same rule through
+// the real loop, which is where it now has to hold.
+//
+// TestEveryActiveRunGetsATurnUnderACeiling above still passes and no longer
+// proves this: it drives Tick, which waits, so nothing is ever in flight when
+// the next pass decides. Fairness among runs whose driving OUTLIVES a pass is a
+// different question, and it is the one an operator asks when a long provider
+// is running and everything else is waiting behind it.
+func TestEveryActiveRunGetsATurnWhileAnotherIsExecuting(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	// One long run, and three siblings that must each get their turn while it
+	// holds its slot. A ceiling of two leaves exactly one slot to share.
+	long := fixture.start()
+	var siblings []string
+	for i := 0; i < 3; i++ {
+		issue := phase8Issue + 40 + i
+		fixture.forge.Issues[issue] = GitHubIssue{
+			Number: issue, URL: "https://github.com/acme/repo/issues/3",
+			Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+		}
+		outcome, err := fixture.runtime.StartIssueRun(context.Background(), issue, AdoptCompatibleGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		siblings = append(siblings, outcome.RunID)
+	}
+
+	gate := &heldForge{
+		GitHubAdapter: fixture.forge, issue: phase8Issue,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseLong := func() { releaseOnce.Do(func() { close(gate.release) }) }
+	t.Cleanup(releaseLong)
+	fixture.deps.GitHub = gate
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: RealClock{}, Owner: "owner-1",
+		StateDir: fixture.stateDir, Repositories: []GitHubRepo{repo},
+		MaxConcurrentRuns: 2, PollInterval: time.Second, Agents: supervisorRegistry(t),
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop := make(chan error, 1)
+	go func() { loop <- supervisor.Run(ctx, nil) }()
+
+	select {
+	case <-gate.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("run %s never reached the held call, so no slot is being held", long)
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		waiting := make([]string, 0, len(siblings))
+		for _, runID := range siblings {
+			if operationsForRun(t, fixture.store, runID) == 0 {
+				waiting = append(waiting, runID)
+			}
+		}
+		if len(waiting) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%v never got a turn on the free slot while run %s held the other one: "+
+				"a pass with room gave it to a sibling every time", waiting, long)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	releaseLong()
+	select {
+	case err := <-loop:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatalf("shutdown never finished draining run %s", long)
+	}
 }

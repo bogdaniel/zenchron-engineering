@@ -136,14 +136,26 @@ decoding. A repository that wants a lower ceiling for itself writes
 never raise — and because the effective bound is the stricter of the two, that
 tightening still holds.
 
-Each tick drives the active runs oldest first and caps the number driven at the
-ceiling, ROTATING the starting point between ticks. The rotation is the part
-that matters: a run stays non-terminal for its whole lifetime, not only while it
-is being reconciled, so a fixed prefix would make a ceiling of one mean "the
-oldest run, forever" and every later submission would wait for it to finish. The
-ceiling is a rate limit, not a queue position. The scheduler enforces the
-same ceiling durably; the supervisor bound exists so the process does not start
-work it cannot lease. A per-run failure is REPORTED inside the tick report and
+Each tick is a scheduling PASS: it starts as many runs as the ceiling still has
+room for, oldest first, ROTATING the starting point between passes, and then
+returns without waiting for them. A run holds its slot for as long as it is
+being driven - a provider that takes half an hour holds one for half an hour -
+and the remaining slots stay available the whole time, so a task submitted while
+another is executing starts on the next pass rather than when that provider
+finishes.
+
+The rotation decides who gets a free slot: a run stays non-terminal for its
+whole lifetime, not only while it is being reconciled, so a fixed prefix would
+make the oldest runs the only ones ever driven. The rotation sweeps the whole
+active fleet and steps over whatever is in flight, which is what gives every run
+a turn.
+
+**At a ceiling of one this is still a queue.** One long-running task holds the
+single slot until it is done and nothing else moves, which is what the default
+ceiling of one means; raise `max_concurrent_runs` to work on several tasks at
+once. Above one, the ceiling is a rate limit on how many run at a time and never
+a fixed ordering. The scheduler enforces the same ceiling durably; the
+supervisor bound exists so the process does not start work it cannot lease. A per-run failure is REPORTED inside the tick report and
 never propagated: one run whose forge call failed, whose provider is unavailable
 or whose workspace is broken must not take its siblings down, and that isolation
 is the whole reason several tasks share one process.

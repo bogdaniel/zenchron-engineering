@@ -289,6 +289,35 @@ func (e *UnknownAgentError) Error() string {
 	return "unknown agent " + strconv.Quote(e.ID) + "; configured agents are " + strings.Join(e.Available, ", ")
 }
 
+// AgentUnusableError names an agent the operator explicitly asked for that IS
+// configured but cannot currently be invoked. It is a different fact than
+// UnknownAgentError, and conflating them sends an operator to fix a
+// configuration that was never wrong: the id is real, and doctor already knows
+// why it can't run. The fix here is to install or authenticate the CLI this id
+// already names, not to edit the config.
+type AgentUnusableError struct {
+	ID     string
+	Reason string
+}
+
+func (e *AgentUnusableError) Error() string {
+	return "agent " + strconv.Quote(e.ID) + " is configured but cannot be invoked: " + e.Reason
+}
+
+// RefuseUnlessInvocable probes an explicitly-requested agent and refuses with
+// AgentUnusableError, naming the same reason `doctor` already reports for it,
+// rather than accepting the selection and letting it fail deep inside a run
+// with no explanation. A nil prober disables the check.
+func RefuseUnlessInvocable(ctx context.Context, agent ResolvedAgent, prober AgentProber) error {
+	if prober == nil {
+		return nil
+	}
+	if readiness := prober.Probe(ctx); !readiness.Available {
+		return &AgentUnusableError{ID: agent.ID, Reason: readiness.Detail}
+	}
+	return nil
+}
+
 // IDs lists configured agent ids in deterministic order.
 func (r AgentRegistry) IDs() []string { return append([]string(nil), r.order...) }
 

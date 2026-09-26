@@ -48,7 +48,8 @@ and can never be mistaken for an adopted controller.
 <state_dir>/                               mode 0700, owner-only
   runtime.db                               append-only journal, runs, operations
   serve.sock                               control endpoint, mode 0600, only while `serve` runs
-  locks/runtime/                           OS advisory ownership locks
+  locks/runtime/                           OS advisory controller-instance locks
+  locks/controller-role                    the single controller role anchor
   runs/<run-id>/candidate/                 the runtime-owned candidate clone
   artifacts/provider/<agent>/<run>/...     per-attempt transcripts, raw and sanitized
   artifacts/feedback/<run>/                admitted third-party text, local-only
@@ -107,12 +108,12 @@ bin/zenchron-engineering autonomy doctor --text
 
 Doctor answers, per capability, whether the thing a real run depends on is
 actually there: the state directory and its mode, the runtime database and its
-schema, the ownership lock and the crash evidence behind it, the trusted Git
+schema, the controller-instance lock and the crash evidence behind it, the trusted Git
 binary and its isolation, the Docker endpoint, the pinned image and whether it
 resolves a Go toolchain offline, the dependency cache, the forge credential and
 its rate limit, both configuration layers, per-agent readiness, the control
 endpoint, and the state ceiling. It creates nothing, repairs nothing, takes no
-ownership lock, and makes no model call. `FAIL` exits 11; `WARN` and `PASS` exit
+controller-instance lock, and makes no model call. `FAIL` exits 11; `WARN` and `PASS` exit
 0. Resolve every `FAIL` before starting work — [troubleshooting.md](troubleshooting.md)
 maps the common ones to a fix.
 

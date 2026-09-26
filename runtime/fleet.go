@@ -51,6 +51,21 @@ type RunSummary struct {
 	// what "implementing" or "testing" actually means underneath.
 	Operation string `json:"operation,omitempty"`
 	Attempt   int    `json:"attempt,omitempty"`
+	// Executing reports whether that operation is running RIGHT NOW, which is
+	// a different question from the run's disposition and from whether an
+	// operation exists at all.
+	//
+	// A run parked on review is `waiting`, and when a review arrives its worker
+	// is re-invoked while the disposition stays exactly where it was - so
+	// "waiting" alone described eight minutes of a provider working as though
+	// nothing were happening. The durable disposition is right and is not
+	// changed for display; this is the fact the display was missing.
+	//
+	// IT COMES FROM THE OPERATION ROWS, not from the reduced journal. See
+	// executingNow: the first version of this read the snapshot's ActiveSince
+	// and reported twenty runs executing on a fleet running two, including
+	// runs that had completed hours earlier.
+	Executing bool `json:"executing,omitempty"`
 	// Elapsed is wall time since the run was created.
 	Elapsed time.Duration `json:"elapsed"`
 	// Candidate identifies the work: the branch, the exact revision and tree,
@@ -79,12 +94,18 @@ type RunSummary struct {
 // Fleet is the whole operator view.
 type Fleet struct {
 	At time.Time `json:"at"`
-	// Capacity is the operator-authorized concurrency ceiling, and Active is
-	// how many runs are currently non-terminal. "3 / 4 active" is a fact about
-	// the operator's configuration, not about this process.
-	Capacity int          `json:"capacity"`
-	Active   int          `json:"active"`
-	Runs     []RunSummary `json:"runs"`
+	// THREE NUMBERS, BECAUSE THEY ARE THREE FACTS. Capacity is the
+	// operator-authorized concurrency ceiling; Executing is how many runs have
+	// a worker running right now; Active is how many runs are non-terminal.
+	//
+	// Only Executing is bounded by Capacity. Rendering Active against it
+	// produced "Workers: 3 / 2 active" on a fleet with one run parked for
+	// review - true of neither quantity, and reading as though the ceiling had
+	// been breached when it had been enforced exactly.
+	Capacity  int          `json:"capacity"`
+	Executing int          `json:"executing"`
+	Active    int          `json:"active"`
+	Runs      []RunSummary `json:"runs"`
 	// Plans is the plan-level view beside the runs. An operator with a plan
 	// awaiting their approval is being waited ON, and that has to be visible in
 	// the same place they look to see whether anything is happening.
@@ -270,6 +291,9 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
 		}
+		if summary.Executing {
+			fleet.Executing++
+		}
 		fleet.Runs = append(fleet.Runs, summary)
 	}
 	// Active work first, then most recent: the runs an operator can still act
@@ -331,6 +355,7 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	if operation, ok := state.currentOperation(); ok {
 		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
 	}
+	summary.Executing = executingNow(store, run.ID)
 	if pr := projection.PullRequest; pr != nil {
 		summary.PullRequest, summary.PRState = pr.Number, pr.State
 	}
@@ -455,4 +480,52 @@ func attemptNumberOf(name string) (int, bool) {
 	}
 	number, err := strconv.Atoi(rest)
 	return number, err == nil && number > 0
+}
+
+// workerIdentity is the execution agent this run is bound to, read from the
+// journal for the same reason the fleet view reads it there: the run row is a
+// projection, and a row that somehow disagreed with the journal would be the
+// wrong one to believe.
+//
+// An agent that cannot be recovered yields an empty identity rather than a
+// guess. A run created before the registry existed has none to recover.
+func (s *runState) workerIdentity(stateDir string) WorkerIdentity {
+	identity := WorkerIdentity{}
+	if agent, err := s.recordedAgent(); err == nil && agent.AgentID != "" {
+		identity.Agent, identity.ProviderKind = agent.AgentID, agent.Kind
+		identity.TrustMode, identity.Model = agent.TrustMode, agent.Model
+	}
+	if dir := candidateDir(stateDir, s.run.ID); dirExists(dir) {
+		identity.Workspace = dir
+	}
+	return identity
+}
+
+// executingNow reports whether any operation of this run is executing.
+//
+// IT ASKS THE OPERATION ROWS. The scheduler owns those: it sets ActiveSince
+// when an attempt begins and clears it when the attempt ends, so "running with
+// an active attempt" is exactly what a worker occupying a slot looks like.
+//
+// The reduced journal is NOT the same answer, and the difference shipped. The
+// snapshot rebuilt from events leaves ActiveSince set on operations that ended
+// - the end is recorded as a later event rather than as a mutation of that
+// field - so reading it there reported every run that had ever started an
+// attempt as executing: twenty of them on a fleet running two, several
+// completed hours earlier. The rows said two, correctly, the whole time.
+//
+// A store that cannot answer yields false. Not knowing is not executing, and
+// the cost of the honest answer here is a row that understates activity for
+// one poll rather than a header that cannot be believed.
+func executingNow(store *SQLiteOperationStore, runID string) bool {
+	operations, err := store.Operations(runID)
+	if err != nil {
+		return false
+	}
+	for _, operation := range operations {
+		if operation.State == Running && operation.ActiveSince != nil {
+			return true
+		}
+	}
+	return false
 }

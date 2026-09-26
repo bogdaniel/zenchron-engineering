@@ -308,7 +308,14 @@ func (c *GitHubAppCredential) do(ctx context.Context, method, path, assertion st
 	if c.HTTP == nil {
 		return 0, nil, nil, &GitHubAuthError{Detail: "the GitHub App credential has no HTTP transport"}
 	}
-	request, err := http.NewRequestWithContext(ctx, method, githubAPIRoot(c.Endpoint)+path, nil)
+	// The endpoint is checked before the assertion is ever placed in a request,
+	// for the same reason the REST adapter and the governance observer check
+	// theirs first: a refused endpoint must never see the credential.
+	root, err := githubAPIRoot(c.Endpoint)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, method, root+path, nil)
 	if err != nil {
 		return 0, nil, nil, &GitHubAPIError{Detail: "the GitHub App request could not be built"}
 	}

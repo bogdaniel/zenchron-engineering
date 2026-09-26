@@ -56,13 +56,22 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 			Credentials: githubCredentials(config.GitHub),
 		}
 	}
-	rulesetReader, ok := forge.(interface {
-		Rulesets(context.Context, runtime.GitHubRepo) ([]runtime.TrustedMainRuleset, error)
-	})
-	if !ok {
-		return runtime.ExitFailed, fmt.Errorf("the configured forge adapter cannot observe repository rulesets, so no trust root can be established")
+	// The trust root is observed through a DIFFERENT credential from the one
+	// that publishes, and the adapter above is never asked for it. GitHub does
+	// not disclose a ruleset's bypass actors to a GitHub App installation
+	// token - it answers current_user_can_bypass instead, which is a different
+	// question - so the identity #82 requires for publication is the one
+	// identity that cannot verify adoption. An unconfigured governance
+	// credential refuses the build; it never falls back to the publication one.
+	governance := overrides.Governance
+	if governance == nil {
+		built, govErr := governanceObserver(config.GitHub)
+		if govErr != nil {
+			return runtime.ExitInvalid, govErr
+		}
+		governance = built
 	}
-	deps := runtime.AdoptedBuildDeps{Rulesets: rulesetReader.Rulesets, RefSHA: forge.RefSHA}
+	deps := runtime.AdoptedBuildDeps{Governance: governance, RefSHA: forge.RefSHA}
 
 	output := strings.TrimSpace(flags.Output)
 	if output == "" {
@@ -107,6 +116,8 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	fmt.Fprintf(stdout, "tree:              %s\n", provenance.Source.Tree)
 	fmt.Fprintf(stdout, "trusted main:      %s (tree %s)\n", provenance.TrustedMain.Revision, provenance.TrustedMain.Tree)
 	fmt.Fprintf(stdout, "trust root:        ruleset %d %q %s\n", provenance.TrustRoot.RulesetID, provenance.TrustRoot.Name, provenance.TrustRoot.Digest)
+	fmt.Fprintf(stdout, "observed by:       %s via %s\n", provenance.TrustRoot.ObservedBy.Role, provenance.TrustRoot.ObservedBy.Method)
+	fmt.Fprintf(stdout, "bypass:            observed=%t, %d actor(s)\n", provenance.TrustRoot.Bypass.Observed, provenance.TrustRoot.Bypass.Count)
 	fmt.Fprintf(stdout, "build environment: %s %s (%s), network %s, source %s, cache %s\n",
 		provenance.BuildEnv.Kind, provenance.BuildEnv.Image, provenance.BuildEnv.Toolchain,
 		provenance.BuildEnv.Network, provenance.BuildEnv.SourceMount, provenance.BuildEnv.CacheMount)
@@ -116,6 +127,27 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	fmt.Fprintf(stdout, "self probe:        %s %s matched=%t\n", provenance.SelfProbe.Kind, provenance.SelfProbe.Version, provenance.SelfProbe.Matched)
 	fmt.Fprintf(stdout, "builder:           kind=%s version=%s\n", provenance.Builder.Kind, provenance.Builder.Version)
 	return runtime.ExitCompleted, nil
+}
+
+// governanceObserver builds the real governance observer from configuration.
+//
+// It is its own function rather than four lines inline because the transport it
+// chooses is load-bearing and a test has to be able to assert that choice. A
+// bare http.Client would carry the operator's governance credential across a
+// same-host https -> http redirect, since net/http's header stripping is keyed
+// on the host and never consults the scheme; GovernanceHTTPClient refuses that
+// hop. Inline, that decision was correct and unasserted, which is the same
+// shape of "true by convention" the rest of this change exists to remove.
+func governanceObserver(config runtime.GitHubConfig) (runtime.ForgeGovernance, error) {
+	credential, err := githubGovernanceCredential(config)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.GitHubGovernanceObserver{
+		HTTP:       runtime.GovernanceHTTPClient(30 * time.Second),
+		Endpoint:   config.Endpoint,
+		Credential: credential,
+	}, nil
 }
 
 // controllerInspectSelf reports this binary's own build provenance and nothing

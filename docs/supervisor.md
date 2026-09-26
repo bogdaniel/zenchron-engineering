@@ -86,7 +86,7 @@ is not recovery.
 The endpoint requires a platform where owner-only permissions can be verified.
 Where they cannot, `serve` declines to offer a control path rather than
 publishing one whose exposure it cannot describe — the same conservative choice
-the ownership lock and the sandbox adapter already make. Everything else still
+the controller-instance lock and the sandbox adapter already make. Everything else still
 works there: runs are driven by the command that started them, exactly as before
 `serve` existed.
 
@@ -159,6 +159,57 @@ wall_limit_seconds          bounds the time the SYSTEM is working
 
 lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
                             optional, absent by default
+
+provider_inactivity_seconds bounds how long ONE provider invocation may go
+                            without recognized provider progress;
+                            finite always
+```
+
+The third bound is the stall detector, and the run wall budget is not. A
+provider subprocess being alive is not evidence of progress: a host that loses
+its network keeps a coding CLI alive and silent, and until that was bounded the
+run-wide wall budget was what discovered a dead provider — in the live run that
+prompted it, 8h55m16s of "active engineering work" with zero external wait.
+Reaching the window terminates the provider's process group, preserves its
+transcript, and records `provider_no_progress`, which is a bounded retry.
+
+A restart does not refund it. Silence is measured from the last moment output
+was actually observed, and that datum is durable, so a controller that dies
+mid-invocation hands its successor the REMAINDER of the window rather than a
+fresh one — four minutes of proven silence leaves six, not ten. That is a
+different authority from the execution budget, which separately charges the
+abandoned interval in full. An attempt that was settled — observed, journalled
+and classified — does get a fresh window, because that is what a bounded retry
+is; the attempt ceiling is what ends it.
+
+Claude Code is the exception. Its window is measured by its own structured
+events, which belong to one physical process, so each new physical Claude
+attempt — after a restart too — gets the full window. What stays cumulative
+across restarts for it is the execution budget, which still charges every
+abandoned interval, and the attempt identity, which still advances; those are
+what keep repeated restarts finite. See
+[configuration.md](configuration.md#budgets).
+
+An explicit connectivity diagnostic is `provider_unavailable` instead, and waits
+without spending the active-work budget — but only when the CLI itself said so.
+A typed provider condition is read from the **terminal diagnostic surface**: the
+bounded tail of the CLI's own diagnostic stream. The session rendering, where
+model text and tool output go, is never consulted. A worker quoting an error, a
+captured test log, or a documentation excerpt therefore cannot park a run on an
+external wait that pauses accounting — a transcript is evidence, not an
+assertion about the world.
+
+Where the provider did state a condition and then went quiet, both facts are
+kept: the classification is the condition the provider named, and the
+termination cause records that the inactivity policy ended the process. Silence
+is the weaker statement, so it does not overwrite the stronger one.
+
+`autonomy status` prints the pair an
+operator needs — time since recognized progress, and the window it is measured
+against:
+
+```text
+progress   last 2026-09-18T09:14:02Z silent 4m12s inactivity limit 10m0s
 ```
 
 These answer different questions and were the same number until a live run
@@ -209,9 +260,13 @@ raise it; where both `supervisor.max_concurrent_runs` and the older
 What the ceiling bounds is **whole-run reconciliation**, not specifically the
 expensive part of it. A run being reconciled holds a slot whether it is invoking
 a coding agent or performing a cheap forge observation, so the bound is coarser
-than "N concurrent provider invocations". In practice a tick's cost is dominated
-by execution and assurance, and the rotation above means a slot is never held
-across ticks. If a deployment ever needs the finer bound - N expensive
+than "N concurrent provider invocations". A slot is held for as long as the run
+is being driven, which is usually several polling intervals: a tick is a
+scheduling PASS that starts work and returns, so a run whose provider takes half
+an hour keeps its slot across every pass in that half hour, and the remaining
+slots stay available to anything an operator submits meanwhile. The alternative
+- a pass that waits for everything it started - made admission as slow as the
+slowest run and is what #202 records. If a deployment ever needs the finer bound - N expensive
 operations rather than N runs - that is a per-operation-kind concurrency class
 in the scheduler, and it is deliberately not built on speculation about which
 kinds would need one.
