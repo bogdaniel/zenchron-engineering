@@ -382,3 +382,8 @@ semantics, with whatever it actually measured. The 5-10x figure in the leverage
 table above remains a hypothesis to be earned against real work, and it is
 deliberately not encoded as an assertion anywhere in the test suite: a number the
 system can check is a number the system will optimize.
+
+The offline evaluator and versioned corpus protocol now live in
+[`benchmarks/README.md`](benchmarks/README.md). No paired live measurements have
+yet established M1's 2× target. The evaluator reports observed ratios unchanged;
+synthetic fixtures exercise the arithmetic and do not establish product leverage.
