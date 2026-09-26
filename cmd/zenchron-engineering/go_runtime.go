@@ -34,12 +34,11 @@ func (r goRuntime) Run(args ...string) error {
 }
 
 // RunTool executes a Go tool selected by the resolved bootstrap runtime.
-// Keeping this boundary here ensures Docker fallback gets the same tool as a
-// compatible local installation, without reimplementing runtime selection.
+// Candidate code must never execute directly on the operator host.
 func (r goRuntime) RunTool(tool string, args ...string) error {
 	switch r.kind {
 	case localGoRuntime:
-		return r.commands.RunEnv(r.repositoryRoot, []string{"GOTOOLCHAIN=local"}, tool, args...)
+		return fmt.Errorf("local Go execution is disabled for untrusted candidate code")
 	case dockerGoRuntime:
 		return r.commands.Run(r.repositoryRoot, "docker", r.dockerToolArgs(tool, args...)...)
 	default:
@@ -51,7 +50,7 @@ func (r goRuntime) RunTool(tool string, args ...string) error {
 func (r goRuntime) OutputTool(tool string, args ...string) (string, error) {
 	switch r.kind {
 	case localGoRuntime:
-		return r.commands.OutputEnv(r.repositoryRoot, []string{"GOTOOLCHAIN=local"}, tool, args...)
+		return "", fmt.Errorf("local Go execution is disabled for untrusted candidate code")
 	case dockerGoRuntime:
 		return r.commands.Output(r.repositoryRoot, "docker", r.dockerToolArgs(tool, args...)...)
 	default:
@@ -61,50 +60,38 @@ func (r goRuntime) OutputTool(tool string, args ...string) (string, error) {
 
 func (r goRuntime) dockerToolArgs(tool string, args ...string) []string {
 	dockerArgs := []string{
-		"run", "--rm", "--network", "bridge",
+		"run", "--rm", "--network", "none",
+		"--pull", "never", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--user", strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
 		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,mode=1777",
-		"--mount", "type=bind,src=" + r.repositoryRoot + ",dst=/workspace",
+		"--mount", "type=bind,src=" + r.repositoryRoot + ",dst=/workspace,readonly",
 		"--workdir", "/workspace",
 		"--env", "GOTOOLCHAIN=local",
+		"--env", "GOPROXY=off",
+		"--env", "GOSUMDB=off",
+		"--env", "GOFLAGS=-mod=readonly",
 		"--env", "HOME=/tmp/zenchron-home",
 		"--env", "GOPATH=/tmp/zenchron-go",
-		"--env", "GOMODCACHE=/tmp/zenchron-go/pkg/mod",
+		"--env", "GOMODCACHE=/go/pkg/mod",
 		"--env", "GOCACHE=/tmp/zenchron-go-build",
 		r.environmentIdentifier, tool,
 	}
 	return append(dockerArgs, args...)
 }
 
+// resolveGoRuntime fails closed: even a compatible host Go cannot isolate
+// candidate tests from operator credentials or host filesystem access.
 func resolveGoRuntime(root string, commands commandRunner) (goRuntime, error) {
 	required, err := requiredGoVersion(filepath.Join(root, "go.mod"))
 	if err != nil {
 		return goRuntime{}, err
 	}
 
-	localProblem := "local Go is not installed"
-	if err := commands.LookPath("go"); err == nil {
-		output, versionErr := commands.OutputEnv(root, []string{"GOTOOLCHAIN=local"}, "go", "version")
-		if versionErr == nil {
-			installed, parseErr := parseGoVersion(output)
-			if parseErr == nil && compatibleGoVersion(installed, required) {
-				return goRuntime{localGoRuntime, installed, "host-go:" + installed, root, commands}, nil
-			}
-			if parseErr != nil {
-				localProblem = parseErr.Error()
-			} else {
-				localProblem = fmt.Sprintf("local Go %s is incompatible with required Go %s", installed, required)
-			}
-		} else {
-			localProblem = fmt.Sprintf("local Go is unusable: %v", versionErr)
-		}
-	}
-
 	if err := commands.LookPath("docker"); err != nil {
-		return goRuntime{}, fmt.Errorf("%s and Docker is not installed; install Go %s or Docker", localProblem, required)
+		return goRuntime{}, fmt.Errorf("Docker is required to isolate candidate Go execution; install Docker")
 	}
 	if _, err := commands.Output(root, "docker", "info", "--format", "{{.ServerVersion}}"); err != nil {
-		return goRuntime{}, fmt.Errorf("%s; Docker must be started and reachable: %w", localProblem, err)
+		return goRuntime{}, fmt.Errorf("Docker must be started and reachable: %w", err)
 	}
 	image := dockerGoImage(required)
 	imageID, err := commands.Output(root, "docker", "image", "inspect", "--format", "{{.Id}}", image)

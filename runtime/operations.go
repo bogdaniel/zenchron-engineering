@@ -514,7 +514,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// It is a CAPABILITY question only. A resolvable tool is one the worker may
 	// run; nothing here grants permission to run anything else, and the list is
 	// operator-owned precisely so a repository cannot extend it.
-	if missing := r.missingWorkerTools(); len(missing) > 0 {
+	if missing := r.missingWorkerTools(ctx); len(missing) > 0 {
 		return effect{
 			state:  OperationFailed,
 			result: mutationResult{FailureClass: FailureToolchainUnavailable},
@@ -875,7 +875,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// claim look identical to an honest silence.
 		if result.Review != nil {
 			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
+				var refusal *ReviewerResultRefusedError
+				if errors.As(admitErr, &refusal) {
+					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
+				}
 				return effect{state: OperationFailed, result: executionRecord{
+					ReviewRefusal:  refusal,
 					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
 					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
 				}}
@@ -1080,7 +1085,8 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 // restarted runtime needs to name a root cause without the process-local error.
 type executionRecord struct {
 	mutationResult
-	Diagnostic *ExecutionDiagnostic `json:"diagnostic,omitempty"`
+	Diagnostic    *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
+	ReviewRefusal *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
 	// PriorContext explains the prior-attempt observations this invocation
 	// inherited, or is absent when it inherited none. It records WHICH earlier
 	// attempts were supplied rather than a copy of what they said, so a replay
@@ -1197,6 +1203,18 @@ func (r *EngineeringRuntime) restoreCandidate(workspace *CandidateWorkspace, cau
 // a bounded signature, so a review comment cannot become an instruction.
 func (s *runState) findings() []Finding {
 	var findings []Finding
+	// Only the latest execution can supply a refusal; a later success clears it.
+	ops := sortOperations(mapValues(s.snapshot.Operations))
+	for i := len(ops) - 1; i >= 0; i-- {
+		if ops[i].Kind != OpExecutionInvoke || len(ops[i].Result) == 0 {
+			continue
+		}
+		var record executionRecord
+		if decodeJSON(ops[i].Result, &record) == nil && record.FailureClass == FailureVerification && record.ReviewRefusal != nil {
+			findings = append(findings, Finding{Classification: FailureVerification, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
+		}
+		break
+	}
 	if a := s.projection.Assurance; a != nil && !a.Stale && !a.Passed {
 		findings = append(findings, s.assuranceFinding(*a))
 	}
@@ -2612,18 +2630,16 @@ func (r *EngineeringRuntime) frozenInstructions(assignment domain.AgentAssignmen
 	return instructions, nil
 }
 
-// missingWorkerTools is the operator-declared required tools this runtime's
-// brokered execution environment cannot resolve.
-//
-// It answers for the ENVIRONMENT rather than for a particular provider: every
-// worker this runtime dispatches gets the same brokered search path, so the
-// answer is the same for all of them and does not need an invocation to find
-// out. An operator who declared no toolchain gets no refusals, exactly as
-// before.
-func (r *EngineeringRuntime) missingWorkerTools() []string {
+// missingWorkerTools resolves requirements in the selected provider's execution environment.
+func (r *EngineeringRuntime) missingWorkerTools(ctx context.Context) []string {
 	toolchain := r.deps.Toolchain
 	if len(toolchain.RequiredTools) == 0 {
 		return nil
+	}
+	if provider, ok := r.deps.Provider.(interface {
+		MissingTools(context.Context, []string) []string
+	}); ok {
+		return provider.MissingTools(ctx, toolchain.RequiredTools)
 	}
 	return CLIAgentProvider{Toolchain: toolchain}.missingTools()
 }
@@ -2637,7 +2653,7 @@ func (r *EngineeringRuntime) missingWorkerTools() []string {
 // hash chain would make a plan's state digest depend on work it does not own.
 //
 // The event identity is derived from the plan revision, the stage, the exact
-// candidate AND the attempt, so:
+// candidate, generation, operation AND the attempt, so:
 //
 //   - the same result admitted twice is ONE event, which is what makes a
 //     retried operation idempotent rather than duplicating a verdict;
@@ -2647,6 +2663,15 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	binding := state.run.Plan
 	if binding == nil || stage.assignment == nil {
 		return &ReviewerResultRefusedError{Detail: "a reviewer result was produced by a run that is not bound to a plan stage"}
+	}
+	snapshot, err := r.deps.Store.ReplayPlan(binding.PlanID)
+	if err != nil {
+		return err
+	}
+	for _, retired := range snapshot.RetiredRuns {
+		if retired == state.run.ID {
+			return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the reviewer run has been retired"}
+		}
 	}
 	plan, found, err := r.deps.Store.PlanRevision(binding.PlanID, binding.Revision)
 	if err != nil {
@@ -2682,8 +2707,8 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	}
 	event := EngineeringEvent{
 		SchemaVersion: SchemaVersion,
-		ID: fmt.Sprintf("plan-stage-reviewed-%s-r%d-%s-%s-%d",
-			binding.PlanID, binding.Revision, binding.StageID, short12(payload.Candidate), operation.Attempt),
+		ID: fmt.Sprintf("plan-stage-reviewed-%s-r%d-%s-g%d-%s-%s-%d",
+			binding.PlanID, binding.Revision, binding.StageID, binding.Generation, payload.Candidate, operation.ID, operation.Attempt),
 		PlanID: binding.PlanID, Type: EventPlanStageReviewed,
 		OccurredAt: r.deps.Clock.Now(), Payload: document,
 	}
