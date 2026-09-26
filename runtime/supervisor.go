@@ -518,7 +518,7 @@ func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	if strings.TrimSpace(reason) == "" {
 		reason = "operator_stop_all"
 	}
-	runs, err := s.deps.Store.Runs()
+	runs, err := s.deps.Store.ActiveRuns()
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +642,7 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	if !report.Draining {
 		report.Plans = s.reconcilePlans(ctx)
 	}
-	runs, err := s.deps.Store.Runs()
+	runs, err := s.deps.Store.ActiveRuns()
 	if err != nil {
 		report.Error = boundedDetail(err.Error())
 		s.collect(&report)

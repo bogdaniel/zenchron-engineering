@@ -334,6 +334,11 @@ SELECT 'current', 'handoff_activation', handoff_id, updated_unix_nano,
                    'artifact', json_extract(document, '$.successor.artifact_path'))
   FROM controller_current_activation
  WHERE id = 'current';
+`, `
+CREATE INDEX run_operations_active ON run_operations(run_id, created_unix_nano, id)
+WHERE json_extract(document, '$.state') IN ('leased', 'running');
+CREATE INDEX runs_active ON runs(created_unix_nano, id)
+WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled');
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -441,6 +446,22 @@ func (s *SQLiteOperationStore) AllOperations() ([]RunOperation, error) {
 	}
 	return scanOperations(rows)
 }
+
+// ActiveOperations returns only leased/running rows, optionally scoped to a run.
+func (s *SQLiteOperationStore) ActiveOperations(runID string) ([]RunOperation, error) {
+	query := `SELECT document FROM run_operations WHERE json_extract(document, '$.state') IN ('leased', 'running')`
+	var args []any
+	if runID != "" {
+		query += ` AND run_id = ?`
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(query+` ORDER BY created_unix_nano ASC, id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanOperations(rows)
+}
+
 func (s *SQLiteOperationStore) Operation(id string) (RunOperation, int64, bool, error) {
 	var document string
 	var revision int64
