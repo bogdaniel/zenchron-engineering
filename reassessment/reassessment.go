@@ -5,11 +5,11 @@ package reassessment
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/evidence"
+	"github.com/bogdaniel/zenchron-engineering/internal/pathpattern"
 	"github.com/bogdaniel/zenchron-engineering/policy"
 )
 
@@ -331,14 +331,7 @@ func suspendedActions(current, candidate domain.EngineeringWorkContract) []domai
 }
 
 func matchesAny(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		path = strings.TrimPrefix(path, "./")
-		pattern = strings.TrimPrefix(pattern, "./")
-		if path == pattern || strings.HasSuffix(pattern, "/**") && (path == strings.TrimSuffix(pattern, "/**") || strings.HasPrefix(path, strings.TrimSuffix(pattern, "/**")+"/")) {
-			return true
-		}
-	}
-	return false
+	return pathpattern.MatchesAny(path, patterns)
 }
 
 func actionDifference(left, right []domain.Action) []domain.Action {
