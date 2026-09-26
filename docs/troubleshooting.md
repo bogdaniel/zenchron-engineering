@@ -249,10 +249,72 @@ fragment.
 | --- | --- |
 | `no assurance.dependency_cache_dir is configured; offline verification has no trusted module material to read and never downloads any` | configure it |
 | `the dependency cache <path> cannot be inspected` | create it |
-| `the dependency cache <path> is EMPTY` | provision it from the trusted base module graph using the pinned image |
+| `the dependency cache <path> is EMPTY` | provision it — the command is below |
 
-Verification is offline by contract. An empty cache is a false readiness claim,
-not a warning: containers will start and then fail on missing modules.
+### Provisioning the dependency cache
+
+Run this once, against a checkout of the trusted base revision — the module
+graph you already trust, not a candidate's. The three values come verbatim from
+the configuration doctor just read.
+
+```bash
+CACHE=/Users/you/.zenchron/modcache   # assurance.dependency_cache_dir
+IMAGE=sha256:0123456789abcdef...      # assurance.image, the pinned digest
+BASE=/path/to/trusted/checkout        # the base module graph: its go.mod and go.sum
+
+mkdir -p "$CACHE"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --read-only --tmpfs /gobuild \
+  --mount type=bind,src="$BASE",dst=/src,readonly \
+  --mount type=bind,src="$CACHE",dst=/cache \
+  --workdir /src \
+  --env GOMODCACHE=/cache \
+  --env GOCACHE=/gobuild/build --env GOTMPDIR=/gobuild \
+  --env GOPATH=/gobuild/gopath --env HOME=/gobuild \
+  --env GOTOOLCHAIN=local --env GOFLAGS='-mod=readonly -buildvcs=false' \
+  "$IMAGE" go mod download all
+```
+
+Then re-run `autonomy doctor --text`; `assurance.dependency_cache` reports how
+many top-level entries it found and whether a `cache/download` tree is there.
+
+Four things about that command are deliberate:
+
+- **It is the only step with a network.** There is no `--network none` here,
+  precisely because this is the operator provisioning trusted material —
+  everything downstream of it runs with networking off.
+- **`dst=/cache` and `GOMODCACHE=/cache` are the verifier's own mount point and
+  variable**, so the layout this writes is the layout verification reads. `$CACHE`
+  is the only writable host path; `/src` is read-only because provisioning reads a
+  module graph, it does not edit one. Every other place Go wants to write is named
+  and lands in the throwaway `/gobuild` tmpfs, which is why the root can be
+  `--read-only`.
+- **`GOTOOLCHAIN=local` pins the writer to the Go inside the pinned image**, the
+  same Go that will later read the cache. If that image's toolchain is older than
+  the tree's `go` directive this fails here, where the fix is the image, rather
+  than mid-verification.
+- **`all` is a module pattern, not a flag.** It downloads every module in the
+  build list rather than only what building the main packages needs. Verification
+  runs `go vet ./...` and `go test ./...` on the exact tree and cannot fetch
+  anything it is short of.
+
+### Why verification cannot fill the cache itself
+
+Assurance runs with no network by contract, and the cache is mounted read-only
+into every container that touches it — including dependency preparation.
+Preparation once mounted it writable and ran `go mod download` against the
+*candidate's* `go.mod`, which meant the module graph one candidate declared
+decided what got written into the material every other run then reads. Nothing
+malicious is needed for that to matter: it is simply not a trusted-material
+boundary if the thing being verified can extend it. Read-only makes the operator
+the only writer, which is what "operator-provisioned pre-warmed cache" always
+meant.
+
+So an empty cache is a false readiness claim rather than a warning, and doctor
+`FAIL`s it. The alternative is worse than a red line in a preflight: containers
+start, the toolchain fails on missing modules, and a missing environment
+prerequisite arrives looking like a verdict about the candidate's code.
 
 **A run waits at `assurance_dependency_unavailable`.** The same environment
 condition, met at run time. Re-running the identical command against the
