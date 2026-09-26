@@ -590,6 +590,12 @@ func (s Scheduler) RecordProviderProgress(id, key string) (RunOperation, error) 
 		if key == "" || key == op.NoProgressKey {
 			return nil
 		}
+		// Only a RUNNING operation takes progress. A late write - the Claude
+		// recorder is deliberately never joined (#322) - must not stamp an
+		// operation Finish already settled, or a row that has moved on.
+		if op.State != Running {
+			return nil
+		}
 		op.NoProgressKey = key
 		op.LastProgressAt = &now
 		return nil

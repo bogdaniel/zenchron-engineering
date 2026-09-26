@@ -249,7 +249,9 @@ type ProviderBudget struct {
 	// the remainder. A provider control derived from the window - Claude's
 	// background-wait ceiling (#322) - reads this one, so a shrunken remainder
 	// can never silently shrink it. Zero means the caller stated no separate
-	// window, and InactivityLimit is then the configured window itself.
+	// window, and InactivityLimit is then the configured window itself: the
+	// planner (supervisor.go) and any caller passing the configured limit
+	// directly rely on that, so zero must stay legal.
 	InactivityWindow time.Duration
 }
 type ExecutionResult struct {

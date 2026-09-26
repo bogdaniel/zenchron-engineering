@@ -883,3 +883,47 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 		t.Fatal("a blocked durable write held the invocation")
 	}
 }
+
+// The field that decides success is REQUIRED and typed: a drifted or missing
+// is_error, or a missing subtype, is not a valid final result, so exit 0
+// fails closed rather than reading the zero value as success.
+func TestARequiredResultFieldCannotFailOpen(t *testing.T) {
+	for name, line := range map[string]string{
+		"is_error as a string":                `{"type":"result","subtype":"error_during_execution","is_error":"true"}`,
+		"is_error drifts after another drift": `{"type":"result","subtype":"success","permission_denials":{},"is_error":"false"}`,
+		"is_error missing":                    `{"type":"result","subtype":"success"}`,
+		"subtype as a number":                 `{"type":"result","subtype":7,"is_error":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			stream := newClaudeStream(1)
+			feed(stream, line)
+			if got := stream.outcome(true); !got.Failed || got.Anomalies != 1 {
+				t.Fatalf("outcome = %+v, want an anomaly and a fail-closed exit 0", got)
+			}
+			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+			fake.outputs = []CommandOutput{{Stdout: []byte(line + "\n")}}
+			result, err := provider.Execute(context.Background(), request)
+			if err != nil || result.Outcome != OperationFailed {
+				t.Fatalf("exit 0 with %s ended %q (%v)", line, result.Outcome, err)
+			}
+		})
+	}
+}
+
+// A durable write that lands after the operation settled is ignored.
+func TestLateProviderProgressCannotStampASettledOperation(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, 30*time.Minute)
+	settled, err := scheduler.Finish(op.ID, Succeeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(time.Minute)
+	late, err := scheduler.RecordProviderProgress(op.ID, "1:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.NoProgressKey == "1:9" || !late.LastProgressAt.Equal(*settled.LastProgressAt) {
+		t.Fatalf("a late write stamped a settled operation: key %q at %v", late.NoProgressKey, late.LastProgressAt)
+	}
+}

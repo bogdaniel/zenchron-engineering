@@ -221,8 +221,11 @@ type claudeEvent struct {
 	Error       json.RawMessage `json:"error"`
 	ErrorStatus json.RawMessage `json:"error_status"`
 	NoResponse  json.RawMessage `json:"no_response"`
-	// result
-	IsError           bool              `json:"is_error"`
+	// result. IsError stays raw and is decoded strictly where it is read: it
+	// decides success, so a missing or type-drifted value must be refused, and
+	// the decoder would otherwise leave false behind (even through a pointer,
+	// which it allocates before it discovers the mismatch).
+	IsError           json.RawMessage   `json:"is_error"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 }
 
@@ -238,11 +241,13 @@ func (s *claudeStream) handle(line []byte) {
 		return
 	}
 	var event claudeEvent
-	// Only a SYNTAX error makes a line an anomaly. A field whose type drifted
-	// in a later CLI - permission_denials as an object, say - is a type error
-	// the decoder reports after filling every other field, and discarding the
-	// whole event for it would turn every successful run's final result into a
-	// protocol failure.
+	// Only a SYNTAX error makes a line an anomaly here. A field whose type
+	// drifted in a later CLI - permission_denials as an object, say - is a type
+	// error the decoder reports after filling every other field, and discarding
+	// the whole event for optional metadata would turn every successful run's
+	// final result into a protocol failure. The REQUIRED result fields are
+	// validated where they are read, below: the decoder skips a drifted field,
+	// so checking them by value also covers a drift it did not report first.
 	var typeDrift *json.UnmarshalTypeError
 	if err := json.Unmarshal(line, &event); err != nil && !errors.As(err, &typeDrift) {
 		s.anomalies++
@@ -297,12 +302,34 @@ func (s *claudeStream) handle(line []byte) {
 			s.retry, s.retrySeq = claudeRetryClass(event), s.seq
 		}
 	case "result":
-		s.sawResult, s.isError = true, event.IsError
+		// A result without a typed is_error and subtype is not a VALID final
+		// result, so it can never make an exit 0 succeed: it is an anomaly, and
+		// the run fails closed for want of a valid one.
+		var isError bool
+		if json.Unmarshal(event.IsError, &isError) != nil || claudeTypedSubtype(line) == "" {
+			s.anomalies++
+			return
+		}
+		s.sawResult, s.isError = true, isError
 		s.denials = len(event.PermissionDenials)
 		// The final result ends every turn. An oversized last tool_result line
 		// must not leave a stale open tool in the provenance of a clean run.
 		clear(s.open)
 	}
+}
+
+// claudeTypedSubtype is a result's subtype if it is present AS A STRING. The
+// shared event decode reads subtype as a string too, but a drifted value there
+// is skipped silently and indistinguishable from an absent one.
+func claudeTypedSubtype(line []byte) string {
+	var typed struct {
+		Subtype json.RawMessage `json:"subtype"`
+	}
+	var subtype string
+	if json.Unmarshal(line, &typed) != nil || json.Unmarshal(typed.Subtype, &subtype) != nil {
+		return ""
+	}
+	return subtype
 }
 
 // progress records one accepted event and refreshes the in-memory watch. It
