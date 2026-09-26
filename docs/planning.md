@@ -386,6 +386,33 @@ half of the fix: `independence` is an **optional** member, to be omitted unless 
 stage genuinely requires independence, and the roles on which an empty
 `different_from` is refused are named.
 
+## Plan identity and configuration changes
+
+Plan identity currently includes the repository, source issue number, and
+operator configuration digest. With unchanged configuration, replanning after
+the default branch moves produces a revision of the same plan, entering base
+rebinding and preserving that plan's consumed budget.
+
+A changed configuration digest instead creates a separate PlanID at revision 1,
+with a fresh budget ledger, even for the same source issue. For example, adding
+operator toolchain configuration can cause this transition. The old plan's
+history, approval, settlements, assurance results, and consumption remain in
+its journal; they are not transferred to the new plan. The new identity does
+not exercise base rebinding and requires its own approval.
+
+Consequently, the aggregate budget below is **per PlanID, not per source issue**.
+“Consumption never resets” applies within a plan, including across revisions;
+it does not prevent an effective budget renewal across configuration changes.
+Operators comparing planning attempts should compare PlanIDs as well as revision
+numbers and inspect the prior plan's consumption.
+
+This is the lifecycle/governance debt recorded in issue #131 after the #127
+adoption wave. Identity redesign and any migration or issue-wide accounting
+policy remain open design questions; this documentation does not change the
+#123 identity contract or the run-level adoption semantics tracked in #89.
+Automated base-rebinding coverage does not establish that the live dogfood path
+has been observed: the reported configuration fork pre-empted that path.
+
 ## The aggregate budget envelope
 
 An approved plan carries a ceiling across all of its runs, on top of the
