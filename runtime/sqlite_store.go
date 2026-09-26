@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -245,6 +247,93 @@ CREATE TABLE plan_approved_assignments (
 	document TEXT NOT NULL,
 	PRIMARY KEY (plan_id, revision, stage_id)
 );
+`, `
+-- One row per controller transition (#234). It is durable state rather than
+-- process state because the question it answers - which controller may recover
+-- this handoff - has to survive the crash of both parties, and a phase held in
+-- memory is a phase that disappears with the process that was mid-transition.
+--
+-- phase is a column of its own, beside the document that also carries it, so a
+-- transition can be a conditional UPDATE: the compare-and-set is what stops two
+-- processes from advancing the same handoff along two different paths.
+CREATE TABLE controller_handoffs (
+	id                TEXT PRIMARY KEY,
+	phase             TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+`, `
+-- WHICH ACTIVATION GOVERNS NOW, as one durable subject.
+--
+-- A handoff row records that a transition activated, and that fact is
+-- historical and permanent: H1 activated, and it will have activated forever.
+-- It does not answer whether H1 still governs, and the runtime had no place
+-- that did - so every authority-bearing path asked "is this transition
+-- activated", which a superseded one still truthfully answers yes to.
+--
+-- This table is that missing subject. Exactly one row, written in the SAME
+-- TRANSACTION as the activation it records, so there is no instant where a
+-- handoff is activated and the current pointer disagrees.
+CREATE TABLE controller_current_activation (
+	id                TEXT PRIMARY KEY CHECK (id = 'current'),
+	handoff_id        TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+
+-- A state directory written before this table existed carries activated
+-- handoffs and no pointer. The newest activated row is the only information
+-- the old schema holds about which of them governs, so it seeds the pointer
+-- once, here. Wall-clock order is not good enough to BE the authority rule -
+-- which is why it is not used after this - and it is the best evidence
+-- available about a past this schema did not record.
+INSERT INTO controller_current_activation (id, handoff_id, updated_unix_nano, document)
+SELECT 'current', id, updated_unix_nano, document
+  FROM controller_handoffs
+ WHERE phase = 'activated'
+ ORDER BY updated_unix_nano DESC, id ASC
+ LIMIT 1;
+`, `
+-- WHAT GOVERNS NOW, WITHOUT ASSUMING A HANDOFF PUT IT THERE.
+--
+-- controller_current_activation can only name an activated transition, and for
+-- as long as that was the only way authority could be established it was the
+-- whole truth. It is not: a controller-effective configuration change cannot
+-- cross an ordinary succession - the successor binding differs in exactly the
+-- member evaluateConfiguration requires to be unchanged - so a state directory
+-- whose configuration moved had no way to establish a new governing root. The
+-- old activation stayed current, every upgrade was correctly refused, and the
+-- directory sat in INVARIANT_VIOLATION with no in-protocol way out.
+--
+-- So present authority becomes its own subject, and it records HOW it was
+-- established. An operator re-adoption is not an activation and is never
+-- written as one: no handoff is fabricated, and controller_handoffs remains
+-- exactly the history it was.
+CREATE TABLE controller_readoptions (
+	id                 TEXT PRIMARY KEY,
+	recorded_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+
+CREATE TABLE controller_current_authority (
+	id                TEXT PRIMARY KEY CHECK (id = 'current'),
+	kind              TEXT NOT NULL,
+	ref               TEXT NOT NULL,
+	updated_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+
+-- The existing pointer is RESTATED, not reinterpreted. Whatever activation
+-- governed a moment before this migration governs a moment after it, under the
+-- name the new subject uses for it, carrying the binding that activation
+-- already named as its successor.
+INSERT INTO controller_current_authority (id, kind, ref, updated_unix_nano, document)
+SELECT 'current', 'handoff_activation', handoff_id, updated_unix_nano,
+       json_object('kind', 'handoff_activation', 'ref', handoff_id,
+                   'binding', json(json_extract(document, '$.successor.binding')),
+                   'artifact', json_extract(document, '$.successor.artifact_path'))
+  FROM controller_current_activation
+ WHERE id = 'current';
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -296,7 +385,7 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
 	// reads state it is about to overwrite (journal sequence allocation) waits
 	// on busy_timeout instead of failing an unretryable upgrade in WAL mode.
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -425,12 +514,32 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // already sees the winner's row.
 //
 // The run-driving slot is the durable operation lease itself, not a second
-// table. A run holds a slot exactly while one of its operations is leased or
-// running, so a run parked on CI, authority, auth, or opt-in removal holds
+// table. A run holds a slot exactly while one of its operations CARRIES A
+// LEASE, so a run parked on CI, authority, auth, or opt-in removal holds
 // nothing - there is no slot to forget to release, and a durable run that
-// nobody is driving never occupies one. Reclaiming a crashed driver's slot is
-// therefore the existing lease takeover, which CanAcquire already gates on
-// owner death AND expiry, so an expired heartbeat alone still steals nothing.
+// nobody is driving never occupies one.
+//
+// The lease, and not the leased/running state, is what the count is taken over.
+// The state records what the last attempt was doing and belongs to the journal;
+// the lease records who is doing it now. Separating them is what lets an
+// abandoned attempt give its slot back while the row still says what the
+// journal says about it.
+//
+// A TERMINAL RUN's operation is refused outright, and that condition belongs in
+// this statement rather than anywhere cheaper. A stop writes the run document
+// and then finishes the run's active operations, so this check is what decides
+// which side of the stop a concurrent acquisition fell on; a driver that read
+// the run before the stop and checked it in Go would be asking a question whose
+// answer had already changed. The count is deliberately left alone: it still
+// counts leases, and a terminal run holds none once its stop has finished them.
+//
+// Reclaiming a crashed driver's slot is the existing lease takeover, which
+// CanAcquire gates on owner death AND expiry, so an expired heartbeat alone
+// still steals nothing. This statement does not perform that reclamation and
+// must not: owner death is a probe of the operating system, not a fact in the
+// database. Scheduler.reclaimAbandoned retires an abandoned operation before
+// this count is taken, so what is counted here is always durable state - and
+// never a durable row plus a live opinion about it.
 func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
@@ -439,11 +548,20 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
+	args := []any{string(document), op.ID, expected, op.RunID}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
+	}
+	args = append(args, op.RunID, maxRuns)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
+		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
-		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')) < ?`,
-		string(document), op.ID, expected, op.RunID, maxRuns)
+		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
+		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
+		args...)
 	if err != nil {
 		return 0, false, err
 	}

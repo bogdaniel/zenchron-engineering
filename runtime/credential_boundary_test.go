@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -566,4 +568,251 @@ func asCredentialMaterial(err error, target **CredentialMaterialError) bool {
 		err = unwrapper.Unwrap()
 	}
 	return false
+}
+
+// TestRepositorySourceIsNotItselfCredentialMaterial is the self-hosting
+// invariant, and it is the one the assembly rule above exists to protect.
+//
+// This repository is its own candidate. Admission scans the complete candidate
+// workspace before any provider is admitted, so one complete token pasted into
+// any tracked file makes trusted main refuse itself: run
+// run-e3d2251de8447561ec518cf4f72f8d49 stopped at candidate_admission with
+// `candidate path "runtime/candidate_commit_recovery_test.go" contains a
+// credential value`, before Claude was ever invoked. The fixture that caused it
+// was in a test proving the credential gate works.
+//
+// THE SUBJECT IS THE TRACKED SOURCE TREE, because that is what becomes a fresh
+// candidate: CreateCandidateClone clones the governed remote, so a candidate
+// holds exactly the tracked files and nothing else. Naming that set with
+// `git ls-files` is what makes this deterministic AND exclusion-free - Git
+// history is not tracked content, and a local build artifact is not tracked at
+// all, so neither needs a rule that could also skip a real source file. The
+// bytes read are the WORKING TREE's, so a literal is caught before it is
+// committed rather than after.
+//
+// THE QUESTION IS ASKED BY PRODUCTION CODE. The tracked set is materialized and
+// handed to ScanCandidateForCredentialValues itself, so this cannot drift from
+// what admission does and is not limited to one file type: a complete token
+// pasted into Markdown, JSON or a shell script refuses trusted main exactly as
+// one in Go source does, and it fails here for the same reason, with the same
+// error. Nothing is exempted - not _test.go, not this package, not the
+// detector's own file - because an exemption here is an exemption in the thing
+// being proven.
+//
+// The module root is FOUND rather than assumed. A test binary runs in its
+// package's source directory, so walking up to go.mod is deterministic wherever
+// the repository is checked out.
+func TestRepositorySourceIsNotItselfCredentialMaterial(t *testing.T) {
+	// The fixtures still have to be credentials, or this test proves only that
+	// the repository contains no credentials because the detector found none.
+	for name, value := range map[string]string{
+		"the fine-grained GitHub fixture": githubFineGrainedTokenValue(),
+		"the classic GitHub fixture":      githubClassicTokenValue(),
+		"the AWS fixture":                 awsSecretAssignment(),
+		"the PEM fixture":                 pemPrivateKeyBlock(),
+	} {
+		if !ContainsCredentialValue([]byte(value)) {
+			t.Fatalf("%s no longer exercises credential detection", name)
+		}
+	}
+	root := moduleRoot(t)
+	requireTrackedSource(t, root)
+	candidate, tracked := materializeTrackedSource(t, root)
+	if len(tracked) == 0 {
+		t.Fatal("no tracked source was materialized, so this test asked nothing")
+	}
+	err := ScanCandidateForCredentialValues(candidate)
+	if err == nil {
+		return
+	}
+	// The production error names one path. Every offender is named here,
+	// because an operator shown a single example of a repository-wide condition
+	// goes looking for a one-off - and a scan that stops at the first one makes
+	// fixing this a loop.
+	var offending []string
+	for _, rel := range tracked {
+		data, readErr := os.ReadFile(filepath.Join(candidate, filepath.FromSlash(rel)))
+		if readErr == nil && ContainsCredentialValue(data) {
+			offending = append(offending, rel)
+		}
+	}
+	sort.Strings(offending)
+	t.Fatalf("candidate admission would refuse this repository's own source, so no provider could be admitted: %v; credential values in: %s",
+		err, strings.Join(offending, ", "))
+}
+
+// materializeTrackedSource builds the candidate a clone of this repository
+// would be: every tracked path, with the working tree's current bytes, under a
+// throwaway root. It returns that root and the paths it holds.
+//
+// A tracked path with no regular file behind it is skipped rather than
+// invented: a deletion staged in the working tree has no content to scan, and a
+// symlink's target is either inside the tree - where it is materialized on its
+// own - or outside it, where it is not candidate content. This is the same
+// distinction ScanCandidateForCredentialValues draws.
+// trackedSourceProbe is what asking Git for the repository answered. It is
+// three outcomes rather than two because "Git did not answer" is not one
+// condition: an absent repository is a place where the question has no meaning,
+// and everything else is a repository that exists and would not answer.
+type trackedSourceProbe int
+
+const (
+	// trackedSourceAvailable: a repository answered, so the guard can run.
+	trackedSourceAvailable trackedSourceProbe = iota
+	// trackedSourceNoRepository: there is no repository here at all.
+	trackedSourceNoRepository
+	// trackedSourceUnavailable: Git failed for some other reason - metadata it
+	// refuses to read, a missing program, a broken invocation.
+	trackedSourceUnavailable
+)
+
+// classifyTrackedSourceProbe decides which of the three a Git failure was.
+//
+// It is a pure function of the exit and the diagnostic so the taxonomy is a
+// table a reader can check, and so the arm that must NOT skip is testable
+// without breaking a real repository to produce it.
+//
+// Only Git's own "not a git repository" earns the skip. Dubious ownership, an
+// unreadable object store, a missing `git` - each of those is a repository that
+// exists and will not answer, or an environment that cannot ask, and skipping
+// on them is how a guard silently stops guarding.
+func classifyTrackedSourceProbe(err error, diagnostic string) trackedSourceProbe {
+	if err == nil {
+		return trackedSourceAvailable
+	}
+	if strings.Contains(diagnostic, "not a git repository") {
+		return trackedSourceNoRepository
+	}
+	return trackedSourceUnavailable
+}
+
+// requireTrackedSource skips a test that cannot name the tracked set because
+// there is no Git repository to name it from - and only for that reason.
+//
+// THE ASSURANCE SANDBOX HAS NO GIT HISTORY, ON PURPOSE. sandbox.go mounts an
+// empty tmpfs over /candidate/.git, so a verifier sees the candidate TREE and
+// nothing about how it was made; `git rev-parse` there answers "not a git
+// repository". A guard that read that as a finding reported the sandbox's own
+// boundary as a defect in the repository - which is what it did: the #148
+// smoke run's assurance failed on this test, on a candidate with no credential
+// in it.
+//
+// It is the same shape as requireExecutableTemp above, and it is a skip for the
+// same reason: the question is unanswerable here, not answered badly. Where a
+// repository IS reachable - a developer checkout, CI - the guard runs, so the
+// invariant still gates every merge.
+//
+// Everything else FAILS. A skip is the guard switching itself off, so it is
+// spent on one named condition and nothing else: corrupted or inaccessible
+// metadata, a Git that will not run, an invocation that broke - all of those
+// are conditions worth failing on, and all of them used to skip.
+//
+// LC_ALL is pinned so the classification reads Git's own English diagnostic
+// rather than whatever the surrounding shell localized it to.
+func requireTrackedSource(t *testing.T, root string) {
+	t.Helper()
+	probe := exec.Command("git", "-C", root, "rev-parse", "--git-dir")
+	probe.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	var diagnostic strings.Builder
+	probe.Stderr = &diagnostic
+	switch err := probe.Run(); classifyTrackedSourceProbe(err, diagnostic.String()) {
+	case trackedSourceAvailable:
+		return
+	case trackedSourceNoRepository:
+		t.Skipf("no Git repository at %s, so the tracked source set cannot be named: %s",
+			root, strings.TrimSpace(diagnostic.String()))
+	default:
+		t.Fatalf("the tracked source set could not be named at %s, and this is not an absent repository: %v: %s",
+			root, err, strings.TrimSpace(diagnostic.String()))
+	}
+}
+
+func materializeTrackedSource(t *testing.T, root string) (string, []string) {
+	t.Helper()
+	listed, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		t.Fatalf("the tracked source set is unavailable, so the self-hosting subject cannot be named: %v", err)
+	}
+	candidate := t.TempDir()
+	var tracked []string
+	for _, rel := range strings.Split(strings.TrimRight(string(listed), "\x00"), "\x00") {
+		if rel == "" {
+			continue
+		}
+		source := filepath.Join(root, filepath.FromSlash(rel))
+		info, statErr := os.Lstat(source)
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		data, readErr := os.ReadFile(source)
+		if readErr != nil {
+			t.Fatalf("tracked source %q is unreadable: %v", rel, readErr)
+		}
+		target := filepath.Join(candidate, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tracked = append(tracked, rel)
+	}
+	return candidate, tracked
+}
+
+// moduleRoot walks up from the package's source directory to the directory
+// holding go.mod. It assumes no checkout path, only that the module has one.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the package source directory")
+		}
+		dir = parent
+	}
+}
+
+// TestTrackedSourceProbeSkipsOnlyAnAbsentRepository pins the one arm that is
+// allowed to switch the self-hosting guard off.
+//
+// The helper previously skipped on every failed `git rev-parse`, which meant
+// inaccessible metadata, a missing Git, or a broken invocation all silently
+// disabled the guard - a guard that cannot fail is not a guard. Only Git's own
+// "not a git repository" is the sandbox condition; everything else is a
+// repository that exists and would not answer.
+func TestTrackedSourceProbeSkipsOnlyAnAbsentRepository(t *testing.T) {
+	failed := exec.Command("false").Run()
+	if failed == nil {
+		t.Fatal("the fixture needs a failing command to classify")
+	}
+	for name, c := range map[string]struct {
+		err        error
+		diagnostic string
+		want       trackedSourceProbe
+	}{
+		"a repository answered": {nil, "", trackedSourceAvailable},
+		// The assurance sandbox, verbatim.
+		"no repository at all": {failed,
+			"fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+			trackedSourceNoRepository},
+		"a named absent repository": {failed, "fatal: not a git repository: '/candidate/.git'\n", trackedSourceNoRepository},
+		// A repository that EXISTS and will not answer. Skipping here is how
+		// the guard stops guarding on a machine nobody is looking at.
+		"metadata Git refuses to read": {failed,
+			"fatal: detected dubious ownership in repository at '/candidate'\n", trackedSourceUnavailable},
+		"an unreadable object store": {failed, "error: object file .git/objects/ab/cdef is empty\n", trackedSourceUnavailable},
+		"no git program":             {failed, "", trackedSourceUnavailable},
+	} {
+		if got := classifyTrackedSourceProbe(c.err, c.diagnostic); got != c.want {
+			t.Errorf("%s classified as %d, want %d", name, got, c.want)
+		}
+	}
 }

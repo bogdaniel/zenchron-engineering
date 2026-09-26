@@ -123,7 +123,7 @@ func TestUnrecognizedProviderDiagnosticsAreNotGuessedIntoCapacity(t *testing.T) 
 		"the model produced an invalid patch",
 		"quota", // a bare word is not one of the recognized signals
 	} {
-		if got := classifyAgentFailure(codexSpec, []byte(diagnostic), nil); got == FailureProviderQuota || got == FailureProviderRateLimited {
+		if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(diagnostic))); got == FailureProviderQuota || got == FailureProviderRateLimited {
 			t.Fatalf("%q was guessed into %q", diagnostic, got)
 		}
 	}
