@@ -39,6 +39,31 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
+	EventReviewContinuationGranted: payloadSchema(func(p ReviewContinuationGrant) error {
+		if p.ActiveBaseline < 0 || p.Allowance <= 0 || p.Allowance > 30*time.Minute {
+			return errors.New("invalid review continuation envelope")
+		}
+		return required("feedback_digest", p.FeedbackDigest)
+	}),
+	// A succession admission is the only event that changes which controller
+	// may append the NEXT one, so its payload is validated rather than trusted:
+	// a decision that is not settled compatible, or that names neither party,
+	// admits nothing and must not reach the journal in a readable-looking form.
+	EventControllerSuccessionAdmitted: payloadSchema(func(p ControllerSuccessionDecision) error {
+		if p.Result != SuccessionCompatible {
+			return fmt.Errorf("a succession admission records a compatible decision, got %q", p.Result)
+		}
+		if _, err := p.Predecessor.Digest(); err != nil {
+			return fmt.Errorf("the admitted predecessor identity is not digestible: %w", err)
+		}
+		if _, err := p.Successor.Digest(); err != nil {
+			return fmt.Errorf("the admitted successor identity is not digestible: %w", err)
+		}
+		for _, refusal := range p.Refusals() {
+			return fmt.Errorf("a compatible decision carries no refusal, got %s", refusal)
+		}
+		return errors.Join(required("run_id", p.RunID), required("handoff_id", p.HandoffID))
+	}),
 	// run.created carries the creating controller's provenance (ControllerBuild)
 	// when the build is attested. It is optional because an unattested build
 	// records no claim, and strict because a recorded claim must be complete.
@@ -82,7 +107,12 @@ var eventPayloads = map[string]payloadValidator{
 			required("commit", p.Commit),
 			required("tree", p.Tree),
 			nonNegative("path_count", p.PathCount),
-			required("paths_digest", p.PathsDigest))
+			required("paths_digest", p.PathsDigest),
+			// The excluded paths are carried WHOLE, so they are bounded like
+			// every other payload list rather than truncated or digested: a
+			// record of which paths a commit left behind is worth nothing if it
+			// is allowed to be a partial one.
+			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
 	// A checkpoint carries the same identity a commit does: it IS a real
 	// runtime-owned commit, and the difference is what it means, not what it
@@ -92,7 +122,8 @@ var eventPayloads = map[string]payloadValidator{
 			required("commit", p.Commit),
 			required("tree", p.Tree),
 			nonNegative("path_count", p.PathCount),
-			required("paths_digest", p.PathsDigest))
+			required("paths_digest", p.PathsDigest),
+			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
@@ -360,6 +391,17 @@ type CandidateCommittedPayload struct {
 	Tree        string `json:"tree"`
 	PathCount   int    `json:"path_count"`
 	PathsDigest string `json:"paths_digest"`
+	// ExcludedPaths names, in full, the runtime-owned paths this commit did
+	// not carry. It is the durable half of the #189 ownership decision: a
+	// crashed run's inherited scratch is left out of the tree deliberately,
+	// and an operator reading the journal has to be able to see WHICH paths
+	// rather than infer them from a path count that does not add up.
+	//
+	// It is bounded like every other payload list, and it is never truncated to
+	// fit: a workspace holding more debris than one payload may carry is
+	// refused at the commit gate, so this list is always the whole of the
+	// decision or there is no commit to describe.
+	ExcludedPaths []string `json:"excluded_paths,omitempty"`
 }
 
 // ExecutionCompletedPayload records that the producer finished its invocation

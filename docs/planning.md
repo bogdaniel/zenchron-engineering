@@ -482,7 +482,7 @@ These commands work while `serve` is running, which is when they matter most:
   this terminal is the owner and decides directly; the output is identical
   either way, so an operator cannot tell which process applied their decision.
 - **Proposals** - `plan issue N` and `plan revise` - go to the supervisor too,
-  first one included. The local path would take the exclusive ownership lock
+  first one included. The local path would take the exclusive controller-instance lock
   `serve` already holds, so an operator could once decide plans while `serve`
   ran but not start one.
 - `plan show --revision N` renders one exact revision. The default is the

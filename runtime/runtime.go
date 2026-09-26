@@ -83,7 +83,8 @@ const (
 	// an exact invocation. It is a separate event from admission so a crash
 	// between observing a review and acting on it can neither lose it nor
 	// deliver it twice.
-	EventFeedbackConsumed = "feedback.consumed"
+	EventFeedbackConsumed          = "feedback.consumed"
+	EventReviewContinuationGranted = "review.continuation_granted"
 	// EventFeedbackPublicationIdentity binds the account the runtime publishes
 	// as. The self-loop guard refuses feedback authored by that identity, so
 	// the binding has to be durable: a credential rotated while `serve` is
@@ -101,7 +102,13 @@ const (
 	EventOperationBefore             = "operation.before"
 	EventOperationAfter              = "operation.after"
 	EventCandidateChanged            = "candidate.changed"
-	EventCandidateCommitted          = "candidate.committed"
+	// EventControllerSuccessionAdmitted records that one adopted controller
+	// may continue this run under another. It is an ADDITION to the journal
+	// and never an edit: the run row keeps naming its creator, and every
+	// earlier event stays bound to the controller that appended it. See
+	// controller_succession.go.
+	EventControllerSuccessionAdmitted = "controller.succession_admitted"
+	EventCandidateCommitted           = "candidate.committed"
 	// EventCandidateCheckpointed is a runtime-owned commit of work an
 	// interrupted producer left behind. It is deliberately NOT
 	// candidate.committed: every reader of that event treats it as an
@@ -225,7 +232,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true}
+var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -364,13 +371,39 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
-	SchemaVersion    string          `json:"schema_version"`
-	ID               string          `json:"id"`
-	RunID            string          `json:"run_id"`
-	Kind             string          `json:"kind"`
-	IdempotencyKey   string          `json:"idempotency_key"`
-	State            OperationState  `json:"state"`
-	Attempt          int             `json:"attempt"`
+	SchemaVersion  string         `json:"schema_version"`
+	ID             string         `json:"id"`
+	RunID          string         `json:"run_id"`
+	Kind           string         `json:"kind"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	State          OperationState `json:"state"`
+	Attempt        int            `json:"attempt"`
+	// AttemptIdentity is the highest PHYSICAL attempt identity allocated for
+	// this operation. It is an identity, not a count of anything, and it only
+	// ever moves forward.
+	//
+	// Attempt is the BUDGET, and RestoreAttempt gives it back when a provider
+	// condition routes to an external wait: observing an account quota is not
+	// work the attempt ceiling should pay for. That makes Attempt deliberately
+	// non-monotonic, which is correct for a budget and unusable as an identity -
+	// and a provider transcript is create-once, so the identity it is filed
+	// under may never be reused. Sourcing one from the other stranded a
+	// resumable run: the second physical invocation of the same logical
+	// operation addressed the first one's transcript slot and was refused by the
+	// evidence store, correctly.
+	//
+	// It is allocated when the operation is started and RESERVED before a
+	// provider is dispatched, so it is durable before anything can write
+	// evidence under it. That ordering is what makes a crash safe: an
+	// invocation that began and produced no transcript still consumed its
+	// identity, and the next one is strictly later rather than landing on a slot
+	// that merely looks free.
+	//
+	// It advances for every operation kind. That is deliberate: it names which
+	// try of an operation this is, which is meaningful whether or not the try
+	// reaches a provider, and a scheduler that had to know which kinds file
+	// evidence would be a scheduler that knows about providers.
+	AttemptIdentity  int             `json:"attempt_identity,omitempty"`
 	MaxAttempts      int             `json:"max_attempts"`
 	DependsOn        []string        `json:"depends_on,omitempty"`
 	InputStateSHA256 string          `json:"input_state_sha256"`
@@ -504,7 +537,16 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			}
 			s.Operations[operation.ID] = operation
 		}
-		if e.Type == EventRunWaiting {
+		// A WAIT NEVER UN-CANCELS A RUN. Replay is otherwise last-wins, which
+		// is right for every automatic disposition - they are all re-derived
+		// from the same state on the next pass - but cancellation is not
+		// derived from anything. It is an operator's instruction, and the only
+		// way a run.waiting lands after one is a driver that read this run
+		// BEFORE the stop and settled its pass afterwards, which is a stale
+		// opinion by construction. Letting it win put the run back in the
+		// supervisor's active set and let the work the operator stopped be
+		// acquired and executed on the next tick.
+		if e.Type == EventRunWaiting && s.Disposition != Cancelled {
 			s.Disposition = Waiting
 			s.Reason = payloadReason(e.Payload)
 		}
@@ -512,7 +554,18 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			s.Disposition = Completed
 			s.Reason = payloadReason(e.Payload)
 		}
-		if e.Type == EventRunFailed {
+		// A FAILURE DOES NOT UN-CANCEL A RUN EITHER, for the same reason a
+		// wait does not. run.failed is appended by a pass that decided the run
+		// failed from a snapshot read before the stop existed - an exhausted
+		// budget, a refused invariant, an attempt ceiling - and none of those
+		// is a later fact about the run, only an earlier opinion about it.
+		// Letting it win reported an operator's stop as a failure.
+		//
+		// run.completed is deliberately NOT guarded. A cancelled run whose
+		// candidate merged IS completed, and conditions() already says so by
+		// consulting MergePrecedence before it consults cancellation; guarding
+		// it here would contradict that rule rather than protect anything.
+		if e.Type == EventRunFailed && s.Disposition != Cancelled {
 			s.Disposition = Failed
 			s.Reason = payloadReason(e.Payload)
 		}
@@ -545,7 +598,6 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 	return op.Lease == nil || (!ownerAlive && !now.Before(op.Lease.ExpiresAt))
 }
 
-// OperationElapsed reports elapsed time only for an actively started operation.
 // OperationRemaining is how much ACTIVE execution authority is left.
 //
 // It is what a provider invocation is bounded by, so a second attempt inherits
@@ -573,11 +625,14 @@ func OperationExpired(op RunOperation, now time.Time) bool {
 	return op.WallBudget > 0 && OperationRemaining(op, now) <= 0
 }
 
+// OperationElapsed reports cumulative active execution across attempts. Finished
+// operations retain their durable consumption; external waiting never adds time.
 func OperationElapsed(op RunOperation, now time.Time) time.Duration {
-	if op.StartedAt == nil || now.Before(*op.StartedAt) {
-		return 0
+	spent := op.ConsumedExecution
+	if op.ActiveSince != nil && now.After(*op.ActiveSince) {
+		spent += now.Sub(*op.ActiveSince)
 	}
-	return now.Sub(*op.StartedAt)
+	return spent
 }
 
 // NoProgressExceeded is deliberately separate from wall time: a heartbeat can

@@ -130,6 +130,14 @@ so it is safe to tail a run a supervisor is driving. A payload above 1 KiB is
 replaced by its size and digest rather than truncated into JSON that no longer
 parses.
 
+Timing in status separates `active consumed` (`active_elapsed` in JSON),
+`external wait` (`external_wait_elapsed`), and `lifecycle age` (`elapsed`).
+Only active consumed time spends the run wall budget. An optional lifecycle
+deadline bounds calendar age independently. A completed operation's active
+consumption is fixed at its journalled completion; it does not grow while the
+run waits for review. Polling during an external wait adds only the observation
+work, and replay preserves the recorded consumption across restart.
+
 Both reads exit with the run's own disposition mapping, so `status` and `run`
 can never disagree about what a disposition means.
 
@@ -278,3 +286,55 @@ Terminal failure reasons carry the operation that exhausted: for example
 - [troubleshooting.md](troubleshooting.md) — symptom to cause to fix
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [spec/runtime-v0.1.md](spec/runtime-v0.1.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
+
+Worker validation scratch is runtime-owned and separate from candidate source.
+For native Go workers, the per-attempt scratch path is supplied as `GOCACHE`,
+`GOTMPDIR`, `TMPDIR`, and `GOPATH`; `GOENV=off` prevents ambient Go configuration
+from redirecting these locations. Codex and Claude receive an explicit write
+grant for that directory. Scratch identity is reconstructed from the run,
+operation, and attempt on replay, and scratch is retired with the run.
+
+Credential admission conservatively scans the entire candidate working tree,
+including ignored and untracked source. Scratch is outside that subject and
+outside the Git worktree used for commits, changed-path evidence, and
+reassessment. There are no cache-name or Git-ignore exemptions: source under
+`.test-cache` or `.work-cache` receives the same fail-closed checks as any other
+source. Oversized candidate files remain inconclusive and refused.
+
+A runtime commit carries engineering work, never a path Git cannot hold content
+for. A nested Git repository under the candidate workspace — the kind a killed
+attempt's own `go test` run leaves behind when recovery reuses the workspace —
+is recorded by `git add -A` as a gitlink naming a commit that exists only inside
+that nested repository, so no tree the runtime owns holds its files. Such a path
+is excluded from the commit and named in full in the `candidate.committed`
+journal entry (`excluded_paths`) and in the operation record. The determination
+is structural and runtime-owned: it comes from the workspace and the index, not
+from a `.gitignore`, a scratch-looking name, or anything a provider reports. The
+same rule decides whether the candidate changed at all, so scratch alone is not
+a change.
+
+An ignored candidate file is still refused outright — a candidate-controlled
+`.gitignore` does not decide what a runtime commit leaves out. The one exception
+is structural and grants the ignore file nothing: an ignored path that is itself
+a nested Git repository is classified as debris and excluded, exactly as the
+same path would be if nothing ignored it. Without that, a killed attempt's
+scratch — routinely both ignored and a real repository — blocked recovery on an
+ignore rule.
+
+The commit gates follow the same ownership split. Path normalization, traversal
+refusal and symlink safety apply to every path the workspace reported, because
+the runtime stats all of them. The credential-shaped-name refusal, the candidate
+size ceiling and the credential-value scan apply to the paths the commit will
+carry, because they are statements about the object being published; an excluded
+scratch repository therefore cannot veto a valid candidate commit, and nothing
+about those gates changes for candidate work. Excluded paths are recorded whole
+and bounded by the ordinary payload list contract — never truncated, never
+replaced by a digest — so a workspace holding more debris than one payload can
+carry is refused before a commit is written rather than after.
+
+Exclusion is an index write and never a worktree write. The directory stays on
+disk exactly as the producer left it — nothing is reset, cleaned, or deleted —
+so it is still dirty after a successful commit, and that residue is expected.
+Because the runtime knows which paths it excluded, that residue cannot fail the
+post-commit cleanliness check; anything else still dirty does, and the message
+names the paths.

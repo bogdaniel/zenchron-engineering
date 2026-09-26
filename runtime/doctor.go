@@ -113,6 +113,9 @@ type DoctorInput struct {
 	// GitHub is the forge adapter. Nil means no read-only forge check is safe
 	// to make, which is reported as WARN, not PASS.
 	GitHub GitHubAdapter
+	// Governance is the separately authorized, read-only adoption observer.
+	// It is never derived from the publication adapter or credential.
+	Governance ForgeGovernance
 	// DiscoveryLabel is the opt-in label. Empty means DefaultDiscoveryLabel.
 	DiscoveryLabel string
 	// GitHubCredentialMode is the operator's declared mode.
@@ -168,6 +171,20 @@ type DoctorInput struct {
 	// failure as a deliberate design choice.
 	ControllerBuild      ControllerBuild
 	ControllerBuildError error
+
+	// ControllerRoot is where adopted generations and the "current" stable
+	// projection live - the same value `controller status`, `controller
+	// build-adopted` and succession itself already use. The entrypoint checks
+	// read it to know what a canonical PATH entry must point at; it names no
+	// authority of its own.
+	ControllerRoot string
+	// EntrypointPathEnv is the operator's shell PATH, read once at the
+	// composition boundary rather than inside the check, so a diagnosis is
+	// reproducible from a value a test can set directly. This is the one
+	// place Doctor deliberately reads ambient state: the question being asked
+	// is what a real shell would resolve, and answering it from anything else
+	// would not be answering that question.
+	EntrypointPathEnv string
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -183,6 +200,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
 	checks = append(checks, doctorController(in))
+	checks = append(checks, doctorEntrypoint(in)...)
 	checks = append(checks, doctorAgents(in)...)
 	checks = append(checks, doctorControlEndpoint(in))
 	checks = append(checks, doctorStateStorage(in))
@@ -263,6 +281,105 @@ func doctorController(in DoctorInput) DoctorCheck {
 	}
 	return pass(doctorGroupController, id, detail+
 		". Its source is adopted, which is a fact established by external merge and never by the runtime itself")
+}
+
+// ---------------------------------------------------------------------------
+// PATH entrypoint
+// ---------------------------------------------------------------------------
+
+const doctorGroupInstall = "install"
+
+// doctorEntrypoint answers #319: is there ONE canonical local install, and
+// does the operator's shell actually reach it?
+//
+// It never mutates anything - `controller install` is the one place that
+// does - and it never guesses which of several PATH entries an operator
+// meant. A stale copy earlier on PATH is reported as exactly that, even when
+// a canonical entrypoint also exists further along: the shell would resolve
+// the stale one, and a report that looked past it to the healthy entry
+// further down would be a green diagnosis of a broken installation.
+//
+// The diagnosis is computed once, against the SAME durable controller
+// authority `controller status` and `controller install` already consult,
+// and handed to both checks below: two independently-opened stores could in
+// principle observe two different moments of the same database, which is
+// exactly the kind of second opinion #319 must not introduce.
+func doctorEntrypoint(in DoctorInput) []DoctorCheck {
+	if strings.TrimSpace(in.ControllerRoot) == "" {
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", "no controller root is configured, so the canonical PATH entrypoint cannot be diagnosed"),
+			warn(doctorGroupInstall, "install.path_shadowing", "no controller root is configured, so PATH shadowing cannot be diagnosed"),
+		}
+	}
+	if strings.TrimSpace(in.StateDir) == "" {
+		reason := "no state directory is configured, so durable controller authority cannot be consulted to diagnose the PATH entrypoint"
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", reason),
+			warn(doctorGroupInstall, "install.path_shadowing", reason),
+		}
+	}
+	store, err := OpenSQLiteOperationStore(in.StateDir)
+	if err != nil {
+		reason := "the runtime database could not be opened to diagnose the PATH entrypoint: " + err.Error()
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", reason),
+			warn(doctorGroupInstall, "install.path_shadowing", reason),
+		}
+	}
+	defer store.Close()
+	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot, store)
+	return []DoctorCheck{doctorEntrypointCanonical(diagnosis), doctorEntrypointShadowing(diagnosis)}
+}
+
+// doctorEntrypointCanonical states the canonical public entrypoint path, the
+// path the shell actually resolves, the adopted target it should reach, and
+// whether it does.
+func doctorEntrypointCanonical(diagnosis EntrypointDiagnosis) DoctorCheck {
+	const id = "install.entrypoint"
+	if diagnosis.Winner == nil {
+		return warn(doctorGroupInstall, id, fmt.Sprintf(
+			"no %s is on PATH; the canonical entrypoint would be a symlink to %s. Run `controller install` to establish it",
+			EntrypointExecutableName, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.Canonical {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the %s that resolves on PATH is %s, and it is not the canonical entrypoint: %s. Canonical target: %s. Run `controller install` to replace the resolved entry with a symlink to it",
+			EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.Detail, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.AuthorityConsistent {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the canonical entrypoint %s is a symlink through %s, and durable controller authority does not support it: %s",
+			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
+	}
+	if !diagnosis.ReachesAdopted {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the canonical entrypoint %s does not reach the adopted target %s: %s",
+			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
+	}
+	return pass(doctorGroupInstall, id, fmt.Sprintf(
+		"the %s that resolves on PATH (%s) is the canonical entrypoint and reaches the adopted target %s",
+		EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.CanonicalTarget))
+}
+
+// doctorEntrypointShadowing names every PATH entry other than the one that
+// wins, so a stale or duplicate copy is visible even when it happens not to
+// be the one the shell currently resolves.
+func doctorEntrypointShadowing(diagnosis EntrypointDiagnosis) DoctorCheck {
+	const id = "install.path_shadowing"
+	if diagnosis.Winner == nil {
+		return pass(doctorGroupInstall, id, fmt.Sprintf("no %s is on PATH at all, so there is nothing to shadow", EntrypointExecutableName))
+	}
+	shadowed := diagnosis.Shadowed()
+	if len(shadowed) == 0 {
+		return pass(doctorGroupInstall, id, fmt.Sprintf("%s appears at exactly one place on PATH (%s)", EntrypointExecutableName, diagnosis.Winner.Path))
+	}
+	paths := make([]string, len(shadowed))
+	for i, candidate := range shadowed {
+		paths[i] = candidate.Path
+	}
+	return warn(doctorGroupInstall, id, fmt.Sprintf(
+		"%s also exists later on PATH at %s, shadowed by the resolved %s; remove the stale entries so they cannot be reached by a different PATH order",
+		EntrypointExecutableName, strings.Join(paths, ", "), diagnosis.Winner.Path))
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +472,7 @@ func doctorStateLock(in DoctorInput) DoctorCheck {
 	if strings.TrimSpace(in.StateDir) == "" {
 		return fail(doctorGroupState, id, "no state directory is configured, so the ownership lock cannot be taken")
 	}
-	lock, err := AcquireOwnershipLock(in.StateDir, NewRuntimeOwner())
+	lock, err := AcquireControllerInstanceLock(in.StateDir, NewRuntimeOwner())
 	if err != nil {
 		return fail(doctorGroupState, id, "the runtime ownership lock could not be taken: "+err.Error()+"; another process may already own this state directory")
 	}
@@ -375,7 +492,7 @@ func doctorStateLiveness(in DoctorInput) DoctorCheck {
 		return fail(doctorGroupState, id, "no state directory is configured, so owner liveness has no evidence to read")
 	}
 	owner := NewRuntimeOwner()
-	lock, err := AcquireOwnershipLock(in.StateDir, owner)
+	lock, err := AcquireControllerInstanceLock(in.StateDir, owner)
 	if err != nil {
 		return fail(doctorGroupState, id, "owner liveness could not be probed because the ownership lock could not be taken: "+err.Error())
 	}
@@ -884,7 +1001,37 @@ const doctorGroupGitHub = "github"
 func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 	credential := doctorGitHubCredential(in)
 	identity, rate := doctorGitHubRead(ctx, in, credential)
-	return []DoctorCheck{credential, doctorPublicationIdentity(ctx, in), identity, rate}
+	return []DoctorCheck{credential, doctorPublicationIdentity(ctx, in), doctorGitHubGovernance(ctx, in), identity, rate}
+}
+
+// doctorGitHubGovernance probes disclosure, not whether repository policy is
+// sufficient for adoption. Raw adapter errors and provenance details are never
+// reported: they can contain credential or response data.
+func doctorGitHubGovernance(ctx context.Context, in DoctorInput) DoctorCheck {
+	const id = "github.governance"
+	if in.Governance == nil {
+		return fail("github", id, "no governance observer is configured; set github.governance_credential_mode to github-cli for controller build-adopted; serve does not require it")
+	}
+	if in.Governance.GovernanceProvenance().Role != CredentialRoleGovernance {
+		return fail("github", id, "the observer does not identify as governance-observation; configure a separate governance credential")
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return warn("github", id, "governance visibility was not probed; select a valid repository with --repo owner/name")
+	}
+	rulesets, err := in.Governance.Rulesets(ctx, repo)
+	if err != nil {
+		return fail("github", id, "governance observation failed; verify the configured governance credential resolves and can read repository rulesets and bypass_actors")
+	}
+	if len(rulesets) == 0 {
+		return warn("github", id, "governance read succeeded but no rulesets were returned; bypass_actors visibility remains unverified")
+	}
+	for _, ruleset := range rulesets {
+		if !ruleset.BypassActorsKnown {
+			return fail("github", id, "governance credential cannot disclose bypass_actors for every ruleset; authorize an identity with governance visibility before controller build-adopted")
+		}
+	}
+	return pass("github", id, "governance credential resolved and disclosed rulesets including bypass_actors; adoption policy is validated by controller build-adopted")
 }
 
 // doctorViewer resolves the account the runtime publishes as, when the adapter

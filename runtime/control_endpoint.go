@@ -170,6 +170,13 @@ const (
 	ControlStop     = "stop"
 	ControlStopAll  = "stop-all"
 	ControlPing     = "ping"
+	// ControlCommandControllerSnapshot asks the running controller for ONE
+	// coherent observation of itself: which generation it is, whether it holds
+	// the controller role, and whether it is admitting work. It is read-only
+	// and requires no authority, because losing ownership must not also cost
+	// observability - an operator diagnosing a stuck handoff needs to see the
+	// state of the thing that is stuck.
+	ControlCommandControllerSnapshot = "controller.snapshot"
 	// The plan lifecycle verbs. Each is an operator decision that already
 	// exists as a command; the endpoint exists so the decision reaches the
 	// supervisor that owns the work rather than racing it from a second

@@ -64,7 +64,8 @@ terms nobody approved.
     "max_execution_attempts": 2,
     "max_execution_continuations": 8,
     "max_remediation_attempts": 2,
-    "max_assurance_attempts": 2
+    "max_assurance_attempts": 2,
+    "provider_inactivity_seconds": 600
   },
   "supervisor": {"max_concurrent_runs": 3, "poll_interval_seconds": 60},
   "storage": {"max_state_bytes": 21474836480},
@@ -166,6 +167,54 @@ refused like any other malformed bound. Attempts and continuations are different
 resources: attempts retry one execution binding, continuations are successive
 pieces of productive work.
 
+`provider_inactivity_seconds` bounds how long ONE provider invocation may go
+without recognized provider progress. It is a third dimension: `wall_limit_seconds` bounds
+the work, `lifecycle_deadline_seconds` bounds the calendar, and this bounds
+SILENCE. It exists because a live subprocess is not evidence of progress — a
+laptop that loses its network keeps a coding CLI alive and quiet, and without
+this bound the run-wide wall budget was what eventually noticed, eight hours and
+fifty-five minutes later. It may be absent, and absent resolves to 600; an
+explicit 0 is read as absent, a negative value is refused, and a stated value
+below 10 is refused at load and reported by `autonomy doctor` (Claude Code's own
+background-wait ceiling is set to three quarters of the window and needs room
+inside it; see below). There is
+deliberately no value that disables it: an unattended CLI worker with no
+inactivity bound is the configuration this budget exists to prevent.
+
+Recognized progress is provider-specific:
+
+- bytes arriving from the child process, for the Codex, Gemini and Qwen
+  adapters;
+- structured assistant and tool events for Claude Code, which runs with
+  `--output-format stream-json --verbose`. An `assistant` message carrying a
+  content block, or a `user` message carrying a `tool_result`, refreshes the
+  window. Raw stdout or stderr bytes, `system` events (including `api_retry`),
+  the final `result` and unknown events do not. While a main-thread tool call
+  is open - a long `go test`, say - the inactivity kill is suspended, but the
+  absolute deadline is not, so a tool that hangs is still ended by it. Each
+  physical Claude attempt gets the full window; the wall budget and the attempt
+  ceiling are what bound repeated restarts. Claude's own
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is set to three quarters of the
+  configured window, so its background-subagent wait gives up before the
+  runtime's bound does. One residual gap is accepted: without partial-message
+  streaming, a single very long assistant content block produces no event until
+  it completes and can still reach the bound.
+
+It deliberately does not mean the process existing, a scheduler lease
+heartbeat, or a clock tick. A CLI
+that is legitimately thinking in silence is why the bound is a window of minutes
+rather than an immediate failure, and why reaching it is a bounded retry rather
+than a terminal failure. An invocation the policy terminates is recorded as
+`provider_no_progress`; a provider that emits an explicit connectivity
+diagnostic is `provider_unavailable` and waits instead, without spending the
+active-work budget. Silence is never classified as offline, and neither is
+anything a worker merely wrote: a typed provider condition is read only from the
+bounded tail of the CLI's own diagnostic stream, or - for Claude Code - from the
+typed fields of its stream-json events (`api_retry.error`, `error_status`,
+`no_response`, the final `result`'s `is_error` and `subtype`), never from the
+session output a model and its tools control. A retry condition counts only if
+no accepted progress followed it.
+
 ### Concurrency and polling
 
 `supervisor.max_concurrent_runs` and `watch.max_concurrent_runs` both state the
@@ -200,10 +249,12 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
+| `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
 | `operator.id` | The identity a run is recorded as having been authorized by. It is provenance, not authentication: nothing here is signed and no challenge was issued. | the local account name |
 | `operator.require_configured_id` | Refuse the local account name as a substitute for a configured identity. | `false` |
+| `github.governance_credential_mode` | The identity that READS governance facts - today, the adoption trust root's disclosed bypass actors. It is separate from `credential_mode` because GitHub does not disclose a ruleset's `bypass_actors` to a GitHub App installation token even with `administration: read`, so the identity that publishes is precisely the one that cannot verify the trust root. The only mode is `github-cli`, your own `gh` login. Zenchron uses it for governance observation only and does not wire it into any publication path - the value it hands back is not a publication credential and cannot be used as one. That is a property of this program, not of the token: your `gh` token carries whatever scopes you granted it (typically `repo`, `workflow`, `read:org`, `gist`), so it is not read-restricted at GitHub and would be able to write if it left this process. Absent means no governance credential is authorized and `controller build-adopted` refuses rather than falling back to the publication credential. `autonomy doctor` reports `github.governance`: FAIL for a missing observer, failed credential resolution or ruleset read, or undisclosed `bypass_actors`; WARN when no repository or rulesets are available to verify disclosure; PASS when the ruleset reads disclose bypass actors. This probes visibility, not adoption policy compliance. `serve` does not require or hold this credential. | none |
 | `github.endpoint` | Alternate API endpoint. | github.com |
 
 ## The in-repo layer
@@ -222,6 +273,7 @@ May name:
 | `budgets.max_execution_continuations` | at least 1, at or below the operator value |
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
+| `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 

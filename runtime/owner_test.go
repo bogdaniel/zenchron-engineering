@@ -12,12 +12,12 @@ import (
 	"time"
 )
 
-// TestOwnershipLockHolderHelper is not a test. It is the child process every
+// TestControllerInstanceLockHolderHelper is not a test. It is the child process every
 // test below drives: a REAL process that takes a REAL kernel lock, so killing
 // it exercises the kernel's release path rather than an in-process fiction.
 // It prints the owner identity it claimed and then holds ownership until its
 // stdin closes (graceful release) or it is killed (kernel release).
-func TestOwnershipLockHolderHelper(t *testing.T) {
+func TestControllerInstanceLockHolderHelper(t *testing.T) {
 	if os.Getenv("ZENCHRON_OWNER_LOCK_HELPER") != "1" {
 		t.Skip("helper process, driven by the ownership lock tests")
 	}
@@ -25,7 +25,7 @@ func TestOwnershipLockHolderHelper(t *testing.T) {
 	if owner == "" {
 		owner = NewRuntimeOwner()
 	}
-	lock, err := AcquireOwnershipLock(os.Getenv("ZENCHRON_OWNER_LOCK_STATE_DIR"), owner)
+	lock, err := AcquireControllerInstanceLock(os.Getenv("ZENCHRON_OWNER_LOCK_STATE_DIR"), owner)
 	if err != nil {
 		fmt.Fprintln(os.Stdout, "error "+err.Error())
 		os.Exit(3)
@@ -48,7 +48,7 @@ type lockHolder struct {
 // owner line it prints is the readiness signal, so no test waits on the clock.
 func startLockHolder(t *testing.T, stateDir, owner string) *lockHolder {
 	t.Helper()
-	command := exec.Command(os.Args[0], "-test.run=TestOwnershipLockHolderHelper")
+	command := exec.Command(os.Args[0], "-test.run=TestControllerInstanceLockHolderHelper")
 	command.Env = append(os.Environ(),
 		"ZENCHRON_OWNER_LOCK_HELPER=1",
 		"ZENCHRON_OWNER_LOCK_STATE_DIR="+stateDir,
@@ -207,7 +207,7 @@ func TestPIDReuseProvesNeitherDeathNorLife(t *testing.T) {
 func TestStaleLockFileDoesNotBlockTakeover(t *testing.T) {
 	stateDir := t.TempDir()
 	dead := fmt.Sprintf("%s/%d/stale", ownerHost(), os.Getpid()+1)
-	lock, err := AcquireOwnershipLock(stateDir, dead)
+	lock, err := AcquireControllerInstanceLock(stateDir, dead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,14 +271,14 @@ func TestUnprovableOwnersAreTreatedAsAlive(t *testing.T) {
 }
 
 // Two runtimes cannot share one identity, and a released identity is reusable.
-func TestAcquireOwnershipLockRefusesADoubleClaim(t *testing.T) {
+func TestAcquireControllerInstanceLockRefusesADoubleClaim(t *testing.T) {
 	stateDir := t.TempDir()
 	holder := startLockHolder(t, stateDir, "")
-	if _, err := AcquireOwnershipLock(stateDir, holder.owner); err == nil {
+	if _, err := AcquireControllerInstanceLock(stateDir, holder.owner); err == nil {
 		t.Fatal("a second claim on a held ownership identity must fail")
 	}
 	holder.shutDown(t)
-	lock, err := AcquireOwnershipLock(stateDir, holder.owner)
+	lock, err := AcquireControllerInstanceLock(stateDir, holder.owner)
 	if err != nil {
 		t.Fatalf("a released identity must be reclaimable: %v", err)
 	}
@@ -288,14 +288,14 @@ func TestAcquireOwnershipLockRefusesADoubleClaim(t *testing.T) {
 	if err := lock.Release(); err != nil {
 		t.Fatalf("Release must be idempotent: %v", err)
 	}
-	var absent *OwnershipLock
+	var absent *ControllerInstanceLock
 	if err := absent.Release(); err != nil {
 		t.Fatalf("Release must be nil-safe: %v", err)
 	}
-	if _, err := AcquireOwnershipLock("", NewRuntimeOwner()); err == nil {
+	if _, err := AcquireControllerInstanceLock("", NewRuntimeOwner()); err == nil {
 		t.Fatal("a lock with no state dir must fail")
 	}
-	if _, err := AcquireOwnershipLock(stateDir, "nonsense"); err == nil {
+	if _, err := AcquireControllerInstanceLock(stateDir, "nonsense"); err == nil {
 		t.Fatal("a lock for a non-identity must fail")
 	}
 }
