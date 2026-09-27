@@ -142,6 +142,17 @@ var codexSpec = cliAgentSpec{
 		{"connection reset by peer", FailureProviderUnavailable},
 		{"network is unreachable", FailureProviderUnavailable},
 	},
+	// CODEX'S RECONNECT LOOP IS NOT PROGRESS (#314). Recorded from the #317
+	// attempt that spent its wall envelope reconnecting: these lines, together
+	// with the Signals above, were every line it printed in that loop. They
+	// only withhold an inactivity refresh and never classify anything, so they
+	// live apart from Signals and the terminal diagnostic stays unchanged.
+	ProgressMode: progressByteOutputExcludingTransportChatter,
+	InactivityNonProgress: []string{
+		"error: reconnecting...",
+		"falling back from websockets to https transport",
+		"failed to lookup address information",
+	},
 	Args: func(i cliInvocation) []string {
 		sandbox := "workspace-write"
 		if i.Bypass {
