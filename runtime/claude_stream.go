@@ -390,6 +390,9 @@ type claudeStreamOutcome struct {
 	Failed                                  bool
 	Accepted                                int64
 	OpenTools, PermissionDenials, Anomalies int
+	// FinalResult reports that a valid final result was read. The denial
+	// count and DeniedTools come from it, so without one they are unknown.
+	FinalResult bool
 	// DeniedTools is the bounded set of typed tool identifiers the final
 	// result's permission_denials named.
 	DeniedTools []string
@@ -416,7 +419,7 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Failed:    exitedZero && (!s.sawResult || s.isError),
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
-		DeniedTools: s.deniedTools,
+		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
 	}
 }
 
@@ -432,7 +435,7 @@ func deniedToolNames(denials []json.RawMessage) []string {
 		var denial struct {
 			ToolName string `json:"tool_name"`
 		}
-		if json.Unmarshal(raw, &denial) != nil || !validDeniedToolName(denial.ToolName) || slices.Contains(names, denial.ToolName) {
+		if json.Unmarshal(raw, &denial) != nil || !domain.IsInvocationIdentifier(denial.ToolName) || slices.Contains(names, denial.ToolName) {
 			continue
 		}
 		names = append(names, denial.ToolName)
@@ -442,20 +445,6 @@ func deniedToolNames(denials []json.RawMessage) []string {
 		names = names[:domain.MaxPermissionDeniedTools]
 	}
 	return names
-}
-
-// validDeniedToolName is the identifier shape a tool name may be recorded in:
-// Bash, WebFetch, mcp__server__tool.
-func validDeniedToolName(name string) bool {
-	if name == "" || len(name) > domain.MaxPermissionDeniedToolBytes {
-		return false
-	}
-	for _, r := range name {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_.:-", r)) {
-			return false
-		}
-	}
-	return true
 }
 
 // MinProviderInactivitySeconds is the smallest provider inactivity window the

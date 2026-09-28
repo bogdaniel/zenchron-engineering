@@ -1130,6 +1130,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		provenance.StructuredEvents = streamed.Accepted
 		provenance.OpenToolsAtExit = streamed.OpenTools
 		provenance.PermissionDenials = streamed.PermissionDenials
+		provenance.FinalResultObserved = streamed.FinalResult
 		provenance.PermissionDeniedTools = streamed.DeniedTools
 		provenance.ProtocolAnomalies = streamed.Anomalies
 	}

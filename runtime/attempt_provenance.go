@@ -30,36 +30,72 @@ type ExecutionAttemptProvenance struct {
 // mistaken for the whole one.
 const argvTruncated = "[argv truncated]"
 
-// newExecutionAttemptProvenance builds the event for one attempt, bounded to
-// the canonical payload ceiling.
+// newExecutionAttemptProvenance builds the event for one attempt. It is TOTAL:
+// whatever the provider reported, the record it returns is appendable, because
+// a record refused at append would fail the pass before operation.after and
+// drop exactly the attempt that most needed explaining.
 //
-// Every field is already bounded where it is produced. What no per-field
-// bound can promise is the SUM - 33 argv elements at the element bound plus
-// long absolute paths elsewhere exceed 8 KiB - and a record refused at append
-// would be a record dropped. So the argv tail is trimmed, and visibly marked,
-// until the whole payload fits: argv is the one member long enough to matter
-// and the one whose tail explains least.
+// Every field is already bounded where it is produced. What no per-field bound
+// can promise is the SUM, so the observation is fitted (fitObservation) and, if
+// even the identity strings around it cannot be recorded, they are reduced to
+// identifiers too.
 func newExecutionAttemptProvenance(operationID string, attempt int, invocation InvocationProvenance) ExecutionAttemptProvenance {
 	invocation.GitRefusals = nil
-	invocation.Argv = append([]string(nil), invocation.Argv...)
 	record := ExecutionAttemptProvenance{OperationID: operationID, AttemptIdentity: attempt, Invocation: invocation}
-	for len(record.Invocation.Argv) > 0 && !fitsPayloadCeiling(record) {
-		argv := record.Invocation.Argv
+	record.Invocation.InvocationObservation = fitObservation(invocation.InvocationObservation, func(o domain.InvocationObservation) bool {
+		candidate := record
+		candidate.Invocation.InvocationObservation = o
+		return appendable(EventExecutionAttemptProvenance, candidate)
+	})
+	if appendable(EventExecutionAttemptProvenance, record) {
+		return record
+	}
+	// THE LAST RESORT: identity reduced to what is an identifier, the
+	// observation to its fixed-size core. Nothing here depends on provider or
+	// configuration text, so it always fits.
+	identifier := func(s string) string {
+		if domain.IsInvocationIdentifier(s) {
+			return s
+		}
+		return ""
+	}
+	minimal := InvocationProvenance{
+		AgentID: identifier(invocation.AgentID), ProviderKind: identifier(invocation.ProviderKind),
+		TrustMode: TrustMode(identifier(string(invocation.TrustMode))), Model: identifier(invocation.Model),
+		InvocationObservation: domain.MinimalInvocationObservation(invocation.InvocationObservation),
+	}
+	return ExecutionAttemptProvenance{OperationID: boundedDetail(operationID), AttemptIdentity: max(1, attempt), Invocation: minimal}
+}
+
+// fitObservation bounds one observation so that fits holds: the argv tail is
+// trimmed first, visibly, because argv is the one member long enough to matter
+// and the one whose tail explains least; if that is not enough, the fixed-size
+// minimal record is returned instead, marked provenance_truncated.
+func fitObservation(o domain.InvocationObservation, fits func(domain.InvocationObservation) bool) domain.InvocationObservation {
+	o.Argv = append([]string(nil), o.Argv...)
+	for len(o.Argv) > 0 && !fits(o) {
+		argv := o.Argv
 		if argv[len(argv)-1] == argvTruncated {
 			argv = argv[:len(argv)-1]
 		}
 		if len(argv) == 0 {
-			record.Invocation.Argv = nil
+			o.Argv = nil
 			break
 		}
-		record.Invocation.Argv = append(argv[:len(argv)-1], argvTruncated)
+		o.Argv = append(argv[:len(argv)-1], argvTruncated)
 	}
-	return record
+	if fits(o) {
+		return o
+	}
+	return domain.MinimalInvocationObservation(o)
 }
 
-func fitsPayloadCeiling(v any) bool {
-	canonical, err := CanonicalJSON(v)
-	return err == nil && len(canonical) <= maxCanonicalPayloadBytes
+// appendable reports whether a payload would pass the journal's own append
+// validation - the canonical ceiling and the type's schema - which is the only
+// definition of "fits" that cannot disagree with the append.
+func appendable(eventType string, payload any) bool {
+	raw, err := marshalPayloadJSON(payload)
+	return err == nil && validateEventPayload(EngineeringEvent{Type: eventType, Payload: raw}) == nil
 }
 
 // validate is the event's schema. It refuses what the producer never writes -
@@ -73,26 +109,37 @@ func (p ExecutionAttemptProvenance) validate() error {
 	if len(inv.GitRefusals) > 0 {
 		return errors.New("attempt provenance carries no git refusals; they are counted on the operation result")
 	}
-	if len(inv.Argv) > maxProvenanceArgs+1 {
-		return fmt.Errorf("attempt provenance argv has %d elements, above the %d element bound", len(inv.Argv), maxProvenanceArgs+1)
+	errs := []error{required("operation_id", p.OperationID), validateInvocationObservation(inv.InvocationObservation)}
+	for name, value := range map[string]string{
+		"agent_id": inv.AgentID, "provider_kind": inv.ProviderKind, "trust_mode": string(inv.TrustMode), "model": inv.Model,
+	} {
+		errs = append(errs, bounded("invocation."+name, value))
 	}
-	if len(inv.PermissionDeniedTools) > domain.MaxPermissionDeniedTools {
-		return fmt.Errorf("attempt provenance names %d denied tools, above the bound of %d", len(inv.PermissionDeniedTools), domain.MaxPermissionDeniedTools)
+	return errors.Join(errs...)
+}
+
+// validateInvocationObservation is the bound every durable copy of an
+// observation is held to, on the run journal and on the plan journal alike.
+func validateInvocationObservation(o domain.InvocationObservation) error {
+	if len(o.Argv) > maxProvenanceArgs+1 {
+		return fmt.Errorf("invocation argv has %d elements, above the %d element bound", len(o.Argv), maxProvenanceArgs+1)
 	}
-	errs := []error{required("operation_id", p.OperationID)}
-	for _, arg := range inv.Argv {
+	if len(o.PermissionDeniedTools) > domain.MaxPermissionDeniedTools {
+		return fmt.Errorf("invocation names %d denied tools, above the bound of %d", len(o.PermissionDeniedTools), domain.MaxPermissionDeniedTools)
+	}
+	var errs []error
+	for _, arg := range o.Argv {
 		errs = append(errs, bounded("invocation.argv[]", arg))
 	}
-	for _, tool := range inv.PermissionDeniedTools {
-		if !validDeniedToolName(tool) {
-			errs = append(errs, fmt.Errorf("attempt provenance denied tool %q is not a tool identifier", tool))
+	for _, tool := range o.PermissionDeniedTools {
+		if !domain.IsInvocationIdentifier(tool) {
+			errs = append(errs, fmt.Errorf("invocation denied tool %q is not a tool identifier", tool))
 		}
 	}
 	for name, value := range map[string]string{
-		"agent_id": inv.AgentID, "provider_kind": inv.ProviderKind, "trust_mode": string(inv.TrustMode), "model": inv.Model,
-		"executable": inv.Executable, "provider_version": inv.Version, "sandbox_mode": inv.SandboxMode,
-		"permission_mode": inv.PermissionMode, "auth_mode": inv.AuthMode, "auth_mode_source": inv.AuthModeSource,
-		"prompt_sha256": inv.PromptSHA256, "termination_cause": inv.TerminationCause, "progress_mode": inv.ProgressMode,
+		"executable": o.Executable, "provider_version": o.Version, "sandbox_mode": o.SandboxMode,
+		"permission_mode": o.PermissionMode, "auth_mode": o.AuthMode, "auth_mode_source": o.AuthModeSource,
+		"prompt_sha256": o.PromptSHA256, "termination_cause": o.TerminationCause, "progress_mode": o.ProgressMode,
 	} {
 		errs = append(errs, bounded("invocation."+name, value))
 	}

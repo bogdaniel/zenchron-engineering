@@ -150,6 +150,7 @@
         "inactivity_limit": 600000000000,
         "progress_mode": "structured_claude_events",
         "structured_progress_events": 41,
+        "final_result_observed": true,
         "permission_denials": 1,
         "permission_denied_tools": ["WebFetch"],
         "process_id": 48213,

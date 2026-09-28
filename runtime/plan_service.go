@@ -1467,6 +1467,28 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 	}
 	if input.Reasoning != nil {
 		payload.Reasoning = reasoningPayload(*input.Reasoning)
+		// HOW THE REFUSED INVOCATION RAN AND ENDED (#327). A planner killed at
+		// its deadline produces no revision, so this attempt record is the only
+		// durable home its provenance has. It is fitted to the event beside
+		// everything else the attempt carries, never allowed to make the
+		// refusal itself unappendable.
+		if observed := input.Reasoning.Invocation; observed != nil {
+			// Measured with the LONGEST attempt id the journal may allocate in
+			// place of the pending one, so the allocation cannot push it over.
+			fits := func(o *domain.InvocationObservation) bool {
+				candidate, reasoning := payload, *payload.Reasoning
+				reasoning.Invocation = o
+				candidate.Reasoning, candidate.AttemptID = &reasoning, strings.Repeat("a", maxPayloadFieldBytes)
+				return appendable(EventPlanAttemptRefused, candidate)
+			}
+			fitted := fitObservation(*observed, func(o domain.InvocationObservation) bool { return fits(&o) })
+			payload.Reasoning.Invocation = &fitted
+			if !fits(&fitted) {
+				// Only when the refusal record around it is itself at the
+				// ceiling: the refusal was appendable before #327, and it stays so.
+				payload.Reasoning.Invocation = nil
+			}
+		}
 	}
 	// The transcripts are attached as event ARTIFACTS as well as referenced in
 	// the payload, so they pass the same ValidateArtifact discipline every other

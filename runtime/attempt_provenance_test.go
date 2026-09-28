@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -63,8 +64,8 @@ func (p *provenanceProvider) Execute(_ context.Context, request ExecutionRequest
 }
 
 // deadlineProvenance is the #324 attempt's shape: killed at its wall deadline
-// under the structured Claude oracle, with tools still open and permission
-// denials on the record.
+// under the structured Claude oracle, with a tool still open and NO final
+// result - so its permission denials are unknown, and absent.
 func deadlineProvenance() *InvocationProvenance {
 	started := time.Date(2026, 9, 26, 17, 50, 8, 0, time.UTC)
 	deadline := started.Add(30 * time.Minute)
@@ -78,18 +79,26 @@ func deadlineProvenance() *InvocationProvenance {
 			PromptSHA256:                    strings.Repeat("ab", 32),
 			Deadline:                        &deadline, StartedAt: &started, CompletedAt: &deadline,
 			Elapsed: 30 * time.Minute, OverranDeadline: false,
-			TerminationCause:      "deadline_reached",
-			InactivityLimit:       10 * time.Minute,
-			ProgressMode:          progressStructuredClaudeEvents,
-			StructuredEvents:      202,
-			OpenToolsAtExit:       1,
-			PermissionDenials:     6,
-			PermissionDeniedTools: []string{"Bash", "WebFetch"},
-			ProcessID:             48213,
-			GitGuarded:            true,
+			TerminationCause: "deadline_reached",
+			InactivityLimit:  10 * time.Minute,
+			ProgressMode:     progressStructuredClaudeEvents,
+			StructuredEvents: 202,
+			OpenToolsAtExit:  1,
+			ProcessID:        48213,
+			GitGuarded:       true,
 		},
 		GitRefusals: []GitRefusal{{Operation: "git worktree --porcelain -z <1 operand(s)>", Reason: "refused", Origin: "provider_runtime", DirtyCount: 4}},
 	}
+}
+
+// successProvenance is an attempt that returned with a final result, which is
+// what makes its denial count and denied tools KNOWN.
+func successProvenance() *InvocationProvenance {
+	invocation := deadlineProvenance()
+	invocation.TerminationCause, invocation.OpenToolsAtExit = "provider_returned", 0
+	invocation.FinalResultObserved = true
+	invocation.PermissionDenials, invocation.PermissionDeniedTools = 6, []string{"Bash", "WebFetch"}
+	return invocation
 }
 
 func provenanceEvents(t *testing.T, rt *EngineeringRuntime, runID string) ([]EngineeringEvent, []ExecutionAttemptProvenance) {
@@ -146,19 +155,25 @@ func TestEveryProviderAttemptJournalsItsInvocationProvenance(t *testing.T) {
 	for name, step := range map[string]provenanceStep{
 		"deadline": {invocation: deadlineProvenance(), mutate: true, err: errors.New("exit status 143"),
 			failure: &ProviderFailure{Classification: FailureUnknown}},
-		"success": {invocation: deadlineProvenance(), mutate: true},
+		"success": {invocation: successProvenance(), mutate: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if name == "success" {
-				step.invocation.TerminationCause = "provider_returned"
-				step.invocation.OpenToolsAtExit = 0
-			}
 			fixture, runID := runWithProvenance(t, step)
 			events, payloads := provenanceEvents(t, fixture.runtime, runID)
 			if len(payloads) == 0 {
 				t.Fatal("a provider-executed attempt journalled no invocation provenance")
 			}
 			assertPinned(t, payloads[0], step.invocation)
+			// UNKNOWN IS NOT ZERO: the deadline attempt had no final result, so
+			// it records no denial count or tools at all; the success does.
+			if inv := payloads[0].Invocation; inv.FinalResultObserved != (name == "success") ||
+				(name == "deadline" && (inv.PermissionDenials != 0 || inv.PermissionDeniedTools != nil)) ||
+				(name == "success" && inv.PermissionDenials != 6) {
+				t.Fatalf("%s: final_result_observed=%v denials=%d tools=%v", name, inv.FinalResultObserved, inv.PermissionDenials, inv.PermissionDeniedTools)
+			}
+			if raw := string(events[0].Payload); name == "deadline" && strings.Contains(raw, "permission_denials") {
+				t.Fatalf("an unknown denial count was persisted: %s", raw)
+			}
 			event := events[0]
 			if payloads[0].OperationID != event.OperationID || payloads[0].AttemptIdentity != 1 {
 				t.Fatalf("provenance is bound to %q attempt %d, the event to %q",
@@ -255,7 +270,7 @@ func TestAttemptProvenanceSurvivesARestartWithoutTheArtifactStore(t *testing.T) 
 	got := status.ExecutionAttemptProvenance.Invocation
 	if got.TerminationCause != "deadline_reached" || got.ProgressMode != progressStructuredClaudeEvents ||
 		got.InactivityLimit != 10*time.Minute || got.StructuredEvents != 202 || got.OpenToolsAtExit != 1 ||
-		got.PermissionDenials != 6 || !reflect.DeepEqual(got.PermissionDeniedTools, []string{"Bash", "WebFetch"}) {
+		got.FinalResultObserved || got.PermissionDenials != 0 || got.PermissionDeniedTools != nil {
 		t.Fatalf("status reports %+v", got)
 	}
 	if _, payloads := provenanceEvents(t, restarted, runID); len(payloads) == 0 {
@@ -321,6 +336,69 @@ func TestALaterAttemptWithoutProvenanceClearsTheEarlierRecord(t *testing.T) {
 // same-length path, so the measured size is the real one).
 const seq20OperationAfter = `{"active_since": "2026-09-26T17:50:08.437533Z", "attempt": 1, "attempt_identity": 1, "created_at": "2026-09-26T17:50:08.426897Z", "deadline": "2026-09-26T18:20:08.437533Z", "id": "run-00a8aecb360c53896934e5b051b0ccc5:execution.invoke:execution.invoke#initial|1|b1202216a0cd9cc534ffcc17fe5dc4605f0bf352", "idempotency_key": "execution.invoke#initial|1|b1202216a0cd9cc534ffcc17fe5dc4605f0bf352", "input_state_sha256": "ec345275bc1471cc8719ef29fc012c2a1fcea4c606dc07d430fcb4224618c060", "kind": "execution.invoke", "last_progress_at": "2026-09-26T17:50:08.437533Z", "max_attempts": 2, "result": {"diagnostic": {"artifact_ref": "/Users/operator1/.zenchron/state/artifacts/provider/claude/run-00a8aecb360c53896934e5b051b0ccc5/run-00a8aecb360c53896934e5b051b0ccc5%3Aexecution.invoke%3Aexecution.invoke%23initial%7C1%7Cb1202216a0cd9cc534ffcc17fe5dc4605f0bf352/attempt-1.raw.log", "failure_class": "execution_incomplete", "message": "exit status 143", "model": "sonnet", "provider_kind": "runtime.CLIAgentProvider", "route": "retry", "stage": "provider_result"}, "discard_refusals": 8, "discard_refused": "git worktree --porcelain -z <1 operand(s)> [origin=provider_runtime] (4 dirty candidate path(s) preserved)", "failure_class": "execution_incomplete", "mutated": true, "path_count": 7, "provider_executed": true, "provider_id": "claude"}, "run_id": "run-00a8aecb360c53896934e5b051b0ccc5", "schema_version": "0.1", "started_at": "2026-09-26T17:50:08.437533Z", "state": "succeeded", "wall_budget": 1800000000000}`
 
+// worstInvocation is THE LARGEST LEGAL SHAPE: every string at its field bound
+// (long absolute paths, with separators that need escaping), the maximum argv
+// cardinality at the element bound, eight maximal denied-tool identifiers,
+// maximal counters and timestamps, and a refusal list that must not be
+// carried. Maximal integers are the I-JSON ceiling the canonicalizer enforces.
+func worstInvocation() (InvocationProvenance, []string, []string) {
+	winPath := long(`C:\Users\operator\AppData\Local\zenchron\state\artifacts\provider\claude\`)
+	stamp := time.Date(2026, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	argv := make([]string, 0, maxProvenanceArgs+1)
+	for i := 0; i < maxProvenanceArgs; i++ {
+		argv = append(argv, long(fmt.Sprintf("--add-dir=/Users/operator/.zenchron/state/scratch/run-%02d/", i)))
+	}
+	argv = append(argv, argvTruncated)
+	tools := make([]string, domain.MaxPermissionDeniedTools)
+	for i := range tools {
+		tools[i] = fmt.Sprintf("mcp__%d__", i) + strings.Repeat("t", domain.MaxPermissionDeniedToolBytes-len(fmt.Sprintf("mcp__%d__", i)))
+	}
+	refusals := make([]GitRefusal, 64)
+	for i := range refusals {
+		refusals[i] = GitRefusal{Operation: long("git reset --hard "), Reason: long("refused "), DirtyPaths: []string{long("a/")}}
+	}
+	return InvocationProvenance{
+		AgentID: long("agent-"), ProviderKind: long("kind-"), TrustMode: TrustMode(long("trust-")), Model: long("model-"),
+		InvocationObservation: domain.InvocationObservation{
+			Executable: winPath, Version: long("version "), SandboxMode: long("sandbox-"), PermissionMode: long("mode-"),
+			PermissionBypass: true, AuthMode: long("auth-"), AuthModeSource: long("source-"),
+			WorkspaceBound: true, WorkspaceInstructionsSuppressed: true,
+			Argv: argv, PromptSHA256: strings.Repeat("f", 64),
+			Deadline: &stamp, StartedAt: &stamp, CompletedAt: &stamp,
+			Elapsed: maxJSONInt, OverranDeadline: true,
+			TerminationCause: long("cause-"), InactivityLimit: maxJSONInt, ProgressMode: long("progress-"),
+			StructuredEvents: maxJSONInt, OpenToolsAtExit: maxJSONInt, FinalResultObserved: true, PermissionDenials: maxJSONInt,
+			PermissionDeniedTools: tools, ProtocolAnomalies: maxJSONInt, ProcessID: maxJSONInt, GitGuarded: true,
+		},
+		GitRefusals: refusals,
+	}, argv, tools
+}
+
+const maxJSONInt = 1<<53 - 1
+
+func long(prefix string) string {
+	return prefix + strings.Repeat("x", maxPayloadFieldBytes-len(prefix))
+}
+
+// hostileInvocation defeats every per-field bound at once: each string is
+// control characters, which canonical JSON escapes six-fold, so even an empty
+// argv leaves the record far above the ceiling - and a duration past the
+// I-JSON range makes it uncanonicalizable outright.
+func hostileInvocation() InvocationProvenance {
+	control := strings.Repeat("\x01", maxPayloadFieldBytes)
+	invocation, _, _ := worstInvocation()
+	invocation.AgentID, invocation.ProviderKind, invocation.TrustMode, invocation.Model = control, control, TrustMode(control), control
+	o := &invocation.InvocationObservation
+	o.Executable, o.Version, o.SandboxMode, o.PermissionMode, o.AuthMode, o.AuthModeSource = control, control, control, control, control, control
+	o.TerminationCause, o.ProgressMode = "deadline_reached", control
+	o.Argv = make([]string, maxProvenanceArgs)
+	for i := range o.Argv {
+		o.Argv[i] = control
+	}
+	o.Elapsed = math.MaxInt64
+	return invocation
+}
+
 // Test 6 of #327: the sizing that chose the dedicated event, kept as a
 // regression so a future provenance field cannot consume the headroom
 // invisibly.
@@ -350,45 +428,7 @@ func TestAttemptProvenanceFitsTheCanonicalPayloadCeiling(t *testing.T) {
 	}
 	t.Logf("#324-shaped attempt provenance event: %d canonical bytes, %d headroom", len(realBytes), maxCanonicalPayloadBytes-len(realBytes))
 
-	// THE LARGEST LEGAL SHAPE: every string at its field bound (long absolute
-	// paths, with separators that need escaping), the maximum argv cardinality
-	// at the element bound, eight maximal denied-tool identifiers, maximal
-	// counters and timestamps, and a refusal list that must not be carried.
-	// Maximal integers are the I-JSON ceiling the canonicalizer enforces.
-	const maxJSONInt = 1<<53 - 1
-	long := func(prefix string) string {
-		return prefix + strings.Repeat("x", maxPayloadFieldBytes-len(prefix))
-	}
-	winPath := long(`C:\Users\operator\AppData\Local\zenchron\state\artifacts\provider\claude\`)
-	stamp := time.Date(2026, 12, 31, 23, 59, 59, 999999999, time.UTC)
-	argv := make([]string, 0, maxProvenanceArgs+1)
-	for i := 0; i < maxProvenanceArgs; i++ {
-		argv = append(argv, long(fmt.Sprintf("--add-dir=/Users/operator/.zenchron/state/scratch/run-%02d/", i)))
-	}
-	argv = append(argv, argvTruncated)
-	tools := make([]string, domain.MaxPermissionDeniedTools)
-	for i := range tools {
-		tools[i] = fmt.Sprintf("mcp__%d__", i) + strings.Repeat("t", domain.MaxPermissionDeniedToolBytes-len(fmt.Sprintf("mcp__%d__", i)))
-	}
-	refusals := make([]GitRefusal, 64)
-	for i := range refusals {
-		refusals[i] = GitRefusal{Operation: long("git reset --hard "), Reason: long("refused "), DirtyPaths: []string{long("a/")}}
-	}
-	worst := InvocationProvenance{
-		AgentID: long("agent-"), ProviderKind: long("kind-"), TrustMode: TrustMode(long("trust-")), Model: long("model-"),
-		InvocationObservation: domain.InvocationObservation{
-			Executable: winPath, Version: long("version "), SandboxMode: long("sandbox-"), PermissionMode: long("mode-"),
-			PermissionBypass: true, AuthMode: long("auth-"), AuthModeSource: long("source-"),
-			WorkspaceBound: true, WorkspaceInstructionsSuppressed: true,
-			Argv: argv, PromptSHA256: strings.Repeat("f", 64),
-			Deadline: &stamp, StartedAt: &stamp, CompletedAt: &stamp,
-			Elapsed: maxJSONInt, OverranDeadline: true,
-			TerminationCause: long("cause-"), InactivityLimit: maxJSONInt, ProgressMode: long("progress-"),
-			StructuredEvents: maxJSONInt, OpenToolsAtExit: maxJSONInt, PermissionDenials: maxJSONInt,
-			PermissionDeniedTools: tools, ProtocolAnomalies: maxJSONInt, ProcessID: maxJSONInt, GitGuarded: true,
-		},
-		GitRefusals: refusals,
-	}
+	worst, argv, tools := worstInvocation()
 	withoutRefusals := worst
 	withoutRefusals.GitRefusals = nil
 	untrimmed, err := CanonicalJSON(ExecutionAttemptProvenance{OperationID: long("op-"), AttemptIdentity: maxJSONInt, Invocation: withoutRefusals})
@@ -419,6 +459,140 @@ func TestAttemptProvenanceFitsTheCanonicalPayloadCeiling(t *testing.T) {
 	}
 	if record.Invocation.GitRefusals != nil || !reflect.DeepEqual(record.Invocation.PermissionDeniedTools, tools) {
 		t.Fatal("bounding changed something other than the argv tail")
+	}
+
+	// THE HOSTILE SHAPE: six-fold escapes everywhere and an uncanonicalizable
+	// duration. The record falls back to its fixed-size core, visibly, and is
+	// still appendable.
+	hostile := hostileInvocation()
+	if _, err := CanonicalJSON(ExecutionAttemptProvenance{OperationID: "op", AttemptIdentity: 1, Invocation: hostile}); err == nil {
+		t.Fatal("the hostile shape canonicalizes; it would not exercise the fallback")
+	}
+	fallback := newExecutionAttemptProvenance(long("op-"), maxJSONInt, hostile)
+	if !fallback.Invocation.Truncated || fallback.Invocation.TerminationCause != "deadline_reached" || fallback.Invocation.Argv != nil {
+		t.Fatalf("the hostile record did not fall back to its marked core: %+v", fallback.Invocation)
+	}
+	if !appendable(EventExecutionAttemptProvenance, fallback) {
+		t.Fatal("the fallback record would be refused at append")
+	}
+	fallbackBytes, err := CanonicalJSON(fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("hostile attempt provenance fallback: %d canonical bytes, %d headroom", len(fallbackBytes), maxCanonicalPayloadBytes-len(fallbackBytes))
+	// Escapes alone, with every value canonicalizable, fall back the same way.
+	escaped := hostileInvocation()
+	escaped.Elapsed = time.Hour
+	if record := newExecutionAttemptProvenance("op", 1, escaped); !record.Invocation.Truncated || !appendable(EventExecutionAttemptProvenance, record) {
+		t.Fatalf("a six-fold-escaped record did not fall back to an appendable core: %+v", record.Invocation)
+	}
+}
+
+// The fallback is not a unit-test artefact: a hostile record reaches the
+// journal through the real reconcile path, before its operation settles.
+func TestAHostileProvenanceRecordStillAppendsBeforeOperationAfter(t *testing.T) {
+	hostile := hostileInvocation()
+	fixture, runID := runWithProvenance(t, provenanceStep{invocation: &hostile, mutate: true})
+	events, payloads := provenanceEvents(t, fixture.runtime, runID)
+	if len(payloads) == 0 || !payloads[0].Invocation.Truncated {
+		t.Fatalf("the hostile attempt left no marked record: %+v", payloads)
+	}
+	journal, err := fixture.runtime.Journal(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, later := range journal[events[0].Sequence:] {
+		if later.Type == EventOperationAfter && later.OperationID == events[0].OperationID {
+			return
+		}
+	}
+	t.Fatal("the pass failed before the operation settled")
+}
+
+// Planning half of the fix: a planner that is REFUSED - here, killed at its
+// deadline - has no revision, so its attempt record is where its invocation
+// provenance lives. It must survive, fitted beside everything else the attempt
+// records.
+func TestAPlannerDeadlineRefusalKeepsItsInvocationProvenance(t *testing.T) {
+	f := newAttemptFixture(t)
+	input := refusedProposal(f)
+	input.Reasoned = nil
+	observed := deadlineProvenance().InvocationObservation
+	input.Reasoning.Invocation = &observed
+	if _, err := f.service.RecordPlanningRefusal(input, &PlannerRefusedError{AgentID: "codex", Detail: "the provider reported execution_incomplete"}); err != nil {
+		t.Fatalf("the refusal could not be recorded: %v", err)
+	}
+	view, err := f.service.AttemptsView("plan-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Attempts) != 1 || view.Attempts[0].Reasoning == nil || view.Attempts[0].Reasoning.Invocation == nil {
+		t.Fatalf("the refused planner's invocation provenance was lost: %#v", view.Attempts)
+	}
+	if got := *view.Attempts[0].Reasoning.Invocation; !reflect.DeepEqual(got, observed) {
+		t.Fatalf("the refused planner recorded %+v, want %+v", got, observed)
+	}
+}
+
+// A heavy refusal record - every stage, reason and reference slot used, with
+// ordinary lengths the record fits by itself - still takes the worst and the
+// hostile observation without becoming unappendable. (A refusal whose own
+// lists are all at their element bounds already exceeds the ceiling without
+// any provenance; that predates #327 and is not changed here.)
+func TestAWorstCasePlannerRefusalStaysUnderTheCeiling(t *testing.T) {
+	for name, invocation := range map[string]func() InvocationProvenance{
+		"worst":   func() InvocationProvenance { inv, _, _ := worstInvocation(); return inv },
+		"hostile": hostileInvocation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAttemptFixture(t)
+			input := refusedProposal(f)
+			input.Reasoned = nil
+			for i := 0; i < maxPayloadListItems+4; i++ {
+				input.Reasoned = append(input.Reasoned, domain.PlanStage{
+					ID: fmt.Sprintf("stage-%02d-%s", i, strings.Repeat("s", 40)), Kind: domain.StageAgent, Role: domain.RoleImplementer,
+					DependsOn: []string{fmt.Sprintf("stage-%02d", i)},
+				})
+			}
+			input.References = nil
+			for i := 0; i < maxPayloadListItems; i++ {
+				input.References = append(input.References, PlanSourceReferencePayload{
+					Repository: "acme/repo", Issue: 1000 + i, Available: false, Detail: "issue could not be read: " + strings.Repeat("d", 60),
+				})
+			}
+			observed := invocation().InvocationObservation
+			input.Reasoning.Invocation = &observed
+			reasons := make([]string, 0, maxPayloadListItems+4)
+			for i := 0; i < cap(reasons); i++ {
+				reasons = append(reasons, fmt.Sprintf("reason %02d: %s", i, strings.Repeat("r", 80)))
+			}
+			if _, err := f.service.RecordPlanningRefusal(input, &PlannerRefusedError{AgentID: "codex", Detail: strings.Join(reasons, "; ")}); err != nil {
+				t.Fatalf("the worst refusal could not be recorded: %v", err)
+			}
+			events, err := f.store.PlanEvents("plan-attempt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Type != EventPlanAttemptRefused {
+					continue
+				}
+				canonical, err := CanonicalJSON(event.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("%s planner refusal event: %d canonical bytes, %d headroom", name, len(canonical), maxCanonicalPayloadBytes-len(canonical))
+				payload, err := decodePayload[PlanAttemptRefusedPayload](event.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if payload.Reasoning == nil || payload.Reasoning.Invocation == nil {
+					t.Fatal("the refusal dropped the invocation it had room to carry a bounded form of")
+				}
+				return
+			}
+			t.Fatal("no refusal event was journalled")
+		})
 	}
 }
 

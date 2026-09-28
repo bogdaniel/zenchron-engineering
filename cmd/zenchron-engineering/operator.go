@@ -645,6 +645,15 @@ func attemptNumbers(attempts []int) string {
 	return strings.Join(parts, ",")
 }
 
+// permissionDenials renders the denial count, which is read from the final
+// result and is therefore UNKNOWN - never 0 - when none was observed.
+func permissionDenials(o domain.InvocationObservation) string {
+	if !o.FinalResultObserved {
+		return "unknown (no final result)"
+	}
+	return strconv.Itoa(o.PermissionDenials)
+}
+
 // orUnknown renders a fact the provider does not expose as unknown rather than
 // as absent. A missing line reads as "the default", which is a claim; "unknown"
 // is what is actually true of a CLI that selects its own model.
@@ -792,9 +801,12 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			limit = inv.InactivityLimit.String()
 		}
 		line("execution attempt", fmt.Sprintf(
-			"identity=%d termination=%s progress_mode=%s inactivity_limit=%s structured_events=%d open_tools_at_exit=%d permission_denials=%d",
+			"identity=%d termination=%s progress_mode=%s inactivity_limit=%s structured_events=%d open_tools_at_exit=%d permission_denials=%s",
 			p.AttemptIdentity, orUnknown(inv.TerminationCause), orUnknown(inv.ProgressMode), limit,
-			inv.StructuredEvents, inv.OpenToolsAtExit, inv.PermissionDenials))
+			inv.StructuredEvents, inv.OpenToolsAtExit, permissionDenials(inv.InvocationObservation)))
+		if inv.Truncated {
+			line("execution attempt", "provenance truncated to its fixed-size core: the full record did not fit the durable ceiling")
+		}
 		if len(inv.PermissionDeniedTools) > 0 {
 			line("denied tools", strings.Join(inv.PermissionDeniedTools, ","))
 		}

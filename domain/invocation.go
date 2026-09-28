@@ -65,9 +65,15 @@ type InvocationObservation struct {
 	// as progress, how many main-thread tool calls were still open when the
 	// process ended, how many permission denials the final result listed, and
 	// how many lines were malformed or oversized.
-	StructuredEvents  int64 `json:"structured_progress_events,omitempty"`
-	OpenToolsAtExit   int   `json:"open_tools_at_exit,omitempty"`
-	PermissionDenials int   `json:"permission_denials,omitempty"`
+	StructuredEvents int64 `json:"structured_progress_events,omitempty"`
+	OpenToolsAtExit  int   `json:"open_tools_at_exit,omitempty"`
+	// FinalResultObserved reports that the stream delivered a valid final
+	// result. PermissionDenials and PermissionDeniedTools are READ from that
+	// result, so without one they are UNKNOWN, not zero: they stay absent and
+	// a reader must say so rather than print 0. An attempt killed at its
+	// deadline typically has none.
+	FinalResultObserved bool `json:"final_result_observed,omitempty"`
+	PermissionDenials   int  `json:"permission_denials,omitempty"`
 	// PermissionDeniedTools is the bounded SET of tool identifiers the typed
 	// permission_denials[].tool_name named: at most MaxPermissionDeniedTools,
 	// identifier characters only, and never a tool input, an argument or the
@@ -80,6 +86,86 @@ type InvocationObservation struct {
 	// GitGuarded reports that this invocation ran under the brokered Git
 	// boundary of #241. Its ABSENCE is the durable fact that matters.
 	GitGuarded bool `json:"git_guarded,omitempty"`
+	// Truncated marks a MINIMAL record: the full observation could not fit
+	// the durable payload ceiling, so only its fixed-size facts - bounds,
+	// times, counters, termination cause - were kept. It is never set on an
+	// ordinary invocation.
+	Truncated bool `json:"provenance_truncated,omitempty"`
+}
+
+// MinimalInvocationObservation is the fixed-size fallback of an observation
+// that cannot be recorded whole. It keeps only members whose encoded size does
+// not depend on provider or configuration text: booleans, clamped counters and
+// durations, representable timestamps, the prompt digest when it is one, and
+// the short runtime identifiers (termination cause, progress mode, denied
+// tools) when they are identifiers. Everything dropped is dropped visibly, by
+// Truncated.
+func MinimalInvocationObservation(o InvocationObservation) InvocationObservation {
+	minimal := InvocationObservation{
+		WorkspaceBound: o.WorkspaceBound, WorkspaceInstructionsSuppressed: o.WorkspaceInstructionsSuppressed,
+		PermissionBypass: o.PermissionBypass, OverranDeadline: o.OverranDeadline, GitGuarded: o.GitGuarded,
+		FinalResultObserved: o.FinalResultObserved,
+		Deadline:            representable(o.Deadline), StartedAt: representable(o.StartedAt), CompletedAt: representable(o.CompletedAt),
+		Elapsed: time.Duration(clamp(int64(o.Elapsed))), InactivityLimit: time.Duration(clamp(int64(o.InactivityLimit))),
+		StructuredEvents: clamp(o.StructuredEvents), OpenToolsAtExit: int(clamp(int64(o.OpenToolsAtExit))),
+		PermissionDenials: int(clamp(int64(o.PermissionDenials))), ProtocolAnomalies: int(clamp(int64(o.ProtocolAnomalies))),
+		ProcessID: int(clamp(int64(o.ProcessID))),
+		Truncated: true,
+	}
+	if IsInvocationIdentifier(o.TerminationCause) {
+		minimal.TerminationCause = o.TerminationCause
+	}
+	if IsInvocationIdentifier(o.ProgressMode) {
+		minimal.ProgressMode = o.ProgressMode
+	}
+	if isSHA256Hex(o.PromptSHA256) {
+		minimal.PromptSHA256 = o.PromptSHA256
+	}
+	for _, tool := range o.PermissionDeniedTools {
+		if IsInvocationIdentifier(tool) && len(minimal.PermissionDeniedTools) < MaxPermissionDeniedTools {
+			minimal.PermissionDeniedTools = append(minimal.PermissionDeniedTools, tool)
+		}
+	}
+	return minimal
+}
+
+// IsInvocationIdentifier is the identifier shape a recorded tool name or
+// runtime enum may take: Bash, WebFetch, mcp__server__tool, deadline_reached.
+// It needs no escaping and is at most MaxPermissionDeniedToolBytes long.
+func IsInvocationIdentifier(name string) bool {
+	if name == "" || len(name) > MaxPermissionDeniedToolBytes {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == ':' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// maxInvocationInteger is the I-JSON ceiling the canonicalizer enforces.
+const maxInvocationInteger = 1<<53 - 1
+
+func clamp(n int64) int64 { return max(0, min(n, maxInvocationInteger)) }
+
+func representable(t *time.Time) *time.Time {
+	if t == nil || t.Year() < 1 || t.Year() > 9999 {
+		return nil
+	}
+	return t
+}
+
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // MaxPermissionDeniedTools and MaxPermissionDeniedToolBytes bound

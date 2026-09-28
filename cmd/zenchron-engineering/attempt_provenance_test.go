@@ -26,7 +26,7 @@ func TestStatusSurfacesTheLatestAttemptProvenance(t *testing.T) {
 					Executable: "claude", PermissionMode: "acceptEdits",
 					TerminationCause: "deadline_reached", ProgressMode: "structured_claude_events",
 					InactivityLimit: 10 * time.Minute, StructuredEvents: 202, OpenToolsAtExit: 1,
-					PermissionDenials: 6, PermissionDeniedTools: []string{"Bash", "WebFetch"},
+					FinalResultObserved: true, PermissionDenials: 6, PermissionDeniedTools: []string{"Bash", "WebFetch"},
 				}},
 			},
 		},
@@ -53,6 +53,18 @@ func TestStatusSurfacesTheLatestAttemptProvenance(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &view); err != nil || view.Provenance == nil ||
 		view.Provenance.Invocation.TerminationCause != "deadline_reached" {
 		t.Fatalf("the JSON status does not carry the provenance (%v):\n%s", err, out.String())
+	}
+
+	// NO FINAL RESULT: the denial count is UNKNOWN, never 0 (#324's shape).
+	deadline := engine.report.ExecutionAttemptProvenance.Invocation.InvocationObservation
+	deadline.FinalResultObserved, deadline.PermissionDenials, deadline.PermissionDeniedTools = false, 0, nil
+	engine.report.ExecutionAttemptProvenance.Invocation.InvocationObservation = deadline
+	var unknown bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &unknown); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unknown.String(), "permission_denials=unknown (no final result)") || strings.Contains(unknown.String(), "permission_denials=0") {
+		t.Fatalf("an unknown denial count was not rendered as unknown:\n%s", unknown.String())
 	}
 
 	// ABSENCE IS STATED, NOT ZERO-FILLED.

@@ -130,6 +130,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "final_result_observed": {
+          "type": "boolean",
+          "description": "A valid final result was read. permission_denials and permission_denied_tools come from it, so without it they are unknown and absent, never zero."
+        },
         "permission_denials": {
           "type": "integer",
           "minimum": 0
@@ -153,6 +157,10 @@
         },
         "git_guarded": {
           "type": "boolean"
+        },
+        "provenance_truncated": {
+          "type": "boolean",
+          "description": "Only the fixed-size core was kept because the full observation did not fit the durable ceiling."
         }
       }
     }
