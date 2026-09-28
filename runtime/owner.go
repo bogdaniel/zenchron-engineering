@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -60,28 +61,37 @@ func NewLockOwnerLiveness(stateDir string) ProcessOwnerLiveness {
 }
 
 func (l ProcessOwnerLiveness) Alive(owner string) bool {
+	alive, decided := l.decide(owner, ownerLockHeld)
+	return alive || !decided
+}
+
+// observe is the READ-ONLY liveness question status asks (#352, #326): the
+// same evidence as Alive, with its uncertainty kept apart - decided is false
+// when the evidence cannot say either way, which status reports as
+// unverified - and a lock probe that never creates anything.
+func (l ProcessOwnerLiveness) observe(owner string) (alive, decided bool) {
+	return l.decide(owner, ownerLockHeldReadOnly)
+}
+
+func (l ProcessOwnerLiveness) decide(owner string, lockHeld func(stateDir, owner string) (bool, bool)) (alive, decided bool) {
 	host, pid, token, ok := parseOwner(owner)
 	if !ok {
-		return true
+		return false, false
 	}
 	if host != l.Host {
 		// Another host's process cannot be observed from here, and a lock file
 		// visible on a shared filesystem says nothing about that host either.
-		return true
+		return false, false
 	}
 	if l.StateDir != "" {
-		held, decided := ownerLockHeld(l.StateDir, owner)
-		if !decided {
-			return true
-		}
-		return held
+		return lockHeld(l.StateDir, owner)
 	}
 	if current, ok := processStartToken(pid); ok {
 		// A different start token means the PID was recycled: the recorded
 		// owner is provably gone.
-		return token == "" || current == token
+		return token == "" || current == token, true
 	}
-	return processExists(pid)
+	return processExists(pid), true
 }
 
 func parseOwner(owner string) (host string, pid int, token string, ok bool) {
@@ -175,6 +185,29 @@ func (l *ControllerInstanceLock) Release() error {
 // absence can never influence the answer.
 func ownerLockHeld(stateDir, owner string) (held bool, decided bool) {
 	file, err := openOwnerLockFile(stateDir, owner)
+	if err != nil {
+		return false, false
+	}
+	defer func() { _ = file.Close() }()
+	locked, err := tryLockFile(file, false)
+	if err != nil {
+		return false, false
+	}
+	return !locked, true
+}
+
+// ownerLockHeldReadOnly is ownerLockHeld for a reader that must not write:
+// status. It opens the lock read-only and creates neither the file nor its
+// directory. A missing file is DECIDED not held, because a live owner holds
+// its file for its whole lifetime; any other failure is undecided.
+func ownerLockHeldReadOnly(stateDir, owner string) (held bool, decided bool) {
+	if strings.TrimSpace(stateDir) == "" {
+		return false, false
+	}
+	file, err := os.Open(ownerLockPath(stateDir, owner))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, true
+	}
 	if err != nil {
 		return false, false
 	}

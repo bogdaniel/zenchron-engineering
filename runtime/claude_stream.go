@@ -71,21 +71,20 @@ const maxClaudeOpenTools = 256
 //
 // It is written to on the os/exec copy goroutine, so Write never blocks on
 // anything slower than its own mutex. The in-memory refresh happens inline; the
-// durable progress write is handed to one coalescing recorder goroutine, so a
-// slow or contended state write can never backpressure Claude's stdout pipe
-// and manufacture the silence it would then diagnose.
+// durable state is handed to the watch's coalescing recorder, which never
+// blocks, so a slow or contended state write can never backpressure Claude's
+// stdout pipe and manufacture the silence it would then diagnose.
 type claudeStream struct {
 	attempt int
 
 	// LOCK ORDER: inactivityWatch.expire holds w.mu and then takes this mu
-	// (holdsOpenTool). Never take w.mu while holding this one.
+	// (holdsOpenTool). Never take a watch lock while holding this one.
 	mu    sync.Mutex
 	watch *inactivityWatch
-	// pending carries the latest accepted count to the recorder goroutine. It
-	// holds at most one value: a newer count replaces an unrecorded older one,
-	// which is all the durable fingerprint needs.
-	pending    chan int64
-	detachOnce sync.Once
+	// progressAt is when the last event was accepted, and openedAt when the
+	// main-thread open-tool set last became non-empty (zero while it is
+	// empty). They are what the durable row is told (#352).
+	progressAt, openedAt time.Time
 	// line holds the current partial line. discarding means the line in
 	// progress already exceeded maxClaudeEventBytes and is being skipped to its
 	// newline.
@@ -135,49 +134,24 @@ func claudeStreamFrom(ctx context.Context) *claudeStream {
 // provider_no_progress.
 type stdoutObservingExecutor interface{ observesStdout() }
 
-// attach binds the watch this stream refreshes and starts the durable
-// recorder. Either may be nil.
+// attach binds the watch this stream refreshes and records through. Either may
+// be nil.
 func (s *claudeStream) attach(watch *inactivityWatch) {
 	if s == nil || watch == nil {
 		return
 	}
 	s.mu.Lock()
 	s.watch = watch
-	s.pending = make(chan int64, 1)
 	s.mu.Unlock()
 	watch.stream = s
-	// The recorder keeps the watch's quarter-window throttle and the
-	// attempt-qualified key. It outlives the process only as long as one
-	// in-flight write: detach closes the channel and nothing waits on it, so a
-	// slow state write cannot hold the invocation either.
-	go func(pending <-chan int64) {
-		for count := range pending {
-			watch.record(fmt.Sprintf("%d:", s.attempt), count)
-		}
-	}(s.pending)
-}
-
-// detach ends the recorder once the process's output is fully copied. It is
-// idempotent and nil-safe.
-func (s *claudeStream) detach() {
-	if s == nil {
-		return
-	}
-	s.detachOnce.Do(func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.pending != nil {
-			close(s.pending)
-			s.pending = nil
-		}
-	})
 }
 
 // Write consumes an arbitrary chunk of stdout. It always reports success: the
 // parser is an observer and must never give the child an I/O error.
 func (s *claudeStream) Write(p []byte) (int, error) {
+	now := time.Now()
 	s.mu.Lock()
-	before := s.accepted
+	before, wasOpen := s.accepted, len(s.open) > 0
 	for rest := p; len(rest) > 0; {
 		newline := bytes.IndexByte(rest, '\n')
 		chunk := rest
@@ -201,18 +175,29 @@ func (s *claudeStream) Write(p []byte) (int, error) {
 			s.line, s.discarding = s.line[:0], false
 		}
 	}
-	// The DURABLE half is only enqueued here, never written: see pending. The
-	// key is qualified by the physical attempt, because RecordProviderProgress
-	// ignores a key equal to the stored one and a bare event count restarts at
-	// 1 after an abandoned attempt is re-adopted.
-	if s.accepted != before && s.pending != nil {
-		select {
-		case <-s.pending:
-		default:
-		}
-		s.pending <- s.accepted
+	// The DURABLE half is handed to the recorder, after this lock is released
+	// (see LOCK ORDER). The key is qualified by the physical attempt, because
+	// RecordProviderProgress ignores a key equal to the stored one and a bare
+	// event count restarts at 1 after an abandoned attempt is re-adopted. An
+	// open-tool transition is recorded too, even with no new progress - the
+	// final result closes tools without being progress - so the durable
+	// suspension follows the one the watchdog reads (#352). tool_progress and
+	// every other unaccepted event change neither.
+	isOpen := len(s.open) > 0
+	if s.accepted != before {
+		s.progressAt = now
 	}
+	if !isOpen {
+		s.openedAt = time.Time{}
+	} else if !wasOpen {
+		s.openedAt = now
+	}
+	changed := s.accepted != before || isOpen != wasOpen
+	key, at, since, watch := fmt.Sprintf("%d:%d", s.attempt, s.accepted), s.progressAt, s.openedAt, s.watch
 	s.mu.Unlock()
+	if changed {
+		watch.record(key, at, since)
+	}
 	return len(p), nil
 }
 

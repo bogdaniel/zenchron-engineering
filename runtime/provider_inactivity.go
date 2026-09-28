@@ -92,7 +92,7 @@ type inactivityPolicy struct {
 	// attempt as silence, and so a controller that dies mid-invocation leaves
 	// behind when progress was last seen. It is nil where the caller keeps no
 	// durable operation state - a probe, a doctor check, a test.
-	record func(key string)
+	record func(ProviderProgress)
 }
 
 type inactivityPolicyKey struct{}
@@ -103,7 +103,7 @@ type inactivityPolicyKey struct{}
 // A zero or negative limit binds nothing and returns ctx unchanged, which is
 // what a run persisted before this budget existed gets: the previous
 // behaviour, exactly, rather than a default invented at read time.
-func withProviderInactivity(ctx context.Context, limit time.Duration, record func(key string)) (context.Context, func()) {
+func withProviderInactivity(ctx context.Context, limit time.Duration, record func(ProviderProgress)) (context.Context, func()) {
 	if limit <= 0 {
 		return ctx, func() {}
 	}
@@ -123,7 +123,7 @@ type progressRecorderKey struct{}
 // budget; the recorder is the caller's own durable operation state, which an
 // adapter must not know the shape of. A caller that keeps none - the planner,
 // a probe, a test - supplies none, and the bound still applies.
-func withProviderProgressRecorder(ctx context.Context, record func(key string)) context.Context {
+func withProviderProgressRecorder(ctx context.Context, record func(ProviderProgress)) context.Context {
 	if record == nil {
 		return ctx
 	}
@@ -132,8 +132,8 @@ func withProviderProgressRecorder(ctx context.Context, record func(key string)) 
 
 // providerProgressRecorder returns the caller's durable progress recorder, or
 // nil when none was supplied.
-func providerProgressRecorder(ctx context.Context) func(key string) {
-	record, _ := ctx.Value(progressRecorderKey{}).(func(key string))
+func providerProgressRecorder(ctx context.Context) func(ProviderProgress) {
+	record, _ := ctx.Value(progressRecorderKey{}).(func(ProviderProgress))
 	return record
 }
 
@@ -177,12 +177,69 @@ type inactivityWatch struct {
 	// (#322). It is set before the watcher starts and is only read after.
 	stream *claudeStream
 
-	mu         sync.Mutex
-	recordedAt time.Duration
+	mu sync.Mutex
 	// finished records that the PROCESS COMPLETED FIRST. It is read and
 	// written under mu, on the same side of the same lock as the decision to
 	// cancel, so completion and expiry can never both win.
 	finished bool
+
+	// recorder makes this process's progress durable (#352). It is nil when
+	// the caller keeps no durable state. ended is the process context's Done -
+	// cancellation, the attempt deadline or the inactivity kill - which ends
+	// any wait on it.
+	recorder *progressRecorder
+	ended    <-chan struct{}
+}
+
+// observation is one accepted progress state as the process observed it.
+// Instants carry the monotonic clock; ages are taken only at write time.
+type observation struct {
+	key string
+	at  time.Time
+	// suspendedSince is when a structured main-thread tool opened, or zero.
+	suspendedSince time.Time
+}
+
+// ProviderProgress is one durable observation of a live provider invocation,
+// as Scheduler.RecordProviderProgress receives it.
+type ProviderProgress struct {
+	// Key is the progress fingerprint; the durable instant moves only when it
+	// changes.
+	Key string
+	// Age is how long before this write the progress was OBSERVED. The row
+	// must say when the work moved, not when the coalescer wrote it (#352).
+	Age time.Duration
+	// Suspended reports a structured main-thread tool held open (#322), and
+	// SuspendedAge how long before this write it opened.
+	Suspended    bool
+	SuspendedAge time.Duration
+	// Final is the recorder's closing write: the process has ended under an
+	// observing controller, so nothing it observed is still unwritten.
+	Final bool
+}
+
+// progressRecordInterval is how often one process may write durable progress:
+// a quarter of the window. A chatty provider must not turn its own output into
+// a write storm on the operation row.
+func progressRecordInterval(limit time.Duration) time.Duration { return limit / 4 }
+
+// progressRecorderLag is L, the CRASH-RECOVERY UNCERTAINTY ALLOWANCE: the most
+// LastProgressAt can trail the last progress of a process whose recorder never
+// closed, so the most a crash can hide and the most ProviderInactivityRemaining
+// ever gives back. It is not an inactivity window. A live invocation is always
+// supervised at the configured limit, and a settled attempt carries an exact
+// datum; L applies only when recovering an attempt whose controller was lost.
+//
+// It is TWO intervals, not one (I = limit/4, so L = 2I = limit/2), and no
+// recorder that keeps the write rate and eventually persists the newest
+// observation at its true instant can do better: progress observed just after
+// a write is written one interval later carrying its own, older instant, and
+// progress observed just before the next write is due is lost by a crash -
+// almost two intervals apart. Store write latency and timer delay add to it,
+// are not bounded here, and only ever push the error towards refusing, never
+// towards granting.
+func progressRecorderLag(limit time.Duration) time.Duration {
+	return 2 * progressRecordInterval(limit)
 }
 
 // armInactivityWatch returns the watch bound to ctx, or nil when no bound
@@ -193,17 +250,19 @@ func armInactivityWatch(ctx context.Context) *inactivityWatch {
 	if !ok || policy.limit <= 0 {
 		return nil
 	}
-	return &inactivityWatch{
+	w := &inactivityWatch{
 		policy: policy, start: time.Now(),
-		quit: make(chan struct{}), stopped: make(chan struct{}),
+		quit: make(chan struct{}), stopped: make(chan struct{}), ended: ctx.Done(),
 	}
+	if policy.record != nil {
+		w.recorder = newProgressRecorder(policy.record, progressRecordInterval(policy.limit))
+	}
+	return w
 }
 
 // progress records n observed output bytes. It is called on the copy
-// goroutines os/exec owns, so everything it touches is atomic and the one
-// blocking thing it can do - the durable write - is throttled to a quarter of
-// the window. A chatty provider must not turn its own output into a write
-// storm on the operation row.
+// goroutines os/exec owns, so it never blocks on the durable write: that is
+// handed to the coalescing recorder.
 func (w *inactivityWatch) progress(n int) {
 	if w == nil || n <= 0 {
 		return
@@ -213,7 +272,7 @@ func (w *inactivityWatch) progress(n int) {
 	// only when the provider actually said something new. That is the same
 	// rule the scheduler's progress fingerprint already applies, and it is
 	// what keeps "progress" from meaning "we asked again".
-	w.record("", w.bytes.Add(int64(n)))
+	w.record(strconv.FormatInt(w.bytes.Add(int64(n)), 10), time.Now(), time.Time{})
 }
 
 // touch refreshes the in-memory window. It is what every recognized progress
@@ -225,22 +284,153 @@ func (w *inactivityWatch) touch() {
 	w.last.Store(int64(time.Since(w.start)))
 }
 
-// record makes the progress count durable, at most once per quarter window.
-// The key is prefix+count, so it changes only when the count does.
-func (w *inactivityWatch) record(prefix string, count int64) {
-	if w == nil || w.policy.record == nil {
+// record hands one accepted observation to the durable recorder. It never
+// blocks on the store.
+func (w *inactivityWatch) record(key string, at, suspendedSince time.Time) {
+	if w == nil || w.recorder == nil {
 		return
 	}
-	elapsed := time.Since(w.start)
-	w.mu.Lock()
-	due := w.recordedAt == 0 || elapsed-w.recordedAt >= w.policy.limit/4
-	if due {
-		w.recordedAt = elapsed
+	w.recorder.observe(observation{key: key, at: at, suspendedSince: suspendedSince})
+}
+
+// progressRecorder COALESCES one process's accepted observations into the
+// durable row (#352). The previous shape dropped any observation that arrived
+// before the next write was due, so a burst followed by quiet left the row at
+// the burst's first event.
+//
+// One goroutine owns every write, so writes are serialized and land in the
+// order they were observed. The first observation is written at once; one
+// arriving inside the interval REPLACES whatever is pending - newest wins,
+// nothing newer is ever dropped - and is written when the interval since the
+// previous write STARTED has passed, carrying the instant it was observed. So
+// write starts stay at least one interval apart: the maximum rate is unchanged.
+type progressRecorder struct {
+	write    func(ProviderProgress)
+	interval time.Duration
+
+	mu      sync.Mutex
+	pending *observation
+	closed  bool
+
+	wake      chan struct{} // one buffered token: something is pending
+	closing   chan struct{} // closed once, by close
+	closeOnce sync.Once
+	done      chan struct{} // closed when the writer returns
+}
+
+func newProgressRecorder(write func(ProviderProgress), interval time.Duration) *progressRecorder {
+	r := &progressRecorder{
+		write: write, interval: interval,
+		wake: make(chan struct{}, 1), closing: make(chan struct{}), done: make(chan struct{}),
 	}
-	w.mu.Unlock()
-	if due {
-		w.policy.record(prefix + strconv.FormatInt(count, 10))
+	go r.run()
+	return r
+}
+
+func (r *progressRecorder) observe(o observation) {
+	r.mu.Lock()
+	// Two copy goroutines can race here; the older never replaces the newer.
+	if r.closed || (r.pending != nil && o.at.Before(r.pending.at)) {
+		r.mu.Unlock()
+		return
 	}
+	r.pending = &o
+	r.mu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *progressRecorder) take() *observation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := r.pending
+	r.pending = nil
+	return next
+}
+
+// run is the recorder's only writer. Its last write is the CLOSING one: the
+// process ended under an observing controller, so its newest observation is
+// written at once, with no tool open and Final set, which tells a successor
+// there is no unwritten tail to allow for. That is at most one write beyond the
+// rate, once per process.
+func (r *progressRecorder) run() {
+	defer close(r.done)
+	var last *observation
+	var lastStart time.Time
+	for {
+		select {
+		case <-r.wake:
+		case <-r.closing:
+		}
+		closing := false
+		select {
+		case <-r.closing:
+			closing = true
+		default:
+			if wait := time.Until(lastStart.Add(r.interval)); !lastStart.IsZero() && wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-r.closing:
+					timer.Stop()
+					closing = true
+				}
+			}
+		}
+		next := r.take()
+		if closing {
+			if next == nil {
+				next = last
+			}
+			if next != nil {
+				final := *next
+				final.suspendedSince = time.Time{}
+				r.write(final.progress(true))
+			}
+			return
+		}
+		if next != nil {
+			lastStart, last = time.Now(), next
+			r.write(next.progress(false))
+		}
+	}
+}
+
+// close ends the recorder and waits for its closing write - BOUNDED. A durable
+// write that does not return must not hold the invocation: the wait ends at
+// the first of the writer finishing, the process context ending (cancelled,
+// its deadline passed, or the inactivity kill), or one record interval, which
+// a healthy write never approaches. A write still in flight then lands late or
+// never. Either way it is bound to this operation and physical attempt, so it
+// cannot touch a successor, and a row it never reached still says its recorder
+// is open, which is the crash rule's case: ProviderInactivityRemaining allows
+// at most progressRecorderLag for it.
+func (r *progressRecorder) close(cancelled <-chan struct{}) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	r.closeOnce.Do(func() { close(r.closing) })
+	bound := time.NewTimer(r.interval)
+	defer bound.Stop()
+	select {
+	case <-r.done:
+	case <-cancelled:
+	case <-bound.C:
+	}
+}
+
+// progress is the observation as the store receives it, aged at write time.
+func (o observation) progress(final bool) ProviderProgress {
+	p := ProviderProgress{Key: o.key, Age: time.Since(o.at), Final: final}
+	if !o.suspendedSince.IsZero() {
+		p.Suspended, p.SuspendedAge = true, time.Since(o.suspendedSince)
+	}
+	return p
 }
 
 // silent reports how long it has been since output arrived.
@@ -288,6 +478,7 @@ func (w *inactivityWatch) watchUntilComplete() func() {
 		w.complete()
 		w.closeQuit.Do(func() { close(w.quit) })
 		<-w.stopped
+		w.recorder.close(w.ended)
 	}
 }
 
@@ -375,6 +566,28 @@ func (w *inactivityWatch) watch() {
 // It never returns more than the configured limit and never less than zero. A
 // zero limit means no bound was configured, and returns zero: absence stays
 // absence rather than resolving to a default here.
+//
+// THE CRASH GAP (#352). Durable progress is coalesced, so a controller that
+// died with an observation still pending left LastProgressAt behind the truth,
+// by less than L = progressRecorderLag, and only when ProgressRecorderOpen says
+// the dead process's recorder never closed. Recovering such an attempt charges
+// the recorded silence less L, floored at zero: the crash-recovery uncertainty
+// allowance. So a successor is never refused on the recorder's own lag, and is
+// granted at most L beyond what the recorded silence leaves - never a fresh
+// window, and never a longer window than the limit: the successor's own
+// process is supervised at no more than the limit, like every other. A closed
+// recorder - the process ended under an observing controller, including a
+// graceful shutdown or drain, which settle the operation - carries an exact
+// datum and gets no allowance.
+//
+// The recovery bound is LastProgressAt + limit + L, and it is subordinate to
+// every absolute bound: the attempt wall, the run's active work, the attempt
+// and continuation ceilings and cancellation are derived exactly as without
+// it. It cannot ACCUMULATE across repeated crashes. It is a pure function of
+// the durable datum, which only a real observed write moves - a restart never
+// does: StartWithin keeps an abandoned attempt's LastProgressAt and flag as
+// they are. Every successor dispatched against the same datum therefore gets
+// the same recovery bound, however many times the controller dies before it.
 func ProviderInactivityRemaining(limit time.Duration, op RunOperation, now time.Time) time.Duration {
 	if limit <= 0 {
 		return 0
@@ -382,7 +595,11 @@ func ProviderInactivityRemaining(limit time.Duration, op RunOperation, now time.
 	if op.LastProgressAt == nil || now.Before(*op.LastProgressAt) {
 		return limit
 	}
-	if remaining := limit - now.Sub(*op.LastProgressAt); remaining > 0 {
+	silence := now.Sub(*op.LastProgressAt)
+	if op.ProgressRecorderOpen {
+		silence = max(silence-progressRecorderLag(limit), 0)
+	}
+	if remaining := limit - silence; remaining > 0 {
 		return remaining
 	}
 	return 0

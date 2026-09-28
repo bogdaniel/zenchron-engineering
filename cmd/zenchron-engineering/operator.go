@@ -797,8 +797,26 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 				progress = view.Operation.LastProgressAt.UTC().Format(time.RFC3339)
 				silent = view.Operation.SilentFor.String()
 			}
-			line("progress"+journalMark, fmt.Sprintf("last %s silent %s inactivity limit %s",
-				progress, silent, window))
+			// A SUSPENDED WINDOW IS NOT AN IMPENDING KILL (#352). An open
+			// structured tool holds the inactivity bound, so printing the
+			// silence against the limit would announce a kill the watch will
+			// not make; the deadline line below is what still bounds it.
+			since := view.Operation.InactivitySuspendedSince
+			switch {
+			case view.Operation.InactivitySuspension == "active" && since != nil:
+				line("progress"+journalMark, fmt.Sprintf("last %s inactivity suspended — structured tool open since %s (limit %s resumes when it closes)",
+					progress, since.UTC().Format(time.RFC3339), window))
+			default:
+				line("progress"+journalMark, fmt.Sprintf("last %s silent %s inactivity limit %s",
+					progress, silent, window))
+				if view.Operation.InactivitySuspension == "unverified" && since != nil {
+					line("suspension", fmt.Sprintf("unverified — a structured tool was recorded open since %s, but the owning controller's liveness cannot be established",
+						since.UTC().Format(time.RFC3339)))
+				}
+			}
+		}
+		if deadline := view.Operation.Deadline; deadline != nil {
+			line("deadline", fmt.Sprintf("%s (%s)", deadline.UTC().Format(time.RFC3339), orUnknown(string(view.Operation.DeadlineBound))))
 		}
 	}
 	if view.Lease != nil {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -723,7 +724,7 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		t.Fatal(err)
 	}
 	// Structured activity advances durable progress, qualified by attempt.
-	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, fmt.Sprintf("%d:%d", op.AttemptIdentity, 1))
+	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: fmt.Sprintf("%d:%d", op.AttemptIdentity, 1)})
 	if err != nil || recorded.LastProgressAt == nil || !recorded.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("structured progress did not advance durably: %+v %v", recorded, err)
 	}
@@ -741,8 +742,15 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		if got := dispatchInactivityWindow(window, op, now, claude); got != window {
 			t.Fatalf("cycle %d: Claude's fresh attempt got %s, want its full %s window", cycle, got, window)
 		}
-		if got := dispatchInactivityWindow(window, op, now, codex); got != 0 {
-			t.Fatalf("cycle %d: codex's abandoned silence was forgiven: %s", cycle, got)
+		// Codex inherits the abandoned silence, less the crash allowance of an
+		// open recorder (#352): 11 recorded minutes less 5 leave 4 once, and
+		// the allowance does not come back on later cycles.
+		want := time.Duration(0)
+		if cycle == 1 {
+			want = window - (11*time.Minute - progressRecorderLag(window))
+		}
+		if got := dispatchInactivityWindow(window, op, now, codex); got != want {
+			t.Fatalf("cycle %d: codex got %s of its abandoned window, want %s", cycle, got, want)
 		}
 		// Monotonic facts across succession.
 		if op.ConsumedExecution < consumed || OperationRemaining(op, now) > remaining || op.AttemptIdentity <= identity {
@@ -860,15 +868,22 @@ func TestTheBackgroundWaitCeilingIgnoresARemainingWindow(t *testing.T) {
 	t.Fatalf("env %v does not carry the ceiling of the configured 10m window", fake.execution(t).env)
 }
 
-// A durable progress write that never returns cannot hold Claude's stdout.
+// A durable progress write that never returns cannot hold Claude's stdout -
+// the child writes far more than a pipe buffer and exits while the write is
+// still blocked - and cannot hold the invocation either (#352): closing the
+// recorder waits for it at most one record interval.
 func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
-	provider, request := claudeProcess(t, emit(
-		claudeAssistant("m1", "", claudeText), claudeAssistant("m2", "", claudeText), claudeResult(false, "success", 0)))
+	const events = 2000
+	finished := t.TempDir() + "/finished"
+	provider, request := claudeProcess(t,
+		"i=0\nwhile [ $i -lt "+fmt.Sprint(events)+" ]; do "+strings.TrimSuffix(emit(claudeAssistant("m1", "", claudeText)), "\n")+
+			"; i=$((i+1)); done\n"+emit(claudeResult(false, "success", 0))+"touch "+finished+"\n")
 	recorded, release := make(chan string, 1), make(chan struct{})
-	defer close(release)
-	ctx := withProviderProgressRecorder(context.Background(), func(key string) {
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	ctx := withProviderProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		select {
-		case recorded <- key:
+		case recorded <- progress.Key:
 		default:
 		}
 		<-release
@@ -886,9 +901,17 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the recorder was never called")
 	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(finished); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a blocked durable write held Claude's stdout: the child never finished writing")
+		}
+	}
 	select {
 	case result := <-done:
-		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != 2 {
+		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != events {
 			t.Fatalf("outcome %q with %d events", result.Outcome, result.Invocation.StructuredEvents)
 		}
 	case <-time.After(5 * time.Second):
@@ -936,7 +959,7 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.advance(time.Minute)
-	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:9")
+	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, ProviderProgress{Key: "1:9"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -954,14 +977,14 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 		t.Fatalf("attempt 2 is not running on a new identity: %+v", second)
 	}
 	clock.advance(time.Minute)
-	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:10")
+	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, ProviderProgress{Key: "1:10"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if late.NoProgressKey != second.NoProgressKey || !late.LastProgressAt.Equal(*second.LastProgressAt) {
 		t.Fatalf("attempt 1's late write stamped attempt 2: key %q at %v", late.NoProgressKey, late.LastProgressAt)
 	}
-	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, "2:1")
+	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, ProviderProgress{Key: "2:1"})
 	if err != nil {
 		t.Fatal(err)
 	}
