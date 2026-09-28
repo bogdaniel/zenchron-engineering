@@ -167,6 +167,33 @@ refused like any other malformed bound. Attempts and continuations are different
 resources: attempts retry one execution binding, continuations are successive
 pieces of productive work.
 
+**Every run budget is frozen when the run is created** (ADR-0003, Phase B1).
+The run records the resolved values, after the in-repo layer and any plan stage
+have tightened them, together with its execution agent, and records a
+RunPolicyDigest over them in its `run.created` event. From then on every budget
+the run is judged by is that frozen value: wall, attempt wall, lifecycle
+deadline, execution, continuation, remediation and assurance attempts, and the
+inactivity window. It is never the live configuration and never the smaller of
+the two. `autonomy status` reports the run's frozen budgets and its `run policy`
+digest and source. The `controller config` line is the current process's
+configuration, and the output labels it that way. Budgets are still part of the
+controller configuration digest, so editing one is still a controller change
+(`controller_changed`, #307) until ADR-0003 B3.
+
+A run created before B1 reports `legacy_run_budgets`, a policy derived from the
+budgets it persisted, or `legacy_controller_binding` when it persisted none. A
+budget such a run never recorded takes the value its controller binding
+identifies. Only a controller with the identical configuration digest ever
+reconciles it, so that value is the one it already had. Lifecycle deadline,
+provider-invocation total and attempt wall limit are exceptions: for these an
+absent value already means "none", "unbounded" or "the pre-#328 rule".
+If status is read by a controller whose configuration differs from the run's,
+the binding value cannot be verified. Status then reports `budgets: null`,
+names those members in `run_policy.unverifiable`, sets the operation's
+`inactivity_limit_unknown` when the window is one of them, and the text prints
+each one as `unknown`. It never shows this process's configuration, a zero, or
+an absent "none" as the run's value.
+
 `attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
 different resource from `wall_limit_seconds`, which is the run's CUMULATIVE
 active-work budget across every attempt and operation (#328). Each attempt's

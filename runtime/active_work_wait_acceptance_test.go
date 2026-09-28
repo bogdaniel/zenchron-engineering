@@ -47,7 +47,15 @@ func assertHandoffAgreesWithReconciler(t *testing.T, fixture *phase8Fixture, sna
 
 func waitAcceptanceFixture(t *testing.T) (*phase8Fixture, string) {
 	t.Helper()
+	return waitAcceptanceFixtureWithLifecycle(t, 0)
+}
+
+// waitAcceptanceFixtureWithLifecycle creates the run under a lifecycle
+// deadline, which is frozen at creation (ADR-0003 B1).
+func waitAcceptanceFixtureWithLifecycle(t *testing.T, lifecycle time.Duration) (*phase8Fixture, string) {
+	t.Helper()
 	fixture := newPhase8Fixture(t)
+	fixture.deps.Budgets.LifecycleDeadline = lifecycle
 	registry := handoffRegistry(t)
 	agent, err := registry.Agent("codex")
 	if err != nil {
@@ -244,10 +252,9 @@ func TestProviderWaitsDoNotSpendActiveWork(t *testing.T) {
 // the production path: after the same multi-day review wait, an operator
 // lifecycle deadline ends the run although active budget remains.
 func TestALifecycleDeadlineExpiresIndependentlyOfActiveWork(t *testing.T) {
-	fixture, runID := waitAcceptanceFixture(t)
+	fixture, runID := waitAcceptanceFixtureWithLifecycle(t, 48*time.Hour)
 	fixture.clock.step = 0
 	fixture.clock.advance(72 * time.Hour)
-	fixture.deps.Budgets.LifecycleDeadline = 48 * time.Hour
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 
 	status, err := fixture.runtime.Status(runID)

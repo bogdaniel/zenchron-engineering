@@ -798,7 +798,7 @@ func (s *runState) conditions() (Disposition, string) {
 			return Failed, ReasonRunWallBudgetExhausted
 		}
 	}
-	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
+	if deadline := s.budgets().LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
 		return Failed, ReasonLifecycleDeadlineExhausted
 	}
 	if s.controllerChanged {
@@ -912,38 +912,6 @@ func (s *runState) plan() (desiredOperation, bool) {
 	return desiredOperation{}, false
 }
 
-// budgets is the bound THIS run is judged by: the operator's configuration,
-// narrowed by whatever the run persisted at creation. A plan stage run persists
-// its stage budget - already narrowed by the assigned profile's constraints -
-// so a profile that tightens wall time or attempts tightens the actual work
-// rather than only the document describing it.
-func (s *runState) budgets() RunBudgets {
-	budgets := s.rt.deps.Budgets.defaults()
-	// The attempt limit is the one member read back EXACTLY: the frozen value,
-	// or zero (the legacy rule) for a run that predates it. Never the live
-	// configuration and never min(live, persisted) - ADR-0003 §2 condition 6.
-	budgets.AttemptWallLimit = 0
-	if s.run.Budgets == nil {
-		return budgets
-	}
-	budgets.AttemptWallLimit = s.run.Budgets.AttemptWallLimit
-	if wall := s.run.Budgets.WallLimit; wall > 0 && wall < budgets.WallLimit {
-		budgets.WallLimit = wall
-	}
-	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
-		budgets.MaxExecutionAttempts = attempts
-	}
-	// The no-progress window narrows the same way, and for the same reason: a
-	// run persisted under a tighter window keeps it. It narrows ONLY - a run
-	// created before this budget existed carries no window at all, and reading
-	// its absence as a bound of zero would hand exactly those runs the
-	// unbounded behaviour this budget exists to remove.
-	if window := s.run.Budgets.ProviderInactivityLimit; window > 0 && window < budgets.ProviderInactivityLimit {
-		budgets.ProviderInactivityLimit = window
-	}
-	return budgets
-}
-
 // runBudgetSpent is the one definition of an exhausted run active-work budget,
 // shared by conditions() and grantReviewContinuation so they cannot disagree
 // at the boundary. ZERO remaining is spent: no successor may start with no
@@ -977,21 +945,16 @@ func (s *runState) attemptLimit(now time.Time) *AttemptLimit {
 	return &AttemptLimit{Within: limit, Bound: BoundAttemptWall}
 }
 
+// attemptsFor is the attempt ceiling a newly planned operation freezes, read
+// from the run's frozen budgets for every kind that has one.
 func (s *runState) attemptsFor(kind string) int {
-	if kind == OpExecutionInvoke {
-		return s.budgets().MaxExecutionAttempts
-	}
-	return s.rt.attemptsFor(kind)
-}
-
-func (r *EngineeringRuntime) attemptsFor(kind string) int {
 	switch kind {
 	case OpExecutionInvoke:
-		return r.deps.Budgets.MaxExecutionAttempts
+		return s.budgets().MaxExecutionAttempts
 	case OpRemediationGofmt:
-		return r.deps.Budgets.MaxRemediationAttempts
+		return s.budgets().MaxRemediationAttempts
 	case OpAssuranceGo, OpAssuranceSemantic:
-		return r.deps.Budgets.MaxAssuranceAttempts
+		return s.budgets().MaxAssuranceAttempts
 	default:
 		return 3
 	}

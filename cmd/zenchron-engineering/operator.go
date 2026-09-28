@@ -704,8 +704,28 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// digest alone cannot say whether the binary or the configuration moved.
 	line("controller build", fmt.Sprintf("%s version=%s source=%s tree=%s binary=%s",
 		build.Kind, build.Version, short(build.SourceRevision), short(build.SourceTree), short(build.BinarySHA256)))
-	line("controller config", fmt.Sprintf("global=%s repository=%s",
+	// The configuration digest is THIS process's; the budgets below are the
+	// run's own frozen policy (ADR-0003 §6.2), and the two are labelled apart.
+	line("controller config", fmt.Sprintf("global=%s repository=%s (current process)",
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
+	policy := fmt.Sprintf("sha=%s source=%s", short(view.RunPolicy.SHA256), view.RunPolicy.Source)
+	if len(view.RunPolicy.Unverifiable) > 0 {
+		policy += " unverifiable (controller changed): " + strings.Join(view.RunPolicy.Unverifiable, ",")
+	}
+	line("run policy", policy)
+	if budgets := view.Budgets; budgets != nil {
+		line("run budgets", fmt.Sprintf("wall=%s attempt_wall=%s lifecycle=%s inactivity=%s attempts=%d continuations=%d invocations=%d remediation=%d assurance=%d",
+			budgets.WallLimit, budgets.AttemptWallLimit, budgets.LifecycleDeadline, budgets.ProviderInactivityLimit,
+			budgets.MaxExecutionAttempts, budgets.MaxExecutionContinuations, budgets.MaxProviderInvocations,
+			budgets.MaxRemediationAttempts, budgets.MaxAssuranceAttempts))
+	} else {
+		// UNKNOWN is printed as unknown, never as a zero or an absent "none".
+		unknown := make([]string, len(view.RunPolicy.Unverifiable))
+		for i, member := range view.RunPolicy.Unverifiable {
+			unknown[i] = member + "=unknown"
+		}
+		line("run budgets", "unknown (controller changed) "+strings.Join(unknown, " "))
+	}
 	// WHO IS DOING THE WORK, in the view an operator opens to ask about one
 	// run. The JSON has carried the binding for a while and the text did not,
 	// so answering "which worker owns this" meant switching output formats.
@@ -766,7 +786,11 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		// four minutes means nothing without the window it is measured
 		// against, and reading the pair is how an operator tells a provider
 		// that is thinking from one whose host lost its network.
-		if limit := view.Operation.InactivityLimit; limit > 0 {
+		if limit := view.Operation.InactivityLimit; limit > 0 || view.Operation.InactivityLimitUnknown {
+			window := limit.String()
+			if view.Operation.InactivityLimitUnknown {
+				window = "unknown"
+			}
 			// No recorded progress means the silence is UNKNOWN, not zero.
 			progress, silent := "none recorded", "unknown"
 			if view.Operation.LastProgressAt != nil {
@@ -774,7 +798,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 				silent = view.Operation.SilentFor.String()
 			}
 			line("progress"+journalMark, fmt.Sprintf("last %s silent %s inactivity limit %s",
-				progress, silent, limit))
+				progress, silent, window))
 		}
 	}
 	if view.Lease != nil {

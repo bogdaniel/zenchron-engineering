@@ -908,6 +908,10 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	// mode against the same CLIs, so a host that loses its network stalls it
 	// exactly as it stalled the producer in #238. Leaving it out would have
 	// bounded the path that is watched and not the one that is not.
+	//
+	// Both bounds are the controller's own configuration, not a frozen
+	// RunPolicy: a planning invocation has no run (see planningWallLimit),
+	// and both values are controller-effective until B3 (ADR-0003).
 	budgets := ProviderBudget{
 		WallLimit:       engine.planningWallLimit(request.WallSeconds),
 		InactivityLimit: engine.deps.Budgets.defaults().ProviderInactivityLimit,

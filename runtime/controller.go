@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -175,14 +176,17 @@ type RunBudgets struct {
 	// provider that is reasoning from one whose host lost its network an hour
 	// ago. A live subprocess is not evidence of progress.
 	//
-	// It is persisted with the run and narrows the configured bound exactly as
-	// WallLimit does, so a run created under a tighter window keeps it and a
-	// restart reconstructs the same bound rather than minting a fresh default.
+	// It is frozen with the run and read back exactly, like every member
+	// (runState.budgets): a later configuration neither widens nor narrows
+	// it, and a restart reconstructs the same bound rather than minting a
+	// fresh default.
 	//
-	// omitempty, and absent means no bound: a run persisted before this budget
-	// existed was never judged by it, and its identity is derived from its
-	// canonical document, so an added zero would re-identify every historical
-	// run. New runs always carry one - see RunBudgets.defaults.
+	// omitempty, because a run persisted before this budget existed has none
+	// and its identity is derived from its canonical document, so an added
+	// zero would re-identify every historical run. That absence is NOT "no
+	// bound": such a run takes the window its controller binding identifies
+	// (the ADR-0003 §5 legacy rule, see runState.budgets). New runs always
+	// carry one - see RunBudgets.defaults.
 	ProviderInactivityLimit time.Duration `json:"provider_inactivity_limit,omitempty"`
 	// AttemptWallLimit bounds ONE physical provider attempt (#328), and it is a
 	// different resource from WallLimit, the run's CUMULATIVE active-work
@@ -490,6 +494,16 @@ func (b RunBudgets) defaults() RunBudgets {
 // unattended against a provider the only one that could run forever. Every
 // producer invocation is bounded by the configured limit; a planner is not
 // special enough to be exempt from it.
+//
+// WHAT GOVERNS IT (ADR-0003 B1). A planning invocation is not an
+// EngineeringRun: no run exists, so there is no RunPolicy to freeze into and
+// none is invented. The stated bound comes from the approved plan revision
+// (category P, frozen and digested there). The fallback is this controller's
+// configured run wall limit, which is controller-effective until B3 and so
+// identified by the controller binding: a changed value is a changed
+// controller, and a changed controller forks the PlanID (#131). B3 must move
+// that fallback into the plan revision before wall_limit_seconds leaves the
+// controller-effective digest.
 func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
 	configured := r.deps.Budgets.WallLimit
 	stated := time.Duration(stageSeconds) * time.Second
@@ -812,12 +826,10 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 		Base:             Ref{ID: r.deps.Repository.DefaultBranch},
 		Candidate:        Candidate{Branch: candidateBranch(runID)},
 		ControllerSHA256: r.controller,
-		// A new run persists the bounds it was created under. Today the
-		// continuation bound is the one runState reads back from here, so it
-		// is the one whose terminal decision replays from durable state rather
-		// than from whatever is configured afterwards; the wall limit and the
-		// attempt ceilings are still read live. Persisting the whole record
-		// now is what lets the rest follow without another schema change.
+		// A new run persists the bounds it was created under, and this record
+		// IS the budget half of its frozen RunPolicy (ADR-0003 B1):
+		// runState.budgets reads every member back exactly - never live, never
+		// min(live, frozen).
 		Budgets: &budgets,
 		AgentID: r.deps.Agent.ID,
 		// The plan binding is part of the run AS CREATED, never attached
@@ -846,12 +858,22 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 	// journal - not in an adjacent metadata file that could be edited or lost.
 	// An unattested controller records nothing, which is exactly the claim it is
 	// entitled to make.
-	var provenance json.RawMessage
+	//
+	// The RunPolicyDigest is recorded here too (ADR-0003 B1), so status and
+	// provenance name the policy this run was frozen under without
+	// reconstructing it from today's configuration file.
+	policy := RunPolicyRecord{RepositoryConfig: r.deps.ConfigDigest.Repository}
+	if policy.SHA256, err = run.policy(policy.RepositoryConfig).Digest(); err != nil {
+		return "", err
+	}
+	genesis := RunCreatedPayload{RunPolicy: &policy}
 	if r.deps.ControllerBuild.Attested() {
-		provenance, err = marshalPayloadJSON(r.deps.ControllerBuild)
-		if err != nil {
-			return "", err
-		}
+		build := r.deps.ControllerBuild
+		genesis.ControllerBuild = &build
+	}
+	provenance, err := marshalPayloadJSON(genesis)
+	if err != nil {
+		return "", err
 	}
 	if _, err := r.deps.Store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
@@ -936,17 +958,26 @@ type ControllerIdentity struct {
 // into the genesis event. A run created before provenance existed, or by an
 // unattested build, reads back as unattested - never as adopted.
 func (s *runState) recordedControllerBuild() ControllerBuild {
+	if build := s.genesis().ControllerBuild; build != nil && build.Attested() {
+		return *build
+	}
+	return ControllerBuild{Kind: ControllerUnattested}
+}
+
+// genesis replays the run.created payload. A genesis that recorded nothing,
+// or nothing readable, reads back as the empty payload.
+func (s *runState) genesis() RunCreatedPayload {
 	for _, event := range s.events {
 		if event.Type != EventRunCreated {
 			continue
 		}
-		var build ControllerBuild
-		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &build) == nil {
-			return build
+		var payload RunCreatedPayload
+		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &payload) == nil {
+			return payload
 		}
 		break
 	}
-	return ControllerBuild{Kind: ControllerUnattested}
+	return RunCreatedPayload{}
 }
 
 // OperationStatus is the operator's view of the current bounded operation.
@@ -978,6 +1009,10 @@ type OperationStatus struct {
 	// operator previously could not get from status at all.
 	SilentFor       time.Duration `json:"silent_for,omitempty"`
 	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
+	// InactivityLimitUnknown says the window cannot be reported, because it is
+	// a legacy run's unrecorded member read under a changed controller. An
+	// absent inactivity_limit would otherwise read as "no limit".
+	InactivityLimitUnknown bool `json:"inactivity_limit_unknown,omitempty"`
 	// ProgressSource says where LastProgressAt, SilentFor, HeartbeatAt and
 	// Lease were read for an operation that is still running or leased: "row"
 	// is the durable operation row of this exact attempt, "journal" is the
@@ -1081,8 +1116,16 @@ type StatusReport struct {
 	// its disposition (#203), exactly as the terminal event recorded it.
 	// Absent on a budget failure means the run held no material result.
 	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
-	Budgets      RunBudgets    `json:"budgets"`
-	StateSHA256  string        `json:"state_sha256"`
+	// Budgets are the budgets THIS RUN is judged by - its frozen RunPolicy,
+	// or the ADR-0003 §5 legacy derivation - never the current process's
+	// configuration (§6.2). RunPolicy names that policy and its source.
+	//
+	// Nil (JSON null) means UNKNOWN: a legacy run read by a controller that is
+	// not its binding, whose unrecorded members RunPolicy.Unverifiable names.
+	// It is never reported as zeroes, which would read as real bounds.
+	Budgets     *RunBudgets     `json:"budgets"`
+	RunPolicy   RunPolicyStatus `json:"run_policy"`
+	StateSHA256 string          `json:"state_sha256"`
 }
 
 // WorkerIdentity is the execution agent a run is bound to.
@@ -1111,6 +1154,9 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		return StatusReport{}, err
 	}
 	now := r.deps.Clock.Now()
+	budgets, unverifiable := state.reportedBudgets()
+	policy := state.runPolicy()
+	policy.Unverifiable = unverifiable
 	report := StatusReport{
 		SchemaVersion: SchemaVersion,
 		RunID:         state.run.ID,
@@ -1139,7 +1185,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,
 		Attempts:              state.projection.Attempts,
-		Budgets:               r.deps.Budgets,
+		Budgets:               budgets,
+		RunPolicy:             policy,
 		StateSHA256:           state.snapshot.StateSHA256,
 		PublicationAuthority:  publicationAuthorityOf(state),
 		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,
@@ -1181,9 +1228,15 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ID: op.ID, Kind: op.Kind, State: op.State,
 			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts, AttemptIdentity: op.AttemptIdentity,
 			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
-			LastProgressAt:  op.LastProgressAt,
-			SilentFor:       ProviderSilence(op, now),
-			InactivityLimit: state.budgets().ProviderInactivityLimit,
+			LastProgressAt: op.LastProgressAt,
+			SilentFor:      ProviderSilence(op, now),
+		}
+		// Budgets is nil exactly when a member is unverifiable. The window is
+		// then reported unknown rather than absent, which would mean "no limit".
+		if budgets != nil {
+			status.InactivityLimit = budgets.ProviderInactivityLimit
+		} else {
+			status.InactivityLimitUnknown = slices.Contains(unverifiable, "provider_inactivity_limit")
 		}
 		if op.State == Leased || op.State == Running {
 			status.ProgressSource = "journal"
