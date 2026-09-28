@@ -96,37 +96,44 @@ type RunPolicyStatus struct {
 
 // reportedBudgets is what status may truthfully present as this run's budgets.
 // Under the creating binding it is exactly budgets(). Under a changed
-// controller, every member that budgets() would fill from the binding (because
-// the run never recorded it) is unverifiable. Filling it from this process's
-// configuration would present another controller's value as the run's, so it
-// is suppressed and named instead.
-func (s *runState) reportedBudgets() (RunBudgets, []string) {
+// controller, a member budgets() would fill from the binding (because the run
+// never recorded it) is unverifiable: filling it from this process's
+// configuration would present another controller's value as the run's. Then
+// NO budgets are reported (nil, JSON null) and the unverifiable members are
+// named instead. A zero would read as a real bound and an omitted lifecycle or
+// inactivity value as "none", so neither encoding is used for UNKNOWN.
+func (s *runState) reportedBudgets() (*RunBudgets, []string) {
 	budgets := s.budgets()
 	if !s.controllerChanged {
-		return budgets, nil
+		return &budgets, nil
 	}
 	var recorded RunBudgets
 	if s.run.Budgets != nil {
 		recorded = *s.run.Budgets
 	}
 	var unverifiable []string
-	suppress := func(name string, missing bool, clear func()) {
-		if missing {
-			clear()
-			unverifiable = append(unverifiable, name)
+	for _, member := range []struct {
+		name    string
+		missing bool
+	}{
+		{"wall_limit", recorded.WallLimit <= 0},
+		// Only a nil record reads the lifecycle deadline from the binding. A
+		// recorded zero means "none".
+		{"lifecycle_deadline", s.run.Budgets == nil},
+		{"max_execution_attempts", recorded.MaxExecutionAttempts <= 0},
+		{"max_execution_continuations", recorded.MaxExecutionContinuations <= 0 && recorded.MaxExecutionAttempts <= 0},
+		{"max_remediation_attempts", recorded.MaxRemediationAttempts <= 0},
+		{"max_assurance_attempts", recorded.MaxAssuranceAttempts <= 0},
+		{"provider_inactivity_limit", recorded.ProviderInactivityLimit <= 0},
+	} {
+		if member.missing {
+			unverifiable = append(unverifiable, member.name)
 		}
 	}
-	suppress("wall_limit", recorded.WallLimit <= 0, func() { budgets.WallLimit = 0 })
-	// Only a nil record reads the lifecycle deadline from the binding. A
-	// recorded zero means "none".
-	suppress("lifecycle_deadline", s.run.Budgets == nil, func() { budgets.LifecycleDeadline = 0 })
-	suppress("max_execution_attempts", recorded.MaxExecutionAttempts <= 0, func() { budgets.MaxExecutionAttempts = 0 })
-	suppress("max_execution_continuations", recorded.MaxExecutionContinuations <= 0 && recorded.MaxExecutionAttempts <= 0,
-		func() { budgets.MaxExecutionContinuations = 0 })
-	suppress("max_remediation_attempts", recorded.MaxRemediationAttempts <= 0, func() { budgets.MaxRemediationAttempts = 0 })
-	suppress("max_assurance_attempts", recorded.MaxAssuranceAttempts <= 0, func() { budgets.MaxAssuranceAttempts = 0 })
-	suppress("provider_inactivity_limit", recorded.ProviderInactivityLimit <= 0, func() { budgets.ProviderInactivityLimit = 0 })
-	return budgets, unverifiable
+	if len(unverifiable) > 0 {
+		return nil, unverifiable
+	}
+	return &budgets, nil
 }
 
 // runPolicy reads the recorded RunPolicyDigest, or states the legacy source.

@@ -188,9 +188,11 @@ reconciles it, so that value is the one it already had. Lifecycle deadline,
 provider-invocation total and attempt wall limit are exceptions: for these an
 absent value already means "none", "unbounded" or "the pre-#328 rule".
 If status is read by a controller whose configuration differs from the run's,
-the binding value cannot be verified. Status then reports those members as zero
-and lists them under `run_policy.unverifiable`, rather than showing this
-process's configuration as if it were the run's.
+the binding value cannot be verified. Status then reports `budgets: null`,
+names those members in `run_policy.unverifiable`, sets the operation's
+`inactivity_limit_unknown` when the window is one of them, and the text prints
+each one as `unknown`. It never shows this process's configuration, a zero, or
+an absent "none" as the run's value.
 
 `attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
 different resource from `wall_limit_seconds`, which is the run's CUMULATIVE

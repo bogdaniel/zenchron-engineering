@@ -64,7 +64,7 @@ func TestEveryRunPolicyMemberIsFrozenAtCreation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if status.Budgets != frozenPolicy {
+		if status.Budgets == nil || *status.Budgets != frozenPolicy {
 			t.Errorf("%s edit: status reports %+v, want the run's frozen %+v", name, status.Budgets, frozenPolicy)
 		}
 		if !reflect.DeepEqual(status.RunPolicy, created.RunPolicy) {
@@ -231,15 +231,16 @@ func TestAConfigEditUnderAChangedControllerDoesNotWidenALiveRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Budgets != frozenPolicy || status.RunPolicy.Source != RunPolicyRecorded || len(status.RunPolicy.Unverifiable) != 0 {
+	if status.Budgets == nil || *status.Budgets != frozenPolicy || status.RunPolicy.Source != RunPolicyRecorded || len(status.RunPolicy.Unverifiable) != 0 {
 		t.Fatalf("status under a changed controller reported %+v / %+v, want the recorded frozen policy", status.Budgets, status.RunPolicy)
 	}
 }
 
 // INVARIANT: status never presents this process's configuration as a legacy
-// run's budgets when the reading controller is not the run's binding. A member
-// the run never recorded is suppressed and named unverifiable. UNKNOWN stays
-// UNKNOWN. A member the run did record is still reported exactly.
+// run's budgets when the reading controller is not the run's binding. If any
+// member is one the run never recorded, no budgets are reported (nil, JSON
+// null) and those members are named unverifiable. UNKNOWN stays UNKNOWN: never
+// a zero, and never an omitted lifecycle or inactivity value reading as "none".
 func TestStatusDoesNotFillALegacyRunFromAChangedController(t *testing.T) {
 	live := RunBudgets{WallLimit: 10 * time.Minute, LifecycleDeadline: time.Hour, MaxExecutionAttempts: 5,
 		MaxRemediationAttempts: 4, MaxAssuranceAttempts: 3, ProviderInactivityLimit: 7 * time.Minute}
@@ -249,24 +250,23 @@ func TestStatusDoesNotFillALegacyRunFromAChangedController(t *testing.T) {
 		name         string
 		budgets      *RunBudgets
 		changed      bool
-		want         RunBudgets
+		want         *RunBudgets
 		unverifiable []string
 	}{
 		{"same binding reports the binding value", &persisted, false,
-			RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 1, MaxExecutionContinuations: 1,
+			&RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 1, MaxExecutionContinuations: 1,
 				MaxRemediationAttempts: 4, MaxAssuranceAttempts: 3, ProviderInactivityLimit: 7 * time.Minute}, nil},
-		{"changed controller, legacy_run_budgets", &persisted, true,
-			RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 1, MaxExecutionContinuations: 1},
+		{"changed controller, legacy_run_budgets", &persisted, true, nil,
 			[]string{"max_remediation_attempts", "max_assurance_attempts", "provider_inactivity_limit"}},
-		{"changed controller, legacy_controller_binding", nil, true, RunBudgets{},
+		{"changed controller, legacy_controller_binding", nil, true, nil,
 			[]string{"wall_limit", "lifecycle_deadline", "max_execution_attempts", "max_execution_continuations",
 				"max_remediation_attempts", "max_assurance_attempts", "provider_inactivity_limit"}},
-		{"changed controller, recorded policy", &frozenPolicy, true, frozenPolicy, nil},
+		{"changed controller, recorded policy", &frozenPolicy, true, &frozenPolicy, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := &runState{rt: rt, run: EngineeringRun{ID: "r", Budgets: tc.budgets}, controllerChanged: tc.changed}
 			got, unverifiable := state.reportedBudgets()
-			if got != tc.want || strings.Join(unverifiable, ",") != strings.Join(tc.unverifiable, ",") {
+			if !reflect.DeepEqual(got, tc.want) || strings.Join(unverifiable, ",") != strings.Join(tc.unverifiable, ",") {
 				t.Fatalf("reported %+v unverifiable %v\nwant     %+v unverifiable %v", got, unverifiable, tc.want, tc.unverifiable)
 			}
 		})

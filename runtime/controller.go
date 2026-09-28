@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1008,6 +1009,10 @@ type OperationStatus struct {
 	// operator previously could not get from status at all.
 	SilentFor       time.Duration `json:"silent_for,omitempty"`
 	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
+	// InactivityLimitUnknown says the window cannot be reported, because it is
+	// a legacy run's unrecorded member read under a changed controller. An
+	// absent inactivity_limit would otherwise read as "no limit".
+	InactivityLimitUnknown bool `json:"inactivity_limit_unknown,omitempty"`
 	// ProgressSource says where LastProgressAt, SilentFor, HeartbeatAt and
 	// Lease were read for an operation that is still running or leased: "row"
 	// is the durable operation row of this exact attempt, "journal" is the
@@ -1114,7 +1119,11 @@ type StatusReport struct {
 	// Budgets are the budgets THIS RUN is judged by - its frozen RunPolicy,
 	// or the ADR-0003 §5 legacy derivation - never the current process's
 	// configuration (§6.2). RunPolicy names that policy and its source.
-	Budgets     RunBudgets      `json:"budgets"`
+	//
+	// Nil (JSON null) means UNKNOWN: a legacy run read by a controller that is
+	// not its binding, whose unrecorded members RunPolicy.Unverifiable names.
+	// It is never reported as zeroes, which would read as real bounds.
+	Budgets     *RunBudgets     `json:"budgets"`
 	RunPolicy   RunPolicyStatus `json:"run_policy"`
 	StateSHA256 string          `json:"state_sha256"`
 }
@@ -1219,9 +1228,15 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ID: op.ID, Kind: op.Kind, State: op.State,
 			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts, AttemptIdentity: op.AttemptIdentity,
 			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
-			LastProgressAt:  op.LastProgressAt,
-			SilentFor:       ProviderSilence(op, now),
-			InactivityLimit: budgets.ProviderInactivityLimit,
+			LastProgressAt: op.LastProgressAt,
+			SilentFor:      ProviderSilence(op, now),
+		}
+		// Budgets is nil exactly when a member is unverifiable. The window is
+		// then reported unknown rather than absent, which would mean "no limit".
+		if budgets != nil {
+			status.InactivityLimit = budgets.ProviderInactivityLimit
+		} else {
+			status.InactivityLimitUnknown = slices.Contains(unverifiable, "provider_inactivity_limit")
 		}
 		if op.State == Leased || op.State == Running {
 			status.ProgressSource = "journal"
