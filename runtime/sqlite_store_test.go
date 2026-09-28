@@ -300,7 +300,7 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", "file:"+dir+"/runtime.db")
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestSQLiteOperationAndJournalWritesShareOneDatabase(t *testing.T) {
 
 func TestSQLiteMigratesAJournalFreeDatabaseForward(t *testing.T) {
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db"))
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

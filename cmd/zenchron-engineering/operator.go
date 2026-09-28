@@ -523,12 +523,22 @@ func staleAuthorityRequests(events []runtime.EngineeringEvent, current *runtime.
 	return out
 }
 
-// leaseOf reports who holds the run-driving lease. The lease owner lives in the
-// operation document the journal records, so it is read from there rather than
-// from a second source.
+// leaseOf reports who holds the run-driving lease. For a running operation it is
+// the live row status matched to this attempt; otherwise it is the operation
+// document the journal records.
 func leaseOf(events []runtime.EngineeringEvent, report runtime.StatusReport) *leaseView {
 	if report.Operation == nil {
 		return nil
+	}
+	// A running operation's live lease is on its row, which status has
+	// already matched to this exact attempt (#326).
+	if report.Operation.ProgressSource == "row" {
+		lease := report.Operation.Lease
+		if lease == nil {
+			return nil
+		}
+		heartbeat, expires := lease.HeartbeatAt, lease.ExpiresAt
+		return &leaseView{Owner: lease.Owner, Operation: report.Operation.ID, HeartbeatAt: &heartbeat, ExpiresAt: &expires, Elapsed: report.Operation.Elapsed}
 	}
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -696,6 +706,12 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))
 	line("candidate", fmt.Sprintf("%s rev=%s tree=%s", view.Candidate.Branch, short(view.Candidate.Revision), short(view.Candidate.Tree)))
 	line("contract", view.Contract.ID+"@"+view.Contract.Revision)
+	// A running operation whose live row could not be matched is reported from
+	// the journal, and says so rather than passing stale values off as live.
+	journalMark := ""
+	if view.Operation != nil && view.Operation.ProgressSource == "journal" {
+		journalMark = " (journal)"
+	}
 	if view.Operation != nil {
 		operation := fmt.Sprintf("%s %s attempt %d/%d active consumed %s",
 			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed)
@@ -715,12 +731,14 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		// against, and reading the pair is how an operator tells a provider
 		// that is thinking from one whose host lost its network.
 		if limit := view.Operation.InactivityLimit; limit > 0 {
-			progress := "none recorded"
+			// No recorded progress means the silence is UNKNOWN, not zero.
+			progress, silent := "none recorded", "unknown"
 			if view.Operation.LastProgressAt != nil {
 				progress = view.Operation.LastProgressAt.UTC().Format(time.RFC3339)
+				silent = view.Operation.SilentFor.String()
 			}
-			line("progress", fmt.Sprintf("last %s silent %s inactivity limit %s",
-				progress, view.Operation.SilentFor, limit))
+			line("progress"+journalMark, fmt.Sprintf("last %s silent %s inactivity limit %s",
+				progress, silent, limit))
 		}
 	}
 	if view.Lease != nil {
@@ -728,7 +746,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		if view.Lease.HeartbeatAt != nil {
 			heartbeat = view.Lease.HeartbeatAt.UTC().Format(time.RFC3339)
 		}
-		line("lease", fmt.Sprintf("%s heartbeat %s elapsed %s", view.Lease.Owner, heartbeat, view.Lease.Elapsed))
+		line("lease"+journalMark, fmt.Sprintf("%s heartbeat %s elapsed %s", view.Lease.Owner, heartbeat, view.Lease.Elapsed))
 	}
 	for _, evidence := range view.Evidence {
 		line("evidence", evidence.ID+"@"+evidence.Revision)

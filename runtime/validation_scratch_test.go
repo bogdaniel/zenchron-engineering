@@ -32,6 +32,46 @@ func TestValidationScratchGrants(t *testing.T) {
 	}
 }
 
+// TestExecutionScratchDirIsShortAndUnescaped is #331. The scratch is the
+// worker's TMPDIR, so a '%' in it breaks every "file:" URI a test builds and
+// its length eats the Unix socket address budget. A real operation id encodes
+// to ~150 bytes of %XX; the leaf must stay escape-free, bounded, unique per
+// operation and attempt, and a pure function of identity.
+func TestExecutionScratchDirIsShortAndUnescaped(t *testing.T) {
+	t.Setenv("GOTMPDIR", "")
+	state := "/Users/operator/.zenchron/state"
+	run := "run-00a8aecb360c53896934e5b051b0ccc5"
+	operation := run + ":execution.invoke:execution.invoke#initial|1|b1202216a0cd9cc534ffcc17fe5dc4605f0bf352"
+	seen := map[string]bool{}
+	for _, attempt := range []ExecutionAttemptRef{
+		{RunID: run, OperationID: operation, Attempt: 1},
+		{RunID: run, OperationID: operation, Attempt: 2},
+		{RunID: run, OperationID: operation + "x", Attempt: 1},
+	} {
+		scratch, err := ExecutionScratchDir(state, attempt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replay, _ := ExecutionScratchDir(state, attempt); replay != scratch {
+			t.Fatalf("scratch is not a function of identity: %q then %q", scratch, replay)
+		}
+		if strings.Contains(scratch, "%") {
+			t.Fatalf("scratch carries an escape: %s", scratch)
+		}
+		// runs/<run>/scratch/<16 hex>/attempt-N beneath the state dir.
+		if leaf, err := filepath.Rel(state, scratch); err != nil || len(leaf) > len("runs/")+len(run)+len("/scratch/")+16+len("/attempt-9") {
+			t.Fatalf("scratch leaf is unbounded: %q", leaf)
+		}
+		if filepath.Dir(filepath.Dir(scratch)) != filepath.Join(state, "runs", run, executionScratchDir) {
+			t.Fatalf("scratch left the run's scratch directory the collector reclaims: %s", scratch)
+		}
+		if seen[scratch] {
+			t.Fatalf("two attempts share scratch %s", scratch)
+		}
+		seen[scratch] = true
+	}
+}
+
 func TestValidationScratchAdmissionSubject(t *testing.T) {
 	root := t.TempDir()
 	candidate := filepath.Join(root, "candidate")

@@ -212,6 +212,16 @@ against:
 progress   last 2026-09-18T09:14:02Z silent 4m12s inactivity limit 10m0s
 ```
 
+While the operation is running, this line and the `lease` line are read from
+the live operation row of that exact attempt, because recorded progress is a
+row-only observation the journal never holds. They are observation, never an
+input to any decision. If that row cannot be read or has moved to another
+attempt, status falls back to the journal and says so: `progress (journal)`,
+`lease (journal)`; JSON carries `operation.progress_source` (`row` or
+`journal`). The lease heartbeat is not renewed yet (#180), so it may read as
+the acquisition time for a healthy attempt's whole life; that alone is not
+evidence the attempt is dead.
+
 These answer different questions and were the same number until a live run
 showed what that costs: a pull request reached its goal in eight minutes, waited
 for review, and was killed at thirty with `run_wall_budget_exhausted`. Any pull
