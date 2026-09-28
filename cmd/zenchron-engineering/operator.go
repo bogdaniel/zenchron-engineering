@@ -859,6 +859,17 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			failure = "provider quota exhausted (" + failure + ")"
 		}
 		line("execution failure", failure)
+		// WHICH BOUND ended the attempt and WHAT comes next (#328): an
+		// attempt-wall stop, run active-work exhaustion and an inactivity stop
+		// are different resources, and a successor the runtime already knows
+		// it cannot admit is named as unavailable rather than implied.
+		if d.Bound != "" || d.Successor != "" {
+			next := d.Successor
+			if d.SuccessorUnavailable != "" {
+				next += " unavailable: " + d.SuccessorUnavailable
+			}
+			line("execution bound", strings.TrimSpace(fmt.Sprintf("bound=%s successor=%s", d.Bound, next)))
+		}
 		line("execution provider", strings.TrimSpace(fmt.Sprintf("%s model=%s", d.ProviderKind, d.Model)))
 		if d.HTTPStatus != 0 || d.ProviderErrorCode != "" || d.ProviderErrorParam != "" {
 			line("execution response", strings.TrimSpace(fmt.Sprintf("http=%d provider_error=%s param=%s",

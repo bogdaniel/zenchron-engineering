@@ -184,6 +184,19 @@ type RunBudgets struct {
 	// canonical document, so an added zero would re-identify every historical
 	// run. New runs always carry one - see RunBudgets.defaults.
 	ProviderInactivityLimit time.Duration `json:"provider_inactivity_limit,omitempty"`
+	// AttemptWallLimit bounds ONE physical provider attempt (#328), and it is a
+	// different resource from WallLimit, the run's CUMULATIVE active-work
+	// budget. Each attempt's durable deadline is start + min(this, remaining
+	// run active work), so a stop at this bound leaves the run able to admit a
+	// successor, while a stop at the run's remaining work exhausts the run.
+	//
+	// It is FROZEN at run creation (absent in configuration derives to
+	// WallLimit) and read back EXACTLY - never from live configuration, never
+	// as min(live, persisted). omitempty, and absent means the run predates
+	// #328 and keeps the legacy rule: the attempt is bounded by its
+	// operation's own remaining WallBudget, nothing else. Nothing is
+	// backfilled.
+	AttemptWallLimit time.Duration `json:"attempt_wall_limit,omitempty"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -457,6 +470,14 @@ func (b RunBudgets) defaults() RunBudgets {
 	if b.ProviderInactivityLimit <= 0 {
 		b.ProviderInactivityLimit = DefaultProviderInactivitySeconds * time.Second
 	}
+	// THE ABSENT ATTEMPT LIMIT IS DERIVED HERE, not in the configuration
+	// layer, so it never enters the controller-effective digest (ADR-0003 §4).
+	// It derives to the run budget: an operator who states nothing keeps the
+	// one-attempt-may-spend-the-run shape they had, and every stop at that
+	// bound is now reported truthfully as run active-work exhaustion.
+	if b.AttemptWallLimit <= 0 || b.AttemptWallLimit > b.WallLimit {
+		b.AttemptWallLimit = b.WallLimit
+	}
 	return b
 }
 
@@ -493,6 +514,11 @@ func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
 func (b RunBudgets) tightenedBy(stage domain.StageBudget) RunBudgets {
 	if wall := time.Duration(stage.MaxWallSeconds) * time.Second; wall > 0 && (b.WallLimit <= 0 || wall < b.WallLimit) {
 		b.WallLimit = wall
+	}
+	// A narrowed run budget narrows the attempt bound with it: one attempt can
+	// never hold more authority than the run it belongs to.
+	if b.AttemptWallLimit > b.WallLimit {
+		b.AttemptWallLimit = b.WallLimit
 	}
 	if attempts := stage.MaxExecutionAttempts; attempts > 0 && (b.MaxExecutionAttempts <= 0 || attempts < b.MaxExecutionAttempts) {
 		b.MaxExecutionAttempts = attempts
