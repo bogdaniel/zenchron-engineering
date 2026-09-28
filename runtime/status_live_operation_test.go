@@ -141,6 +141,27 @@ func TestStatusDoesNotMixAnotherAttemptsRowIntoTheReport(t *testing.T) {
 	})
 }
 
+// A row of the same attempt that has already settled or been abandoned is no
+// longer live state: status keeps the journal's values and says so.
+func TestStatusIgnoresASettledRowOfTheSameAttempt(t *testing.T) {
+	for _, settled := range []OperationState{Succeeded, Unknown} {
+		t.Run(string(settled), func(t *testing.T) {
+			duringInvocation(t, func(f *phase8Fixture, runID string, journal RunOperation) {
+				other := journal.LastProgressAt.Add(9 * time.Minute)
+				restore := rewriteRow(t, f, journal.ID, func(op *RunOperation) {
+					op.State = settled
+					op.LastProgressAt = &other
+				})
+				defer restore()
+				status := liveStatus(t, f, runID)
+				if status.ProgressSource != "journal" || !status.LastProgressAt.Equal(*journal.LastProgressAt) {
+					t.Fatalf("a %s row leaked into the report: %#v", settled, status)
+				}
+			})
+		})
+	}
+}
+
 // A failed row read degrades to the journal instead of failing status.
 func TestStatusDegradesToTheJournalWhenTheRowCannotBeRead(t *testing.T) {
 	duringInvocation(t, func(f *phase8Fixture, runID string, journal RunOperation) {

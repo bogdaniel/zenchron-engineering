@@ -731,12 +731,14 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		// against, and reading the pair is how an operator tells a provider
 		// that is thinking from one whose host lost its network.
 		if limit := view.Operation.InactivityLimit; limit > 0 {
-			progress := "none recorded"
+			// No recorded progress means the silence is UNKNOWN, not zero.
+			progress, silent := "none recorded", "unknown"
 			if view.Operation.LastProgressAt != nil {
 				progress = view.Operation.LastProgressAt.UTC().Format(time.RFC3339)
+				silent = view.Operation.SilentFor.String()
 			}
 			line("progress"+journalMark, fmt.Sprintf("last %s silent %s inactivity limit %s",
-				progress, view.Operation.SilentFor, limit))
+				progress, silent, limit))
 		}
 	}
 	if view.Lease != nil {

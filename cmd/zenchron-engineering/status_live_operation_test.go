@@ -39,7 +39,8 @@ func TestLeaseLineOfARunningOperationIsTheRowLease(t *testing.T) {
 	if err := renderStatusText(&out, statusView{StatusReport: report, Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"progress (journal):", "lease (journal):"} {
+	// No recorded progress: silence is unknown, never a reassuring 0s.
+	for _, want := range []string{"progress (journal):", "lease (journal):", "last none recorded silent unknown inactivity limit"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("text does not mark the journal source %q:\n%s", want, out.String())
 		}
