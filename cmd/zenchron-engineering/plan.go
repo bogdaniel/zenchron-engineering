@@ -289,6 +289,7 @@ func openPlanReader(flags autonomyFlags, overrides autonomyOverrides) (*planRead
 		service: runtime.PlanService{
 			Store: store, Clock: runtime.RealClock{}, Registry: registry,
 			Agents: described, DefaultAgent: agents.Default(), Envelope: config.PlanEnvelope(),
+			Config: config.Digest,
 		},
 		release: func() { _ = store.Close() },
 	}, nil
@@ -326,7 +327,7 @@ func buildPlanComposition(flags autonomyFlags, overrides autonomyOverrides) (*pl
 		service: runtime.PlanService{
 			Store: built.store, Clock: runtime.RealClock{}, Registry: registry,
 			Agents: agents, DefaultAgent: built.agents.Default(),
-			Envelope: built.config.PlanEnvelope(),
+			Envelope: built.config.PlanEnvelope(), Config: built.config.Digest,
 		},
 	}, nil
 }
@@ -370,6 +371,13 @@ func proposeWithComposition(ctx context.Context, composed *planComposition, flag
 // every run in the fleet - the reconciler takes the same lock before it drives
 // anything - so the long part runs unlocked and only the append is serialized.
 func proposeSerialized(ctx context.Context, composed *planComposition, flags autonomyFlags, issue int, planID string, stdout io.Writer, under func(func() error) error) (int, error) {
+	// A revision of a plan held for a configuration change is refused before
+	// anything - a forge read, a planning invocation - is spent on it.
+	if planID != "" {
+		if err := composed.service.RefuseConfigurationHold(planID); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	intent, err := composed.engine.CompilePlanIntent(ctx, issue)
 	if err != nil {
 		return runtime.ExitFailed, err

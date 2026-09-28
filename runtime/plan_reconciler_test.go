@@ -55,10 +55,18 @@ func planAgents() []domain.ExecutionAgentDescriptor {
 func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture {
 	t.Helper()
 	base := newPhase8Fixture(t)
+	return newPlanRunFixtureOn(t, base, stages, base.deps.ConfigDigest)
+}
+
+// newPlanRunFixtureOn builds the same plan over an existing phase 8 fixture,
+// so a scenario that needs other durable state first shares its store.
+func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest) *planRunFixture {
+	t.Helper()
 	fixture := &planRunFixture{phase8Fixture: base}
 	fixture.service = PlanService{
 		Store: base.store, Clock: base.clock, Agents: planAgents(), DefaultAgent: "codex",
 		Envelope: domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12},
+		Config:   config,
 	}
 	plan := domain.EngineeringPlan{
 		SchemaVersion: domain.SchemaVersion, ID: "plan-fixture", Revision: 1,
@@ -81,6 +89,9 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 	}
 	plan.Digest = digest
 	if _, err := base.store.ClaimPlan(plan, base.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.store.BindPlanConfig(plan.ID, config); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := base.store.PutPlanRevision(plan); err != nil {
