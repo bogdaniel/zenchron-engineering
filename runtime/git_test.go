@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,74 @@ func TestCandidateCloneCommitAndMetadataIntegrity(t *testing.T) {
 	}
 	if err := w.AssertIntegrity(); err == nil {
 		t.Fatal("accepted producer Git metadata mutation")
+	}
+}
+
+// TestRefuseSubmodulesAtAdmission pins the clone shape the runtime really uses
+// (`clone --no-checkout`, `checkout --detach`): a submodule path is an empty
+// directory and `git status` is clean, yet the index records the gitlink. The
+// refusal must come from the index, must name the capability limit, and must
+// not fire for a repository without submodules.
+func TestRefuseSubmodulesAtAdmission(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	if _, err := runGit("", "init", origin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "config", "user.name", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "config", "user.email", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "commit", "-m", "plain"); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := gitOutput(origin, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain = strings.TrimSpace(plain)
+	if _, err := runGit(origin, "update-index", "--add", "--cacheinfo", "160000,"+plain+",vendor/lib"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "commit", "-m", "submodule"); err != nil {
+		t.Fatal(err)
+	}
+	withSubmodule, err := gitOutput(origin, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withSubmodule = strings.TrimSpace(withSubmodule)
+
+	clean, err := CreateCandidateClone(filepath.Join(root, "state"), "run-plain", origin, plain, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseSubmodules(clean.Dir); err != nil {
+		t.Fatalf("refused a repository with no submodules: %v", err)
+	}
+
+	w, err := CreateCandidateClone(filepath.Join(root, "state"), "run-sub", origin, withSubmodule, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = refuseSubmodules(w.Dir)
+	if err == nil {
+		t.Fatal("admitted a repository that records a submodule")
+	}
+	var refusal *SubmoduleUnsupportedError
+	if !errors.As(err, &refusal) || len(refusal.Paths) != 1 || refusal.Paths[0] != "vendor/lib" {
+		t.Fatalf("refusal does not name the submodule path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot carry submodules") {
+		t.Fatalf("refusal does not name the capability limit: %v", err)
 	}
 }
 
