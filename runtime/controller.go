@@ -1024,6 +1024,21 @@ type OperationStatus struct {
 	ProgressSource string `json:"progress_source,omitempty"`
 	// Lease is the live row's lease, set only when ProgressSource is "row".
 	Lease *Lease `json:"lease,omitempty"`
+	// InactivitySuspension is "active" while a structured main-thread tool of
+	// THIS attempt holds the inactivity kill suspended (#322, #352), and
+	// InactivitySuspendedSince when it opened. It is "unverified" when the row
+	// records one but the owning process's liveness cannot be established, so
+	// it may belong to a controller that died: SilentFor then stands. Neither is
+	// set when ProgressSource is not "row". While it is active, SilentFor is
+	// not approaching a kill: the window resumes when the tool closes. It is up
+	// to one record interval behind the process, like the progress beside it.
+	InactivitySuspension     string     `json:"inactivity_suspension,omitempty"`
+	InactivitySuspendedSince *time.Time `json:"inactivity_suspended_since,omitempty"`
+	// Deadline is the absolute instant this attempt's authority ends, and
+	// DeadlineBound which bound set it (#328). A suspension never moves it.
+	// Both are reported only while the operation is leased or running.
+	Deadline      *time.Time   `json:"deadline,omitempty"`
+	DeadlineBound AttemptBound `json:"deadline_bound,omitempty"`
 }
 
 // SourceIdentity is the pinned, untrusted source the run answers. The title
@@ -1240,12 +1255,17 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		}
 		if op.State == Leased || op.State == Running {
 			status.ProgressSource = "journal"
+			status.Deadline, status.DeadlineBound = op.Deadline, op.DeadlineBound
 			if row, ok := r.liveOperationRow(op); ok {
 				status.ProgressSource = "row"
 				status.LastProgressAt = row.LastProgressAt
 				status.SilentFor = ProviderSilence(row, now)
 				status.Lease = row.Lease
 				op.Lease = row.Lease
+				if state := r.inactivitySuspension(row); state != "" {
+					since := row.InactivitySuspension.Since
+					status.InactivitySuspension, status.InactivitySuspendedSince = state, &since
+				}
 			}
 		}
 		if op.Lease != nil {
@@ -1258,8 +1278,9 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 }
 
 // liveOperationRow is the durable row of op's CURRENT attempt, read by status
-// for its progress and lease observations only (#326): progress is a row-only
-// write, so the journal cannot hold it for a running operation. Like
+// for its progress, open-tool suspension and lease observations only (#326,
+// #352): those are row-only writes, so the journal cannot hold them for a
+// running operation. Like
 // currentOperation it is never consulted to decide what to do next, and
 // nothing else in the report is taken from it. A row that cannot be read, is
 // missing, is on a different attempt, or is no longer active is not this
@@ -1271,6 +1292,40 @@ func (r *EngineeringRuntime) liveOperationRow(op RunOperation) (RunOperation, bo
 		return RunOperation{}, false
 	}
 	return row, true
+}
+
+// inactivitySuspension is whether the live row's recorded open-tool suspension
+// is ACTIVE (#352): "active", "unverified", or "" for none.
+//
+// A suspension is a claim about one process, so it is active only while that
+// process still owns the attempt: the row is on the suspension's attempt, the
+// lease is still held by the owner that recorded it, and that owner is not
+// provably dead. The lease heartbeat cannot say so (#180: nothing renews it),
+// so the owner's liveness is read from the same evidence a takeover uses.
+// Provably dead - a crashed controller whose row nothing has reclaimed yet -
+// is no suspension at all: nothing is supervising that attempt, and its
+// silence is reported as silence. Evidence that cannot decide is "unverified",
+// never "active". A takeover, a reclaim, a new attempt or a settlement each
+// break one of the conditions, so no later attempt can inherit it.
+func (r *EngineeringRuntime) inactivitySuspension(row RunOperation) string {
+	s := row.InactivitySuspension
+	if s == nil || s.AttemptIdentity != row.AttemptIdentity || row.Lease == nil || row.Lease.Owner != s.Owner {
+		return ""
+	}
+	liveness := r.scheduler.defaults().Liveness
+	if decider, ok := liveness.(interface {
+		decide(string) (bool, bool)
+	}); ok {
+		switch alive, decided := decider.decide(s.Owner); {
+		case !decided:
+			return "unverified"
+		case !alive:
+			return ""
+		}
+	} else if !liveness.Alive(s.Owner) {
+		return ""
+	}
+	return "active"
 }
 
 // The journal's after payload is written before Scheduler.Finish and older

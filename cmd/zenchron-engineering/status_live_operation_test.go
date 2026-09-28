@@ -46,3 +46,52 @@ func TestLeaseLineOfARunningOperationIsTheRowLease(t *testing.T) {
 		}
 	}
 }
+
+// #352: while a structured tool holds the window, the text says so and never
+// presents silence past the limit as a pending kill; the absolute deadline
+// stays on its own line.
+func TestASuspendedWindowIsNotRenderedAsAnImpendingKill(t *testing.T) {
+	last := time.Unix(1_800_000_000, 0).UTC()
+	deadline := last.Add(30 * time.Minute)
+	operation := &runtime.OperationStatus{
+		ID: "op-1", State: runtime.Running, ProgressSource: "row",
+		LastProgressAt: &last, SilentFor: 25 * time.Minute, InactivityLimit: 10 * time.Minute,
+		InactivitySuspension: "active", InactivitySuspendedSince: &last, Deadline: &deadline, DeadlineBound: runtime.AttemptBound("attempt_wall"),
+	}
+	var out bytes.Buffer
+	if err := renderStatusText(&out, statusView{StatusReport: runtime.StatusReport{Operation: operation}}); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"inactivity suspended — structured tool open since " + last.Format(time.RFC3339),
+		deadline.Format(time.RFC3339) + " (attempt_wall)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "silent 25m0s") {
+		t.Fatalf("a suspended window was rendered as silence against the limit:\n%s", text)
+	}
+	// A suspension whose owner's liveness cannot be established is not
+	// presented as one: the silence stands, and the record is marked.
+	operation.InactivitySuspension = "unverified"
+	out.Reset()
+	if err := renderStatusText(&out, statusView{StatusReport: runtime.StatusReport{Operation: operation}}); err != nil {
+		t.Fatal(err)
+	}
+	if text := out.String(); !strings.Contains(text, "silent 25m0s inactivity limit 10m0s") ||
+		!strings.Contains(text, "unverified — a structured tool was recorded open since "+last.Format(time.RFC3339)) ||
+		strings.Contains(text, "inactivity suspended") {
+		t.Fatalf("an unverified suspension was rendered as active:\n%s", text)
+	}
+	operation.InactivitySuspension, operation.InactivitySuspendedSince = "", nil
+	out.Reset()
+	if err := renderStatusText(&out, statusView{StatusReport: runtime.StatusReport{Operation: operation}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "silent 25m0s inactivity limit 10m0s") {
+		t.Fatalf("an unsuspended window lost its silence line:\n%s", out.String())
+	}
+}

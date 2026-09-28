@@ -192,6 +192,37 @@ abandoned interval in full. An attempt that was settled — observed, journalled
 and classified — does get a fresh window, because that is what a bounded retry
 is; the attempt ceiling is what ends it.
 
+The datum is written at most once per quarter of the window. Progress that
+arrives inside that interval is coalesced, not dropped: the newest observation
+waits and is written at the next due point with the instant it was observed,
+and a process that ends under a running controller writes its last observation
+as it closes. So the datum is exact whenever the process was seen to end.
+
+A controller that dies abruptly can lose the one observation still waiting. The
+row then records that its recorder never closed, and only then does the
+successor's window allow for it, by a fixed `L` of half the window (300s for
+the default 600s): the silence charged is the recorded silence less `L`,
+floored at zero. `L` is two write intervals, not one, because an observation
+made just after a write is written one interval later carrying its own, older
+instant, and one made just before the next write is due is the one a crash
+loses. So a successor is never refused on the recorder's own lag, and it is
+never granted more than `L` beyond what the recorded silence leaves, nor a
+fresh window, nor any execution time: the attempt deadline and the run's active
+work are derived exactly as before. The allowance does not accumulate across
+repeated restarts, because only a real observed write moves the datum and a
+restart never does: every successor dispatched against the same datum gets the
+same absolute bound, the last recorded progress plus the window plus `L`.
+
+A durable write that never returns does not hold the invocation: once the
+process ends, the recorder waits for its closing write for at most one write
+interval, and not at all once the invocation's context has ended (cancelled,
+the deadline passed, or the inactivity kill). A write still in flight then lands
+late or never. Either way it is bound to its operation and physical attempt,
+so it cannot touch a successor, and a row it never reached still says its
+recorder is open, which is the crash case above. Store latency beyond the
+interval can make the datum trail by more than `L`; that only ever errs
+towards refusing, never towards granting.
+
 Claude Code is the exception. Its window is measured by its own structured
 events, which belong to one physical process, so each new physical Claude
 attempt — after a restart too — gets the full window. What stays cumulative
@@ -231,6 +262,44 @@ attempt, status falls back to the journal and says so: `progress (journal)`,
 `journal`). The lease heartbeat is not renewed yet (#180), so it may read as
 the acquisition time for a healthy attempt's whole life; that alone is not
 evidence the attempt is dead.
+
+The live row trails the process by less than half the window, and only while
+newer progress is waiting to be written. Silence of half the window or more is
+therefore never an artefact of that lag.
+
+While a structured Claude tool call is open, the inactivity kill is suspended,
+and status says so instead of printing silence against a limit the watch is not
+applying. The absolute deadline still bounds the attempt and stays on its own
+line:
+
+```text
+progress   last 2026-09-18T09:14:02Z inactivity suspended — structured tool open since 2026-09-18T09:14:02Z (limit 10m0s resumes when it closes)
+deadline   2026-09-18T09:44:02Z (attempt_wall)
+```
+
+JSON carries `operation.inactivity_suspension` (`active` or `unverified`),
+`operation.inactivity_suspended_since`, `operation.deadline` and
+`operation.deadline_bound`. The suspension is written when the tool opens and
+cleared when the tool result, a new main-thread turn or the final result closes
+it, and whenever the attempt ends. `tool_progress` heartbeats neither open nor
+close it.
+
+A suspension is a claim about one process, so status reports it as active only
+while that process still owns the attempt: the row is on the suspension's
+attempt, its lease is still held by the owner that recorded it, and that owner
+is not provably dead by the same lock evidence a takeover uses (the lease
+heartbeat cannot say, see above). A controller that crashed with a tool open
+therefore stops being reported as suspended at once, and its silence is shown
+as silence. When the evidence cannot decide, status prints the silence line and
+marks the record `unverified` rather than claiming the suspension:
+
+```text
+progress   last 2026-09-18T09:14:02Z silent 12m3s inactivity limit 10m0s
+suspension unverified — a structured tool was recorded open since 2026-09-18T09:14:02Z, but the owning controller's liveness cannot be established
+```
+
+No takeover, reclaim, new attempt or settlement inherits it, and the watchdog
+never reads it: the kill is governed by the live process's own stream.
 
 These answer different questions and were the same number until a live run
 showed what that costs: a pull request reached its goal in eight minutes, waited

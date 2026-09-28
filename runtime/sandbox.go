@@ -185,9 +185,10 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	// caller reads context.Cause several frames up, and a natural exit that
 	// raced an expiring timer would otherwise be classified as a stall.
 	//
-	// It also guarantees nothing is still writing into the buffers read below.
+	// It also guarantees nothing is still writing into the buffers read below,
+	// and it closes the durable progress recorder: the process's last
+	// observation is written, waiting on the store only boundedly (#352).
 	stopWatch()
-	stream.detach()
 	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
 	// Read after the run: Start happens inside, and a process that never
 	// started truthfully reports no pid.

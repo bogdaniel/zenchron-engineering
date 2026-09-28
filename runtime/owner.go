@@ -60,28 +60,32 @@ func NewLockOwnerLiveness(stateDir string) ProcessOwnerLiveness {
 }
 
 func (l ProcessOwnerLiveness) Alive(owner string) bool {
+	alive, decided := l.decide(owner)
+	return alive || !decided
+}
+
+// decide is Alive with its uncertainty kept apart: decided is false when the
+// evidence cannot say either way, which Alive reports as alive and status
+// reports as unverified (#352).
+func (l ProcessOwnerLiveness) decide(owner string) (alive, decided bool) {
 	host, pid, token, ok := parseOwner(owner)
 	if !ok {
-		return true
+		return false, false
 	}
 	if host != l.Host {
 		// Another host's process cannot be observed from here, and a lock file
 		// visible on a shared filesystem says nothing about that host either.
-		return true
+		return false, false
 	}
 	if l.StateDir != "" {
-		held, decided := ownerLockHeld(l.StateDir, owner)
-		if !decided {
-			return true
-		}
-		return held
+		return ownerLockHeld(l.StateDir, owner)
 	}
 	if current, ok := processStartToken(pid); ok {
 		// A different start token means the PID was recycled: the recorded
 		// owner is provably gone.
-		return token == "" || current == token
+		return token == "" || current == token, true
 	}
-	return processExists(pid)
+	return processExists(pid), true
 }
 
 func parseOwner(owner string) (host string, pid int, token string, ok bool) {
