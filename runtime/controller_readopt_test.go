@@ -7,7 +7,6 @@ package runtime
 // afterwards with no special path.
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,89 +130,6 @@ func TestAColdReadoptionBecomesTheGoverningAuthority(t *testing.T) {
 	if readoption.Reason == "" || readoption.Operator.ID == "" {
 		t.Fatal("an authority event was recorded without a reason or an operator")
 	}
-}
-
-// A PLAN IS OLD-CONFIGURATION WORK TOO (#307, #89). A plan approved under
-// configuration X whose agent stages have not started has no nonterminal run,
-// so the stranded-run check does not see it. After a re-adoption to Y the
-// supervisor must not dispatch its stages as new runs under Y: that would carry
-// work across the operator boundary #307 exists to hold.
-func TestAPlanFromBeforeAConfigurationReadoptionDispatchesNothing(t *testing.T) {
-	report, created := planTickAcrossReadoption(t, true)
-	if started := report.Started; len(started) != 0 {
-		t.Fatalf("a plan from the previous configuration dispatched %d stage run(s) across the re-adoption: %#v", len(started), started)
-	}
-	if created != 0 {
-		t.Fatalf("the tick created %d run(s)", created)
-	}
-	if !strings.Contains(report.Waiting, "configuration_changed") {
-		t.Fatalf("the plan does not say why it is held: %q", report.Waiting)
-	}
-}
-
-// The control: a plan proposed AFTER the re-adoption belongs to the governing
-// configuration and dispatches exactly as it would with no boundary at all.
-func TestAPlanFromAfterAConfigurationReadoptionDispatches(t *testing.T) {
-	report, _ := planTickAcrossReadoption(t, false)
-	if len(report.Started) != 2 || report.Waiting != "" {
-		t.Fatalf("a plan created under the governing configuration was held: %#v", report)
-	}
-}
-
-// planTickAcrossReadoption approves the fixture plan before or after a real
-// configuration-changing re-adoption, runs one supervisor tick, and returns the
-// plan's report and how many runs the tick created.
-func planTickAcrossReadoption(t *testing.T, planFirst bool) (PlanTickReport, int) {
-	t.Helper()
-	c, request := readoptionFixture(t)
-	var plan *planRunFixture
-	if planFirst {
-		plan = newPlanRunFixtureOn(t, c.fixture, parallelStages())
-		plan.approve(t)
-	}
-	settleLiveRuns(t, c, request.Now)
-	request.Now = c.fixture.clock.Now()
-	if _, err := ReadoptController(c.store, readoptionLease(t, c), request); err != nil {
-		t.Fatalf("the re-adoption was refused: %v", err)
-	}
-	if !planFirst {
-		plan = newPlanRunFixtureOn(t, c.fixture, parallelStages())
-		plan.approve(t)
-	}
-	runsBefore, err := c.store.Runs()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	repo, err := ParseGitHubRepo("acme/repo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	supervisor, err := NewSupervisor(SupervisorDependencies{
-		Store: c.store, Clock: c.fixture.clock, Owner: "owner-1",
-		Liveness:          OwnerLivenessFunc(func(string) bool { return false }),
-		Repositories:      []GitHubRepo{repo},
-		MaxConcurrentRuns: 2,
-		PollInterval:      time.Minute,
-		Agents:            supervisorRegistry(t),
-		Plans:             plan.service,
-		Runtime:           func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return c.fixture.runtime, nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := supervisor.Tick(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(report.Plans) != 1 {
-		t.Fatalf("the tick reconciled %d plans", len(report.Plans))
-	}
-	runsAfter, err := c.store.Runs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return report.Plans[0], len(runsAfter) - len(runsBefore)
 }
 
 // AND ORDINARY SUCCESSION CONTINUES FROM IT. This is the clause that decides

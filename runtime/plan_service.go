@@ -56,6 +56,25 @@ type PlanService struct {
 	// Envelope is the OPERATOR's aggregate ceiling. A plan may be tighter and
 	// can never be wider, and only this path can raise it.
 	Envelope domain.PlanBudgetEnvelope
+	// Config is the controller-effective configuration this process runs
+	// under. A plan records it when first claimed, and a plan recorded under
+	// another one is held rather than revised, approved or dispatched (#307).
+	Config ConfigDigest
+}
+
+// RefuseConfigurationHold refuses work on a plan that belongs to another
+// controller-effective configuration. It is checked before anything is spent:
+// a revision would otherwise pay for a planning invocation on a plan that can
+// never dispatch.
+func (s PlanService) RefuseConfigurationHold(planID string) error {
+	held, err := planConfigurationHold(s.Store, planID, s.Config)
+	if err != nil {
+		return err
+	}
+	if held != "" {
+		return &PlanRefusedError{PlanID: planID, Detail: held}
+	}
+	return nil
 }
 
 func (s PlanService) now() time.Time {
@@ -186,6 +205,9 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	if s.Store == nil {
 		return domain.EngineeringPlan{}, &PlanRefusedError{Detail: "a durable store is required"}
 	}
+	if err := s.RefuseConfigurationHold(input.PlanID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	existing, found, err := s.Store.Plan(input.PlanID)
 	if err != nil {
 		return domain.EngineeringPlan{}, err
@@ -294,6 +316,11 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 			}
 		}
 	}
+	// The configuration this plan belongs to. First binding wins, so this is
+	// idempotent on every revision and repairs a crash between claim and bind.
+	if err := s.Store.BindPlanConfig(plan.ID, s.Config); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	// ClaimPlan writes the first revision with the plan row, in one
 	// transaction, so a first proposal's PutPlanRevision is a no-op by
 	// construction: the claim IS the creation.
@@ -381,6 +408,9 @@ func unstarted(assignments []domain.AgentAssignment, snapshot PlanSnapshot) []do
 // assignments the registry happened to resolve at decide time. Naming it is
 // what makes the approval a decision about work the operator actually read.
 func (s PlanService) Approve(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
+	if err := s.RefuseConfigurationHold(planID); err != nil {
+		return PlanSnapshot{}, err
+	}
 	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanApproved)
 }
 
@@ -1401,6 +1431,9 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 		return "", &PlanRefusedError{PlanID: input.PlanID, Detail: "a plan attempt is bound to a repository"}
 	}
 	if _, err := s.Store.ClaimPlanAttempt(input.PlanID, repository, s.now()); err != nil {
+		return "", err
+	}
+	if err := s.Store.BindPlanConfig(input.PlanID, s.Config); err != nil {
 		return "", err
 	}
 	// The identity answers the SOURCE, whether or not it ever reached a plan.

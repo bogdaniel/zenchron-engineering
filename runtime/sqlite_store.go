@@ -339,6 +339,10 @@ CREATE INDEX run_operations_active ON run_operations(run_id, created_unix_nano, 
 WHERE json_extract(document, '$.state') IN ('leased', 'running');
 CREATE INDEX runs_active ON runs(created_unix_nano, id)
 WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled');
+`, `
+-- The controller-effective configuration a plan was first claimed under (#307).
+-- Empty for plans that predate it; see planConfigurationHold.
+ALTER TABLE plans ADD COLUMN config_digest TEXT NOT NULL DEFAULT '';
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

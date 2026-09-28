@@ -258,17 +258,28 @@ func (s *SQLiteOperationStore) PlanRevision(id string, revision int) (domain.Eng
 	return plan, err == nil, err
 }
 
-// planCreatedAt is when a plan was claimed.
-func (s *SQLiteOperationStore) planCreatedAt(id string) (time.Time, bool, error) {
-	var nanos int64
-	err := s.db.QueryRow(`SELECT created_unix_nano FROM plans WHERE id = ?`, id).Scan(&nanos)
-	if err == sql.ErrNoRows {
-		return time.Time{}, false, nil
-	}
+// BindPlanConfig records the controller-effective configuration a plan was
+// first claimed under. The first binding wins and is never rewritten: a plan
+// proposed under one configuration does not become another's by being revised
+// under it.
+func (s *SQLiteOperationStore) BindPlanConfig(planID string, config ConfigDigest) error {
+	digest, err := Digest(config)
 	if err != nil {
-		return time.Time{}, false, err
+		return err
 	}
-	return time.Unix(0, nanos).UTC(), true, nil
+	_, err = s.db.Exec(`UPDATE plans SET config_digest = ? WHERE id = ? AND config_digest = ''`, digest, planID)
+	return err
+}
+
+// planConfig is the configuration digest a plan recorded, empty when it
+// predates the record, and whether the plan exists at all.
+func (s *SQLiteOperationStore) planConfig(planID string) (string, bool, error) {
+	var digest string
+	err := s.db.QueryRow(`SELECT config_digest FROM plans WHERE id = ?`, planID).Scan(&digest)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return digest, err == nil, err
 }
 
 // Plans lists every plan at its highest stored revision, oldest first.

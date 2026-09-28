@@ -405,6 +405,7 @@ func (c *composition) planService() (runtime.PlanService, error) {
 	return runtime.PlanService{
 		Store: c.store, Clock: runtime.RealClock{}, Registry: registry,
 		Agents: agents, DefaultAgent: c.agents.Default(), Envelope: c.config.PlanEnvelope(),
+		Config: c.config.Digest,
 	}, nil
 }
 

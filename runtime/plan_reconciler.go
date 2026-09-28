@@ -114,10 +114,10 @@ func (r PlanReconciler) now() time.Time {
 func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickReport, error) {
 	report := PlanTickReport{PlanID: planID}
 	// OLD-CONFIGURATION WORK IS NOT CARRIED ACROSS A RE-ADOPTION (#307). A run
-	// records its controller and parks as controller_changed; a plan records
-	// neither, so before anything is settled, invoked or started the plan is
-	// placed on its side of the boundary.
-	if held, err := planPredatesConfigurationReadoption(r.Store, planID); err != nil || held != "" {
+	// records its controller and parks as controller_changed; a plan is checked
+	// against the configuration it recorded before anything is settled, invoked
+	// or started.
+	if held, err := planConfigurationHold(r.Store, planID, r.Service.Config); err != nil || held != "" {
 		report.Waiting = held
 		return report, err
 	}
@@ -2121,38 +2121,46 @@ func planDependenciesSatisfied(stage domain.PlanStage, snapshot PlanSnapshot) (b
 	return true, ""
 }
 
-// planPredatesConfigurationReadoption names the re-adoption a plan was created
-// before, when that re-adoption changed the controller-effective configuration
-// or had no previous authority to compare against. Such a plan was proposed,
-// resolved and budgeted under a configuration that no longer governs, and its
-// remaining stages would otherwise become new runs under the current one. It is
-// held, not rewritten: an operator proposes it again under this configuration.
+// planConfigurationHold says why a plan belongs to a controller-effective
+// configuration other than current, or "" when it does not (or does not exist).
+// Such a plan was proposed, resolved and budgeted under a configuration that no
+// longer governs, and its remaining stages would otherwise become new runs under
+// this one - carried across the #307 boundary without anyone sanctioning it.
+// It is held, not rewritten.
 //
-// Ordinary succession cannot change the configuration, so re-adoptions are the
-// only configuration boundaries there are.
-//
-// ponytail: plans record no controller binding, so creation time against the
-// cold re-adoption's time is the boundary; a durable plan binding replaces this
-// if plans ever need to survive a re-adoption (#89 R1/R3).
-func planPredatesConfigurationReadoption(store *SQLiteOperationStore, planID string) (string, error) {
-	created, found, err := store.planCreatedAt(planID)
+// A plan records the digest it was first claimed under. A plan from before that
+// record is judged by its identity instead: PlanID is derived from the
+// configuration, so a legacy plan whose id is not the one this configuration
+// derives for its source was not proposed under it. A legacy plan with any
+// other id is held too - fail closed. The way out is the same in every case:
+// `autonomy plan issue N` under the current configuration derives a different
+// id, so it is a new plan rather than this one.
+func planConfigurationHold(store *SQLiteOperationStore, planID string, current ConfigDigest) (string, error) {
+	recorded, found, err := store.planConfig(planID)
 	if err != nil || !found {
 		return "", err
 	}
-	readoptions, err := store.ControllerReadoptions()
+	held := fmt.Sprintf("configuration_changed: plan %s was proposed under a different controller-effective configuration; "+
+		"it is not carried across that boundary - propose the issue again under the current configuration", planID)
+	if recorded != "" {
+		want, err := Digest(current)
+		if err != nil || recorded == want {
+			return "", err
+		}
+		return held, nil
+	}
+	repository, issue, _, err := store.PlanSource(planID)
 	if err != nil {
 		return "", err
 	}
-	for _, readoption := range readoptions {
-		if readoption.Previous != nil && readoption.PreviousConfig == readoption.Config {
-			continue
-		}
-		if created.Before(readoption.RecordedAt) {
-			return fmt.Sprintf("configuration_changed: plan %s was created before re-adoption %s changed the controller-effective configuration; "+
-				"it is not carried across that boundary - propose it again under the current configuration", planID, readoption.ID), nil
-		}
+	if issue <= 0 {
+		return held, nil
 	}
-	return "", nil
+	derived, err := derivePlanID(repository, issue, current)
+	if err != nil || derived == planID {
+		return "", err
+	}
+	return held, nil
 }
 
 // terminalStageState is a stage this plan will not touch again.
