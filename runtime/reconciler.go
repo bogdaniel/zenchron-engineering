@@ -604,12 +604,17 @@ func (s *runState) pristineCandidateHead() string {
 	return s.pinnedBase()
 }
 
-// baseRevision is the base the candidate currently sits on.
+// baseRevision is the base the candidate currently sits on: the recorded base
+// once a base.integrate has moved it, otherwise the pristine head the
+// workspace started from - which, for a stage consuming an unpublished
+// upstream candidate, is the transferred candidate rather than the trusted
+// base the clone itself resolved. Falling back to pinnedBase here would claim
+// the workspace sits on a commit createCandidate never checked it out to.
 func (s *runState) baseRevision() string {
 	if s.projection.BaseRevision != "" {
 		return s.projection.BaseRevision
 	}
-	return s.pinnedBase()
+	return s.pristineCandidateHead()
 }
 
 func (s *runState) contractRevision() string { return s.projection.Contract.Revision }
