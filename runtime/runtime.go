@@ -452,7 +452,8 @@ type RunOperation struct {
 	// wrote to this row and never closed: its process did not end under an
 	// observing controller. LastProgressAt may then trail the last progress
 	// that process actually made by up to progressRecorderLag, and only a
-	// dispatch that inherits the datum reads it (#352).
+	// dispatch that inherits the datum reads it, as the crash-recovery
+	// uncertainty allowance (#352).
 	ProgressRecorderOpen bool `json:"progress_recorder_open,omitempty"`
 	// InactivitySuspension is set while a structured main-thread tool of the
 	// attempt it names holds the inactivity kill suspended (#322, #352). It is

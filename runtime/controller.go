@@ -1301,7 +1301,8 @@ func (r *EngineeringRuntime) liveOperationRow(op RunOperation) (RunOperation, bo
 // process still owns the attempt: the row is on the suspension's attempt, the
 // lease is still held by the owner that recorded it, and that owner is not
 // provably dead. The lease heartbeat cannot say so (#180: nothing renews it),
-// so the owner's liveness is read from the same evidence a takeover uses.
+// so the owner's liveness is read from the same lock evidence a takeover uses,
+// through a probe that only reads: status creates no lock file (#326).
 // Provably dead - a crashed controller whose row nothing has reclaimed yet -
 // is no suspension at all: nothing is supervising that attempt, and its
 // silence is reported as silence. Evidence that cannot decide is "unverified",
@@ -1313,10 +1314,10 @@ func (r *EngineeringRuntime) inactivitySuspension(row RunOperation) string {
 		return ""
 	}
 	liveness := r.scheduler.defaults().Liveness
-	if decider, ok := liveness.(interface {
-		decide(string) (bool, bool)
+	if observer, ok := liveness.(interface {
+		observe(string) (bool, bool)
 	}); ok {
-		switch alive, decided := decider.decide(s.Owner); {
+		switch alive, decided := observer.observe(s.Owner); {
 		case !decided:
 			return "unverified"
 		case !alive:

@@ -223,17 +223,21 @@ type ProviderProgress struct {
 // a write storm on the operation row.
 func progressRecordInterval(limit time.Duration) time.Duration { return limit / 4 }
 
-// progressRecorderLag is L, the most LastProgressAt can trail the last
-// progress a process whose recorder never closed actually made. It is what a
-// crash can hide, so it is the most ProviderInactivityRemaining ever gives back.
+// progressRecorderLag is L, the CRASH-RECOVERY UNCERTAINTY ALLOWANCE: the most
+// LastProgressAt can trail the last progress of a process whose recorder never
+// closed, so the most a crash can hide and the most ProviderInactivityRemaining
+// ever gives back. It is not an inactivity window. A live invocation is always
+// supervised at the configured limit, and a settled attempt carries an exact
+// datum; L applies only when recovering an attempt whose controller was lost.
 //
-// It is TWO intervals, not one, and no recorder that keeps the write rate and
-// eventually persists the newest observation at its true instant can do
-// better: progress observed just after a write is written one interval later
-// carrying its own, older instant, and progress observed just before the next
-// write is due is lost by a crash - almost two intervals apart. Store write
-// latency and timer delay add to it, are not bounded here, and only ever push
-// the error towards refusing, never towards granting.
+// It is TWO intervals, not one (I = limit/4, so L = 2I = limit/2), and no
+// recorder that keeps the write rate and eventually persists the newest
+// observation at its true instant can do better: progress observed just after
+// a write is written one interval later carrying its own, older instant, and
+// progress observed just before the next write is due is lost by a crash -
+// almost two intervals apart. Store write latency and timer delay add to it,
+// are not bounded here, and only ever push the error towards refusing, never
+// towards granting.
 func progressRecorderLag(limit time.Duration) time.Duration {
 	return 2 * progressRecordInterval(limit)
 }
@@ -565,19 +569,25 @@ func (w *inactivityWatch) watch() {
 //
 // THE CRASH GAP (#352). Durable progress is coalesced, so a controller that
 // died with an observation still pending left LastProgressAt behind the truth,
-// by less than L = progressRecorderLag (half the window), and only when
-// ProgressRecorderOpen says the dead process's recorder never closed. The
-// silence charged is then the recorded silence less L, floored at zero. So a
-// successor is never refused on the recorder's own lag, and is granted at most
-// L beyond what the recorded silence leaves - never a fresh window. A closed
-// recorder carries an exact datum and gets no allowance.
+// by less than L = progressRecorderLag, and only when ProgressRecorderOpen says
+// the dead process's recorder never closed. Recovering such an attempt charges
+// the recorded silence less L, floored at zero: the crash-recovery uncertainty
+// allowance. So a successor is never refused on the recorder's own lag, and is
+// granted at most L beyond what the recorded silence leaves - never a fresh
+// window, and never a longer window than the limit: the successor's own
+// process is supervised at no more than the limit, like every other. A closed
+// recorder - the process ended under an observing controller, including a
+// graceful shutdown or drain, which settle the operation - carries an exact
+// datum and gets no allowance.
 //
-// The allowance cannot ACCUMULATE across repeated crashes. It is a pure
-// function of the durable datum, which only a real observed write moves - a
-// restart never does: StartWithin keeps an abandoned attempt's LastProgressAt
-// and flag as they are. Every successor dispatched against the same datum
-// therefore gets the same absolute bound, LastProgressAt + limit + L, however
-// many times the controller dies before it.
+// The recovery bound is LastProgressAt + limit + L, and it is subordinate to
+// every absolute bound: the attempt wall, the run's active work, the attempt
+// and continuation ceilings and cancellation are derived exactly as without
+// it. It cannot ACCUMULATE across repeated crashes. It is a pure function of
+// the durable datum, which only a real observed write moves - a restart never
+// does: StartWithin keeps an abandoned attempt's LastProgressAt and flag as
+// they are. Every successor dispatched against the same datum therefore gets
+// the same recovery bound, however many times the controller dies before it.
 func ProviderInactivityRemaining(limit time.Duration, op RunOperation, now time.Time) time.Duration {
 	if limit <= 0 {
 		return 0

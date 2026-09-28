@@ -198,20 +198,41 @@ waits and is written at the next due point with the instant it was observed,
 and a process that ends under a running controller writes its last observation
 as it closes. So the datum is exact whenever the process was seen to end.
 
-A controller that dies abruptly can lose the one observation still waiting. The
-row then records that its recorder never closed, and only then does the
-successor's window allow for it, by a fixed `L` of half the window (300s for
-the default 600s): the silence charged is the recorded silence less `L`,
-floored at zero. `L` is two write intervals, not one, because an observation
-made just after a write is written one interval later carrying its own, older
-instant, and one made just before the next write is due is the one a crash
-loses. So a successor is never refused on the recorder's own lag, and it is
-never granted more than `L` beyond what the recorded silence leaves, nor a
-fresh window, nor any execution time: the attempt deadline and the run's active
-work are derived exactly as before. The allowance does not accumulate across
-repeated restarts, because only a real observed write moves the datum and a
-restart never does: every successor dispatched against the same datum gets the
-same absolute bound, the last recorded progress plus the window plus `L`.
+A controller that dies abruptly can lose the one observation still waiting.
+The row then records that its recorder never closed, and only then does
+recovering that attempt allow for it, by a fixed crash-recovery uncertainty
+allowance `L` of half the window (300s for the default 600s): the silence
+charged is the recorded silence less `L`, floored at zero. The implementation
+and its review established a worst-case durable-progress lag approaching two
+recorder intervals; with the interval `I` at a quarter of the window, the
+evidence-backed bound is `L = 2I`, half the window. That is because an
+observation made just after a write is written one interval later carrying its
+own, older instant, and one made just before the next write is due is the one a
+crash loses.
+
+`L` is not an inactivity window. Every live invocation is supervised at the
+configured limit and is killed with `provider_no_progress` after that much
+silence, not a moment later; a successor's window is never longer than the
+limit either. `L` only decides how much of an abandoned attempt's recorded
+silence a recovery charges. So a successor is never refused on the recorder's
+own lag, and never granted more than `L` beyond what the recorded silence
+leaves, nor a fresh window. The recovery bound is the last recorded progress
+plus the window plus `L`, and it is subordinate to every absolute bound: the
+attempt deadline, the run's active work, the attempt and continuation ceilings
+and cancellation are derived exactly as without it. It does not accumulate
+across repeated restarts, because only a real observed write moves the datum
+and a restart never does: every successor dispatched against the same datum
+gets the same recovery bound.
+
+Which restarts get the allowance is decided by durable state alone. A graceful
+`shutdown` cancels the in-flight invocation, which then returns
+`controller_shutdown` and is journalled and settled like any other outcome; a
+`drain` lets it finish and settle. A settled attempt's successor starts from a
+fresh datum, as every settled retry does, so neither gets an allowance. Only an
+attempt nothing settled - the controller was killed, crashed or lost power
+before it journalled the outcome, or a graceful shutdown's own unwinding was
+cut short the same way - is recovered conservatively with the allowance, and
+only if its recorder had not closed.
 
 A durable write that never returns does not hold the invocation: once the
 process ends, the recorder waits for its closing write for at most one write
@@ -219,7 +240,7 @@ interval, and not at all once the invocation's context has ended (cancelled,
 the deadline passed, or the inactivity kill). A write still in flight then lands
 late or never. Either way it is bound to its operation and physical attempt,
 so it cannot touch a successor, and a row it never reached still says its
-recorder is open, which is the crash case above. Store latency beyond the
+recorder is open, which is the crash-recovery case above. Store latency beyond the
 interval can make the datum trail by more than `L`; that only ever errs
 towards refusing, never towards granting.
 

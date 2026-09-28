@@ -10,7 +10,12 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
 	goruntime "runtime"
 	"strings"
 	"sync"
@@ -894,4 +899,173 @@ func TestAStuckDurableWriteCannotHoldTheInvocation(t *testing.T) {
 			t.Fatalf("provenance %+v, write blocked %t", result.Invocation, blocked.Load())
 		}
 	})
+}
+
+// stateTree lists every path under dir, so a test can prove nothing was
+// created. A missing dir is an empty tree.
+func stateTree(t *testing.T, dir string) []string {
+	t.Helper()
+	var paths []string
+	err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		paths = append(paths, path)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return paths
+}
+
+// B (read-only status, #326). Status decides a suspension's liveness through
+// the REAL lock probe, and that probe only reads: a dead owner whose lock file
+// is gone, or a state dir with no lock directory at all, is decided dead
+// without anything being created, and a live owner's held lock still reads as
+// active.
+func TestStatusProbesSuspensionLivenessWithoutWritingState(t *testing.T) {
+	owner := ownerHost() + "/" + fmt.Sprint(os.Getpid()) + "/status-probe"
+	duringInvocation(t, func(f *phase8Fixture, runID string, journal RunOperation) {
+		restoreRow := rewriteRow(t, f, journal.ID, func(op *RunOperation) {
+			op.Lease.Owner = owner
+			op.InactivitySuspension = &InactivitySuspension{Since: f.clock.Now(), AttemptIdentity: op.AttemptIdentity, Owner: owner}
+		})
+		defer restoreRow()
+		previous := f.runtime.scheduler.Liveness
+		defer func() { f.runtime.scheduler.Liveness = previous }()
+
+		for name, prepare := range map[string]func(stateDir string){
+			"missing lock dir": func(string) {},
+			"dead owner": func(stateDir string) {
+				if err := os.MkdirAll(filepath.Join(stateDir, "locks", "runtime"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		} {
+			stateDir := t.TempDir()
+			prepare(stateDir)
+			f.runtime.scheduler.Liveness = NewLockOwnerLiveness(stateDir)
+			before := stateTree(t, stateDir)
+			if got := liveStatus(t, f, runID); got.InactivitySuspension != "" {
+				t.Fatalf("%s: a dead owner's suspension is %q", name, got.InactivitySuspension)
+			}
+			if after := stateTree(t, stateDir); !reflect.DeepEqual(before, after) {
+				t.Fatalf("%s: status wrote state: before %v after %v", name, before, after)
+			}
+		}
+
+		stateDir := t.TempDir()
+		lock, err := AcquireControllerInstanceLock(stateDir, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lock.Release() }()
+		f.runtime.scheduler.Liveness = NewLockOwnerLiveness(stateDir)
+		before := stateTree(t, stateDir)
+		if got := liveStatus(t, f, runID); got.InactivitySuspension != "active" {
+			t.Fatalf("a live owner's held lock read as %q", got.InactivitySuspension)
+		}
+		if after := stateTree(t, stateDir); !reflect.DeepEqual(before, after) {
+			t.Fatalf("status wrote state: before %v after %v", before, after)
+		}
+	})
+}
+
+// NORMAL vs RECOVERY. L is a crash-recovery uncertainty allowance, never an
+// inactivity window. A live invocation under an observing controller is killed
+// for silence at the configured limit - not at limit plus L - and the attempt
+// it leaves, ended and then settled normally, carries a closed recorder and an
+// exact datum: nothing it hands on includes the allowance.
+func TestALiveInvocationGetsNoRecoveryAllowance(t *testing.T) {
+	const limit = 1200 * time.Millisecond
+	L := progressRecorderLag(limit)
+	provider, request, _ := inactivityFixture(t, "echo started\nsleep 30\n")
+	request.Budgets.InactivityLimit = limit
+	scheduler := liveScheduler()
+	op := plannedExecution(t, scheduler, time.Hour)
+	log := &progressLog{}
+	ctx := withProviderProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
+	started := time.Now()
+	result, _ := provider.Execute(ctx, request)
+	elapsed := time.Since(started)
+	if result.Failure == nil || result.Failure.Classification != FailureProviderNoProgress {
+		t.Fatalf("failure %#v, want provider_no_progress", result.Failure)
+	}
+	if elapsed < limit || elapsed >= limit+L/2 {
+		t.Fatalf("killed after %s: a live invocation's window is the %s limit, not the limit plus the %s allowance", elapsed, limit, L)
+	}
+	if result.Invocation == nil || result.Invocation.InactivityLimit != limit {
+		t.Fatalf("provenance %+v, want the %s limit", result.Invocation, limit)
+	}
+
+	// The process ended under this controller: its recorder closed.
+	waitForClosingWrite(t, log)
+	ended := row(t, scheduler, op.ID)
+	if ended.ProgressRecorderOpen || ended.LastProgressAt == nil {
+		t.Fatalf("an observed end left the recorder open: %+v", ended)
+	}
+	codex := CLIAgentProvider{Agent: ResolvedAgent{Kind: AgentKindCodexCLI}}
+	if got := dispatchInactivityWindow(limit, ended, ended.LastProgressAt.Add(limit), codex); got != 0 {
+		t.Fatalf("a closed recorder's datum left %s after a full window of silence: an allowance applied", got)
+	}
+
+	// Settled normally, the retry is a fresh attempt with a fresh datum.
+	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.Next(op.RunID); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := scheduler.Start(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.ProgressRecorderOpen || !retry.LastProgressAt.Equal(*retry.StartedAt) {
+		t.Fatalf("a settled retry inherited recovery state: %+v", retry)
+	}
+	if got := dispatchInactivityWindow(limit, retry, *retry.StartedAt, codex); got != limit {
+		t.Fatalf("a settled retry got %s, want exactly the %s limit", got, limit)
+	}
+}
+
+// Graceful shutdown resolves the attempt: the cancelled invocation returns
+// controller_shutdown, which the reconciler journals and SETTLES like any
+// other outcome. So even when the recorder's closing write never landed - the
+// process context had ended, so closing did not wait for it - the settled row
+// carries no open recorder and no live execution, and a restart starts the
+// next attempt fresh: no crash-recovery allowance after a graceful restart.
+func TestAGracefulShutdownLeavesNoRecoveryAllowance(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	var id string
+	fixture.provider.FakeExecutionProvider.Result = ExecutionResult{
+		ProviderID: "test-provider", Outcome: OperationCancelled,
+		Failure: &ProviderFailure{Classification: FailureControllerShutdown},
+	}
+	fixture.provider.mutate = func(string) error {
+		journal, ok := fixture.state(runID).currentOperation()
+		if !ok || journal.State != Running {
+			t.Fatalf("no running operation: %#v", journal)
+		}
+		id = journal.ID
+		recorded, err := fixture.runtime.scheduler.RecordProviderProgress(journal.ID, journal.AttemptIdentity,
+			ProviderProgress{Key: "1:3", Suspended: true})
+		if err != nil || !recorded.ProgressRecorderOpen {
+			t.Fatalf("precondition: an open recorder on the row: %+v %v", recorded, err)
+		}
+		return nil
+	}
+	fixture.reconcile(runID)
+	if id == "" {
+		t.Fatal("the provider was never invoked")
+	}
+	settled, _, found, err := fixture.store.Operation(id)
+	if err != nil || !found {
+		t.Fatalf("row %s: %v", id, err)
+	}
+	if settled.State == Running || settled.State == Leased || settled.Lease != nil || settled.ActiveSince != nil ||
+		settled.ProgressRecorderOpen || settled.InactivitySuspension != nil {
+		t.Fatalf("a graceful shutdown left recovery state on the row: %+v", settled)
+	}
 }

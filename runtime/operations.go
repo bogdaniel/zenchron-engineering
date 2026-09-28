@@ -710,11 +710,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// has already been silent for its whole window. There is nothing left to
 	// spend, so nothing is started.
 	if inactivityLimit > 0 && inactivityRemaining <= 0 {
+		// The crash-recovery uncertainty allowance (#352) is part of the
+		// arithmetic when the abandoned attempt's recorder never closed, so the
+		// diagnostic names it: otherwise the silence printed can exceed the
+		// bound by up to L with nothing to say why it was not refused sooner.
+		allowance := ""
+		if operation.ProgressRecorderOpen {
+			allowance = fmt.Sprintf(" plus the %s crash-recovery uncertainty allowance for progress the lost controller may not have written",
+				progressRecorderLag(inactivityLimit))
+		}
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
 			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
-				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound before this invocation could start",
-					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit)),
+				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
+					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance)),
 		}}
 	}
 	// Observed progress is written back to the operation row, so "silent for"
