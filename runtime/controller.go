@@ -175,14 +175,17 @@ type RunBudgets struct {
 	// provider that is reasoning from one whose host lost its network an hour
 	// ago. A live subprocess is not evidence of progress.
 	//
-	// It is persisted with the run and narrows the configured bound exactly as
-	// WallLimit does, so a run created under a tighter window keeps it and a
-	// restart reconstructs the same bound rather than minting a fresh default.
+	// It is frozen with the run and read back exactly, like every member
+	// (runState.budgets): a later configuration neither widens nor narrows
+	// it, and a restart reconstructs the same bound rather than minting a
+	// fresh default.
 	//
-	// omitempty, and absent means no bound: a run persisted before this budget
-	// existed was never judged by it, and its identity is derived from its
-	// canonical document, so an added zero would re-identify every historical
-	// run. New runs always carry one - see RunBudgets.defaults.
+	// omitempty, because a run persisted before this budget existed has none
+	// and its identity is derived from its canonical document, so an added
+	// zero would re-identify every historical run. That absence is NOT "no
+	// bound": such a run takes the window its controller binding identifies
+	// (the ADR-0003 §5 legacy rule, see runState.budgets). New runs always
+	// carry one - see RunBudgets.defaults.
 	ProviderInactivityLimit time.Duration `json:"provider_inactivity_limit,omitempty"`
 	// AttemptWallLimit bounds ONE physical provider attempt (#328), and it is a
 	// different resource from WallLimit, the run's CUMULATIVE active-work
@@ -1142,6 +1145,9 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		return StatusReport{}, err
 	}
 	now := r.deps.Clock.Now()
+	budgets, unverifiable := state.reportedBudgets()
+	policy := state.runPolicy()
+	policy.Unverifiable = unverifiable
 	report := StatusReport{
 		SchemaVersion: SchemaVersion,
 		RunID:         state.run.ID,
@@ -1170,8 +1176,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,
 		Attempts:              state.projection.Attempts,
-		Budgets:               state.budgets(),
-		RunPolicy:             state.runPolicy(),
+		Budgets:               budgets,
+		RunPolicy:             policy,
 		StateSHA256:           state.snapshot.StateSHA256,
 		PublicationAuthority:  publicationAuthorityOf(state),
 		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,
@@ -1215,7 +1221,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
 			LastProgressAt:  op.LastProgressAt,
 			SilentFor:       ProviderSilence(op, now),
-			InactivityLimit: state.budgets().ProviderInactivityLimit,
+			InactivityLimit: budgets.ProviderInactivityLimit,
 		}
 		if op.State == Leased || op.State == Running {
 			status.ProgressSource = "journal"

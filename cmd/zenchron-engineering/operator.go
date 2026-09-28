@@ -709,7 +709,11 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	line("controller config", fmt.Sprintf("global=%s repository=%s (current process)",
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
 	budgets := view.Budgets
-	line("run policy", strings.TrimSpace(fmt.Sprintf("sha=%s source=%s", short(view.RunPolicy.SHA256), view.RunPolicy.Source)))
+	policy := fmt.Sprintf("sha=%s source=%s", short(view.RunPolicy.SHA256), view.RunPolicy.Source)
+	if len(view.RunPolicy.Unverifiable) > 0 {
+		policy += " unverifiable (controller changed): " + strings.Join(view.RunPolicy.Unverifiable, ",")
+	}
+	line("run policy", policy)
 	line("run budgets", fmt.Sprintf("wall=%s attempt_wall=%s lifecycle=%s inactivity=%s attempts=%d continuations=%d invocations=%d remediation=%d assurance=%d",
 		budgets.WallLimit, budgets.AttemptWallLimit, budgets.LifecycleDeadline, budgets.ProviderInactivityLimit,
 		budgets.MaxExecutionAttempts, budgets.MaxExecutionContinuations, budgets.MaxProviderInvocations,

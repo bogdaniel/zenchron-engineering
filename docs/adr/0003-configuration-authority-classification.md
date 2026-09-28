@@ -168,11 +168,11 @@ field declaration.
 | `supervisor.max_concurrent_runs`, `supervisor.poll_interval_seconds` (config.go:260-263) | Supervisor concurrency and poll cadence | S | supervisor start | SupervisorPolicyDigest. The plan clamp is frozen into the plan revision (P). | No. Scheduling only. The scheduler still enforces the ceiling durably. | As above. | This is the runtime's own operating bound (config.go:247-258). |
 | `plan.max_child_runs`, `plan.max_concurrency`, `plan.max_provider_invocations`, `plan.max_wall_seconds`, `plan.max_cost_micros` (config.go:275-288) | Aggregate plan ceiling | P | plan revision proposal (`plan.BudgetEnvelope`, `runtime/plan_service.go:245`) | Plan revision content digest (already exists) | No for approved revisions. A new revision re-resolves and needs re-approval. Consumed budget never resets. | Existing revisions already carry `budget_envelope`. | Already frozen and self-identifying. Moving it out of PlanID removes one #131 fork source. Moves in B3. |
 | `budgets.wall_limit_seconds` (config.go:390) | **Cumulative run active-work budget** (#83). Today it is also, implicitly, the physical-attempt deadline. | R | run creation | RunPolicyDigest | After migration, no. See §4. | See §4 and §5. | See §4. |
-| `budgets.lifecycle_deadline_seconds` (config.go:399) | Total calendar bound on a run | R | run creation | RunPolicyDigest | Today it is persisted but **read live** (reconciler.go:796). Target: no. | Runs with `run.Budgets` keep their persisted value. Runs with nil `run.Budgets` → absent (no deadline). | A per-run bound. Reading it live would let a config edit widen or shorten a live run. |
+| `budgets.lifecycle_deadline_seconds` (config.go:399) | Total calendar bound on a run | R | run creation | RunPolicyDigest | Today it is persisted but **read live** (reconciler.go:796). Target: no. | Runs with `run.Budgets` keep their persisted value. Runs with nil `run.Budgets` take the value their controller binding identifies. Under an identical digest, which is the only binding that reconciles them, that is the configured value. It is **not** "no deadline": absent would widen a run that was always judged by the configured deadline. See §5. | A per-run bound. Reading it live would let a config edit widen or shorten a live run. |
 | `budgets.max_execution_attempts` (config.go:400) | Same-binding retry budget (#54) | R | run creation. `operation.MaxAttempts` is frozen when the operation is planned (reconciler.go:1575). | RunPolicyDigest | Today `min(live, persisted)` (reconciler.go:923). Target: frozen exact. | Persisted value, else the legacy value identified by the controller binding. | A per-run retry authority. |
 | `budgets.max_execution_continuations` (config.go:418) | Continuation-binding budget (#54) | R | run creation | RunPolicyDigest | No. It is already frozen exactly (reconciler.go:1108-1119). | Already defined: nil → the persisted `max_execution_attempts`, else the configured value (reconciler.go:1100-1107). | Already meets condition 6. |
 | `budgets.max_remediation_attempts`, `budgets.max_assurance_attempts` (config.go:419-420) | Remediation and assurance retry budgets | R | run creation | RunPolicyDigest | Today persisted but **read live** (reconciler.go:944-953). Target: no. | Persisted value, else the legacy value. | Per-run retry authority. |
-| `budgets.provider_inactivity_seconds` (config.go:438) | The no-progress window of one invocation | A (value frozen at run creation, recorded per attempt) | run creation (ceiling) and attempt start (effective) | RunPolicyDigest and attempt provenance `inactivity_limit` (cli_agent.go:900, persisted by #327) | Today `min(live, persisted)` (reconciler.go:931). Planning invocations read it live (supervisor.go:913). Target: frozen exact. | Runs persisted before it existed have no window. That legacy meaning is already documented (controller.go:180-184). | Per-invocation bound, but its ceiling must not widen on restart (#322). |
+| `budgets.provider_inactivity_seconds` (config.go:438) | The no-progress window of one invocation | A (value frozen at run creation, recorded per attempt) | run creation (ceiling) and attempt start (effective) | RunPolicyDigest and attempt provenance `inactivity_limit` (cli_agent.go:900, persisted by #327) | Today `min(live, persisted)` (reconciler.go:931). Planning invocations read it live (supervisor.go:913). Target: frozen exact. | Runs persisted before it existed (pre-#238) take the window their controller binding identifies. Under an identical digest that is the configured window, which is the one the reconciler has always given them. It is **not** "no window": absent would widen them to the unbounded stall this budget exists to remove. See §5. | Per-invocation bound, but its ceiling must not widen on restart (#322). |
 | `budgets.attempt_wall_limit_seconds` | Physical provider-attempt wall bound (#328), distinct from the run active-work budget | A | run creation (effective limit, frozen into `run.Budgets`); attempt start (effective deadline, the durable operation `deadline` and `deadline_bound`) | A stated value: controller-effective until B3, then RunPolicyDigest. Absent: in no digest | No. Absent is derived per run at creation; a stated value reaches new runs only. | Runs without a frozen limit keep the operation-remainder rule (§4). | See §4. Implemented by #328. |
 | `watch.repositories`, `watch.label` (config.go:492-493) | Which repositories automation may touch, and what counts as consent | C | controller start | controller-effective digest, run ID, PlanID | Yes | None. Stays C. | Enrolment and consent are authority (config.go:488-490). |
 | `watch.poll_interval_seconds`, `watch.max_concurrent_runs` (config.go:494-498) | Watch cadence and concurrency | S | supervisor start | SupervisorPolicyDigest | No | As `storage`. | Same bounds as `supervisor.*`, combined stricter-wins (config.go:926-944). |
@@ -223,15 +223,28 @@ remains a prerequisite for B3.
 - **Run created before RunPolicy exists, with `run.Budgets` present.** Its
   RunPolicy is derived from `run.Budgets` and marked
   `source: legacy_run_budgets`. It is never claimed as a record made at creation.
-  Dimensions absent from `run.Budgets` keep their existing documented meanings:
-  continuations (reconciler.go:1100-1107), provider invocations (absent means
-  unbounded, reconciler.go:1088-1097), and inactivity (absent means no window,
-  controller.go:180-184). `lifecycle_deadline`, `max_remediation_attempts` and
-  `max_assurance_attempts` were persisted but never read back. They are read
-  from `run.Budgets`, because that is the value the run was created under.
+  Some dimensions have a documented meaning when absent from `run.Budgets`, and
+  keep it: continuations (the #54 rule, `runState.continuationLimit`), provider
+  invocations (absent means unbounded), lifecycle deadline (absent means none)
+  and attempt wall limit (absent means the pre-#328 operation rule). Any other
+  member the run never recorded (wall, execution, remediation and assurance
+  attempts, and the inactivity window, which is absent for pre-#238 runs) takes
+  **the value the run's controller binding identifies**. That is the
+  configured value, and it is correct only because it cannot be anything else:
+  such a run is reconciled solely by a controller with the identical binding,
+  and so the identical config digest. Any other controller parks it
+  `controller_changed` before planning, and #307 re-adopt refuses while it is
+  live. The fallback therefore reproduces exactly the value the run already
+  had, and never a wider one. Present members, including `lifecycle_deadline`,
+  `max_remediation_attempts` and `max_assurance_attempts` (persisted but never
+  read back before B1), are read from `run.Budgets` exactly.
 - **Run with nil `run.Budgets`.** The configuration that governed it is
   identified only by the config digest inside its controller binding, and the
-  file cannot be recovered from that. Such a run can be continued only by a
+  file cannot be recovered from that. Every member takes the binding value, by
+  the same rule and for the same reason as above. Status reports the source as
+  `legacy_controller_binding` and claims no RunPolicyDigest. Under a changed
+  controller, the binding value is unverifiable, and status says so instead of
+  presenting today's configuration as the run's. Such a run can be continued only by a
   controller with the identical legacy binding. Otherwise it is settled, as
   #307 requires today. #89 may classify it `compatible_with_migration` only when
   every dimension can be derived from durable run facts. Otherwise the result is
@@ -255,7 +268,12 @@ Seven items: six contradictions or gaps, and one confirmed agreement (7).
    assurance attempts are read live (reconciler.go:944-953). Planning invocations
    take the inactivity window live (supervisor.go:913) and the wall limit live
    (controller.go:472-483). This is safe only while every budget is
-   controller-effective. It is condition 6 of §2, and B1 fixes it.
+   controller-effective. It is condition 6 of §2. B1 fixes every run reader.
+   The planning reads move to **B3** (#345): no run exists for a planning
+   invocation, so there is no RunPolicy to freeze into, and both values are C
+   until B3. B3 must give that fallback a freeze point, for example the plan
+   revision, before `wall_limit_seconds` or `provider_inactivity_seconds` leaves
+   the controller-effective digest.
 2. **Status against requirement 8.** The run report's `Budgets` is the current
    process's configuration (controller.go:1096), not the run's. Its
    `ControllerIdentity.ConfigDigest` is the current digest (controller.go:1077),
@@ -328,8 +346,10 @@ controller-effective digest before its destination satisfies all of §2.
 - **B1: frozen RunPolicy with a RunPolicyDigest.** Persist the complete resolved
   run policy at creation, together with the repository tightening that produced
   it. Record its digest in the genesis event. Make every reader use the frozen
-  value (fix reconciler.go:796, 915-953, supervisor.go:913, controller.go:472-483).
-  Report it in status (controller.go:1096). Implement the §5 legacy derivation.
+  value (fix reconciler.go:796, 915-953). Report it in status
+  (controller.go:1096). Implement the §5 legacy derivation. The planning
+  invocation reads (supervisor.go:913, controller.go:472-483) are **not** B1:
+  no run exists, and they are C until B3 (see §6.1 and B3).
   Nothing leaves the digest yet. B1 is a prerequisite for B3. It is **not** a
   prerequisite for #328.
 - **B2: #328.** Add the attempt wall limit and the successor admissibility rule
@@ -350,6 +370,11 @@ controller-effective digest before its destination satisfies all of §2.
   evidence keeps its recorded producer revision. B3 also covers the adoption
   guard, the handoff recovery owner, the `runs.controller_sha256` column, the
   plan-cancel owner, the re-adopt recompute, and plan-stage `derivedRunID`.
+  B3 also owns the **planning invocation fallback** (supervisor.go:913,
+  controller.go:472-483), which is moved here from B1. No run exists for a
+  planning invocation, and its fallback wall and inactivity window are C until
+  B3. They must be given a freeze point before those fields leave the digest.
+  Tracked in #345.
 - **B4: SupervisorPolicy generation.** A durable supervisor-start record with a
   SupervisorPolicyDigest over `storage.*`, `supervisor.*`,
   `watch.poll_interval_seconds`, `watch.max_concurrent_runs`, `gc.*` and
