@@ -32,13 +32,13 @@ import (
 // name, which pushes a socket address past the ~100-byte limit an operating
 // system allows for one - a real state directory is short, and a test that
 // tripped that limit would be testing the fixture rather than the endpoint.
+//
+// It is shortStateDir, rooted at /tmp rather than TMPDIR: a worker's brokered
+// TMPDIR is its attempt scratch under the run (#331), which with a real state
+// directory is already ~110 bytes, past the whole budget on its own.
 func controlStateDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "zc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := shortStateDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

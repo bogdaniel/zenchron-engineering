@@ -433,7 +433,7 @@ func doctorStateSchema(in DoctorInput) DoctorCheck {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return pass(doctorGroupState, id, fmt.Sprintf("no database exists yet; the first run creates it at schema version %d", sqliteSchemaVersion))
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqliteFileURI(path)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return warn(doctorGroupState, id, "the schema version could not be read from "+path+": "+err.Error())
 	}

@@ -204,7 +204,7 @@ func TestWatchStateSchemaIsCoveredByTheNewerSchemaRefusal(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db"))
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

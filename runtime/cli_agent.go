@@ -1536,13 +1536,22 @@ func ExecCapableScratchBase(preferred string) string {
 // build cache that a remediation attempt re-uses - deleting it per invocation
 // would make every retry recompile the world, and this workload is bounded by
 // wall time. It is retired with the run instead.
+//
+// The operation component is a DIGEST, not the encoded identity the transcript
+// uses (#331). This path is the worker's TMPDIR, and an operation id encodes to
+// ~150 bytes of %XX escapes: SQLite URI-decodes a "file:" path, and a Unix
+// socket address is bounded near 104 bytes, so the worker's own tests broke on
+// the directory rather than on the change. The path is recomputed from
+// identity; it is not an identity or authority input and is never read back,
+// so a 64-bit digest keeps it unique and replayable without the escapes.
 func ExecutionScratchDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
 	if err := attempt.Validate(); err != nil {
 		return "", err
 	}
+	operation := sha256.Sum256([]byte(attempt.OperationID))
 	return filepath.Join(ExecCapableScratchBase(stateDir), "runs",
 		encodePathComponent(attempt.RunID), executionScratchDir,
-		encodePathComponent(attempt.OperationID),
+		hex.EncodeToString(operation[:8]),
 		fmt.Sprintf("attempt-%d", attempt.Attempt)), nil
 }
 
