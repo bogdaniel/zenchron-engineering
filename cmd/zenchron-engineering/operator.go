@@ -655,6 +655,22 @@ func attemptNumbers(attempts []int) string {
 	return strings.Join(parts, ",")
 }
 
+// permissionDenials renders the denial count, which is read from the final
+// result and is therefore UNKNOWN - never 0 - when none was observed.
+//
+// It is decided from the progress mode RECORDED with the attempt: only the
+// structured Claude stream has a final result that lists denials at all, so
+// for every other provider the count is not unknown but not applicable.
+func permissionDenials(o domain.InvocationObservation) string {
+	if o.ProgressMode != runtime.ProgressStructuredClaudeEvents {
+		return "n/a (provider reports none)"
+	}
+	if !o.FinalResultObserved {
+		return "unknown (no final result)"
+	}
+	return strconv.Itoa(o.PermissionDenials)
+}
+
 // orUnknown renders a fact the provider does not expose as unknown rather than
 // as absent. A missing line reads as "the default", which is a claim; "unknown"
 // is what is actually true of a CLI that selects its own model.
@@ -798,6 +814,32 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("candidate discard refused", fmt.Sprintf(
 			"%d destructive Git operation(s) refused; dirty candidate work preserved: %s",
 			n, view.CandidateDiscardRefused))
+	}
+	// HOW THE LATEST EXECUTION ATTEMPT RAN AND ENDED (#327), from its
+	// journalled provenance, so a stalled or deadline-killed attempt explains
+	// itself without the raw transcript. Absence is stated, never rendered as
+	// zeros: an attempt that never reached a provider recorded nothing.
+	if p := view.ExecutionAttemptProvenance; p != nil {
+		inv := p.Invocation
+		limit := "none"
+		if inv.InactivityLimit > 0 {
+			limit = inv.InactivityLimit.String()
+		}
+		line("execution attempt", fmt.Sprintf(
+			"identity=%d termination=%s progress_mode=%s inactivity_limit=%s structured_events=%d open_tools_at_exit=%d permission_denials=%s",
+			p.AttemptIdentity, orUnknown(inv.TerminationCause), orUnknown(inv.ProgressMode), limit,
+			inv.StructuredEvents, inv.OpenToolsAtExit, permissionDenials(inv.InvocationObservation)))
+		if inv.Truncated {
+			line("execution attempt", "provenance truncated to its fixed-size core: the full record did not fit the durable ceiling")
+		}
+		if len(inv.PermissionDeniedTools) > 0 {
+			line("denied tools", strings.Join(inv.PermissionDeniedTools, ","))
+		}
+		line("execution invocation", fmt.Sprintf("%s version=%s permission=%s sandbox=%s auth=%s (%s) elapsed=%s overran_deadline=%t",
+			inv.Executable, orUnknown(inv.Version), orUnknown(inv.PermissionMode), orUnknown(inv.SandboxMode),
+			orUnknown(inv.AuthMode), orUnknown(inv.AuthModeSource), inv.Elapsed, inv.OverranDeadline))
+	} else if view.Attempts[runtime.OpExecutionInvoke] > 0 {
+		line("execution attempt", "no invocation provenance recorded: the latest attempt did not reach a provider, or has not ended")
 	}
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",

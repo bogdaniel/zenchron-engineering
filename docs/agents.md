@@ -203,7 +203,7 @@ standing permission is itself a posture.
 
 ## Invocation provenance
 
-Every attempt records, without secrets:
+Every attempt that reaches a provider records, without secrets:
 
 ```text
 agent id, provider kind, trust mode, model
@@ -213,7 +213,12 @@ whether a bypass was authorized and requested
 observed auth mode and how it was observed
 whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
-the security-relevant argv, with the prompt replaced by its digest
+the security-relevant argv, with the prompt element replaced by the literal
+  placeholder [prompt], and the prompt's digest as prompt_sha256
+execution deadline, start, completion, elapsed, and whether it overran
+termination cause (provider_returned, deadline_reached,
+  provider_inactivity_limit_reached), process id, and whether it ran
+  under the brokered candidate Git guard
 the inactivity window and the progress mode that measured it
   (byte_output; byte_output_excluding_transport_chatter for Codex, where a
   line matching its known reconnect/transport chatter does not refresh the
@@ -221,12 +226,68 @@ the inactivity window and the progress mode that measured it
   provider_no_progress; or structured_claude_events)
 for Claude Code: accepted structured progress events, main-thread tool calls
   still open at exit, permission denials in the final result, and malformed
-  or oversized stream lines - counts only, never provider text
+  or oversized stream lines - counts only, never provider text - plus at
+  most 8 denied tool identifiers read from the typed
+  permission_denials[].tool_name (never a tool input or denial text).
+  final_result_observed says whether a final result was read at all: the
+  denial count and tool names come from it, so without one - an attempt
+  killed at its deadline, typically - they are UNKNOWN, recorded as absent
+  and shown as "unknown (no final result)", never as 0; for a provider
+  without the structured stream (a byte_output mode) it is shown as
+  "n/a (provider reports none)", decided from the recorded progress mode
 ```
 
-The prompt is excluded from the durable record and referenced by digest: it
+The prompt text is excluded from the durable record: its argv slot holds the
+placeholder `[prompt]` and its SHA-256 is recorded as `prompt_sha256`. It
 carries untrusted third-party text and is unbounded, while every
 security-relevant flag is short and is kept verbatim.
+
+**Where it is recorded.** For a run attempt - initial execution, remediation or
+continuation, whether it succeeded, failed, hit its deadline, was ended for
+inactivity or was cancelled - the record is one immutable
+`execution.attempt_provenance` journal event, bound to the operation id and the
+physical `attempt_identity`, appended before that operation's
+`operation.after`. Two attempts of one operation are two events. Refused
+destructive candidate Git operations are not repeated there: they stay counted,
+with the latest one shaped, on the operation result. `autonomy events RUN`
+shows the event, and `autonomy status RUN` (text, and `--json` field
+`execution_attempt_provenance`) shows the latest execution attempt's record from
+the journal alone, after any restart and without reading a transcript. An
+attempt that never reached a provider records none, and status says so rather
+than showing zeros.
+
+The event is bounded by the 8 KiB canonical payload ceiling. Every field is
+bounded where it is produced; argv, the one member long enough to reach the
+ceiling in aggregate, has its tail trimmed in that case and then ends in
+`[argv truncated]` - never silently, and never for an ordinary invocation. If
+even that cannot fit (for example configuration strings full of control
+characters, which canonical JSON escapes six-fold), the record falls back to a
+fixed-size core - bounds, times, counters, termination cause and progress mode -
+marked `provenance_truncated`. The record is never dropped, and never made
+unappendable.
+
+For a planning invocation the same explanatory core is persisted with the plan
+revision, as `provenance.reasoning.invocation` (the `invocation_observation`
+definition in `schemas/planning-vocabulary.schema.json`). Planning has no run
+operation or physical attempt, so it records no `operation_id`,
+`attempt_identity` or refused-operation list; a revision whose provider
+reported no provenance, or that predates it, has no `invocation` member. A
+planning attempt that is REFUSED - including one killed at its deadline - has no
+revision, so its `plan.attempt_refused` journal event carries the same record in
+`reasoning.invocation`, fitted to that event's ceiling alongside everything else
+the attempt records; a refusal already at the ceiling that cannot take even the
+fixed-size core says `invocation_dropped_for_size` instead, so a dropped record
+is never mistaken for one the provider never reported. A proposed revision's
+journal event does not repeat it: the
+revision document is its one home.
+
+Planning provenance carries host-local and time-bound facts (paths, a process
+id, timestamps). It enters only the plan revision's own content digest - which
+an approval pins, so the operator approves what was recorded - and no plan id,
+attempt id, proposal id, idempotency key or run identity is derived from it.
+
+This record is observation. Nothing routes, classifies, authorizes or budgets
+from it.
 
 `workspace_instructions_suppressed` is a real difference between providers.
 Codex, Claude Code and Qwen expose a flag that keeps a candidate repository's own

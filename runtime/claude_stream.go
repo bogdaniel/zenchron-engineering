@@ -33,9 +33,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // The progress oracles an adapter's inactivity bound can be supervised by.
@@ -46,6 +49,11 @@ const (
 	progressByteOutputExcludingTransportChatter = "byte_output_excluding_transport_chatter"
 	progressStructuredClaudeEvents              = "structured_claude_events"
 )
+
+// ProgressStructuredClaudeEvents is the recorded progress mode under which an
+// attempt's permission denials are observable at all, exported so a reader of
+// recorded provenance decides from the record rather than from live config.
+const ProgressStructuredClaudeEvents = progressStructuredClaudeEvents
 
 // maxClaudeEventBytes bounds one NDJSON line. A longer line - a huge tool
 // result, say - is a protocol anomaly: it does not refresh the bound, it does
@@ -97,9 +105,10 @@ type claudeStream struct {
 	open map[string]struct{}
 	turn string
 
-	sawResult bool
-	isError   bool
-	denials   int
+	sawResult   bool
+	isError     bool
+	denials     int
+	deniedTools []string
 }
 
 func newClaudeStream(attempt int) *claudeStream {
@@ -318,6 +327,7 @@ func (s *claudeStream) handle(line []byte) {
 		}
 		s.sawResult, s.isError = true, *isError
 		s.denials = len(event.PermissionDenials)
+		s.deniedTools = deniedToolNames(event.PermissionDenials)
 		// The final result ends every turn. An oversized last tool_result line
 		// must not leave a stale open tool in the provenance of a clean run.
 		clear(s.open)
@@ -386,6 +396,12 @@ type claudeStreamOutcome struct {
 	Failed                                  bool
 	Accepted                                int64
 	OpenTools, PermissionDenials, Anomalies int
+	// FinalResult reports that a valid final result was read. The denial
+	// count and DeniedTools come from it, so without one they are unknown.
+	FinalResult bool
+	// DeniedTools is the bounded set of typed tool identifiers the final
+	// result's permission_denials named.
+	DeniedTools []string
 }
 
 // outcome reads the final state. A result is REQUIRED only when the process
@@ -409,7 +425,32 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Failed:    exitedZero && (!s.sawResult || s.isError),
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
+		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
 	}
+}
+
+// deniedToolNames reads ONLY the typed tool_name of each permission denial:
+// never its input, its arguments or any denial text. The result is a sorted,
+// de-duplicated set of at most domain.MaxPermissionDeniedTools identifiers, and
+// a name that is not a short identifier is skipped rather than recorded, so a
+// provider cannot write prose - or anything that needs escaping - into a
+// durable row through it.
+func deniedToolNames(denials []json.RawMessage) []string {
+	var names []string
+	for _, raw := range denials {
+		var denial struct {
+			ToolName string `json:"tool_name"`
+		}
+		if json.Unmarshal(raw, &denial) != nil || !domain.IsInvocationIdentifier(denial.ToolName) || slices.Contains(names, denial.ToolName) {
+			continue
+		}
+		names = append(names, denial.ToolName)
+	}
+	slices.Sort(names)
+	if len(names) > domain.MaxPermissionDeniedTools {
+		names = names[:domain.MaxPermissionDeniedTools]
+	}
+	return names
 }
 
 // MinProviderInactivitySeconds is the smallest provider inactivity window the

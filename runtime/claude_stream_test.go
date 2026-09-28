@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -509,6 +510,10 @@ func TestAHungToolIsBoundedByTheAbsoluteDeadline(t *testing.T) {
 	if result.Invocation.TerminationCause != "deadline_reached" || result.Invocation.OpenToolsAtExit != 1 {
 		t.Fatalf("provenance = %+v, want the deadline with the tool still open", result.Invocation)
 	}
+	// NO FINAL RESULT, SO THE DENIALS ARE UNKNOWN (#327): absent, never 0.
+	if result.Invocation.FinalResultObserved || result.Invocation.PermissionDeniedTools != nil {
+		t.Fatalf("a deadline-killed attempt claims a final result: %+v", result.Invocation)
+	}
 	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete {
 		t.Fatalf("failure = %#v, want the existing deadline semantics", result.Failure)
 	}
@@ -602,6 +607,13 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 			}
 			if result.Invocation.PermissionDenials != tc.denials {
 				t.Fatalf("permission denials = %d, want %d", result.Invocation.PermissionDenials, tc.denials)
+			}
+			// The denial count is only KNOWN when a final result was read.
+			if observed := name != "no final result"; result.Invocation.FinalResultObserved != observed {
+				t.Fatalf("final_result_observed = %v, want %v", result.Invocation.FinalResultObserved, observed)
+			}
+			if tc.denials > 0 && !reflect.DeepEqual(result.Invocation.PermissionDeniedTools, []string{"Bash"}) {
+				t.Fatalf("denied tools = %v, want the typed tool name only", result.Invocation.PermissionDeniedTools)
 			}
 			if !tc.failed {
 				if result.Failure != nil {

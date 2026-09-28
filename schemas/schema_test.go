@@ -84,6 +84,9 @@ var invalidExpectations = map[string]invalidExpectation{
 	"agent-workflow-obligation.engineering-policy.json": {"/rules/RULE-001/effect/engineering_requirements/roles/0", "additionalProperties"},
 	// A gate is not an agent stage. Only `agent` stages become EngineeringRuns.
 	"agent-gate-requirement.engineering-work-contract.json": {"/plan_requirements/gates/0/kind", "enum"},
+	// Planning invocation provenance names a denied TOOL, never what it was
+	// asked to do (#327): a tool input is not an identifier.
+	"denied-tool-input.engineering-plan.json": {"/provenance/reasoning/invocation/permission_denied_tools/1", "pattern"},
 }
 
 func TestSchemasCompile(t *testing.T) {

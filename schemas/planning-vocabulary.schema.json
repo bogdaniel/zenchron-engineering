@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json",
   "title": "Planning vocabulary v0.1",
-  "description": "The closed role and capability catalogues, defined ONCE. They were restated in six places, so adding a role meant six coordinated edits and one missed edit silently accepted a value in some artifact types and refused it in others. The Go catalogues in domain/plan.go remain authoritative; schemas.TestTheSchemaVocabularyMatchesTheDomainCatalogue holds the two together.",
+  "description": "The closed role and capability catalogues, defined ONCE. They were restated in six places, so adding a role meant six coordinated edits and one missed edit silently accepted a value in some artifact types and refused it in others. The Go catalogues in domain/plan.go remain authoritative; schemas.TestTheSchemaVocabularyMatchesTheDomainCatalogue holds the two together. It also defines, once, the invocation observation a planning revision's reasoning provenance carries (#327), which domain.InvocationObservation produces.",
   "$defs": {
     "role": {
       "enum": [
@@ -26,6 +26,143 @@
         "verification",
         "security_review"
       ]
+    },
+    "invocation_observation": {
+      "description": "How one provider invocation ran and ended: bounded, non-secret observation only (no prompt, provider prose, tool input or credential). A planning invocation carries no run operation id, physical attempt identity or counted Git refusals; those exist only for run attempts, in the execution.attempt_provenance journal event, and are deliberately not represented here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "workspace_bound",
+        "workspace_instructions_suppressed"
+      ],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "provider_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sandbox_mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "permission_mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "permission_bypass": {
+          "type": "boolean"
+        },
+        "auth_mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "auth_mode_source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "workspace_bound": {
+          "type": "boolean"
+        },
+        "workspace_instructions_suppressed": {
+          "type": "boolean"
+        },
+        "argv": {
+          "type": "array",
+          "maxItems": 33,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "prompt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "execution_deadline": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "execution_started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "execution_completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "observed_wall_elapsed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Nanoseconds."
+        },
+        "overran_deadline": {
+          "type": "boolean"
+        },
+        "termination_cause": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "inactivity_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Nanoseconds; absent when no no-progress window was in force."
+        },
+        "progress_mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "structured_progress_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "open_tools_at_exit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "final_result_observed": {
+          "type": "boolean",
+          "description": "A valid final result was read. permission_denials and permission_denied_tools come from it, so without it they are unknown and absent, never zero."
+        },
+        "permission_denials": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "permission_denied_tools": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,64}$"
+          }
+        },
+        "protocol_anomalies": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "git_guarded": {
+          "type": "boolean"
+        },
+        "provenance_truncated": {
+          "type": "boolean",
+          "description": "Only the fixed-size core was kept because the full observation did not fit the durable ceiling."
+        }
+      }
     }
   }
 }

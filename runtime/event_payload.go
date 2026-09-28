@@ -231,6 +231,7 @@ var eventPayloads = map[string]payloadValidator{
 			required("text_digest", p.TextDigest),
 			bounded("actor", p.Actor))
 	}),
+	EventExecutionAttemptProvenance: payloadSchema(ExecutionAttemptProvenance.validate),
 	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
 		// A record may carry ONLY unavailable keys: when every pending item's
 		// text artifact has been reclaimed, nothing was delivered and the
@@ -772,6 +773,16 @@ type PlanReasoningPayload struct {
 	WorkspaceDigestBefore string `json:"workspace_digest_before"`
 	WorkspaceDigestAfter  string `json:"workspace_digest_after"`
 	WorkspaceUnchanged    bool   `json:"workspace_unchanged"`
+	// Invocation is how the planning invocation ran and ended (#327). It is
+	// carried ONLY on a refused attempt, which has no plan revision to hold
+	// it; a proposed revision holds its own copy in the revision document, and
+	// the journal does not repeat it. Bounded to fit the event, and absent
+	// when the provider reported none.
+	Invocation *domain.InvocationObservation `json:"invocation,omitempty"`
+	// InvocationDroppedForSize marks a refused attempt whose invocation
+	// provenance existed but could not fit the event even in its fixed-size
+	// form. Absent Invocation without it means the provider reported none.
+	InvocationDroppedForSize bool `json:"invocation_dropped_for_size,omitempty"`
 }
 
 // PlanAttemptRefusedPayload records one reasoning proposal the deterministic
@@ -1437,7 +1448,15 @@ func validatePlanReasoning(reasoning *PlanReasoningPayload) error {
 		bounded("vendor_family", reasoning.VendorFamily),
 		bounded("model", reasoning.Model),
 		bounded("profile_id", reasoning.ProfileID),
-		bounded("provider_mode", reasoning.ProviderMode))
+		bounded("provider_mode", reasoning.ProviderMode),
+		validateReasoningInvocation(reasoning.Invocation))
+}
+
+func validateReasoningInvocation(o *domain.InvocationObservation) error {
+	if o == nil {
+		return nil
+	}
+	return validateInvocationObservation(*o)
 }
 
 func init() {
