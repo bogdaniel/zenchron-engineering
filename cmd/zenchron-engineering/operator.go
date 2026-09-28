@@ -704,8 +704,16 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// digest alone cannot say whether the binary or the configuration moved.
 	line("controller build", fmt.Sprintf("%s version=%s source=%s tree=%s binary=%s",
 		build.Kind, build.Version, short(build.SourceRevision), short(build.SourceTree), short(build.BinarySHA256)))
-	line("controller config", fmt.Sprintf("global=%s repository=%s",
+	// The configuration digest is THIS process's; the budgets below are the
+	// run's own frozen policy (ADR-0003 §6.2), and the two are labelled apart.
+	line("controller config", fmt.Sprintf("global=%s repository=%s (current process)",
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
+	budgets := view.Budgets
+	line("run policy", strings.TrimSpace(fmt.Sprintf("sha=%s source=%s", short(view.RunPolicy.SHA256), view.RunPolicy.Source)))
+	line("run budgets", fmt.Sprintf("wall=%s attempt_wall=%s lifecycle=%s inactivity=%s attempts=%d continuations=%d invocations=%d remediation=%d assurance=%d",
+		budgets.WallLimit, budgets.AttemptWallLimit, budgets.LifecycleDeadline, budgets.ProviderInactivityLimit,
+		budgets.MaxExecutionAttempts, budgets.MaxExecutionContinuations, budgets.MaxProviderInvocations,
+		budgets.MaxRemediationAttempts, budgets.MaxAssuranceAttempts))
 	// WHO IS DOING THE WORK, in the view an operator opens to ask about one
 	// run. The JSON has carried the binding for a while and the text did not,
 	// so answering "which worker owns this" meant switching output formats.

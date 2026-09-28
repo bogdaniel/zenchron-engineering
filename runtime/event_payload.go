@@ -65,9 +65,10 @@ var eventPayloads = map[string]payloadValidator{
 		return errors.Join(required("run_id", p.RunID), required("handoff_id", p.HandoffID))
 	}),
 	// run.created carries the creating controller's provenance (ControllerBuild)
-	// when the build is attested. It is optional because an unattested build
-	// records no claim, and strict because a recorded claim must be complete.
-	EventRunCreated: optionalPayload(payloadSchema(ControllerBuild.validateAttested)),
+	// when the build is attested, and the run's RunPolicyDigest (ADR-0003 B1).
+	// It is optional because a pre-B1 run from an unattested build recorded
+	// nothing, and strict because a recorded claim must be complete.
+	EventRunCreated: optionalPayload(payloadSchema(RunCreatedPayload.validate)),
 
 	EventRunWaiting:   dispositionPayload(false),
 	EventRunCompleted: dispositionPayload(false),

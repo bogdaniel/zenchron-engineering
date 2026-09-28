@@ -490,6 +490,16 @@ func (b RunBudgets) defaults() RunBudgets {
 // unattended against a provider the only one that could run forever. Every
 // producer invocation is bounded by the configured limit; a planner is not
 // special enough to be exempt from it.
+//
+// WHAT GOVERNS IT (ADR-0003 B1). A planning invocation is not an
+// EngineeringRun: no run exists, so there is no RunPolicy to freeze into and
+// none is invented. The stated bound comes from the approved plan revision
+// (category P, frozen and digested there). The fallback is this controller's
+// configured run wall limit, which is controller-effective until B3 and so
+// identified by the controller binding: a changed value is a changed
+// controller, and a changed controller forks the PlanID (#131). B3 must move
+// that fallback into the plan revision before wall_limit_seconds leaves the
+// controller-effective digest.
 func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
 	configured := r.deps.Budgets.WallLimit
 	stated := time.Duration(stageSeconds) * time.Second
@@ -812,12 +822,10 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 		Base:             Ref{ID: r.deps.Repository.DefaultBranch},
 		Candidate:        Candidate{Branch: candidateBranch(runID)},
 		ControllerSHA256: r.controller,
-		// A new run persists the bounds it was created under. Today the
-		// continuation bound is the one runState reads back from here, so it
-		// is the one whose terminal decision replays from durable state rather
-		// than from whatever is configured afterwards; the wall limit and the
-		// attempt ceilings are still read live. Persisting the whole record
-		// now is what lets the rest follow without another schema change.
+		// A new run persists the bounds it was created under, and this record
+		// IS the budget half of its frozen RunPolicy (ADR-0003 B1):
+		// runState.budgets reads every member back exactly - never live, never
+		// min(live, frozen).
 		Budgets: &budgets,
 		AgentID: r.deps.Agent.ID,
 		// The plan binding is part of the run AS CREATED, never attached
@@ -846,12 +854,22 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 	// journal - not in an adjacent metadata file that could be edited or lost.
 	// An unattested controller records nothing, which is exactly the claim it is
 	// entitled to make.
-	var provenance json.RawMessage
+	//
+	// The RunPolicyDigest is recorded here too (ADR-0003 B1), so status and
+	// provenance name the policy this run was frozen under without
+	// reconstructing it from today's configuration file.
+	policy := RunPolicyRecord{RepositoryConfig: r.deps.ConfigDigest.Repository}
+	if policy.SHA256, err = run.policy(policy.RepositoryConfig).Digest(); err != nil {
+		return "", err
+	}
+	genesis := RunCreatedPayload{RunPolicy: &policy}
 	if r.deps.ControllerBuild.Attested() {
-		provenance, err = marshalPayloadJSON(r.deps.ControllerBuild)
-		if err != nil {
-			return "", err
-		}
+		build := r.deps.ControllerBuild
+		genesis.ControllerBuild = &build
+	}
+	provenance, err := marshalPayloadJSON(genesis)
+	if err != nil {
+		return "", err
 	}
 	if _, err := r.deps.Store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
@@ -936,17 +954,26 @@ type ControllerIdentity struct {
 // into the genesis event. A run created before provenance existed, or by an
 // unattested build, reads back as unattested - never as adopted.
 func (s *runState) recordedControllerBuild() ControllerBuild {
+	if build := s.genesis().ControllerBuild; build != nil && build.Attested() {
+		return *build
+	}
+	return ControllerBuild{Kind: ControllerUnattested}
+}
+
+// genesis replays the run.created payload. A genesis that recorded nothing,
+// or nothing readable, reads back as the empty payload.
+func (s *runState) genesis() RunCreatedPayload {
 	for _, event := range s.events {
 		if event.Type != EventRunCreated {
 			continue
 		}
-		var build ControllerBuild
-		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &build) == nil {
-			return build
+		var payload RunCreatedPayload
+		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &payload) == nil {
+			return payload
 		}
 		break
 	}
-	return ControllerBuild{Kind: ControllerUnattested}
+	return RunCreatedPayload{}
 }
 
 // OperationStatus is the operator's view of the current bounded operation.
@@ -1081,8 +1108,12 @@ type StatusReport struct {
 	// its disposition (#203), exactly as the terminal event recorded it.
 	// Absent on a budget failure means the run held no material result.
 	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
-	Budgets      RunBudgets    `json:"budgets"`
-	StateSHA256  string        `json:"state_sha256"`
+	// Budgets are the budgets THIS RUN is judged by - its frozen RunPolicy,
+	// or the ADR-0003 §5 legacy derivation - never the current process's
+	// configuration (§6.2). RunPolicy names that policy and its source.
+	Budgets     RunBudgets      `json:"budgets"`
+	RunPolicy   RunPolicyStatus `json:"run_policy"`
+	StateSHA256 string          `json:"state_sha256"`
 }
 
 // WorkerIdentity is the execution agent a run is bound to.
@@ -1139,7 +1170,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,
 		Attempts:              state.projection.Attempts,
-		Budgets:               r.deps.Budgets,
+		Budgets:               state.budgets(),
+		RunPolicy:             state.runPolicy(),
 		StateSHA256:           state.snapshot.StateSHA256,
 		PublicationAuthority:  publicationAuthorityOf(state),
 		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,

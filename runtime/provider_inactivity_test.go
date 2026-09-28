@@ -577,10 +577,8 @@ func TestTheProviderInactivityBudgetIsFiniteAndTightenOnly(t *testing.T) {
 	}
 }
 
-// TestARunKeepsTheTighterWindowItWasCreatedUnder proves the persisted budget
-// narrows the configured one, exactly as the wall limit does. A run created
-// under a tighter window must not silently widen because the operator later
-// relaxed their configuration.
+// TestARunKeepsTheTighterWindowItWasCreatedUnder proves the persisted window is
+// the run's, exactly: a later configuration neither widens nor narrows it.
 func TestARunKeepsTheTighterWindowItWasCreatedUnder(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	deps := fixture.deps
@@ -603,10 +601,12 @@ func TestARunKeepsTheTighterWindowItWasCreatedUnder(t *testing.T) {
 	if got := state.budgets().ProviderInactivityLimit; got != 2*time.Minute {
 		t.Fatalf("the run's tighter window was overruled by configuration: %s", got)
 	}
-	// A run persisted under a WIDER one does not widen the configured bound.
+	// A run persisted under a WIDER one keeps it too: the frozen value is
+	// exact, so a later, narrower configuration does not reach a live run
+	// (ADR-0003 B1 - never min(live, frozen)).
 	state.run.Budgets = &RunBudgets{ProviderInactivityLimit: time.Hour}
-	if got := state.budgets().ProviderInactivityLimit; got != 10*time.Minute {
-		t.Fatalf("a persisted run widened its own window to %s", got)
+	if got := state.budgets().ProviderInactivityLimit; got != time.Hour {
+		t.Fatalf("a later configuration rewrote the run's frozen window to %s", got)
 	}
 	// A run persisted BEFORE this budget existed carries none, and must get the
 	// configured window rather than an unbounded one.

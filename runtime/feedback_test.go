@@ -591,7 +591,7 @@ func TestAPermanentPermissionFailureIsReportedNotDeferred(t *testing.T) {
 }
 
 func TestOverBudgetReviewRetainsRunAndPendingFeedback(t *testing.T) {
-	fixture, runID := feedbackFixture(t)
+	fixture, runID := feedbackFixtureWithWallLimit(t, 30*time.Minute)
 	number := fixture.state(runID).projection.PullRequest.Number
 	fixture.forge.ConversationComments[number] = []GitHubComment{{
 		ID: 9501, Author: GitHubActor{Login: "maintainer", ID: 7},
@@ -608,8 +608,18 @@ func TestOverBudgetReviewRetainsRunAndPendingFeedback(t *testing.T) {
 	pending := before.pendingFeedbackKeys()
 	candidate := before.projection.CandidateRevision
 	requests := len(fixture.provider.requests)
+	// Spend the run's FROZEN wall budget as active work. Lowering the live
+	// configuration no longer reaches a live run (ADR-0003 B1).
+	if err := fixture.runtime.recordDisposition(before, Waiting, "operation_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.advance(31 * time.Minute)
+	// ...and the one-time review continuation it is then owed (#210).
+	if err := fixture.runtime.grantReviewContinuation(fixture.state(runID)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.advance(31 * time.Minute)
 	for i := 0; i < 2; i++ {
-		fixture.runtime.deps.Budgets.WallLimit = time.Nanosecond
 		outcome := fixture.reconcile(runID)
 		if outcome.Disposition != Waiting || outcome.Reason != ReasonReviewBudgetExhausted {
 			t.Fatalf("outcome: %+v", outcome)
