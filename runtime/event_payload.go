@@ -231,6 +231,7 @@ var eventPayloads = map[string]payloadValidator{
 			required("text_digest", p.TextDigest),
 			bounded("actor", p.Actor))
 	}),
+	EventExecutionAttemptProvenance: payloadSchema(ExecutionAttemptProvenance.validate),
 	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
 		// A record may carry ONLY unavailable keys: when every pending item's
 		// text artifact has been reclaimed, nothing was delivered and the

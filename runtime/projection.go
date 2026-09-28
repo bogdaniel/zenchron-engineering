@@ -71,6 +71,12 @@ type RunProjection struct {
 	// the most recent one.
 	CandidateDiscardRefusals int    `json:"candidate_discard_refusals,omitempty"`
 	CandidateDiscardRefused  string `json:"candidate_discard_refused,omitempty"`
+	// ExecutionAttemptProvenance is the invocation provenance of the LATEST
+	// execution attempt, from its execution.attempt_provenance event (#327).
+	// Each execution operation.before clears it, so an attempt that never
+	// reached a provider - or one still running - reads as none recorded,
+	// never as the previous attempt's record or as zeros.
+	ExecutionAttemptProvenance *ExecutionAttemptProvenance `json:"execution_attempt_provenance,omitempty"`
 	// CandidateComplete reports whether the CURRENT candidate head is
 	// execution-complete: a producer finished against it, rather than being cut
 	// off mid-invocation with its partial work preserved. It is what separates
@@ -320,6 +326,15 @@ func (p *RunProjection) apply(e EngineeringEvent) error {
 			p.Attempts = map[string]int{}
 		}
 		p.Attempts[operation.Kind]++
+		if operation.Kind == OpExecutionInvoke {
+			p.ExecutionAttemptProvenance = nil
+		}
+	case EventExecutionAttemptProvenance:
+		payload, err := decodePayload[ExecutionAttemptProvenance](e.Payload)
+		if err != nil {
+			return err
+		}
+		p.ExecutionAttemptProvenance = &payload
 	case EventOperationAfter:
 		operation, err := decodePayload[RunOperation](e.Payload)
 		if err != nil {

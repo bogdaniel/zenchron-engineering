@@ -119,12 +119,17 @@ const (
 	// finishing, rather than by running out of a bound. It is a producer
 	// COMPLETION OBSERVATION and nothing more: it asserts no acceptance, no
 	// evidence and no authority.
-	EventExecutionCompleted       = "execution.completed"
-	EventCandidateBaseIntegrated  = "candidate.base_integrated"
-	EventCandidateExternalChanged = "candidate.external_changed"
-	EventContractCompiled         = "contract.compiled"
-	EventReassessmentCompleted    = "reassessment.completed"
-	EventAssuranceObserved        = "assurance.observed"
+	EventExecutionCompleted = "execution.completed"
+	// EventExecutionAttemptProvenance is the immutable record of HOW one
+	// physical provider attempt ran and ended (#327), bound to the operation
+	// and the attempt identity that produced it. It is OBSERVATION: nothing
+	// routes, classifies, authorizes or budgets from it.
+	EventExecutionAttemptProvenance = "execution.attempt_provenance"
+	EventCandidateBaseIntegrated    = "candidate.base_integrated"
+	EventCandidateExternalChanged   = "candidate.external_changed"
+	EventContractCompiled           = "contract.compiled"
+	EventReassessmentCompleted      = "reassessment.completed"
+	EventAssuranceObserved          = "assurance.observed"
 	// EventSemanticAssuranceObserved is the INDEPENDENT semantic verifier's own
 	// observation. It is a distinct event because it is a distinct producer
 	// answering a distinct question: every reader that means "the automated
@@ -232,7 +237,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
+var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain

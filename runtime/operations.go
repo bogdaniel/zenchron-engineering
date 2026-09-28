@@ -786,12 +786,26 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// provenance record cannot describe different realities.
 		Deadline: operation.Deadline,
 	}))
+	// THE ATTEMPT EXPLAINS ITSELF DURABLY (#327). Provenance exists only for
+	// an invocation that reached a provider, and it is journalled on EVERY
+	// path out of here - success, failure, deadline, revocation, refusal -
+	// because the attempt that most needs explaining is the one that ended
+	// badly. It is observation: nothing below reads it to decide anything.
+	var attemptProvenance []journalEntry
+	if result.Invocation != nil {
+		attemptProvenance = []journalEntry{{Type: EventExecutionAttemptProvenance,
+			Payload: newExecutionAttemptProvenance(operation.ID, physicalAttempt, *result.Invocation)}}
+	}
+	recorded := func(e effect) effect {
+		e.events = append(append([]journalEntry(nil), attemptProvenance...), e.events...)
+		return e
+	}
 	if err := workspace.AssertIntegrity(); err != nil {
-		return r.restoreCandidate(workspace, err)
+		return recorded(r.restoreCandidate(workspace, err))
 	}
 	paths, pathErr := candidateChangedPaths(workspace.Dir)
 	if pathErr != nil {
-		return failed(pathErr)
+		return recorded(failed(pathErr))
 	}
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
@@ -808,7 +822,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		ProviderExecuted: execErr == nil || result.Invocation != nil,
 	}
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
-	events := []journalEntry{{
+	events := append(attemptProvenance, journalEntry{
 		Type: EventCandidateChanged,
 		Payload: CandidateChangedPayload{
 			ProducerID: producerID,
@@ -816,7 +830,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Outcome:    providerOutcome(result, execErr),
 		},
 		Artifacts: result.Artifacts,
-	}}
+	})
 	// A producer that FINISHED is the only thing that completes an execution.
 	// It is an observation about the producer, not about the work: it makes the
 	// exact subject eligible to be treated as a finished candidate, and it
@@ -865,7 +879,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 	}
 	if revokeErr != nil {
-		return failed(revokeErr)
+		return recorded(failed(revokeErr))
 	}
 	if execErr == nil && result.Failure == nil && revoked == "" {
 		// Admission happens in the RUNTIME, against the frozen assignment -
@@ -879,11 +893,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				if errors.As(admitErr, &refusal) {
 					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
 				}
-				return effect{state: OperationFailed, result: executionRecord{
+				return recorded(effect{state: OperationFailed, result: executionRecord{
 					ReviewRefusal:  refusal,
 					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
 					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
-				}}
+				}})
 			}
 		}
 		events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{

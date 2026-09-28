@@ -33,9 +33,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // The progress oracles an adapter's inactivity bound can be supervised by.
@@ -96,9 +99,10 @@ type claudeStream struct {
 	open map[string]struct{}
 	turn string
 
-	sawResult bool
-	isError   bool
-	denials   int
+	sawResult   bool
+	isError     bool
+	denials     int
+	deniedTools []string
 }
 
 func newClaudeStream(attempt int) *claudeStream {
@@ -317,6 +321,7 @@ func (s *claudeStream) handle(line []byte) {
 		}
 		s.sawResult, s.isError = true, *isError
 		s.denials = len(event.PermissionDenials)
+		s.deniedTools = deniedToolNames(event.PermissionDenials)
 		// The final result ends every turn. An oversized last tool_result line
 		// must not leave a stale open tool in the provenance of a clean run.
 		clear(s.open)
@@ -385,6 +390,9 @@ type claudeStreamOutcome struct {
 	Failed                                  bool
 	Accepted                                int64
 	OpenTools, PermissionDenials, Anomalies int
+	// DeniedTools is the bounded set of typed tool identifiers the final
+	// result's permission_denials named.
+	DeniedTools []string
 }
 
 // outcome reads the final state. A result is REQUIRED only when the process
@@ -408,7 +416,46 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Failed:    exitedZero && (!s.sawResult || s.isError),
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
+		DeniedTools: s.deniedTools,
 	}
+}
+
+// deniedToolNames reads ONLY the typed tool_name of each permission denial:
+// never its input, its arguments or any denial text. The result is a sorted,
+// de-duplicated set of at most domain.MaxPermissionDeniedTools identifiers, and
+// a name that is not a short identifier is skipped rather than recorded, so a
+// provider cannot write prose - or anything that needs escaping - into a
+// durable row through it.
+func deniedToolNames(denials []json.RawMessage) []string {
+	var names []string
+	for _, raw := range denials {
+		var denial struct {
+			ToolName string `json:"tool_name"`
+		}
+		if json.Unmarshal(raw, &denial) != nil || !validDeniedToolName(denial.ToolName) || slices.Contains(names, denial.ToolName) {
+			continue
+		}
+		names = append(names, denial.ToolName)
+	}
+	slices.Sort(names)
+	if len(names) > domain.MaxPermissionDeniedTools {
+		names = names[:domain.MaxPermissionDeniedTools]
+	}
+	return names
+}
+
+// validDeniedToolName is the identifier shape a tool name may be recorded in:
+// Bash, WebFetch, mcp__server__tool.
+func validDeniedToolName(name string) bool {
+	if name == "" || len(name) > domain.MaxPermissionDeniedToolBytes {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_.:-", r)) {
+			return false
+		}
+	}
+	return true
 }
 
 // MinProviderInactivitySeconds is the smallest provider inactivity window the

@@ -1033,10 +1033,15 @@ type StatusReport struct {
 	// It is projected because an operator reading a run that took two provider
 	// attempts deserves to know that one of them tried to erase the other's
 	// work. It is not a failure and it is deliberately not rendered as one.
-	CandidateDiscardRefusals int        `json:"candidate_discard_refusals,omitempty"`
-	CandidateDiscardRefused  string     `json:"candidate_discard_refused,omitempty"`
-	Budgets                  RunBudgets `json:"budgets"`
-	StateSHA256              string     `json:"state_sha256"`
+	CandidateDiscardRefusals int    `json:"candidate_discard_refusals,omitempty"`
+	CandidateDiscardRefused  string `json:"candidate_discard_refused,omitempty"`
+	// ExecutionAttemptProvenance is how the latest execution attempt ran and
+	// ended, replayed from its journalled attempt-provenance event (#327) and
+	// never from the live operation row. Absent means that attempt recorded
+	// none: it never reached a provider, or it has not ended yet.
+	ExecutionAttemptProvenance *ExecutionAttemptProvenance `json:"execution_attempt_provenance,omitempty"`
+	Budgets                    RunBudgets                  `json:"budgets"`
+	StateSHA256                string                      `json:"state_sha256"`
 }
 
 // WorkerIdentity is the execution agent a run is bound to.
@@ -1101,6 +1106,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 
 		CandidateDiscardRefusals: state.projection.CandidateDiscardRefusals,
 		CandidateDiscardRefused:  state.projection.CandidateDiscardRefused,
+
+		ExecutionAttemptProvenance: state.projection.ExecutionAttemptProvenance,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{

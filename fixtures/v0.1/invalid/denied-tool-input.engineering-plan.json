@@ -140,7 +140,15 @@
         "auth_mode_source": "provider_state",
         "workspace_bound": false,
         "workspace_instructions_suppressed": true,
-        "argv": ["--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "[prompt]"],
+        "argv": [
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--permission-mode",
+          "plan",
+          "[prompt]"
+        ],
         "prompt_sha256": "9f2c5a7e1b3d4c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6",
         "execution_deadline": "2026-09-26T18:20:08Z",
         "execution_started_at": "2026-09-26T17:50:08Z",
@@ -151,7 +159,10 @@
         "progress_mode": "structured_claude_events",
         "structured_progress_events": 41,
         "permission_denials": 1,
-        "permission_denied_tools": ["WebFetch"],
+        "permission_denied_tools": [
+          "WebFetch",
+          "Bash(rm -rf ./candidate)"
+        ],
         "process_id": 48213,
         "git_guarded": true
       }

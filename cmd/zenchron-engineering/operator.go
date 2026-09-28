@@ -781,6 +781,29 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			"%d destructive Git operation(s) refused; dirty candidate work preserved: %s",
 			n, view.CandidateDiscardRefused))
 	}
+	// HOW THE LATEST EXECUTION ATTEMPT RAN AND ENDED (#327), from its
+	// journalled provenance, so a stalled or deadline-killed attempt explains
+	// itself without the raw transcript. Absence is stated, never rendered as
+	// zeros: an attempt that never reached a provider recorded nothing.
+	if p := view.ExecutionAttemptProvenance; p != nil {
+		inv := p.Invocation
+		limit := "none"
+		if inv.InactivityLimit > 0 {
+			limit = inv.InactivityLimit.String()
+		}
+		line("execution attempt", fmt.Sprintf(
+			"identity=%d termination=%s progress_mode=%s inactivity_limit=%s structured_events=%d open_tools_at_exit=%d permission_denials=%d",
+			p.AttemptIdentity, orUnknown(inv.TerminationCause), orUnknown(inv.ProgressMode), limit,
+			inv.StructuredEvents, inv.OpenToolsAtExit, inv.PermissionDenials))
+		if len(inv.PermissionDeniedTools) > 0 {
+			line("denied tools", strings.Join(inv.PermissionDeniedTools, ","))
+		}
+		line("execution invocation", fmt.Sprintf("%s version=%s permission=%s sandbox=%s auth=%s (%s) elapsed=%s overran_deadline=%t",
+			inv.Executable, orUnknown(inv.Version), orUnknown(inv.PermissionMode), orUnknown(inv.SandboxMode),
+			orUnknown(inv.AuthMode), orUnknown(inv.AuthModeSource), inv.Elapsed, inv.OverranDeadline))
+	} else if view.Attempts[runtime.OpExecutionInvoke] > 0 {
+		line("execution attempt", "no invocation provenance recorded: the latest attempt did not reach a provider, or has not ended")
+	}
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
 			d.Stage, d.FailureClass, d.Route, d.Code))
