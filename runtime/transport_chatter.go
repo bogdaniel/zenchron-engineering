@@ -20,22 +20,44 @@ package runtime
 // and terminal classification still reads only the stderr tail, through
 // classifyAgentFailure, after the process has exited.
 //
-// Known residual: a legitimate tool that prints nothing but matching lines for
-// a whole window is terminated as provider_no_progress. That is the bounded
-// side of the trade-off. The run is still finite and the attempt is retried.
-// If live evidence shows it matters, the answer is a stronger provider oracle,
-// not letting matched text grant a failure class.
+// An inactivity kill under this mode is ALWAYS provider_no_progress: the
+// stderr tail is not consulted on that path (cli_agent.go), because on Codex a
+// candidate's stderr shares it. So a real #317 loop ends as no-progress and is
+// retried under the existing attempt authority, not parked on a wait.
+//
+// Known residuals:
+//   - a legitimate tool that prints nothing but matching lines for a whole
+//     window is terminated as provider_no_progress. The run is still finite
+//     and the attempt is retried. If live evidence shows it matters, the answer
+//     is a stronger provider oracle, not letting matched text grant a class;
+//   - other Codex retry chatter is known and NOT covered, e.g.
+//     `stream error: ... retrying N/5`. It still refreshes, as before;
+//   - the patterns come from one recorded macOS transcript. A missed pattern
+//     degrades to plain byte output, never to anything less bounded.
 
 import (
 	"bytes"
 	"context"
+	"regexp"
 )
 
 // maxJudgedLineBytes bounds the unterminated line held while waiting for its
 // newline. Output that reaches it without one is judged as it stands, so a
 // long run of text with no newline still refreshes the window instead of
 // being buffered without bound.
+//
+// ponytail: two known edges, accepted until evidence says otherwise.
+// (1) A line longer than this is judged in 4 KiB pieces, so a pattern split
+// across a piece boundary is missed and that piece refreshes (safe direction).
+// (2) Slow unterminated output - progress dots, a spinner without newline -
+// refreshes only when its newline arrives or the bound fills, where byte
+// output refreshed on every write. Codex exec writes whole lines to a pipe,
+// so neither is observed; judge partial lines eagerly if one ever is.
 const maxJudgedLineBytes = 4 << 10
+
+// ansiSGR is a terminal colour escape. Codex colours its diagnostics when it
+// thinks it can, and `\x1b[31mERROR\x1b[0m: Reconnecting...` must still match.
+var ansiSGR = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 type transportChatterKey struct{}
 
@@ -98,7 +120,7 @@ func (f *chatterFilter) judge() {
 
 // isTransportChatter reports whether line matches a pattern, ignoring case.
 func isTransportChatter(line []byte, patterns []string) bool {
-	lower := bytes.ToLower(line)
+	lower := bytes.ToLower(ansiSGR.ReplaceAll(line, nil))
 	for _, pattern := range patterns {
 		if bytes.Contains(lower, []byte(pattern)) {
 			return true

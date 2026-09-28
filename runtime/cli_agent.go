@@ -1263,7 +1263,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		switch {
-		case inactive && recognized != FailureUnknown:
+		case inactive && recognized != FailureUnknown && progressMode != progressByteOutputExcludingTransportChatter:
 			// THE PROVIDER SAID WHAT WAS WRONG AND THEN WENT QUIET. Both facts
 			// are true and they are recorded separately: the CONDITION is the
 			// one the provider named, and how the process ENDED is already in
@@ -1281,6 +1281,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// A phrase the model wrote into its session output never reaches
 			// here at all, so preserving it cannot become a way for untrusted
 			// text to outrank a bound the runtime actually enforced.
+			//
+			// NOT UNDER THE CHATTER FILTER (#314). There the inactivity kill is
+			// reached BECAUSE matching lines were withheld, and on Codex a
+			// candidate's own stderr (a test retrying `connection refused`)
+			// lands in the same tail. Preserving the tail would let matched
+			// candidate text turn into provider_unavailable and a RouteWait, so
+			// that kill is provider_no_progress. A genuine #317 reconnect loop
+			// therefore retries under the existing attempt authority rather
+			// than waiting; a provider that EXITS on its own is still
+			// classified from the tail exactly as before.
 		case inactive:
 			// The PROVIDER STOPPED MOVING and the runtime ended it, with
 			// nothing recognized to say why. The process group is already gone

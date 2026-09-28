@@ -121,8 +121,14 @@ func assertProcessGroupIsGone(t *testing.T, leader, child string) {
 // inactivityFixture is one native CLI agent whose invocation is a real process.
 func inactivityFixture(t *testing.T, script string) (CLIAgentProvider, ExecutionRequest, *inactivityCLI) {
 	t.Helper()
+	return inactivityFixtureFor(t, AgentKindCodexCLI, script)
+}
+
+// inactivityFixtureFor is inactivityFixture for another native CLI kind.
+func inactivityFixtureFor(t *testing.T, kind, script string) (CLIAgentProvider, ExecutionRequest, *inactivityCLI) {
+	t.Helper()
 	requireBoundedProcess(t)
-	provider, request, _ := agentFixture(t, AgentKindCodexCLI)
+	provider, request, _ := agentFixture(t, kind)
 	cli := &inactivityCLI{script: script}
 	provider.Executor = cli
 	// A short grace so the graceful-then-forced escalation completes inside an
@@ -589,17 +595,23 @@ func TestAGenuineTransportDiagnosticStillReachesABoundedWait(t *testing.T) {
 // stalled provider when their allowance had simply run out - and would spend a
 // retry on a condition no retry can clear.
 func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
+	// Codex is the exception (#314): under its transport-chatter filter a
+	// candidate's stderr shares the tail, so its inactivity kill is always
+	// provider_no_progress. Gemini, on plain byte output, keeps the precedence.
 	for name, tc := range map[string]struct {
+		kind       string
 		diagnostic string
 		want       FailureClass
 		route      FailureRoute
 	}{
-		"quota then silence":       {"ERROR: You've hit your usage limit.", FailureProviderQuota, RouteWait},
-		"unavailable then silence": {"ERROR: error sending request: dns error", FailureProviderUnavailable, RouteWait},
-		"account then silence":     {"ERROR: your refresh token was revoked", FailureProviderAccountUnavailable, RouteWait},
+		"quota then silence":             {AgentKindGeminiCLI, "Error: RESOURCE_EXHAUSTED: quota exceeded", FailureProviderQuota, RouteWait},
+		"unavailable then silence":       {AgentKindGeminiCLI, "Error: getaddrinfo ENOTFOUND generativelanguage.googleapis.com", FailureProviderUnavailable, RouteWait},
+		"codex quota then silence":       {AgentKindCodexCLI, "ERROR: You've hit your usage limit.", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
+		"codex unavailable then silence": {AgentKindCodexCLI, "ERROR: error sending request: dns error", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
+		"codex account then silence":     {AgentKindCodexCLI, "ERROR: your refresh token was revoked", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			provider, request, _ := inactivityFixture(t,
+			provider, request, _ := inactivityFixtureFor(t, tc.kind,
 				"trap '' TERM\n"+
 					"echo "+shellQuoted(tc.diagnostic)+" >&2\n"+
 					"while :; do sleep 30; done\n")
