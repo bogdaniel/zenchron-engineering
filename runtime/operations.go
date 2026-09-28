@@ -1103,13 +1103,24 @@ func (s *runState) admitSuccessor(d *ExecutionDiagnostic, operation RunOperation
 	default:
 		return
 	}
+	// A spent run budget does NOT refuse the successor while outstanding review
+	// feedback has no grant yet: grantReviewContinuation grants one on the next
+	// pass and the successor runs under it (#210). Claiming otherwise would be
+	// the untruth this exists to remove, in the other direction.
+	runSpent := d.Bound == BoundRunActiveWork || s.activeWorkRemaining(now) <= 0
+	_, granted := s.reviewContinuationGrant()
+	reviewPending := !granted && len(s.outstandingReviewKeys()) > 0
 	switch {
-	case d.Bound == BoundRunActiveWork || s.activeWorkRemaining(now) <= 0:
+	case runSpent && !reviewPending:
 		d.SuccessorUnavailable = "run_active_work_exhausted"
 	case d.Successor == SuccessorRetry && operation.Attempt >= operation.MaxAttempts:
 		d.SuccessorUnavailable = "execution_attempts_exhausted"
 	case d.Successor == SuccessorContinuation && s.continuationsAfter(operation) >= s.continuationLimit():
 		d.SuccessorUnavailable = "execution_continuations_exhausted"
+	// The run TOTAL of provider invocations (a plan stage's headroom). The
+	// projection was read before this attempt began, so it is counted here.
+	case s.providerInvocationLimit() > 0 && s.projection.Attempts[OpExecutionInvoke]+1 >= s.providerInvocationLimit():
+		d.SuccessorUnavailable = "run_provider_invocations_exhausted"
 	}
 	if d.SuccessorUnavailable != "" {
 		d.Route = RouteStop
@@ -1127,16 +1138,18 @@ func (s *runState) continuationsAfter(operation RunOperation) int {
 	return len(started)
 }
 
-// continuationEligible reports whether a provider stop is one the runtime knows
-// how to resume from. It is deliberately a stated allowlist rather than "any
-// stop with mutation": a cancelled run, a deadline, a refused request or a
-// no-progress loop are not interrupted work waiting to continue, and treating
-// them as continuable would turn a stuck run into an endless one.
+// continuationEligible reports whether a TYPED API-provider stop is one the
+// runtime knows how to resume from, and so classifies as execution_incomplete.
+// It is a stated allowlist: a cancelled run, a refused request or a no-progress
+// loop are not interrupted work waiting to continue.
 //
-// StopIterationBudget is the observed case and the only one this pass adds. The
-// provider reasoned, mutated the workspace, and was cut off by a bound the
-// runtime itself set - the one situation where continuing is exactly what a
-// human would do.
+// StopIterationBudget is the case it names: the provider reasoned, mutated the
+// workspace, and was cut off by a bound the runtime itself set. It is no longer
+// the only road to a checkpoint. A CLI attempt that reaches its own wall
+// deadline is classified execution_incomplete by the adapter, and with work in
+// the tree that is a checkpoint too (#328). That is bounded rather than
+// endless because each attempt's deadline is min(attempt limit, remaining run
+// active work), and continuation depth has its own ceiling (#54).
 func continuationEligible(cause error) bool {
 	var stop *ProviderStopError
 	if !errors.As(cause, &stop) {

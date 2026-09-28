@@ -589,3 +589,99 @@ func TestARestartRenewsNeitherTheAttemptNorTheRunBudget(t *testing.T) {
 		t.Fatalf("run reason %q, want run_wall_budget_exhausted", state.snapshot.Reason)
 	}
 }
+
+// INVARIANT (#54): a productive attempt-wall stop whose continuation would be a
+// binding beyond the continuation ceiling does not advertise it, and the run
+// ends execution_continuations_exhausted with run budget left.
+func TestAnExhaustedContinuationBudgetIsNotAdvertised(t *testing.T) {
+	fixture, provider := wallFixture(t,
+		RunBudgets{WallLimit: time.Hour, AttemptWallLimit: 10 * time.Minute, MaxExecutionAttempts: 3, MaxExecutionContinuations: 1},
+		wallStep{mutate: true}, wallStep{mutate: true})
+	runID := fixture.start()
+	drive(fixture, provider, runID)
+
+	if len(provider.requests) != 2 || provider.requests[1].Purpose != InvocationContinuation {
+		t.Fatalf("want an initial attempt and one continuation, got %d invocation(s)", len(provider.requests))
+	}
+	diagnostics := attemptDiagnostics(t, journalOf(t, fixture.runtime, runID))
+	if first := diagnostics[0]; first.Successor != SuccessorContinuation || first.SuccessorUnavailable != "" {
+		t.Fatalf("first stop %+v, want its one permitted continuation available", first)
+	}
+	last := diagnostics[len(diagnostics)-1]
+	if last.Bound != BoundAttemptWall || last.Successor != SuccessorContinuation ||
+		last.SuccessorUnavailable != "execution_continuations_exhausted" || last.Route != RouteStop {
+		t.Fatalf("second stop %+v, want continuation unavailable: execution_continuations_exhausted, route stop", last)
+	}
+	if state := fixture.state(runID); state.snapshot.Disposition != Failed || state.snapshot.Reason != "execution_continuations_exhausted" {
+		t.Fatalf("run %s/%s, want failed/execution_continuations_exhausted", state.snapshot.Disposition, state.snapshot.Reason)
+	}
+}
+
+// successorState is the smallest runState admitSuccessor reads: a run whose
+// 30m budget is exactly spent, with the given journal.
+func successorState(events []EngineeringEvent, budgets RunBudgets) *runState {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	state := conditionsFixture(start, &steppingClock{at: start.Add(30 * time.Minute)}, budgets, events)
+	state.run.Budgets = &budgets
+	return state
+}
+
+// truncatedStop is a zero-delta or productive stop at a deadline whose bound
+// was the given one, as the attempt's #327 provenance records it.
+func truncatedStop(bound AttemptBound) (*ExecutionDiagnostic, RunOperation, *InvocationProvenance) {
+	return &ExecutionDiagnostic{FailureClass: FailureExecutionIncomplete, Route: RouteRetry},
+		RunOperation{ID: "op", Kind: OpExecutionInvoke, IdempotencyKey: OpExecutionInvoke + "#initial|c|b", Attempt: 1, MaxAttempts: 3},
+		&InvocationProvenance{DeadlineBound: bound, InvocationObservation: domain.InvocationObservation{TerminationCause: TerminationDeadlineReached}}
+}
+
+// INVARIANT (#210 composition): run exhaustion does not refuse the successor
+// while outstanding review feedback has no grant yet - grantReviewContinuation
+// grants one and the successor runs under it. Once a grant exists and is spent,
+// it is refused.
+func TestRunExhaustionWithPendingReviewDoesNotRefuseTheSuccessor(t *testing.T) {
+	budgets := RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionContinuations: 8}
+	observed, _ := json.Marshal(FeedbackObservedPayload{FeedbackDecision: FeedbackDecision{Key: "review:1", Admitted: true}})
+	events := []EngineeringEvent{{Type: EventFeedbackObserved, Payload: observed}}
+
+	state := successorState(events, budgets)
+	d, op, invocation := truncatedStop(BoundRunActiveWork)
+	state.admitSuccessor(d, op, invocation, true, false, state.rt.deps.Clock.Now())
+	if d.Bound != BoundRunActiveWork || d.Successor != SuccessorContinuation || d.SuccessorUnavailable != "" || d.Route == RouteStop {
+		t.Fatalf("pending review recorded %+v, want the continuation left available", d)
+	}
+
+	grant, _ := json.Marshal(ReviewContinuationGrant{Allowance: time.Minute})
+	state = successorState(append(events, EngineeringEvent{Type: EventReviewContinuationGranted, Payload: grant}), budgets)
+	d, op, invocation = truncatedStop(BoundRunActiveWork)
+	state.admitSuccessor(d, op, invocation, true, false, state.rt.deps.Clock.Now())
+	if d.SuccessorUnavailable != "run_active_work_exhausted" || d.Route != RouteStop {
+		t.Fatalf("spent review grant recorded %+v, want run_active_work_exhausted", d)
+	}
+}
+
+// INVARIANT: a run whose provider-invocation total (a plan stage's headroom) is
+// spent by this attempt advertises no successor, with run budget left.
+func TestAnExhaustedInvocationTotalIsNotAdvertised(t *testing.T) {
+	budgets := RunBudgets{WallLimit: time.Hour, MaxExecutionContinuations: 8, MaxProviderInvocations: 2}
+	state := successorState(nil, budgets)
+	state.projection.Attempts = map[string]int{OpExecutionInvoke: 1} // this attempt is the 2nd
+	d, op, invocation := truncatedStop(BoundAttemptWall)
+	state.admitSuccessor(d, op, invocation, false, true, state.rt.deps.Clock.Now())
+	if d.Successor != SuccessorRetry || d.SuccessorUnavailable != "run_provider_invocations_exhausted" || d.Route != RouteStop {
+		t.Fatalf("spent invocation total recorded %+v, want retry unavailable: run_provider_invocations_exhausted", d)
+	}
+}
+
+// INVARIANT: zero remaining active work is exhausted. At EXACT equality the run
+// fails rather than dispatching an attempt with no authority; the review grant
+// shares the same boundary through runBudgetSpent.
+func TestExactlySpentActiveWorkIsExhausted(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	state := conditionsFixture(start, &steppingClock{at: start.Add(30 * time.Minute)}, RunBudgets{WallLimit: 30 * time.Minute}, nil)
+	if d, reason := state.conditions(); d != Failed || reason != "run_wall_budget_exhausted" {
+		t.Fatalf("exactly spent run budget read as %s/%s", d, reason)
+	}
+	if !runBudgetSpent(30*time.Minute, 30*time.Minute) {
+		t.Fatal("the review grant would not be due at exactly the spent budget")
+	}
+}

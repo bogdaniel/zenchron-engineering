@@ -119,7 +119,7 @@ func (r *EngineeringRuntime) grantReviewContinuation(s *runState) error {
 	}
 	limit := s.budgets().WallLimit
 	elapsed := s.activeElapsed(r.deps.Clock.Now())
-	if limit <= 0 || elapsed < limit {
+	if !runBudgetSpent(limit, elapsed) {
 		return nil
 	}
 	allowance := limit

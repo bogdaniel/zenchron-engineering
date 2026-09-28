@@ -182,12 +182,17 @@ attempt stops:
   never turns productive work into a retry;
 - at the run's remaining active work (the attempt was truncated because the run
   had less left than one attempt limit), the stop is **run active-work
-  exhaustion**, and the run fails `run_wall_budget_exhausted`.
+  exhaustion**, and the run fails `run_wall_budget_exhausted` - UNLESS the run
+  has outstanding admitted review feedback and no review continuation yet. In
+  that case the one-time bounded review continuation is granted and the
+  successor runs under it, so status leaves that successor available.
 
 Status names which bound ended the attempt - `provider_inactivity`,
 `attempt_wall` or `run_active_work` - and the successor it selected, and says
 `unavailable: <reason>` (with route `stop`) instead of advertising a retry or
-continuation the run can no longer admit.
+continuation the run can no longer admit. The reasons are
+`run_active_work_exhausted`, `execution_attempts_exhausted`,
+`execution_continuations_exhausted` and `run_provider_invocations_exhausted`.
 
 It may be absent, and absent is the shipped default: it stays out of the
 configuration digest (so upgrading changes no existing configuration's

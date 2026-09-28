@@ -782,7 +782,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
 	reviewDelivered := false
-	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) >= limit {
+	if runBudgetSpent(s.budgets().WallLimit, s.activeElapsed(now)) {
 		if len(s.outstandingReviewKeys()) > 0 {
 			if s.reviewContinuationRemaining(now) <= 0 {
 				return Waiting, ReasonReviewBudgetExhausted
@@ -938,6 +938,12 @@ func (s *runState) budgets() RunBudgets {
 	}
 	return budgets
 }
+
+// runBudgetSpent is the one definition of an exhausted run active-work budget,
+// shared by conditions() and grantReviewContinuation so they cannot disagree
+// at the boundary. ZERO remaining is spent: no successor may start with no
+// authority (#328).
+func runBudgetSpent(limit, elapsed time.Duration) bool { return limit > 0 && elapsed >= limit }
 
 // activeWorkRemaining is the run's remaining CUMULATIVE active-work authority,
 // from the existing journal-derived counter (#83). Once a review continuation
