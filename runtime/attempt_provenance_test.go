@@ -128,6 +128,12 @@ func assertPinned(t *testing.T, got ExecutionAttemptProvenance, want *Invocation
 	t.Helper()
 	expected := *want
 	expected.GitRefusals = nil
+	// deadline_bound is the RUNTIME's decision at attempt start (#328), not
+	// the adapter's, so it is added here; attempt_wall_budget_test pins it.
+	if got.Invocation.DeadlineBound == "" {
+		t.Fatal("journalled provenance names no deadline bound for a run with a frozen attempt limit")
+	}
+	expected.DeadlineBound = got.Invocation.DeadlineBound
 	if !reflect.DeepEqual(got.Invocation, expected) {
 		gotJSON, _ := json.Marshal(got.Invocation)
 		wantJSON, _ := json.Marshal(expected)

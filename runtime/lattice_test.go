@@ -138,6 +138,9 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// asking for a shorter window is a narrowing, so a repository may name
 		// it and appears below.
 		"budgets.provider_inactivity_seconds",
+		// The physical-attempt wall (#328): a bound on one attempt, distinct
+		// from the cumulative run budget. Tightenable, so it appears below.
+		"budgets.attempt_wall_limit_seconds",
 		"watch.repositories",
 		// The brokered worker execution environment. Both members are
 		// CAPABILITY statements and neither is an unsafe override: the path
@@ -239,6 +242,7 @@ func TestRepositoryLayerReachesOnlyTightenableBounds(t *testing.T) {
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
 		"budgets.provider_inactivity_seconds",
+		"budgets.attempt_wall_limit_seconds",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
 	})

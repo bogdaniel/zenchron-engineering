@@ -793,8 +793,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// badly. It is observation: nothing below reads it to decide anything.
 	var attemptProvenance []journalEntry
 	if result.Invocation != nil {
+		// Which bound the deadline is (#328) was decided when the attempt
+		// started; it is recorded beside the deadline it explains.
+		invocation := *result.Invocation
+		invocation.DeadlineBound = operation.DeadlineBound
+		result.Invocation = &invocation
 		attemptProvenance = []journalEntry{{Type: EventExecutionAttemptProvenance,
-			Payload: newExecutionAttemptProvenance(operation.ID, physicalAttempt, *result.Invocation)}}
+			Payload: newExecutionAttemptProvenance(operation.ID, physicalAttempt, invocation)}}
 	}
 	recorded := func(e effect) effect {
 		e.events = append(append([]journalEntry(nil), attemptProvenance...), e.events...)
@@ -1013,7 +1018,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		if result.Failure != nil {
 			stage = execStageProviderResult
 		}
-		produced.result = executionRecord{
+		execution := executionRecord{
 			mutationResult: record,
 			PriorContext:   result.PriorContext,
 			Diagnostic:     r.executionDiagnostic(stage, class, result, execErr),
@@ -1025,7 +1030,14 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// the second: one blank README line, produced after eight failed
 			// patch attempts and an exhausted iteration budget, was committed
 			// and sent to assurance as if the objective had been addressed.
-			Checkpoint: record.Mutated && (continuationEligible(execErr) ||
+			//
+			// A runtime bound reached with work in the tree is incomplete work
+			// whichever bound it was: the iteration budget, or (#328) the
+			// physical attempt's wall deadline. The deadline case used to fall
+			// through to candidate.committed and promote unfinished work to a
+			// complete candidate. Under #54 it is a continuation, and it is
+			// never forced back into same-binding retry accounting.
+			Checkpoint: record.Mutated && (class == FailureExecutionIncomplete ||
 				(class == FailureProviderNoProgress && len(state.outstandingReviewKeys()) > 0)),
 		}
 		// A producer that left real work behind did its bounded job, so the
@@ -1045,20 +1057,99 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		if !record.Mutated {
 			produced.state = OperationFailed
 		}
+		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
+		produced.result = execution
 	}
 	return produced
 }
 
-// continuationEligible reports whether a provider stop is one the runtime knows
-// how to resume from. It is deliberately a stated allowlist rather than "any
-// stop with mutation": a cancelled run, a deadline, a refused request or a
-// no-progress loop are not interrupted work waiting to continue, and treating
-// them as continuable would turn a stuck run into an endless one.
+// admitSuccessor records, on the attempt's diagnostic, WHICH bound ended it and
+// WHICH successor the existing routing/checkpoint law selects - a same-binding
+// retry for a zero-delta retryable failure, `continuation|<revision>` for a
+// productive checkpoint (#54) - and, when that successor cannot be admitted,
+// why. An unadmittable successor is not advertised: the route becomes stop.
 //
-// StopIterationBudget is the observed case and the only one this pass adds. The
-// provider reasoned, mutated the workspace, and was cut off by a bound the
-// runtime itself set - the one situation where continuing is exactly what a
-// human would do.
+// It decides nothing. Admission itself stays where it always was (conditions,
+// the attempt ceiling, the continuation ceiling); this only stops the result
+// from promising what those rules are already known to refuse (#328).
+//
+// The bound is read from the attempt's own provenance (#327) - how the process
+// ENDED and which bound its deadline was - so status and the provenance event
+// cannot disagree. Inactivity is taken from the termination cause as well as
+// the class: a kill whose provider named a condition keeps that class (#238),
+// and under #314's chatter filter the class is provider_no_progress either way.
+// An attempt with no provenance (an adapter that records none) falls back to
+// whether its durable deadline had passed.
+func (s *runState) admitSuccessor(d *ExecutionDiagnostic, operation RunOperation, invocation *InvocationProvenance, checkpoint, failed bool, now time.Time) {
+	if d == nil {
+		return
+	}
+	switch {
+	case d.FailureClass == FailureProviderNoProgress ||
+		(invocation != nil && invocation.TerminationCause == TerminationProviderInactivity):
+		d.Bound = BoundProviderInactivity
+	case invocation != nil:
+		if invocation.TerminationCause == TerminationDeadlineReached {
+			d.Bound = invocation.DeadlineBound
+		}
+	case operation.Deadline != nil && !now.Before(*operation.Deadline):
+		d.Bound = operation.DeadlineBound
+	}
+	switch {
+	case checkpoint:
+		d.Successor = SuccessorContinuation
+	case failed && RouteFailure(d.FailureClass) == RouteRetry:
+		d.Successor = SuccessorRetry
+	default:
+		return
+	}
+	// A spent run budget does NOT refuse the successor while outstanding review
+	// feedback has no grant yet: grantReviewContinuation grants one on the next
+	// pass and the successor runs under it (#210). Claiming otherwise would be
+	// the untruth this exists to remove, in the other direction.
+	runSpent := d.Bound == BoundRunActiveWork || s.activeWorkRemaining(now) <= 0
+	_, granted := s.reviewContinuationGrant()
+	reviewPending := !granted && len(s.outstandingReviewKeys()) > 0
+	switch {
+	case runSpent && !reviewPending:
+		d.SuccessorUnavailable = "run_active_work_exhausted"
+	case d.Successor == SuccessorRetry && operation.Attempt >= operation.MaxAttempts:
+		d.SuccessorUnavailable = "execution_attempts_exhausted"
+	case d.Successor == SuccessorContinuation && s.continuationsAfter(operation) >= s.continuationLimit():
+		d.SuccessorUnavailable = "execution_continuations_exhausted"
+	// The run TOTAL of provider invocations (a plan stage's headroom). The
+	// projection was read before this attempt began, so it is counted here.
+	case s.providerInvocationLimit() > 0 && s.projection.Attempts[OpExecutionInvoke]+1 >= s.providerInvocationLimit():
+		d.SuccessorUnavailable = "run_provider_invocations_exhausted"
+	}
+	if d.SuccessorUnavailable != "" {
+		d.Route = RouteStop
+	}
+}
+
+// continuationsAfter is how many distinct continuation bindings the run will
+// have started once this operation is counted; the snapshot was read before it
+// was planned.
+func (s *runState) continuationsAfter(operation RunOperation) int {
+	started := s.startedContinuationBindings()
+	if binding := bindingOf(operation); strings.HasPrefix(binding, invocationContinuationPrefix) {
+		started[binding] = true
+	}
+	return len(started)
+}
+
+// continuationEligible reports whether a TYPED API-provider stop is one the
+// runtime knows how to resume from, and so classifies as execution_incomplete.
+// It is a stated allowlist: a cancelled run, a refused request or a no-progress
+// loop are not interrupted work waiting to continue.
+//
+// StopIterationBudget is the case it names: the provider reasoned, mutated the
+// workspace, and was cut off by a bound the runtime itself set. It is no longer
+// the only road to a checkpoint. A CLI attempt that reaches its own wall
+// deadline is classified execution_incomplete by the adapter, and with work in
+// the tree that is a checkpoint too (#328). That is bounded rather than
+// endless because each attempt's deadline is min(attempt limit, remaining run
+// active work), and continuation depth has its own ceiling (#54).
 func continuationEligible(cause error) bool {
 	var stop *ProviderStopError
 	if !errors.As(cause, &stop) {
@@ -1134,7 +1225,24 @@ type ExecutionDiagnostic struct {
 	ProviderErrorCode  string       `json:"provider_error_code,omitempty"`
 	ProviderErrorParam string       `json:"provider_error_param,omitempty"`
 	ArtifactRef        string       `json:"artifact_ref,omitempty"`
+	// Bound is which runtime bound ended the attempt, when one did (#328):
+	// provider inactivity, the physical-attempt wall, or the run's cumulative
+	// active work. Empty for any other ending, and for an attempt of a run
+	// that predates the attempt limit.
+	Bound AttemptBound `json:"bound,omitempty"`
+	// Successor is the binding the routing/checkpoint law selects next -
+	// "retry" of the same binding or "continuation" of a checkpoint (#54) -
+	// and SuccessorUnavailable names the authority that already refuses it.
+	Successor            string `json:"successor,omitempty"`
+	SuccessorUnavailable string `json:"successor_unavailable,omitempty"`
 }
+
+// The two successor kinds a bounded attempt can select. They spend different
+// authority and are never merged (#54).
+const (
+	SuccessorRetry        = "retry"
+	SuccessorContinuation = "continuation"
+)
 
 // Stages name WHERE an execution died, which is the fact source archaeology was
 // otherwise needed for: a request the provider refused before any transport, a
@@ -1267,8 +1375,18 @@ func (s *runState) findings() []Finding {
 // an attempt is actually executing.
 func executionWallBound(state *runState, operation RunOperation) time.Duration {
 	bound := state.budgets().WallLimit
+	now := state.rt.deps.Clock.Now()
 	if operation.WallBudget > 0 {
-		bound = OperationRemaining(operation, state.rt.deps.Clock.Now())
+		bound = OperationRemaining(operation, now)
+	}
+	// THE DURABLE DEADLINE IS THE ATTEMPT'S AUTHORITY (#328). For a legacy run
+	// it is exactly the operation remainder above, so this changes nothing;
+	// for a run with a frozen attempt limit it is min(attempt limit, remaining
+	// run active work), which the operation remainder alone cannot express.
+	if operation.Deadline != nil {
+		if left := max(operation.Deadline.Sub(now), 0); left < bound {
+			bound = left
+		}
 	}
 	if _, granted := state.reviewContinuationGrant(); granted {
 		if remaining := state.reviewContinuationRemaining(state.rt.deps.Clock.Now()); remaining < bound {

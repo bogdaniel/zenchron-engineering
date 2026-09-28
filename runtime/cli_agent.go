@@ -867,6 +867,12 @@ type InvocationProvenance struct {
 	ProviderKind string    `json:"provider_kind"`
 	TrustMode    TrustMode `json:"trust_mode"`
 	Model        string    `json:"model,omitempty"`
+	// DeadlineBound is WHICH bound this attempt's execution_deadline is
+	// (#328): the physical-attempt wall, or the run's remaining active work
+	// when that was smaller. The runtime decided it when the attempt started
+	// and records it here, beside the deadline it explains; no adapter sets it.
+	// Empty for an attempt of a run that predates the attempt limit.
+	DeadlineBound AttemptBound `json:"deadline_bound,omitempty"`
 	domain.InvocationObservation
 	// GitRefusals are the destructive Git operations the runtime refused during
 	// this invocation, bounded and carrying no provider-chosen operand.
@@ -1177,7 +1183,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// reconstructible from a transcript.
 	provenance.InactivityLimit = providerInactivityLimit(ctx)
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		provenance.TerminationCause = "deadline_reached"
+		provenance.TerminationCause = TerminationDeadlineReached
 	}
 	// THE STALL IS NAMED BEFORE THE SHUTDOWN. An inactivity kill cancels this
 	// context, so through ctx.Err() alone it is indistinguishable from a
@@ -1185,7 +1191,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// that stopped moving, the other is a pause the run resumes from.
 	inactive := providerInactivityCause(ctx)
 	if inactive {
-		provenance.TerminationCause = "provider_inactivity_limit_reached"
+		provenance.TerminationCause = TerminationProviderInactivity
 	}
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(p.Agent.ID, request.AttemptRef(), output.Stdout, output.Stderr)
 	if artifactErr != nil {
