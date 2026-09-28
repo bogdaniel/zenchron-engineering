@@ -258,6 +258,19 @@ func (s *SQLiteOperationStore) PlanRevision(id string, revision int) (domain.Eng
 	return plan, err == nil, err
 }
 
+// planCreatedAt is when a plan was claimed.
+func (s *SQLiteOperationStore) planCreatedAt(id string) (time.Time, bool, error) {
+	var nanos int64
+	err := s.db.QueryRow(`SELECT created_unix_nano FROM plans WHERE id = ?`, id).Scan(&nanos)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return time.Unix(0, nanos).UTC(), true, nil
+}
+
 // Plans lists every plan at its highest stored revision, oldest first.
 func (s *SQLiteOperationStore) Plans() ([]domain.EngineeringPlan, error) {
 	rows, err := s.db.Query(`SELECT r.document FROM plans p

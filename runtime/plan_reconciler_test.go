@@ -54,7 +54,13 @@ func planAgents() []domain.ExecutionAgentDescriptor {
 // stages, an assurance gate and a human decision gate.
 func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture {
 	t.Helper()
-	base := newPhase8Fixture(t)
+	return newPlanRunFixtureOn(t, newPhase8Fixture(t), stages)
+}
+
+// newPlanRunFixtureOn builds the same plan over an existing phase 8 fixture,
+// so a scenario that needs other durable state first shares its store.
+func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.PlanStage) *planRunFixture {
+	t.Helper()
 	fixture := &planRunFixture{phase8Fixture: base}
 	fixture.service = PlanService{
 		Store: base.store, Clock: base.clock, Agents: planAgents(), DefaultAgent: "codex",

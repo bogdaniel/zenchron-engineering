@@ -310,6 +310,10 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	before, err := os.ReadFile(filepath.Join(dir, "runtime.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = OpenSQLiteOperationStore(dir)
 	var unsupported UnsupportedSchemaError
 	if !errors.As(err, &unsupported) {
@@ -317,6 +321,15 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	}
 	if unsupported.Found != 99 || unsupported.Supported != sqliteSchemaVersion {
 		t.Fatalf("unexpected schema error detail: %+v", unsupported)
+	}
+	// FAIL CLOSED MEANS UNTOUCHED (#89 A6): the refusal writes nothing to the
+	// database another binary still depends on.
+	after, err := os.ReadFile(filepath.Join(dir, "runtime.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("refusing a newer schema modified the database")
 	}
 }
 

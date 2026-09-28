@@ -113,6 +113,14 @@ func (r PlanReconciler) now() time.Time {
 // Reconcile advances one plan by one pass.
 func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickReport, error) {
 	report := PlanTickReport{PlanID: planID}
+	// OLD-CONFIGURATION WORK IS NOT CARRIED ACROSS A RE-ADOPTION (#307). A run
+	// records its controller and parks as controller_changed; a plan records
+	// neither, so before anything is settled, invoked or started the plan is
+	// placed on its side of the boundary.
+	if held, err := planPredatesConfigurationReadoption(r.Store, planID); err != nil || held != "" {
+		report.Waiting = held
+		return report, err
+	}
 	snapshot, err := r.Store.ReplayPlan(planID)
 	if err != nil {
 		return report, err
@@ -2111,6 +2119,40 @@ func planDependenciesSatisfied(stage domain.PlanStage, snapshot PlanSnapshot) (b
 		}
 	}
 	return true, ""
+}
+
+// planPredatesConfigurationReadoption names the re-adoption a plan was created
+// before, when that re-adoption changed the controller-effective configuration
+// or had no previous authority to compare against. Such a plan was proposed,
+// resolved and budgeted under a configuration that no longer governs, and its
+// remaining stages would otherwise become new runs under the current one. It is
+// held, not rewritten: an operator proposes it again under this configuration.
+//
+// Ordinary succession cannot change the configuration, so re-adoptions are the
+// only configuration boundaries there are.
+//
+// ponytail: plans record no controller binding, so creation time against the
+// cold re-adoption's time is the boundary; a durable plan binding replaces this
+// if plans ever need to survive a re-adoption (#89 R1/R3).
+func planPredatesConfigurationReadoption(store *SQLiteOperationStore, planID string) (string, error) {
+	created, found, err := store.planCreatedAt(planID)
+	if err != nil || !found {
+		return "", err
+	}
+	readoptions, err := store.ControllerReadoptions()
+	if err != nil {
+		return "", err
+	}
+	for _, readoption := range readoptions {
+		if readoption.Previous != nil && readoption.PreviousConfig == readoption.Config {
+			continue
+		}
+		if created.Before(readoption.RecordedAt) {
+			return fmt.Sprintf("configuration_changed: plan %s was created before re-adoption %s changed the controller-effective configuration; "+
+				"it is not carried across that boundary - propose it again under the current configuration", planID, readoption.ID), nil
+		}
+	}
+	return "", nil
 }
 
 // terminalStageState is a stage this plan will not touch again.
