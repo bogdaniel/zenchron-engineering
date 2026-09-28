@@ -21,7 +21,8 @@ where the value freezes, and which identities or digests it takes part in. It
 also records the migration law and splits Phase B into separate pieces.
 
 This ADR changes no behaviour. `runtime/config_classification_test.go` fails
-when a configuration field exists in code but is not named in this document.
+when a configuration field that `encoding/json` would serialize is not named in
+the §3 inventory tables.
 
 ## How the digest is built today (evidence)
 
@@ -49,7 +50,22 @@ when a configuration field exists in code but is not named in this document.
      (`runtime/plan_intent.go:141-145`). That is #131.
   4. **Authority request identity**, through `ControllerSHA256`
      (`runtime/authority_request.go:251`).
-  5. **Recorded, not identity.** `AgentHandoffRecord.Config`
+  5. **Other `ControllerSHA256` / controller-digest consumers.** Any change to
+     the digest's composition moves each of these:
+     - evidence producer revision `Producer: {ControllerID, r.controller}`
+       (`runtime/operations.go:1539,1678`). This is part of the evidence identity;
+     - PR body controller line (`runtime/operations.go:2022`);
+     - adoption guard `refuseUnlessSucceeded` and `AdoptedFrom`
+       (`runtime/controller.go:711,1268`);
+     - handoff recovery owner `MayRecover` (`runtime/controller_handoff.go:401`,
+       `runtime/controller_choreography.go:109,192`);
+     - the `runs.controller_sha256` column (`runtime/source_claim.go:52`,
+       `runtime/journal.go:75`);
+     - plan-cancel scheduler owner (`runtime/plan_reconciler.go:444`);
+     - re-adopt binding recompute (`cmd/zenchron-engineering/controller_succession.go:390`);
+     - plan-stage run identity `derivedRunID(..., ConfigDigest, ...)`
+       (`runtime/controller.go:1224`).
+  6. **Recorded, not identity.** `AgentHandoffRecord.Config`
      (`runtime/agent_binding.go:112,331`) and the status `ControllerIdentity.ConfigDigest`
      (`runtime/controller.go:1077`). Status reports the current process's
      digest, not the digest the run was created under.
@@ -144,7 +160,7 @@ field declaration.
 | `agents.<id>.credential_path`, `agents.<id>.endpoint` (agents.go:145,147) | A Zenchron-held credential and its remote endpoint | C | controller start | as above | Yes | None. Stays C. | Credential authority. |
 | `agents.<id>.allow_permission_bypass` (agents.go:154) | Standing permission for unsafe bypass invocation | C | controller start | as above | Yes | None. Stays C. | Privilege. Moving it would allow silent escalation on a live run, which ADR-0001 prohibits. |
 | `agents.<id>.command`, `agents.<id>.home`, `agents.<id>.model` (agents.go:127,131,139) | The executable, provider profile and model of a worker | A | agent assignment (#84 posture) and attempt start | #84 posture fingerprint and attempt provenance (#327) | After migration, new runs only. A change for a live run → `waiting_configuration_drift` (#89). | As `toolchain`. | Execution posture (#84). **Stays C until #84, #327 and B5.** |
-| `agents.<id>.unattended` (agents.go:160) | Whether supervisor discovery may start work with this agent | S | supervisor start | SupervisorPolicyDigest | No. It gates creation only, and never an existing run. | Pre-migration supervisor starts carry no policy digest. Their policy is identified by the controller binding. | Scheduling eligibility, not trust. Explicit work is unaffected. |
+| `agents.<id>.unattended` (agents.go:160) | Whether supervisor discovery may start work with this agent | S | supervisor start | SupervisorPolicyDigest | No. It gates creation only, and never an existing run. | Pre-migration supervisor starts carry no policy digest. Their policy is identified by the controller binding. | Scheduling eligibility, not trust. Explicit work is unaffected. Provisional: B4 must re-justify it, because it gates autonomous starts under the agent's account. |
 | `default_agent` (config.go:580) | Which agent a new run is assigned when none is named | R | run creation (frozen as `run.agent_assigned`) | Existing `run.agent_assigned` event. Also RunPolicyDigest. | No. The assignment is already durable per run. | Runs without `agent_assigned` keep the documented legacy meaning (runtime.go:298-302). | Already self-identifying at its freeze point. This is the first field eligible to move, in B3. |
 | `github.credential_mode`, `github.token_path`, `github.app_id`, `github.installation_id`, `github.private_key_path`, `github.endpoint`, `github.governance_credential_mode` (config.go:167-237) | Publication identity, forge endpoint, trust-root observation identity | C | controller start | controller-effective digest, run ID, PlanID | Yes | None. Stays C. | Who the runtime publishes as and what it treats as authoritative forge state. |
 | `feedback.min_permission`, `feedback.allowed_bots`, `feedback.self_logins` (config.go:360-367) | Who may direct a worker through model-visible feedback | C | controller start | as above | Yes. Widening admission on a live run widens who can steer it. | None. Stays C. | Authority over model input (config.go:345-349). |
@@ -181,19 +197,24 @@ an input to the RunPolicyDigest and the SupervisorPolicyDigest.
 | --- | --- | --- |
 | Configuration | `budgets.wall_limit_seconds`. The name is kept, and its meaning is narrowed to exactly this. | New operator member (name owned by #328, e.g. `budgets.attempt_wall_limit_seconds`) and the same repository tighten-only member |
 | Category | R | A |
-| Freezes | At run creation, into `RunPolicy` (it is already persisted today as `run.Budgets.WallLimit`, controller.go:778-795). | The **limit** freezes at run creation into `RunPolicy`. The **effective deadline** freezes at attempt start as `start + min(frozen attempt limit, remaining run active-work)`. It is persisted as the operation `deadline` (scheduler.go:536-543, already durable) and in attempt provenance (#327). |
-| Digest / identity | RunPolicyDigest only. It is **not** in the controller-effective digest, the run ID or the PlanID. | RunPolicyDigest (limit) and attempt provenance (effective deadline and which bound was binding). It is **not** in the controller-effective digest, the run ID, the PlanID or any operation idempotency key. |
+| Freezes | At run creation, into `run.Budgets` (already persisted today as `run.Budgets.WallLimit`, controller.go:778-795), and into `RunPolicy` once B1 exists. | The **effective limit** freezes at run creation into `run.Budgets`, and into `RunPolicy` once B1 exists. It is then read back exactly: never live, never `min(live, persisted)`. The **effective deadline** freezes at each physical attempt start as `start + min(frozen attempt limit, remaining run active-work)`. It is persisted as the operation `deadline` (scheduler.go:536-543, already durable) and in attempt provenance (#327). |
+| Digest / identity | **Controller-effective until B3**, like every budget today. After B3 it is in the RunPolicyDigest only, and **not** in the controller-effective digest, the run ID or the PlanID. | A **stated** value is **controller-effective until B3**, like every budget today. An **absent** value is never in any digest (see Default). After B3 the limit is in the RunPolicyDigest only. The effective deadline and which bound was binding are in attempt provenance. It is never in the run ID, the PlanID or any operation idempotency key. |
 | Charged against | Cumulative active elapsed time across all attempts and operations (reconciler.go:785, #83). Waiting is never charged. | One physical attempt. Ending an attempt at this deadline charges only the active time actually spent to the run budget. It neither consumes nor restores the remaining run budget. |
-| Default | Required, as today (config.go:1121). No shipped default. Embedders get 1h (controller.go:437-438), and this is unchanged. | An absent value is resolved **at config load, before any digest** (the `provider_inactivity_seconds` pattern, config.go:464-479), to a finite value no greater than the run budget. #328 owns the number and must justify and pin it. If #328 ships no separate constant, absent resolves to the value of `wall_limit_seconds`, which reproduces today's behaviour byte for byte. "30m attempt / 90m run" is an example, not a decision. |
+| Default | Required, as today (config.go:1121). No shipped default. Embedders get 1h (controller.go:437-438), and this is unchanged. | An absent value **stays absent in the digested form**: `omitempty`, an unresolved zero, and **not** resolved in `BudgetConfig.resolved()`. Resolving it before the digest, the `provider_inactivity_seconds` pattern at config.go:464-479 and 745, would add the new key to every existing config's Global digest. That would park every nonterminal run as `controller_changed`, move the run-ID space (#58) and fork every PlanID (#131). The absent value is instead **derived at run creation**, as `wall_limit_seconds` unless #328 justifies and pins a shipped constant (capped by the run budget), and is frozen into `run.Budgets`. A stated value is digested like any other member. This is §6.5 applied to a new field: its shipped default freezes at its own freeze point, not into the controller digest. "30m attempt / 90m run" is an example, not a decision. |
 | Invariant | — | A stated attempt limit greater than `wall_limit_seconds` is refused at load, like the lifecycle-below-wall refusal at config.go:1159-1162. If the remaining run budget is below one attempt limit, the attempt is truncated to the remaining budget, and a stop at that bound is recorded as **run active-work exhaustion**, not as an attempt-wall stop. A successor route (a same-binding retry, or `continuation|<revision>` per #54) is advertised only if both its binding-specific authority and the remaining run active-work allow it. |
 | Ceilings | Operator ceiling. The repository may tighten it. | Operator ceiling. The repository may tighten it. It can never exceed the frozen run budget. |
-| Migration from `wall_limit_seconds` | A config with only `wall_limit_seconds` keeps its meaning as the run active-work budget. | The attempt limit is absent and resolves by the default rule. A historical run with no frozen attempt limit is read under the legacy rule "attempt deadline = remaining run active-work", which is exactly today's `executionWallBound` (operations.go:1254-1265). Nothing is backfilled. |
-| Restart | Reads the frozen value. Consumed active time comes from durable operations. | Reads the durable `deadline` of an in-flight attempt, and never mints a fresh one. The attempt count comes from durable operations. |
+| Migration from `wall_limit_seconds` | A config with only `wall_limit_seconds` keeps its meaning as the run active-work budget. | The attempt limit is absent, stays out of the digest, and is derived at run creation by the default rule. A historical run with no frozen attempt limit keeps **today's rule**, which is not "remaining run active-work". Today the attempt bound is the operation's `WallBudget` minus **that operation's own** `ConsumedExecution` (operations.go:1254-1262, scheduler.go:536-541). `WallBudget` is set when the operation is planned from the run's effective wall limit, `min(live, persisted)` (reconciler.go:1583, 915-921), and the bound is further capped by the review-continuation remaining time (operations.go:1259-1263). Cumulative run active time across operations is checked only at reconcile (reconciler.go:785). Nothing is backfilled. **#328 must decide** what `op.WallBudget` becomes: the attempt limit, the remaining run active-work, or the minimum of the two. It must also decide how the review-continuation cap composes with the attempt limit. |
+| Restart | Reads the frozen value. Consumed active time comes from the existing durable cumulative counter. | An attempt in flight when its controller died is **abandoned**. Its orphaned interval is charged in full to `ConsumedExecution` (scheduler.go:503-508). The next activation mints a **new** `Deadline` (scheduler.go:536-543). Under #328 that successor is a **new physical attempt**. It counts against same-binding retry or continuation authority (#54), and its deadline is `min(frozen attempt limit, remaining run active-work)`. Neither budget is renewed. |
 
-#328 may land after RunPolicy exists (B1). It must not add the attempt field as
-a controller-effective member first and migrate it later. If #328 has to land
-before B1, the field stays in the controller-effective digest, like every other
-budget, until B1 and B3.
+**Ordering (coordinator decision).** #328 may land **before** B1, provided that it:
+
+- (a) keeps an absent attempt limit out of the digested form;
+- (b) freezes the effective attempt limit into `run.Budgets` at creation and
+  reads it exactly, never live and never `min(live, persisted)`;
+- (c) computes remaining run active-work from the existing cumulative counter.
+
+A stated attempt limit is controller-effective until B3, like every budget. B1
+remains a prerequisite for B3.
 
 ### 5. Legacy interpretation (no invented backfill)
 
@@ -220,6 +241,8 @@ budget, until B1 and B3.
   identified by the controller binding's config digest, and nothing more.
 
 ### 6. Contradictions found (recorded, not silently resolved)
+
+Seven items: six contradictions or gaps, and one confirmed agreement (7).
 
 1. **"Existing runs keep their policy" (#329, requirement 4) against the current
    reads.** `run.Budgets` is persisted at creation (controller.go:778-795), and
@@ -305,10 +328,11 @@ controller-effective digest before its destination satisfies all of §2.
   it. Record its digest in the genesis event. Make every reader use the frozen
   value (fix reconciler.go:796, 915-953, supervisor.go:913, controller.go:472-483).
   Report it in status (controller.go:1096). Implement the §5 legacy derivation.
-  Nothing leaves the digest yet. This can be done inside #328 or directly
-  before it.
+  Nothing leaves the digest yet. B1 is a prerequisite for B3. It is **not** a
+  prerequisite for #328.
 - **B2: #328.** Add the attempt wall limit and the successor admissibility rule
-  of §4 on top of B1.
+  of §4. It may land before B1 under the three conditions in §4 (Ordering). It
+  keeps an absent attempt limit out of the digest.
 - **B3: split the controller-effective digest.** `ControllerBinding.Config`,
   the run ID and the PlanID hash only the C projection. R and P fields
   (`budgets.*` except `provider_inactivity_seconds`, `default_agent`, `plan.*`)
@@ -317,11 +341,21 @@ controller-effective digest before its destination satisfies all of §2.
   landed a `compatible_with_migration` for it. **Gated on #58.** Partially
   addresses #131. Includes the required dogfood: Run R alive under default A,
   change to B, R continues under A, new Run S gets B, no re-adopt. A separate
-  C-field change still requires #307.
+  C-field change still requires #307. B3 must list every consumer in "How the
+  digest is built today" item 5 and handle it explicitly. In particular, the
+  **evidence producer identity** `Producer: {ControllerID, ControllerSHA256}`
+  (operations.go:1539,1678) changes for every new evidence record. Existing
+  evidence keeps its recorded producer revision. B3 also covers the adoption
+  guard, the handoff recovery owner, the `runs.controller_sha256` column, the
+  plan-cancel owner, the re-adopt recompute, and plan-stage `derivedRunID`.
 - **B4: SupervisorPolicy generation.** A durable supervisor-start record with a
   SupervisorPolicyDigest over `storage.*`, `supervisor.*`,
   `watch.poll_interval_seconds`, `watch.max_concurrent_runs`, `gc.*` and
   `agents.<id>.unattended`. Then those fields leave C. No hot reload.
+  `agents.<id>.unattended` must be **re-justified** in B4 before it leaves C.
+  It gates autonomous starts under that agent's account, so a false → true
+  change widens what may run unattended as that account. If B4 cannot show
+  that this is scheduling policy rather than authority, it stays C.
 - **B5: attempt and provider posture.** After #327 (persisted invocation
   provenance) and #84 (resolved-agent fingerprint bound at assignment), move
   `agents.<id>.command`, `home` and `model`, `provider.model`, `toolchain.*`
