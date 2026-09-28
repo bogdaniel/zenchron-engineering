@@ -458,7 +458,7 @@ func (r *EngineeringRuntime) workspace(state *runState) (*CandidateWorkspace, er
 	}
 	expected := state.projection.CandidateRevision
 	if expected == "" {
-		expected = state.pinnedBase()
+		expected = state.pristineCandidateHead()
 	}
 	if got := strings.TrimSpace(head); got != expected {
 		return nil, &WorkspaceIntegrityError{Detail: "candidate head " + got + " is not the recorded revision " + expected}
@@ -1198,8 +1198,8 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 		}
 		return nil
 	}
-	if subject.Commit != workspace.BaseRevision {
-		return &WorkspaceIntegrityError{Detail: "pristine candidate head " + subject.Commit + " is not the trusted base " + workspace.BaseRevision}
+	if expected := state.pristineCandidateHead(); subject.Commit != expected {
+		return &WorkspaceIntegrityError{Detail: "pristine candidate head " + subject.Commit + " is not the trusted base " + expected}
 	}
 	return nil
 }

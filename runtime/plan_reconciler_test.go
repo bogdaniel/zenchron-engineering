@@ -947,7 +947,9 @@ func TestAPullRequestForADifferentCandidateIsNotUsedAsABase(t *testing.T) {
 			})},
 		// The producer moves on to a second, unpublished candidate...
 		{SchemaVersion: SchemaVersion, ID: "up-3", RunID: "run-upstream", Type: EventCandidateCommitted,
-			Payload: mustPayload(t, CandidateCommittedPayload{Commit: "cafe222", Tree: "tafe222"})},
+			Payload: mustPayload(t, CandidateCommittedPayload{
+				Commit: "cafe222", Tree: "tafe222", PathCount: 1, PathsDigest: strings.Repeat("c", 64),
+			})},
 		// ...and the remote observation catches up to it, so the pull request is
 		// not STALE - it matches the run's current head - it is simply for a
 		// different commit than the one this stage froze.

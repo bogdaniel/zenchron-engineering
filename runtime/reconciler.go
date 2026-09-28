@@ -592,6 +592,18 @@ func (s *runState) upstreamCandidate() *CandidateRef {
 	return s.run.Plan.UpstreamCandidate
 }
 
+// pristineCandidateHead is the commit a freshly cloned workspace must be at
+// before this run has made any commit of its own: ordinarily the trusted
+// base it was cloned at, but the exact upstream candidate when this stage
+// consumes one that was never published and had to be transferred into the
+// workspace after the clone - see createCandidate.
+func (s *runState) pristineCandidateHead() string {
+	if ref := s.upstreamCandidate(); ref != nil {
+		return ref.Revision
+	}
+	return s.pinnedBase()
+}
+
 // baseRevision is the base the candidate currently sits on.
 func (s *runState) baseRevision() string {
 	if s.projection.BaseRevision != "" {

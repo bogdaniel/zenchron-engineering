@@ -470,6 +470,7 @@ func driveReviewer(t *testing.T, fixture *planRunFixture, runID string) {
 			if event.Type == EventExecutionCompleted {
 				invoked = true
 			}
+			t.Logf("DEBUGZC2[%d] event=%s payload=%s", i, event.Type, string(event.Payload))
 		}
 		run, found, err := fixture.store.Run(runID)
 		if err != nil || !found {
