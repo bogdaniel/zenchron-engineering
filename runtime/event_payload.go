@@ -779,6 +779,10 @@ type PlanReasoningPayload struct {
 	// the journal does not repeat it. Bounded to fit the event, and absent
 	// when the provider reported none.
 	Invocation *domain.InvocationObservation `json:"invocation,omitempty"`
+	// InvocationDroppedForSize marks a refused attempt whose invocation
+	// provenance existed but could not fit the event even in its fixed-size
+	// form. Absent Invocation without it means the provider reported none.
+	InvocationDroppedForSize bool `json:"invocation_dropped_for_size,omitempty"`
 }
 
 // PlanAttemptRefusedPayload records one reasoning proposal the deterministic

@@ -67,6 +67,19 @@ func TestStatusSurfacesTheLatestAttemptProvenance(t *testing.T) {
 		t.Fatalf("an unknown denial count was not rendered as unknown:\n%s", unknown.String())
 	}
 
+	// A provider without the structured stream reports no denials at all: the
+	// count is NOT APPLICABLE, decided from the recorded progress mode.
+	byteOutput := engine.report.ExecutionAttemptProvenance.Invocation.InvocationObservation
+	byteOutput.ProgressMode = "byte_output"
+	engine.report.ExecutionAttemptProvenance.Invocation.InvocationObservation = byteOutput
+	var notApplicable bytes.Buffer
+	if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &notApplicable); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(notApplicable.String(), "permission_denials=n/a (provider reports none)") {
+		t.Fatalf("a byte_output provider's denials were not rendered as not applicable:\n%s", notApplicable.String())
+	}
+
 	// ABSENCE IS STATED, NOT ZERO-FILLED.
 	engine.report.ExecutionAttemptProvenance = nil
 	var none bytes.Buffer

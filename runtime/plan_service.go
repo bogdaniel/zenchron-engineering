@@ -1473,21 +1473,7 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 		// everything else the attempt carries, never allowed to make the
 		// refusal itself unappendable.
 		if observed := input.Reasoning.Invocation; observed != nil {
-			// Measured with the LONGEST attempt id the journal may allocate in
-			// place of the pending one, so the allocation cannot push it over.
-			fits := func(o *domain.InvocationObservation) bool {
-				candidate, reasoning := payload, *payload.Reasoning
-				reasoning.Invocation = o
-				candidate.Reasoning, candidate.AttemptID = &reasoning, strings.Repeat("a", maxPayloadFieldBytes)
-				return appendable(EventPlanAttemptRefused, candidate)
-			}
-			fitted := fitObservation(*observed, func(o domain.InvocationObservation) bool { return fits(&o) })
-			payload.Reasoning.Invocation = &fitted
-			if !fits(&fitted) {
-				// Only when the refusal record around it is itself at the
-				// ceiling: the refusal was appendable before #327, and it stays so.
-				payload.Reasoning.Invocation = nil
-			}
+			fitRefusalInvocation(&payload, *observed)
 		}
 	}
 	// The transcripts are attached as event ARTIFACTS as well as referenced in
@@ -1506,6 +1492,41 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 		return "", err
 	}
 	return recorded.AttemptID, nil
+}
+
+// fitRefusalInvocation attaches a refused planning invocation's provenance to
+// its attempt record, fitted to the event beside everything else the attempt
+// carries. It is measured with the LONGEST attempt id the journal may allocate
+// in place of the pending one, so the allocation cannot push it over.
+//
+// It never makes the refusal itself unappendable. When even the fixed-size
+// core cannot fit - only a refusal already at the ceiling on its own - the
+// record says so with invocation_dropped_for_size, so "dropped" is never
+// confused with "the provider reported none".
+func fitRefusalInvocation(payload *PlanAttemptRefusedPayload, observed domain.InvocationObservation) {
+	fits := func(reasoning PlanReasoningPayload) bool {
+		candidate := *payload
+		candidate.Reasoning, candidate.AttemptID = &reasoning, strings.Repeat("a", maxPayloadFieldBytes)
+		return appendable(EventPlanAttemptRefused, candidate)
+	}
+	with := func(o *domain.InvocationObservation) PlanReasoningPayload {
+		reasoning := *payload.Reasoning
+		reasoning.Invocation = o
+		return reasoning
+	}
+	fitted := fitObservation(observed, func(o domain.InvocationObservation) bool { return fits(with(&o)) })
+	if fits(with(&fitted)) {
+		payload.Reasoning.Invocation = &fitted
+		return
+	}
+	dropped := with(nil)
+	dropped.InvocationDroppedForSize = true
+	// ponytail: a refusal within a few bytes of the ceiling cannot even take
+	// the flag, and records neither; that record was already at the limit
+	// before #327 and stays appendable.
+	if fits(dropped) {
+		*payload.Reasoning = dropped
+	}
 }
 
 // attemptStages reduces the proposal to the members that decide whether it is

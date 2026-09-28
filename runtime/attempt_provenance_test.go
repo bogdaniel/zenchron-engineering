@@ -678,3 +678,78 @@ func TestPlanningReasoningCarriesTheInvocationObservation(t *testing.T) {
 		t.Fatalf("provider mode = %q", output.Reasoning.ProviderMode)
 	}
 }
+
+func refusalReasoning() *PlanReasoningPayload {
+	return reasoningPayload(domain.PlanReasoningProvenance{
+		AgentID: "claude", ProviderKind: AgentKindClaudeCode, TrustMode: domain.TrustRequirementOperatorTrusted,
+		InvocationMode:        domain.InvocationModeNonMutatingPlanning,
+		WorkspaceDigestBefore: strings.Repeat("a", 64), WorkspaceDigestAfter: strings.Repeat("a", 64),
+		WorkspaceUnchanged: true,
+	})
+}
+
+// A refusal already at the ceiling cannot take even the fixed-size core of its
+// invocation. It still appends, and it SAYS the provenance was dropped for
+// size, so "dropped" never reads as "the provider reported none".
+func TestARefusalAtTheCeilingMarksItsInvocationAsDropped(t *testing.T) {
+	base := PlanAttemptRefusedPayload{
+		AttemptID: PendingAttemptID, Revision: 1, Origin: domain.ProposalOriginInitial,
+		Errors: []string{"the provider reported execution_incomplete"},
+	}
+	// Room for the flag, not for the minimal observation.
+	flagged := func(p PlanAttemptRefusedPayload) bool {
+		r := *refusalReasoning()
+		r.InvocationDroppedForSize = true
+		p.Reasoning, p.AttemptID = &r, strings.Repeat("a", maxPayloadFieldBytes)
+		return appendable(EventPlanAttemptRefused, p)
+	}
+	// Add depends_on elements across stages until one no longer fits, then
+	// size that last element to the byte.
+padding:
+	for s := 0; s < maxPayloadListItems; s++ {
+		base.Stages = append(base.Stages, PlanAttemptStagePayload{ID: fmt.Sprintf("pad-%02d", s), Kind: string(domain.StageAgent)})
+		stage := &base.Stages[len(base.Stages)-1]
+		for d := 0; d < maxPayloadListItems; d++ {
+			stage.DependsOn = append(stage.DependsOn, long(fmt.Sprintf("dep-%02d-%02d-", s, d)))
+			if flagged(base) {
+				continue
+			}
+			lo, hi := 0, maxPayloadFieldBytes
+			for lo < hi {
+				mid := (lo + hi + 1) / 2
+				stage.DependsOn[d] = strings.Repeat("d", mid)
+				if flagged(base) {
+					lo = mid
+				} else {
+					hi = mid - 1
+				}
+			}
+			if lo == 0 {
+				stage.DependsOn = stage.DependsOn[:d]
+			} else {
+				stage.DependsOn[d] = strings.Repeat("d", lo)
+			}
+			break padding
+		}
+	}
+	if !flagged(base) {
+		t.Fatal("could not pad the refusal to the ceiling")
+	}
+	payload := base
+	payload.Reasoning = refusalReasoning()
+	fitRefusalInvocation(&payload, deadlineProvenance().InvocationObservation)
+	if payload.Reasoning.Invocation != nil || !payload.Reasoning.InvocationDroppedForSize {
+		t.Fatalf("a dropped invocation was not marked: invocation=%v dropped=%v", payload.Reasoning.Invocation, payload.Reasoning.InvocationDroppedForSize)
+	}
+	payload.AttemptID = strings.Repeat("a", maxPayloadFieldBytes)
+	if !appendable(EventPlanAttemptRefused, payload) {
+		t.Fatal("marking the drop made the refusal unappendable")
+	}
+	// A refusal with room keeps the invocation, unmarked.
+	roomy := PlanAttemptRefusedPayload{AttemptID: PendingAttemptID, Revision: 1, Origin: domain.ProposalOriginInitial,
+		Errors: []string{"refused"}, Reasoning: refusalReasoning()}
+	fitRefusalInvocation(&roomy, deadlineProvenance().InvocationObservation)
+	if roomy.Reasoning.Invocation == nil || roomy.Reasoning.InvocationDroppedForSize {
+		t.Fatal("a refusal with room lost or mis-marked its invocation")
+	}
+}

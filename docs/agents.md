@@ -229,7 +229,9 @@ for Claude Code: accepted structured progress events, main-thread tool calls
   final_result_observed says whether a final result was read at all: the
   denial count and tool names come from it, so without one - an attempt
   killed at its deadline, typically - they are UNKNOWN, recorded as absent
-  and shown as "unknown (no final result)", never as 0
+  and shown as "unknown (no final result)", never as 0; for a provider
+  without the structured stream (byte_output) it is shown as
+  "n/a (provider reports none)", decided from the recorded progress mode
 ```
 
 The prompt text is excluded from the durable record: its argv slot holds the
@@ -270,7 +272,10 @@ reported no provenance, or that predates it, has no `invocation` member. A
 planning attempt that is REFUSED - including one killed at its deadline - has no
 revision, so its `plan.attempt_refused` journal event carries the same record in
 `reasoning.invocation`, fitted to that event's ceiling alongside everything else
-the attempt records. A proposed revision's journal event does not repeat it: the
+the attempt records; a refusal already at the ceiling that cannot take even the
+fixed-size core says `invocation_dropped_for_size` instead, so a dropped record
+is never mistaken for one the provider never reported. A proposed revision's
+journal event does not repeat it: the
 revision document is its one home.
 
 Planning provenance carries host-local and time-bound facts (paths, a process

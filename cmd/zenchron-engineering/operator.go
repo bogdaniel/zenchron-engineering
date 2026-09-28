@@ -657,7 +657,14 @@ func attemptNumbers(attempts []int) string {
 
 // permissionDenials renders the denial count, which is read from the final
 // result and is therefore UNKNOWN - never 0 - when none was observed.
+//
+// It is decided from the progress mode RECORDED with the attempt: only the
+// structured Claude stream has a final result that lists denials at all, so
+// for every other provider the count is not unknown but not applicable.
 func permissionDenials(o domain.InvocationObservation) string {
+	if o.ProgressMode != runtime.ProgressStructuredClaudeEvents {
+		return "n/a (provider reports none)"
+	}
 	if !o.FinalResultObserved {
 		return "unknown (no final result)"
 	}

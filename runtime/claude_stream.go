@@ -49,6 +49,11 @@ const (
 	progressStructuredClaudeEvents = "structured_claude_events"
 )
 
+// ProgressStructuredClaudeEvents is the recorded progress mode under which an
+// attempt's permission denials are observable at all, exported so a reader of
+// recorded provenance decides from the record rather than from live config.
+const ProgressStructuredClaudeEvents = progressStructuredClaudeEvents
+
 // maxClaudeEventBytes bounds one NDJSON line. A longer line - a huge tool
 // result, say - is a protocol anomaly: it does not refresh the bound, it does
 // not kill the invocation, and it is never buffered past this size. It is a var
