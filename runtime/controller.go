@@ -1077,8 +1077,12 @@ type StatusReport struct {
 	// never from the live operation row. Absent means that attempt recorded
 	// none: it never reached a provider, or it has not ended yet.
 	ExecutionAttemptProvenance *ExecutionAttemptProvenance `json:"execution_attempt_provenance,omitempty"`
-	Budgets                    RunBudgets                  `json:"budgets"`
-	StateSHA256                string                      `json:"state_sha256"`
+	// HeldMaterial is the valuable material a budget-ended run is holding and
+	// its disposition (#203), exactly as the terminal event recorded it.
+	// Absent on a budget failure means the run held no material result.
+	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
+	Budgets      RunBudgets    `json:"budgets"`
+	StateSHA256  string        `json:"state_sha256"`
 }
 
 // WorkerIdentity is the execution agent a run is bound to.
@@ -1145,6 +1149,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		CandidateDiscardRefused:  state.projection.CandidateDiscardRefused,
 
 		ExecutionAttemptProvenance: state.projection.ExecutionAttemptProvenance,
+		HeldMaterial:               state.snapshot.HeldMaterial,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{
