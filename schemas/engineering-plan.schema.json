@@ -414,6 +414,9 @@
         },
         "workspace_unchanged": {
           "type": "boolean"
+        },
+        "invocation": {
+          "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/invocation_observation"
         }
       }
     },

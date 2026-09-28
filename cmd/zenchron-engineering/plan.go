@@ -748,6 +748,13 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 			fmt.Fprintf(stdout, "  workspace       %s (%s -> %s)\n",
 				map[bool]string{true: "unchanged", false: "CHANGED"}[reasoning.WorkspaceUnchanged],
 				terminalSafe(short(reasoning.WorkspaceDigestBefore)), terminalSafe(short(reasoning.WorkspaceDigestAfter)))
+			if inv := reasoning.Invocation; inv != nil {
+				fmt.Fprintf(stdout, "  invocation      termination=%s progress_mode=%s elapsed=%s structured_events=%d permission_denials=%s\n",
+					terminalSafe(orUnknown(inv.TerminationCause)), terminalSafe(orUnknown(inv.ProgressMode)), inv.Elapsed,
+					inv.StructuredEvents, permissionDenials(*inv))
+			} else if reasoning.InvocationDroppedForSize {
+				fmt.Fprintln(stdout, "  invocation      reported, but dropped: it did not fit this attempt record")
+			}
 		}
 		// WHAT IT WAS BOUND TO, on both sides, whenever the record holds them.
 		// A refusal about a subject relationship whose record shows neither

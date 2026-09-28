@@ -169,6 +169,12 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	cmd.Stdout, cmd.Stderr = out, errOut
 	if stream != nil {
 		cmd.Stdout = io.MultiWriter(stream, out)
+	} else if patterns := transportChatterFrom(ctx); patterns != nil && watch != nil {
+		// KNOWN TRANSPORT CHATTER IS NOT PROGRESS (#314): every other line
+		// still refreshes the bound, a matching one does not.
+		out.observe, errOut.observe = nil, nil
+		cmd.Stdout = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, out)
+		cmd.Stderr = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, errOut)
 	}
 	stopWatch := watch.watchUntilComplete()
 	err := runBoundedProcess(ctx, cmd, grace)

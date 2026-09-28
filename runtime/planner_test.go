@@ -40,6 +40,8 @@ type fakePlanningProvider struct {
 	// anything fenced inside the prompt is a candidate answer unless the
 	// runtime prevents it.
 	echoPrompt bool
+	// invocation replaces the minimal provenance the fake reports.
+	invocation *InvocationProvenance
 
 	artifacts ArtifactStore
 	requests  []ExecutionRequest
@@ -66,8 +68,11 @@ func (p *fakePlanningProvider) Execute(_ context.Context, request ExecutionReque
 	}
 	result := ExecutionResult{
 		ProviderID: "planner", Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
-		Invocation: &InvocationProvenance{PermissionMode: "read-only"},
+		Invocation: &InvocationProvenance{InvocationObservation: domain.InvocationObservation{PermissionMode: "read-only"}},
 		Failure:    p.failure,
+	}
+	if p.invocation != nil {
+		result.Invocation = p.invocation
 	}
 	if p.failure != nil {
 		result.Outcome = OperationFailed

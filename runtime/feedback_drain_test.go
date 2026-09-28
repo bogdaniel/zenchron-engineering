@@ -7,6 +7,8 @@ package runtime
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // TestAConsumptionRecordMayCarryOnlyLostItems. When every pending item's text
@@ -59,7 +61,7 @@ func TestFeedbackIsNotConsumedWhenNoWorkerRan(t *testing.T) {
 	}
 	ranAndFailed := ExecutionResult{
 		Outcome:    OperationFailed,
-		Invocation: &InvocationProvenance{AgentID: "codex", Executable: "codex"},
+		Invocation: &InvocationProvenance{AgentID: "codex", InvocationObservation: domain.InvocationObservation{Executable: "codex"}},
 		Failure:    &ProviderFailure{Classification: FailureUnknown},
 	}
 	if ranAndFailed.Invocation == nil {

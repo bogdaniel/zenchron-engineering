@@ -388,6 +388,12 @@ func InvokePlanner(ctx context.Context, input PlannerInput) (PlannerOutput, erro
 	}
 	if result.Invocation != nil {
 		provenance.ProviderMode = result.Invocation.PermissionMode
+		// THE WHOLE EXPLANATORY CORE, not one field of it (#327). It is
+		// persisted with the plan revision this reasoning produced; planning
+		// has no run operation or physical attempt to bind a journal event to,
+		// and none is invented for it.
+		observed := result.Invocation.InvocationObservation
+		provenance.Invocation = &observed
 	}
 	if !provenance.WorkspaceUnchanged {
 		return PlannerOutput{Reasoning: provenance, Artifacts: result.Artifacts}, &PlanningWorkspaceError{

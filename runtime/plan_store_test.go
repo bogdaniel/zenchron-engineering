@@ -552,7 +552,7 @@ func TestPlanJournalRefusesATamperedChain(t *testing.T) {
 // history.
 func TestMigrationPreservesAPreExistingRunJournal(t *testing.T) {
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db")+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)")
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db"))+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +767,7 @@ func TestAProposalOriginMustBeInTheCatalogue(t *testing.T) {
 // performance that happened - which is what the whole freeze is for.
 func TestMigrationKeepsPreGenerationAssignments(t *testing.T) {
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db")+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)")
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db"))+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatal(err)
 	}

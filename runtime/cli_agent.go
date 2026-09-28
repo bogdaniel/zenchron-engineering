@@ -231,10 +231,19 @@ type cliAgentSpec struct {
 	ReadOnly *cliReadOnlyMode
 	// ProgressMode is the oracle that supervises this CLI's inactivity bound.
 	// Empty is progressByteOutput: any stdout or stderr byte refreshes it.
+	// progressByteOutputExcludingTransportChatter is byte output where a line
+	// matching InactivityNonProgress or a Signals Match does not refresh it
+	// (#314, transport_chatter.go).
 	// progressStructuredClaudeEvents supervises it from Claude's stream-json
 	// events instead (#322, claude_stream.go), which requires an executor that
 	// tees stdout to the parser and a per-physical-attempt window.
 	ProgressMode string
+	// InactivityNonProgress are lowercase substrings of this CLI's own
+	// transport-retry chatter. A matching output line does not refresh the
+	// inactivity window. It is NOT a diagnostic: nothing here is ever read by
+	// classifyAgentFailure, so a match can withhold a refresh and never grant a
+	// failure class.
+	InactivityNonProgress []string
 	// InvocationEnv returns non-secret provider controls for the MAIN
 	// invocation only, from the CONFIGURED per-attempt inactivity window
 	// (ProviderBudget.InactivityWindow), never from a remainder.
@@ -848,79 +857,17 @@ func resolvesDeclaredExecutable(candidate string) bool {
 // invoked. It is what makes a constrained native run and an explicitly
 // authorized bypass run distinguishable forever.
 //
-// Argv is the effective argument vector with the prompt element replaced by a
-// digest reference. The prompt carries untrusted third-party text and is
-// unbounded; every security-relevant flag is short and is kept verbatim.
+// The explanatory core - command, modes, bounds, termination and the
+// structured-progress counters - is domain.InvocationObservation, embedded so
+// the wire shape stays flat and unchanged, and so a run attempt's journal event
+// and a planning revision carry ONE definition of it (#327). What is added here
+// is who ran, and the #241 refusals only a run attempt has.
 type InvocationProvenance struct {
 	AgentID      string    `json:"agent_id"`
 	ProviderKind string    `json:"provider_kind"`
 	TrustMode    TrustMode `json:"trust_mode"`
 	Model        string    `json:"model,omitempty"`
-	Executable   string    `json:"executable"`
-	Version      string    `json:"provider_version,omitempty"`
-	// SandboxMode is empty when the provider exposes no selectable sandbox.
-	SandboxMode    string `json:"sandbox_mode,omitempty"`
-	PermissionMode string `json:"permission_mode,omitempty"`
-	// PermissionBypass records an explicitly authorized unsafe invocation. It
-	// is omitempty, so its ABSENCE in every ordinary attempt is the norm and
-	// its presence is conspicuous.
-	PermissionBypass bool   `json:"permission_bypass,omitempty"`
-	AuthMode         string `json:"auth_mode,omitempty"`
-	AuthModeSource   string `json:"auth_mode_source,omitempty"`
-	// WorkspaceBound reports that the invocation named the runtime-owned
-	// candidate directory explicitly with a working-directory flag. Only one
-	// of the supported CLIs offers one; for the rest the workspace is the
-	// bounded process's working directory, which is equally exact and is
-	// recorded as such rather than claimed as a flag that was not passed.
-	WorkspaceBound bool `json:"workspace_bound"`
-	// WorkspaceInstructionsSuppressed reports whether instruction files inside
-	// the candidate tree were kept out of the CLI's own context.
-	WorkspaceInstructionsSuppressed bool     `json:"workspace_instructions_suppressed"`
-	Argv                            []string `json:"argv,omitempty"`
-	PromptSHA256                    string   `json:"prompt_sha256,omitempty"`
-
-	// THE AUTHORITY THIS INVOCATION ACTUALLY RAN UNDER, and what it did with
-	// it. None of these authorize anything; they exist so that an invocation
-	// which outlives its bound explains itself from the journal instead of
-	// costing a forensic reconstruction of timestamps and transcripts.
-	Deadline        *time.Time    `json:"execution_deadline,omitempty"`
-	StartedAt       *time.Time    `json:"execution_started_at,omitempty"`
-	CompletedAt     *time.Time    `json:"execution_completed_at,omitempty"`
-	Elapsed         time.Duration `json:"observed_wall_elapsed,omitempty"`
-	OverranDeadline bool          `json:"overran_deadline,omitempty"`
-	// TerminationCause is why the process stopped: it returned on its own, the
-	// runtime ended it at the deadline, or the runtime ended it because it had
-	// produced no recognized progress for the whole inactivity window.
-	TerminationCause string `json:"termination_cause,omitempty"`
-	// InactivityLimit is the no-progress window this invocation ran under, and
-	// zero when none was in force. It is recorded beside the deadline because
-	// it is the same kind of fact - a bound the runtime imposed - and an
-	// operator reading a stalled invocation needs to know which window it was
-	// measured against.
-	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
-	// ProgressMode is the oracle that measured progress against that window:
-	// byte_output, or structured_claude_events (#322).
-	ProgressMode string `json:"progress_mode,omitempty"`
-	// Bounded observations from a structured stream, recorded so an
-	// inactivity termination explains itself without the raw transcript: how
-	// many events counted as progress, how many main-thread tool calls were
-	// still open when the process ended, how many permission denials the final
-	// result listed, and how many lines were malformed or oversized. They are
-	// diagnostics, never authority, and carry no provider text.
-	StructuredEvents  int64 `json:"structured_progress_events,omitempty"`
-	OpenToolsAtExit   int   `json:"open_tools_at_exit,omitempty"`
-	PermissionDenials int   `json:"permission_denials,omitempty"`
-	ProtocolAnomalies int   `json:"protocol_anomalies,omitempty"`
-	// ProcessID is the pid - and, because every bounded process is started with
-	// Setpgid, the process-GROUP id - the runtime owned.
-	ProcessID int `json:"process_id,omitempty"`
-
-	// GitGuarded reports that this invocation ran under the brokered Git
-	// boundary of #241. It is recorded because its ABSENCE matters: a
-	// composition that prepared no guard produced a worker that could discard
-	// dirty candidate work, and that must be a durable fact rather than
-	// something an operator has to infer from the configuration.
-	GitGuarded bool `json:"git_guarded,omitempty"`
+	domain.InvocationObservation
 	// GitRefusals are the destructive Git operations the runtime refused during
 	// this invocation, bounded and carrying no provider-chosen operand.
 	//
@@ -928,6 +875,9 @@ type InvocationProvenance struct {
 	// destructive recovery, was refused, and then did the work properly
 	// succeeded - and the refusal is still the most interesting thing that
 	// happened, because it is where expensive reasoning was nearly lost.
+	//
+	// They are folded into the operation result as a count and the latest
+	// shape, which is why the attempt-provenance event carries none of them.
 	GitRefusals []GitRefusal `json:"git_refusals,omitempty"`
 }
 
@@ -1113,20 +1063,29 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 	}
 	progressMode := spec.ProgressMode
-	if progressMode == "" {
+	// An executor that does not observe output cannot apply the chatter
+	// filter, so provenance records what it will actually do: byte output.
+	if _, observes := p.executor().(stdoutObservingExecutor); progressMode == "" ||
+		(progressMode == progressByteOutputExcludingTransportChatter && !observes) {
 		progressMode = progressByteOutput
 	}
 	authMode, authSource := p.observeAuthMode(spec, home)
 	provenance := InvocationProvenance{
 		AgentID: p.Agent.ID, ProviderKind: p.Agent.Kind, TrustMode: p.Agent.TrustMode,
-		Model: invocation.Model(), Executable: p.command(), Version: p.version(ctx, spec, home),
-		SandboxMode: sandboxMode, PermissionMode: permissionMode,
-		PermissionBypass: p.PermissionBypass, AuthMode: authMode, AuthModeSource: authSource,
-		WorkspaceBound:                  spec.WorkingDirectoryFlag,
-		WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
-		Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
-		PromptSHA256:                    promptDigest(invocation.Prompt),
-		ProgressMode:                    progressMode,
+		// Operator-configured strings are bounded like every other durable
+		// field: a configured command path or model name is not a licence to
+		// grow a journal row.
+		Model: boundedDetail(invocation.Model()),
+		InvocationObservation: domain.InvocationObservation{
+			Executable: boundedDetail(p.command()), Version: p.version(ctx, spec, home),
+			SandboxMode: sandboxMode, PermissionMode: permissionMode,
+			PermissionBypass: p.PermissionBypass, AuthMode: boundedDetail(authMode), AuthModeSource: authSource,
+			WorkspaceBound:                  spec.WorkingDirectoryFlag,
+			WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
+			Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
+			PromptSHA256:                    promptDigest(invocation.Prompt),
+			ProgressMode:                    progressMode,
+		},
 	}
 	// The invocation's WALL BOUND is applied here, where the process actually
 	// runs. It was carried all the way into the request and read by nobody on
@@ -1167,6 +1126,9 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	if progressMode == progressByteOutputExcludingTransportChatter {
+		ctx = withTransportChatter(ctx, transportChatterPatterns(spec))
+	}
 	var stream *claudeStream
 	if progressMode == progressStructuredClaudeEvents {
 		stream = newClaudeStream(request.Attempt)
@@ -1183,6 +1145,8 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		provenance.StructuredEvents = streamed.Accepted
 		provenance.OpenToolsAtExit = streamed.OpenTools
 		provenance.PermissionDenials = streamed.PermissionDenials
+		provenance.FinalResultObserved = streamed.FinalResult
+		provenance.PermissionDeniedTools = streamed.DeniedTools
 		provenance.ProtocolAnomalies = streamed.Anomalies
 	}
 	// WHAT THIS INVOCATION ACTUALLY DID WITH ITS AUTHORITY. Recorded whether it
@@ -1247,7 +1211,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		switch {
-		case inactive && recognized != FailureUnknown:
+		case inactive && recognized != FailureUnknown && progressMode != progressByteOutputExcludingTransportChatter:
 			// THE PROVIDER SAID WHAT WAS WRONG AND THEN WENT QUIET. Both facts
 			// are true and they are recorded separately: the CONDITION is the
 			// one the provider named, and how the process ENDED is already in
@@ -1265,6 +1229,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// A phrase the model wrote into its session output never reaches
 			// here at all, so preserving it cannot become a way for untrusted
 			// text to outrank a bound the runtime actually enforced.
+			//
+			// NOT UNDER THE CHATTER FILTER (#314). There the inactivity kill is
+			// reached BECAUSE matching lines were withheld, and on Codex a
+			// candidate's own stderr (a test retrying `connection refused`)
+			// lands in the same tail. Preserving the tail would let matched
+			// candidate text turn into provider_unavailable and a RouteWait, so
+			// that kill is provider_no_progress. A genuine #317 reconnect loop
+			// therefore retries under the existing attempt authority rather
+			// than waiting; a provider that EXITS on its own is still
+			// classified from the tail exactly as before.
 		case inactive:
 			// The PROVIDER STOPPED MOVING and the runtime ended it, with
 			// nothing recognized to say why. The process group is already gone
@@ -1587,13 +1561,22 @@ func ExecCapableScratchBase(preferred string) string {
 // build cache that a remediation attempt re-uses - deleting it per invocation
 // would make every retry recompile the world, and this workload is bounded by
 // wall time. It is retired with the run instead.
+//
+// The operation component is a DIGEST, not the encoded identity the transcript
+// uses (#331). This path is the worker's TMPDIR, and an operation id encodes to
+// ~150 bytes of %XX escapes: SQLite URI-decodes a "file:" path, and a Unix
+// socket address is bounded near 104 bytes, so the worker's own tests broke on
+// the directory rather than on the change. The path is recomputed from
+// identity; it is not an identity or authority input and is never read back,
+// so a 64-bit digest keeps it unique and replayable without the escapes.
 func ExecutionScratchDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
 	if err := attempt.Validate(); err != nil {
 		return "", err
 	}
+	operation := sha256.Sum256([]byte(attempt.OperationID))
 	return filepath.Join(ExecCapableScratchBase(stateDir), "runs",
 		encodePathComponent(attempt.RunID), executionScratchDir,
-		encodePathComponent(attempt.OperationID),
+		hex.EncodeToString(operation[:8]),
 		fmt.Sprintf("attempt-%d", attempt.Attempt)), nil
 }
 

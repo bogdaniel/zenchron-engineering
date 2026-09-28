@@ -600,7 +600,7 @@ func TestDoctorReportsExhaustedAndUnreportedRateLimit(t *testing.T) {
 func TestDoctorFailsOnUnsupportedNewerSQLiteSchema(t *testing.T) {
 	f := newDoctorFixture(t)
 	path := filepath.Join(f.stateDir, "runtime.db")
-	db, err := sql.Open("sqlite", "file:"+path)
+	db, err := sql.Open("sqlite", sqliteFileURI(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,6 +616,23 @@ func TestDoctorFailsOnUnsupportedNewerSQLiteSchema(t *testing.T) {
 	requireCheck(t, report, "state.sqlite", DoctorFail)
 	if report.Status != DoctorFail {
 		t.Fatalf("report status is %s, want FAIL", report.Status)
+	}
+}
+
+// TestDoctorReadsTheSchemaOfAStateDirContainingAPercent is #331: SQLite
+// percent-decodes a "file:" URI, so a raw "file:"+path made doctor open a
+// different, nonexistent file under a worker's %XX-shaped TMPDIR.
+func TestDoctorReadsTheSchemaOfAStateDirContainingAPercent(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "run%3Aexec%23initial%7C1")
+	store, err := OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if check := doctorStateSchema(DoctorInput{StateDir: stateDir}); check.Status != DoctorPass {
+		t.Fatalf("state.schema is %s under a %%-containing state dir: %s", check.Status, check.Reason)
 	}
 }
 

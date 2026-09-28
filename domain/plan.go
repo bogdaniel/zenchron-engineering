@@ -651,6 +651,11 @@ type PlanReasoningProvenance struct {
 	// WorkspaceUnchanged is the conclusion. It is recorded rather than implied
 	// so a reader never has to compare two digests to learn the answer.
 	WorkspaceUnchanged bool `json:"workspace_unchanged"`
+	// Invocation is how the planning invocation ran and ended (#327), where
+	// the provider reported it. It is absent - never zero-filled - for a
+	// provider that reported no invocation provenance, and for every revision
+	// persisted before it existed.
+	Invocation *InvocationObservation `json:"invocation,omitempty"`
 }
 
 // PlanProvenance binds a plan revision to everything that produced it.

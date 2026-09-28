@@ -70,7 +70,7 @@ func openJournal(t *testing.T) (string, *SQLiteOperationStore) {
 // rawJournalDB bypasses the store to model corruption or a foreign writer.
 func rawJournalDB(t *testing.T, dir string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db")+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db"))+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
