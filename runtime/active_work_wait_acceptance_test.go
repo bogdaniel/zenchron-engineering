@@ -115,10 +115,8 @@ func TestAMultiDayReviewWaitSeparatesTheThreeClocks(t *testing.T) {
 	if got := during.status.Elapsed - before.status.Elapsed; got != span {
 		t.Fatalf("lifecycle age advanced by %s over a %s wait", got, span)
 	}
-	// Acceptance 8: three distinct numbers, and they partition lifecycle age.
-	if during.status.ActiveElapsed+during.status.ExternalWaitElapsed != during.status.Elapsed {
-		t.Fatalf("active %s + wait %s != age %s", during.status.ActiveElapsed, during.status.ExternalWaitElapsed, during.status.Elapsed)
-	}
+	// Acceptance 8: status reports the three clocks as distinct numbers (the
+	// wait field is derived as age - active, so their sum is not re-asserted).
 	if during.status.Elapsed <= fixture.deps.Budgets.WallLimit {
 		t.Fatalf("the fixture did not outlive its wall budget in calendar time (%s <= %s); nothing was proven", during.status.Elapsed, fixture.deps.Budgets.WallLimit)
 	}
@@ -167,13 +165,50 @@ func TestAMultiDayReviewWaitSeparatesTheThreeClocks(t *testing.T) {
 	if got := fixture.runtime.remainingBudgets(fixture.state(runID)); got.WallSeconds != before.budgets.WallSeconds {
 		t.Fatalf("resuming after the wait had %#v active wall budget, want exactly %#v", got.WallSeconds, before.budgets.WallSeconds)
 	}
+	// Let the resumed work take real (injected) time, then prove it and only
+	// it was charged: active grows by at most the span the resume occupied,
+	// and the remaining budget is exactly the pre-wait remainder minus it.
+	fixture.clock.step = time.Second
 	invocations := len(fixture.provider.requests)
+	resumeStart := fixture.clock.Now()
 	outcome := fixture.reconcile(runID)
+	resumeEnd := fixture.clock.Now()
 	if outcome.Disposition == Failed {
 		t.Fatalf("a run resumed after a %s review wait was failed: %s", span, outcome.Reason)
 	}
 	if len(fixture.provider.requests) <= invocations {
 		t.Fatal("the review did not resume the same run's worker")
+	}
+	fixture.clock.step = 0
+	after := takeActiveWorkSnapshot(t, fixture, runID)
+	resumed := after.status.ActiveElapsed - before.status.ActiveElapsed
+	if resumed <= 0 || resumed > resumeEnd.Sub(resumeStart) {
+		t.Fatalf("resumed work charged %s active; the resume occupied %s", resumed, resumeEnd.Sub(resumeStart))
+	}
+	if got, want := after.budgets.WallSeconds.Remaining, int64((fixture.deps.Budgets.WallLimit-before.status.ActiveElapsed-resumed)/time.Second); got != want {
+		t.Fatalf("remaining after resume = %ds, want pre-wait remainder minus resumed work = %ds", got, want)
+	}
+	assertHandoffAgreesWithReconciler(t, fixture, after)
+}
+
+// TestAClosedExternalWaitStaysExcluded pins the CLOSED-wait branch of the
+// fold: once a later disposition ends the wait, its idle span must remain
+// excluded rather than being charged retroactively.
+func TestAClosedExternalWaitStaysExcluded(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	work := operationPair("exec", start.Add(time.Minute), 10*time.Minute)
+	waitAt := start.Add(11 * time.Minute)
+	closeAt := waitAt.Add(72 * time.Hour)
+	closers := map[string]EngineeringEvent{
+		"internal wait": waitEvent(closeAt, "operation_unavailable"),
+		"terminal":      {Type: EventRunCompleted, OccurredAt: closeAt},
+	}
+	for name, closer := range closers {
+		events := append(append([]EngineeringEvent(nil), work...), waitEvent(waitAt, "execution_provider_quota"), closer)
+		state := &runState{run: EngineeringRun{CreatedAt: start}, events: events}
+		if got := state.activeElapsed(closeAt); got != 11*time.Minute {
+			t.Fatalf("%s: a closed 72h external wait was charged: active %s, want 11m", name, got)
+		}
 	}
 }
 
