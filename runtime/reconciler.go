@@ -156,6 +156,11 @@ type mutationResult struct {
 	// not being a failure at all.
 	DiscardRefusals int    `json:"discard_refusals,omitempty"`
 	DiscardRefused  string `json:"discard_refused,omitempty"`
+	// ContentDigest identifies the uncommitted change this operation left in
+	// the workspace (workspaceContentDigest), taken when it returned. It is
+	// what binds held material to exact content when a budget ends the run
+	// before the change is committed (#203). Empty means unknown.
+	ContentDigest string `json:"content_digest,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -1906,13 +1911,22 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 		if !ok {
 			return fmt.Errorf("no journal event for disposition %q", disposition)
 		}
-		payload := struct {
-			Reason string `json:"reason,omitempty"`
-		}{reason}
+		// A budget boundary names what the run is holding (#203) in the SAME
+		// event that ends it, so the terminal fact and the held material can
+		// never be journalled apart, and replay reads the record back rather
+		// than re-deriving it.
+		var held *HeldMaterial
+		if BudgetBoundary(disposition, reason) {
+			held = state.heldMaterial(reason)
+		}
+		payload := dispositionRecord{Reason: reason, HeldMaterial: held}
 		if err := r.append(state, eventType, "", payload, nil); err != nil {
 			return err
 		}
 		state.snapshot.Disposition, state.snapshot.Reason = disposition, reason
+		if held != nil {
+			state.snapshot.HeldMaterial = held
+		}
 	}
 	run := state.run
 	run.Phase = state.phase()

@@ -287,10 +287,22 @@ func dispositionPayload(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return nil
 	}
-	var payload struct {
-		Reason string `json:"reason"`
+	var payload dispositionRecord
+	if err := strictJSON(raw, &payload); err != nil {
+		return err
 	}
-	return strictJSON(raw, &payload)
+	if payload.HeldMaterial != nil {
+		return payload.HeldMaterial.validate()
+	}
+	return nil
+}
+
+// dispositionRecord is the run disposition payload. HeldMaterial is present
+// only on a budget-boundary failure that held valuable material (#203); every
+// older event, and every other disposition, has none.
+type dispositionRecord struct {
+	Reason       string        `json:"reason,omitempty"`
+	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
 }
 
 // operationPayload is the RunOperation lifecycle payload Reduce folds into the

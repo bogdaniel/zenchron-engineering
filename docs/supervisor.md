@@ -263,6 +263,37 @@ nobody has classified spends the budget. A new wait pauses the clock only when
 somebody decides it should, which is the safe direction for a bound whose whole
 job is to end things.
 
+### What a budget-ended run is holding
+
+A budget still ends the run; nothing extends it. But completed material work
+must not be silently made useless by that boundary (#203), so every terminal
+failure whose reason is a budget boundary (`*_exhausted`) records, in the same
+`run.failed` event, whether the run holds valuable material:
+
+```text
+verified_unpublished   execution-complete commit, assurance passed at it, no
+                       pull request carries it
+committed_unverified   execution-complete commit not yet verified
+checkpoint             runtime-owned incomplete checkpoint commit (#54)
+uncommitted            a succeeded producer's change the budget stopped before
+                       candidate.commit; identified by producing operation, path
+                       count and a content digest taken when the producer
+                       returned (no Git write was made to compute it)
+```
+
+Each record binds the exact revision (and tree when known), names the next
+lifecycle step and the budget reason it is blocked by, and, when the latest
+attempt selected a retry or continuation that cannot be admitted (#328), that
+successor and why. Its disposition is `held`: the material stays in the run's
+candidate workspace, `gc` retains that workspace, and **nothing is granted** -
+no attempt, continuation, active work, token or cost, provider deadline, Git
+operation or publication. Carrying it forward is new, governed work.
+
+The record is written once and read back from the journal, so a restart or a
+changed configuration reports the same identity and disposition. `autonomy
+status` prints `held material`, and prints `none (no material result)` for a
+budget failure that held nothing, so the two are never confused.
+
 ## Concurrency
 
 The ceiling is operator authority:

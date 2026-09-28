@@ -632,6 +632,10 @@ func nextOperatorAction(view statusView) string {
 		return "the forge rate-limit budget is exhausted until " + view.GitHub.RateLimit.ResetAt.UTC().Format(time.RFC3339) + "; no action is needed before then"
 	}
 	if view.Disposition == runtime.Failed {
+		if h := view.HeldMaterial; h != nil {
+			return "the run ended (" + view.Reason + ") holding " + h.Kind + " material at " + short(h.Revision) +
+				" in its candidate workspace; nothing was published and no budget was renewed. It is retained from gc: inspect it there and carry it forward through new, governed work"
+		}
 		if d := view.ExecutionDiagnostic; d != nil {
 			return "the run failed (" + view.Reason + ") at execution stage " + d.Stage +
 				"; the sanitized diagnostic is shown above and `autonomy events " + run + "` holds the full journal"
@@ -722,6 +726,22 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))
 	line("candidate", fmt.Sprintf("%s rev=%s tree=%s", view.Candidate.Branch, short(view.Candidate.Revision), short(view.Candidate.Tree)))
 	line("contract", view.Contract.ID+"@"+view.Contract.Revision)
+	// WHAT A BUDGET-ENDED RUN IS HOLDING (#203). Exhaustion with valuable
+	// material and exhaustion with none are different facts, so both are
+	// stated rather than one being left as a missing line.
+	if h := view.HeldMaterial; h != nil {
+		line("held material", fmt.Sprintf("%s %s rev=%s tree=%s", h.Disposition, h.Kind, orUnknown(short(h.Revision)), orUnknown(short(h.Tree))))
+		if h.Kind == runtime.HeldUncommitted {
+			line("held content", fmt.Sprintf("operation=%s paths=%d digest=%s", h.Operation, h.PathCount, orUnknown(short(h.ContentDigest))))
+		}
+		blocked := h.NextStep
+		if h.Successor != "" {
+			blocked = strings.TrimSpace(blocked + " successor=" + h.Successor + " unavailable: " + h.SuccessorUnavailable)
+		}
+		line("held next step", strings.TrimSpace(orUnknown(blocked)+" blocked by "+h.BlockedBy))
+	} else if runtime.BudgetBoundary(view.Disposition, view.Reason) {
+		line("held material", "none (no material result)")
+	}
 	// A running operation whose live row could not be matched is reported from
 	// the journal, and says so rather than passing stale values off as live.
 	journalMark := ""

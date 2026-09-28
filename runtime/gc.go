@@ -367,6 +367,12 @@ func (c Collector) prove(root string, target GCTarget, now time.Time) string {
 	if now.Sub(settled) < c.retention() {
 		return "within the retention window"
 	}
+	// Held material (#203) lives in the candidate workspace: an unpublished
+	// runtime commit or uncommitted changes nothing else has a copy of.
+	// Retention age is no reason to destroy it; only an operator is.
+	if held := snapshot.HeldMaterial; held != nil && target.Kind == GCCandidateWorkspace {
+		return "run holds " + held.Kind + " material at " + held.Revision
+	}
 	if target.Kind == GCRawTranscript && !rawArtifactOf(snapshot, target.Path) {
 		return "ownership cannot be proven: no journalled raw artifact at this path"
 	}

@@ -481,9 +481,12 @@ type EngineeringEvent struct {
 }
 type RunSnapshot struct {
 	EngineeringRun
-	Operations  map[string]RunOperation `json:"operations"`
-	Artifacts   []Artifact              `json:"artifacts,omitempty"`
-	StateSHA256 string                  `json:"state_sha256"`
+	Operations map[string]RunOperation `json:"operations"`
+	Artifacts  []Artifact              `json:"artifacts,omitempty"`
+	// HeldMaterial is what a budget-ended run is holding (#203), read back
+	// from its run.failed event exactly as recorded.
+	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
+	StateSHA256  string        `json:"state_sha256"`
 }
 
 // CanonicalJSON serializes a typed runtime value to JSON, then applies RFC 8785
@@ -576,8 +579,10 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 		// consulting MergePrecedence before it consults cancellation; guarding
 		// it here would contradict that rule rather than protect anything.
 		if e.Type == EventRunFailed && s.Disposition != Cancelled {
+			var record dispositionRecord
+			_ = json.Unmarshal(e.Payload, &record) // validated at append
 			s.Disposition = Failed
-			s.Reason = payloadReason(e.Payload)
+			s.Reason, s.HeldMaterial = record.Reason, record.HeldMaterial
 		}
 		if e.Type == EventRunCancelled {
 			s.Disposition = Cancelled

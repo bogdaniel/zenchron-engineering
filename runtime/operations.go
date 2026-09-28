@@ -814,6 +814,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
+		ContentDigest: workspaceContentDigest(workspace.Dir, paths),
 		// WHAT THE #241 BOUNDARY REFUSED, folded into durable operation state
 		// so status can say it without re-reading a provider transcript. The
 		// most recent operation's shape is kept and the rest are counted: the
@@ -1502,7 +1503,8 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 	if err != nil {
 		return failed(err)
 	}
-	return effect{state: Succeeded, result: mutationResult{Mutated: len(changed) > 0, PathCount: len(changed), ProviderID: "gofmt"}}
+	return effect{state: Succeeded, result: mutationResult{Mutated: len(changed) > 0, PathCount: len(changed), ProviderID: "gofmt",
+		ContentDigest: workspaceContentDigest(workspace.Dir, changed)}}
 }
 
 // ---------------------------------------------------------------------------
