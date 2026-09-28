@@ -440,7 +440,12 @@ type RunOperation struct {
 	// provenance are one fact rather than two arithmetic results that can
 	// disagree. It is NOT the lifetime identity of the operation: that is
 	// ConsumedExecution against WallBudget.
-	Deadline         *time.Time    `json:"deadline,omitempty"`
+	Deadline *time.Time `json:"deadline,omitempty"`
+	// DeadlineBound names WHICH bound Deadline is (#328): the physical-attempt
+	// wall limit, or the run's remaining active work when that was smaller.
+	// It is decided once, when the attempt starts, and is empty for an
+	// operation of a run that predates the attempt limit.
+	DeadlineBound    AttemptBound  `json:"deadline_bound,omitempty"`
 	NoProgressBudget time.Duration `json:"no_progress_budget,omitempty"`
 	NoProgressKey    string        `json:"no_progress_key,omitempty"`
 	CancelRequested  bool          `json:"cancel_requested,omitempty"`
@@ -602,6 +607,26 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 	}
 	return op.Lease == nil || (!ownerAlive && !now.Before(op.Lease.ExpiresAt))
 }
+
+// AttemptBound names the bound that ended, or would end, one physical provider
+// attempt. The three are different resources and are reported apart (#328):
+// inactivity is the provider not moving, the attempt wall is this ATTEMPT
+// being long enough, and run active work is the whole RUN's cumulative budget.
+type AttemptBound string
+
+const (
+	BoundProviderInactivity AttemptBound = "provider_inactivity"
+	BoundAttemptWall        AttemptBound = "attempt_wall"
+	BoundRunActiveWork      AttemptBound = "run_active_work"
+)
+
+// The InvocationProvenance termination causes the runtime reads back. For
+// an inactivity kill the failure CLASS may be a condition the provider named
+// (#238, #314), so the bound is read from the cause, not the class.
+const (
+	TerminationProviderInactivity = "provider_inactivity_limit_reached"
+	TerminationDeadlineReached    = "deadline_reached"
+)
 
 // OperationRemaining is how much ACTIVE execution authority is left.
 //

@@ -167,6 +167,45 @@ refused like any other malformed bound. Attempts and continuations are different
 resources: attempts retry one execution binding, continuations are successive
 pieces of productive work.
 
+`attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
+different resource from `wall_limit_seconds`, which is the run's CUMULATIVE
+active-work budget across every attempt and operation (#328). Each attempt's
+deadline is fixed when it starts, as `start + min(attempt limit, remaining run
+active work)`, and is durable, so a restart resumes the same instant and a
+successor attempt never receives a fresh envelope of either kind. When an
+attempt stops:
+
+- at its own wall with run budget left, the existing checkpoint law picks the
+  successor: zero-delta work is a same-binding **retry** (spends
+  `max_execution_attempts`), productive work is a checkpoint and a
+  **continuation** (spends `max_execution_continuations`). An attempt-wall stop
+  never turns productive work into a retry;
+- at the run's remaining active work (the attempt was truncated because the run
+  had less left than one attempt limit), the stop is **run active-work
+  exhaustion**, and the run fails `run_wall_budget_exhausted` - UNLESS the run
+  has outstanding admitted review feedback and no review continuation yet. In
+  that case the one-time bounded review continuation is granted and the
+  successor runs under it, so status leaves that successor available.
+
+Status names which bound ended the attempt - `provider_inactivity`,
+`attempt_wall` or `run_active_work` - and the successor it selected, and says
+`unavailable: <reason>` (with route `stop`) instead of advertising a retry or
+continuation the run can no longer admit. The reasons are
+`run_active_work_exhausted`, `execution_attempts_exhausted`,
+`execution_continuations_exhausted` and `run_provider_invocations_exhausted`.
+
+It may be absent, and absent is the shipped default: it stays out of the
+configuration digest (so upgrading changes no existing configuration's
+identity), and each new run derives it at creation as its own
+`wall_limit_seconds` - one attempt may still spend the whole run, exactly as
+before, but a stop there is now reported as run exhaustion rather than as a
+retry. State a smaller value (for example 1800 inside a 5400 run) to give a run
+room for successors. A stated value above `wall_limit_seconds` is refused at
+load; 0 means absent. The value is frozen into the run at creation and read
+back exactly: editing the configuration never changes a live run, and runs
+created before this bound existed keep their original rule (the attempt is
+bounded by its operation's own remaining budget).
+
 `provider_inactivity_seconds` bounds how long ONE provider invocation may go
 without recognized provider progress. It is a third dimension: `wall_limit_seconds` bounds
 the work, `lifecycle_deadline_seconds` bounds the calendar, and this bounds
@@ -249,6 +288,7 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
+| `budgets.attempt_wall_limit_seconds` | Wall bound of ONE physical provider attempt, distinct from the cumulative run budget `wall_limit_seconds`. Frozen per run at creation. At most `wall_limit_seconds`. | absent: each run derives its own `wall_limit_seconds` |
 | `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; for Codex, output lines other than its known transport-retry chatter, and a Codex inactivity kill is always `provider_no_progress` rather than a transport class read from its output; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
@@ -274,6 +314,7 @@ May name:
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
 | `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
+| `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or the operator `wall_limit_seconds` when the operator states none) |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 

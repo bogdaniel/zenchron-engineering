@@ -62,6 +62,7 @@ func newExecutionAttemptProvenance(operationID string, attempt int, invocation I
 	minimal := InvocationProvenance{
 		AgentID: identifier(invocation.AgentID), ProviderKind: identifier(invocation.ProviderKind),
 		TrustMode: TrustMode(identifier(string(invocation.TrustMode))), Model: identifier(invocation.Model),
+		DeadlineBound:         invocation.DeadlineBound,
 		InvocationObservation: domain.MinimalInvocationObservation(invocation.InvocationObservation),
 	}
 	return ExecutionAttemptProvenance{OperationID: boundedDetail(operationID), AttemptIdentity: max(1, attempt), Invocation: minimal}
@@ -110,6 +111,11 @@ func (p ExecutionAttemptProvenance) validate() error {
 		return errors.New("attempt provenance carries no git refusals; they are counted on the operation result")
 	}
 	errs := []error{required("operation_id", p.OperationID), validateInvocationObservation(inv.InvocationObservation)}
+	switch inv.DeadlineBound {
+	case "", BoundAttemptWall, BoundRunActiveWork:
+	default:
+		errs = append(errs, fmt.Errorf("invocation deadline_bound %q is not a deadline bound", inv.DeadlineBound))
+	}
 	for name, value := range map[string]string{
 		"agent_id": inv.AgentID, "provider_kind": inv.ProviderKind, "trust_mode": string(inv.TrustMode), "model": inv.Model,
 	} {

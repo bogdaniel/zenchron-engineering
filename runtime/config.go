@@ -436,6 +436,18 @@ type BudgetConfig struct {
 	// read as absent, like lifecycle_deadline_seconds, and a negative value is
 	// refused.
 	ProviderInactivitySeconds int `json:"provider_inactivity_seconds,omitempty"`
+	// AttemptWallLimitSeconds bounds ONE physical provider attempt (#328). It
+	// is a different resource from WallLimitSeconds, which is the CUMULATIVE
+	// active-work budget of the whole run: an attempt that ends at this bound
+	// charges the run only what it actually spent, and its successor (a retry
+	// or a continuation) is bounded again by min(this, remaining run work).
+	//
+	// ABSENT STAYS ABSENT in the digested form - omitempty, never resolved in
+	// resolved() - so upgrading the binary does not move the Global digest of
+	// any existing configuration (ADR-0003 §4). An absent value is derived at
+	// run creation, as the run's wall limit, and frozen into run.Budgets. A
+	// stated value may not exceed wall_limit_seconds, and 0 means absent.
+	AttemptWallLimitSeconds int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
 // checkProviderInactivityMinimum refuses a stated window below
@@ -614,6 +626,10 @@ type RepositoryBudgets struct {
 	// can never ask for a longer one. A repository that could widen it would be
 	// choosing how long its own provider may stall.
 	ProviderInactivitySeconds *int `json:"provider_inactivity_seconds,omitempty"`
+	// AttemptWallLimitSeconds is tighten-only too. Its ceiling is the
+	// operator's stated attempt limit, or the run wall limit when the operator
+	// states none - the value an absent limit is derived to at run creation.
+	AttemptWallLimitSeconds *int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
 // RepositoryWatch is the only part of watch a repository may address, and both
@@ -665,6 +681,7 @@ func (c Config) RunBudgets() RunBudgets {
 		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
 		MaxAssuranceAttempts:      c.Budgets.MaxAssuranceAttempts,
 		ProviderInactivityLimit:   time.Duration(c.Budgets.ProviderInactivitySeconds) * time.Second,
+		AttemptWallLimit:          time.Duration(c.Budgets.AttemptWallLimitSeconds) * time.Second,
 	}
 }
 
@@ -818,6 +835,10 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	// value is behind a pointer that `tightened := c` shares with c, so writing
 	// through it would silently retighten the configuration it came from.
 	continuations := tightened.Budgets.continuations()
+	attemptWall := tightened.Budgets.AttemptWallLimitSeconds
+	if attemptWall <= 0 {
+		attemptWall = tightened.Budgets.WallLimitSeconds
+	}
 	proposals := []struct {
 		name     string
 		proposed *int
@@ -829,6 +850,7 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		{"budgets.max_remediation_attempts", budgets.MaxRemediationAttempts, &tightened.Budgets.MaxRemediationAttempts},
 		{"budgets.max_assurance_attempts", budgets.MaxAssuranceAttempts, &tightened.Budgets.MaxAssuranceAttempts},
 		{"budgets.provider_inactivity_seconds", budgets.ProviderInactivitySeconds, &tightened.Budgets.ProviderInactivitySeconds},
+		{"budgets.attempt_wall_limit_seconds", budgets.AttemptWallLimitSeconds, &attemptWall},
 	}
 	for _, proposal := range proposals {
 		if proposal.proposed == nil {
@@ -848,6 +870,11 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		*proposal.ceiling = *proposal.proposed
 	}
 	tightened.Budgets.MaxExecutionContinuations = &continuations
+	// Written back only when the repository stated one, so an absent limit
+	// stays absent and is derived at run creation like the operator's.
+	if budgets.AttemptWallLimitSeconds != nil {
+		tightened.Budgets.AttemptWallLimitSeconds = attemptWall
+	}
 	if err := tightened.tightenWatch(repository.Watch); err != nil {
 		return OperatorConfig{}, err
 	}
@@ -1155,6 +1182,16 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if err := checkProviderInactivityMinimum(c.Budgets.ProviderInactivitySeconds); err != "" {
 		return refuse(err)
+	}
+	// attempt_wall_limit_seconds is optional (0 means absent). A stated value
+	// above the run budget is refused rather than clamped: one physical attempt
+	// can never hold more authority than the whole run it belongs to.
+	if a := c.Budgets.AttemptWallLimitSeconds; a < 0 {
+		return refuse("budgets.attempt_wall_limit_seconds must not be negative")
+	} else if a > c.Budgets.WallLimitSeconds {
+		return refuse(fmt.Sprintf(
+			"budgets.attempt_wall_limit_seconds (%d) exceeds budgets.wall_limit_seconds (%d): one provider attempt cannot hold more active-work authority than its whole run",
+			a, c.Budgets.WallLimitSeconds))
 	}
 	if d := c.Budgets.LifecycleDeadlineSeconds; d > 0 && d < c.Budgets.WallLimitSeconds {
 		return refuse(fmt.Sprintf(

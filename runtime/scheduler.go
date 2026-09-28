@@ -457,7 +457,19 @@ func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool
 	return released, err
 }
 
-func (s Scheduler) Start(id string) (RunOperation, error) {
+func (s Scheduler) Start(id string) (RunOperation, error) { return s.StartWithin(id, nil) }
+
+// AttemptLimit caps one physical attempt below its operation's own remaining
+// WallBudget. Within is the authority; Bound names which bound it is.
+type AttemptLimit struct {
+	Within time.Duration
+	Bound  AttemptBound
+}
+
+// StartWithin is Start with the attempt's deadline additionally bounded by
+// limit (#328). A nil limit is the legacy rule exactly. A non-positive Within
+// is zero authority - an already-passed deadline - never "unbounded".
+func (s Scheduler) StartWithin(id string, limit *AttemptLimit) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
 		if op.State != Leased || op.Lease == nil || op.Lease.Owner != s.Owner {
 			return fmt.Errorf("operation is not leased by scheduler")
@@ -540,6 +552,18 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 			}
 			deadline := now.Add(remaining)
 			op.Deadline = &deadline
+		}
+		op.DeadlineBound = ""
+		if limit != nil {
+			// The operation's own WallBudget is the run envelope it was planned
+			// under, so when IT is the earlier instant the binding bound is
+			// still the run's active work.
+			op.DeadlineBound = BoundRunActiveWork
+			within := max(limit.Within, 0)
+			if deadline := now.Add(within); op.Deadline == nil || !deadline.After(*op.Deadline) {
+				op.Deadline = &deadline
+				op.DeadlineBound = limit.Bound
+			}
 		}
 		return nil
 	})
@@ -630,7 +654,7 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 			op.LastAttemptExecution = spent
 			op.ActiveSince = nil
 		}
-		op.Deadline = nil
+		op.Deadline, op.DeadlineBound = nil, ""
 		return nil
 	})
 }
@@ -708,7 +732,7 @@ func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation
 		}
 		op.LastAttemptExecution = 0
 		op.ActiveSince = nil
-		op.Deadline = nil
+		op.Deadline, op.DeadlineBound = nil, ""
 		return nil
 	})
 }

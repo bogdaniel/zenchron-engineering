@@ -163,7 +163,17 @@ lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
 provider_inactivity_seconds bounds how long ONE provider invocation may go
                             without recognized provider progress;
                             finite always
+
+attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
+                            is min(this, remaining run work) at attempt start;
+                            absent derives to wall_limit_seconds per run
 ```
+
+`wall_limit_seconds` is cumulative across every attempt; the attempt limit is
+per attempt. Status names which of the three per-attempt bounds ended an
+attempt (`provider_inactivity`, `attempt_wall`, `run_active_work`) and never
+advertises a retry or continuation the run can no longer admit. See
+[configuration.md](configuration.md#budgets).
 
 The third bound is the stall detector, and the run wall budget is not. A
 provider subprocess being alive is not evidence of progress: a host that loses

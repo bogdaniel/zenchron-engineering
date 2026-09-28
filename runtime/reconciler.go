@@ -782,7 +782,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
 	reviewDelivered := false
-	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
+	if runBudgetSpent(s.budgets().WallLimit, s.activeElapsed(now)) {
 		if len(s.outstandingReviewKeys()) > 0 {
 			if s.reviewContinuationRemaining(now) <= 0 {
 				return Waiting, ReasonReviewBudgetExhausted
@@ -914,9 +914,14 @@ func (s *runState) plan() (desiredOperation, bool) {
 // rather than only the document describing it.
 func (s *runState) budgets() RunBudgets {
 	budgets := s.rt.deps.Budgets.defaults()
+	// The attempt limit is the one member read back EXACTLY: the frozen value,
+	// or zero (the legacy rule) for a run that predates it. Never the live
+	// configuration and never min(live, persisted) - ADR-0003 §2 condition 6.
+	budgets.AttemptWallLimit = 0
 	if s.run.Budgets == nil {
 		return budgets
 	}
+	budgets.AttemptWallLimit = s.run.Budgets.AttemptWallLimit
 	if wall := s.run.Budgets.WallLimit; wall > 0 && wall < budgets.WallLimit {
 		budgets.WallLimit = wall
 	}
@@ -932,6 +937,39 @@ func (s *runState) budgets() RunBudgets {
 		budgets.ProviderInactivityLimit = window
 	}
 	return budgets
+}
+
+// runBudgetSpent is the one definition of an exhausted run active-work budget,
+// shared by conditions() and grantReviewContinuation so they cannot disagree
+// at the boundary. ZERO remaining is spent: no successor may start with no
+// authority (#328).
+func runBudgetSpent(limit, elapsed time.Duration) bool { return limit > 0 && elapsed >= limit }
+
+// activeWorkRemaining is the run's remaining CUMULATIVE active-work authority,
+// from the existing journal-derived counter (#83). Once a review continuation
+// has been granted the run budget is already spent and the grant is the
+// enclosing envelope, so it is what remains.
+func (s *runState) activeWorkRemaining(now time.Time) time.Duration {
+	if _, granted := s.reviewContinuationGrant(); granted {
+		return s.reviewContinuationRemaining(now)
+	}
+	return max(s.budgets().WallLimit-s.activeElapsed(now), 0)
+}
+
+// attemptLimit is the authority ONE physical attempt starting now receives:
+// min(frozen attempt limit, remaining run active work). When the run has less
+// left than a full attempt, the attempt is truncated and the bound is the RUN's
+// - a stop there is run exhaustion, not an attempt-wall stop. A run frozen
+// before the attempt limit existed gets nil: the legacy rule, unchanged.
+func (s *runState) attemptLimit(now time.Time) *AttemptLimit {
+	limit := s.budgets().AttemptWallLimit
+	if limit <= 0 {
+		return nil
+	}
+	if remaining := s.activeWorkRemaining(now); remaining <= limit {
+		return &AttemptLimit{Within: remaining, Bound: BoundRunActiveWork}
+	}
+	return &AttemptLimit{Within: limit, Bound: BoundAttemptWall}
 }
 
 func (s *runState) attemptsFor(kind string) int {
@@ -1653,7 +1691,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Failed, leased.Kind+"_failure_not_retryable")
 		return false, outcome, err
 	}
-	started, err := r.scheduler.Start(leased.ID)
+	started, err := r.scheduler.StartWithin(leased.ID, state.attemptLimit(r.deps.Clock.Now()))
 	if err != nil {
 		return false, Outcome{}, err
 	}
