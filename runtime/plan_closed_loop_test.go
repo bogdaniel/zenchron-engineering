@@ -163,7 +163,10 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("the reviewer froze no assignment: found=%v err=%v", found, err)
 	}
-	subject, ok := fixture.reconciler.reviewSubject(assignment)
+	subject, ok, err := fixture.reconciler.reviewSubject(assignment)
+	if err != nil {
+		t.Fatalf("reviewSubject: %v", err)
+	}
 	if !ok {
 		t.Fatalf("the reviewer froze no upstream candidate: %#v", assignment.Context.UpstreamOutputs)
 	}
@@ -245,7 +248,10 @@ func TestTheClosedLoopSurvivesAFailedVerificationAndABlockingReview(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("the re-performance froze no assignment: found=%v err=%v", found, err)
 	}
-	nextSubject, ok := fixture.reconciler.reviewSubject(next)
+	nextSubject, ok, err := fixture.reconciler.reviewSubject(next)
+	if err != nil {
+		t.Fatalf("reviewSubject: %v", err)
+	}
 	if !ok || nextSubject.Candidate != candidateC {
 		t.Fatalf("the re-performed review judges %#v, and the current work is %s", nextSubject, candidateC)
 	}
@@ -855,6 +861,79 @@ func (p *dyingReviewerProvider) Execute(ctx context.Context, r ExecutionRequest)
 		// A failed invocation carries no verdict out of the adapter either: the
 		// production adapter returns before reading the file at all.
 		result.Review = nil
+	}
+	return result, err
+}
+
+// A DEFENSIVE GATE: admission does not rely solely on providers pairing every
+// non-succeeded outcome with a non-nil Failure.
+//
+// Every in-tree provider does pair them today, so result.Failure == nil
+// already implies success in practice. A future or third-party adapter is not
+// bound to that convention, and a result reporting a cancelled outcome while
+// carrying a nil Failure and a populated verdict must still be refused:
+// admitting it would be the exact unfinished-invocation-contributing-a-
+// finished-answer defect this gate exists to close, reached through a
+// provider that simply never paired the two fields.
+func TestAVerdictWithANonSucceededOutcomeAndNoFailureIsNeverAdmitted(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	inner := NewFakeReviewerProvider(ReviewerResult{
+		SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted,
+	})
+	deps := fixture.deps
+	deps.Provider = &outcomeOnlyFailureReviewerProvider{FakeReviewerProvider: inner}
+	deps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+	fixture.engines["claude"] = fixture.newRuntime(deps)
+
+	fixture.approve(t)
+	fixture.reconcile(t)
+	producer := planStageState(t, fixture, "implementation").RunID
+	produceCandidate(t, fixture, producer, "package b\n", true)
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	review := planStageState(t, fixture, "review")
+	if review.RunID == "" {
+		t.Fatal("the reviewer stage created no run")
+	}
+	engine := fixture.engines["claude"]
+	for i := 0; i < 6; i++ {
+		if _, err := engine.Reconcile(context.Background(), review.RunID); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	// The reviewer DID write an accepting verdict - this test is about the
+	// runtime refusing to admit it once the outcome says the invocation did not
+	// succeed, not about a reviewer that stayed silent.
+	if len(inner.Reviewed) == 0 {
+		t.Fatal("the reviewer was never given a result path, so this proves nothing")
+	}
+
+	after := planStageState(t, fixture, "review")
+	if after.Review != nil {
+		t.Fatalf("a verdict with a cancelled outcome and no Failure was admitted: %+v", after.Review)
+	}
+	if after.State == PlanStageCompleted {
+		t.Fatal("the reviewer stage was accepted without an admitted verdict")
+	}
+	if gate := planStageState(t, fixture, "assurance"); gate.State == PlanStageSatisfied {
+		t.Fatal("the assurance gate was satisfied over a verdict nobody admitted")
+	}
+}
+
+// outcomeOnlyFailureReviewerProvider reports a non-succeeded Outcome without
+// pairing it with a Failure and without clearing Review, unlike every in-tree
+// provider. It models a future or third-party adapter that skips that
+// pairing convention, which is the gap the defensive Outcome check in the
+// admission gate exists to close.
+type outcomeOnlyFailureReviewerProvider struct {
+	*FakeReviewerProvider
+}
+
+func (p *outcomeOnlyFailureReviewerProvider) Execute(ctx context.Context, r ExecutionRequest) (ExecutionResult, error) {
+	result, err := p.FakeReviewerProvider.Execute(ctx, r)
+	if r.ReviewerResultPath != "" {
+		result.Outcome = OperationCancelled
 	}
 	return result, err
 }

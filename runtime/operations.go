@@ -898,12 +898,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if revokeErr != nil {
 		return recorded(failed(revokeErr))
 	}
-	if execErr == nil && result.Failure == nil && revoked == "" {
+	if execErr == nil && result.Failure == nil && revoked == "" && providerOutcome(result, execErr) == Succeeded {
 		// Admission happens in the RUNTIME, against the frozen assignment -
 		// never in the adapter, which only read a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
 		// treating that as "no verdict" would let a malformed or mis-scoped
 		// claim look identical to an honest silence.
+		//
+		// The Outcome check is defensive: today every in-tree provider pairs a
+		// failed or cancelled outcome with a non-nil Failure, so result.Failure
+		// == nil already implies success in practice. A future or third-party
+		// adapter is not bound to that pairing, and admitting a verdict from a
+		// result that reports OperationFailed or OperationCancelled with a nil
+		// Failure would be exactly the unfinished-invocation-contributing-a-
+		// finished-answer defect this gate exists to close.
 		if result.Review != nil {
 			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
 				var refusal *ReviewerResultRefusedError
