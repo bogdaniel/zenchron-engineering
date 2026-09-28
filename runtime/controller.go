@@ -952,6 +952,17 @@ type OperationStatus struct {
 	// operator previously could not get from status at all.
 	SilentFor       time.Duration `json:"silent_for,omitempty"`
 	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
+	// ProgressSource says where LastProgressAt, SilentFor, HeartbeatAt and
+	// Lease were read for an operation that is still running or leased: "row"
+	// is the durable operation row of this exact attempt, "journal" is the
+	// fallback when that row could not be read or no longer matches (#326).
+	// It is empty once the operation has settled, when the journal is the
+	// only source. The heartbeat is only as fresh as its producer keeps the
+	// row; renewing it is #180, so an unchanged heartbeat here is not by
+	// itself evidence the attempt is dead.
+	ProgressSource string `json:"progress_source,omitempty"`
+	// Lease is the live row's lease, set only when ProgressSource is "row".
+	Lease *Lease `json:"lease,omitempty"`
 }
 
 // SourceIdentity is the pinned, untrusted source the run answers. The title
@@ -1143,6 +1154,16 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			SilentFor:       ProviderSilence(op, now),
 			InactivityLimit: state.budgets().ProviderInactivityLimit,
 		}
+		if op.State == Leased || op.State == Running {
+			status.ProgressSource = "journal"
+			if row, ok := r.liveOperationRow(op); ok {
+				status.ProgressSource = "row"
+				status.LastProgressAt = row.LastProgressAt
+				status.SilentFor = ProviderSilence(row, now)
+				status.Lease = row.Lease
+				op.Lease = row.Lease
+			}
+		}
 		if op.Lease != nil {
 			heartbeat := op.Lease.HeartbeatAt
 			status.HeartbeatAt = &heartbeat
@@ -1150,6 +1171,22 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		report.Operation = &status
 	}
 	return report, nil
+}
+
+// liveOperationRow is the durable row of op's CURRENT attempt, read by status
+// for its progress and lease observations only (#326): progress is a row-only
+// write, so the journal cannot hold it for a running operation. Like
+// currentOperation it is never consulted to decide what to do next, and
+// nothing else in the report is taken from it. A row that cannot be read, is
+// missing, is on a different attempt, or is no longer active is not this
+// attempt's live state, so the caller keeps the journal's values rather than
+// mixing two attempts in one report.
+func (r *EngineeringRuntime) liveOperationRow(op RunOperation) (RunOperation, bool) {
+	row, _, found, err := r.deps.Store.Operation(op.ID)
+	if err != nil || !found || row.AttemptIdentity != op.AttemptIdentity || (row.State != Leased && row.State != Running) {
+		return RunOperation{}, false
+	}
+	return row, true
 }
 
 // The journal's after payload is written before Scheduler.Finish and older
