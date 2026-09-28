@@ -180,6 +180,32 @@ func TestAPrePlanConfigurationRowMigratesAsLegacy(t *testing.T) {
 	}
 }
 
+// The first binding wins: revising a plan under another configuration must not
+// re-home it there.
+func TestAPlansConfigurationIsNeverRebound(t *testing.T) {
+	f := newPhase8Fixture(t)
+	if _, err := f.store.ClaimPlanAttempt("plan-bound", "acme/repo", f.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.BindPlanConfig("plan-bound", f.deps.ConfigDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.BindPlanConfig("plan-bound", configAfterTheChange); err != nil {
+		t.Fatal(err)
+	}
+	recorded, _, err := f.store.planConfig("plan-bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Digest(f.deps.ConfigDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded != want {
+		t.Fatalf("the plan's configuration was rebound to %s, want the first binding %s", recorded, want)
+	}
+}
+
 // (e) Approving or revising a held plan is refused up front: an approval could
 // never dispatch, and a revision would spend a planning invocation on it.
 func TestAHeldPlanCannotBeApprovedOrRevised(t *testing.T) {
