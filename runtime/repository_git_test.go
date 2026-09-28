@@ -451,6 +451,10 @@ func (c *fixedCredential) Credential(identity RemoteIdentity) (string, string, e
 // involved, and the secret must never appear in argv, the child environment,
 // or the resulting repository.
 func TestRemoteCredentialSeamAuthenticatesWithoutLeaking(t *testing.T) {
+	// The leak check below scans os.TempDir(). A PRIVATE one makes it answer
+	// for this test's seam alone, not for every process sharing the host's
+	// temporary directory (#331).
+	t.Setenv("TMPDIR", t.TempDir())
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin")
 	initFixtureRepo(t, origin, "README.md", "real\n")

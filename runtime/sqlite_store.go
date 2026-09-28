@@ -390,7 +390,7 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
 	// reads state it is about to overwrite (journal sequence allocation) waits
 	// on busy_timeout instead of failing an unretryable upgrade in WAL mode.
-	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -400,6 +400,14 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 		return nil, err
 	}
 	return &SQLiteOperationStore{db: db}, nil
+}
+
+// sqliteFileURI is the one way a filesystem path becomes a SQLite "file:" URI.
+// SQLite percent-decodes the URI, so a raw "file:"+path opens a DIFFERENT file
+// whenever the path holds a '%', '?' or '#' (#331); url.URL escapes them.
+// path must be absolute: a relative one is not a valid "file:" URI path.
+func sqliteFileURI(path string) string {
+	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 
 func (s *SQLiteOperationStore) Close() error { return s.db.Close() }
