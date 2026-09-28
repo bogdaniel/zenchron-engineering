@@ -215,7 +215,10 @@ whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
 the security-relevant argv, with the prompt replaced by its digest
 the inactivity window and the progress mode that measured it
-  (byte_output, or structured_claude_events)
+  (byte_output; byte_output_excluding_transport_chatter for Codex, where a
+  line matching its known reconnect/transport chatter does not refresh the
+  window, never classifies a failure, and an inactivity kill is always
+  provider_no_progress; or structured_claude_events)
 for Claude Code: accepted structured progress events, main-thread tool calls
   still open at exit, permission denials in the final result, and malformed
   or oversized stream lines - counts only, never provider text

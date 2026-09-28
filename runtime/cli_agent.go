@@ -231,10 +231,19 @@ type cliAgentSpec struct {
 	ReadOnly *cliReadOnlyMode
 	// ProgressMode is the oracle that supervises this CLI's inactivity bound.
 	// Empty is progressByteOutput: any stdout or stderr byte refreshes it.
+	// progressByteOutputExcludingTransportChatter is byte output where a line
+	// matching InactivityNonProgress or a Signals Match does not refresh it
+	// (#314, transport_chatter.go).
 	// progressStructuredClaudeEvents supervises it from Claude's stream-json
 	// events instead (#322, claude_stream.go), which requires an executor that
 	// tees stdout to the parser and a per-physical-attempt window.
 	ProgressMode string
+	// InactivityNonProgress are lowercase substrings of this CLI's own
+	// transport-retry chatter. A matching output line does not refresh the
+	// inactivity window. It is NOT a diagnostic: nothing here is ever read by
+	// classifyAgentFailure, so a match can withhold a refresh and never grant a
+	// failure class.
+	InactivityNonProgress []string
 	// InvocationEnv returns non-secret provider controls for the MAIN
 	// invocation only, from the CONFIGURED per-attempt inactivity window
 	// (ProviderBudget.InactivityWindow), never from a remainder.
@@ -899,7 +908,8 @@ type InvocationProvenance struct {
 	// measured against.
 	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
 	// ProgressMode is the oracle that measured progress against that window:
-	// byte_output, or structured_claude_events (#322).
+	// byte_output, byte_output_excluding_transport_chatter (#314), or
+	// structured_claude_events (#322).
 	ProgressMode string `json:"progress_mode,omitempty"`
 	// Bounded observations from a structured stream, recorded so an
 	// inactivity termination explains itself without the raw transcript: how
@@ -1113,7 +1123,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 	}
 	progressMode := spec.ProgressMode
-	if progressMode == "" {
+	// An executor that does not observe output cannot apply the chatter
+	// filter, so provenance records what it will actually do: byte output.
+	if _, observes := p.executor().(stdoutObservingExecutor); progressMode == "" ||
+		(progressMode == progressByteOutputExcludingTransportChatter && !observes) {
 		progressMode = progressByteOutput
 	}
 	authMode, authSource := p.observeAuthMode(spec, home)
@@ -1166,6 +1179,9 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		bounded, cancel := context.WithTimeout(ctx, limit)
 		defer cancel()
 		ctx = bounded
+	}
+	if progressMode == progressByteOutputExcludingTransportChatter {
+		ctx = withTransportChatter(ctx, transportChatterPatterns(spec))
 	}
 	var stream *claudeStream
 	if progressMode == progressStructuredClaudeEvents {
@@ -1247,7 +1263,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		switch {
-		case inactive && recognized != FailureUnknown:
+		case inactive && recognized != FailureUnknown && progressMode != progressByteOutputExcludingTransportChatter:
 			// THE PROVIDER SAID WHAT WAS WRONG AND THEN WENT QUIET. Both facts
 			// are true and they are recorded separately: the CONDITION is the
 			// one the provider named, and how the process ENDED is already in
@@ -1265,6 +1281,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// A phrase the model wrote into its session output never reaches
 			// here at all, so preserving it cannot become a way for untrusted
 			// text to outrank a bound the runtime actually enforced.
+			//
+			// NOT UNDER THE CHATTER FILTER (#314). There the inactivity kill is
+			// reached BECAUSE matching lines were withheld, and on Codex a
+			// candidate's own stderr (a test retrying `connection refused`)
+			// lands in the same tail. Preserving the tail would let matched
+			// candidate text turn into provider_unavailable and a RouteWait, so
+			// that kill is provider_no_progress. A genuine #317 reconnect loop
+			// therefore retries under the existing attempt authority rather
+			// than waiting; a provider that EXITS on its own is still
+			// classified from the tail exactly as before.
 		case inactive:
 			// The PROVIDER STOPPED MOVING and the runtime ended it, with
 			// nothing recognized to say why. The process group is already gone
