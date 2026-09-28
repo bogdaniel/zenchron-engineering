@@ -220,7 +220,10 @@ termination cause (provider_returned, deadline_reached,
   provider_inactivity_limit_reached), process id, and whether it ran
   under the brokered candidate Git guard
 the inactivity window and the progress mode that measured it
-  (byte_output, or structured_claude_events)
+  (byte_output; byte_output_excluding_transport_chatter for Codex, where a
+  line matching its known reconnect/transport chatter does not refresh the
+  window, never classifies a failure, and an inactivity kill is always
+  provider_no_progress; or structured_claude_events)
 for Claude Code: accepted structured progress events, main-thread tool calls
   still open at exit, permission denials in the final result, and malformed
   or oversized stream lines - counts only, never provider text - plus at
@@ -230,7 +233,7 @@ for Claude Code: accepted structured progress events, main-thread tool calls
   denial count and tool names come from it, so without one - an attempt
   killed at its deadline, typically - they are UNKNOWN, recorded as absent
   and shown as "unknown (no final result)", never as 0; for a provider
-  without the structured stream (byte_output) it is shown as
+  without the structured stream (a byte_output mode) it is shown as
   "n/a (provider reports none)", decided from the recorded progress mode
 ```
 

@@ -45,8 +45,9 @@ import (
 // Recorded in InvocationProvenance so incident review can tell which one
 // measured a stalled attempt.
 const (
-	progressByteOutput             = "byte_output"
-	progressStructuredClaudeEvents = "structured_claude_events"
+	progressByteOutput                          = "byte_output"
+	progressByteOutputExcludingTransportChatter = "byte_output_excluding_transport_chatter"
+	progressStructuredClaudeEvents              = "structured_claude_events"
 )
 
 // ProgressStructuredClaudeEvents is the recorded progress mode under which an

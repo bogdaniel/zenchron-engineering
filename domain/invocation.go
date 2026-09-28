@@ -59,7 +59,8 @@ type InvocationObservation struct {
 	// zero when none was in force.
 	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
 	// ProgressMode is the oracle that measured progress against that window:
-	// byte_output, or structured_claude_events (#322).
+	// byte_output, byte_output_excluding_transport_chatter (#314), or
+	// structured_claude_events (#322).
 	ProgressMode string `json:"progress_mode,omitempty"`
 	// Bounded observations from a structured stream: how many events counted
 	// as progress, how many main-thread tool calls were still open when the
