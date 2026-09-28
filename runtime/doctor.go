@@ -1482,6 +1482,12 @@ func doctorControlEndpoint(in DoctorInput) DoctorCheck {
 // operator's ceiling. Parallel candidate clones make disk an operator-level
 // resource, and the honest failure is a typed refusal before allocation rather
 // than ENOSPC in the middle of a clone.
+// heldStorageNote points at the held-workspace count. Doctor deliberately does
+// not open the durable store, and only the journal knows which workspaces are
+// held (#203), so the count comes from gc, which does.
+const heldStorageNote = "Candidate workspaces holding budget-stranded material are never reclaimed by gc; " +
+	"`autonomy gc --dry-run` reports their count and size under \"held\""
+
 func doctorStateStorage(in DoctorInput) DoctorCheck {
 	const id = "state.storage"
 	if strings.TrimSpace(in.StateDir) == "" {
@@ -1502,12 +1508,12 @@ func doctorStateStorage(in DoctorInput) DoctorCheck {
 		// problem has nothing to repair.
 		return pass(doctorGroupState, id, fmt.Sprintf(
 			"the state directory holds %d bytes and no ceiling is configured. Each concurrent run adds a full candidate clone, "+
-				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone", used))
+				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone. "+heldStorageNote, used))
 	}
 	if err := storage.Admit(); err != nil {
 		return fail(doctorGroupState, id, err.Error())
 	}
 	return pass(doctorGroupState, id, fmt.Sprintf(
-		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace",
+		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace. "+heldStorageNote,
 		used, storage.CeilingBytes))
 }

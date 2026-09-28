@@ -74,13 +74,7 @@ func notPublished(t *testing.T, f *phase8Fixture, runID string) {
 // event names the exact verified commit, the step it could not take, and holds
 // it; nothing is published.
 func TestAVerifiedCandidateIsHeldWhenTheBudgetEndsTheRun(t *testing.T) {
-	fixture := newPhase8Fixture(t)
-	fixture.deps.Budgets = RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 2, MaxRemediationAttempts: 2, MaxAssuranceAttempts: 2}
-	fixture.deps.SemanticAssurance = &burningAssurance{inner: fixture.deps.SemanticAssurance, clock: fixture.clock, burn: 31 * time.Minute}
-	fixture.runtime = fixture.newRuntime(fixture.deps)
-	runID := fixture.start()
-	outcome := fixture.reconcile(runID)
-
+	fixture, runID, outcome := verifiedHeldRun(t)
 	if outcome.Disposition != Failed || outcome.Reason != "run_wall_budget_exhausted" {
 		t.Fatalf("outcome %s/%s, want the budget to still end the run", outcome.Disposition, outcome.Reason)
 	}
@@ -95,6 +89,54 @@ func TestAVerifiedCandidateIsHeldWhenTheBudgetEndsTheRun(t *testing.T) {
 		t.Fatalf("held %+v, want %+v", *held, want)
 	}
 	notPublished(t, fixture, runID)
+}
+
+// verifiedHeldRun reproduces run-9d2a446: the envelope is gone the moment the
+// last verifier answers.
+func verifiedHeldRun(t *testing.T) (*phase8Fixture, string, Outcome) {
+	t.Helper()
+	fixture := newPhase8Fixture(t)
+	fixture.deps.Budgets = RunBudgets{WallLimit: 30 * time.Minute, MaxExecutionAttempts: 2, MaxRemediationAttempts: 2, MaxAssuranceAttempts: 2}
+	fixture.deps.SemanticAssurance = &burningAssurance{inner: fixture.deps.SemanticAssurance, clock: fixture.clock, burn: 31 * time.Minute}
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+	return fixture, runID, fixture.reconcile(runID)
+}
+
+// INVARIANT: verified_unpublished is claimed only for EXACT-head evidence.
+// Automated assurance that passed at an older head, or a failing independent
+// semantic finding at the head, is committed_unverified.
+func TestVerifiedUnpublishedRequiresExactHeadAndPassingSemantic(t *testing.T) {
+	fixture, runID, _ := verifiedHeldRun(t)
+	kind := func(mutate func(p *RunProjection)) string {
+		state := fixture.state(runID)
+		mutate(&state.projection)
+		held := state.heldMaterial(ReasonRunWallBudgetExhausted)
+		if held == nil {
+			t.Fatal("no material derived")
+		}
+		return held.Kind
+	}
+	if got := kind(func(*RunProjection) {}); got != HeldVerifiedUnpublished {
+		t.Fatalf("baseline kind %q, want verified_unpublished", got)
+	}
+	if got := kind(func(p *RunProjection) {
+		older := *p.Assurance
+		older.Commit = fixture.base
+		p.Assurance = &older
+	}); got != HeldCommittedUnverified {
+		t.Fatalf("assurance at an older head gave %q, want committed_unverified", got)
+	}
+	if got := kind(func(p *RunProjection) {
+		if p.SemanticAssurance == nil || p.SemanticAssurance.Commit != p.CandidateRevision {
+			t.Fatal("scenario has no head semantic finding")
+		}
+		failing := *p.SemanticAssurance
+		failing.Passed = false
+		p.SemanticAssurance = &failing
+	}); got != HeldCommittedUnverified {
+		t.Fatalf("a failing semantic finding at the head gave %q, want committed_unverified", got)
+	}
 }
 
 // INVARIANT (shapes 2 and 3): a productive attempt truncated by run active-work
@@ -265,6 +307,9 @@ func TestGCRetainsTheWorkspaceOfHeldMaterial(t *testing.T) {
 	if reason, ok := retainedReason(plan, m.candidate); !ok || !strings.Contains(reason, "verified_unpublished") {
 		t.Fatalf("held workspace retained for %q (%v), want the held-material refusal", reason, ok)
 	}
+	if plan.Held.Workspaces != 1 || plan.Held.Bytes <= 0 {
+		t.Fatalf("gc held summary %+v, want one workspace with its measured size", plan.Held)
+	}
 	if _, err := f.collector().Collect(); err != nil {
 		t.Fatal(err)
 	}
@@ -275,8 +320,8 @@ func TestGCRetainsTheWorkspaceOfHeldMaterial(t *testing.T) {
 // ceiling at every field's bound; an unbounded or incomplete one is refused.
 func TestTheHeldMaterialEventIsBounded(t *testing.T) {
 	long := strings.Repeat("x", maxPayloadFieldBytes)
-	held := HeldMaterial{Kind: long, Revision: long, Tree: long, Operation: long, PathCount: 1 << 30, ContentDigest: long,
-		NextStep: long, BlockedBy: long, Successor: long, SuccessorUnavailable: long, Disposition: long}
+	held := HeldMaterial{Kind: HeldCommittedUnverified, Revision: long, Tree: long, Operation: long, PathCount: 1 << 30, ContentDigest: long,
+		NextStep: long, BlockedBy: long, Successor: long, SuccessorUnavailable: long, Disposition: HeldDisposition}
 	event := func(h HeldMaterial) EngineeringEvent {
 		payload, err := marshalPayloadJSON(dispositionRecord{Reason: long, HeldMaterial: &h})
 		if err != nil {
@@ -301,8 +346,95 @@ func TestTheHeldMaterialEventIsBounded(t *testing.T) {
 		t.Fatal("an over-bound held field was accepted")
 	}
 	missing := held
-	missing.Kind = ""
+	missing.Kind = "salvaged"
 	if err := validateEventPayload(event(missing)); err == nil {
-		t.Fatal("held material with no kind was accepted")
+		t.Fatal("held material with a kind outside the closed set was accepted")
+	}
+	undisposed := held
+	undisposed.Disposition = "published"
+	if err := validateEventPayload(event(undisposed)); err == nil {
+		t.Fatal("held material with a disposition other than held was accepted")
+	}
+	// Only run.failed may carry held material.
+	for _, eventType := range []string{EventRunWaiting, EventRunCompleted, EventRunCancelled} {
+		e := event(held)
+		e.Type = eventType
+		if err := validateEventPayload(e); err == nil {
+			t.Fatalf("%s carrying held material was accepted", eventType)
+		}
+	}
+}
+
+// INVARIANT: a derived record never makes the terminal event unappendable. A
+// descriptive field is bounded; an identity field past the bound is UNKNOWN,
+// never truncated into a different identity.
+func TestAnOverBoundHeldRecordStaysAppendable(t *testing.T) {
+	long := strings.Repeat("y", maxPayloadFieldBytes+1)
+	held := HeldMaterial{Kind: HeldUncommitted, Revision: long, Tree: long, Operation: long, ContentDigest: long,
+		NextStep: long, BlockedBy: ReasonRunWallBudgetExhausted + long, Successor: long, SuccessorUnavailable: long,
+		Disposition: HeldDisposition}.bounded()
+	if held.Revision != "" || held.Tree != "" || held.Operation != "" || held.ContentDigest != "" {
+		t.Fatalf("an over-bound identity was kept or truncated: %+v", *held)
+	}
+	if err := held.validate(); err != nil {
+		t.Fatalf("a bounded record is still refused: %v", err)
+	}
+}
+
+// INVARIANT: the budget boundary is a CLOSED set plus an operation's attempt
+// budget - not any reason that happens to end in _exhausted.
+func TestBudgetBoundaryIsAClosedSet(t *testing.T) {
+	for reason, want := range map[string]bool{
+		ReasonRunWallBudgetExhausted: true, ReasonLifecycleDeadlineExhausted: true,
+		ReasonContinuationsExhausted: true, ReasonProviderInvocationsExhausted: true,
+		OpExecutionInvoke + "_attempts_exhausted": true,
+		ReasonReviewBudgetExhausted:               false,
+		"patience_exhausted":                      false,
+		"no_progress":                             false,
+	} {
+		if got := BudgetBoundary(Failed, reason); got != want {
+			t.Errorf("BudgetBoundary(failed, %q) = %v, want %v", reason, got, want)
+		}
+	}
+	if BudgetBoundary(Waiting, ReasonRunWallBudgetExhausted) {
+		t.Error("a waiting disposition is a budget boundary")
+	}
+}
+
+// INVARIANT: the record is STICKY. A later re-settle of the same run - a
+// lifecycle deadline after restart, an invariant violation - keeps the first
+// record, journals the same one, and replay equals the live state.
+func TestAHeldRecordSurvivesALaterReSettle(t *testing.T) {
+	fixture, provider := wallFixture(t,
+		RunBudgets{WallLimit: time.Hour, AttemptWallLimit: 50 * time.Minute, MaxExecutionAttempts: 5},
+		wallStep{}, wallStep{mutate: true})
+	runID := fixture.start()
+	drive(fixture, provider, runID)
+	original := fixture.state(runID).snapshot.HeldMaterial
+	if original == nil {
+		t.Fatal("scenario held nothing")
+	}
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	for _, reason := range []string{ReasonLifecycleDeadlineExhausted, "invariant_violation"} {
+		state := fixture.state(runID)
+		if err := fixture.runtime.recordDisposition(state, Failed, reason); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(state.snapshot.HeldMaterial, original) {
+			t.Fatalf("re-settle as %s replaced the record: %+v", reason, state.snapshot.HeldMaterial)
+		}
+	}
+	events := journalOf(t, fixture.runtime, runID)
+	record, count := terminalRecord(t, events)
+	if count != 3 || !reflect.DeepEqual(record.HeldMaterial, original) {
+		t.Fatalf("%d run.failed events, last carrying %+v; want 3, each with the original record", count, record.HeldMaterial)
+	}
+	live := fixture.state(runID)
+	replayed, err := Reduce(live.run, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(replayed.HeldMaterial, original) || !reflect.DeepEqual(live.snapshot.HeldMaterial, original) {
+		t.Fatalf("replay %+v / live %+v, want the original %+v", replayed.HeldMaterial, live.snapshot.HeldMaterial, *original)
 	}
 }

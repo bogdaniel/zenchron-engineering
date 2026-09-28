@@ -795,11 +795,11 @@ func (s *runState) conditions() (Disposition, string) {
 		} else if s.reviewContinuationDelivered() {
 			reviewDelivered = true
 		} else {
-			return Failed, "run_wall_budget_exhausted"
+			return Failed, ReasonRunWallBudgetExhausted
 		}
 	}
 	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
-		return Failed, "run_lifecycle_deadline_exhausted"
+		return Failed, ReasonLifecycleDeadlineExhausted
 	}
 	if s.controllerChanged {
 		return Waiting, "controller_changed"
@@ -830,7 +830,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// run-1b876b78f20d83195e6b503831fcc9c7 is the proof: 4 checkpoints, 3
 	// distinct continuation bindings, terminated while still productive.
 	if s.continuationCeilingReached() {
-		return Failed, "execution_continuations_exhausted"
+		return Failed, ReasonContinuationsExhausted
 	}
 	// The RUN TOTAL of provider invocations, across every binding. This is the
 	// bound a plan's remaining aggregate headroom becomes: continuation depth
@@ -838,7 +838,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// retries within one, but neither of them bounds the sum, and a plan
 	// ceiling is a sum.
 	if s.providerInvocationCeilingReached() {
-		return Failed, "run_provider_invocations_exhausted"
+		return Failed, ReasonProviderInvocationsExhausted
 	}
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
 		return Waiting, "requested_privilege_expansion"
@@ -1634,7 +1634,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 	}
 	if planned.Attempt >= planned.MaxAttempts {
-		outcome, err := r.settle(state, Failed, desired.kind+"_attempts_exhausted")
+		outcome, err := r.settle(state, Failed, desired.kind+attemptsExhaustedSuffix)
 		return false, outcome, err
 	}
 	leased, err := r.scheduler.Next(state.run.ID)
@@ -1915,9 +1915,15 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 		// event that ends it, so the terminal fact and the held material can
 		// never be journalled apart, and replay reads the record back rather
 		// than re-deriving it.
+		// A record already journalled is reused, never re-derived: a later
+		// re-settle carries the SAME identity rather than an opinion of it
+		// from moved state. Only run.failed may carry one.
 		var held *HeldMaterial
-		if BudgetBoundary(disposition, reason) {
-			held = state.heldMaterial(reason)
+		if disposition == Failed {
+			held = state.snapshot.HeldMaterial
+			if held == nil && BudgetBoundary(disposition, reason) {
+				held = state.heldMaterial(reason)
+			}
 		}
 		payload := dispositionRecord{Reason: reason, HeldMaterial: held}
 		if err := r.append(state, eventType, "", payload, nil); err != nil {

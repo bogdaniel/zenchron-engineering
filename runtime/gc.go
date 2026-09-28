@@ -92,7 +92,20 @@ type GCPlan struct {
 	Now      time.Time  `json:"now"`
 	Eligible []GCTarget `json:"eligible"`
 	Retained []GCTarget `json:"retained"`
+	// Held counts the retained candidate workspaces that hold #203 material,
+	// and their measured size: disk gc will never reclaim on its own.
+	Held GCHeldSummary `json:"held"`
 }
+
+// GCHeldSummary is how many held workspaces exist and how many bytes they use.
+// Bytes is a lower bound when part of a workspace is unreadable.
+type GCHeldSummary struct {
+	Workspaces int   `json:"workspaces"`
+	Bytes      int64 `json:"bytes"`
+}
+
+// gcHeldReason prefixes the retention reason of a held workspace.
+const gcHeldReason = "run holds held material: "
 
 // GCResult is what a real run did. Skipped holds targets the plan judged
 // eligible and revalidation then refused - the concurrency case, reported
@@ -188,6 +201,11 @@ func (c Collector) Plan() (GCPlan, error) {
 		if reason := c.prove(root, target, now); reason != "" {
 			target.Reason = reason
 			plan.Retained = append(plan.Retained, target)
+			if strings.HasPrefix(reason, gcHeldReason) {
+				bytes, _ := StateStorage{Dir: target.Path}.Usage() // lower bound on error
+				plan.Held.Workspaces++
+				plan.Held.Bytes += bytes
+			}
 			continue
 		}
 		plan.Eligible = append(plan.Eligible, target)
@@ -369,9 +387,12 @@ func (c Collector) prove(root string, target GCTarget, now time.Time) string {
 	}
 	// Held material (#203) lives in the candidate workspace: an unpublished
 	// runtime commit or uncommitted changes nothing else has a copy of.
-	// Retention age is no reason to destroy it; only an operator is.
+	// Retention age is no reason to destroy it, so gc never collects it. There
+	// is NO governed release yet: the only way such a workspace goes away
+	// today is an operator deleting it by hand outside the runtime. The
+	// plan's Held summary counts these so the cost stays visible.
 	if held := snapshot.HeldMaterial; held != nil && target.Kind == GCCandidateWorkspace {
-		return "run holds " + held.Kind + " material at " + held.Revision
+		return gcHeldReason + held.Kind + " at " + held.Revision
 	}
 	if target.Kind == GCRawTranscript && !rawArtifactOf(snapshot, target.Path) {
 		return "ownership cannot be proven: no journalled raw artifact at this path"

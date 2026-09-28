@@ -582,7 +582,12 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			var record dispositionRecord
 			_ = json.Unmarshal(e.Payload, &record) // validated at append
 			s.Disposition = Failed
-			s.Reason, s.HeldMaterial = record.Reason, record.HeldMaterial
+			s.Reason = record.Reason
+			// STICKY: the first held record names the material, and a later
+			// re-settle neither replaces nor clears it.
+			if s.HeldMaterial == nil {
+				s.HeldMaterial = record.HeldMaterial
+			}
 		}
 		if e.Type == EventRunCancelled {
 			s.Disposition = Cancelled

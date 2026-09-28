@@ -20,6 +20,7 @@ package runtime
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,8 +79,17 @@ type HeldMaterial struct {
 	Disposition          string `json:"disposition"`
 }
 
+var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true}
+
 func (h HeldMaterial) validate() error {
-	return errors.Join(
+	var closed error
+	if !heldKinds[h.Kind] {
+		closed = fmt.Errorf("held_material.kind %q is not a held-material kind", h.Kind)
+	}
+	if h.Disposition != HeldDisposition {
+		closed = errors.Join(closed, fmt.Errorf("held_material.disposition must be %q", HeldDisposition))
+	}
+	return errors.Join(closed,
 		required("held_material.kind", h.Kind),
 		bounded("held_material.revision", h.Revision),
 		bounded("held_material.tree", h.Tree),
@@ -93,12 +103,25 @@ func (h HeldMaterial) validate() error {
 		required("held_material.disposition", h.Disposition))
 }
 
-// BudgetBoundary reports whether a terminal failure reason is a budget
-// boundary. Every budget reason the runtime settles on ends in _exhausted: the
-// run wall, the lifecycle deadline, the continuation and provider-invocation
-// ceilings, and an operation's attempt budget.
+// The run-level budget reasons conditions() settles a run on.
+const (
+	ReasonRunWallBudgetExhausted       = "run_wall_budget_exhausted"
+	ReasonLifecycleDeadlineExhausted   = "run_lifecycle_deadline_exhausted"
+	ReasonContinuationsExhausted       = "execution_continuations_exhausted"
+	ReasonProviderInvocationsExhausted = "run_provider_invocations_exhausted"
+	attemptsExhaustedSuffix            = "_attempts_exhausted"
+)
+
+var budgetReasons = map[string]bool{
+	ReasonRunWallBudgetExhausted: true, ReasonLifecycleDeadlineExhausted: true,
+	ReasonContinuationsExhausted: true, ReasonProviderInvocationsExhausted: true,
+}
+
+// BudgetBoundary reports whether a terminal failure is a budget boundary: one
+// of the closed set of run-level budget reasons, or an operation's attempt
+// budget (`<kind>_attempts_exhausted`).
 func BudgetBoundary(disposition Disposition, reason string) bool {
-	return disposition == Failed && strings.HasSuffix(reason, "_exhausted")
+	return disposition == Failed && (budgetReasons[reason] || strings.HasSuffix(reason, attemptsExhaustedSuffix))
 }
 
 // heldMaterial names the valuable material the run holds when a budget ends
@@ -115,17 +138,12 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		// invented: the kind and the producing operation still stand.
 		_ = json.Unmarshal(s.snapshot.Operations[producing].Result, &record)
 		held.Kind, held.Operation = HeldUncommitted, producing
-		if len(producing) > maxPayloadFieldBytes {
-			// Never make the terminal event unappendable: an id past the field
-			// bound is recorded as unknown rather than truncated into a lie.
-			held.Operation = ""
-		}
 		held.PathCount, held.ContentDigest = record.PathCount, record.ContentDigest
 		held.Revision, held.Tree = head, s.projection.CandidateTree
 		if head == "" {
 			held.Revision, held.Tree = s.baseRevision(), ""
 		}
-		return &held
+		return held.bounded()
 	}
 	if head == "" {
 		return nil
@@ -137,19 +155,37 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 	switch {
 	case !s.projection.CandidateComplete:
 		held.Kind = HeldCheckpoint
-	case s.verifiedAt(head, held.NextStep):
+	case s.verifiedAt(head):
 		held.Kind = HeldVerifiedUnpublished
 	default:
 		held.Kind = HeldCommittedUnverified
 	}
-	return &held
+	return held.bounded()
+}
+
+// bounded never lets the terminal event become unappendable. Descriptive
+// fields go through the package's one boundedField. An IDENTITY field past the
+// bound is recorded as UNKNOWN (empty) instead: a truncated commit or
+// operation id would name a different object, which is worse than naming none.
+func (h HeldMaterial) bounded() *HeldMaterial {
+	for _, field := range []*string{&h.NextStep, &h.BlockedBy, &h.Successor, &h.SuccessorUnavailable} {
+		*field = boundedField(*field)
+	}
+	for _, field := range []*string{&h.Revision, &h.Tree, &h.Operation, &h.ContentDigest} {
+		if boundedField(*field) != *field {
+			*field = ""
+		}
+	}
+	return &h
 }
 
 // verifiedAt reports whether head carries every assurance the lifecycle wants
 // before publication: automated assurance passed at that exact commit, no
-// independent semantic finding at it failed, and no assurance step is still
-// the next one wanted. Anything less is committed_unverified.
-func (s *runState) verifiedAt(head, next string) bool {
+// independent semantic finding at it failed, and neither assurance operation
+// is still wanted and unsatisfied. It asks the assurance bindings directly
+// rather than the planner's first pick, which an earlier op could mask.
+// Anything less is committed_unverified.
+func (s *runState) verifiedAt(head string) bool {
 	automated, semantic := s.projection.Assurance, s.projection.SemanticAssurance
 	if automated == nil || automated.Commit != head || !automated.Passed {
 		return false
@@ -157,7 +193,12 @@ func (s *runState) verifiedAt(head, next string) bool {
 	if semantic != nil && semantic.Commit == head && !semantic.Passed {
 		return false
 	}
-	return next != OpAssuranceGo && next != OpAssuranceSemantic
+	for _, spec := range []operationSpec{{OpAssuranceGo, bindAssuranceGo}, {OpAssuranceSemantic, bindAssuranceSemantic}} {
+		if key, wanted := spec.bind(s); wanted && key != "" && !s.satisfied(spec.kind, key) {
+			return false
+		}
+	}
+	return true
 }
 
 // nextLifecycleStep is the first non-observation operation the planner still
@@ -177,9 +218,15 @@ func (s *runState) nextLifecycleStep() string {
 
 // workspaceContentDigest identifies uncommitted workspace material by path and
 // content WITHOUT any Git operation: it reads files, it writes no object, index
-// or ref. A deleted path and a symlink are identified as such. An unreadable
-// path makes the whole digest unknown (""), and so does an empty change: there
-// is nothing to identify.
+// or ref. A deleted path, a symlink and a special file are identified as such.
+// Only a REGULAR file is ever opened: opening a FIFO a producer left in place
+// of a tracked file blocks forever, and a device is not the producer's content.
+// An unreadable path makes the whole digest unknown (""), and so does an empty
+// change: there is nothing to identify.
+//
+// ponytail: Lstat-then-open races a process swapping a regular file for a FIFO
+// in between. The digest runs after the producer returned, so no runtime-
+// launched writer is live; an O_NONBLOCK open is the upgrade if that changes.
 func workspaceContentDigest(dir string, paths []string) string {
 	if len(paths) == 0 {
 		return ""
@@ -202,6 +249,8 @@ func workspaceContentDigest(dir string, paths []string) string {
 				return ""
 			}
 			identity = "symlink:" + target
+		case !info.Mode().IsRegular():
+			identity = "special:" + info.Mode().Type().String()
 		default:
 			digest, err := fileDigest(full)
 			if err != nil {

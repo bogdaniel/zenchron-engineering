@@ -290,9 +290,28 @@ no attempt, continuation, active work, token or cost, provider deadline, Git
 operation or publication. Carrying it forward is new, governed work.
 
 The record is written once and read back from the journal, so a restart or a
-changed configuration reports the same identity and disposition. `autonomy
+changed configuration reports the same identity and disposition. It is also
+sticky: a later re-settle of the same run keeps the original record. `autonomy
 status` prints `held material`, and prints `none (no material result)` for a
 budget failure that held nothing, so the two are never confused.
+
+**The operator path, today.** `gc` never reclaims a held workspace, so its disk
+is spent until an operator acts:
+
+1. `autonomy gc --dry-run` reports every held workspace under `retained`
+   (reason `run holds held material: …`) and their total under
+   `held: {workspaces, bytes}`. `autonomy doctor`'s `state.storage` check points
+   here.
+2. `autonomy status RUN --text` names the material: kind, revision, tree, and
+   for uncommitted work the producing operation and content digest. Inspect it
+   in the workspace path shown there.
+3. To keep the work, carry it forward as new governed work: a new run, or your
+   own branch, reviewed like any other change. The runtime publishes nothing
+   for you.
+4. To discard it, delete `<state>/runs/RUN/candidate` by hand. There is no
+   governed release yet, so this deletion is not journalled, and status keeps
+   reporting what the run held. #344 tracks an explicit, journalled release that
+   makes the workspace collectable.
 
 ## Concurrency
 

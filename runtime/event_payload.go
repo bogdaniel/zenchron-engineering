@@ -69,10 +69,10 @@ var eventPayloads = map[string]payloadValidator{
 	// records no claim, and strict because a recorded claim must be complete.
 	EventRunCreated: optionalPayload(payloadSchema(ControllerBuild.validateAttested)),
 
-	EventRunWaiting:   dispositionPayload,
-	EventRunCompleted: dispositionPayload,
-	EventRunFailed:    dispositionPayload,
-	EventRunCancelled: dispositionPayload,
+	EventRunWaiting:   dispositionPayload(false),
+	EventRunCompleted: dispositionPayload(false),
+	EventRunFailed:    dispositionPayload(true),
+	EventRunCancelled: dispositionPayload(false),
 
 	EventFeedbackPublicationIdentity: payloadSchema(FeedbackPublicationIdentityPayload.validate),
 
@@ -283,18 +283,25 @@ func validateEventPayload(e EngineeringEvent) error {
 }
 
 // dispositionPayload is what Reduce reads from the run disposition events.
-func dispositionPayload(raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var payload dispositionRecord
-	if err := strictJSON(raw, &payload); err != nil {
-		return err
-	}
-	if payload.HeldMaterial != nil {
+// Only run.failed may carry held material (#203); on any other disposition it
+// is refused rather than ignored.
+func dispositionPayload(mayHold bool) payloadValidator {
+	return func(raw json.RawMessage) error {
+		if len(raw) == 0 {
+			return nil
+		}
+		var payload dispositionRecord
+		if err := strictJSON(raw, &payload); err != nil {
+			return err
+		}
+		switch {
+		case payload.HeldMaterial == nil:
+			return nil
+		case !mayHold:
+			return errors.New("held_material is recorded only on run.failed")
+		}
 		return payload.HeldMaterial.validate()
 	}
-	return nil
 }
 
 // dispositionRecord is the run disposition payload. HeldMaterial is present
