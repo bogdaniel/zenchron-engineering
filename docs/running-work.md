@@ -244,20 +244,20 @@ zenchron-engineering autonomy run issue 42 --agent claude --new-generation
 `autonomy stop RUN` (and `stop-all`) cancels a run durably: it journals
 `run.cancelled`, and no operation of that run is leased afterwards. If the run
 is inside an `execution.invoke` when the stop lands, the controller notices
-the durable stop while the provider process runs (#213), cancels that
-invocation, and journals the attempt `cancelled` with failure class
+the durable stop while the provider process runs (#213) and terminates it;
+when the stop is what ended it, the attempt is journalled `cancelled` with
+failure class
 `run_cancelled` (and, for CLI agents, termination cause `run_stopped`).
 `status` shows that diagnostic. A stop already durable just before the
 provider would start means it never starts.
 
-Only the provider is watched. A stop landing while the runtime is preparing
-the invocation, or after the provider has returned, interrupts nothing and
-rewrites nothing: an attempt that ended for its own reason (it exited by
-itself, a quota, an attempt-wall or inactivity kill) keeps that reason and its
-termination cause. The stop is acted on only after the run is
-actually read as cancelled; a state database the watcher cannot read never
-kills a provider, and the failed reads are noted in the attempt's diagnostic
-when it has one. A provider that ignores cancellation and returns anyway still
+Only the provider is watched. A completed provider execution retains the
+termination owner established by the event that actually ended or initiated
+termination of that physical execution. Later run-level cancellation or
+authority revocation does not rewrite it. The stop is acted on only after the
+run is actually read as cancelled; a state database the watcher cannot read
+never kills a provider, and the failed reads are noted in the attempt's
+diagnostic when it has one. A provider that ignores cancellation and returns anyway still
 has its result refused.
 
 That is the whole of what a stop interrupts. `candidate.commit`,

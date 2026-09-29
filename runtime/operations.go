@@ -49,9 +49,8 @@ type effect struct {
 	result any
 	state  OperationState
 	// interrupted is set only by invokeExecution, and only when an operator
-	// stop ended the attempt: no provider was started, or the stop was
-	// observed while the provider was active and it reported only its
-	// cancelled context (#213).
+	// stop ended the attempt: no provider was started, or the provider's
+	// executor committed the stop as the owner of its termination (#213).
 	interrupted bool
 }
 
@@ -1049,15 +1048,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			class = FailureExecutionIncomplete
 			record.FailureClass = class
 		}
-		// The stop was observed while the provider was active, and the
-		// provider reported only that its context ended (a shutdown, or
-		// nothing recognised): the stop ended it, so it is run_cancelled -
-		// never controller_shutdown, which would leave a stopped run looking
-		// resumable. Any ending the provider itself recorded (a quota, a
-		// deadline or inactivity kill, its own exit) came first and is kept.
-		if watch.observed && (class == FailureControllerShutdown || class == FailureUnknown) {
-			class = FailureRunCancelled
-			record.FailureClass = class
+		// The stop ended this attempt only if the PROVIDER says so: its
+		// executor committed operator_stop as the termination owner and
+		// reported run_cancelled. That settled ownership is consumed here,
+		// never reconstructed - an unknown class, an error, or a cancelled
+		// context is not evidence of who ended the process.
+		if watch.observed && class == FailureRunCancelled {
 			watch.ended = true
 		}
 		// A provider that reported a failure of its own reached at least its own

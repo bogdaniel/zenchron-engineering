@@ -459,6 +459,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				stop, detail = cancellationStop(ctxErr)
+				classification = cancellationOwner(ctx)
 			} else {
 				classification = classifyOpenAIFailure(providerCode, raw)
 			}
@@ -489,6 +490,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		for _, call := range calls {
 			if err := ctx.Err(); err != nil {
 				stop, detail = cancellationStop(err)
+				classification = cancellationOwner(ctx)
 				break
 			}
 			toolCalls++
@@ -570,6 +572,16 @@ func classifyOpenAIFailure(code string, raw []byte) FailureClass {
 		return FailureProviderAccountUnavailable
 	}
 	return ClassifyProviderFailure(raw, nil)
+}
+
+// cancellationOwner is the class of a loop this provider ended because its
+// context ended, decided at that instant (#213): an operator stop is
+// run_cancelled; any other cause keeps the unknown it always had.
+func cancellationOwner(ctx context.Context) FailureClass {
+	if ownerOfCancellation(ctx) == OwnerOperatorStop {
+		return FailureRunCancelled
+	}
+	return FailureUnknown
 }
 
 func cancellationStop(err error) (ProviderStop, string) {

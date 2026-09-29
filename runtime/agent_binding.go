@@ -422,9 +422,10 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // reached (#213): the provider of a running execution.invoke. invokeExecution
 // arms watchExecution around Provider.Execute only; it reads this same durable
 // disposition while the provider runs and cancels the invocation once it has
-// successfully read the run as Cancelled. An invocation that then reports only
-// its cancelled context is journalled OperationCancelled with a run_cancelled
-// diagnostic; one that reports a condition of its own keeps it. Every other operation kind already started -
+// successfully read the run as Cancelled. An invocation whose executor
+// committed the stop as the owner of its termination is journalled
+// OperationCancelled with a run_cancelled diagnostic; one ended by anything
+// else keeps that. Every other operation kind already started -
 // candidate.commit, candidate.push, pull_request.create, publication - runs to
 // completion exactly as before; whether a stop should gate those runtime
 // effects is #215, not this. Nothing a stop does retracts an effect that has

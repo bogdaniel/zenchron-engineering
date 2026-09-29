@@ -36,7 +36,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1149,21 +1148,33 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// exited on its own, or one a runtime bound killed, into something it was
 	// not (#213).
 	//
-	// The stop owns the ending only if its cause was already set when the
-	// process returned AND the process did not return by itself (runErr == nil
-	// means it exited on its own before any kill). A deadline or inactivity
-	// kill that came first owns ctx's own cause, so the stop cannot be read
-	// back through it.
-	exitErr, parentErr := ctx.Err(), parent.Err()
-	stopped := runErr != nil && runStopObserved(ctx)
-	if runErr == nil && runStopObserved(ctx) {
-		exitErr = nil
+	// The executor commits the owner when it is decided (output.Owner) and
+	// this adapter consumes it; it is never re-derived from a context or from
+	// durable state after the process returned. Only an executor that decides
+	// no owner falls back to reading the context, once, here.
+	owner := output.Owner
+	if owner == OwnerUndecided {
+		owner = OwnerProviderExited
+		if runErr != nil && ctx.Err() != nil {
+			owner = ownerOfCancellation(ctx)
+		}
+	}
+	killed := owner != OwnerProviderExited
+	stopped := owner == OwnerOperatorStop
+	// A deadline the executor killed for is THIS invocation's own unless the
+	// parent carried the same or an earlier deadline - structural, so nothing
+	// cancelled later can make it look inherited.
+	ownDeadline := true
+	if bound, ok := ctx.Deadline(); ok {
+		if inherited, parentBounded := parent.Deadline(); parentBounded && !bound.Before(inherited) {
+			ownDeadline = false
+		}
 	}
 	// WHAT THE STRUCTURED STREAM ESTABLISHED, read once the process returned.
 	// A final result is required only of a process that exited 0.
 	streamed := claudeStreamOutcome{Condition: FailureUnknown}
 	if stream != nil {
-		streamed = stream.outcome(runErr == nil && exitErr == nil)
+		streamed = stream.outcome(runErr == nil && !killed)
 		provenance.StructuredEvents = streamed.Accepted
 		provenance.OpenToolsAtExit = streamed.OpenTools
 		provenance.PermissionDenials = streamed.PermissionDenials
@@ -1198,14 +1209,14 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// and "which no-progress window was this running under" is not
 	// reconstructible from a transcript.
 	provenance.InactivityLimit = providerInactivityLimit(ctx)
-	if exitErr != nil && errors.Is(exitErr, context.DeadlineExceeded) {
+	if owner == OwnerDeadline {
 		provenance.TerminationCause = TerminationDeadlineReached
 	}
 	// THE STALL IS NAMED BEFORE THE SHUTDOWN. An inactivity kill cancels this
 	// context, so through ctx.Err() alone it is indistinguishable from a
 	// supervisor draining - and those mean opposite things: one is a provider
 	// that stopped moving, the other is a pause the run resumes from.
-	inactive := providerInactivityCause(ctx)
+	inactive := owner == OwnerInactivity
 	if inactive {
 		provenance.TerminationCause = TerminationProviderInactivity
 	}
@@ -1218,7 +1229,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
-	if runErr != nil || exitErr != nil {
+	if runErr != nil || killed {
 		result.Outcome = OperationFailed
 		// The typed condition the PROVIDER ITSELF stated, read only from the
 		// narrow terminal surface. FailureUnknown here means the CLI named
@@ -1270,7 +1281,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// had authority left), not a shutdown (the controller is fine), and
 			// not an unknown (nothing about the BOUND is undiagnosed).
 			result.Failure.Classification = FailureProviderNoProgress
-		case exitErr != nil && parentErr == nil && errors.Is(exitErr, context.DeadlineExceeded):
+		case owner == OwnerDeadline && ownDeadline:
 			// THIS INVOCATION ran out of its own wall bound. Nothing stopped,
 			// and saying "the controller stopped" was affirmatively false: it
 			// routed to RouteWait, so a provider that always overruns its bound
@@ -1280,15 +1291,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// routes to a bounded retry.
 			result.Failure.Classification = FailureExecutionIncomplete
 		case stopped:
-			// The OPERATOR stopped this run and the runtime's execution
-			// watcher cancelled the invocation BEFORE the process exited
-			// (#213); a stop landing after the exit is not seen here. Neither a
-			// shutdown, which leaves the run resumable, nor a failure of the
-			// work: it is the stop, recorded as the stop.
+			// The OPERATOR stopped this run, and the executor began
+			// terminating the still-running process because of it (#213). It
+			// is neither a shutdown, which leaves the run resumable, nor a
+			// failure of the work: it is the stop, recorded as the stop. A
+			// provider that had already exited is OwnerProviderExited and
+			// never reaches here, however long its pipes stayed open.
 			result.Outcome = OperationCancelled
 			result.Failure.Classification = FailureRunCancelled
 			provenance.TerminationCause = TerminationRunStopped
-		case exitErr != nil:
+		case killed:
 			// The CONTROLLER stopped, not the work. Recording this as
 			// FailureUnknown routed it to RouteStop and terminalized a run that
 			// a shutdown is supposed to leave resumable.

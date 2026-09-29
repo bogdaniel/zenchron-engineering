@@ -400,7 +400,7 @@ func TestAStubbornProcessGroupIsTerminatedAtTheDeadline(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", script)
 	start := time.Now()
-	err := runBoundedProcess(ctx, cmd, 300*time.Millisecond)
+	_, err := runBoundedProcess(ctx, cmd, 300*time.Millisecond)
 	if elapsed := time.Since(start); elapsed > 6*time.Second {
 		t.Fatalf("the bounded process did not return promptly after its deadline: %s", elapsed)
 	}
@@ -448,7 +448,7 @@ func TestADetachedDescendantDoesNotBlockTheDeadline(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", script)
 	start := time.Now()
-	err := runBoundedProcess(ctx, cmd, 300*time.Millisecond)
+	_, err := runBoundedProcess(ctx, cmd, 300*time.Millisecond)
 	elapsed := time.Since(start)
 	// THE INVARIANT THAT HOLDS ON EVERY PLATFORM: the runtime does not wait for
 	// an escapee. A descendant holding the inherited stdout pipe used to be

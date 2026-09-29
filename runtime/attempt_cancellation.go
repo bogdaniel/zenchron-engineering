@@ -29,9 +29,9 @@ type executionWatch struct {
 	// before Provider.Execute returned.
 	observed bool
 	// ended: the stop, and nothing else, ended this attempt - either no
-	// provider was started, or the provider reported only its cancelled
-	// context. Set by invokeExecution; it is what makes the attempt
-	// interrupted.
+	// provider was started, or the provider's executor committed the stop as
+	// the owner of its termination (it reports run_cancelled). Set by
+	// invokeExecution; it is what makes the attempt interrupted.
 	ended bool
 	// readFailures counts durable reads that failed; none of them was
 	// treated as a stop.

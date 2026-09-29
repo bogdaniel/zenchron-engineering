@@ -136,10 +136,9 @@ func TestAStopAfterStartNeverInvokesTheProvider(t *testing.T) {
 	assertStoppedExecution(t, f, runID, outcome)
 }
 
-// blockingProvider runs until its context ends and then reports what the
-// provider adapter would have reported before #213: a controller shutdown. The
-// runtime, not the adapter, is what must turn an observed stop into
-// run_cancelled.
+// blockingProvider runs until its context ends and then attributes the ending
+// the way a real executor does: by the cause that ended it, committed at that
+// instant. The runtime consumes that attribution; it never reconstructs it.
 type blockingProvider struct {
 	*isolatedProvider
 	during      func(ctx context.Context)
@@ -151,8 +150,13 @@ func (p *blockingProvider) Execute(ctx context.Context, request ExecutionRequest
 	p.during(ctx)
 	select {
 	case <-ctx.Done():
+		// Attributed the way an executor does: by the cause that ended it.
 		p.interrupted = true
-		return ExecutionResult{Outcome: OperationCancelled, Failure: &ProviderFailure{Classification: FailureControllerShutdown}}, ctx.Err()
+		class := FailureControllerShutdown
+		if ownerOfCancellation(ctx) == OwnerOperatorStop {
+			class = FailureRunCancelled
+		}
+		return ExecutionResult{Outcome: OperationCancelled, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
 	case <-time.After(10 * time.Second):
 		return ExecutionResult{}, errors.New("the provider was never interrupted")
 	}

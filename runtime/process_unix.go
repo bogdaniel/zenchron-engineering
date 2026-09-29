@@ -5,9 +5,11 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -22,17 +24,37 @@ import (
 // only the deaths this process survives - a cancelled context, an expired
 // authority, a drained shutdown. It cannot cover the death of this process
 // itself, which is what armOwnerDeathGuard exists for.
-func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) error {
+//
+// It returns the TerminationOwner, committed exactly once (#213):
+//
+//   - the root process exiting before any external event initiated its
+//     termination is OwnerProviderExited, however long descendants then hold
+//     its output pipes open;
+//   - otherwise the owner is the cause of the context at the instant THIS
+//     function began terminating the group (ownerOfCancellation), and it
+//     stays the owner through the grace period whatever arrives meanwhile.
+//
+// PROCESS EXIT IS OBSERVED SEPARATELY FROM PIPE DRAIN. With a non-*os.File
+// Stdout/Stderr, os/exec creates the pipes itself and Cmd.Wait returns only
+// after its copy goroutines finish, so a background descendant holding the
+// pipe delays Wait past the root's exit - and a stop landing in that window
+// would look like the thing that ended the process. ownOutputPipes therefore
+// hands the child *os.File pipe ends: Cmd.Wait then waits only for the root
+// (one reaper, no double wait), and this function drains the pipes itself,
+// after exit is known, with the same bound WaitDelay applied before.
+func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) (TerminationOwner, error) {
 	if grace <= 0 {
 		grace = 5 * time.Second
 	}
 	cmd.Cancel = nil // CommandContext's single-child kill is insufficient here.
-	// Last-resort unblock: if a descendant escapes the owned-set kill below and
-	// keeps holding the inherited stdout/stderr pipe, os/exec's WaitDelay closes
-	// those pipes so Wait returns. Not the primary containment mechanism — the
-	// explicit stop sequence below can itself take up to ~2*grace.
+	// Last-resort unblock for the root itself: the pipes are drained below.
 	cmd.WaitDelay = 3 * grace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	pipes, err := ownOutputPipes(cmd)
+	if err != nil {
+		return OwnerUndecided, err
+	}
+	defer pipes.closeReaders()
 	// THE GUARD IS ARMED BEFORE THERE IS ANYTHING TO GUARD. Arming can fail -
 	// a fork returns EAGAIN on a machine out of process slots, and guards are
 	// one per bounded process - and refusing to run uncontained is only an
@@ -42,12 +64,15 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 	// harshly as a hostile process.
 	own, stopGuard, err := armOwnerDeathGuard(grace)
 	if err != nil {
-		return err
+		pipes.closeWriters()
+		return OwnerUndecided, err
 	}
 	defer stopGuard()
 	if err := cmd.Start(); err != nil {
-		return err
+		pipes.closeWriters()
+		return OwnerUndecided, err
 	}
+	pipes.start()
 	// Naming the group is one write on a pipe that is already open. The
 	// interval in which this process's death would still orphan the group is
 	// therefore that write, not a fork and an exec: sub-millisecond either way,
@@ -56,23 +81,152 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 	own(cmd.Process.Pid)
 	owned := newOwnedProcessSet(cmd.Process.Pid)
 	defer owned.Close()
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	stop := func() error {
 		// Snapshot before signalling the root: otherwise a detached descendant
 		// could be reparented before it is identified. Signal errors are benign
 		// here because the root may have won the race and exited naturally.
 		owned.GracefulStop(grace)
 		select {
-		case err := <-done:
+		case err := <-exited:
 			return err
 		case <-time.After(grace):
 			owned.ForceKill()
-			return <-done
+			return <-exited
 		}
+	}
+	var ownership terminalOwnership
+	var waitErr error
+	select {
+	case waitErr = <-exited:
+		ownership.settle(OwnerProviderExited)
+	case <-ctx.Done():
+		select {
+		case waitErr = <-exited:
+			// Both were ready: the root had already exited, so no external
+			// event ended it.
+			ownership.settle(OwnerProviderExited)
+		default:
+			ownership.settle(ownerOfCancellation(ctx))
+			waitErr = stop()
+		}
+	}
+	// The owner is committed. What remains is draining the pipes, which a
+	// descendant may still hold; a cancellation now only cleans up.
+	cleanup := func() {
+		owned.GracefulStop(grace)
+		select {
+		case <-pipes.done:
+		case <-time.After(grace):
+			owned.ForceKill()
+		}
+	}
+	if err := pipes.drain(ctx, 3*grace, cleanup); err != nil && waitErr == nil {
+		waitErr = err
+	}
+	return ownership.settle(OwnerUndecided), waitErr
+}
+
+// ownedPipes are the child's stdout/stderr pipes, created here rather than by
+// os/exec so that Cmd.Wait observes the root's exit without also waiting for
+// every descendant that inherited the write end (#213).
+type ownedPipes struct {
+	readers, writers []*os.File
+	targets          []io.Writer
+	done             chan struct{}
+}
+
+// ownOutputPipes replaces each non-file Stdout/Stderr writer with the write end
+// of a pipe this function owns. A writer shared by both streams shares one
+// pipe, as os/exec does, so the target never sees concurrent writes.
+func ownOutputPipes(cmd *exec.Cmd) (*ownedPipes, error) {
+	p := &ownedPipes{done: make(chan struct{})}
+	var shared *os.File
+	for i, slot := range []*io.Writer{&cmd.Stdout, &cmd.Stderr} {
+		target := *slot
+		if target == nil {
+			continue
+		}
+		if _, isFile := target.(*os.File); isFile {
+			continue
+		}
+		if i == 1 && shared != nil && sameWriter(cmd.Stderr, p.targets[0]) {
+			*slot = shared
+			continue
+		}
+		r, w, err := os.Pipe()
+		if err != nil {
+			p.closeWriters()
+			p.closeReaders()
+			return nil, err
+		}
+		p.readers, p.writers, p.targets = append(p.readers, r), append(p.writers, w), append(p.targets, target)
+		*slot = w
+		if i == 0 {
+			shared = w
+		}
+	}
+	return p, nil
+}
+
+func sameWriter(a, b io.Writer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
+}
+
+// start closes this process's copies of the write ends - the child holds its
+// own - and copies each pipe into its target until every writer has closed.
+func (p *ownedPipes) start() {
+	p.closeWriters()
+	var copying sync.WaitGroup
+	for i := range p.readers {
+		copying.Add(1)
+		go func(r *os.File, target io.Writer) {
+			defer copying.Done()
+			_, _ = io.Copy(target, r)
+		}(p.readers[i], p.targets[i])
+	}
+	go func() { copying.Wait(); close(p.done) }()
+}
+
+// drain waits for the copies to finish. A descendant may hold the pipes past
+// the root's exit: a cancellation meanwhile runs cleanup (it ends the
+// descendants, it owns nothing), and after bound the pipes are closed and
+// exec.ErrWaitDelay reported, exactly as os/exec's WaitDelay did.
+func (p *ownedPipes) drain(ctx context.Context, bound time.Duration, cleanup func()) error {
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	cancelled := ctx.Done()
+	for {
+		select {
+		case <-p.done:
+			return nil
+		case <-cancelled:
+			cancelled = nil
+			cleanup()
+		case <-timer.C:
+			p.closeReaders()
+			<-p.done
+			return exec.ErrWaitDelay
+		}
+	}
+}
+
+func (p *ownedPipes) closeWriters() {
+	for _, w := range p.writers {
+		_ = w.Close()
+	}
+	p.writers = nil
+}
+
+func (p *ownedPipes) closeReaders() {
+	for _, r := range p.readers {
+		_ = r.Close()
 	}
 }
 
