@@ -277,7 +277,8 @@ func TestNoSuspensionLeaksAcrossAContinuation(t *testing.T) {
 
 // TOOL STORM. Many tiny tools open and close as fast as the stream can carry
 // them. Edge writes are bounded - every write starts at least the edge spacing
-// after the previous one - and the FINAL state is never dropped: once the
+// after the previous one - and, with a live process and a store that accepts
+// the write, the FINAL state is not coalesced away: once the
 // storm ends with no tool open, the row says so within the edge spacing.
 func TestAToolStormIsRateBoundAndEndsOnItsFinalState(t *testing.T) {
 	const limit = 4 * time.Second
@@ -299,7 +300,7 @@ func TestAToolStormIsRateBoundAndEndsOnItsFinalState(t *testing.T) {
 		return row(t, scheduler, op.ID).InactivitySuspension == nil
 	})
 	// Progress that did not change the suspension is ordinary: it lands at
-	// the next ordinary slot, newest first, never dropped.
+	// the next ordinary slot, newest first.
 	eventually(t, progressRecordInterval(limit)+100*time.Millisecond, "the storm's last progress reached the row", func() bool {
 		return row(t, scheduler, op.ID).NoProgressKey == stream.key()
 	})
@@ -323,4 +324,140 @@ func (s *claudeStream) key() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return fmt.Sprintf("%d:%d", s.attempt, s.accepted)
+}
+
+// 5 (status). THE CONTINUATION BOUNDARY AS STATUS SEES IT, through the real
+// reconciler and EngineeringRuntime.Status. The predecessor holds a tool open
+// - status reports it - and checkpoints with a write carrying that suspension
+// still stuck in the store. Once it has settled, status reports no
+// suspension; once the continuation is running and the stuck write has
+// landed, status for the continuation reports none either.
+func TestAContinuationsStatusInheritsNoSuspension(t *testing.T) {
+	const limit = 400 * time.Millisecond // a 100ms interval
+	fixture := newPhase8Fixture(t)
+	var runID string
+	var predecessor RunOperation
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	var stuck, inStore, landed atomic.Bool
+	producer := blankLineProducer()
+	mutate := producer.mutate
+	producer.mutate = func(dir string, invocation int) error {
+		current, ok := fixture.state(runID).currentOperation()
+		if !ok || current.State != Running {
+			t.Fatalf("invocation %d: no running operation: %+v", invocation, current)
+		}
+		switch invocation {
+		case 1:
+			predecessor = current
+			stream, _, stop := edgeStream(limit, func(p ProviderProgress) {
+				if p.Suspended && stuck.Load() {
+					inStore.Store(true)
+					<-gate
+					defer landed.Store(true)
+				}
+				_, _ = fixture.runtime.scheduler.RecordProviderProgress(current.ID, current.AttemptIdentity, p)
+			})
+			feed(stream, claudeAssistant("M1", "", claudeToolUse("X")))
+			eventually(t, time.Second, "status reported the predecessor's open tool", func() bool {
+				return statusSuspension(t, fixture, runID) == "active"
+			})
+			// More progress inside the open tool's turn: an ordinary write,
+			// suspension and all, that is stuck in the store when the attempt
+			// checkpoints.
+			stuck.Store(true)
+			feed(stream, claudeAssistant("M1", "", claudeText))
+			eventually(t, time.Second, "the suspended write is stuck in the store", inStore.Load)
+			stop() // bounded: returns with that write still stuck
+		case 2:
+			if current.ID == predecessor.ID && current.AttemptIdentity == predecessor.AttemptIdentity {
+				t.Fatalf("the continuation is the predecessor's own attempt: %+v", current)
+			}
+			release()
+			eventually(t, time.Second, "the predecessor's stuck write landed", landed.Load)
+			got := liveStatus(t, fixture, runID)
+			if got.ID != current.ID || got.InactivitySuspension != "" || got.InactivitySuspendedSince != nil {
+				t.Fatalf("status for the continuation %s reports %q since %v: the predecessor's suspension leaked",
+					got.ID, got.InactivitySuspension, got.InactivitySuspendedSince)
+			}
+		}
+		return mutate(dir, invocation)
+	}
+	fixture.deps.Provider = producer
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	defer ownerLiveness(fixture, true)()
+	runID = fixture.start()
+	if outcome := fixture.reconcile(runID); outcome.Reason != "execution_checkpointed" {
+		t.Fatalf("the first pass settled %q, want a checkpoint", outcome.Reason)
+	}
+	// Settled: the stored transition cleared it, and status says so.
+	if report, err := fixture.runtime.Status(runID); err != nil || report.Operation == nil ||
+		report.Operation.InactivitySuspension != "" || report.Operation.InactivitySuspendedSince != nil {
+		t.Fatalf("status after the checkpoint: %+v %v", report.Operation, err)
+	}
+	if r := row(t, fixture.runtime.scheduler, predecessor.ID); r.InactivitySuspension != nil {
+		t.Fatalf("the checkpointed row kept its suspension: %+v", r.InactivitySuspension)
+	}
+	fixture.reconcile(runID)
+	if len(producer.requests) != 2 {
+		t.Fatalf("%d invocations, want the predecessor and its continuation", len(producer.requests))
+	}
+}
+
+// 5b. THE SAME OPERATION'S NEXT ATTEMPT. An open-edge write of attempt N is
+// stuck in the store when StartWithin moves the same operation to N+1 -
+// after an abandonment or a settled retry. Released, it changes nothing on
+// N+1: no suspension and no progress carried over.
+func TestAStuckEdgeWriteCannotReachTheNextAttemptOfTheSameOperation(t *testing.T) {
+	const limit = 4 * time.Second
+	for name, succeed := range map[string]func(*testing.T, Scheduler, string){
+		"abandoned": func(t *testing.T, s Scheduler, id string) { abandonExecution(t, s, id) },
+		"settled retry": func(t *testing.T, s Scheduler, id string) {
+			if _, err := s.Finish(id, OperationFailed); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Next("run-1"); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheduler := liveScheduler()
+			op := plannedExecution(t, scheduler, time.Hour)
+			gate := make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(gate) }) }
+			t.Cleanup(release)
+			var blocked, landed atomic.Bool
+			stream, _, stop := edgeStream(limit, func(p ProviderProgress) {
+				if p.Suspended && !blocked.Swap(true) {
+					<-gate
+					defer landed.Store(true)
+				}
+				_, _ = scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, p)
+			})
+			feed(stream, claudeAssistant("M1", "", claudeToolUse("X")))
+			eventually(t, time.Second, "the open edge is stuck in the store", blocked.Load)
+			succeed(t, scheduler, op.ID)
+			next, err := scheduler.Start(op.ID)
+			if err != nil || next.AttemptIdentity == op.AttemptIdentity {
+				t.Fatalf("no attempt N+1: %+v %v", next, err)
+			}
+			release()
+			eventually(t, time.Second, "the stuck write landed", landed.Load)
+			stop()
+			after := row(t, scheduler, op.ID)
+			if after.InactivitySuspension != nil || after.NoProgressKey != next.NoProgressKey ||
+				!equalInstant(after.LastProgressAt, next.LastProgressAt) || after.ProgressRecorderOpen != next.ProgressRecorderOpen {
+				t.Fatalf("attempt %d's stuck write reached attempt %d: before %+v after %+v",
+					op.AttemptIdentity, next.AttemptIdentity, next, after)
+			}
+		})
+	}
+}
+
+func equalInstant(a, b *time.Time) bool {
+	return (a == nil) == (b == nil) && (a == nil || a.Equal(*b))
 }
