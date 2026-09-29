@@ -173,13 +173,16 @@ func TestADeferredWriteCannotCrossIntoTheSuccessorAttempt(t *testing.T) {
 	log := &progressLog{}
 	watch, stop := armedWatch(400*time.Millisecond, boundRecorder(scheduler, op, log))
 
-	watch.record("1:1", time.Now(), time.Time{})
+	// The tool is open from the first write, so the second observation is not
+	// a suspension edge (#355) and waits for the ordinary slot.
+	opened := time.Now()
+	watch.record("1:1", time.Now(), opened)
 	log.waitFor(t, 1)
 	if got := row(t, scheduler, op.ID); got.NoProgressKey != "1:1" || !got.ProgressRecorderOpen {
 		t.Fatalf("attempt N's own write did not land: %+v", got)
 	}
 	// A deferred write, suspension and all, pending when N settles.
-	watch.record("1:2", time.Now(), time.Now())
+	watch.record("1:2", time.Now(), opened)
 	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
 		t.Fatal(err)
 	}

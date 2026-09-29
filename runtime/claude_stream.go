@@ -151,7 +151,8 @@ func (s *claudeStream) attach(watch *inactivityWatch) {
 func (s *claudeStream) Write(p []byte) (int, error) {
 	now := time.Now()
 	s.mu.Lock()
-	before, wasOpen := s.accepted, len(s.open) > 0
+	defer s.mu.Unlock()
+	before, openedBefore := s.accepted, s.openedAt
 	for rest := p; len(rest) > 0; {
 		newline := bytes.IndexByte(rest, '\n')
 		chunk := rest
@@ -171,32 +172,35 @@ func (s *claudeStream) Write(p []byte) (int, error) {
 		if newline >= 0 {
 			if !s.discarding {
 				s.handle(s.line)
+				// Per EVENT, not per chunk (#355): tool A's result and tool
+				// B's call can share one pipe read, and B's suspension starts
+				// at B, not at A.
+				if len(s.open) == 0 {
+					s.openedAt = time.Time{}
+				} else if s.openedAt.IsZero() {
+					s.openedAt = now
+				}
 			}
 			s.line, s.discarding = s.line[:0], false
 		}
 	}
-	// The DURABLE half is handed to the recorder, after this lock is released
-	// (see LOCK ORDER). The key is qualified by the physical attempt, because
-	// RecordProviderProgress ignores a key equal to the stored one and a bare
-	// event count restarts at 1 after an abandoned attempt is re-adopted. An
-	// open-tool transition is recorded too, even with no new progress - the
-	// final result closes tools without being progress - so the durable
-	// suspension follows the one the watchdog reads (#352). tool_progress and
-	// every other unaccepted event change neither.
-	isOpen := len(s.open) > 0
+	// The DURABLE half is handed to the recorder. The key is qualified by the
+	// physical attempt, because RecordProviderProgress ignores a key equal to
+	// the stored one and a bare event count restarts at 1 after an abandoned
+	// attempt is re-adopted. An open-tool transition is recorded too, even
+	// with no new progress - the final result closes tools without being
+	// progress - so the durable suspension follows the one the watchdog reads
+	// (#352). tool_progress and every other unaccepted event change neither.
+	//
+	// It is handed over UNDER this lock, so observations reach the recorder in
+	// stream order and an older suspension state can never be queued behind a
+	// newer one (#355). That keeps the LOCK ORDER: observe takes only the
+	// recorder's own leaf lock and never blocks, and no watch lock is taken.
 	if s.accepted != before {
 		s.progressAt = now
 	}
-	if !isOpen {
-		s.openedAt = time.Time{}
-	} else if !wasOpen {
-		s.openedAt = now
-	}
-	changed := s.accepted != before || isOpen != wasOpen
-	key, at, since, watch := fmt.Sprintf("%d:%d", s.attempt, s.accepted), s.progressAt, s.openedAt, s.watch
-	s.mu.Unlock()
-	if changed {
-		watch.record(key, at, since)
+	if s.accepted != before || !s.openedAt.Equal(openedBefore) {
+		s.watch.record(fmt.Sprintf("%d:%d", s.attempt, s.accepted), s.progressAt, s.openedAt)
 	}
 	return len(p), nil
 }
@@ -266,6 +270,7 @@ func (s *claudeStream) handle(line []byte) {
 			if id := event.Message.ID; id != "" && id != s.turn {
 				if s.turn != "" {
 					clear(s.open)
+					s.openedAt = time.Time{} // the previous turn's tools ended
 				}
 				s.turn = id
 			}

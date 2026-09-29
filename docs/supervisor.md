@@ -192,11 +192,20 @@ abandoned interval in full. An attempt that was settled — observed, journalled
 and classified — does get a fresh window, because that is what a bounded retry
 is; the attempt ceiling is what ends it.
 
-The datum is written at most once per quarter of the window. Progress that
+Ordinary progress is written at most once per quarter of the window. Progress that
 arrives inside that interval is coalesced, not dropped: the newest observation
 waits and is written at the next due point with the instant it was observed,
 and a process that ends under a running controller writes its last observation
 as it closes. So the datum is exact whenever the process was seen to end.
+
+A structured tool opening or closing is not ordinary progress: it changes
+whether inactivity is suspended, which is what status reports. Such an edge is
+written within a sixtieth of that interval (2.5s for the default window)
+instead of waiting for the next due point, so status stops claiming a
+suspension shortly after the tool closes. Every write, edges included, still
+starts at least that spacing after the previous one, and edges arriving inside
+it coalesce into the newest state; without tool edges the rate is the ordinary
+one above.
 
 A controller that dies abruptly can lose the one observation still waiting.
 The row then records that its recorder never closed, and only then does

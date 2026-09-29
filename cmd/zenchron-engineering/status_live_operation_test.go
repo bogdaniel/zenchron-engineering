@@ -95,3 +95,36 @@ func TestASuspendedWindowIsNotRenderedAsAnImpendingKill(t *testing.T) {
 		t.Fatalf("an unsuspended window lost its silence line:\n%s", out.String())
 	}
 }
+
+// #355: `autonomy status --text` for a continuation whose report carries no
+// suspension - which runtime's TestAContinuationsStatusInheritsNoSuspension
+// proves the real Status returns - says nothing about one, while the
+// predecessor's report, suspended, does.
+func TestAContinuationsStatusTextShowsNoInheritedSuspension(t *testing.T) {
+	last := time.Unix(1_800_000_000, 0).UTC()
+	report := func(opID string, suspension string, since *time.Time) *scriptedRuntime {
+		return &scriptedRuntime{runID: "run-1", report: runtime.StatusReport{
+			SchemaVersion: runtime.SchemaVersion, RunID: "run-1", Repository: "zenchron/seeded",
+			Phase: runtime.Execute, Disposition: runtime.Active,
+			Operation: &runtime.OperationStatus{
+				ID: opID, Kind: runtime.OpExecutionInvoke, State: runtime.Running, ProgressSource: "row",
+				LastProgressAt: &last, SilentFor: time.Minute, InactivityLimit: 10 * time.Minute,
+				InactivitySuspension: suspension, InactivitySuspendedSince: since,
+			},
+		}}
+	}
+	render := func(engine *scriptedRuntime) string {
+		var text bytes.Buffer
+		if _, err := autonomy([]string{"status", "run-1", "--text"}, autonomyOverrides{Runtime: engine}, &text); err != nil {
+			t.Fatal(err)
+		}
+		return text.String()
+	}
+	if text := render(report("op-predecessor", "active", &last)); !strings.Contains(text, "inactivity suspended") {
+		t.Fatalf("the predecessor's open tool is not rendered:\n%s", text)
+	}
+	if text := render(report("op-continuation", "", nil)); strings.Contains(text, "inactivity suspended") ||
+		!strings.Contains(text, "silent 1m0s inactivity limit 10m0s") {
+		t.Fatalf("the continuation's text claims a suspension it does not have:\n%s", text)
+	}
+}
