@@ -748,6 +748,12 @@ const (
 	// where it prevents the invocation rather than discarding its result. This
 	// class is what remains for an attempt that was legitimately acquired and
 	// then outlived the stop.
+	//
+	// It is also the class a provider reports when its executor committed
+	// the operator stop as the owner of its termination (#213): the stop was
+	// the first event that initiated ending a still-running execution. That
+	// is the operator's act, never FailureControllerShutdown, which would
+	// leave a stopped run looking resumable.
 	FailureRunCancelled FailureClass = "run_cancelled"
 	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
 	// being there: the configured image resolves no toolchain, the
