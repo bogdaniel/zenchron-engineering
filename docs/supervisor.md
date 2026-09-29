@@ -132,6 +132,8 @@ shutdown    stop scheduling
 stop-all    actually CANCEL the selected runs
             journalled per run, through the same single cancellation path
             `autonomy stop RUN` uses
+            a running execution.invoke is interrupted and recorded
+            `run_cancelled`, never `controller_shutdown`
 ```
 
 Only the third is run cancellation. Signalling the process, or killing it, is a

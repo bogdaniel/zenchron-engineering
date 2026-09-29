@@ -384,12 +384,6 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // the provider, the candidate mutation, the commit, the push and the
 // publication in one place rather than in five.
 //
-// What this does NOT do is interrupt an attempt already under way. An operation
-// leased and started before the stop runs to completion: nothing on the
-// executing path re-reads the run, and ending it early is cooperative
-// cancellation, a different mechanism from a durable condition. That boundary
-// is stated again where each condition lives.
-//
 // CancelRun records durable operator cancellation intent for one run and stops
 // its scheduling. It lives here, in the runtime, because two callers need
 // exactly one cancellation path: the `stop RUN` command and the supervisor's
@@ -424,14 +418,18 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // terminal. There is no third case FOR AN ACQUISITION, because the run document
 // and the acquisition are the same database.
 //
-// That is the boundary, and it is narrower than "stop means stop". What this
-// prevents is work being TAKEN UP after the stop; it does not interrupt an
-// attempt that has already begun. An operation acquired and started before the
-// run document was written executes to completion: Start, the operation.before
-// append and handle re-read nothing, and CancelRequested has no reader on the
-// executing path at all - Next's eligibility filter is its only one.
-// Interrupting a started attempt is cooperative cancellation, which is a
-// different mechanism and is not built here.
+// An attempt already STARTED is a different window, and only one kind of it is
+// reached (#213): the provider of a running execution.invoke. invokeExecution
+// arms watchExecution around Provider.Execute only; it reads this same durable
+// disposition while the provider runs and cancels the invocation once it has
+// successfully read the run as Cancelled. An invocation whose executor
+// committed the stop as the owner of its termination is journalled
+// OperationCancelled with a run_cancelled diagnostic; one ended by anything
+// else keeps that. Every other operation kind already started -
+// candidate.commit, candidate.push, pull_request.create, publication - runs to
+// completion exactly as before; whether a stop should gate those runtime
+// effects is #215, not this. Nothing a stop does retracts an effect that has
+// already happened.
 //
 // It is idempotent: cancelling an already cancelled run appends nothing and
 // reports the same answer. It is also REPEATABLE, which is not the same thing:
