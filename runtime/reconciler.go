@@ -1575,7 +1575,18 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 //	effect
 //	events
 //	after   -> (crash here: journal is authoritative, store is reconciled)
-func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (bool, Outcome, error) {
+func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (progress bool, outcome Outcome, resultErr error) {
+	// A stop may also race Start or Finish. The durable cancelled outcome wins
+	// over a stale operation transition error and never becomes a retry.
+	defer func() {
+		cancelled, stopped, err := r.cancelledAttempt(state.run.ID)
+		if err != nil && resultErr == nil {
+			progress, outcome, resultErr = false, Outcome{}, err
+		}
+		if stopped {
+			progress, outcome, resultErr = false, cancelled, nil
+		}
+	}()
 	planned, created, err := r.scheduler.Plan(RunOperation{
 		RunID:            state.run.ID,
 		Kind:             desired.kind,
@@ -1666,7 +1677,18 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err := r.append(state, EventOperationBefore, started.ID, started, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	produced := r.handle(ctx, state, started)
+	attemptCtx, stopWatching := r.watchAttempt(ctx, state.run.ID)
+	defer stopWatching()
+	if cancelled, stopped, err := r.cancelledAttempt(state.run.ID); err != nil || stopped {
+		return false, cancelled, err
+	}
+	produced := r.handle(attemptCtx, state, started)
+	if err := stopWatching(); err != nil {
+		return false, Outcome{}, err
+	}
+	if cancelled, stopped, err := r.cancelledAttempt(state.run.ID); err != nil || stopped {
+		return false, cancelled, err
+	}
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
 			return false, Outcome{}, err

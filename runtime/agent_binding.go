@@ -424,14 +424,9 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // terminal. There is no third case FOR AN ACQUISITION, because the run document
 // and the acquisition are the same database.
 //
-// That is the boundary, and it is narrower than "stop means stop". What this
-// prevents is work being TAKEN UP after the stop; it does not interrupt an
-// attempt that has already begun. An operation acquired and started before the
-// run document was written executes to completion: Start, the operation.before
-// append and handle re-read nothing, and CancelRequested has no reader on the
-// executing path at all - Next's eligibility filter is its only one.
-// Interrupting a started attempt is cooperative cancellation, which is a
-// different mechanism and is not built here.
+// Started attempts observe this durable disposition through the reconciler's
+// attempt monitor, which cancels their handler context. Providers must cooperate
+// with context cancellation; a stop cannot retract an already completed effect.
 //
 // It is idempotent: cancelling an already cancelled run appends nothing and
 // reports the same answer. It is also REPEATABLE, which is not the same thing:

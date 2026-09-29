@@ -45,10 +45,8 @@ type OperationStore interface {
 	// control endpoint's stop-all are different goroutines and nothing
 	// serializes them - leased and executed work the operator had stopped.
 	//
-	// It does not reach an attempt that has already STARTED. Nothing on the
-	// executing path re-reads the run or the cancellation flag, so an operation
-	// acquired before the stop runs to completion; ending it early would be
-	// cooperative cancellation, which is a different mechanism.
+	// Started attempts are covered separately by the reconciler's durable
+	// cancellation monitor and the handler's context.
 	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
 }
 
