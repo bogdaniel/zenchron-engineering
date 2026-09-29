@@ -46,9 +46,9 @@ type OperationStore interface {
 	// serializes them - leased and executed work the operator had stopped.
 	//
 	// It does not reach an attempt that has already STARTED. The one started
-	// attempt a stop interrupts is a running execution.invoke, through the
-	// reconciler's execution watcher (#213); every other started operation
-	// runs to completion (#215).
+	// attempt a stop interrupts is the provider of a running
+	// execution.invoke, through the execution watcher (#213); every other
+	// started operation runs to completion (#215).
 	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
 }
 

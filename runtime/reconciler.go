@@ -1666,22 +1666,17 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err := r.append(state, EventOperationBefore, started.ID, started, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	// Only a running execution.invoke is interruptible by a stop (#213); every
-	// other kind is handled exactly as before. See watchExecution.
-	handleCtx, stopWatching := ctx, func() bool { return false }
-	if started.Kind == OpExecutionInvoke {
-		handleCtx, stopWatching = r.watchExecution(ctx, state.run.ID)
-	}
-	produced := r.handle(handleCtx, state, started)
-	interrupted := stopWatching()
+	produced := r.handle(ctx, state, started)
+	// Only invokeExecution ever sets interrupted: a running provider is the one
+	// started attempt a stop reaches (#213); every other kind is unchanged.
+	interrupted := produced.interrupted
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
 			return false, Outcome{}, err
 		}
 	}
-	// interrupted is true only when the watcher observed the stop and cancelled
-	// this execution. It ends OperationCancelled - the state the stop itself
-	// writes to the scheduler row - so journal and store agree, and the
+	// An interrupted execution ends OperationCancelled - the state the stop
+	// itself writes to the scheduler row - so journal and store agree, and the
 	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
 	finished.State = produced.state
@@ -1702,14 +1697,14 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	}
 	if _, err := r.scheduler.Finish(started.ID, finished.State); err != nil {
 		// The stop may already have finished the row. That is accepted only for
-		// an observed interruption and only when the row is durably no longer
-		// active - the tolerance CancelRun applies to the same race from the
-		// other side. Every other Finish failure is reported as it always was.
+		// an interrupted execution and only when the row durably reads
+		// OperationCancelled - the one state CancelRun writes. Every other
+		// Finish failure is reported as it always was.
 		if !interrupted {
 			return false, Outcome{}, err
 		}
 		stored, _, found, readErr := r.deps.Store.Operation(started.ID)
-		if readErr != nil || !found || stored.State == Leased || stored.State == Running {
+		if readErr != nil || !found || stored.State != OperationCancelled {
 			return false, Outcome{}, err
 		}
 	}

@@ -1143,11 +1143,27 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	startedAt := time.Now()
 	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()
+	// WHAT ENDED THE PROCESS is fixed at the instant it exited, and it has
+	// exactly one owner. The contexts stay live while the transcript is stored
+	// below, and a stop or shutdown landing then must not turn a process that
+	// exited on its own, or one a runtime bound killed, into something it was
+	// not (#213).
+	//
+	// The stop owns the ending only if its cause was already set when the
+	// process returned AND the process did not return by itself (runErr == nil
+	// means it exited on its own before any kill). A deadline or inactivity
+	// kill that came first owns ctx's own cause, so the stop cannot be read
+	// back through it.
+	exitErr, parentErr := ctx.Err(), parent.Err()
+	stopped := runErr != nil && runStopObserved(ctx)
+	if runErr == nil && runStopObserved(ctx) {
+		exitErr = nil
+	}
 	// WHAT THE STRUCTURED STREAM ESTABLISHED, read once the process returned.
 	// A final result is required only of a process that exited 0.
 	streamed := claudeStreamOutcome{Condition: FailureUnknown}
 	if stream != nil {
-		streamed = stream.outcome(runErr == nil && ctx.Err() == nil)
+		streamed = stream.outcome(runErr == nil && exitErr == nil)
 		provenance.StructuredEvents = streamed.Accepted
 		provenance.OpenToolsAtExit = streamed.OpenTools
 		provenance.PermissionDenials = streamed.PermissionDenials
@@ -1182,7 +1198,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// and "which no-progress window was this running under" is not
 	// reconstructible from a transcript.
 	provenance.InactivityLimit = providerInactivityLimit(ctx)
-	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if exitErr != nil && errors.Is(exitErr, context.DeadlineExceeded) {
 		provenance.TerminationCause = TerminationDeadlineReached
 	}
 	// THE STALL IS NAMED BEFORE THE SHUTDOWN. An inactivity kill cancels this
@@ -1202,7 +1218,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
-	if runErr != nil || ctx.Err() != nil {
+	if runErr != nil || exitErr != nil {
 		result.Outcome = OperationFailed
 		// The typed condition the PROVIDER ITSELF stated, read only from the
 		// narrow terminal surface. FailureUnknown here means the CLI named
@@ -1254,7 +1270,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// had authority left), not a shutdown (the controller is fine), and
 			// not an unknown (nothing about the BOUND is undiagnosed).
 			result.Failure.Classification = FailureProviderNoProgress
-		case ctx.Err() != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		case exitErr != nil && parentErr == nil && errors.Is(exitErr, context.DeadlineExceeded):
 			// THIS INVOCATION ran out of its own wall bound. Nothing stopped,
 			// and saying "the controller stopped" was affirmatively false: it
 			// routed to RouteWait, so a provider that always overruns its bound
@@ -1263,15 +1279,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// preserved, which is what execution_incomplete means, and that
 			// routes to a bounded retry.
 			result.Failure.Classification = FailureExecutionIncomplete
-		case runStopObserved(ctx):
+		case stopped:
 			// The OPERATOR stopped this run and the runtime's execution
-			// watcher cancelled the invocation (#213). It is neither a
+			// watcher cancelled the invocation BEFORE the process exited
+			// (#213); a stop landing after the exit is not seen here. Neither a
 			// shutdown, which leaves the run resumable, nor a failure of the
 			// work: it is the stop, recorded as the stop.
 			result.Outcome = OperationCancelled
 			result.Failure.Classification = FailureRunCancelled
 			provenance.TerminationCause = TerminationRunStopped
-		case ctx.Err() != nil:
+		case exitErr != nil:
 			// The CONTROLLER stopped, not the work. Recording this as
 			// FailureUnknown routed it to RouteStop and terminalized a run that
 			// a shutdown is supposed to leave resumable.

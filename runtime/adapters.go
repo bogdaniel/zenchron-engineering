@@ -750,9 +750,10 @@ const (
 	// then outlived the stop.
 	//
 	// It is also the class of an invocation the runtime INTERRUPTED because it
-	// observed the stop while the provider was running (#213). That is still
-	// the operator's act, never FailureControllerShutdown, which would leave a
-	// stopped run looking resumable.
+	// observed the stop while the provider was running (#213) and that
+	// reported nothing but its cancelled context. That is the operator's act,
+	// never FailureControllerShutdown, which would leave a stopped run looking
+	// resumable. A condition the provider itself recognised is kept.
 	FailureRunCancelled FailureClass = "run_cancelled"
 	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
 	// being there: the configured image resolves no toolchain, the
