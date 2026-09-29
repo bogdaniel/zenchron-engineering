@@ -154,7 +154,7 @@ func asUnheld(err error, target **ControllerRoleUnheldError) bool {
 // quietly becoming one again.
 func TestOwningTheControlSocketGrantsNoRoleAuthority(t *testing.T) {
 	state := shortStateDir(t)
-	holdRoleInAnotherProcess(t, state)
+	holder := holdRoleInAnotherProcess(t, state)
 
 	// This process takes the socket - the thing that used to make a supervisor
 	// exclusive - while another process holds the role.
@@ -168,6 +168,7 @@ func TestOwningTheControlSocketGrantsNoRoleAuthority(t *testing.T) {
 	}
 
 	// It cannot obtain the capability, so there is nothing it can act under.
+	requireHolderAlive(t, holder, "before asserting the role is unavailable")
 	if _, err := AcquireControllerRole(state); err == nil {
 		t.Fatal("binding the control socket produced controller-role authority")
 	}
@@ -211,7 +212,7 @@ func TestRoleAuthoritySurvivesAnAbsentControlSocket(t *testing.T) {
 // identical to this process's by construction.
 func TestSameGenerationWithoutTheLeaseHasNoAuthority(t *testing.T) {
 	state := t.TempDir()
-	holdRoleInAnotherProcess(t, state)
+	holder := holdRoleInAnotherProcess(t, state)
 
 	declared := ControllerDeclaration{
 		Kind: ControllerAdopted, Version: "main-same", SourceRevision: predecessorRevision, SourceTree: "tree-a",
@@ -232,7 +233,11 @@ func TestSameGenerationWithoutTheLeaseHasNoAuthority(t *testing.T) {
 	}
 
 	// Proving the generation gains this process nothing: the capability is
-	// held elsewhere and cannot be derived from identity.
+	// held elsewhere and cannot be derived from identity. Confirm the holder
+	// is still the one holding it: measuring two identities above took real
+	// time, and a holder that died in that window would free the role for a
+	// reason that has nothing to do with the property under test.
+	requireHolderAlive(t, holder, "before asserting the role is unavailable")
 	if _, err := AcquireControllerRole(state); err == nil {
 		t.Fatal("a process of the right generation took a role another process holds")
 	} else if !strings.Contains(err.Error(), "another live process") {

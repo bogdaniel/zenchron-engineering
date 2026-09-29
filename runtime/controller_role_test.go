@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -73,12 +74,27 @@ func holdRoleInAnotherProcess(t *testing.T, stateDir string) *exec.Cmd {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if held, decided := ControllerRoleHeld(stateDir); held && decided {
+			requireHolderAlive(t, cmd, "once the role read as held")
 			return cmd
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the role never read as held while another process held it")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// requireHolderAlive is a HARNESS assertion, not a protocol one. The holder
+// exists only to make "another process holds the role" true; if it died
+// between signalling readiness and the caller's assertion, an exclusion
+// check that then succeeds would read as the role wrongly admitting a second
+// holder when the real defect is a dead fixture process. Naming that here,
+// at the point the race window is narrowest, is the difference between a
+// flaky fixture and a reported protocol failure.
+func requireHolderAlive(t *testing.T, cmd *exec.Cmd, when string) {
+	t.Helper()
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("HARNESS PRECONDITION: the role holder is not alive %s: %v", when, err)
 	}
 }
 
