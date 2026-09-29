@@ -152,6 +152,15 @@ For non-trivial changes:
 7. prefer small, reviewable commits;
 8. report assumptions, unresolved uncertainty, and evidence produced.
 
+## Local testing
+
+Always run focused tests locally: the packages and `-run` patterns that cover
+the change, plus `gofmt -l .` and `go vet ./...`. Add `-race` when the change
+touches concurrency. Do not run the full suite (`go test ./...`) by default.
+GitHub Actions runs it on every push and pull request, and that CI result is
+the full-suite evidence. Run the full suite locally only when asked, or when
+you need to reproduce a CI failure.
+
 ## Milestones
 
 **M0-M1, complete.** Prove the authorization kernel using representative
