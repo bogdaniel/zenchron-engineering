@@ -410,6 +410,12 @@ func (r *progressRecorder) run() {
 				next = last
 			}
 			if next != nil {
+				// A fast process can finish before this goroutine gets its
+				// first turn. Preserve the initial observation before the
+				// closing write clears its suspension.
+				if last == nil {
+					r.write(next.progress(false))
+				}
 				final := *next
 				final.suspendedSince = time.Time{}
 				r.write(final.progress(true))
