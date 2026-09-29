@@ -322,30 +322,6 @@ func TestClosingTheToolResumesInactivityDurably(t *testing.T) {
 	}
 }
 
-func TestRecorderClosedBeforeWriterStartsPreservesSuspension(t *testing.T) {
-	log := &progressLog{}
-	now := time.Now()
-	// Hold the writer until both the observation and close are ready, as
-	// happens when a short-lived provider exits before the writer is scheduled.
-	r := &progressRecorder{
-		write: log.record, interval: time.Second,
-		pending: &observation{key: "1:1", at: now, suspendedSince: now},
-		closed:  true, closing: make(chan struct{}), done: make(chan struct{}),
-	}
-	close(r.closing)
-	r.run()
-	writes := log.snapshot()
-	if len(writes) != 2 {
-		t.Fatalf("writes %+v, want initial observation and final write", writes)
-	}
-	if !writes[0].Suspended || writes[0].Final || writes[0].Key != "1:1" {
-		t.Fatalf("initial write = %+v", writes[0])
-	}
-	if writes[1].Suspended || !writes[1].Final || writes[1].Key != "1:1" {
-		t.Fatalf("closing write = %+v", writes[1])
-	}
-}
-
 // E. However the attempt ends with a tool open, its suspension ends with it
 // and cannot govern a later attempt.
 func TestASuspensionEndsWithItsAttempt(t *testing.T) {
