@@ -1263,6 +1263,14 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// preserved, which is what execution_incomplete means, and that
 			// routes to a bounded retry.
 			result.Failure.Classification = FailureExecutionIncomplete
+		case runStopObserved(ctx):
+			// The OPERATOR stopped this run and the runtime's execution
+			// watcher cancelled the invocation (#213). It is neither a
+			// shutdown, which leaves the run resumable, nor a failure of the
+			// work: it is the stop, recorded as the stop.
+			result.Outcome = OperationCancelled
+			result.Failure.Classification = FailureRunCancelled
+			provenance.TerminationCause = TerminationRunStopped
 		case ctx.Err() != nil:
 			// The CONTROLLER stopped, not the work. Recording this as
 			// FailureUnknown routed it to RouteStop and terminalized a run that

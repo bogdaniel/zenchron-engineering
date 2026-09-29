@@ -241,6 +241,24 @@ zenchron-engineering autonomy run issue 42 --agent claude --new-generation
 
 ## What a stop means
 
+`autonomy stop RUN` (and `stop-all`) cancels a run durably: it journals
+`run.cancelled`, and no operation of that run is leased afterwards. If the run
+is inside an `execution.invoke` when the stop lands, the controller notices
+the durable stop while the provider runs (#213), cancels that invocation, and
+journals the attempt `cancelled` with failure class `run_cancelled` (and, for
+CLI agents, termination cause `run_stopped`). `status` shows that diagnostic.
+The stop is only acted on after the run is actually read as cancelled; a state
+database the watcher cannot read never kills a provider. A provider that
+ignores cancellation and returns anyway still has its result refused.
+
+That is the whole of what a stop interrupts. `candidate.commit`,
+`candidate.push`, `pull_request.create` and publication already under way
+when a stop lands are not interrupted or skipped by it; whether a stop should
+gate those runtime effects is a separate question (#215) that this does not
+define. A stop is also neither a `drain` (which lets started work finish) nor a
+`shutdown` (which interrupts the invocation as `controller_shutdown` and leaves
+the run resumable); see [supervisor.md](supervisor.md).
+
 Waiting reasons, in the vocabulary `status` prints:
 
 | Reason | Meaning | What clears it |

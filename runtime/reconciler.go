@@ -1575,18 +1575,7 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 //	effect
 //	events
 //	after   -> (crash here: journal is authoritative, store is reconciled)
-func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (progress bool, outcome Outcome, resultErr error) {
-	// A stop may also race Start or Finish. The durable cancelled outcome wins
-	// over a stale operation transition error and never becomes a retry.
-	defer func() {
-		cancelled, stopped, err := r.cancelledAttempt(state.run.ID)
-		if err != nil && resultErr == nil {
-			progress, outcome, resultErr = false, Outcome{}, err
-		}
-		if stopped {
-			progress, outcome, resultErr = false, cancelled, nil
-		}
-	}()
+func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (bool, Outcome, error) {
 	planned, created, err := r.scheduler.Plan(RunOperation{
 		RunID:            state.run.ID,
 		Kind:             desired.kind,
@@ -1677,29 +1666,28 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err := r.append(state, EventOperationBefore, started.ID, started, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	attemptCtx, stopWatching := r.watchAttempt(ctx, state.run.ID)
-	defer stopWatching()
-	if cancelled, stopped, err := r.cancelledAttempt(state.run.ID); err != nil || stopped {
-		return false, cancelled, err
+	// Only a running execution.invoke is interruptible by a stop (#213); every
+	// other kind is handled exactly as before. See watchExecution.
+	handleCtx, stopWatching := ctx, func() bool { return false }
+	if started.Kind == OpExecutionInvoke {
+		handleCtx, stopWatching = r.watchExecution(ctx, state.run.ID)
 	}
-	produced := r.handle(attemptCtx, state, started)
-	watchErr := stopWatching()
-	// Cancellation revokes authority, not observations of effects that already
-	// happened. The handler gates result admission; preserve its journal entries
-	// before returning the stop outcome or a monitoring error.
+	produced := r.handle(handleCtx, state, started)
+	interrupted := stopWatching()
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
 			return false, Outcome{}, err
 		}
 	}
-	if watchErr != nil {
-		return false, Outcome{}, watchErr
-	}
-	if cancelled, stopped, err := r.cancelledAttempt(state.run.ID); err != nil || stopped {
-		return false, cancelled, err
-	}
+	// interrupted is true only when the watcher observed the stop and cancelled
+	// this execution. It ends OperationCancelled - the state the stop itself
+	// writes to the scheduler row - so journal and store agree, and the
+	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
 	finished.State = produced.state
+	if interrupted {
+		finished.State = OperationCancelled
+	}
 	finished.Lease = nil
 	if produced.result != nil {
 		raw, err := marshalPayloadJSON(produced.result)
@@ -1712,8 +1700,23 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.Finish(started.ID, produced.state); err != nil {
-		return false, Outcome{}, err
+	if _, err := r.scheduler.Finish(started.ID, finished.State); err != nil {
+		// The stop may already have finished the row. That is accepted only for
+		// an observed interruption and only when the row is durably no longer
+		// active - the tolerance CancelRun applies to the same race from the
+		// other side. Every other Finish failure is reported as it always was.
+		if !interrupted {
+			return false, Outcome{}, err
+		}
+		stored, _, found, readErr := r.deps.Store.Operation(started.ID)
+		if readErr != nil || !found || stored.State == Leased || stored.State == Running {
+			return false, Outcome{}, err
+		}
+	}
+	// The next pass reloads, finds run.cancelled in replay and settles the run
+	// cancelled through the ordinary terminal path.
+	if interrupted {
+		return true, Outcome{}, nil
 	}
 	// A wait-routed failure settles the RUN, not just the operation: the
 	// external world refused, nothing here can change that, and the pass must

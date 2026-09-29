@@ -384,12 +384,6 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // the provider, the candidate mutation, the commit, the push and the
 // publication in one place rather than in five.
 //
-// What this does NOT do is interrupt an attempt already under way. An operation
-// leased and started before the stop runs to completion: nothing on the
-// executing path re-reads the run, and ending it early is cooperative
-// cancellation, a different mechanism from a durable condition. That boundary
-// is stated again where each condition lives.
-//
 // CancelRun records durable operator cancellation intent for one run and stops
 // its scheduling. It lives here, in the runtime, because two callers need
 // exactly one cancellation path: the `stop RUN` command and the supervisor's
@@ -424,9 +418,16 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // terminal. There is no third case FOR AN ACQUISITION, because the run document
 // and the acquisition are the same database.
 //
-// Started attempts observe this durable disposition through the reconciler's
-// attempt monitor, which cancels their handler context. Providers must cooperate
-// with context cancellation; a stop cannot retract an already completed effect.
+// An attempt already STARTED is a different window, and only one kind of it is
+// reached (#213): a running execution.invoke. The reconciler's execution
+// watcher (watchExecution) reads this same durable disposition while the
+// provider runs, cancels the invocation once it has successfully read the run
+// as Cancelled, and journals the attempt OperationCancelled with a
+// run_cancelled diagnostic. Every other operation kind already started -
+// candidate.commit, candidate.push, pull_request.create, publication - runs to
+// completion exactly as before; whether a stop should gate those runtime
+// effects is #215, not this. Nothing a stop does retracts an effect that has
+// already happened.
 //
 // It is idempotent: cancelling an already cancelled run appends nothing and
 // reports the same answer. It is also REPEATABLE, which is not the same thing:
