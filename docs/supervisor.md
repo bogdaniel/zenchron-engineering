@@ -205,7 +205,9 @@ instead of waiting for the next due point, so status stops claiming a
 suspension shortly after the tool closes. Every write, edges included, still
 starts at least that spacing after the previous one, and edges arriving inside
 it coalesce into the newest state; without tool edges the rate is the ordinary
-one above.
+one above. That promptness holds while the process lives: an edge the process
+outruns - it ends before the edge is written - collapses into the closing
+write, which carries its newest observation with no tool open.
 
 A controller that dies abruptly can lose the one observation still waiting.
 The row then records that its recorder never closed, and only then does
