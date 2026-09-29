@@ -97,11 +97,7 @@ func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, ma
 // driver leases the execution operation, and the provider must not be invoked -
 // not on that pass, and not on any pass after it.
 //
-// The name says ACQUISITION deliberately. A stop landing one durable write
-// later - after Start - is a different window and is NOT covered: nothing on
-// the executing path re-reads the run or the cancellation flag, so that attempt
-// finishes. It reproduces identically on main, it is the mid-flight drain case,
-// and closing it needs cooperative cancellation rather than a durable condition.
+// Stops after Start are covered separately by attempt_cancellation_test.go.
 //
 // It fails three different ways without the three parts of the repair, which is
 // why all three are asserted here rather than in separate tests:
