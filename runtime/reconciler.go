@@ -1683,16 +1683,20 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, cancelled, err
 	}
 	produced := r.handle(attemptCtx, state, started)
-	if err := stopWatching(); err != nil {
-		return false, Outcome{}, err
-	}
-	if cancelled, stopped, err := r.cancelledAttempt(state.run.ID); err != nil || stopped {
-		return false, cancelled, err
-	}
+	watchErr := stopWatching()
+	// Cancellation revokes authority, not observations of effects that already
+	// happened. The handler gates result admission; preserve its journal entries
+	// before returning the stop outcome or a monitoring error.
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
 			return false, Outcome{}, err
 		}
+	}
+	if watchErr != nil {
+		return false, Outcome{}, watchErr
+	}
+	if cancelled, stopped, err := r.cancelledAttempt(state.run.ID); err != nil || stopped {
+		return false, cancelled, err
 	}
 	finished := started
 	finished.State = produced.state
