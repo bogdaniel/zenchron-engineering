@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -23,6 +24,10 @@ import (
 // before it exits: every event that lands in that window arrives AFTER the
 // owner was committed.
 const gracefulProviderScript = "trap 'sleep 0.25; exit 143' TERM\nwhile :; do sleep 0.02; done\n"
+
+// A provider that stops itself (as SIGSTOP, or SIGTTIN/SIGTTOU from its own
+// background process group, would): still running, not exited.
+const stoppedProviderScript = "kill -STOP $$\necho resumed\n"
 
 // runWithStopAt runs script as a real Codex CLI invocation, committing an
 // operator stop on the invocation's parent context after `stop`.
@@ -122,10 +127,18 @@ func TestTheExecutorCommitsTheFirstDecisiveTerminalEvent(t *testing.T) {
 		events [][2]int64
 		want   TerminationOwner
 	}{
+		{"provider exits by itself, no event", "exit 0\n", nil, OwnerProviderExited},
 		{"provider exits first, then stop", "sleep 5 &\nexit 1\n", [][2]int64{at(stop, 100*ms)}, OwnerProviderExited},
 		{"provider exits cleanly first, then stop", "sleep 5 &\nexit 0\n", [][2]int64{at(stop, 100*ms)}, OwnerProviderExited},
 		{"stop first, provider running", gracefulProviderScript, [][2]int64{at(stop, 50*ms)}, OwnerOperatorStop},
 		{"deadline first, then stop", gracefulProviderScript, [][2]int64{at(deadline, 50*ms), at(stop, 150*ms)}, OwnerDeadline},
+		{"deadline first, then the process exits", gracefulProviderScript, [][2]int64{at(deadline, 50*ms)}, OwnerDeadline},
+		// A STOPPED provider is still running, not exited: every external
+		// event wins arbitration before termination is initiated.
+		{"stopped, deadline", stoppedProviderScript, [][2]int64{at(deadline, 100*ms)}, OwnerDeadline},
+		{"stopped, operator stop", stoppedProviderScript, [][2]int64{at(stop, 100*ms)}, OwnerOperatorStop},
+		{"stopped, inactivity", stoppedProviderScript, [][2]int64{at(inactivity, 100*ms)}, OwnerInactivity},
+		{"stopped, controller shutdown", stoppedProviderScript, [][2]int64{at(shutdown, 100*ms)}, OwnerControllerShutdown},
 		{"stop first, then deadline", gracefulProviderScript, [][2]int64{at(stop, 50*ms), at(deadline, 150*ms)}, OwnerOperatorStop},
 		{"inactivity first, then stop", gracefulProviderScript, [][2]int64{at(inactivity, 50*ms), at(stop, 150*ms)}, OwnerInactivity},
 		{"stop first, then inactivity", gracefulProviderScript, [][2]int64{at(stop, 50*ms), at(inactivity, 150*ms)}, OwnerOperatorStop},
@@ -258,6 +271,22 @@ func TestRootExitedDoesNotReap(t *testing.T) {
 	if rootExited(running.Process.Pid) {
 		t.Fatal("a running child read as exited")
 	}
+	// darwin's waitid reports a STOPPED child with si_signo SIGCHLD; only an
+	// exit si_code may read as exited.
+	if err := running.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if rootExited(running.Process.Pid) {
+		t.Fatal("a stopped child read as exited")
+	}
+	if err := running.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if rootExited(running.Process.Pid) {
+		t.Fatal("a continued child read as exited")
+	}
 	_ = running.Process.Kill()
 	_ = running.Wait()
 	exited := exec.Command("sh", "-c", "exit 7")
@@ -299,5 +328,37 @@ func TestAStopBeforeStartIsNotAProviderTermination(t *testing.T) {
 	}
 	if result.Failure == nil || result.Failure.Classification != FailureRunCancelled {
 		t.Fatalf("failure %#v, want run_cancelled for a stop before start", result.Failure)
+	}
+}
+
+// Defence in depth: the kernel reported a terminal state, so provider_exited
+// is linearized - and the reap then stalls. The executor cleans the group up
+// within about one grace period, and the owner is NOT rewritten.
+func TestAStalledReapAfterALinearizedExitKeepsTheOwner(t *testing.T) {
+	requireBoundedProcess(t)
+	restore := probeRootExited
+	probeRootExited = func(int) bool { return true }
+	defer func() { probeRootExited = restore }()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	timer := time.AfterFunc(50*time.Millisecond, func() { cancel(errRunStopped) })
+	defer timer.Stop()
+	started := time.Now()
+	owner, _ := runBoundedProcess(ctx, exec.Command("sh", "-c", "while :; do sleep 0.02; done"), 300*time.Millisecond)
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("a stalled reap held the executor for %s", elapsed)
+	}
+	if owner != OwnerProviderExited {
+		t.Fatalf("owner = %q: the bounded cleanup rewrote a linearized provider_exited", owner)
+	}
+}
+
+// Only the terminal si_code values read as exited; stopped, continued and
+// trapped children do not.
+func TestOnlyTerminalChildCodesReadAsExited(t *testing.T) {
+	for code, want := range map[int32]bool{0: false, 1: true, 2: true, 3: true, 4: false, 5: false, 6: false} {
+		if got := terminalChildCode(code); got != want {
+			t.Errorf("terminalChildCode(%d) = %v, want %v", code, got, want)
+		}
 	}
 }

@@ -120,9 +120,21 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 		// the KERNEL is asked, without reaping, whether the root has already
 		// exited. Only a root still running is terminated for the context's
 		// cause; one that already exited owns its own ending.
-		if rootExited(cmd.Process.Pid) {
+		//
+		// A stopped root is NOT exited (rootExited accepts only a terminal
+		// si_code), so the context's cause wins arbitration before any
+		// signal is sent.
+		if probeRootExited(cmd.Process.Pid) {
+			// provider_exited is linearized here and is never rewritten. The
+			// wait on the reaper is still BOUNDED: if it has not delivered
+			// within grace, the group is terminated and reaped as CLEANUP
+			// only, so a stalled reap can never hold the controller.
 			ownership.settle(OwnerProviderExited)
-			waitErr = <-exited
+			select {
+			case waitErr = <-exited:
+			case <-time.After(grace):
+				waitErr = stop()
+			}
 		} else {
 			ownership.settle(ownerOfCancellation(ctx))
 			waitErr = stop()
@@ -249,6 +261,10 @@ func (p *ownedPipes) closeReaders() {
 		_ = r.Close()
 	}
 }
+
+// probeRootExited is rootExited, as a seam so a test can make the probe
+// misreport and prove the bounded fallback.
+var probeRootExited = rootExited
 
 // ownerDeathGuardShell is an absolute path on purpose. The guard is a
 // containment mechanism, and resolving it through PATH would let the

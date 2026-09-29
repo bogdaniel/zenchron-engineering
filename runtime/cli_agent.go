@@ -1151,8 +1151,8 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	//
 	// The executor commits the owner when it is decided (output.Owner) and
 	// this adapter consumes it; it is never re-derived from a context or from
-	// durable state after the process returned. An executor that decides no
-	// owner is taken at its word that nothing external ended the process.
+	// durable state after the process returned. An executor that reports no
+	// owner reports no EXTERNAL owner: nothing the runtime did ended it.
 	//
 	// NOT STARTED is not a termination at all: the executor refused to start
 	// the process because its context had already ended. No invocation
@@ -1163,10 +1163,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		return notStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), runErr
 	}
 	owner := output.Owner
-	if owner == OwnerUndecided {
-		owner = OwnerProviderExited
-	}
-	killed := owner != OwnerProviderExited
+	killed := owner != OwnerUndecided && owner != OwnerProviderExited
 	stopped := owner == OwnerOperatorStop
 	// A deadline the executor killed for is THIS invocation's own unless the
 	// parent carried the same or an earlier deadline - structural, so nothing
