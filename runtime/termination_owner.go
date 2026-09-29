@@ -32,7 +32,26 @@ const (
 	OwnerOperatorStop TerminationOwner = "operator_stop"
 	// OwnerControllerShutdown: the controller's own context ended first.
 	OwnerControllerShutdown TerminationOwner = "controller_shutdown"
+	// OwnerNotStarted: the executor refused to start the process because its
+	// context had already ended. No process existed, so no provider
+	// termination is attributed to anything.
+	OwnerNotStarted TerminationOwner = "not_started"
 )
+
+// ProviderNotStartedError is the executor's answer when it refused to start a
+// provider because its context had already ended. Cause is that context's
+// cause at the refusal.
+type ProviderNotStartedError struct{ Cause error }
+
+func (e *ProviderNotStartedError) Error() string {
+	return "the provider was not started: " + e.Cause.Error()
+}
+
+func (e *ProviderNotStartedError) Unwrap() error { return e.Cause }
+
+// holdReaper is a test seam: it runs in the reaper goroutine before it waits
+// on the root, so a test can hold the reap back after the root has exited.
+var holdReaper = func() {}
 
 // terminalOwnership is the single-assignment state UNDECIDED -> exactly one
 // owner, with no transition out. settle commits the first owner offered and
@@ -52,7 +71,11 @@ func (o *terminalOwnership) settle(owner TerminationOwner) TerminationOwner {
 // this is the event that actually fired first, not whichever one is inspected
 // last.
 func ownerOfCancellation(ctx context.Context) TerminationOwner {
-	cause := context.Cause(ctx)
+	return ownerOfCause(context.Cause(ctx))
+}
+
+// ownerOfCause names the owner a cancellation cause stands for.
+func ownerOfCause(cause error) TerminationOwner {
 	switch {
 	case errors.Is(cause, errRunStopped):
 		return OwnerOperatorStop

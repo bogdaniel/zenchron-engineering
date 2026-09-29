@@ -36,6 +36,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1150,14 +1151,20 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	//
 	// The executor commits the owner when it is decided (output.Owner) and
 	// this adapter consumes it; it is never re-derived from a context or from
-	// durable state after the process returned. Only an executor that decides
-	// no owner falls back to reading the context, once, here.
+	// durable state after the process returned. An executor that decides no
+	// owner is taken at its word that nothing external ended the process.
+	//
+	// NOT STARTED is not a termination at all: the executor refused to start
+	// the process because its context had already ended. No invocation
+	// happened, so no provenance or transcript is invented for it; the
+	// executor's recorded cause says only why nothing ran.
+	var notStarted *ProviderNotStartedError
+	if errors.As(runErr, &notStarted) {
+		return notStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), runErr
+	}
 	owner := output.Owner
 	if owner == OwnerUndecided {
 		owner = OwnerProviderExited
-		if runErr != nil && ctx.Err() != nil {
-			owner = ownerOfCancellation(ctx)
-		}
 	}
 	killed := owner != OwnerProviderExited
 	stopped := owner == OwnerOperatorStop
@@ -1669,4 +1676,23 @@ func (p CLIAgentProvider) refuseUnsupportedObligations(request ExecutionRequest)
 		AgentID: p.Agent.ID, Missing: missing,
 		Declared: append([]string(nil), p.Toolchain.RequiredTools...),
 	}
+}
+
+// notStartedResult is the answer for a provider the executor never started
+// because its context had already ended (#213). It carries no invocation
+// provenance and no transcript: nothing ran. The class names why nothing ran,
+// from the cause the executor recorded at the refusal.
+func notStartedResult(providerID, model, authMode string, attempt int, notStarted *ProviderNotStartedError) ExecutionResult {
+	result := ExecutionResult{ProviderID: providerID, Model: model, AuthMode: authMode, Attempt: attempt, Outcome: OperationCancelled}
+	class := FailureControllerShutdown
+	switch ownerOfCause(notStarted.Cause) {
+	case OwnerOperatorStop:
+		class = FailureRunCancelled
+	case OwnerDeadline:
+		result.Outcome, class = OperationFailed, FailureExecutionIncomplete
+	case OwnerInactivity:
+		result.Outcome, class = OperationFailed, FailureProviderNoProgress
+	}
+	result.Failure = &ProviderFailure{Classification: class}
+	return result
 }

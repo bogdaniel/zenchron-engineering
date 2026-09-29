@@ -1059,7 +1059,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// A provider that reported a failure of its own reached at least its own
 		// result; one that only returned an error refused the request before it.
 		stage := execStageProviderRequest
-		if result.Failure != nil {
+		var notStarted *ProviderNotStartedError
+		if result.Failure != nil && !errors.As(execErr, &notStarted) {
 			stage = execStageProviderResult
 		}
 		execution := executionRecord{

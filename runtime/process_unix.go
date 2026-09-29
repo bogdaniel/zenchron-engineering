@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,6 +71,13 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 	defer stopGuard()
 	if err := cmd.Start(); err != nil {
 		pipes.closeWriters()
+		// A context already ended refuses the start (os/exec returns its
+		// Err before forking). No process existed, so no provider
+		// termination is attributed: the executor settles "not started" and
+		// records the cause as it stands at the refusal.
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return OwnerNotStarted, &ProviderNotStartedError{Cause: context.Cause(ctx)}
+		}
 		return OwnerUndecided, err
 	}
 	pipes.start()
@@ -82,7 +90,11 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 	owned := newOwnedProcessSet(cmd.Process.Pid)
 	defer owned.Close()
 	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	// THE ONLY REAPER. Everything else observes exit without reaping.
+	go func() {
+		holdReaper()
+		exited <- cmd.Wait()
+	}()
 	stop := func() error {
 		// Snapshot before signalling the root: otherwise a detached descendant
 		// could be reparented before it is identified. Signal errors are benign
@@ -96,18 +108,22 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 			return <-exited
 		}
 	}
+	// settle is called on exactly one of the paths below, once, before any
+	// signal is sent; the final settle(OwnerUndecided) only reads it back.
 	var ownership terminalOwnership
 	var waitErr error
 	select {
 	case waitErr = <-exited:
 		ownership.settle(OwnerProviderExited)
 	case <-ctx.Done():
-		select {
-		case waitErr = <-exited:
-			// Both were ready: the root had already exited, so no external
-			// event ended it.
+		// THE LINEARIZATION POINT. The reaper may not have delivered yet, so
+		// the KERNEL is asked, without reaping, whether the root has already
+		// exited. Only a root still running is terminated for the context's
+		// cause; one that already exited owns its own ending.
+		if rootExited(cmd.Process.Pid) {
 			ownership.settle(OwnerProviderExited)
-		default:
+			waitErr = <-exited
+		} else {
 			ownership.settle(ownerOfCancellation(ctx))
 			waitErr = stop()
 		}
@@ -188,7 +204,11 @@ func (p *ownedPipes) start() {
 		copying.Add(1)
 		go func(r *os.File, target io.Writer) {
 			defer copying.Done()
-			_, _ = io.Copy(target, r)
+			// A failing target closes the read end, as os/exec does, so the
+			// child gets EPIPE instead of blocking on a full pipe.
+			if _, err := io.Copy(target, r); err != nil {
+				_ = r.Close()
+			}
 		}(p.readers[i], p.targets[i])
 	}
 	go func() { copying.Wait(); close(p.done) }()

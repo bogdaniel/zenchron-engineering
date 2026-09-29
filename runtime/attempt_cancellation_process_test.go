@@ -11,7 +11,9 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -202,5 +204,100 @@ func TestTerminalOwnershipIsCommittedOnce(t *testing.T) {
 		if again := ownership.settle(OwnerControllerShutdown); again != seen[0] {
 			t.Fatalf("a later event replaced the owner: %q -> %q", seen[0], again)
 		}
+	}
+}
+
+// The linearization point: the root has exited in the kernel, the reaper has
+// not delivered yet, and only then does the context fire. The executor asks
+// the kernel without reaping, sees the exit, and the provider owns its ending.
+// The held reaper then still reaps it: there is exactly one reaper.
+func TestAnExitedRootIsNotTerminatedByALaterContext(t *testing.T) {
+	requireBoundedProcess(t)
+	release := make(chan struct{})
+	restore := holdReaper
+	holdReaper = func() { <-release }
+	defer func() { holdReaper = restore }()
+	marker := filepath.Join(t.TempDir(), "exiting")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	cmd := exec.Command("sh", "-c", ": > "+marker+"; exit 3")
+	type outcome struct {
+		owner TerminationOwner
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		owner, err := runBoundedProcess(ctx, cmd, time.Second)
+		done <- outcome{owner, err}
+	}()
+	if err := waitForFile(marker, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // the root has exited; nothing has reaped it
+	cancel(errRunStopped)
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	got := <-done
+	if got.owner != OwnerProviderExited {
+		t.Fatalf("owner = %q: a root that had already exited was attributed to a later stop", got.owner)
+	}
+	var exit *exec.ExitError
+	if !errors.As(got.err, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("the reaper did not reap the root's own exit status: %v", got.err)
+	}
+}
+
+// rootExited never reaps: a running child reads as running, an exited child
+// reads as exited, and the real Wait afterwards still gets its status.
+func TestRootExitedDoesNotReap(t *testing.T) {
+	requireBoundedProcess(t)
+	running := exec.Command("sleep", "5")
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if rootExited(running.Process.Pid) {
+		t.Fatal("a running child read as exited")
+	}
+	_ = running.Process.Kill()
+	_ = running.Wait()
+	exited := exec.Command("sh", "-c", "exit 7")
+	if err := exited.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !rootExited(exited.Process.Pid) {
+		if time.Now().After(deadline) {
+			t.Fatal("an exited child never read as exited")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	var exit *exec.ExitError
+	if err := exited.Wait(); !errors.As(err, &exit) || exit.ExitCode() != 7 {
+		t.Fatalf("the probe reaped the child: Wait = %v", err)
+	}
+}
+
+// A context already ended when the executor would start the process: no
+// process exists, so the executor settles "not started" - never a provider
+// termination - and the adapter invents no provenance for it.
+func TestAStopBeforeStartIsNotAProviderTermination(t *testing.T) {
+	requireBoundedProcess(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errRunStopped)
+	owner, err := runBoundedProcess(ctx, exec.CommandContext(ctx, "sh", "-c", "exit 0"), time.Second)
+	var notStarted *ProviderNotStartedError
+	if owner != OwnerNotStarted || !errors.As(err, &notStarted) || !errors.Is(notStarted.Cause, errRunStopped) {
+		t.Fatalf("owner %q err %v, want not_started with the stop as its cause", owner, err)
+	}
+	provider, request, _ := inactivityFixture(t, "exit 0\n")
+	result, runErr := provider.Execute(ctx, request)
+	if !errors.As(runErr, &notStarted) {
+		t.Fatalf("Execute = %v, want the executor's not-started answer", runErr)
+	}
+	if result.Invocation != nil || len(result.Artifacts) != 0 {
+		t.Fatalf("a provider that never started was given provenance %#v / artifacts %v", result.Invocation, result.Artifacts)
+	}
+	if result.Failure == nil || result.Failure.Classification != FailureRunCancelled {
+		t.Fatalf("failure %#v, want run_cancelled for a stop before start", result.Failure)
 	}
 }

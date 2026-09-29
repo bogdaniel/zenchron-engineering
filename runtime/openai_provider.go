@@ -457,7 +457,10 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			if response.Error != nil {
 				providerCode, providerParam = response.Error.Code, response.Error.Param
 			}
-			if ctxErr := ctx.Err(); ctxErr != nil {
+			// The call ended BECAUSE its context ended only when the call's own
+			// error is that cancellation. An unrelated failure that merely
+			// coincides with a stop keeps its own class and stop reason.
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(callErr, ctxErr) {
 				stop, detail = cancellationStop(ctxErr)
 				classification = cancellationOwner(ctx)
 			} else {
@@ -603,11 +606,19 @@ func (p OpenAIProvider) call(ctx context.Context, key string, body []byte) (open
 	httpRequest.Header.Set("Authorization", "Bearer "+key)
 	httpResponse, err := p.HTTP.Do(httpRequest)
 	if err != nil {
+		// Only the context's own error is carried: it says the request ended
+		// because the context did, and it holds no provider text.
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return openaiResponse{}, 0, nil, fmt.Errorf("provider request failed: %w", ctxErr)
+		}
 		return openaiResponse{}, 0, nil, fmt.Errorf("provider request failed")
 	}
 	defer httpResponse.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(httpResponse.Body, 8<<20))
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return openaiResponse{}, httpResponse.StatusCode, raw, fmt.Errorf("provider response unreadable: %w", ctxErr)
+		}
 		return openaiResponse{}, httpResponse.StatusCode, raw, fmt.Errorf("provider response unreadable")
 	}
 	if httpResponse.StatusCode != http.StatusOK {
