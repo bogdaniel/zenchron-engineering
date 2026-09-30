@@ -474,7 +474,7 @@ func TestRecognizedProgressAdvancesDurablyAndRepetitionDoesNot(t *testing.T) {
 	started := *op.LastProgressAt
 
 	clock.advance(time.Minute)
-	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512")
+	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "512"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestRecognizedProgressAdvancesDurablyAndRepetitionDoesNot(t *testing.T) {
 	// alive - must not refresh the window.
 	advanced := *moved.LastProgressAt
 	clock.advance(time.Minute)
-	same, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512")
+	same, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "512"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,8 +687,10 @@ func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
 	op := plannedExecution(t, scheduler, 30*time.Minute)
 
 	// Real provider output, recorded durably, opens the window where it should.
+	// It is a CLOSED recorder's write, so the datum is exact and the arithmetic
+	// below carries no crash allowance (#352) that could mask a refresh.
 	clock.advance(time.Minute)
-	if _, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512"); err != nil {
+	if _, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "512", Final: true}); err != nil {
 		t.Fatal(err)
 	}
 	observed, _, _, err := scheduler.Store.Operation(op.ID)
@@ -731,7 +733,7 @@ func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
 
 	// AND REAL OUTPUT STILL DOES BOTH. The narrowing must not have made the
 	// durable record unreachable.
-	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "1024")
+	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "1024"})
 	if err != nil {
 		t.Fatal(err)
 	}

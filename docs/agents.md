@@ -217,7 +217,7 @@ the security-relevant argv, with the prompt element replaced by the literal
   placeholder [prompt], and the prompt's digest as prompt_sha256
 execution deadline, start, completion, elapsed, and whether it overran
 termination cause (provider_returned, deadline_reached,
-  provider_inactivity_limit_reached), process id, and whether it ran
+  provider_inactivity_limit_reached, run_stopped), process id, and whether it ran
   under the brokered candidate Git guard
 the inactivity window and the progress mode that measured it
   (byte_output; byte_output_excluding_transport_chatter for Codex, where a

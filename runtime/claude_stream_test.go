@@ -8,11 +8,13 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -223,6 +225,18 @@ func claudeResult(isError bool, subtype string, denials int) string {
 	}
 	return fmt.Sprintf(`{"type":"result","subtype":%q,"is_error":%t,"result":"rate_limit authentication_failed overloaded","permission_denials":[%s]}`,
 		subtype, isError, strings.Join(d, ","))
+}
+
+// claudeResultWithAnswer is a result line carrying a caller-chosen semantic
+// answer, JSON-escaped by the real encoder rather than assembled by hand - so
+// the escaping under test (#366) is the genuine transport encoding, not a
+// hand-built approximation of it.
+func claudeResultWithAnswer(isError bool, answer string) string {
+	encoded, err := json.Marshal(answer)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(`{"type":"result","subtype":"success","is_error":%t,"result":%s}`, isError, encoded)
 }
 
 // feed writes lines to a stream in small arbitrary chunks, which is how the
@@ -723,7 +737,7 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		t.Fatal(err)
 	}
 	// Structured activity advances durable progress, qualified by attempt.
-	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, fmt.Sprintf("%d:%d", op.AttemptIdentity, 1))
+	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: fmt.Sprintf("%d:%d", op.AttemptIdentity, 1)})
 	if err != nil || recorded.LastProgressAt == nil || !recorded.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("structured progress did not advance durably: %+v %v", recorded, err)
 	}
@@ -741,8 +755,15 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		if got := dispatchInactivityWindow(window, op, now, claude); got != window {
 			t.Fatalf("cycle %d: Claude's fresh attempt got %s, want its full %s window", cycle, got, window)
 		}
-		if got := dispatchInactivityWindow(window, op, now, codex); got != 0 {
-			t.Fatalf("cycle %d: codex's abandoned silence was forgiven: %s", cycle, got)
+		// Codex inherits the abandoned silence, less the crash allowance of an
+		// open recorder (#352): 11 recorded minutes less 5 leave 4 once, and
+		// the allowance does not come back on later cycles.
+		want := time.Duration(0)
+		if cycle == 1 {
+			want = window - (11*time.Minute - progressRecorderLag(window))
+		}
+		if got := dispatchInactivityWindow(window, op, now, codex); got != want {
+			t.Fatalf("cycle %d: codex got %s of its abandoned window, want %s", cycle, got, want)
 		}
 		// Monotonic facts across succession.
 		if op.ConsumedExecution < consumed || OperationRemaining(op, now) > remaining || op.AttemptIdentity <= identity {
@@ -860,15 +881,22 @@ func TestTheBackgroundWaitCeilingIgnoresARemainingWindow(t *testing.T) {
 	t.Fatalf("env %v does not carry the ceiling of the configured 10m window", fake.execution(t).env)
 }
 
-// A durable progress write that never returns cannot hold Claude's stdout.
+// A durable progress write that never returns cannot hold Claude's stdout -
+// the child writes far more than a pipe buffer and exits while the write is
+// still blocked - and cannot hold the invocation either (#352): closing the
+// recorder waits for it at most one record interval.
 func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
-	provider, request := claudeProcess(t, emit(
-		claudeAssistant("m1", "", claudeText), claudeAssistant("m2", "", claudeText), claudeResult(false, "success", 0)))
+	const events = 2000
+	finished := t.TempDir() + "/finished"
+	provider, request := claudeProcess(t,
+		"i=0\nwhile [ $i -lt "+fmt.Sprint(events)+" ]; do "+strings.TrimSuffix(emit(claudeAssistant("m1", "", claudeText)), "\n")+
+			"; i=$((i+1)); done\n"+emit(claudeResult(false, "success", 0))+"touch "+finished+"\n")
 	recorded, release := make(chan string, 1), make(chan struct{})
-	defer close(release)
-	ctx := withProviderProgressRecorder(context.Background(), func(key string) {
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	ctx := withProviderProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		select {
-		case recorded <- key:
+		case recorded <- progress.Key:
 		default:
 		}
 		<-release
@@ -886,9 +914,17 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the recorder was never called")
 	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(finished); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a blocked durable write held Claude's stdout: the child never finished writing")
+		}
+	}
 	select {
 	case result := <-done:
-		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != 2 {
+		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != events {
 			t.Fatalf("outcome %q with %d events", result.Outcome, result.Invocation.StructuredEvents)
 		}
 	case <-time.After(5 * time.Second):
@@ -936,7 +972,7 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.advance(time.Minute)
-	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:9")
+	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, ProviderProgress{Key: "1:9"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -954,19 +990,80 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 		t.Fatalf("attempt 2 is not running on a new identity: %+v", second)
 	}
 	clock.advance(time.Minute)
-	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:10")
+	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, ProviderProgress{Key: "1:10"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if late.NoProgressKey != second.NoProgressKey || !late.LastProgressAt.Equal(*second.LastProgressAt) {
 		t.Fatalf("attempt 1's late write stamped attempt 2: key %q at %v", late.NoProgressKey, late.LastProgressAt)
 	}
-	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, "2:1")
+	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, ProviderProgress{Key: "2:1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if own.NoProgressKey != "2:1" || !own.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("attempt 2's own write did not land: key %q at %v", own.NoProgressKey, own.LastProgressAt)
+	}
+}
+
+// #366, end to end through the real adapter: ExecutionResult.Answer carries
+// the decoded semantic text, redacted exactly as the stored transcript is -
+// and a provider with no such shape (Codex) exposes no answer at all, which
+// is the signal that keeps the planner's fallback path alive for it.
+func TestExecutionResultAnswerIsExposedOnlyByClaudesStructuredStream(t *testing.T) {
+	answer := "Proposal:\n```json\n{\"stages\": []}\n```\nissued with ghp_" + strings.Repeat("x", 36) + "\n"
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.outputs = []CommandOutput{{Stdout: []byte(claudeResultWithAnswer(false, answer) + "\n")}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil || result.Outcome != Succeeded {
+		t.Fatalf("execute: %v %#v", err, result.Failure)
+	}
+	if strings.Contains(result.Answer, "ghp_") || !strings.Contains(result.Answer, "[REDACTED]") {
+		t.Fatalf("answer was not redacted: %q", result.Answer)
+	}
+	if !strings.Contains(result.Answer, "```json") {
+		t.Fatalf("answer lost its real content: %q", result.Answer)
+	}
+
+	codex, codexRequest, codexFake := agentFixture(t, AgentKindCodexCLI)
+	codexFake.outputs = []CommandOutput{{Stdout: []byte("done\n")}}
+	codexResult, err := codex.Execute(context.Background(), codexRequest)
+	if err != nil || codexResult.Outcome != Succeeded {
+		t.Fatalf("codex execute: %v %#v", err, codexResult.Failure)
+	}
+	if codexResult.Answer != "" {
+		t.Fatalf("codex exposed a semantic answer it has no shape for: %q", codexResult.Answer)
+	}
+}
+
+// #366: the semantic answer is decoded exactly once out of the transport. A
+// fenced plan whose fence and quotes are JSON-escaped inside the "result"
+// field surfaces with real newlines and real quotes - what a consumer that
+// scanned the raw transcript bytes for that same fence would never find,
+// because there the fence and every quote inside it stay escaped.
+func TestClaudeStreamDecodesTheSemanticAnswerExactlyOnce(t *testing.T) {
+	answer := "Proposal:\n```json\n{\"stages\": []}\n```\n"
+	stream := newClaudeStream(1)
+	feed(stream, claudeResultWithAnswer(false, answer))
+	if got := stream.outcome(true); !got.AnswerObserved || got.Answer != answer {
+		t.Fatalf("answer = %q observed=%v, want %q observed=true", got.Answer, got.AnswerObserved, answer)
+	}
+
+	// AN ERROR RESULT NEVER PROMOTES ITS OWN TEXT TO AN ANSWER, even though the
+	// field is present and well-typed: the two typed terminal inputs gate this
+	// exactly as they gate FinalResult itself.
+	errored := newClaudeStream(1)
+	feed(errored, claudeResultWithAnswer(true, answer))
+	if got := errored.outcome(true); got.AnswerObserved {
+		t.Fatalf("an error result exposed an answer: %+v", got)
+	}
+
+	// A missing "result" field leaves AnswerObserved false rather than
+	// promoting its zero value into an accepted empty answer.
+	bare := newClaudeStream(1)
+	feed(bare, `{"type":"result","subtype":"success","is_error":false}`)
+	if got := bare.outcome(true); got.AnswerObserved {
+		t.Fatalf("a result with no \"result\" field exposed an answer: %+v", got)
 	}
 }
 

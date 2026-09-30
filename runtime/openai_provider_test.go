@@ -607,3 +607,55 @@ func TestOpenAIProviderReachesTheRealAPIWhenConfigured(t *testing.T) {
 		}
 	}
 }
+
+// stopDuringCall commits an operator stop while a request is in flight, then
+// either fails the request because of that cancellation or answers with an
+// unrelated server error.
+type stopDuringCall struct {
+	stop      func()
+	cancelled bool
+}
+
+func (d *stopDuringCall) Do(request *http.Request) (*http.Response, error) {
+	d.stop()
+	if d.cancelled {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	}
+	return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"server_error","code":"server_error"}}`)), Header: http.Header{}}, nil
+}
+
+// The OpenAI loop attributes run_cancelled only to a call that failed BECAUSE
+// the stop cancelled it; an unrelated failure that merely coincides with a
+// stop keeps its own class and stop reason (#213).
+func TestOpenAIRunCancelledOnlyWhenTheStopEndedTheCall(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		cancelled bool
+		want      FailureClass
+		reason    ProviderStop
+	}{
+		{"the stop cancelled the call", true, FailureRunCancelled, StopCancelled},
+		{"an unrelated failure coincided with a stop", false, "", StopProviderError},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			provider, request, _, _ := openaiFixture(t, &fakeResponsesAPI{})
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			provider.HTTP = &stopDuringCall{stop: func() { cancel(errRunStopped) }, cancelled: c.cancelled}
+			result, err := provider.Execute(ctx, request)
+			if got := stopReason(t, err); got != c.reason {
+				t.Fatalf("stop reason = %q, want %q", got, c.reason)
+			}
+			if result.Failure == nil {
+				t.Fatal("no failure recorded")
+			}
+			if c.want == FailureRunCancelled && result.Failure.Classification != FailureRunCancelled {
+				t.Fatalf("class = %q, want run_cancelled", result.Failure.Classification)
+			}
+			if c.want == "" && result.Failure.Classification == FailureRunCancelled {
+				t.Fatal("an unrelated failure that coincided with a stop was attributed to the stop")
+			}
+		})
+	}
+}

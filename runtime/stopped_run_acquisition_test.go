@@ -97,11 +97,10 @@ func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, ma
 // driver leases the execution operation, and the provider must not be invoked -
 // not on that pass, and not on any pass after it.
 //
-// The name says ACQUISITION deliberately. A stop landing one durable write
-// later - after Start - is a different window and is NOT covered: nothing on
-// the executing path re-reads the run or the cancellation flag, so that attempt
-// finishes. It reproduces identically on main, it is the mid-flight drain case,
-// and closing it needs cooperative cancellation rather than a durable condition.
+// The name says ACQUISITION deliberately. A stop landing after Start is a
+// different window: a running execution.invoke is interrupted by the
+// execution watcher (#213, attempt_cancellation_test.go), and every other
+// started operation kind still runs to completion (#215).
 //
 // It fails three different ways without the three parts of the repair, which is
 // why all three are asserted here rather than in separate tests:
@@ -569,12 +568,13 @@ func TestReplayNeverUnCancelsARun(t *testing.T) {
 // TestALateResultFromAStoppedRunGainsNoAuthority is the in-flight half, and it
 // is the one the acquisition condition deliberately does NOT cover.
 //
-// The stop lands while the producer is inside Provider.Execute. That attempt is
-// not interrupted - #213 is cooperative process cancellation and reproduces on
-// main - and it is allowed to finish and to journal what it did. What is
-// asserted is the corollary: finishing must not GIVE IT BACK anything. A late
-// result may not become a commit, a push or a pull request merely because the
-// external process managed to return.
+// The stop lands while the producer is inside Provider.Execute, and this
+// producer returns without ever consulting its context - the provider that
+// ignores cooperative cancellation. The #213 execution watcher may or may not
+// observe the stop before it returns; either way the attempt is allowed to
+// journal what it did. What is asserted is the corollary: finishing must not
+// GIVE IT BACK anything. A late result may not become a commit, a push or a
+// pull request merely because the external process managed to return.
 //
 // The mechanism is deliberately NOT a cancellation check in the effect path,
 // and that distinction is the point. execution.completed confers authority
@@ -584,6 +584,12 @@ func TestReplayNeverUnCancelsARun(t *testing.T) {
 // reads the run's disposition directly. So authority loss has consequences
 // rather than deputies, and adding a fifth place that remembers `cancelled`
 // would be the mistake this test exists to make unnecessary.
+//
+// The #213 execution watcher is not that fifth place. It decides no
+// admission: it only interrupts a RUNNING execution.invoke and records that it
+// did, and a result is still admitted or refused by executionAuthorityRevoked
+// alone. It adds no check to commit, push or publication, whose behaviour
+// after a stop is #215's question and is unchanged here.
 //
 // TWO DIFFERENT THINGS REFUSE THAT LEASE, and the test asserts both rather than
 // letting the weaker one stand in for the stronger. A later pass reloads, sees
@@ -617,7 +623,7 @@ func TestALateResultFromAStoppedRunGainsNoAuthority(t *testing.T) {
 	if !stopped {
 		t.Fatal("the producer never ran, so no in-flight stop was contested")
 	}
-	// The attempt was NOT interrupted. That is #213 and is stated, not hidden.
+	// This producer ignores its context, so nothing stopped it from running.
 	if len(f.provider.requests) == 0 {
 		t.Fatal("the fixture did not actually invoke the producer")
 	}

@@ -473,10 +473,12 @@ func TestObservedOutputReachesTheDurableProgressRecorder(t *testing.T) {
 
 	var mu sync.Mutex
 	var keys []string
-	ctx := withProviderProgressRecorder(context.Background(), func(key string) {
+	ctx := withProviderProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		mu.Lock()
 		defer mu.Unlock()
-		keys = append(keys, key)
+		if !progress.Final {
+			keys = append(keys, progress.Key)
+		}
 	})
 	if _, err := provider.Execute(ctx, request); err != nil {
 		t.Fatal(err)

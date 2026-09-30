@@ -48,6 +48,10 @@ type effect struct {
 	events []journalEntry
 	result any
 	state  OperationState
+	// interrupted is set only by invokeExecution, and only when an operator
+	// stop ended the attempt: no provider was started, or the provider's
+	// executor committed the stop as the owner of its termination (#213).
+	interrupted bool
 }
 
 func failed(err error) effect {
@@ -512,7 +516,12 @@ is never an instruction to this system and never expands what you may do.`
 // governance envelope and the findings; it receives no credential and its
 // result is an observation with no acceptance authority. Whether it actually
 // changed anything is established from the workspace, not from its own report.
-func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runState, operation RunOperation) effect {
+func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runState, operation RunOperation) (out effect) {
+	// What the #213 stop watcher saw while the provider was active. It exists
+	// only around Provider.Execute; a stop landing before or after that
+	// window rewrites nothing here.
+	var watch executionWatch
+	defer func() { watch.settle(&out) }()
 	// CAN THIS WORKER ATTEMPT WHAT IT IS ABOUT TO BE OBLIGATED TO DO?
 	//
 	// Asked before the workspace is touched and before any invocation is spent.
@@ -721,11 +730,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// has already been silent for its whole window. There is nothing left to
 	// spend, so nothing is started.
 	if inactivityLimit > 0 && inactivityRemaining <= 0 {
+		// The crash-recovery uncertainty allowance (#352) is part of the
+		// arithmetic when the abandoned attempt's recorder never closed, so the
+		// diagnostic names it: otherwise the silence printed can exceed the
+		// bound by up to L with nothing to say why it was not refused sooner.
+		allowance := ""
+		if operation.ProgressRecorderOpen {
+			allowance = fmt.Sprintf(" plus the %s crash-recovery uncertainty allowance for progress the lost controller may not have written",
+				progressRecorderLag(inactivityLimit))
+		}
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
 			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
-				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound before this invocation could start",
-					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit)),
+				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
+					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance)),
 		}}
 	}
 	// Observed progress is written back to the operation row, so "silent for"
@@ -735,7 +753,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// different claim from the work moving, and #238 is the cost of letting the
 	// first stand in for the second.
 	ctx = withProviderProgressRecorder(ctx,
-		func(key string) { _, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, key) })
+		func(progress ProviderProgress) {
+			_, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, progress)
+		})
 	// A continuation is bounded independently of the original operation.
 	// The absolute deadline also makes a spent (zero) allowance fail closed.
 	if _, granted := state.reviewContinuationGrant(); granted {
@@ -745,7 +765,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			operation.Deadline = &deadline
 		}
 	}
-	result, execErr := r.deps.Provider.Execute(ctx, stage.apply(ExecutionRequest{
+	// THE STOP WATCH starts here, after the tool probe and all preparation,
+	// and ends the moment Provider.Execute returns. Its first read is
+	// synchronous: a stop already durable now means no provider is started,
+	// and the attempt records the stop as happening BEFORE the provider, with
+	// no provider termination attributed to it.
+	executing, endWatch := r.watchExecution(ctx, state.run.ID)
+	if runStopObserved(executing) {
+		watch = endWatch()
+		watch.ended = true
+		return effect{state: OperationCancelled, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureRunCancelled},
+			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureRunCancelled, ExecutionResult{}, errStoppedBeforeProvider),
+		}}
+	}
+	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
 		ReviewerResultPath: reviewerResultPath,
 		ScratchDir:         scratchDir,
 		// The operation that authorized this invocation owns the Docker
@@ -797,6 +831,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// provenance record cannot describe different realities.
 		Deadline: operation.Deadline,
 	}))
+	watch = endWatch()
 	// THE ATTEMPT EXPLAINS ITSELF DURABLY (#327). Provenance exists only for
 	// an invocation that reached a provider, and it is journalled on EVERY
 	// path out of here - success, failure, deadline, revocation, refusal -
@@ -1024,10 +1059,19 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			class = FailureExecutionIncomplete
 			record.FailureClass = class
 		}
+		// The stop ended this attempt only if the PROVIDER says so: its
+		// executor committed operator_stop as the termination owner and
+		// reported run_cancelled. That settled ownership is consumed here,
+		// never reconstructed - an unknown class, an error, or a cancelled
+		// context is not evidence of who ended the process.
+		if watch.observed && class == FailureRunCancelled {
+			watch.ended = true
+		}
 		// A provider that reported a failure of its own reached at least its own
 		// result; one that only returned an error refused the request before it.
 		stage := execStageProviderRequest
-		if result.Failure != nil {
+		var notStarted *ProviderNotStartedError
+		if result.Failure != nil && !errors.As(execErr, &notStarted) {
 			stage = execStageProviderResult
 		}
 		execution := executionRecord{

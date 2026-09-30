@@ -448,7 +448,29 @@ type RunOperation struct {
 	DeadlineBound    AttemptBound  `json:"deadline_bound,omitempty"`
 	NoProgressBudget time.Duration `json:"no_progress_budget,omitempty"`
 	NoProgressKey    string        `json:"no_progress_key,omitempty"`
-	CancelRequested  bool          `json:"cancel_requested,omitempty"`
+	// ProgressRecorderOpen says a physical attempt's durable progress recorder
+	// wrote to this row and never closed: its process did not end under an
+	// observing controller. LastProgressAt may then trail the last progress
+	// that process actually made by up to progressRecorderLag, and only a
+	// dispatch that inherits the datum reads it, as the crash-recovery
+	// uncertainty allowance (#352).
+	ProgressRecorderOpen bool `json:"progress_recorder_open,omitempty"`
+	// InactivitySuspension is set while a structured main-thread tool of the
+	// attempt it names holds the inactivity kill suspended (#322, #352). It is
+	// observation for status, never an input to the watchdog, which reads its
+	// own in-memory stream. It is ACTIVE only while its attempt is the row's and
+	// its owner still holds the lease and is not provably dead; anything else is
+	// history (see EngineeringRuntime.inactivitySuspension).
+	InactivitySuspension *InactivitySuspension `json:"inactivity_suspension,omitempty"`
+	CancelRequested      bool                  `json:"cancel_requested,omitempty"`
+}
+
+// InactivitySuspension is a durable open-tool suspension: since when, which
+// physical attempt, and which lease owner's process opened it.
+type InactivitySuspension struct {
+	Since           time.Time `json:"since"`
+	AttemptIdentity int       `json:"attempt_identity"`
+	Owner           string    `json:"owner"`
 }
 type Lease struct {
 	Owner       string    `json:"owner"`
@@ -636,6 +658,9 @@ const (
 const (
 	TerminationProviderInactivity = "provider_inactivity_limit_reached"
 	TerminationDeadlineReached    = "deadline_reached"
+	// TerminationRunStopped is an invocation the runtime cancelled because an
+	// operator stopped its run while it was executing (#213).
+	TerminationRunStopped = "run_stopped"
 )
 
 // OperationRemaining is how much ACTIVE execution authority is left.

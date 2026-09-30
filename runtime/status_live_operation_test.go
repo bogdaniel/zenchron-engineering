@@ -72,7 +72,7 @@ func TestStatusReportsLiveProgressFromTheAttemptRow(t *testing.T) {
 		}
 		start := *journal.LastProgressAt
 		f.clock.advance(20 * time.Minute)
-		recorded, err := f.runtime.scheduler.RecordProviderProgress(journal.ID, journal.AttemptIdentity, "1:42")
+		recorded, err := f.runtime.scheduler.RecordProviderProgress(journal.ID, journal.AttemptIdentity, ProviderProgress{Key: "1:42"})
 		if err != nil {
 			t.Fatal(err)
 		}

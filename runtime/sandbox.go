@@ -40,6 +40,10 @@ type CommandOutput struct {
 	// recorded so an overrun can be traced to the process that caused it rather
 	// than reconstructed from wall-clock guesses.
 	ProcessID int
+	// Owner is the one event that ended, or initiated the ending of, the
+	// process, committed by the executor when it was decided (#213). An
+	// executor that does not decide it leaves OwnerUndecided.
+	Owner TerminationOwner
 }
 type CommandExecutor interface {
 	LookPath(string) error
@@ -177,7 +181,7 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 		cmd.Stderr = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, errOut)
 	}
 	stopWatch := watch.watchUntilComplete()
-	err := runBoundedProcess(ctx, cmd, grace)
+	owner, err := runBoundedProcess(ctx, cmd, grace)
 	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the
 	// order is the whole point. The process has returned, so completion is a
 	// fact; recording it under the watcher's own lock and then waiting for the
@@ -185,10 +189,11 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	// caller reads context.Cause several frames up, and a natural exit that
 	// raced an expiring timer would otherwise be classified as a stall.
 	//
-	// It also guarantees nothing is still writing into the buffers read below.
+	// It also guarantees nothing is still writing into the buffers read below,
+	// and it closes the durable progress recorder: the process's last
+	// observation is written, waiting on the store only boundedly (#352).
 	stopWatch()
-	stream.detach()
-	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes()}
+	result := CommandOutput{Stdout: out.Bytes(), Stderr: errOut.Bytes(), Owner: owner}
 	// Read after the run: Start happens inside, and a process that never
 	// started truthfully reports no pid.
 	if cmd.Process != nil {

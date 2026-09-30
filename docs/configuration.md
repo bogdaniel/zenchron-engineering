@@ -257,7 +257,10 @@ Recognized progress is provider-specific:
   window. Raw stdout or stderr bytes, `system` events (including `api_retry`),
   the final `result` and unknown events do not. While a main-thread tool call
   is open - a long `go test`, say - the inactivity kill is suspended, but the
-  absolute deadline is not, so a tool that hangs is still ended by it. Each
+  absolute deadline is not, so a tool that hangs is still ended by it. Status
+  reports the suspension from the live row of that attempt rather than silence
+  against the window (see [supervisor.md](supervisor.md)); a `tool_progress`
+  heartbeat is neither progress nor a suspension. Each
   physical Claude attempt gets the full window; the wall budget and the attempt
   ceiling are what bound repeated restarts. Claude's own
   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is set to three quarters of the

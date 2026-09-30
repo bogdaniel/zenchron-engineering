@@ -45,10 +45,10 @@ type OperationStore interface {
 	// control endpoint's stop-all are different goroutines and nothing
 	// serializes them - leased and executed work the operator had stopped.
 	//
-	// It does not reach an attempt that has already STARTED. Nothing on the
-	// executing path re-reads the run or the cancellation flag, so an operation
-	// acquired before the stop runs to completion; ending it early would be
-	// cooperative cancellation, which is a different mechanism.
+	// It does not reach an attempt that has already STARTED. The one started
+	// attempt a stop interrupts is the provider of a running
+	// execution.invoke, through the execution watcher (#213); every other
+	// started operation runs to completion (#215).
 	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
 }
 
@@ -87,6 +87,10 @@ func copyOperation(op RunOperation) RunOperation {
 	if op.LastProgressAt != nil {
 		progress := *op.LastProgressAt
 		op.LastProgressAt = &progress
+	}
+	if op.InactivitySuspension != nil {
+		suspension := *op.InactivitySuspension
+		op.InactivitySuspension = &suspension
 	}
 	return op
 }
@@ -489,6 +493,9 @@ func (s Scheduler) StartWithin(id string, limit *AttemptLimit) (RunOperation, er
 		// process's total and read as "nothing new" - which would suppress the
 		// successor's real progress until it out-talked its predecessor.
 		op.NoProgressKey = ""
+		// A suspension belongs to the process that opened the tool, and that
+		// process is gone: no successor inherits it (#352).
+		op.InactivitySuspension = nil
 		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
 		//
 		// The attempt's deadline is derived from what the operation has NOT yet
@@ -541,8 +548,14 @@ func (s Scheduler) StartWithin(id string, limit *AttemptLimit) (RunOperation, er
 		// retry that inherited an exhausted window would refuse before dispatch
 		// forever, which is not a retry. The attempt ceiling is what bounds it,
 		// exactly as it bounds every other reattemptable class.
+		//
+		// An inherited datum keeps ProgressRecorderOpen with it: that is the
+		// evidence that the dead process's newest progress may never have
+		// become durable (#352). A fresh stamp is not recorded progress and
+		// has no unwritten tail.
 		if !abandoned || op.LastProgressAt == nil {
 			op.LastProgressAt = &now
+			op.ProgressRecorderOpen = false
 		}
 		op.ActiveSince = &now
 		if op.WallBudget > 0 {
@@ -611,22 +624,36 @@ func (s Scheduler) Heartbeat(id string) (RunOperation, error) {
 // fail an invocation that is working.
 //
 // It is BOUND to the physical attempt that observed it: the write lands only
-// while the row is running THAT attempt. The Claude recorder is deliberately
-// never joined (#322), so a delayed write from attempt N can arrive after N
-// settled, or after N+1 started on the same row - and either would durably
-// claim progress a different process made. (An operation leased before the
-// identity counter existed carries 0 here while its dispatch was clamped to 1,
-// so it misses its durable stamps until it settles; that is the only cost.)
-func (s Scheduler) RecordProviderProgress(id string, attempt int, key string) (RunOperation, error) {
+// while the row is running THAT attempt. A write of attempt N can still land
+// after N settled, or after N+1 started on the same row, and either would
+// durably claim progress - or a suspension - a different process made. (An
+// operation leased before the identity counter existed carries 0 here while
+// its dispatch was clamped to 1, so it misses its durable stamps until it
+// settles; that is the only cost.)
+//
+// The instant recorded is when the progress was OBSERVED - now less its Age -
+// not when the coalescing recorder got round to writing it (#352), and it
+// never moves backwards. The suspension and the recorder-open flag are the
+// attempt's current state, replaced whole on every write.
+func (s Scheduler) RecordProviderProgress(id string, attempt int, progress ProviderProgress) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
-		if key == "" || key == op.NoProgressKey {
-			return nil
-		}
 		if op.State != Running || op.AttemptIdentity != attempt {
 			return nil
 		}
-		op.NoProgressKey = key
-		op.LastProgressAt = &now
+		if progress.Key != "" && progress.Key != op.NoProgressKey {
+			at := now.Add(-max(progress.Age, 0))
+			if op.LastProgressAt != nil && at.Before(*op.LastProgressAt) {
+				at = *op.LastProgressAt
+			}
+			op.NoProgressKey, op.LastProgressAt = progress.Key, &at
+		}
+		op.ProgressRecorderOpen = !progress.Final
+		op.InactivitySuspension = nil
+		if progress.Suspended {
+			op.InactivitySuspension = &InactivitySuspension{
+				Since: now.Add(-max(progress.SuspendedAge, 0)), AttemptIdentity: attempt, Owner: s.Owner,
+			}
+		}
 		return nil
 	})
 }
@@ -655,6 +682,8 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 			op.ActiveSince = nil
 		}
 		op.Deadline, op.DeadlineBound = nil, ""
+		// The attempt's process is over, so neither can still be true of it.
+		op.InactivitySuspension, op.ProgressRecorderOpen = nil, false
 		return nil
 	})
 }
