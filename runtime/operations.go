@@ -384,6 +384,9 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 			}
 			base = ref.Revision
 		}
+		if err := refuseSubmodules(dir); err != nil {
+			return failed(err)
+		}
 		adopted, err := gitMetadataDigest(dir)
 		if err != nil {
 			return failed(err)
@@ -426,6 +429,9 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		if err := MaterializeCandidate(workspace.Dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
 			return failed(err)
 		}
+		if err := refuseSubmodules(workspace.Dir); err != nil {
+			return failed(err)
+		}
 		// The metadata baseline is taken AFTER the transfer, so the durable
 		// baseline describes the workspace the run will actually use.
 		digest, err := gitMetadataDigest(workspace.Dir)
@@ -433,6 +439,11 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 			return failed(err)
 		}
 		return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, ref.Revision, digest}}
+	}
+	// Admission ends here: a repository that records submodules is refused
+	// before any producer work is paid for.
+	if err := refuseSubmodules(workspace.Dir); err != nil {
+		return failed(err)
 	}
 	return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, workspace.BaseRevision, workspace.TrustedMetadata}}
 }
