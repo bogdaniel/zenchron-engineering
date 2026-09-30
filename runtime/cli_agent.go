@@ -1233,6 +1233,15 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
+	// THE SEMANTIC ANSWER, exposed only when the structured stream itself
+	// decoded one off a valid, non-error final result (claude_stream.go). It
+	// is redacted exactly as the stored transcript is - the same secret
+	// patterns, the same replacement - so a consumer reading this field sees
+	// what every other reader of this invocation's output is allowed to see,
+	// never a step earlier.
+	if streamed.AnswerObserved {
+		result.Answer = string(redactTranscript([]byte(streamed.Answer)))
+	}
 	if runErr != nil || killed {
 		result.Outcome = OperationFailed
 		// The typed condition the PROVIDER ITSELF stated, read only from the

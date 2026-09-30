@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -224,6 +225,18 @@ func claudeResult(isError bool, subtype string, denials int) string {
 	}
 	return fmt.Sprintf(`{"type":"result","subtype":%q,"is_error":%t,"result":"rate_limit authentication_failed overloaded","permission_denials":[%s]}`,
 		subtype, isError, strings.Join(d, ","))
+}
+
+// claudeResultWithAnswer is a result line carrying a caller-chosen semantic
+// answer, JSON-escaped by the real encoder rather than assembled by hand - so
+// the escaping under test (#366) is the genuine transport encoding, not a
+// hand-built approximation of it.
+func claudeResultWithAnswer(isError bool, answer string) string {
+	encoded, err := json.Marshal(answer)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(`{"type":"result","subtype":"success","is_error":%t,"result":%s}`, isError, encoded)
 }
 
 // feed writes lines to a stream in small arbitrary chunks, which is how the
@@ -990,6 +1003,67 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 	}
 	if own.NoProgressKey != "2:1" || !own.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("attempt 2's own write did not land: key %q at %v", own.NoProgressKey, own.LastProgressAt)
+	}
+}
+
+// #366, end to end through the real adapter: ExecutionResult.Answer carries
+// the decoded semantic text, redacted exactly as the stored transcript is -
+// and a provider with no such shape (Codex) exposes no answer at all, which
+// is the signal that keeps the planner's fallback path alive for it.
+func TestExecutionResultAnswerIsExposedOnlyByClaudesStructuredStream(t *testing.T) {
+	answer := "Proposal:\n```json\n{\"stages\": []}\n```\nissued with ghp_" + strings.Repeat("x", 36) + "\n"
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.outputs = []CommandOutput{{Stdout: []byte(claudeResultWithAnswer(false, answer) + "\n")}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil || result.Outcome != Succeeded {
+		t.Fatalf("execute: %v %#v", err, result.Failure)
+	}
+	if strings.Contains(result.Answer, "ghp_") || !strings.Contains(result.Answer, "[REDACTED]") {
+		t.Fatalf("answer was not redacted: %q", result.Answer)
+	}
+	if !strings.Contains(result.Answer, "```json") {
+		t.Fatalf("answer lost its real content: %q", result.Answer)
+	}
+
+	codex, codexRequest, codexFake := agentFixture(t, AgentKindCodexCLI)
+	codexFake.outputs = []CommandOutput{{Stdout: []byte("done\n")}}
+	codexResult, err := codex.Execute(context.Background(), codexRequest)
+	if err != nil || codexResult.Outcome != Succeeded {
+		t.Fatalf("codex execute: %v %#v", err, codexResult.Failure)
+	}
+	if codexResult.Answer != "" {
+		t.Fatalf("codex exposed a semantic answer it has no shape for: %q", codexResult.Answer)
+	}
+}
+
+// #366: the semantic answer is decoded exactly once out of the transport. A
+// fenced plan whose fence and quotes are JSON-escaped inside the "result"
+// field surfaces with real newlines and real quotes - what a consumer that
+// scanned the raw transcript bytes for that same fence would never find,
+// because there the fence and every quote inside it stay escaped.
+func TestClaudeStreamDecodesTheSemanticAnswerExactlyOnce(t *testing.T) {
+	answer := "Proposal:\n```json\n{\"stages\": []}\n```\n"
+	stream := newClaudeStream(1)
+	feed(stream, claudeResultWithAnswer(false, answer))
+	if got := stream.outcome(true); !got.AnswerObserved || got.Answer != answer {
+		t.Fatalf("answer = %q observed=%v, want %q observed=true", got.Answer, got.AnswerObserved, answer)
+	}
+
+	// AN ERROR RESULT NEVER PROMOTES ITS OWN TEXT TO AN ANSWER, even though the
+	// field is present and well-typed: the two typed terminal inputs gate this
+	// exactly as they gate FinalResult itself.
+	errored := newClaudeStream(1)
+	feed(errored, claudeResultWithAnswer(true, answer))
+	if got := errored.outcome(true); got.AnswerObserved {
+		t.Fatalf("an error result exposed an answer: %+v", got)
+	}
+
+	// A missing "result" field leaves AnswerObserved false rather than
+	// promoting its zero value into an accepted empty answer.
+	bare := newClaudeStream(1)
+	feed(bare, `{"type":"result","subtype":"success","is_error":false}`)
+	if got := bare.outcome(true); got.AnswerObserved {
+		t.Fatalf("a result with no \"result\" field exposed an answer: %+v", got)
 	}
 }
 
