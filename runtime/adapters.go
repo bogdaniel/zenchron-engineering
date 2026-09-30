@@ -283,6 +283,16 @@ type ExecutionResult struct {
 	// unsettled. It is a CLAIM at this point and authorizes nothing until
 	// AdmitReviewerResult has checked it.
 	Review *ReviewerResult
+	// Answer is the invocation's SEMANTIC final answer text, exposed by an
+	// adapter that can state one directly rather than leaving a consumer to
+	// locate it inside the forensic transcript. It is empty whenever the
+	// adapter has no such shape to offer - every provider but Claude's
+	// structured stream, and even that one on a failed or malformed
+	// invocation - and emptiness is exactly the signal that a consumer must
+	// fall back to reading the transcript itself. Provider-specific transport
+	// framing (stream-json event shapes, escaping, and the like) is decoded by
+	// the adapter that owns it and never described here.
+	Answer string
 }
 
 // ExecutionAttemptRef is the runtime-owned identity of one provider
