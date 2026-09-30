@@ -238,12 +238,33 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	// below it is refused at compile time rather than approved and then blocked
 	// at the first stage that tries to run under it.
 	var consumed domain.PlanConsumption
+	// The privilege ratchet's floor: the latest revision an OPERATOR approved,
+	// never merely the latest stored one. `previous` above is the latest
+	// stored revision whatever its status, and a rejected or still-pending
+	// proposal grants no privilege floor - see planning.ValidationInput's
+	// RatchetBaseline. Nil here means nothing has ever been approved, which is
+	// itself the correct answer: there is no proposal-history floor to hold a
+	// first or still-unapproved proposal to.
+	var ratchetBaseline *domain.EngineeringPlan
 	if found {
 		snapshot, err := s.Store.ReplayPlan(input.PlanID)
 		if err != nil {
 			return domain.EngineeringPlan{}, err
 		}
 		consumed = snapshot.Consumed
+		if approvedRevision, ok := snapshot.ApprovedRevision(); ok {
+			baseline, baselineFound, err := s.Store.PlanRevision(input.PlanID, approvedRevision)
+			if err != nil {
+				return domain.EngineeringPlan{}, err
+			}
+			if !baselineFound {
+				return domain.EngineeringPlan{}, &PlanRefusedError{
+					PlanID: input.PlanID,
+					Detail: fmt.Sprintf("revision %d is approved and not stored, so a new proposal cannot be checked against it", approvedRevision),
+				}
+			}
+			ratchetBaseline = &baseline
+		}
 	}
 	// WHETHER A BASE REBINDING IS AUTHORIZED, before anything is compiled.
 	//
@@ -265,7 +286,7 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
 			Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
-			Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
+			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
 		})
 	}
 	if compileErr != nil {

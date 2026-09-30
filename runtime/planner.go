@@ -411,9 +411,21 @@ func InvokePlanner(ctx context.Context, input PlannerInput) (PlannerOutput, erro
 		}
 	}
 
-	answer, err := readPlannerAnswer(result.Artifacts)
-	if err != nil {
-		return PlannerOutput{Reasoning: provenance, Artifacts: result.Artifacts}, err
+	// THE PROVIDER'S SEMANTIC ANSWER, when its adapter could state one
+	// directly (#366). Consuming ExecutionResult.Answer here - rather than
+	// re-deriving it from the transcript - is what keeps this file free of any
+	// provider's transport framing: Claude's stream-json shape is decoded once,
+	// in claude_stream.go, and this file never learns that shape exists. An
+	// adapter with no such shape to offer - Codex today - leaves Answer empty,
+	// which is exactly the signal to fall back to the transcript scan that
+	// served every provider before this field existed.
+	answer := result.Answer
+	if strings.TrimSpace(answer) == "" {
+		var err error
+		answer, err = readPlannerAnswer(result.Artifacts)
+		if err != nil {
+			return PlannerOutput{Reasoning: provenance, Artifacts: result.Artifacts}, err
+		}
 	}
 	stages, notes, err := decodePlannerProposal(answer, input)
 	if err != nil {
@@ -581,7 +593,10 @@ func stageIDs(plan domain.EngineeringPlan) []string {
 }
 
 // readPlannerAnswer reads the model's answer back from the SANITIZED
-// transcript.
+// transcript. It is the FALLBACK path (#366): a provider whose adapter can
+// state its semantic answer directly is read from ExecutionResult.Answer
+// instead, and this function exists for the providers - Codex today - whose
+// adapter exposes no such shape.
 //
 // The sanitized copy is used deliberately: it is the same text every other
 // reader of a provider transcript sees, credential values are already replaced

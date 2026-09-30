@@ -58,6 +58,14 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// authorize its own work. It can now say "I accept", and that sentence
 		// is checked by machines before it means anything.
 		"Review",
+		// Answer is the invocation's semantic final answer text, exposed only
+		// by an adapter that can state one directly (Claude's structured
+		// stream, on a successful non-error final result) and empty
+		// otherwise. It asserts nothing about acceptance and satisfies no
+		// authority condition: it is read by the planner as an alternative
+		// source for the SAME text a consumer could otherwise recover from
+		// the transcript, never as a claim that the work is approved.
+		"Answer",
 	}
 	typ := reflect.TypeOf(ExecutionResult{})
 	var got []string
