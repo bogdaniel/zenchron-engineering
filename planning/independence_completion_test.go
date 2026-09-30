@@ -162,6 +162,83 @@ func TestProducersWithoutIndependenceCompileUnchanged(t *testing.T) {
 	}
 }
 
+// The #368 plan dogfood shape, compiled.
+//
+// A real planning attempt proposed an ACYCLIC four-stage decomposition: an
+// implementer, two reviewers independent of "whatever produced the change",
+// and an integrator that depends on both reviewers. The compiler is required
+// to add the assurance gate the contract's claims obligate - that much is
+// #64 - but completing the reviewers' empty "different_from" bound them to
+// EVERY material producer, including the integrator, which already depended
+// on them. The peer edge that obligation manufactured then closed a loop
+// through the integrator: review -> integrate -> review.
+//
+// A producer downstream of a stage is never a candidate for that stage's
+// unbound independence completion, for the same reason #120 refuses an
+// unbound requirement on a producer itself: the compiler never turns
+// ambiguous shorthand into a dependency edge that reverses one the plan
+// already states.
+func dogfoodDownstreamIntegratorStages() []domain.PlanStage {
+	independent := &domain.IndependenceRequirement{Dimension: domain.IndependenceExecutionAgent}
+	return []domain.PlanStage{
+		{ID: "implement-digest-warning", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: "implement the digest warning"},
+		{ID: "security-review-digest-warning", Kind: domain.StageAgent, Role: domain.RoleSecurityReviewer,
+			Objective: "security-review the digest warning", Independence: independent},
+		{ID: "review-digest-warning", Kind: domain.StageAgent, Role: domain.RoleReviewer,
+			Objective: "review the digest warning", Independence: independent},
+		{ID: "integrate-digest-warning", Kind: domain.StageAgent, Role: domain.RoleIntegrator,
+			Objective: "integrate the digest warning",
+			DependsOn: []string{"security-review-digest-warning", "review-digest-warning"}},
+	}
+}
+
+func TestAssuranceInsertionOverADownstreamIntegratorCompilesWithoutACycle(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.Proposed = dogfoodDownstreamIntegratorStages()
+	if len(input.Contract.RequiredClaims) == 0 {
+		t.Fatal("the fixture contract requires no claims: this test needs one that does")
+	}
+
+	plan := compilePlan(t, input)
+
+	assurance, found := stageByKind(plan, domain.StageAssuranceGate)
+	if !found {
+		t.Fatalf("the contract requires claims and no assurance gate was compiled: %v", planStageIDs(plan))
+	}
+	if len(assurance.RequiredClaims) == 0 {
+		t.Fatal("the assurance gate references no claim: the contract's obligation was dropped")
+	}
+
+	for _, id := range []string{"security-review-digest-warning", "review-digest-warning"} {
+		reviewer, found := stageByID(plan, id)
+		if !found {
+			t.Fatalf("stage %q is missing from the compiled plan", id)
+		}
+		if reviewer.Independence == nil {
+			t.Fatalf("stage %q lost its independence requirement", id)
+		}
+		if !containsString(reviewer.Independence.DifferentFrom, "implement-digest-warning") {
+			t.Fatalf("stage %q is no longer independent of the implementer: %#v", id, reviewer.Independence)
+		}
+		if containsString(reviewer.Independence.DifferentFrom, "integrate-digest-warning") {
+			t.Fatalf("stage %q was bound to the downstream integrator, which is how #368 manufactures a cycle: %#v", id, reviewer.Independence)
+		}
+		if containsString(reviewer.DependsOn, "integrate-digest-warning") {
+			t.Fatalf("stage %q depends on the downstream integrator that already depends on it: %v", id, reviewer.DependsOn)
+		}
+	}
+}
+
+func stageByKind(plan domain.EngineeringPlan, kind domain.StageKind) (domain.PlanStage, bool) {
+	for _, stage := range plan.Stages {
+		if stage.Kind == kind {
+			return stage, true
+		}
+	}
+	return domain.PlanStage{}, false
+}
+
 func planStageIDs(plan domain.EngineeringPlan) []string {
 	ids := make([]string, 0, len(plan.Stages))
 	for _, stage := range plan.Stages {
