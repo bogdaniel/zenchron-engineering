@@ -447,7 +447,8 @@ domain/                         Go v0.1 representations and canonical JSON codec
 planning/                       Plan compilation, validation, resolution, context
 reassessment/                   Observed-scope validation and contract reassessment
 runtime/                        Local runtime, adapters, supervisor, scheduler, state
-benchmarks/                     Recorded leverage results, in #66's shape
+benchmarks/                     Serve leverage corpus, protocol and raw observations
+benchmark/                      Offline leverage measurement and gate evaluation
 fixtures/v0.1/                  Positive and targeted invalid schema fixtures
 cmd/zenchron-engineering/       CLI entry point and composition root
 ```

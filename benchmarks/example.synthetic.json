@@ -1,0 +1,160 @@
+{
+  "schema_version": "1",
+  "benchmark": "zenchron-leverage",
+  "corpus_version": "serve-v1",
+  "minimum_per_class": 3,
+  "cohorts": [
+    {
+      "id": "synthetic-pair-not-product-evidence",
+      "mode": "direct_agent",
+      "operator": "synthetic-operator",
+      "repository": "synthetic/repository",
+      "base_revision": "synthetic-base",
+      "controller": "synthetic-controller",
+      "agent": "synthetic-agent",
+      "provider": "synthetic-provider",
+      "model": "synthetic-model",
+      "trust_mode": "synthetic-trust",
+      "engineering_version": "synthetic-version",
+      "window": {
+        "start": "2026-01-01T00:00:00Z",
+        "end": "2026-01-01T00:30:00Z"
+      },
+      "attention": [
+        {
+          "start": "2026-01-01T00:00:00Z",
+          "end": "2026-01-01T00:10:00Z",
+          "category": "active_before_review"
+        }
+      ],
+      "unattended_provider_ci_minutes": 0,
+      "cost": {
+        "amount": null,
+        "currency": "",
+        "reason": "Synthetic example; no cost measured"
+      },
+      "provider_usage_tokens": null,
+      "failure_blocked_unrelated": false,
+      "tasks": [
+        {
+          "id": "synthetic-task-0",
+          "acceptance": "Synthetic example only: independent acceptance checks pass.",
+          "worker": "worker-0",
+          "work": {
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-01T00:10:00Z"
+          },
+          "accepted": true,
+          "first_pass": false,
+          "review_cycles": 1,
+          "rework": 1,
+          "escaped_defects": 0,
+          "unsafe_authority": 0,
+          "relay_actions": 0,
+          "workarounds": 0,
+          "authority_interventions": 1,
+          "false_blocks": 0,
+          "authority": null,
+          "class": "concurrent_cohort"
+        },
+        {
+          "id": "synthetic-task-1",
+          "acceptance": "Synthetic example only: independent acceptance checks pass.",
+          "worker": "worker-1",
+          "work": {
+            "start": "2026-01-01T00:10:00Z",
+            "end": "2026-01-01T00:20:00Z"
+          },
+          "accepted": true,
+          "first_pass": false,
+          "review_cycles": 1,
+          "rework": 0,
+          "escaped_defects": 0,
+          "unsafe_authority": 0,
+          "relay_actions": 0,
+          "workarounds": 0,
+          "authority_interventions": 1,
+          "false_blocks": 0,
+          "authority": null,
+          "class": "concurrent_cohort"
+        }
+      ]
+    },
+    {
+      "id": "synthetic-pair-not-product-evidence",
+      "mode": "zenchron_explicit",
+      "operator": "synthetic-operator",
+      "repository": "synthetic/repository",
+      "base_revision": "synthetic-base",
+      "controller": "synthetic-controller",
+      "agent": "synthetic-agent",
+      "provider": "synthetic-provider",
+      "model": "synthetic-model",
+      "trust_mode": "synthetic-trust",
+      "engineering_version": "synthetic-version",
+      "window": {
+        "start": "2026-01-01T01:00:00Z",
+        "end": "2026-01-01T01:30:00Z"
+      },
+      "attention": [
+        {
+          "start": "2026-01-01T01:00:00Z",
+          "end": "2026-01-01T01:05:00Z",
+          "category": "active_before_review"
+        }
+      ],
+      "unattended_provider_ci_minutes": 0,
+      "cost": {
+        "amount": null,
+        "currency": "",
+        "reason": "Synthetic example; no cost measured"
+      },
+      "provider_usage_tokens": null,
+      "failure_blocked_unrelated": false,
+      "tasks": [
+        {
+          "id": "synthetic-task-0",
+          "acceptance": "Synthetic example only: independent acceptance checks pass.",
+          "worker": "worker-0",
+          "work": {
+            "start": "2026-01-01T01:00:00Z",
+            "end": "2026-01-01T01:10:00Z"
+          },
+          "accepted": true,
+          "first_pass": false,
+          "review_cycles": 1,
+          "rework": 1,
+          "escaped_defects": 0,
+          "unsafe_authority": 0,
+          "relay_actions": 0,
+          "workarounds": 0,
+          "authority_interventions": 1,
+          "false_blocks": 0,
+          "authority": null,
+          "class": "concurrent_cohort"
+        },
+        {
+          "id": "synthetic-task-1",
+          "acceptance": "Synthetic example only: independent acceptance checks pass.",
+          "worker": "worker-1",
+          "work": {
+            "start": "2026-01-01T01:00:00Z",
+            "end": "2026-01-01T01:10:00Z"
+          },
+          "accepted": true,
+          "first_pass": false,
+          "review_cycles": 1,
+          "rework": 0,
+          "escaped_defects": 0,
+          "unsafe_authority": 0,
+          "relay_actions": 0,
+          "workarounds": 0,
+          "authority_interventions": 1,
+          "false_blocks": 0,
+          "authority": null,
+          "class": "concurrent_cohort"
+        }
+      ]
+    }
+  ]
+}
