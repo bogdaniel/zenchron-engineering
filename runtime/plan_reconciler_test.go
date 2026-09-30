@@ -921,6 +921,60 @@ func TestADownstreamStageIsBasedOnPublishedUpstreamWork(t *testing.T) {
 	}
 }
 
+// A published pull request is only proof for the EXACT candidate it names. A
+// producer that publishes one candidate and then produces a second,
+// unpublished one leaves a pull request the remote can resolve - just not at
+// the newer commit - and a stage frozen on that first candidate must not be
+// handed a clone base for work the remote never published either.
+func TestAPullRequestForADifferentCandidateIsNotUsedAsABase(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	assignment := domain.AgentAssignment{
+		Context: domain.ContextPack{UpstreamOutputs: []domain.UpstreamOutput{
+			{StageID: "implementation", RunID: "run-upstream", Candidate: "c0ffee", Tree: "t0ffee"},
+		}},
+	}
+	if err := fixture.store.PutRun(EngineeringRun{
+		SchemaVersion: SchemaVersion, ID: "run-upstream", Repository: "acme/repo",
+		Goal: "github-issue:acme/repo#41", Disposition: Waiting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []EngineeringEvent{
+		{SchemaVersion: SchemaVersion, ID: "up-1", RunID: "run-upstream", Type: EventRunCreated},
+		{SchemaVersion: SchemaVersion, ID: "up-2", RunID: "run-upstream", Type: EventGitHubPRObserved,
+			Payload: mustPayload(t, GitHubPRObservedPayload{
+				Number: 7, HeadRevision: "c0ffee", BaseRevision: "base", State: "open",
+			})},
+		// The producer moves on to a second, unpublished candidate...
+		{SchemaVersion: SchemaVersion, ID: "up-3", RunID: "run-upstream", Type: EventCandidateCommitted,
+			Payload: mustPayload(t, CandidateCommittedPayload{
+				Commit: "cafe222", Tree: "tafe222", PathCount: 1, PathsDigest: strings.Repeat("c", 64),
+			})},
+		// ...and the remote observation catches up to it, so the pull request is
+		// not STALE - it matches the run's current head - it is simply for a
+		// different commit than the one this stage froze.
+		{SchemaVersion: SchemaVersion, ID: "up-4", RunID: "run-upstream", Type: EventGitHubPRObserved,
+			Payload: mustPayload(t, GitHubPRObservedPayload{
+				Number: 7, HeadRevision: "cafe222", BaseRevision: "base", State: "open",
+			})},
+	} {
+		if _, err := fixture.store.AppendEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	base, local, err := fixture.reconciler.upstreamBase(assignment)
+	if err != nil {
+		t.Fatalf("upstreamBase: %v", err)
+	}
+	if base != "" {
+		t.Fatalf("a pull request for a different candidate was used as a clone base: %q", base)
+	}
+	if local == nil || local.RunID != "run-upstream" || local.Revision != "c0ffee" || local.Tree != "t0ffee" {
+		t.Fatalf("the exact frozen candidate was not offered for local transfer once its pull request diverged: %#v", local)
+	}
+}
+
 func mustPayload(t *testing.T, payload any) []byte {
 	t.Helper()
 	encoded, err := marshalPayloadJSON(payload)
