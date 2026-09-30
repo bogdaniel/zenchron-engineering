@@ -67,8 +67,16 @@ type CompileInput struct {
 	// Reasoning is the provenance of the invocation that produced Proposed.
 	Reasoning *domain.PlanReasoningProvenance
 	// Previous is the revision this compilation replaces, when it is a
-	// revision rather than a first plan.
+	// revision rather than a first plan. It is recorded as this plan's
+	// Provenance.PreviousRevision and checked for document continuity; it is
+	// NOT what the privilege ratchet is measured against - see
+	// RatchetBaseline.
 	Previous *domain.EngineeringPlan
+	// RatchetBaseline is the latest operator-approved revision, when one
+	// exists, forwarded to ValidationInput.RatchetBaseline unchanged. See its
+	// doc comment: a rejected or still-pending Previous grants no privilege
+	// floor.
+	RatchetBaseline *domain.EngineeringPlan
 	// Consumed is what that plan has already spent. A revision may tighten the
 	// remaining envelope and may never claim back consumption, and passing it
 	// here is what makes that refusal reachable rather than theoretical.
@@ -133,6 +141,7 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 	}
 	if err := Validate(plan, ValidationInput{
 		Contract: input.Contract, Envelope: input.Envelope, Previous: input.Previous,
+		RatchetBaseline: input.RatchetBaseline,
 		// What the plan has ALREADY spent. Without it the consumed-budget
 		// refusals in envelopeViolations saw zero on the only path that
 		// compiles a real revision, so a revision could claim a ceiling below

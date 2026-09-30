@@ -270,7 +270,7 @@ func TestRevisionsCannotWidenPrivilege(t *testing.T) {
 	}
 	err := planning.Validate(weakened, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Envelope: operatorEnvelope(), Previous: &previous,
+		Envelope: operatorEnvelope(), Previous: &previous, RatchetBaseline: &previous,
 	})
 	if err == nil || !strings.Contains(err.Error(), "weakens independence") {
 		t.Fatalf("expected a privilege refusal, got %v", err)
