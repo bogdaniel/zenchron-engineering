@@ -727,7 +727,9 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		// A terminal failure leaves a last head, not a replacement input
+		// that dependent work can consume.
+		if outcome, settled := runSettled(run); !settled || outcome != "completed" {
 			continue
 		}
 		head := run.Candidate.Revision
