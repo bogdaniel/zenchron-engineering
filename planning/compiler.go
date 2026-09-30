@@ -346,7 +346,12 @@ func applyRoleObligation(stages []domain.PlanStage, requirement domain.RoleRequi
 		stage.TrustRequirement = requirement.TrustRequirement
 	}
 	if requirement.Independence != nil {
-		strengthened, err := strengthenIndependence(stage.Independence, *requirement.Independence, producers, stage, planID)
+		// producersExcept, not the raw producer list: a policy obligation that
+		// names no peer is the same ambiguous shorthand fillStageDefaults
+		// completes for a proposal, and it is refused the same way here - a
+		// producer already downstream of this stage is never a candidate for it,
+		// for the identical reason.
+		strengthened, err := strengthenIndependence(stage.Independence, *requirement.Independence, producersExcept(stages, stage.ID), stage, planID)
 		if err != nil {
 			return nil, err
 		}
@@ -790,17 +795,57 @@ func shareBudget(stages []domain.PlanStage, envelope domain.PlanBudgetEnvelope) 
 // Small helpers
 // ---------------------------------------------------------------------------
 
-// producersExcept is the material producers other than one stage. A reviewer
-// that produced nothing is independent of itself trivially, and naming itself
-// would make the obligation unsatisfiable.
+// producersExcept is the material producers other than one stage, and never
+// one that already depends on it, directly or transitively.
+//
+// A reviewer that produced nothing is independent of itself trivially, and
+// naming itself would make the obligation unsatisfiable - that is the "except"
+// this function is named for. But a producer DOWNSTREAM of the stage (an
+// integrator that depends on this reviewer's approval, say) is excluded for a
+// different reason: binding it would need this stage to depend on the
+// producer, which reverses an edge the plan already states and manufactures a
+// cycle nobody proposed. #368 is this exact shape - a reviewer's empty
+// different_from tried to bind an integrator that already depended on it.
 func producersExcept(stages []domain.PlanStage, self string) []string {
+	dependsOn := dependencyIndex(stages)
 	var producers []string
 	for _, id := range materialProducerStages(stages) {
-		if id != self {
-			producers = append(producers, id)
+		if id == self || reaches(dependsOn, id, self) {
+			continue
 		}
+		producers = append(producers, id)
 	}
 	return producers
+}
+
+// dependencyIndex is a stage id's stated dependencies, for a reachability walk
+// that does not need the rest of what a stage carries.
+func dependencyIndex(stages []domain.PlanStage) map[string][]string {
+	index := make(map[string][]string, len(stages))
+	for _, stage := range stages {
+		index[stage.ID] = stage.DependsOn
+	}
+	return index
+}
+
+// reaches reports whether stage "from" depends on stage "to", directly or
+// transitively through DependsOn edges.
+func reaches(dependsOn map[string][]string, from, to string) bool {
+	visited := map[string]bool{from: true}
+	frontier := append([]string(nil), dependsOn[from]...)
+	for len(frontier) > 0 {
+		next := frontier[0]
+		frontier = frontier[1:]
+		if next == to {
+			return true
+		}
+		if visited[next] {
+			continue
+		}
+		visited[next] = true
+		frontier = append(frontier, dependsOn[next]...)
+	}
+	return false
 }
 
 func materialProducerStages(stages []domain.PlanStage) []string {
