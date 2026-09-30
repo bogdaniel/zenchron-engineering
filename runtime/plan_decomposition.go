@@ -186,7 +186,12 @@ func (r PlanReconciler) recordProposal(plan domain.EngineeringPlan, stage domain
 	proposed, compileErr := planning.Compile(planning.CompileInput{
 		PlanID: plan.ID, Revision: next, Objective: plan.Objective, Subject: plan.Subject,
 		Contract: contract, Model: model, Envelope: plan.BudgetEnvelope, Proposed: output.Stages,
-		Reasoning: &reasoning, Previous: &plan, Consumed: snapshot.Consumed, ProposalID: proposalID,
+		Reasoning: &reasoning, Previous: &plan,
+		// A decomposition stage runs only within the currently GOVERNING
+		// revision, which is why `plan` doubles as both Previous and the
+		// privilege ratchet's baseline here: it is, by construction, the
+		// latest operator-approved revision.
+		RatchetBaseline: &plan, Consumed: snapshot.Consumed, ProposalID: proposalID,
 	})
 	proposal := domain.PlanRevisionProposal{
 		SchemaVersion: domain.SchemaVersion,
