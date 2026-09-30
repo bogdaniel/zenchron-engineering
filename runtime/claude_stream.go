@@ -108,6 +108,13 @@ type claudeStream struct {
 	isError     bool
 	denials     int
 	deniedTools []string
+	// answer is Claude's own semantic final answer text, decoded exactly once
+	// out of a successful final result's "result" field. hasAnswer
+	// distinguishes "no valid final result, or it was an error" from "the
+	// result held the empty string" - both leave answer at its zero value, but
+	// only the latter is a real (if useless) answer.
+	answer    string
+	hasAnswer bool
 }
 
 func newClaudeStream(attempt int) *claudeStream {
@@ -151,7 +158,8 @@ func (s *claudeStream) attach(watch *inactivityWatch) {
 func (s *claudeStream) Write(p []byte) (int, error) {
 	now := time.Now()
 	s.mu.Lock()
-	before, wasOpen := s.accepted, len(s.open) > 0
+	defer s.mu.Unlock()
+	before, openedBefore := s.accepted, s.openedAt
 	for rest := p; len(rest) > 0; {
 		newline := bytes.IndexByte(rest, '\n')
 		chunk := rest
@@ -171,32 +179,35 @@ func (s *claudeStream) Write(p []byte) (int, error) {
 		if newline >= 0 {
 			if !s.discarding {
 				s.handle(s.line)
+				// Per EVENT, not per chunk (#355): tool A's result and tool
+				// B's call can share one pipe read, and B's suspension starts
+				// at B, not at A.
+				if len(s.open) == 0 {
+					s.openedAt = time.Time{}
+				} else if s.openedAt.IsZero() {
+					s.openedAt = now
+				}
 			}
 			s.line, s.discarding = s.line[:0], false
 		}
 	}
-	// The DURABLE half is handed to the recorder, after this lock is released
-	// (see LOCK ORDER). The key is qualified by the physical attempt, because
-	// RecordProviderProgress ignores a key equal to the stored one and a bare
-	// event count restarts at 1 after an abandoned attempt is re-adopted. An
-	// open-tool transition is recorded too, even with no new progress - the
-	// final result closes tools without being progress - so the durable
-	// suspension follows the one the watchdog reads (#352). tool_progress and
-	// every other unaccepted event change neither.
-	isOpen := len(s.open) > 0
+	// The DURABLE half is handed to the recorder. The key is qualified by the
+	// physical attempt, because RecordProviderProgress ignores a key equal to
+	// the stored one and a bare event count restarts at 1 after an abandoned
+	// attempt is re-adopted. An open-tool transition is recorded too, even
+	// with no new progress - the final result closes tools without being
+	// progress - so the durable suspension follows the one the watchdog reads
+	// (#352). tool_progress and every other unaccepted event change neither.
+	//
+	// It is handed over UNDER this lock, so observations reach the recorder in
+	// stream order and an older suspension state can never be queued behind a
+	// newer one (#355). That keeps the LOCK ORDER: observe takes only the
+	// recorder's own leaf lock and never blocks, and no watch lock is taken.
 	if s.accepted != before {
 		s.progressAt = now
 	}
-	if !isOpen {
-		s.openedAt = time.Time{}
-	} else if !wasOpen {
-		s.openedAt = now
-	}
-	changed := s.accepted != before || isOpen != wasOpen
-	key, at, since, watch := fmt.Sprintf("%d:%d", s.attempt, s.accepted), s.progressAt, s.openedAt, s.watch
-	s.mu.Unlock()
-	if changed {
-		watch.record(key, at, since)
+	if s.accepted != before || !s.openedAt.Equal(openedBefore) {
+		s.watch.record(fmt.Sprintf("%d:%d", s.attempt, s.accepted), s.progressAt, s.openedAt)
 	}
 	return len(p), nil
 }
@@ -222,6 +233,13 @@ type claudeEvent struct {
 	// which it allocates before it discovers the mismatch).
 	IsError           json.RawMessage   `json:"is_error"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
+	// Answer is the JSON field literally named "result" on a result event: this
+	// invocation's SEMANTIC final answer, exactly as Claude wrote it before the
+	// stream-json transport wrapped it in this event's own JSON encoding. It
+	// stays raw here for the same reason IsError does - decoded strictly, only
+	// once a valid final result is otherwise established - so a missing or
+	// type-drifted value never promotes to an answer.
+	Answer json.RawMessage `json:"result"`
 }
 
 type claudeContentBlock struct {
@@ -266,6 +284,7 @@ func (s *claudeStream) handle(line []byte) {
 			if id := event.Message.ID; id != "" && id != s.turn {
 				if s.turn != "" {
 					clear(s.open)
+					s.openedAt = time.Time{} // the previous turn's tools ended
 				}
 				s.turn = id
 			}
@@ -313,6 +332,17 @@ func (s *claudeStream) handle(line []byte) {
 		s.sawResult, s.isError = true, *isError
 		s.denials = len(event.PermissionDenials)
 		s.deniedTools = deniedToolNames(event.PermissionDenials)
+		// THE SEMANTIC ANSWER, read only off a result the two typed fields above
+		// already established as a valid, non-error final result. A malformed or
+		// error result must never promote to an answer, so this is reached only
+		// past that gate - and a wrong-typed or missing "result" field simply
+		// leaves hasAnswer false, exactly like every other optional field here.
+		if !s.isError {
+			var answer *string
+			if json.Unmarshal(event.Answer, &answer) == nil && answer != nil {
+				s.answer, s.hasAnswer = *answer, true
+			}
+		}
 		// The final result ends every turn. An oversized last tool_result line
 		// must not leave a stale open tool in the provenance of a clean run.
 		clear(s.open)
@@ -387,6 +417,14 @@ type claudeStreamOutcome struct {
 	// DeniedTools is the bounded set of typed tool identifiers the final
 	// result's permission_denials named.
 	DeniedTools []string
+	// Answer is Claude's own semantic final answer text - the transport's
+	// stream-json encoding decoded exactly once, never the raw transcript bytes
+	// re-scanned by a consumer that has to guess where the model's prose ends
+	// and its transport framing begins. AnswerObserved is set only alongside a
+	// successful FinalResult; a failed or missing one never reaches here at
+	// all, so this can never promote a malformed answer into a valid one.
+	Answer         string
+	AnswerObserved bool
 }
 
 // outcome reads the final state. A result is REQUIRED only when the process
@@ -411,6 +449,7 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
 		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
+		Answer: s.answer, AnswerObserved: s.hasAnswer,
 	}
 }
 

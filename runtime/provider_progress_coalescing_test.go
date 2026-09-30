@@ -173,13 +173,16 @@ func TestADeferredWriteCannotCrossIntoTheSuccessorAttempt(t *testing.T) {
 	log := &progressLog{}
 	watch, stop := armedWatch(400*time.Millisecond, boundRecorder(scheduler, op, log))
 
-	watch.record("1:1", time.Now(), time.Time{})
+	// The tool is open from the first write, so the second observation is not
+	// a suspension edge (#355) and waits for the ordinary slot.
+	opened := time.Now()
+	watch.record("1:1", time.Now(), opened)
 	log.waitFor(t, 1)
 	if got := row(t, scheduler, op.ID); got.NoProgressKey != "1:1" || !got.ProgressRecorderOpen {
 		t.Fatalf("attempt N's own write did not land: %+v", got)
 	}
 	// A deferred write, suspension and all, pending when N settles.
-	watch.record("1:2", time.Now(), time.Now())
+	watch.record("1:2", time.Now(), opened)
 	if _, err := scheduler.Finish(op.ID, OperationFailed); err != nil {
 		t.Fatal(err)
 	}
@@ -346,14 +349,30 @@ func TestASuspensionEndsWithItsAttempt(t *testing.T) {
 				}
 			}
 			writes := waitForClosingWrite(t, log)
-			if !writes[0].Suspended {
+			closing := writes[len(writes)-1]
+			// "fail" exits right after the tool opens. If the process ends
+			// before the writer takes the open observation, the bounded close
+			// writes it as the Final, unsuspended (#360): the edge collapses,
+			// the observation is not lost. The others outlive the open's
+			// immediate slot, so it must be durable before the close.
+			collapsed := name == "fail" && len(writes) == 1 && closing.Key == "1:1"
+			if !writes[0].Suspended && !collapsed {
 				t.Fatalf("writes %+v, want the open tool recorded first", writes)
 			}
-			if closing := writes[len(writes)-1]; closing.Suspended {
+			if closing.Suspended {
 				t.Fatalf("closing write %+v still claims the tool open", closing)
 			}
-			if r := row(t, scheduler, op.ID); r.InactivitySuspension != nil || r.ProgressRecorderOpen {
-				t.Fatalf("row after the attempt: %+v", r)
+			// The log records a write before the store applies it, and once
+			// the context has ended (attempt_wall) the close does not wait for
+			// it, so the row is read eventually.
+			for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(2 * time.Millisecond) {
+				r := row(t, scheduler, op.ID)
+				if r.InactivitySuspension == nil && !r.ProgressRecorderOpen {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("row after the attempt: %+v", r)
+				}
 			}
 		})
 	}
@@ -391,6 +410,26 @@ func TestASuspensionEndsWithItsAttempt(t *testing.T) {
 			t.Fatalf("settled row %+v %v", settled, err)
 		}
 	})
+}
+
+// E (fast exit, #360). The process ends before the writer has taken the open
+// observation: the edge collapses into the bounded close. The one write is the
+// Final, carrying that observation's key, with no tool open. Deterministic:
+// the writer runs only after the close.
+func TestAnOpenEdgeTheProcessOutrunsCollapsesIntoTheFinal(t *testing.T) {
+	log := &progressLog{}
+	r := &progressRecorder{
+		write: log.record, interval: time.Hour, edge: time.Minute,
+		wake: make(chan struct{}, 1), closing: make(chan struct{}), done: make(chan struct{}),
+	}
+	now := time.Now()
+	r.observe(observation{key: "1:1", at: now, suspendedSince: now})
+	r.closeOnce.Do(func() { close(r.closing) })
+	r.run()
+	writes := log.snapshot()
+	if len(writes) != 1 || !writes[0].Final || writes[0].Suspended || writes[0].Key != "1:1" {
+		t.Fatalf("writes %+v, want only the unsuspended Final of key 1:1", writes)
+	}
 }
 
 // C (status). The suspension is reported structurally for the live attempt,

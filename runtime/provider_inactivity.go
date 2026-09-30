@@ -223,6 +223,16 @@ type ProviderProgress struct {
 // a write storm on the operation row.
 func progressRecordInterval(limit time.Duration) time.Duration { return limit / 4 }
 
+// progressEdgeSpacing is how soon after the previous write a SUSPENSION EDGE
+// may be written (#355): a sixtieth of the interval, 2.5s for the shipped
+// window. An edge - a structured tool opening or closing - is not ordinary
+// progress: status reads the row to say whether inactivity is suspended, so
+// holding a close for the ordinary interval made status claim a protection the
+// watchdog had already dropped. The spacing bounds a storm of tiny tools: all
+// writes, edges included, start at least this far apart, and edges arriving
+// inside it coalesce into the newest state.
+func progressEdgeSpacing(interval time.Duration) time.Duration { return interval / 60 }
+
 // progressRecorderLag is L, the CRASH-RECOVERY UNCERTAINTY ALLOWANCE: the most
 // LastProgressAt can trail the last progress of a process whose recorder never
 // closed, so the most a crash can hide and the most ProviderInactivityRemaining
@@ -303,10 +313,20 @@ func (w *inactivityWatch) record(key string, at, suspendedSince time.Time) {
 // arriving inside the interval REPLACES whatever is pending - newest wins,
 // nothing newer is ever dropped - and is written when the interval since the
 // previous write STARTED has passed, carrying the instant it was observed. So
-// write starts stay at least one interval apart: the maximum rate is unchanged.
+// ordinary write starts stay at least one interval apart: the maximum rate is
+// unchanged.
+//
+// A SUSPENSION EDGE is the exception (#355): an observation whose open-tool
+// state differs from the last one WRITTEN is due progressEdgeSpacing after the
+// previous write instead of an interval after it. It is still the newest
+// pending observation, written by the same goroutine, so it carries the newest
+// progress too and nothing older can follow it. The worst case is one write per
+// edge spacing while tools keep opening and closing; without edges it is one
+// per interval, exactly as before.
 type progressRecorder struct {
 	write    func(ProviderProgress)
 	interval time.Duration
+	edge     time.Duration
 
 	mu      sync.Mutex
 	pending *observation
@@ -320,7 +340,7 @@ type progressRecorder struct {
 
 func newProgressRecorder(write func(ProviderProgress), interval time.Duration) *progressRecorder {
 	r := &progressRecorder{
-		write: write, interval: interval,
+		write: write, interval: interval, edge: progressEdgeSpacing(interval),
 		wake: make(chan struct{}, 1), closing: make(chan struct{}), done: make(chan struct{}),
 	}
 	go r.run()
@@ -350,6 +370,29 @@ func (r *progressRecorder) take() *observation {
 	return next
 }
 
+// due takes the pending observation once its slot has come - an interval after
+// the previous write started, or the edge spacing for a suspension edge
+// relative to `last`, the observation last written - and otherwise reports how
+// long until it comes, zero when nothing is pending. Deciding and taking under
+// one lock means the observation written is the one that was judged due.
+func (r *progressRecorder) due(last *observation, lastStart time.Time) (*observation, time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == nil {
+		return nil, 0
+	}
+	spacing := r.interval
+	if last == nil || !r.pending.suspendedSince.Equal(last.suspendedSince) {
+		spacing = r.edge
+	}
+	if wait := time.Until(lastStart.Add(spacing)); !lastStart.IsZero() && wait > 0 {
+		return nil, wait
+	}
+	next := r.pending
+	r.pending = nil
+	return next, 0
+}
+
 // run is the recorder's only writer. Its last write is the CLOSING one: the
 // process ended under an observing controller, so its newest observation is
 // written at once, with no tool open and Final set, which tells a successor
@@ -361,26 +404,8 @@ func (r *progressRecorder) run() {
 	var lastStart time.Time
 	for {
 		select {
-		case <-r.wake:
 		case <-r.closing:
-		}
-		closing := false
-		select {
-		case <-r.closing:
-			closing = true
-		default:
-			if wait := time.Until(lastStart.Add(r.interval)); !lastStart.IsZero() && wait > 0 {
-				timer := time.NewTimer(wait)
-				select {
-				case <-timer.C:
-				case <-r.closing:
-					timer.Stop()
-					closing = true
-				}
-			}
-		}
-		next := r.take()
-		if closing {
+			next := r.take()
 			if next == nil {
 				next = last
 			}
@@ -390,10 +415,29 @@ func (r *progressRecorder) run() {
 				r.write(final.progress(true))
 			}
 			return
+		default:
 		}
+		next, wait := r.due(last, lastStart)
 		if next != nil {
 			lastStart, last = time.Now(), next
 			r.write(next.progress(false))
+			continue
+		}
+		// Nothing due: wait for its slot, or for a newer observation - an
+		// edge arriving while an ordinary one waits is due sooner.
+		var slot <-chan time.Time
+		var timer *time.Timer
+		if wait > 0 {
+			timer = time.NewTimer(wait)
+			slot = timer.C
+		}
+		select {
+		case <-r.wake:
+		case <-slot:
+		case <-r.closing:
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 	}
 }

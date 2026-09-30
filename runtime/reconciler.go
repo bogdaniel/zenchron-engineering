@@ -1684,13 +1684,22 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, Outcome{}, err
 	}
 	produced := r.handle(ctx, state, started)
+	// Only invokeExecution ever sets interrupted: a running provider is the one
+	// started attempt a stop reaches (#213); every other kind is unchanged.
+	interrupted := produced.interrupted
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
 			return false, Outcome{}, err
 		}
 	}
+	// An interrupted execution ends OperationCancelled - the state the stop
+	// itself writes to the scheduler row - so journal and store agree, and the
+	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
 	finished.State = produced.state
+	if interrupted {
+		finished.State = OperationCancelled
+	}
 	finished.Lease = nil
 	if produced.result != nil {
 		raw, err := marshalPayloadJSON(produced.result)
@@ -1703,8 +1712,23 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.Finish(started.ID, produced.state); err != nil {
-		return false, Outcome{}, err
+	if _, err := r.scheduler.Finish(started.ID, finished.State); err != nil {
+		// The stop may already have finished the row. That is accepted only for
+		// an interrupted execution and only when the row durably reads
+		// OperationCancelled - the one state CancelRun writes. Every other
+		// Finish failure is reported as it always was.
+		if !interrupted {
+			return false, Outcome{}, err
+		}
+		stored, _, found, readErr := r.deps.Store.Operation(started.ID)
+		if readErr != nil || !found || stored.State != OperationCancelled {
+			return false, Outcome{}, err
+		}
+	}
+	// The next pass reloads, finds run.cancelled in replay and settles the run
+	// cancelled through the ordinary terminal path.
+	if interrupted {
+		return true, Outcome{}, nil
 	}
 	// A wait-routed failure settles the RUN, not just the operation: the
 	// external world refused, nothing here can change that, and the pass must
