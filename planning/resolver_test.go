@@ -416,7 +416,7 @@ func TestARevisionCannotEscapeIndependenceByBecomingAGate(t *testing.T) {
 		next.Provenance.PreviousRevision = &revision
 		next.Stages = stages
 		return planning.Validate(next, planning.ValidationInput{
-			Contract: permitRequirement(permitted), Envelope: operatorEnvelope(), Previous: &source,
+			Contract: permitRequirement(permitted), Envelope: operatorEnvelope(), Previous: &source, RatchetBaseline: &source,
 		})
 	}
 
@@ -630,7 +630,7 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 
 	err := planning.Validate(renamed, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Previous: &previous,
+		Previous: &previous, RatchetBaseline: &previous,
 	})
 	if err == nil {
 		t.Fatal("a revision dropped an independence obligation by renaming the stage that held it")
@@ -677,14 +677,14 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 	})
 	if err := planning.Validate(repointed, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Previous: &previous,
+		Previous: &previous, RatchetBaseline: &previous,
 	}); err == nil {
 		t.Fatal("an obligation was dropped by renaming the reviewer and re-pointing it at another stage")
 	}
 
 	err = planning.Validate(gated, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Previous: &previous,
+		Previous: &previous, RatchetBaseline: &previous,
 	})
 	if err == nil {
 		t.Fatal("an obligation was answered by a human gate policy never permitted")
@@ -756,7 +756,7 @@ func TestARevisionCannotSwapTheRoleOrRepointTheObligation(t *testing.T) {
 			mutate(&stage)
 			next.Stages[i] = stage
 		}
-		return planning.Validate(next, planning.ValidationInput{Contract: contract, Previous: &previous})
+		return planning.Validate(next, planning.ValidationInput{Contract: contract, Previous: &previous, RatchetBaseline: &previous})
 	}
 	revise := func(mutate func(*domain.PlanStage)) error { return reviseWith(nil, mutate) }
 

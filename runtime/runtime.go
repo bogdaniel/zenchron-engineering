@@ -658,6 +658,9 @@ const (
 const (
 	TerminationProviderInactivity = "provider_inactivity_limit_reached"
 	TerminationDeadlineReached    = "deadline_reached"
+	// TerminationRunStopped is an invocation the runtime cancelled because an
+	// operator stopped its run while it was executing (#213).
+	TerminationRunStopped = "run_stopped"
 )
 
 // OperationRemaining is how much ACTIVE execution authority is left.

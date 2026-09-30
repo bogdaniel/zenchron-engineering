@@ -46,7 +46,7 @@ func (f *fakeAgentExecutor) Run(ctx context.Context, name string, args []string,
 	f.record(name, args, dir, env)
 	if f.block {
 		<-ctx.Done()
-		return CommandOutput{}, ctx.Err()
+		return CommandOutput{Owner: ownerOfCancellation(ctx)}, ctx.Err()
 	}
 	var out CommandOutput
 	if len(f.outputs) > 0 {

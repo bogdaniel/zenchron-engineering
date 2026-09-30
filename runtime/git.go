@@ -514,8 +514,8 @@ type runtimeDebris struct{ Excluded, Unlink []string }
 // as the ordinary content it now is - the producer's files land in the tree
 // instead of a gitlink nobody can resolve.
 //
-// A repository that genuinely uses submodules cannot be a candidate here, and
-// that is the honest answer rather than an omission: this runtime cannot show a
+// A repository that genuinely uses submodules cannot be a candidate here (it is
+// refused at workspace admission, see refuseSubmodules), and that is the honest answer rather than an omission: this runtime cannot show a
 // submodule's content to assurance either.
 func classifyRuntimeDebris(dir string, paths []string) (runtimeDebris, error) {
 	excluded, unlink := map[string]bool{}, map[string]bool{}
@@ -552,6 +552,50 @@ func classifyRuntimeDebris(dir string, paths []string) (runtimeDebris, error) {
 		}
 	}
 	return runtimeDebris{Excluded: sortedPathSet(excluded), Unlink: sortedPathSet(unlink)}, nil
+}
+
+// SubmoduleUnsupportedError is the admission refusal for a target repository
+// that records submodules. It names the capability limit rather than the Git
+// mechanism, so an operator reads "this runtime cannot carry submodules" and
+// not a gitlink diagnostic.
+type SubmoduleUnsupportedError struct{ Paths []string }
+
+func (e *SubmoduleUnsupportedError) Error() string {
+	return fmt.Sprintf("this runtime cannot carry submodules: the target repository records %d submodule path(s): %s. "+
+		"A submodule's content is not visible to assurance, so a candidate commit could not be verified against it; "+
+		"the run is refused at workspace admission, before any producer work. "+
+		"Remove the submodule from the target repository or point the runtime at a repository without submodules",
+		len(e.Paths), quotedPaths(e.Paths))
+}
+
+// refuseSubmodules refuses a workspace whose index records a submodule (a
+// 160000 gitlink). It runs at workspace admission, where the answer costs
+// nothing and precedes any provider invocation. Asking at commit time refused
+// every candidate commit for the repository, after the producer was paid for,
+// over a path the producer never touched.
+//
+// The question is asked of the index: `clone --no-checkout` followed by
+// `checkout --detach` leaves a submodule directory empty and `git status`
+// clean, so no worktree predicate can see it.
+func refuseSubmodules(dir string) error {
+	staged, err := gitOutput(dir, "ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for _, record := range strings.Split(strings.TrimRight(staged, "\x00"), "\x00") {
+		if !strings.HasPrefix(record, "160000 ") {
+			continue
+		}
+		if tab := strings.IndexByte(record, '\t'); tab >= 0 {
+			paths = append(paths, record[tab+1:])
+		}
+	}
+	if len(paths) > 0 {
+		sort.Strings(paths)
+		return &SubmoduleUnsupportedError{Paths: paths}
+	}
+	return nil
 }
 
 // isNestedRepository is the whole of the structural test, in one place because

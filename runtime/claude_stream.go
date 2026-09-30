@@ -108,6 +108,13 @@ type claudeStream struct {
 	isError     bool
 	denials     int
 	deniedTools []string
+	// answer is Claude's own semantic final answer text, decoded exactly once
+	// out of a successful final result's "result" field. hasAnswer
+	// distinguishes "no valid final result, or it was an error" from "the
+	// result held the empty string" - both leave answer at its zero value, but
+	// only the latter is a real (if useless) answer.
+	answer    string
+	hasAnswer bool
 }
 
 func newClaudeStream(attempt int) *claudeStream {
@@ -226,6 +233,13 @@ type claudeEvent struct {
 	// which it allocates before it discovers the mismatch).
 	IsError           json.RawMessage   `json:"is_error"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
+	// Answer is the JSON field literally named "result" on a result event: this
+	// invocation's SEMANTIC final answer, exactly as Claude wrote it before the
+	// stream-json transport wrapped it in this event's own JSON encoding. It
+	// stays raw here for the same reason IsError does - decoded strictly, only
+	// once a valid final result is otherwise established - so a missing or
+	// type-drifted value never promotes to an answer.
+	Answer json.RawMessage `json:"result"`
 }
 
 type claudeContentBlock struct {
@@ -318,6 +332,17 @@ func (s *claudeStream) handle(line []byte) {
 		s.sawResult, s.isError = true, *isError
 		s.denials = len(event.PermissionDenials)
 		s.deniedTools = deniedToolNames(event.PermissionDenials)
+		// THE SEMANTIC ANSWER, read only off a result the two typed fields above
+		// already established as a valid, non-error final result. A malformed or
+		// error result must never promote to an answer, so this is reached only
+		// past that gate - and a wrong-typed or missing "result" field simply
+		// leaves hasAnswer false, exactly like every other optional field here.
+		if !s.isError {
+			var answer *string
+			if json.Unmarshal(event.Answer, &answer) == nil && answer != nil {
+				s.answer, s.hasAnswer = *answer, true
+			}
+		}
 		// The final result ends every turn. An oversized last tool_result line
 		// must not leave a stale open tool in the provenance of a clean run.
 		clear(s.open)
@@ -392,6 +417,14 @@ type claudeStreamOutcome struct {
 	// DeniedTools is the bounded set of typed tool identifiers the final
 	// result's permission_denials named.
 	DeniedTools []string
+	// Answer is Claude's own semantic final answer text - the transport's
+	// stream-json encoding decoded exactly once, never the raw transcript bytes
+	// re-scanned by a consumer that has to guess where the model's prose ends
+	// and its transport framing begins. AnswerObserved is set only alongside a
+	// successful FinalResult; a failed or missing one never reaches here at
+	// all, so this can never promote a malformed answer into a valid one.
+	Answer         string
+	AnswerObserved bool
 }
 
 // outcome reads the final state. A result is REQUIRED only when the process
@@ -416,6 +449,7 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
 		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
+		Answer: s.answer, AnswerObserved: s.hasAnswer,
 	}
 }
 
