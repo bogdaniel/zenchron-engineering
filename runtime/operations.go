@@ -1045,12 +1045,28 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
 				var refusal *ReviewerResultRefusedError
 				if errors.As(admitErr, &refusal) {
-					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
+					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail), Protocol: refusal.Protocol}
+				}
+				// A PROTOCOL refusal (#374) - an unrecognized schema version or
+				// verdict, or a verdict/findings combination the protocol
+				// disallows - is the exact same kind of failure a malformed
+				// decode already is: the reviewer answered, but not in a shape
+				// this build may act on. It gets the same classification, the
+				// same retained exact reason, and the same one bounded
+				// correction - never FailureVerification, which would say the
+				// CANDIDATE failed review when nothing was actually judged. An
+				// AUTHORITY refusal (wrong stage, wrong worker, wrong candidate,
+				// broken independence) is not something rewriting the document
+				// fixes, so it keeps the verification classification it always
+				// had.
+				class := FailureVerification
+				if refusal != nil && refusal.Protocol {
+					class = FailureReviewerProtocolIncomplete
 				}
 				return recorded(effect{state: OperationFailed, result: executionRecord{
 					ReviewRefusal:  refusal,
-					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
-					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
+					mutationResult: mutationResult{FailureClass: class, ProviderID: result.ProviderID},
+					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, result, admitErr),
 				}})
 			}
 		}

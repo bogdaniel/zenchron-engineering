@@ -13,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -172,6 +173,84 @@ func TestARepositoryCannotPreSeedTheResult(t *testing.T) {
 	}
 }
 
+// THE PROTOCOL DEFINITION IS ONE STRUCT, READ TWICE, NOT TWO DESCRIPTIONS
+// (#374).
+//
+// reviewerEnvelope (sandbox.go) builds the instructions a reviewer reads from
+// ReviewerResultMembers/ReviewerFindingMembers/reviewerResultStatedMembers
+// rather than typing member names a second time, and indexes into their
+// result by position. That only stays correct if this exact field order,
+// shape and set survive - so it is pinned here the same way
+// TestProviderExecutionResultCarriesNoAuthorityBearingField pins
+// ExecutionResult: a field added, removed, renamed or reordered on
+// ReviewerResult or ReviewerFinding fails this test, loudly, rather than
+// silently producing prose that no longer matches what ReadReviewerResult
+// accepts.
+func TestReviewerEnvelopeMembersMatchTheProtocolStructFields(t *testing.T) {
+	wantResult := []string{"schema_version", "verdict", "candidate", "tree", "findings", "reason"}
+	if got := ReviewerResultMembers(); !reflect.DeepEqual(got, wantResult) {
+		t.Fatalf("ReviewerResult JSON members = %v, want %v (update deliberately, together with reviewerEnvelope's positional use of them)", got, wantResult)
+	}
+	wantStated := []string{"schema_version", "verdict", "findings", "reason"}
+	if got := reviewerResultStatedMembers(); !reflect.DeepEqual(got, wantStated) {
+		t.Fatalf("reviewerResultStatedMembers() = %v, want %v", got, wantStated)
+	}
+	wantFinding := []string{"signature", "detail"}
+	if got := ReviewerFindingMembers(); !reflect.DeepEqual(got, wantFinding) {
+		t.Fatalf("ReviewerFinding JSON members = %v, want %v", got, wantFinding)
+	}
+}
+
+// A DOCUMENT BUILT FROM EXACTLY WHAT reviewerEnvelope TELLS A REVIEWER TO
+// WRITE ROUND-TRIPS THROUGH THE STRICT DECODER, CONTENT INTACT (#374). This is
+// the positive mirror of TestAMalformedResultIsRefused: not merely "the two
+// descriptions currently agree" but "a document shaped from the live member
+// list is accepted and nothing in it is lost."
+func TestTheEnvelopesStatedMembersRoundTripThroughTheStrictDecoder(t *testing.T) {
+	document := map[string]any{}
+	for _, name := range reviewerResultStatedMembers() {
+		switch name {
+		case "schema_version":
+			document[name] = ReviewerResultSchemaVersion
+		case "verdict":
+			document[name] = StageReviewBlocked
+		case "findings":
+			finding := map[string]any{}
+			for _, member := range ReviewerFindingMembers() {
+				switch member {
+				case "signature":
+					finding[member] = "review:defect"
+				case "detail":
+					finding[member] = "the change is wrong"
+				default:
+					t.Fatalf("unhandled finding member %q - extend this test alongside ReviewerFinding", member)
+				}
+			}
+			document[name] = []map[string]any{finding}
+		case "reason":
+			document[name] = "because the obligations were not met"
+		default:
+			t.Fatalf("unhandled result member %q - extend this test alongside ReviewerResult", name)
+		}
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "reviewer-result.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ReadReviewerResult(path)
+	if err != nil {
+		t.Fatalf("a document built from exactly the envelope's stated members was refused: %v (document: %s)", err, raw)
+	}
+	if result.Verdict != StageReviewBlocked || len(result.Findings) != 1 ||
+		result.Findings[0].Signature != "review:defect" || result.Findings[0].Detail != "the change is wrong" {
+		t.Fatalf("round trip lost content: %#v", result)
+	}
+}
+
 // Malformed, oversized and unknown-member documents are refused rather than
 // interpreted. A result this build cannot read is not a verdict it may act on.
 func TestAMalformedResultIsRefused(t *testing.T) {
@@ -207,10 +286,22 @@ func TestAnOversizedResultIsRefused(t *testing.T) {
 
 // Every admission refusal, one case each. They share a table because the shape
 // of the assertion is the same: this claim does not become lifecycle state.
+//
+// Each case also states whether its refusal is a PROTOCOL refusal or an
+// AUTHORITY one (#374). The two cannot be told apart by trying it again with
+// better-formed JSON: a protocol refusal can be, because nothing about it
+// depended on who asked or what they claimed to have reviewed; an authority
+// refusal cannot, because rewriting the document changes none of the facts
+// that caused it. operations.go's admitReview reads exactly this field to
+// decide between FailureReviewerProtocolIncomplete (bounded correction) and
+// FailureVerification (a verdict on the invocation, not on the candidate) -
+// so a case drifting to the wrong side here is the #374 regression returning
+// through this exact table.
 func TestReviewerResultAdmissionRefusals(t *testing.T) {
 	cases := []struct {
-		name   string
-		mutate func(*reviewerFixture, *ReviewerResult)
+		name     string
+		mutate   func(*reviewerFixture, *ReviewerResult)
+		protocol bool
 	}{
 		{
 			// AN IMPLEMENTER CANNOT BECOME A REVIEWER by writing matching JSON.
@@ -266,20 +357,24 @@ func TestReviewerResultAdmissionRefusals(t *testing.T) {
 			mutate: func(f *reviewerFixture, _ *ReviewerResult) { f.subject = domain.UpstreamOutput{} },
 		},
 		{
-			name:   "an unrecognized schema version",
-			mutate: func(_ *reviewerFixture, r *ReviewerResult) { r.SchemaVersion = "99.0" },
+			name:     "an unrecognized schema version",
+			mutate:   func(_ *reviewerFixture, r *ReviewerResult) { r.SchemaVersion = "99.0" },
+			protocol: true,
 		},
 		{
-			name:   "no schema version at all",
-			mutate: func(_ *reviewerFixture, r *ReviewerResult) { r.SchemaVersion = "" },
+			name:     "no schema version at all",
+			mutate:   func(_ *reviewerFixture, r *ReviewerResult) { r.SchemaVersion = "" },
+			protocol: true,
 		},
 		{
-			name:   "an unrecognized verdict",
-			mutate: func(_ *reviewerFixture, r *ReviewerResult) { r.Verdict = "probably-fine" },
+			name:     "an unrecognized verdict",
+			mutate:   func(_ *reviewerFixture, r *ReviewerResult) { r.Verdict = "probably-fine" },
+			protocol: true,
 		},
 		{
-			name:   "no verdict at all",
-			mutate: func(_ *reviewerFixture, r *ReviewerResult) { r.Verdict = "" },
+			name:     "no verdict at all",
+			mutate:   func(_ *reviewerFixture, r *ReviewerResult) { r.Verdict = "" },
+			protocol: true,
 		},
 		{
 			// TWO ANSWERS AT ONCE. A gate reads the verdict, so accepting while
@@ -289,17 +384,20 @@ func TestReviewerResultAdmissionRefusals(t *testing.T) {
 				r.Verdict = StageReviewAccepted
 				r.Findings = []ReviewerFinding{{Signature: "review:defect"}}
 			},
+			protocol: true,
 		},
 		{
 			// A BLOCK REMEDIATION CANNOT ACT ON.
-			name:   "a block naming no finding",
-			mutate: func(_ *reviewerFixture, r *ReviewerResult) { r.Findings = nil },
+			name:     "a block naming no finding",
+			mutate:   func(_ *reviewerFixture, r *ReviewerResult) { r.Findings = nil },
+			protocol: true,
 		},
 		{
 			name: "a finding with no signature",
 			mutate: func(_ *reviewerFixture, r *ReviewerResult) {
 				r.Findings = []ReviewerFinding{{Detail: "something is wrong"}}
 			},
+			protocol: true,
 		},
 		{
 			name: "more findings than the bound allows",
@@ -309,6 +407,7 @@ func TestReviewerResultAdmissionRefusals(t *testing.T) {
 					r.Findings[i] = ReviewerFinding{Signature: "review:defect"}
 				}
 			},
+			protocol: true,
 		},
 	}
 	for _, tc := range cases {
@@ -323,6 +422,9 @@ func TestReviewerResultAdmissionRefusals(t *testing.T) {
 			var refused *ReviewerResultRefusedError
 			if !asReviewerRefusal(err, &refused) {
 				t.Fatalf("the refusal is untyped: %v", err)
+			}
+			if refused.Protocol != tc.protocol {
+				t.Fatalf("refusal.Protocol = %v, want %v: a case must be classified as correctable protocol failure (one bounded retry) xor authority failure (never corrected), see FailureReviewerProtocolIncomplete vs FailureVerification in operations.go", refused.Protocol, tc.protocol)
 			}
 		})
 	}

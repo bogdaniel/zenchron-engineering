@@ -340,6 +340,43 @@ func (s *runState) lastReviewRefusal(id string) (*ReviewerResultRefusedError, bo
 	return record.ReviewRefusal, true
 }
 
+// reviewerProtocolCorrectionExhausted reports whether this operation's two
+// most recent CONSECUTIVE attempts both failed to cross the reviewer-result
+// protocol (#374). The runtime grants exactly one corrective reviewer
+// invocation after a malformed or missing result; it is independent of
+// max_execution_attempts, which bounds a different question (how many tries
+// this operation gets, for any reason) and must not be read as also answering
+// this one. A second FailureReviewerProtocolIncomplete in a row means the
+// correction offered through lastReviewRefusal was not taken up.
+//
+// It reads the full event history, not the folded operation, because the
+// folded operation (lastFailure, lastReviewRefusal) only ever holds the most
+// recent attempt - exactly one attempt short of what "two in a row" needs. A
+// non-reviewer-protocol attempt anywhere in the streak - success, a different
+// failure class, an external wait - resets the count: only a run of
+// uninterrupted protocol failures, starting from the most recent attempt,
+// counts against the one-correction grant.
+func (s *runState) reviewerProtocolCorrectionExhausted(id string) bool {
+	streak := 0
+	for _, e := range s.events {
+		if e.Type != EventOperationAfter || e.OperationID != id {
+			continue
+		}
+		var op RunOperation
+		if decodeJSON(e.Payload, &op) != nil || op.State != OperationFailed {
+			streak = 0
+			continue
+		}
+		var record executionRecord
+		if decodeJSON(op.Result, &record) == nil && record.FailureClass == FailureReviewerProtocolIncomplete {
+			streak++
+		} else {
+			streak = 0
+		}
+	}
+	return streak >= 2
+}
+
 // currentOperation is the most recently started operation, for the status
 // report only. It is never consulted to decide what to do next.
 func (s *runState) currentOperation() (RunOperation, bool) {
@@ -1729,6 +1766,26 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// account state, so asking it again is the only honest re-derivation; the
 	// attempt that only re-observes the wait is given back by RestoreAttempt,
 	// which is what keeps repeated passes from spending the run's budget.
+	// A REVIEWER PROTOCOL FAILURE gets exactly ONE corrective re-invocation
+	// (#374), never a budget's worth. RouteFailure(FailureReviewerProtocolIncomplete)
+	// is RouteRetry - a malformed or missing result is a correctable mistake,
+	// not a verdict on the candidate - so without this check the ordinary rule
+	// below would keep re-dispatching the SAME reviewer for as many attempts as
+	// the operator's execution-attempt budget happens to allow, which answers a
+	// question #374 does not ask: how many tries does this invocation get, not
+	// how many corrections does a reviewer that keeps failing the protocol
+	// deserve. One correction is the whole grant. A reviewer handed its own
+	// exact refusal reason (lastReviewRefusal, consulted in invokeExecution)
+	// and still failing to cross the protocol a second time in a row has shown
+	// the correction was not taken up, and no further authority accrues to
+	// this operation from retrying it again - whatever budget remains.
+	if state.reviewerProtocolCorrectionExhausted(leased.ID) {
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Failed, leased.Kind+"_reviewer_protocol_correction_exhausted")
+		return false, outcome, err
+	}
 	if class, recorded := state.lastFailure(leased.ID); recorded && !reattemptable(RouteFailure(class)) {
 		// The journal already records this operation as failed; releasing the
 		// lease keeps the scheduler row saying the same thing.

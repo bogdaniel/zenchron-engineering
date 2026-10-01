@@ -1123,21 +1123,52 @@ func planningEnvelope(r ExecutionRequest) string {
 // comes from the stage objective the planner wrote and the operator approved,
 // and how to judge it comes from the contract's acceptance obligations. This
 // text only says how to ANSWER.
+//
+// The member names it quotes come from reviewerResultStatedMembers and
+// ReviewerFindingMembers (reviewer_result.go), never typed here directly
+// (#374): this function and ReadReviewerResult's strict decoder both close
+// over the same ReviewerResult/ReviewerFinding structs, so a member this
+// prose tells a reviewer to write is, by construction, a member the decoder
+// also accepts - see TestReviewerEnvelopeMembersMatchTheProtocolStructFields
+// for what pins that order down.
+//
+// It also states the VERIFICATION BOUNDARY explicitly (#374 dogfood
+// evidence): a reviewer's permission grant is independent of this runtime's
+// own assurance pipeline, and may not include running the build or test
+// commands an acceptance obligation names. That is a scope boundary, not a
+// capability gap for the reviewer to route around by attempting those
+// commands anyway - the #343 dogfood recorded ten denied Bash calls from one
+// reviewer invocation for exactly this reason. The model is: this runtime
+// independently observes build and test evidence through its own pipeline and
+// quotes it below, under its own untrusted-evidence marker, when it exists;
+// the reviewer judges FROM that evidence and from what its own grant actually
+// lets it inspect, and a denied command is reported through the obligation it
+// left unverified - the existing "not verified is not satisfied" rule, which
+// already covers this case - never as a separate malfunction.
 func reviewerEnvelope(r ExecutionRequest) string {
 	if r.ReviewerResultPath == "" {
 		return ""
 	}
+	members, findingMembers := reviewerResultStatedMembers(), ReviewerFindingMembers()
 	return fmt.Sprintf(
 		"\n\nREQUIRED RESULT. This is a review stage, and its work product is a verdict rather than a change. "+
 			"Prose alone does not complete it: write a JSON document to %s and nothing else decides this stage. "+
-			"The document is a JSON object with exactly these members: schema_version (%q), verdict (%q or %q), "+
-			"findings (an array of objects with a signature and an optional detail), and an optional reason. "+
+			"The document is a JSON object with exactly these members: %s (%q), %s (%q or %q), "+
+			"%s (an array of objects with a %s and an optional %s), and an optional %s. "+
 			"Use %q only when every acceptance obligation above is satisfied by evidence you actually observed, and name no findings with it. "+
-			"Use %q when any obligation is unmet, naming at least one finding; each finding's signature is a short stable identifier for one defect. "+
+			"Use %q when any obligation is unmet, naming at least one finding; each finding's %s is a short stable identifier for one defect. "+
 			"An obligation you could not verify is NOT satisfied - report it as a finding rather than treating it as passed. "+
+			"VERIFICATION BOUNDARY: this runtime's own assurance pipeline independently observes build and test evidence and, when it exists, quotes it to you separately as evidence to reason about; "+
+			"your permission grant for this invocation may not include running the commands an acceptance obligation names, and that is a scope boundary rather than a defect in this invocation. "+
+			"Judge such an obligation from the evidence presented and from what your own grant actually lets you inspect - do not repeatedly attempt a command you have already been denied, and do not treat a denial itself as a finding; "+
+			"an obligation you still cannot verify after that is, as above, not satisfied, and is reported through the ordinary finding for that obligation. "+
 			"Do not restate the candidate revision or tree: the runtime binds this result to the exact candidate it gave you.",
-		r.ReviewerResultPath, ReviewerResultSchemaVersion,
-		StageReviewAccepted, StageReviewBlocked, StageReviewAccepted, StageReviewBlocked)
+		r.ReviewerResultPath,
+		members[0], ReviewerResultSchemaVersion,
+		members[1], StageReviewAccepted, StageReviewBlocked,
+		members[2], findingMembers[0], findingMembers[1],
+		members[3],
+		StageReviewAccepted, StageReviewBlocked, findingMembers[0])
 }
 
 func providerEnvelope(r ExecutionRequest) string {
