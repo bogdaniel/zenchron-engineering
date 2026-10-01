@@ -1357,12 +1357,20 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// that tried to answer and produced something unreadable has not silently
 	// declined to answer, and treating the two the same would hide a broken
 	// protocol behind a stage that merely never settles.
+	//
+	// It is classified FailureReviewerProtocol, not FailureVerification: no
+	// verdict about the candidate was reached, so there is nothing for a
+	// producer to remediate - what failed is the reviewer's OWN protocol
+	// exchange, and it is corrected by asking the same reviewer again. The
+	// exact decode reason is kept in Detail rather than discarded, so the
+	// retried invocation can be told precisely what was wrong (#374).
 	if request.ReviewerResultPath != "" {
 		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
 		if reviewErr != nil {
 			result.Outcome = OperationFailed
 			result.Failure = &ProviderFailure{
-				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
+				Classification: FailureReviewerProtocol, RawDiagnosticRef: artifacts[0].Path,
+				Detail: reviewErr.Error(),
 			}
 			return result, nil
 		}

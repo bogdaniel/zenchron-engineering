@@ -352,6 +352,13 @@ func (a ExecutionAttemptRef) Validate() error {
 type ProviderFailure struct {
 	Classification   FailureClass
 	RawDiagnosticRef string
+	// Detail is the exact reason, when the adapter itself determined one -
+	// a reviewer result that failed to decode, for instance. It is folded
+	// into the durable diagnostic's Message by executionDiagnostic, so the
+	// reason survives even when no process error carries it. RawDiagnosticRef
+	// still names the artifact an operator can open; this is the string an
+	// operator (or a retried reviewer) is actually told.
+	Detail string
 }
 type AssuranceProvider interface {
 	Assure(context.Context, AssuranceRequest) (AssuranceResult, error)
@@ -847,7 +854,32 @@ const (
 	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
 	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
 	FailureFlaky                     FailureClass = "flaky_verification"
-	FailureUnknown                   FailureClass = "unknown"
+	// FailureReviewerProtocol is a REVIEWER stage's structured result channel
+	// failing to carry a verdict on an otherwise-successful invocation: the
+	// result is absent, unreadable, or refused by AdmitReviewerResult's
+	// authority checks. A malformed document and a silently absent one are the
+	// same failure here - the reviewer tried to answer and produced something
+	// this build cannot read, or never answered at all.
+	//
+	// It is deliberately NOT FailureVerification. That class means a verdict
+	// was REACHED about the candidate; this means no verdict was reached,
+	// because the protocol that carries one was never completed. Classifying
+	// it as FailureVerification routed it to RouteProviderRemediation, which
+	// binds a NEW operation keyed to a COMMITTED candidate revision - and a
+	// reviewer stage that mutates nothing never commits one, so the very same
+	// initial operation was replanned, found its own prior failure unroutable
+	// under the reattempt rule, and the run died reporting an engineering
+	// failure for a review that was never actually judged (#374). A valid
+	// BLOCK is a successful review outcome; this is the protocol failing to
+	// deliver one at all, and is correctable by asking again.
+	//
+	// It routes to a bounded RETRY of the SAME invocation, under the same
+	// execution attempt ceiling every other retryable class spends from, so
+	// the exact reason - kept, never discarded - reaches the reviewer's next
+	// attempt and the stage stays open for its verdict rather than failing the
+	// candidate it never judged.
+	FailureReviewerProtocol FailureClass = "reviewer_protocol_incomplete"
+	FailureUnknown          FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -885,7 +917,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress:
+		FailureProviderNoProgress, FailureReviewerProtocol:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess

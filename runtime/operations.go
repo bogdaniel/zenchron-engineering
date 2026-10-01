@@ -642,6 +642,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// A REVIEWER retrying after its own prior attempt's result was refused or
+	// unreadable is told exactly why, even though no candidate was ever
+	// committed for it to remediate - the branch above that assembles
+	// findings from state.findings() never fires for a stage that mutates
+	// nothing, which is the common case for a reviewer. Without this, the
+	// retried reviewer received no signal at all about what its predecessor
+	// did wrong (#374).
+	if stage.producesVerdict() && priorFailure == FailureReviewerProtocol {
+		if reason, ok := state.reviewerProtocolReason(operation.ID); ok {
+			findings = append(findings, Finding{
+				Classification: FailureReviewerProtocol,
+				Signature:      boundedDetail("reviewer-protocol: " + reason),
+			})
+		}
+	}
 	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
 	//
 	// It is NOT operation.Attempt. That is the budget counter, and a provider
@@ -953,12 +968,31 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				if errors.As(admitErr, &refusal) {
 					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
 				}
+				// A refused result is a PROTOCOL failure, not a verdict about the
+				// candidate: the reviewer wrote something, but not something this
+				// runtime's authority checks can accept as one. It is corrected by
+				// asking the same reviewer again, exactly like an unreadable
+				// document, so it carries the same class (#374).
 				return recorded(effect{state: OperationFailed, result: executionRecord{
 					ReviewRefusal:  refusal,
-					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
-					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
+					mutationResult: mutationResult{FailureClass: FailureReviewerProtocol, ProviderID: result.ProviderID},
+					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureReviewerProtocol, result, admitErr),
 				}})
 			}
+		} else if stage.producesVerdict() {
+			// NO VERDICT AT ALL, from an invocation that otherwise succeeded: a
+			// reviewer that produced only prose. It is not an honest "nothing to
+			// report" - a verdict-producing stage has exactly one job - and
+			// completing the operation anyway stranded the stage open forever
+			// with no further invocation ever planned to ask again, because
+			// nothing records the operation as anything other than succeeded. It
+			// is a bounded-retry protocol failure like a malformed result, not a
+			// verification failure of a candidate nothing judged (#374).
+			missing := fmt.Errorf("the invocation completed without writing a verdict to the structured reviewer-result channel")
+			return recorded(effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureReviewerProtocol, ProviderID: result.ProviderID},
+				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureReviewerProtocol, result, missing),
+			}})
 		}
 		events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
 			ProducerID:    producerID,
@@ -1328,8 +1362,15 @@ func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClas
 		ProviderKind: boundedDetail(fmt.Sprintf("%T", r.deps.Provider)),
 		Model:        boundedDetail(result.Model),
 	}
-	if cause != nil {
+	switch {
+	case cause != nil:
 		diagnostic.Message = sanitizedDetail(cause.Error())
+	case result.Failure != nil && result.Failure.Detail != "":
+		// The adapter determined a reason but reported no process error - a
+		// reviewer result that failed to decode, for instance. Without this,
+		// Detail was recorded nowhere durable and the exact reason a reviewer
+		// needs to correct itself was lost (#374).
+		diagnostic.Message = sanitizedDetail(result.Failure.Detail)
 	}
 	// A typed stop is the richer answer: it names the bounded loop's own exit
 	// reason and, when an HTTP exchange actually happened, its status and the
@@ -1396,8 +1437,8 @@ func (s *runState) findings() []Finding {
 			continue
 		}
 		var record executionRecord
-		if decodeJSON(ops[i].Result, &record) == nil && record.FailureClass == FailureVerification && record.ReviewRefusal != nil {
-			findings = append(findings, Finding{Classification: FailureVerification, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
+		if decodeJSON(ops[i].Result, &record) == nil && record.FailureClass == FailureReviewerProtocol && record.ReviewRefusal != nil {
+			findings = append(findings, Finding{Classification: FailureReviewerProtocol, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
 		}
 		break
 	}
@@ -1427,6 +1468,22 @@ func (s *runState) findings() []Finding {
 		}
 	}
 	return findings
+}
+
+// reviewerProtocolReason reads the exact reason the current operation's most
+// recent attempt recorded for a FailureReviewerProtocol failure - the same
+// durable record lastFailure reads the class from, read one level deeper for
+// the message a retried reviewer needs rather than just the classification.
+func (s *runState) reviewerProtocolReason(id string) (string, bool) {
+	op, ok := s.snapshot.Operations[id]
+	if !ok || op.State != OperationFailed {
+		return "", false
+	}
+	var record executionRecord
+	if decodeJSON(op.Result, &record) != nil || record.FailureClass != FailureReviewerProtocol || record.Diagnostic == nil {
+		return "", false
+	}
+	return record.Diagnostic.Message, record.Diagnostic.Message != ""
 }
 
 // executionWallBound is how long THIS invocation may run: the operation's

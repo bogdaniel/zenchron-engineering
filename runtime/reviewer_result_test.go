@@ -446,8 +446,16 @@ func TestAMalformedVerdictFailsAnOtherwiseSuccessfulInvocation(t *testing.T) {
 	if result.Outcome != OperationFailed || result.Failure == nil {
 		t.Fatalf("a malformed verdict did not fail the invocation: %+v", result)
 	}
-	if result.Failure.Classification != FailureVerification {
-		t.Fatalf("classification %q, want %q", result.Failure.Classification, FailureVerification)
+	// FailureReviewerProtocol, not FailureVerification: no verdict about the
+	// candidate was reached, so there is nothing for a producer to remediate -
+	// what failed is the reviewer's own protocol exchange, which a bounded
+	// retry of the SAME invocation corrects (#374).
+	if result.Failure.Classification != FailureReviewerProtocol {
+		t.Fatalf("classification %q, want %q", result.Failure.Classification, FailureReviewerProtocol)
+	}
+	if RouteFailure(result.Failure.Classification) != RouteRetry {
+		t.Fatalf("a malformed verdict routes to %q, so no bounded retry of the reviewer is ever planned",
+			RouteFailure(result.Failure.Classification))
 	}
 	if result.Review != nil {
 		t.Fatalf("a malformed verdict was carried out anyway: %+v", result.Review)
