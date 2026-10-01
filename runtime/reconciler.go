@@ -320,6 +320,52 @@ func (s *runState) lastFailure(id string) (FailureClass, bool) {
 	return result.FailureClass, true
 }
 
+// connectivityWaitPending is #380's durable retry gate: it reports whether
+// THIS operation's last durable attempt recorded a recognized connectivity-
+// class failure (lastFailure) whose bounded backoff (withConnectivityBackoff,
+// operations.go) has not yet elapsed.
+//
+// It is read from the same journal-folded operation document lastFailure
+// reads - never from an in-memory timer - so a controller that restarts
+// inside the wait sees the IDENTICAL retry instant rather than retrying
+// immediately, and the caller consults it BEFORE leasing or dispatching the
+// operation, so a pass inside the window makes no network call and consumes
+// no attempt. Once the instant has passed, this reports no wait pending and
+// the operation is dispatched exactly as any other reattemptable failure.
+func (s *runState) connectivityWaitPending(id string, now time.Time) (FailureClass, bool) {
+	class, recorded := s.lastFailure(id)
+	if !recorded || RouteFailure(class) != RouteWait {
+		return "", false
+	}
+	op := s.snapshot.Operations[id]
+	var result failedResult
+	if decodeJSON(op.Result, &result) != nil || result.ConnectivityWaitUntil.IsZero() {
+		return "", false
+	}
+	if !now.Before(result.ConnectivityWaitUntil) {
+		return "", false
+	}
+	return class, true
+}
+
+// connectivityWaitExhausted reports whether a connectivity-class failure's own
+// durable streak (ConnectivityWaitStreak) has exceeded the operation's OWN
+// attempt ceiling - existing authority, applied to a different resource,
+// never a budget #380 mints. It is consulted only for a class
+// connectivityWaitPending already treats as a bounded wait, so a connectivity
+// failure that has recurred that many times, running out a bounded wait every
+// time and never once seeing the world change, stops waiting and lets the
+// run fail truthfully through the SAME attempts-exhausted settle every other
+// operation uses, rather than waiting on a condition that has shown no sign
+// of clearing.
+func connectivityWaitExhausted(raw json.RawMessage, maxAttempts int) bool {
+	var result failedResult
+	if decodeJSON(raw, &result) != nil {
+		return false
+	}
+	return maxAttempts > 0 && result.ConnectivityWaitStreak > maxAttempts
+}
+
 // lastReviewRefusal reads the exact reviewer-protocol refusal THIS operation's
 // most recent failed attempt recorded, so a bounded retry of the same
 // reviewer invocation (#374) can be told why rather than being re-dispatched
@@ -1798,6 +1844,21 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Failed, leased.Kind+"_failure_not_retryable")
 		return false, outcome, err
 	}
+	// #380's durable retry gate. A connectivity-class failure's bounded
+	// backoff is consulted HERE, before the lease is ever started and before
+	// the handler ever runs, because that is what keeps a pass inside the
+	// window from making the network call it would otherwise make only to
+	// discover the condition unchanged - the exact shape of the live #380
+	// incident, where three attempts fired inside one second. The lease is
+	// released rather than started, so no attempt is spent and the durable
+	// record this pass read is left exactly as the prior pass wrote it.
+	if class, waiting := state.connectivityWaitPending(leased.ID, r.deps.Clock.Now()); waiting {
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Waiting, waitReason(class))
+		return false, outcome, err
+	}
 	started, err := r.scheduler.StartWithin(leased.ID, state.attemptLimit(r.deps.Clock.Now()))
 	if err != nil {
 		return false, Outcome{}, err
@@ -1869,6 +1930,20 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
+		// #380's bounded exhaustion. A connectivity-class wait's own durable
+		// streak - how many times IN A ROW this exact operation has recorded
+		// this exact condition, each time running out a bounded backoff and
+		// never once seeing the world change - is bounded by the operation's
+		// OWN attempt ceiling: existing authority, not a budget this invariant
+		// mints. Once exceeded, the wait stops and the run fails through the
+		// SAME attempts-exhausted settle every other operation uses, with its
+		// held material and obligations preserved exactly as that path already
+		// preserves them - rather than waiting on a condition that has shown
+		// no sign of clearing.
+		if class == FailureForgeUnavailable && connectivityWaitExhausted(finished.Result, started.MaxAttempts) {
+			outcome, err := r.settle(state, Failed, started.Kind+attemptsExhaustedSuffix)
+			return false, outcome, err
+		}
 		// The ATTEMPT is always given back - observing an external refusal is
 		// not work. The execution TIME is given back only when no execution
 		// happened: a provider that reasoned for twenty minutes and only then

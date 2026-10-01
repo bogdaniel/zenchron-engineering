@@ -245,6 +245,14 @@ var claudeSpec = cliAgentSpec{
 	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},
+		// Claude Code's OWN wrapping of a resolver failure, observed live
+		// during the #380 dogfood incident as "API Error: Can't reach the API
+		// server — check your internet or DNS (ENOTFOUND)". It is reported as
+		// this sentence, not as libuv's "getaddrinfo ENOTFOUND" literal, so it
+		// needs its own signal: nodeTransportSignals' token below did not
+		// match it, and the live run was classified unknown/stop instead of
+		// reaching this bounded wait.
+		{"can't reach the api server", FailureProviderUnavailable},
 	}, nodeTransportSignals...),
 	Args: func(i cliInvocation) []string {
 		mode := "acceptEdits"

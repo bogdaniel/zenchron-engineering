@@ -54,11 +54,37 @@ type effect struct {
 	interrupted bool
 }
 
+// failedResult is what failed() records, and the ONLY shape handle's backoff
+// decoration (withConnectivityBackoff) ever reads or writes. Naming it, rather
+// than leaving it the anonymous struct it was before #380, is what lets that
+// single choke point type-assert the result instead of every one of failed's
+// dozens of call sites having to thread a clock and a durable streak through
+// itself.
+type failedResult struct {
+	Error        string       `json:"error"`
+	FailureClass FailureClass `json:"failure_class,omitempty"`
+	// ConnectivityWaitUntil and ConnectivityWaitStreak are #380's durable
+	// bounded backoff. Both are zero from failed() itself - this struct has no
+	// clock and no memory of a prior attempt - and are populated afterward, by
+	// handle, only for a RECOGNIZED connectivity-class failure. They ride the
+	// same durable journal row every other field on a failed operation does,
+	// so a controller restart reads back the identical retry instant rather
+	// than retrying immediately.
+	ConnectivityWaitUntil time.Time `json:"connectivity_wait_until,omitempty"`
+	// ConnectivityWaitStreak counts the CONSECUTIVE connectivity-class waits
+	// this exact operation has recorded since its last attempt that was not
+	// one. It is what bounds the backoff's own exhaustion (runOperation): once
+	// it exceeds the operation's own MaxAttempts - existing authority, not a
+	// new one - the wait stops and the run fails truthfully instead of waiting
+	// forever.
+	ConnectivityWaitStreak int `json:"connectivity_wait_streak,omitempty"`
+}
+
 func failed(err error) effect {
-	return effect{state: OperationFailed, result: struct {
-		Error        string       `json:"error"`
-		FailureClass FailureClass `json:"failure_class,omitempty"`
-	}{boundedDetail(err.Error()), observationFailureClass(err)}}
+	return effect{state: OperationFailed, result: failedResult{
+		Error:        boundedDetail(err.Error()),
+		FailureClass: observationFailureClass(err),
+	}}
 }
 
 // observationFailureClass recognizes a narrow, typed set of failures that name
@@ -126,7 +152,71 @@ func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op Run
 	if !ok {
 		return failed(fmt.Errorf("no handler for operation kind %q", op.Kind))
 	}
-	return handler(ctx, state, op)
+	return r.withConnectivityBackoff(state, op, handler(ctx, state, op))
+}
+
+// connectivityWaitBase and connectivityWaitMax bound #380's durable backoff:
+// bounded exponential growth from a floor that still lets an operator who
+// fixed connectivity see it take within the minute, capped well short of
+// parking a run for a working day. The shape mirrors watch.go's own
+// forge-discovery backoff; the constants are named separately because they
+// bound a different resource - one run operation's retries, not a whole
+// repository's poll cadence.
+const (
+	connectivityWaitBase = 30 * time.Second
+	connectivityWaitMax  = 10 * time.Minute
+)
+
+// connectivityWaitBackoff is bounded exponential growth from the base,
+// doubling once per consecutive connectivity-class wait this exact operation
+// has recorded in a row.
+func connectivityWaitBackoff(streak int) time.Duration {
+	wait := connectivityWaitBase
+	for i := 1; i < streak && wait < connectivityWaitMax; i++ {
+		wait *= 2
+	}
+	if wait > connectivityWaitMax {
+		wait = connectivityWaitMax
+	}
+	return wait
+}
+
+// withConnectivityBackoff is handle's single choke point for #380: every
+// operation kind's effect passes through it, so the durable backoff applies
+// uniformly rather than being a source.observe special case.
+//
+// A RECOGNIZED connectivity-class failure (today: FailureForgeUnavailable,
+// the forge's typed counterpart of a recognized transport failure) is given a
+// durable, bounded retry instant rather than being left eligible the instant
+// its attempt is restored - which is what let the live #380 incident consume
+// three attempts of source.observe inside one second. The streak that drives
+// both the backoff and its own exhaustion is read back from the durable
+// record this operation's OWN last attempt left (state.snapshot.Operations,
+// the same journal-folded document lastFailure reads), never from memory, so
+// a controller restart sees the identical count and the identical instant.
+//
+// Every other failure - unclassified, or classified into any other route -
+// passes through unchanged. This is deliberately not a general treatment of
+// RouteWait: #83's existing external-wait classes already have their own
+// settled meaning, and folding them into a streak they were never measured
+// against would change their behaviour for a reason this issue does not ask
+// for.
+func (r *EngineeringRuntime) withConnectivityBackoff(state *runState, op RunOperation, produced effect) effect {
+	result, ok := produced.result.(failedResult)
+	if !ok || result.FailureClass != FailureForgeUnavailable {
+		return produced
+	}
+	streak := 1
+	if prior, found := state.snapshot.Operations[op.ID]; found {
+		var priorResult failedResult
+		if decodeJSON(prior.Result, &priorResult) == nil && priorResult.FailureClass == FailureForgeUnavailable {
+			streak = priorResult.ConnectivityWaitStreak + 1
+		}
+	}
+	result.ConnectivityWaitStreak = streak
+	result.ConnectivityWaitUntil = r.deps.Clock.Now().Add(connectivityWaitBackoff(streak))
+	produced.result = result
+	return produced
 }
 
 // ---------------------------------------------------------------------------
