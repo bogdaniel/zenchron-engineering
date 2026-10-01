@@ -1876,6 +1876,26 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, "execution_checkpointed")
 		return false, outcome, err
 	}
+	// AN UNRESOLVED CONTINUATION ALSO ENDS THE PASS (#379), for the same
+	// reason a checkpoint does: the checkpoint it inherited is unresolved work,
+	// not a flake worth hammering same-call like an ordinary retryable
+	// failure. feedback_unresolved and reviewer-protocol failures are
+	// deliberately NOT given this treatment - they retry within the same pass,
+	// spending their whole attempt budget at once, because that failure is
+	// about a candidate already known to exist and already being iterated on.
+	// A checkpoint continuation is different: it is the one invocation that
+	// may have just spent real wall-clock time deferring to work it never
+	// finished, and retrying it immediately, in the same call, is exactly how
+	// the fourth dogfood's checkpoint got hammered through its whole budget
+	// and promoted on the attempt that happened to return clean. Ending the
+	// pass here means each continuation attempt is observed at a durable
+	// point - the checkpoint stays exactly where it was, the attempt it spent
+	// is not given back, and a later reconciliation (not this same call)
+	// decides whether to spend the next one.
+	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
+		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
 		// The ATTEMPT is always given back - observing an external refusal is
 		// not work. The execution TIME is given back only when no execution
@@ -1889,6 +1909,18 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	return true, Outcome{}, nil
+}
+
+// failureClassOf reads the same one shared mutationResult field lastFailure
+// does, without requiring the caller to care whether the class routes
+// anywhere in particular - unlike waitRoutedFailure, which only answers for
+// RouteWait.
+func failureClassOf(raw json.RawMessage) FailureClass {
+	var result mutationResult
+	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
+		return ""
+	}
+	return result.FailureClass
 }
 
 // journalled reports whether an effect appended one particular event type.

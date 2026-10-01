@@ -20,6 +20,12 @@ type budgetStep struct {
 	mutate string // a filename to write, or "" for a zero-delta invocation
 	stop   ProviderStop
 	detail string
+	// resolve, meaningful only alongside stop == StopCompleted, has the
+	// invocation state an explicit checkpoint-completion claim (#379) bound to
+	// the exact candidate revision it was shown, instead of merely returning
+	// clean. A clean return with neither a mutation nor this claim is not
+	// completion - see TestNormalCompletionWithNoDeltaNeedsNoFakeCommit.
+	resolve bool
 }
 
 func (p *budgetProvider) Isolation() ProviderIsolation {
@@ -47,7 +53,15 @@ func (p *budgetProvider) Execute(_ context.Context, request ExecutionRequest) (E
 		}
 	}
 	if step.stop == StopCompleted {
-		return ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}, nil
+		result := ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+		if step.resolve {
+			result.Resolution = &FeedbackResolution{
+				SchemaVersion: FeedbackResolutionSchemaVersion,
+				Resolution:    FeedbackResolutionNoChangeRequired,
+				Subject:       request.Candidate.Revision,
+			}
+		}
+		return result, nil
 	}
 	return ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed},
 		&ProviderStopError{Reason: step.stop, Detail: step.detail}
@@ -210,10 +224,21 @@ func TestZeroDeltaContinuationAtTheCeilingKeepsItsCheckpoint(t *testing.T) {
 // TestNormalCompletionWithNoDeltaNeedsNoFakeCommit is case F: a continuation
 // that finishes without further change inherits the checkpoint rather than
 // manufacturing a commit for zero bytes.
+//
+// Case F used to reach this by returning clean with nothing more: a provider
+// outcome of Succeeded and a zero-byte diff. #379 records that exact shape -
+// clean provider return, no mutation - as indistinguishable from a
+// continuation that deferred unfinished background work and exited, so it is
+// no longer read as completion by itself. The checkpoint-completion claim
+// below, bound to the exact checkpoint it was shown, is what now states the
+// no-further-change conclusion case F is actually about; without it the
+// candidate stays an incomplete checkpoint, which is what
+// TestContinuationWithoutFurtherMutationStaysIncomplete (fourth_dogfood_test.go)
+// proves directly.
 func TestNormalCompletionWithNoDeltaNeedsNoFakeCommit(t *testing.T) {
 	fixture, _, runID := budgetFixture(t,
 		budgetStep{mutate: "first.go"},
-		budgetStep{stop: StopCompleted}, // completes, changes nothing
+		budgetStep{stop: StopCompleted, resolve: true}, // completes, changes nothing, states why
 	)
 	events := journalOf(t, fixture.runtime, runID)
 	if got := countEvents(events, EventCandidateCommitted) + countEvents(events, EventCandidateCheckpointed); got != 1 {
