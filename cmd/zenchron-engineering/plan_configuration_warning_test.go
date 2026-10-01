@@ -88,7 +88,11 @@ func runPlanConfigurationWarningCase(t *testing.T, verb, member, format string, 
 			args = append(args, "--deterministic")
 		} else {
 			revision, digest, assignments := pendingDecision(t, configPath, planID, 41)
-			args = append(args, "--revision", strconv.Itoa(revision), "--digest", digest, "--assignments", assignments)
+			args = append(args, "--revision", strconv.Itoa(revision), "--digest", digest)
+			// Only approval binds an assignment set; rejection must omit it.
+			if verb == "approve" {
+				args = append(args, "--assignments", assignments)
+			}
 			wantCode = runtime.ExitCompleted
 		}
 	}
