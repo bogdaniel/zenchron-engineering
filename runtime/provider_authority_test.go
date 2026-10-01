@@ -58,6 +58,24 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// authorize its own work. It can now say "I accept", and that sentence
 		// is checked by machines before it means anything.
 		"Review",
+		// Resolution is the structured no-change resolution a producer
+		// invocation emitted, and it is admitted here for the same reason
+		// Review is: at THIS boundary it is a CLAIM, not authority.
+		//
+		// The adapter read a file and returned what it found. Nothing has yet
+		// established that the claimed subject matches what the runtime
+		// actually invoked against, that the claimed keys match what this
+		// invocation was actually delivered, or that the schema is one the
+		// runtime recognizes - AdmitFeedbackResolution does all of that in
+		// the runtime, against the frozen delivery, and a claim that fails
+		// any of it discharges nothing (#376).
+		//
+		// So the invariant this test protects still holds here too: a
+		// provider cannot discharge review feedback by merely returning, and
+		// it cannot authorize its own no-change claim either. It can now say
+		// "no change is required", and that sentence is checked by machines
+		// before it means anything.
+		"Resolution",
 		// Answer is the invocation's semantic final answer text, exposed only
 		// by an adapter that can state one directly (Claude's structured
 		// stream, on a successful non-error final result) and empty
