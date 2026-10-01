@@ -9,7 +9,7 @@ import (
 )
 
 func TestReviewRefusalFindingsSurviveRetryAndClearOnSuccess(t *testing.T) {
-	record, err := json.Marshal(executionRecord{mutationResult: mutationResult{FailureClass: FailureVerification}, ReviewRefusal: &ReviewerResultRefusedError{StageID: "review", Detail: strings.Repeat("bad candidate ", 1000)}})
+	record, err := json.Marshal(executionRecord{mutationResult: mutationResult{FailureClass: FailureReviewerProtocol}, ReviewRefusal: &ReviewerResultRefusedError{StageID: "review", Detail: strings.Repeat("bad candidate ", 1000)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +18,7 @@ func TestReviewRefusalFindingsSurviveRetryAndClearOnSuccess(t *testing.T) {
 		"next":  {ID: "next", Kind: OpExecutionInvoke, CreatedAt: time.Now()},
 	}}}
 	findings := state.findings()
-	if len(findings) != 1 || findings[0].Classification != FailureVerification || !strings.Contains(findings[0].Signature, "bad candidate") || findings[0].Signature != boundedDetail(findings[0].Signature) {
+	if len(findings) != 1 || findings[0].Classification != FailureReviewerProtocol || !strings.Contains(findings[0].Signature, "bad candidate") || findings[0].Signature != boundedDetail(findings[0].Signature) {
 		t.Fatalf("refusal not bounded and actionable: %#v", findings)
 	}
 	state.snapshot.Operations["next"] = RunOperation{ID: "next", Kind: OpExecutionInvoke, State: Succeeded, Result: json.RawMessage(`{}`), CreatedAt: time.Now()}
