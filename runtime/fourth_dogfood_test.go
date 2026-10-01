@@ -358,8 +358,11 @@ func TestCheckpointContinuesAcrossRestartAndOnlyThenBecomesAssurable(t *testing.
 		t.Fatalf("the checkpoint did not survive the restart: %+v", projection)
 	}
 
-	// 6-8: the producer now completes. No manual cleanup or reset happens.
+	// 6-8: the producer now completes and states an explicit checkpoint-
+	// completion claim (#379) bound to the exact checkpoint it inherited - a
+	// clean return alone is never enough. No manual cleanup or reset happens.
 	producer.completeAt = len(producer.requests) + 1
+	producer.resolveAt = producer.completeAt
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 	fixture.reconcile(runID)
 
