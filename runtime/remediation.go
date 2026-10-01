@@ -359,7 +359,8 @@ func (f *FakeReviewerProvider) read(request ExecutionRequest, result ExecutionRe
 	review, err := ReadReviewerResult(request.ReviewerResultPath)
 	if err != nil {
 		result.Outcome = OperationFailed
-		result.Failure = &ProviderFailure{Classification: FailureVerification}
+		result.Failure = &ProviderFailure{Classification: FailureReviewerProtocolIncomplete}
+		result.ReviewRefusal = &ReviewerResultRefusedError{Detail: boundedDetail(err.Error())}
 		return result, nil
 	}
 	result.Review = review

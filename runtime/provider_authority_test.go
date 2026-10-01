@@ -58,6 +58,16 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// authorize its own work. It can now say "I accept", and that sentence
 		// is checked by machines before it means anything.
 		"Review",
+		// ReviewRefusal is set by an adapter that tried to read Review and
+		// could not decode it, and it is admitted here for the same reason
+		// Review is: it is an observation ABOUT THE READ, not an authority
+		// claim. It carries the runtime's own exact decode reason so that
+		// reason survives past this boundary, but it asserts nothing about
+		// acceptance - it is the typed shape of "no valid verdict was found",
+		// consumed by lastReviewRefusal (reconciler.go) only to hand the same
+		// reason back to a bounded retry of the reviewer, never to authorize
+		// anything itself (#374).
+		"ReviewRefusal",
 		// Resolution is the structured no-change resolution a producer
 		// invocation emitted, and it is admitted here for the same reason
 		// Review is: at THIS boundary it is a CLAIM, not authority.

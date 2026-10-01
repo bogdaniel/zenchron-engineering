@@ -643,6 +643,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
 	priorFailure, _ := state.lastFailure(operation.ID)
+	// A REVIEWER PROTOCOL REFUSAL from THIS exact operation's own last attempt
+	// is delivered as a finding regardless of purpose (#374): a reviewer-role
+	// run that never mutates its workspace never acquires a CandidateRevision,
+	// so it never reaches the InvocationRemediation branch above and would
+	// otherwise be re-dispatched with no account of why its last attempt was
+	// refused. Findings carry independently of Purpose (see the request built
+	// below), so this does not force Purpose to Remediation - doing so here
+	// would fail assertExecutionSubject, which requires a non-initial purpose
+	// to already have a recorded CandidateRevision this run has none of.
+	if refusal, ok := state.lastReviewRefusal(operation.ID); ok {
+		findings = append(findings, Finding{
+			Classification: FailureReviewerProtocolIncomplete,
+			Signature:      boundedDetail("reviewer-protocol: " + refusal.Error()),
+		})
+	}
 	// A PLAN STAGE run executes under its frozen assignment: the stage
 	// objective the operator approved, the context that stage's role receives,
 	// and the instruction packs its profile named - by digest. An ordinary run
@@ -937,6 +952,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// obligation behind an operation the scheduler already considers settled.
 	feedbackUnresolved := len(feedback) > 0 && !record.Mutated && execErr == nil &&
 		result.Failure == nil && len(record.ResolvedFeedback) == 0
+	// THE REVIEWER PROTOCOL COMPLETION GATE (#374), the same shape as #376's
+	// feedback gate just above. A stage whose role produces a verdict crosses
+	// the reviewer-result protocol in exactly one of two ways: it writes a
+	// result that fails to decode (result.Failure is already set for that, by
+	// the adapter), or it writes a result that decodes (result.Review is
+	// non-nil). Provider return with NEITHER is a third way - a clean exit
+	// that wrote nothing to the runtime-owned path - and left unchecked it is
+	// the #374 second dogfood shape exactly: the invocation is recorded
+	// Succeeded, candidate.changed is journalled, and the stage is left
+	// "running" forever because nothing ever calls admitReview to settle it
+	// one way or the other. This fails the OPERATION instead, under the same
+	// bounded-retry class a malformed result gets, so the run keeps asking
+	// for a verdict rather than silently waiting on one that will never come.
+	reviewUnresolved := stage.producesVerdict() && execErr == nil &&
+		result.Failure == nil && result.Review == nil
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := append(attemptProvenance, journalEntry{
 		Type: EventCandidateChanged,
@@ -1015,21 +1045,38 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
 				var refusal *ReviewerResultRefusedError
 				if errors.As(admitErr, &refusal) {
-					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
+					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail), Protocol: refusal.Protocol}
+				}
+				// A PROTOCOL refusal (#374) - an unrecognized schema version or
+				// verdict, or a verdict/findings combination the protocol
+				// disallows - is the exact same kind of failure a malformed
+				// decode already is: the reviewer answered, but not in a shape
+				// this build may act on. It gets the same classification, the
+				// same retained exact reason, and the same one bounded
+				// correction - never FailureVerification, which would say the
+				// CANDIDATE failed review when nothing was actually judged. An
+				// AUTHORITY refusal (wrong stage, wrong worker, wrong candidate,
+				// broken independence) is not something rewriting the document
+				// fixes, so it keeps the verification classification it always
+				// had.
+				class := FailureVerification
+				if refusal != nil && refusal.Protocol {
+					class = FailureReviewerProtocolIncomplete
 				}
 				return recorded(effect{state: OperationFailed, result: executionRecord{
 					ReviewRefusal:  refusal,
-					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
-					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
+					mutationResult: mutationResult{FailureClass: class, ProviderID: result.ProviderID},
+					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, result, admitErr),
 				}})
 			}
 		}
-		// feedbackUnresolved is excluded here deliberately: it is NOT a
-		// finished execution (#376) even though the provider itself reported
-		// success, so the exact subject it left behind must not become
-		// eligible to be treated as a finished candidate. The failure path
-		// below is what actually settles this attempt.
-		if !feedbackUnresolved {
+		// feedbackUnresolved and reviewUnresolved are excluded here
+		// deliberately: neither is a finished execution (#376, #374) even
+		// though the provider itself reported success, so the exact subject
+		// it left behind must not become eligible to be treated as a finished
+		// candidate. The failure path below is what actually settles this
+		// attempt.
+		if !feedbackUnresolved && !reviewUnresolved {
 			events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
 				ProducerID:    producerID,
 				Purpose:       purpose,
@@ -1133,6 +1180,35 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			},
 		}
 	}
+	// THE OPERATION FAILS HERE for the same reason #376's feedback gate just
+	// above does (#374): a reviewer-role invocation that returned clean but
+	// crossed no reviewer-result protocol has not completed. Left Succeeded,
+	// this operation would satisfy bindExecutionInvoke's wanted binding
+	// forever while admitting no verdict, which is exactly the #374 second
+	// dogfood shape - candidate.changed succeeded, the stage left "running"
+	// with nothing left to want. Failing it with a class that routes to
+	// RouteRetry (never FailureVerification - no verdict was reached, so
+	// nothing about the candidate failed review) keeps the SAME operation
+	// eligible for a bounded retry under its own existing attempt ceiling; the
+	// exact reason is attached so the next attempt's findings (see
+	// lastReviewRefusal above) can tell the reviewer what was missing.
+	if reviewUnresolved {
+		record.FailureClass = FailureReviewerProtocolIncomplete
+		cause := errors.New("the invocation completed without writing a reviewer result")
+		refusal := &ReviewerResultRefusedError{Detail: boundedDetail(cause.Error())}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureReviewerProtocolIncomplete, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				ReviewRefusal:  refusal,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
 		if result.Failure != nil {
@@ -1186,7 +1262,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		execution := executionRecord{
 			mutationResult: record,
 			PriorContext:   result.PriorContext,
-			Diagnostic:     r.executionDiagnostic(stage, class, result, execErr),
+			// Carried whether this refusal came from a decode failure (set by
+			// the adapter on ExecutionResult) or survives from nowhere else:
+			// the admission-refusal path below sets its own ReviewRefusal on
+			// its own executionRecord literal, and this is the OTHER place a
+			// reviewer-role invocation's exact reason must reach the journal
+			// rather than being discarded down to a bare classification
+			// (#374).
+			ReviewRefusal: result.ReviewRefusal,
+			Diagnostic:    r.executionDiagnostic(stage, class, result, execErr),
 			// Real work exists but the producer did not finish, so what it left
 			// is a CHECKPOINT: preserved, exactly identified, reassessed, and
 			// deliberately not eligible for assurance or anything past it.
@@ -1219,7 +1303,17 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// and the checkpoint ceiling still bounds how much unfinished work one
 		// run may accumulate, because a zero-delta invocation creates no
 		// checkpoint.
-		if !record.Mutated {
+		//
+		// A REVIEWER PROTOCOL FAILURE ALWAYS FAILS THE OPERATION, mutation or
+		// not (#374). "Left real work behind" means something for a producer,
+		// whose deliverable IS candidate content; a reviewer's deliverable is
+		// the verdict, and incidental workspace touches (review notes, a
+		// toolchain's own output) are not that verdict. Letting Mutated excuse
+		// this class would let the runtime's own candidate.commit operation
+		// treat a reviewer's scratch output as a successful execution and
+		// commit it - admitting candidate content from an invocation that
+		// never crossed the protocol it was there to run.
+		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
@@ -1497,8 +1591,9 @@ func (s *runState) findings() []Finding {
 			continue
 		}
 		var record executionRecord
-		if decodeJSON(ops[i].Result, &record) == nil && record.FailureClass == FailureVerification && record.ReviewRefusal != nil {
-			findings = append(findings, Finding{Classification: FailureVerification, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
+		if decodeJSON(ops[i].Result, &record) == nil && record.ReviewRefusal != nil &&
+			(record.FailureClass == FailureVerification || record.FailureClass == FailureReviewerProtocolIncomplete) {
+			findings = append(findings, Finding{Classification: record.FailureClass, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
 		}
 		break
 	}
