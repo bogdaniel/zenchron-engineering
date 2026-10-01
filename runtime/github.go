@@ -334,13 +334,16 @@ type RateLimitObservation struct {
 }
 
 // GitHubTransientError is the typed outcome of an observation that failed for a
-// reason expected to clear by itself: a 5xx, a 429, or a rate limit refusal.
+// reason expected to clear by itself: a 5xx, a 429, a rate limit refusal, or a
+// recognized connectivity failure where the request never reached GitHub at
+// all (github_rest.go's recognizedTransientTransportError).
 //
 // It is deliberately neither GitHubAuthError nor GitHubAPIError. A caller routes
 // the three differently: a credential failure needs an operator, an API error
 // needs a human to look at it, and this one needs nothing but bounded backoff.
-// The RateLimit field carries what the forge said about when to come back;
-// deciding when is the caller's job, not this package's.
+// The RateLimit field carries what the forge said about when to come back; it
+// is zero for a connectivity failure, which named no budget to wait on.
+// Deciding when is the caller's job, not this package's.
 type GitHubTransientError struct {
 	Status    int
 	Detail    string

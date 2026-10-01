@@ -738,6 +738,27 @@ const (
 	// interval must not be charged to the active-work budget, and the same run
 	// continues once connectivity returns.
 	FailureProviderUnavailable FailureClass = "provider_unavailable"
+	// FailureForgeUnavailable is the governed FORGE's transport being gone,
+	// named by a recognized typed connectivity failure or by the forge's own
+	// 5xx/429/rate-limit refusal (GitHubTransientError) - the forge's
+	// counterpart to FailureProviderUnavailable, same shape, different
+	// external dependency.
+	//
+	// It is kept distinct from FailureProviderUnavailable because the operator
+	// reads a different thing from each: an execution provider being
+	// unreachable says something about that provider's own account or network
+	// path, while the forge being unreachable says nothing about the work or
+	// about any execution provider at all. It is never an inference from an
+	// arbitrary error - GitHubTransientError is itself a narrow, typed
+	// allowlist (github.go) - so an unrecognized forge fault stays
+	// unclassified rather than being guessed into a wait that never clears.
+	//
+	// It routes to a bounded external WAIT under the existing #83 accounting,
+	// exactly like FailureProviderUnavailable: observing a forge that is not
+	// answering is not engineering work, so the interval is not charged to the
+	// active-work budget, and the same run continues once the forge answers
+	// again.
+	FailureForgeUnavailable FailureClass = "forge_unavailable"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -964,7 +985,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureForgeUnavailable:
 		return RouteWait
 	default:
 		return RouteStop

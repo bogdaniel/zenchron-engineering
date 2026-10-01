@@ -462,7 +462,10 @@ var externalWaitReasons = map[string]bool{
 	// not performing engineering work, and #238's whole defect was charging
 	// exactly this interval to the active-work budget - so leaving it out here
 	// would fix the detection and keep the accounting lie.
-	"execution_provider_unavailable":   true,
+	"execution_provider_unavailable": true,
+	// The host cannot reach the governed forge at all, the same #238 shape as
+	// the execution provider above, for the GitHub side of the boundary.
+	"source_forge_unavailable":         true,
 	"assurance_dependency_unavailable": true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
@@ -1942,7 +1945,12 @@ var waitReasons = map[FailureClass]string{
 	// two capacity waits and from the account prerequisite because the
 	// operator action is different again: nothing is spent, nothing is
 	// revoked, and what has to change is connectivity.
-	FailureProviderUnavailable:   "execution_provider_unavailable",
+	FailureProviderUnavailable: "execution_provider_unavailable",
+	// The governed FORGE cannot be reached, named separately from the
+	// execution provider above because the operator action is different
+	// again: nothing about any provider or its account is wrong, and what has
+	// to change is connectivity to GitHub rather than to a model endpoint.
+	FailureForgeUnavailable:      "source_forge_unavailable",
 	FailureStateStorageExhausted: "state_storage_exhausted",
 	// The controller cannot install its own candidate-Git boundary. An
 	// operator repairs the installation; nothing about the work is wrong.

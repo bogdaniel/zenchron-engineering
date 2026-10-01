@@ -56,8 +56,29 @@ type effect struct {
 
 func failed(err error) effect {
 	return effect{state: OperationFailed, result: struct {
-		Error string `json:"error"`
-	}{boundedDetail(err.Error())}}
+		Error        string       `json:"error"`
+		FailureClass FailureClass `json:"failure_class,omitempty"`
+	}{boundedDetail(err.Error()), observationFailureClass(err)}}
+}
+
+// observationFailureClass recognizes a narrow, typed set of failures that name
+// an external condition rather than a defect in this run, so a handler that
+// merely wraps an adapter error in failed() still reports one the scheduler
+// can route.
+//
+// It is deliberately narrow: only *GitHubTransientError is recognized, which is
+// itself a typed allowlist a forge adapter builds from a recognized
+// connectivity failure or the forge's own 5xx/429/rate-limit refusal
+// (github.go, github_rest.go). Every other error - a local filesystem fault, a
+// decode failure, a credential refusal, anything this boundary has not been
+// told to recognize - stays unclassified and keeps the budget-only retry it
+// already had; see lastFailure.
+func observationFailureClass(err error) FailureClass {
+	var transient *GitHubTransientError
+	if errors.As(err, &transient) {
+		return FailureForgeUnavailable
+	}
+	return ""
 }
 
 func boundedDetail(detail string) string { return boundedField(detail) }

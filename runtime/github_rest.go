@@ -20,11 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -184,6 +186,16 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 	}
 	response, err := a.HTTP.Do(request)
 	if err != nil {
+		// A RECOGNIZED connectivity failure is typed as GitHubTransientError,
+		// the same outcome a 5xx or a 429 already produces: the request never
+		// reached GitHub, which needs nothing but bounded backoff, not an
+		// operator's attention. Everything else - a cancellation, a deadline,
+		// anything this boundary has not been told to recognize - keeps the
+		// %w wrapping below unchanged, which is what lets the caller-local
+		// error path above (context.Canceled/DeadlineExceeded) keep working.
+		if recognizedTransientTransportError(err) {
+			return 0, nil, nil, &GitHubTransientError{Detail: "github endpoint could not be reached"}
+		}
 		return 0, nil, nil, fmt.Errorf("github request failed: %w", err)
 	}
 	defer response.Body.Close()
@@ -192,6 +204,33 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 		return 0, nil, nil, fmt.Errorf("github response unreadable")
 	}
 	return response.StatusCode, response.Header, raw, nil
+}
+
+// recognizedTransientTransportError reports whether err states, in a form
+// Go's net package already types rather than one this code infers from a
+// string, that the request never reached GitHub at all: the name did not
+// resolve, or the dial was refused, reset, or had no route.
+//
+// It is a CLOSED, conservative set, the same boundary nodeTransportSignals
+// draws for subprocess diagnostics (agent_specs.go) expressed here as Go's own
+// typed transport errors instead of substring matching. A timeout is
+// deliberately excluded - it is indistinguishable from a slow server - and so
+// is anything else this boundary has not been told to recognize: guessing
+// "the network is the problem" from an arbitrary error is how a permanent
+// fault becomes an infinite retry.
+func recognizedTransientTransportError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return !dnsErr.IsTimeout
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENETDOWN:
+			return true
+		}
+	}
+	return false
 }
 
 // readBoundedBody reads a forge response under a fixed ceiling, so a hostile or
