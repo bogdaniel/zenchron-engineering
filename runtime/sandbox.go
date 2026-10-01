@@ -1070,7 +1070,29 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback)
+	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r)
+}
+
+// feedbackResolutionEnvelope states the REQUIRED OUTPUT when a producer
+// invocation decides none of the admitted feedback above needs a change.
+//
+// Provider return is not proof of completion (#376): an invocation that
+// simply leaves the workspace unmodified and exits is indistinguishable from
+// one that ran out of time or deferred unfinished work. So a legitimate
+// no-change conclusion has to be WRITTEN, the same way a reviewer's verdict
+// has to be - never left for the runtime to infer from an empty diff.
+func feedbackResolutionEnvelope(r ExecutionRequest) string {
+	if r.FeedbackResolutionPath == "" || len(r.Feedback) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\n\nIf, having investigated, NONE of the admitted feedback above requires a change to this candidate, "+
+			"that conclusion must be WRITTEN rather than left to be inferred from an unmodified workspace: write a JSON document to %s and make no edit. "+
+			"The document is a JSON object with exactly these members: schema_version (%q), resolution (%q), subject (the exact candidate revision %s), "+
+			"keys (an array naming every admitted feedback key above, exactly - not a subset), and an optional reason. "+
+			"Write this document ONLY when every admitted item needs no change. If any item needs a change, make the change instead and do not write this document. "+
+			"An invocation that neither changes the candidate nor writes this document leaves every item above outstanding, however the invocation otherwise ends.",
+		r.FeedbackResolutionPath, FeedbackResolutionSchemaVersion, FeedbackResolutionNoChangeRequired, r.Candidate.Revision)
 }
 
 // planningEnvelope is the envelope for a NON-MUTATING invocation. It is a

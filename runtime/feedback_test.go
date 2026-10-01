@@ -11,6 +11,8 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -252,10 +254,32 @@ func TestGitHubFeedbackReachesTheWorkerExactlyOnce(t *testing.T) {
 		t.Fatalf("re-polling re-judged an item already decided: %#v", repeat)
 	}
 
+	// The remediation invocation actually addresses the comment: a genuine
+	// mutation, distinct from the initial invocation's content, so this
+	// attempt completes on its own rather than needing the #376
+	// unresolved-feedback retry machinery exercised elsewhere.
+	fixture.provider.mutate = func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, "candidate.go"), []byte("package candidate\n// doc comment added\n"), 0600)
+	}
+	// The fixture's forge mirrors the PR's observed head only where a test
+	// tells it to (see TestInterruptedReviewContinuesWithPersistedBudget):
+	// the republish itself is real, but FakeGitHubAdapter needs this hook to
+	// reflect the pushed head back into the PR it hands to a later observe.
+	fixture.inject(func(call GitHubCall) error {
+		if call.Method == "UpdatePullRequest" {
+			pr := fixture.forge.PullRequests[number]
+			pr.HeadSHA = fixture.forge.Refs[candidateBranch(runID)]
+			fixture.forge.PullRequests[number] = pr
+		}
+		return nil
+	})
 	before := len(fixture.provider.requests)
-	fixture.reconcile(runID)
+	outcome := fixture.reconcile(runID)
 	if len(fixture.provider.requests) <= before {
 		t.Fatal("admitted feedback did not cause the worker to be invoked again")
+	}
+	if outcome.Disposition != Waiting || outcome.Reason != ReasonGoalStateReached {
+		t.Fatalf("the mutation that addressed the feedback did not complete: %+v", outcome)
 	}
 	invocation := fixture.provider.requests[len(fixture.provider.requests)-1]
 	if len(invocation.Feedback) != 1 || invocation.Feedback[0].Actor != "maintainer" {
@@ -287,6 +311,18 @@ func TestGitHubFeedbackReachesTheWorkerExactlyOnce(t *testing.T) {
 	}
 	if countType(state.events, EventFeedbackConsumed) != 1 {
 		t.Fatalf("delivery was not journalled exactly once: %v", journalTypes(state.events))
+	}
+	// The mutation path all the way through (#376): a real change addressing
+	// admitted feedback is verified, published, and the feedback discharged -
+	// never left outstanding behind a successful publish.
+	if state.projection.Assurance == nil || !state.projection.Assurance.Passed {
+		t.Fatalf("the mutation that addressed feedback was not verified: %+v", state.projection.Assurance)
+	}
+	if state.projection.PullRequest == nil || state.projection.PullRequest.HeadRevision != state.projection.CandidateRevision {
+		t.Fatalf("the mutation that addressed feedback was not republished to the same PR: %+v", state.projection.PullRequest)
+	}
+	if keys := state.outstandingReviewKeys(); len(keys) != 0 {
+		t.Fatalf("an addressed, republished review stayed outstanding: %v", keys)
 	}
 }
 

@@ -622,6 +622,18 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// worker is being asked to change something in response to a finding, and
 	// the invocation contract requires a remediation to carry findings.
 	pending := state.feedbackState().Pending(state.projection.Head())
+	// A RETRY of this exact operation (#376): Pending() excludes anything an
+	// earlier attempt already recorded as consumed, which happens the instant
+	// that attempt reaches a worker - before it even settles. Without this, a
+	// retry of an attempt that returned having neither mutated the candidate
+	// nor stated an admitted resolution would see nothing pending, carry no
+	// feedback at all, and trivially "succeed" an obligation it was never
+	// actually given a second chance to address. This re-derives exactly the
+	// keys THIS operation's own prior attempt(s) consumed - never a different
+	// or wider set - so a retry is shown exactly what it was shown before.
+	if len(pending) == 0 {
+		pending = state.feedbackRedeliveryFor(operation.ID)
+	}
 	feedback := r.feedbackContext(state.run.ID, pending)
 	if len(feedback) > 0 && purpose != InvocationContinuation {
 		purpose = InvocationRemediation
@@ -691,6 +703,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	reviewerResultPath := ""
 	if stage.producesVerdict() {
 		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
+			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
+		})
+		if err != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureUnknown},
+				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+			}}
+		}
+	}
+	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation and only
+	// when this invocation is being given admitted feedback to address. A
+	// producer that concludes no change is required for it has somewhere to
+	// STATE that; a producer given no feedback has nothing to resolve and is
+	// given no path, so it cannot write a claim that binds to nothing (#376).
+	feedbackResolutionPath := ""
+	if len(feedback) > 0 {
+		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, ExecutionAttemptRef{
 			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 		})
 		if err != nil {
@@ -780,8 +809,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}}
 	}
 	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
-		ReviewerResultPath: reviewerResultPath,
-		ScratchDir:         scratchDir,
+		ReviewerResultPath:     reviewerResultPath,
+		FeedbackResolutionPath: feedbackResolutionPath,
+		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -873,6 +903,40 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// same signal the feedback-delivery record below relies on.
 		ProviderExecuted: execErr == nil || result.Invocation != nil,
 	}
+	// THE EXPLICIT NO-CHANGE RESOLUTION, admitted only against what this
+	// attempt actually left behind. A provider that also mutated the
+	// workspace is not stating "no change required" - it is doing a change -
+	// so a resolution is considered only when the inspected workspace agrees
+	// there is none, never from the provider's own claim that nothing
+	// changed. A resolution that fails to bind (#376: wrong subject, wrong or
+	// partial keys, wrong schema) is simply not admitted; it does not fail
+	// the operation BY ITSELF - see feedbackUnresolved below, which is what
+	// actually fails it - but the exact refusal reason is kept rather than
+	// discarded, so an operator sees why it did not bind instead of a bare
+	// "nothing happened".
+	var resolutionErr error
+	if result.Resolution != nil && !record.Mutated && execErr == nil && result.Failure == nil {
+		deliveredKeys := make([]string, 0, len(feedback))
+		for _, item := range feedback {
+			deliveredKeys = append(deliveredKeys, item.Key)
+		}
+		if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
+			record.ResolvedFeedback = resolved
+		} else {
+			resolutionErr = admitErr
+		}
+	}
+	// THE SEMANTIC COMPLETION GATE (#376). An invocation delivered admitted
+	// feedback settles it in exactly one of two ways: it mutates the
+	// candidate, or it states a resolution that binds. Provider return is not
+	// a third way - a clean exit that did neither is exactly the shape of an
+	// invocation that deferred unfinished background work and simply
+	// returned, which is the defect #376 exists to close. It fails the
+	// OPERATION (see below) rather than only leaving the feedback outstanding,
+	// so the run keeps wanting a successor instead of silently stranding the
+	// obligation behind an operation the scheduler already considers settled.
+	feedbackUnresolved := len(feedback) > 0 && !record.Mutated && execErr == nil &&
+		result.Failure == nil && len(record.ResolvedFeedback) == 0
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := append(attemptProvenance, journalEntry{
 		Type: EventCandidateChanged,
@@ -960,12 +1024,19 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				}})
 			}
 		}
-		events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
-			ProducerID:    producerID,
-			Purpose:       purpose,
-			SubjectCommit: subject.Commit,
-			SubjectTree:   subject.Tree,
-		}})
+		// feedbackUnresolved is excluded here deliberately: it is NOT a
+		// finished execution (#376) even though the provider itself reported
+		// success, so the exact subject it left behind must not become
+		// eligible to be treated as a finished candidate. The failure path
+		// below is what actually settles this attempt.
+		if !feedbackUnresolved {
+			events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
+				ProducerID:    producerID,
+				Purpose:       purpose,
+				SubjectCommit: subject.Commit,
+				SubjectTree:   subject.Tree,
+			}})
+		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.
 	// Delivery is journalled whether or not the invocation went on to succeed:
@@ -1029,6 +1100,36 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				mutationResult: record,
 				PriorContext:   result.PriorContext,
 				Diagnostic:     r.executionDiagnostic(execStageProviderResult, revoked, result, detail),
+			},
+		}
+	}
+	// THE OPERATION FAILS HERE, not just the feedback staying outstanding
+	// (#376). bindExecutionInvoke's feedback branch binds this operation from
+	// pendingFeedbackKeys(), and the EventFeedbackConsumed above already moved
+	// every delivered key out of "pending" - so an operation left Succeeded
+	// here would satisfy that binding forever while discharging nothing: the
+	// obligation would be stranded, outstanding but with no operation left
+	// that wants to run for it. Failing it keeps the SAME operation (the SAME
+	// idempotency key) eligible for a bounded retry under its own existing
+	// attempt ceiling - no new counter, no reset budget - and when that
+	// ceiling is reached the run stops truthfully with the feedback still
+	// visibly outstanding, exactly like any other producer failure that never
+	// lands.
+	if feedbackUnresolved {
+		record.FailureClass = FailureFeedbackUnresolved
+		cause := errors.New("the invocation neither changed the candidate nor stated an admitted no-change resolution for the feedback it was delivered")
+		if resolutionErr != nil {
+			cause = fmt.Errorf("the feedback resolution did not bind: %w", resolutionErr)
+		}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureFeedbackUnresolved, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic:     diagnostic,
 			},
 		}
 	}

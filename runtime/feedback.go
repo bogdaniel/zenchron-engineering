@@ -424,6 +424,42 @@ func (s FeedbackState) Pending(head string) []FeedbackObservedPayload {
 	return pending
 }
 
+// feedbackRedeliveryFor is the admitted feedback a PRIOR ATTEMPT of exactly
+// this operation already consumed, re-derived for a retry (#376). It reads
+// the durable EventFeedbackConsumed records this operation ID itself wrote -
+// never a different operation's - and resolves them back against the
+// admitted record, ignoring Pending()'s own-consumption filter entirely: the
+// whole point is to show a retry the SAME items it was shown before, which
+// Pending() would otherwise have already excluded.
+func (s *runState) feedbackRedeliveryFor(operationID string) []FeedbackObservedPayload {
+	if operationID == "" {
+		return nil
+	}
+	keys := map[string]bool{}
+	for _, e := range s.events {
+		if e.Type != EventFeedbackConsumed || e.OperationID != operationID {
+			continue
+		}
+		var payload FeedbackConsumedPayload
+		if decodeJSON(e.Payload, &payload) != nil {
+			continue
+		}
+		for _, key := range payload.Keys {
+			keys[key] = true
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	var redelivered []FeedbackObservedPayload
+	for _, decision := range s.feedbackState().Admitted {
+		if keys[decision.Key] {
+			redelivered = append(redelivered, decision)
+		}
+	}
+	return redelivered
+}
+
 // Seen reports whether an item has already been judged, so re-polling records
 // nothing new. Dedup is by durable forge identity, never by text.
 func (s FeedbackState) Seen(key string) bool {
