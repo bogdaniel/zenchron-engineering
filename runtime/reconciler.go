@@ -161,6 +161,17 @@ type mutationResult struct {
 	// what binds held material to exact content when a budget ends the run
 	// before the change is committed (#203). Empty means unknown.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// ResolvedFeedback is the set of admitted feedback keys this attempt
+	// explicitly and typedly resolved as requiring no change, admitted by
+	// AdmitFeedbackResolution against exactly what this attempt was
+	// delivered and exactly the subject it was invoked against (#376).
+	//
+	// It is populated ONLY through that admission. It is never set from
+	// "the provider returned success and the workspace is unchanged" alone -
+	// that observation is indistinguishable from a provider that deferred
+	// unfinished work and simply exited, which is the exact defect #376
+	// exists to close. Discharge reads this field and nothing else.
+	ResolvedFeedback []string `json:"resolved_feedback,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already

@@ -127,6 +127,55 @@ func TestDischargedReviewDoesNotExemptUnrelatedWork(t *testing.T) {
 	}
 }
 
+// TestProviderReturnAloneDoesNotDischargeFeedback is the restored #376
+// defect, stated directly against outstandingReviewKeys(): an invocation
+// that reached a provider, left the workspace unmodified, and simply
+// returned success is NOT evidence the admitted feedback was addressed. The
+// production no-change-success rule used to discharge exactly this shape
+// (ProviderExecuted && !Mutated), which is indistinguishable from a provider
+// that deferred unfinished background work and exited. It must stay
+// outstanding until an explicit, bound resolution admits it.
+func TestProviderReturnAloneDoesNotDischargeFeedback(t *testing.T) {
+	payload := func(p any) json.RawMessage {
+		b, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	const head = "head-1"
+	baseEvents := []EngineeringEvent{
+		{Type: EventFeedbackObserved, Payload: payload(FeedbackObservedPayload{FeedbackDecision: FeedbackDecision{Key: "review:1", Admitted: true}})},
+		{Type: EventGitHubPRObserved, Payload: payload(GitHubPRObservedPayload{HeadRevision: head})},
+		{Type: EventFeedbackConsumed, Payload: payload(FeedbackConsumedPayload{Keys: []string{"review:1"}, OperationID: "op-1"})},
+		{OperationID: "op-1", Type: EventExecutionCompleted, Payload: payload(ExecutionCompletedPayload{SubjectCommit: head})},
+	}
+	t.Run("return alone leaves feedback outstanding", func(t *testing.T) {
+		events := append(append([]EngineeringEvent(nil), baseEvents...), EngineeringEvent{
+			Type: EventOperationAfter, Payload: payload(RunOperation{
+				ID: "op-1", Kind: OpExecutionInvoke, State: Succeeded,
+				Result: payload(mutationResult{ProviderExecuted: true, Mutated: false}),
+			}),
+		})
+		s := &runState{events: events}
+		if keys := s.outstandingReviewKeys(); len(keys) != 1 || keys[0] != "review:1" {
+			t.Fatalf("a provider that merely returned discharged feedback without stating a resolution: %v", keys)
+		}
+	})
+	t.Run("an explicit bound resolution discharges it", func(t *testing.T) {
+		events := append(append([]EngineeringEvent(nil), baseEvents...), EngineeringEvent{
+			Type: EventOperationAfter, Payload: payload(RunOperation{
+				ID: "op-1", Kind: OpExecutionInvoke, State: Succeeded,
+				Result: payload(mutationResult{ProviderExecuted: true, Mutated: false, ResolvedFeedback: []string{"review:1"}}),
+			}),
+		})
+		s := &runState{events: events}
+		if keys := s.outstandingReviewKeys(); len(keys) != 0 {
+			t.Fatalf("an admitted, bound no-change resolution did not discharge feedback: %v", keys)
+		}
+	})
+}
+
 func TestReviewContinuationCannotBeRenewedByCommentsOrRestart(t *testing.T) {
 	f, id := feedbackFixtureWithWallLimit(t, 30*time.Minute)
 	number := f.state(id).projection.PullRequest.Number
@@ -213,6 +262,10 @@ func TestCompletedUnchangedReviewDoesNotGrantContinuation(t *testing.T) {
 	if _, err := f.runtime.ObserveFeedback(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
+	// The provider's return alone must never discharge the review (#376): it
+	// has to STATE that no change is required, through the typed resolution
+	// channel, bound to this attempt's exact delivered key and subject.
+	f.provider.resolveFeedback = true
 	outcome := f.reconcile(id)
 	if outcome.Disposition != Waiting || outcome.Reason != ReasonGoalStateReached {
 		t.Fatalf("review did not complete: %+v", outcome)

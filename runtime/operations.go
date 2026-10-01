@@ -700,6 +700,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			}}
 		}
 	}
+	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation and only
+	// when this invocation is being given admitted feedback to address. A
+	// producer that concludes no change is required for it has somewhere to
+	// STATE that; a producer given no feedback has nothing to resolve and is
+	// given no path, so it cannot write a claim that binds to nothing (#376).
+	feedbackResolutionPath := ""
+	if len(feedback) > 0 {
+		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, ExecutionAttemptRef{
+			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
+		})
+		if err != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureUnknown},
+				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+			}}
+		}
+	}
 	// THE BUILD SCRATCH, owned by the runtime and scoped to this attempt. An
 	// invocation whose contract obliges `go test` has to be able to EXECUTE the
 	// binary that command links, and the default temporary location is noexec
@@ -780,8 +797,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}}
 	}
 	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
-		ReviewerResultPath: reviewerResultPath,
-		ScratchDir:         scratchDir,
+		ReviewerResultPath:     reviewerResultPath,
+		FeedbackResolutionPath: feedbackResolutionPath,
+		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -872,6 +890,24 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// it is the honest signal for "this attempt reached a worker" - the
 		// same signal the feedback-delivery record below relies on.
 		ProviderExecuted: execErr == nil || result.Invocation != nil,
+	}
+	// THE EXPLICIT NO-CHANGE RESOLUTION, admitted only against what this
+	// attempt actually left behind. A provider that also mutated the
+	// workspace is not stating "no change required" - it is doing a change -
+	// so a resolution is considered only when the inspected workspace agrees
+	// there is none, never from the provider's own claim that nothing
+	// changed. A resolution that fails to bind (#376: wrong subject, wrong or
+	// partial keys, wrong schema) is simply not admitted; it does not fail
+	// the operation, and the feedback it would have discharged stays
+	// outstanding - the same fail-closed default as no resolution at all.
+	if result.Resolution != nil && !record.Mutated && execErr == nil && result.Failure == nil {
+		deliveredKeys := make([]string, 0, len(feedback))
+		for _, item := range feedback {
+			deliveredKeys = append(deliveredKeys, item.Key)
+		}
+		if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
+			record.ResolvedFeedback = resolved
+		}
 	}
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := append(attemptProvenance, journalEntry{

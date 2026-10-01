@@ -112,6 +112,13 @@ type ExecutionRequest struct {
 	// the invocation so no earlier attempt's answer can be inherited. Empty for
 	// every other stage, and a provider that is given none emits no verdict.
 	ReviewerResultPath string
+	// FeedbackResolutionPath is the runtime-owned file a producer invocation
+	// may write an explicit no-change resolution to, set only when this
+	// invocation was given admitted feedback to address. It is the same kind
+	// of unspoofable, runtime-cleared channel ReviewerResultPath is, and it
+	// exists so a producer that decides no change is required can STATE that
+	// rather than have it inferred from an unmodified workspace (#376).
+	FeedbackResolutionPath string
 	// RequiredTools are the executables THIS invocation's contract obliges the
 	// worker to run, derived from the contract's own frozen acceptance
 	// obligations.
@@ -283,6 +290,13 @@ type ExecutionResult struct {
 	// unsettled. It is a CLAIM at this point and authorizes nothing until
 	// AdmitReviewerResult has checked it.
 	Review *ReviewerResult
+	// Resolution is the structured no-change resolution a producer invocation
+	// emitted, read by the adapter from the runtime-owned result path. It is
+	// nil when none was written - the ordinary case for an invocation that
+	// mutated the workspace, and also the case for one that merely returned
+	// without stating anything. A nil Resolution authorizes no discharge;
+	// see AdmitFeedbackResolution.
+	Resolution *FeedbackResolution
 	// Answer is the invocation's SEMANTIC final answer text, exposed by an
 	// adapter that can state one directly rather than leaving a consumer to
 	// locate it inside the forensic transcript. It is empty whenever the

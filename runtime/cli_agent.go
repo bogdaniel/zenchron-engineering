@@ -1023,7 +1023,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// directory its typed result goes in, and the executables its contract
 		// obliges it to run. Both are runtime-owned facts; neither widens the
 		// sandbox beyond them.
-		ResultDir:     resultDirFor(request.ReviewerResultPath),
+		ResultDir:     resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath)),
 		RequiredTools: request.RequiredTools,
 		ScratchDir:    request.ScratchDir,
 	}
@@ -1367,6 +1367,22 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			return result, nil
 		}
 		result.Review = review
+	}
+	// THE FEEDBACK RESOLUTION, read the same way and for the same reason: a
+	// malformed document on a successful invocation fails it rather than
+	// being silently dropped, and an absent one simply leaves Resolution nil
+	// - which AdmitFeedbackResolution and outstandingReviewKeys already treat
+	// as "nothing was stated" (#376).
+	if request.FeedbackResolutionPath != "" {
+		resolution, resolutionErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
+		if resolutionErr != nil {
+			result.Outcome = OperationFailed
+			result.Failure = &ProviderFailure{
+				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
+			}
+			return result, nil
+		}
+		result.Resolution = resolution
 	}
 	return result, runErr
 }

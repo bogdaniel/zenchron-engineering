@@ -57,6 +57,14 @@ type isolatedProvider struct {
 	*FakeExecutionProvider
 	mutate   func(dir string) error
 	requests []ExecutionRequest
+	// resolveFeedback, when set, writes a real FeedbackResolution document to
+	// whatever FeedbackResolutionPath the invocation was given, claiming
+	// every delivered key resolved with no change required, and then reads
+	// it back through the production decoder - exactly as an installed CLI
+	// writing the real channel and CLIAgentProvider reading it would. A test
+	// wanting a provider that merely returns without stating a resolution
+	// (the #376 case that must NOT discharge feedback) leaves this unset.
+	resolveFeedback bool
 }
 
 func newIsolatedProvider(mutate func(dir string) error) *isolatedProvider {
@@ -80,7 +88,32 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 			return ExecutionResult{}, err
 		}
 	}
-	return p.FakeExecutionProvider.Execute(ctx, request)
+	result, err := p.FakeExecutionProvider.Execute(ctx, request)
+	if err != nil || !p.resolveFeedback || request.FeedbackResolutionPath == "" || len(request.Feedback) == 0 {
+		return result, err
+	}
+	keys := make([]string, 0, len(request.Feedback))
+	for _, item := range request.Feedback {
+		keys = append(keys, item.Key)
+	}
+	document, marshalErr := json.Marshal(FeedbackResolution{
+		SchemaVersion: FeedbackResolutionSchemaVersion,
+		Resolution:    FeedbackResolutionNoChangeRequired,
+		Subject:       request.Candidate.Revision,
+		Keys:          keys,
+	})
+	if marshalErr != nil {
+		return result, marshalErr
+	}
+	if writeErr := os.WriteFile(request.FeedbackResolutionPath, document, 0o600); writeErr != nil {
+		return result, writeErr
+	}
+	resolution, readErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
+	if readErr != nil {
+		return result, readErr
+	}
+	result.Resolution = resolution
+	return result, nil
 }
 
 // passingAssurance keeps FakeAssuranceProvider topped up so a run can verify
