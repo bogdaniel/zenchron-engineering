@@ -132,6 +132,67 @@ func TestAFeedbackResolutionCollapsesDuplicateKeysBeforeComparison(t *testing.T)
 	}
 }
 
+const resolutionTree = "abababababababababababababababababababab"
+
+func validCheckpointCompletion(keys ...string) *FeedbackResolution {
+	return &FeedbackResolution{
+		SchemaVersion: FeedbackResolutionSchemaVersion,
+		Resolution:    FeedbackResolutionCheckpointComplete,
+		Subject:       resolutionSubject,
+		Tree:          resolutionTree,
+		Keys:          keys,
+	}
+}
+
+// TestAdmitCheckpointCompletionDischargesExactlyWhatItWasDelivered is the
+// positive case for #379's continuation-completion claim: it is admitted
+// whether the delivered key set is empty (a pure checkpoint, no feedback
+// involved) or not, exactly like AdmitFeedbackResolution's positive case.
+func TestAdmitCheckpointCompletionDischargesExactlyWhatItWasDelivered(t *testing.T) {
+	resolved, err := AdmitCheckpointCompletion([]string{"review:1"}, resolutionSubject, resolutionTree, validCheckpointCompletion("review:1"))
+	if err != nil || len(resolved) != 1 || resolved[0] != "review:1" {
+		t.Fatalf("a well-formed checkpoint completion naming exactly what was delivered was refused: resolved=%v err=%v", resolved, err)
+	}
+	resolved, err = AdmitCheckpointCompletion(nil, resolutionSubject, resolutionTree, validCheckpointCompletion())
+	if err != nil || len(resolved) != 0 {
+		t.Fatalf("a checkpoint-only completion (no feedback delivered) was refused: resolved=%v err=%v", resolved, err)
+	}
+}
+
+// TestAdmitCheckpointCompletionChecksRevisionAndTreeIndependently proves
+// #379's binding requirement: a claim that gets EITHER the revision or the
+// tree wrong is refused, each with its own distinguishable reason, not folded
+// into a single combined identity check.
+func TestAdmitCheckpointCompletionChecksRevisionAndTreeIndependently(t *testing.T) {
+	wrongRevision := strings.Repeat("c", 40)
+	if _, err := AdmitCheckpointCompletion(nil, wrongRevision, resolutionTree, validCheckpointCompletion()); err == nil || !strings.Contains(err.Error(), "claims subject") {
+		t.Fatalf("a checkpoint completion claiming the wrong revision was not refused on the revision: %v", err)
+	}
+	wrongTree := strings.Repeat("d", 40)
+	if _, err := AdmitCheckpointCompletion(nil, resolutionSubject, wrongTree, validCheckpointCompletion()); err == nil || !strings.Contains(err.Error(), "claims tree") {
+		t.Fatalf("a checkpoint completion claiming the wrong tree was not refused on the tree: %v", err)
+	}
+}
+
+// TestAdmitCheckpointCompletionRejectsTheNoChangeValue and its mirror prove
+// the two claims are genuinely distinct protocol values (#379): a
+// continuation may not settle its checkpoint with a no_change_required
+// document, and a non-continuation resolution may not settle feedback with a
+// checkpoint_complete one, even when every other field would otherwise bind.
+func TestAdmitCheckpointCompletionRejectsTheNoChangeValue(t *testing.T) {
+	claim := validResolution() // Resolution: FeedbackResolutionNoChangeRequired
+	claim.Tree = resolutionTree
+	if _, err := AdmitCheckpointCompletion(nil, resolutionSubject, resolutionTree, claim); err == nil || !strings.Contains(err.Error(), "is not") {
+		t.Fatalf("a no_change_required document was admitted as a checkpoint completion: %v", err)
+	}
+}
+
+func TestAFeedbackResolutionRejectsTheCheckpointCompleteValue(t *testing.T) {
+	if _, err := AdmitFeedbackResolution(nil, resolutionSubject, validCheckpointCompletion()); err == nil || !strings.Contains(err.Error(), "is not") {
+		t.Fatalf("a checkpoint_complete document was admitted as a no-change feedback resolution: %v", err)
+	}
+}
+
 // TestReadFeedbackResolutionAbsentIsNotAClaim is the other half of the
 // fail-closed default: a provider that wrote nothing leaves (nil, nil), the
 // same shape AdmitFeedbackResolution treats as no claim at all.
