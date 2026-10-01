@@ -66,6 +66,16 @@ func waitAcceptanceFixtureWithLifecycle(t *testing.T, lifecycle time.Duration) (
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 	fixture.forge.ViewerActor = GitHubActor{Login: "zenchron-runtime", ID: 99}
 	fixture.forge.Permissions["maintainer"] = PermissionWrite
+	// The fixture's default provider mutates the candidate with the same
+	// fixed content on every invocation, so a resumed invocation given the
+	// review comment admitted below would leave the tree byte-identical to
+	// what it already published. That is a legitimate no-change case (#376:
+	// "a candidate can already satisfy feedback based on a misunderstanding"),
+	// and this test is about the three clocks surviving the wait, not about
+	// feedback remediation - so the provider states that explicitly through
+	// the real resolution channel instead of leaving it to be inferred from
+	// a clean return, which #376 forbids.
+	fixture.provider.resolveFeedback = true
 
 	runID := fixture.start()
 	for pass := 0; pass < 12; pass++ {
