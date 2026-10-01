@@ -861,7 +861,29 @@ const (
 	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
 	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
 	FailureFlaky                     FailureClass = "flaky_verification"
-	FailureUnknown                   FailureClass = "unknown"
+	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
+	// that returned without discharging it: the workspace it left behind is
+	// unchanged, and it did not state (or failed to bind) an explicit
+	// no_change_required resolution. See FeedbackResolution.
+	//
+	// Provider return is not proof of semantic completion (#376): a producer
+	// that defers to background work it never finishes, or that simply
+	// misreads admitted feedback, returns exactly this way - indistinguishable
+	// from one that legitimately needed to do nothing, right up until it is
+	// asked to STATE that rather than have it inferred. So neither shape is
+	// read as success; both are this class, and only a bound, admitted
+	// resolution (or a mutation) escapes it.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation,
+	// under that operation's existing attempt ceiling - no budget is minted
+	// or reset, and a provider that keeps returning unresolved exhausts its
+	// attempts and stops truthfully, exactly like any other producer failure
+	// that never lands. It is deliberately excluded from
+	// PriorAttemptContextEligible: the provider was not cut short by a
+	// runtime bound mid-task, so the retry gets a fresh invocation rather
+	// than observations from an attempt that said nothing.
+	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
+	FailureUnknown            FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -899,7 +921,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress:
+		FailureProviderNoProgress, FailureFeedbackUnresolved:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess

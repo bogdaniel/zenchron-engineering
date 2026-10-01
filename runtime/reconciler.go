@@ -1047,8 +1047,39 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	// rather than a retry of this one. That is what makes "the same comment is
 	// never sent to the worker twice" a property of the planner rather than of
 	// a cursor someone has to remember to advance.
+	//
+	// An EXISTING unresolved delivery for this head is checked FIRST and takes
+	// priority over deriving a fresh binding from newly pending items (#376).
+	// pendingFeedbackKeys() empties the instant delivery is journalled - before
+	// the attempt that delivered it even succeeds or fails - so re-deriving a
+	// binding purely from what is still pending would stop proposing THIS
+	// operation again the moment it failed with feedback_unresolved: plan()
+	// would find nothing wanted, the run would settle, and the operation would
+	// sit failed-but-retryable forever with its feedback still outstanding.
+	// Re-finding the EXACT key that existing non-succeeded operation already
+	// used keeps it eligible for the scheduler's own bounded retry instead.
+	if binding, ok := s.unresolvedFeedbackBinding(s.projection.CandidateRevision); ok {
+		return binding, true
+	}
 	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
 		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	return "", false
+}
+
+// unresolvedFeedbackBinding re-proposes the exact feedback execution binding
+// an earlier attempt for this head already started, when that operation has
+// not succeeded. See the call site in bindExecutionInvoke for why this is
+// necessary rather than merely convenient.
+func (s *runState) unresolvedFeedbackBinding(head string) (string, bool) {
+	prefix := "feedback|" + head + "|"
+	for _, op := range s.snapshot.Operations {
+		if op.Kind != OpExecutionInvoke || op.State == Succeeded {
+			continue
+		}
+		if binding := bindingOf(op); strings.HasPrefix(binding, prefix) {
+			return binding, true
+		}
 	}
 	return "", false
 }

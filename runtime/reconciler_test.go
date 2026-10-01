@@ -65,6 +65,12 @@ type isolatedProvider struct {
 	// wanting a provider that merely returns without stating a resolution
 	// (the #376 case that must NOT discharge feedback) leaves this unset.
 	resolveFeedback bool
+	// malformedResolutionSubject, when non-empty, writes a resolution through
+	// the same real write/read path as resolveFeedback, but claiming THIS
+	// subject instead of the exact one the invocation was shown - a bound
+	// refusal AdmitFeedbackResolution must produce, through the real decoder,
+	// never a synthetic result.Resolution a test assembled by hand.
+	malformedResolutionSubject string
 }
 
 func newIsolatedProvider(mutate func(dir string) error) *isolatedProvider {
@@ -89,17 +95,22 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 		}
 	}
 	result, err := p.FakeExecutionProvider.Execute(ctx, request)
-	if err != nil || !p.resolveFeedback || request.FeedbackResolutionPath == "" || len(request.Feedback) == 0 {
+	writeResolution := p.resolveFeedback || p.malformedResolutionSubject != ""
+	if err != nil || !writeResolution || request.FeedbackResolutionPath == "" || len(request.Feedback) == 0 {
 		return result, err
 	}
 	keys := make([]string, 0, len(request.Feedback))
 	for _, item := range request.Feedback {
 		keys = append(keys, item.Key)
 	}
+	subject := request.Candidate.Revision
+	if p.malformedResolutionSubject != "" {
+		subject = p.malformedResolutionSubject
+	}
 	document, marshalErr := json.Marshal(FeedbackResolution{
 		SchemaVersion: FeedbackResolutionSchemaVersion,
 		Resolution:    FeedbackResolutionNoChangeRequired,
-		Subject:       request.Candidate.Revision,
+		Subject:       subject,
 		Keys:          keys,
 	})
 	if marshalErr != nil {
