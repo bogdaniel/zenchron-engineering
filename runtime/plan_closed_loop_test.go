@@ -921,6 +921,154 @@ func TestAVerdictWithANonSucceededOutcomeAndNoFailureIsNeverAdmitted(t *testing.
 	}
 }
 
+// A MALFORMED REVIEWER RESULT IS A BOUNDED PROTOCOL RETRY, NEVER A
+// VERIFICATION FAILURE (#374).
+//
+// A reviewer that writes a result the runtime cannot decode has reached no
+// verdict about the candidate at all - nothing was judged, so nothing about
+// the candidate failed review. Classifying it as FailureVerification (what
+// the dogfood evidence for #374 reproduced) routed it to producer
+// remediation, which for a reviewer-role run that never commits a candidate
+// of its own re-leased the SAME un-reattemptable operation and terminalized
+// the run on its very first attempt - exactly the "a valid BLOCK ... became a
+// failed stage" shape, just one JSON field away from a valid BLOCK. This
+// proves the SAME operation instead gets a bounded retry, with the exact
+// decode reason delivered to it as a finding, and that a corrected result on
+// that retry is admitted normally.
+func TestAMalformedReviewerResultIsABoundedProtocolRetryNotAVerificationFailure(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	reviewer := NewFakeReviewerProvider(
+		ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted},
+		ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted},
+	)
+	// The first invocation writes a document shaped like a real review (a
+	// BLOCK with findings) but under the wrong schema - the exact #374 dogfood
+	// shape, where a reviewer answered honestly using fields the protocol does
+	// not define.
+	reviewer.Raw = map[int]string{0: `{"verdict":"blocked","category":"correctness","summary":"needs changes"}`}
+	deps := fixture.deps
+	deps.Provider = reviewer
+	deps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+	fixture.engines["claude"] = fixture.newRuntime(deps)
+
+	fixture.approve(t)
+	fixture.reconcile(t)
+	producer := planStageState(t, fixture, "implementation").RunID
+	produceCandidate(t, fixture, producer, "package b\n", true)
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	review := planStageState(t, fixture, "review")
+	if review.RunID == "" {
+		t.Fatal("the reviewer stage created no run")
+	}
+	engine := fixture.engines["claude"]
+	for i := 0; i < 14; i++ {
+		if _, err := engine.Reconcile(context.Background(), review.RunID); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	if len(reviewer.Reviewed) < 2 {
+		t.Fatalf("the reviewer was not given a bounded retry after its malformed result: %d invocation(s)", len(reviewer.Reviewed))
+	}
+
+	events, err := fixture.store.Events(review.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := executionDiagnostics(t, events)
+	if len(records) == 0 {
+		t.Fatal("no execution.invoke result was recorded")
+	}
+	first := records[0]
+	if first.FailureClass != FailureReviewerProtocolIncomplete {
+		t.Fatalf("a malformed result was classified %q, want %q", first.FailureClass, FailureReviewerProtocolIncomplete)
+	}
+	if RouteFailure(first.FailureClass) != RouteRetry {
+		t.Fatalf("a reviewer protocol failure routes to %q, want %q", RouteFailure(first.FailureClass), RouteRetry)
+	}
+	if first.ReviewRefusal == nil || first.ReviewRefusal.Detail == "" {
+		t.Fatalf("the exact decode reason was not retained: %+v", first.ReviewRefusal)
+	}
+
+	after := planStageState(t, fixture, "review")
+	if after.Review == nil || after.Review.Verdict != StageReviewAccepted {
+		t.Fatalf("the corrected retry's verdict was not admitted: %#v", after.Review)
+	}
+}
+
+// A REVIEWER THAT WRITES NOTHING IS A PROTOCOL FAILURE, NOT A SILENT SUCCESS
+// (#374).
+//
+// Provider return with no Failure and no written reviewer result is the
+// second #374 dogfood shape: an invocation the adapter reports Succeeded that
+// never crossed the reviewer-result protocol at all. Left unchecked, the
+// operation settles Succeeded, execution.completed is journalled, and the
+// stage is stuck "running" forever - nothing ever calls admitReview to settle
+// it either way, because result.Review is nil and the success path only
+// admits a non-nil one. This asserts the operation fails instead, with the
+// reviewer-protocol class, so the run keeps asking for a verdict rather than
+// waiting on one that will never come.
+func TestAReviewerThatWritesNoResultFailsRatherThanHangingSucceeded(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	reviewer := NewFakeReviewerProvider() // no verdicts: the reviewer writes prose and nothing else
+	deps := fixture.deps
+	deps.Provider = reviewer
+	deps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+	fixture.engines["claude"] = fixture.newRuntime(deps)
+
+	fixture.approve(t)
+	fixture.reconcile(t)
+	producer := planStageState(t, fixture, "implementation").RunID
+	produceCandidate(t, fixture, producer, "package b\n", true)
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	review := planStageState(t, fixture, "review")
+	if review.RunID == "" {
+		t.Fatal("the reviewer stage created no run")
+	}
+	engine := fixture.engines["claude"]
+	for i := 0; i < 10; i++ {
+		if _, err := engine.Reconcile(context.Background(), review.RunID); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	if len(reviewer.Reviewed) == 0 {
+		t.Fatal("the reviewer was never given a result path, so this proves nothing")
+	}
+
+	events, err := fixture.store.Events(review.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == EventExecutionCompleted {
+			t.Fatal("an invocation that wrote no reviewer result was still recorded execution.completed")
+		}
+	}
+	records := executionDiagnostics(t, events)
+	if len(records) == 0 {
+		t.Fatal("no execution.invoke result was recorded")
+	}
+	for _, record := range records {
+		if record.FailureClass != FailureReviewerProtocolIncomplete {
+			t.Fatalf("a reviewer invocation that wrote no result was classified %q, want %q", record.FailureClass, FailureReviewerProtocolIncomplete)
+		}
+		if record.ReviewRefusal == nil {
+			t.Fatalf("no exact reason was retained for the missing result: %+v", record)
+		}
+	}
+
+	after := planStageState(t, fixture, "review")
+	if after.State == PlanStageCompleted {
+		t.Fatal("a reviewer that wrote no result settled its stage completed")
+	}
+	if after.Review != nil {
+		t.Fatalf("a reviewer that wrote no result produced a verdict: %#v", after.Review)
+	}
+}
+
 // outcomeOnlyFailureReviewerProvider reports a non-succeeded Outcome without
 // pairing it with a Failure and without clearing Review, unlike every in-tree
 // provider. It models a future or third-party adapter that skips that

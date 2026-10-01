@@ -446,11 +446,19 @@ func TestAMalformedVerdictFailsAnOtherwiseSuccessfulInvocation(t *testing.T) {
 	if result.Outcome != OperationFailed || result.Failure == nil {
 		t.Fatalf("a malformed verdict did not fail the invocation: %+v", result)
 	}
-	if result.Failure.Classification != FailureVerification {
-		t.Fatalf("classification %q, want %q", result.Failure.Classification, FailureVerification)
+	// Never FailureVerification (#374): nothing was judged, so nothing about
+	// the candidate failed review - this is the reviewer's OWN invocation
+	// failing to cross the result protocol.
+	if result.Failure.Classification != FailureReviewerProtocolIncomplete {
+		t.Fatalf("classification %q, want %q", result.Failure.Classification, FailureReviewerProtocolIncomplete)
 	}
 	if result.Review != nil {
 		t.Fatalf("a malformed verdict was carried out anyway: %+v", result.Review)
+	}
+	// The exact reason is retained rather than discarded down to a bare
+	// classification, so a bounded retry can tell the reviewer what was wrong.
+	if result.ReviewRefusal == nil || !strings.Contains(result.ReviewRefusal.Detail, "not a valid") {
+		t.Fatalf("the exact decode reason was not retained: %+v", result.ReviewRefusal)
 	}
 }
 

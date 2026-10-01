@@ -320,6 +320,26 @@ func (s *runState) lastFailure(id string) (FailureClass, bool) {
 	return result.FailureClass, true
 }
 
+// lastReviewRefusal reads the exact reviewer-protocol refusal THIS operation's
+// most recent failed attempt recorded, so a bounded retry of the same
+// reviewer invocation (#374) can be told why rather than being re-dispatched
+// blind. It is scoped to FailureReviewerProtocolIncomplete deliberately: that
+// is the one class a retry of this exact operation, not a different one,
+// answers - unlike FailureVerification's admission refusals, which only ever
+// surface once a candidate exists for the run to remediate (see findings()).
+func (s *runState) lastReviewRefusal(id string) (*ReviewerResultRefusedError, bool) {
+	op, ok := s.snapshot.Operations[id]
+	if !ok || op.State != OperationFailed {
+		return nil, false
+	}
+	var record executionRecord
+	if decodeJSON(op.Result, &record) != nil ||
+		record.FailureClass != FailureReviewerProtocolIncomplete || record.ReviewRefusal == nil {
+		return nil, false
+	}
+	return record.ReviewRefusal, true
+}
+
 // currentOperation is the most recently started operation, for the status
 // report only. It is never consulted to decide what to do next.
 func (s *runState) currentOperation() (RunOperation, bool) {

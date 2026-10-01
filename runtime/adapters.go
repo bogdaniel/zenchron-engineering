@@ -290,6 +290,14 @@ type ExecutionResult struct {
 	// unsettled. It is a CLAIM at this point and authorizes nothing until
 	// AdmitReviewerResult has checked it.
 	Review *ReviewerResult
+	// ReviewRefusal is set by an adapter that tried to read Review and could
+	// not: the reviewer-result file existed but failed to decode as one. It
+	// carries the runtime's own exact reason, through the same typed refusal
+	// AdmitReviewerResult produces for a result that decoded but failed its
+	// authority checks, so a decode failure and an authority refusal retain
+	// their reason the same way instead of the decode failure's being
+	// discarded down to a bare classification (#374).
+	ReviewRefusal *ReviewerResultRefusedError
 	// Resolution is the structured no-change resolution a producer invocation
 	// emitted, read by the adapter from the runtime-owned result path. It is
 	// nil when none was written - the ordinary case for an invocation that
@@ -883,7 +891,28 @@ const (
 	// runtime bound mid-task, so the retry gets a fresh invocation rather
 	// than observations from an attempt that said nothing.
 	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
-	FailureUnknown            FailureClass = "unknown"
+	// FailureReviewerProtocolIncomplete is a reviewer-role invocation that
+	// completed - the process exited cleanly, within its bounds - without
+	// crossing the reviewer-result protocol (reviewer_result.go): the result
+	// file it wrote failed to decode as one, or it wrote none at all.
+	//
+	// It is deliberately NOT FailureVerification. That class means a verdict
+	// WAS reached and the candidate was judged and found wanting; this class
+	// means no verdict was reached at all. A reviewer that produced malformed
+	// JSON, or stdout but no result file, has refused to answer the question
+	// it was asked - that is a defect of THIS invocation's protocol
+	// compliance, not an observation about the candidate under review, and
+	// folding it into FailureVerification is what let a reviewer's own broken
+	// output read as the candidate having failed review (#374).
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// same shape FailureFeedbackUnresolved uses: no budget is minted or reset,
+	// and a reviewer that keeps failing the protocol exhausts its attempts and
+	// stops truthfully. The exact reason is kept (ReviewerResultRefusedError)
+	// and returned to the reviewer on the retry as a finding, so correction is
+	// possible instead of the reviewer guessing what was wrong the first time.
+	FailureReviewerProtocolIncomplete FailureClass = "reviewer_protocol_incomplete"
+	FailureUnknown                    FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -921,7 +950,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress, FailureFeedbackUnresolved:
+		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureReviewerProtocolIncomplete:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
