@@ -75,6 +75,12 @@ func TestInterruptedReviewContinuesWithPersistedBudget(t *testing.T) {
 		}
 		return os.WriteFile(filepath.Join(dir, "review.go"), []byte("package candidate\n// completed review fix\n"), 0600)
 	}
+	// The delivered continuation states an explicit checkpoint-completion
+	// claim (#379), bound to the exact checkpoint it inherited - mutating the
+	// workspace further is real work, but it does not by itself prove the
+	// inherited checkpoint is finished, so a clean return alone must not
+	// promote it.
+	f.provider.resolveFeedback = true
 	outcome = f.reconcile(id)
 	final := f.state(id)
 	if outcome.Disposition != Waiting || outcome.Reason != ReasonGoalStateReached {

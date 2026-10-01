@@ -172,6 +172,18 @@ type mutationResult struct {
 	// unfinished work and simply exited, which is the exact defect #376
 	// exists to close. Discharge reads this field and nothing else.
 	ResolvedFeedback []string `json:"resolved_feedback,omitempty"`
+	// CheckpointResolved records that AdmitCheckpointCompletion admitted a
+	// FeedbackResolutionCheckpointComplete claim for this attempt, independent
+	// of how many feedback keys (if any) it named and independent of Mutated.
+	// ResolvedFeedback alone cannot say this: an admitted resolution naming
+	// zero keys - the shape a continuation that inherits a checkpoint with no
+	// feedback obligation writes to state "this checkpoint is complete" -
+	// leaves ResolvedFeedback empty exactly like no resolution was ever
+	// admitted at all. This is #379's generalization of #376 from feedback
+	// discharge to checkpoint continuation: a continuation that returns
+	// without setting this is not evidence the checkpoint it inherited is
+	// complete, whether or not it mutated the candidate further.
+	CheckpointResolved bool `json:"checkpoint_resolved,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -1865,6 +1877,26 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, "execution_checkpointed")
 		return false, outcome, err
 	}
+	// AN UNRESOLVED CONTINUATION ALSO ENDS THE PASS (#379), for the same
+	// reason a checkpoint does: the checkpoint it inherited is unresolved work,
+	// not a flake worth hammering same-call like an ordinary retryable
+	// failure. feedback_unresolved and reviewer-protocol failures are
+	// deliberately NOT given this treatment - they retry within the same pass,
+	// spending their whole attempt budget at once, because that failure is
+	// about a candidate already known to exist and already being iterated on.
+	// A checkpoint continuation is different: it is the one invocation that
+	// may have just spent real wall-clock time deferring to work it never
+	// finished, and retrying it immediately, in the same call, is exactly how
+	// the fourth dogfood's checkpoint got hammered through its whole budget
+	// and promoted on the attempt that happened to return clean. Ending the
+	// pass here means each continuation attempt is observed at a durable
+	// point - the checkpoint stays exactly where it was, the attempt it spent
+	// is not given back, and a later reconciliation (not this same call)
+	// decides whether to spend the next one.
+	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
+		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
 		// The ATTEMPT is always given back - observing an external refusal is
 		// not work. The execution TIME is given back only when no execution
@@ -1878,6 +1910,18 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	return true, Outcome{}, nil
+}
+
+// failureClassOf reads the same one shared mutationResult field lastFailure
+// does, without requiring the caller to care whether the class routes
+// anywhere in particular - unlike waitRoutedFailure, which only answers for
+// RouteWait.
+func failureClassOf(raw json.RawMessage) FailureClass {
+	var result mutationResult
+	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
+		return ""
+	}
+	return result.FailureClass
 }
 
 // journalled reports whether an effect appended one particular event type.

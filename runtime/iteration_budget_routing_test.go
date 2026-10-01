@@ -20,6 +20,14 @@ type budgetStep struct {
 	mutate string // a filename to write, or "" for a zero-delta invocation
 	stop   ProviderStop
 	detail string
+	// resolve, meaningful only alongside stop == StopCompleted, has the
+	// invocation state an explicit completion claim bound to the exact
+	// candidate revision (and, for a continuation, tree) it was shown, instead
+	// of merely returning clean. A clean return with neither a mutation nor
+	// this claim is not completion - see TestNormalCompletionWithNoDeltaNeedsNoFakeCommit.
+	// A MUTATING continuation still needs this claim too (#379): see
+	// TestContinuationCanCompleteAfterFurtherMutation.
+	resolve bool
 }
 
 func (p *budgetProvider) Isolation() ProviderIsolation {
@@ -47,7 +55,18 @@ func (p *budgetProvider) Execute(_ context.Context, request ExecutionRequest) (E
 		}
 	}
 	if step.stop == StopCompleted {
-		return ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}, nil
+		result := ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+		if step.resolve {
+			resolution := FeedbackResolution{SchemaVersion: FeedbackResolutionSchemaVersion, Subject: request.Candidate.Revision}
+			if request.Purpose == InvocationContinuation {
+				resolution.Resolution = FeedbackResolutionCheckpointComplete
+				resolution.Tree = request.Candidate.Tree
+			} else {
+				resolution.Resolution = FeedbackResolutionNoChangeRequired
+			}
+			result.Resolution = &resolution
+		}
+		return result, nil
 	}
 	return ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed},
 		&ProviderStopError{Reason: step.stop, Detail: step.detail}
@@ -210,10 +229,21 @@ func TestZeroDeltaContinuationAtTheCeilingKeepsItsCheckpoint(t *testing.T) {
 // TestNormalCompletionWithNoDeltaNeedsNoFakeCommit is case F: a continuation
 // that finishes without further change inherits the checkpoint rather than
 // manufacturing a commit for zero bytes.
+//
+// Case F used to reach this by returning clean with nothing more: a provider
+// outcome of Succeeded and a zero-byte diff. #379 records that exact shape -
+// clean provider return, no mutation - as indistinguishable from a
+// continuation that deferred unfinished background work and exited, so it is
+// no longer read as completion by itself. The checkpoint-completion claim
+// below, bound to the exact checkpoint it was shown, is what now states the
+// no-further-change conclusion case F is actually about; without it the
+// candidate stays an incomplete checkpoint, which is what
+// TestContinuationWithoutFurtherMutationStaysIncomplete (fourth_dogfood_test.go)
+// proves directly.
 func TestNormalCompletionWithNoDeltaNeedsNoFakeCommit(t *testing.T) {
 	fixture, _, runID := budgetFixture(t,
 		budgetStep{mutate: "first.go"},
-		budgetStep{stop: StopCompleted}, // completes, changes nothing
+		budgetStep{stop: StopCompleted, resolve: true}, // completes, changes nothing, states why
 	)
 	events := journalOf(t, fixture.runtime, runID)
 	if got := countEvents(events, EventCandidateCommitted) + countEvents(events, EventCandidateCheckpointed); got != 1 {
@@ -226,6 +256,29 @@ func TestNormalCompletionWithNoDeltaNeedsNoFakeCommit(t *testing.T) {
 	// arrive at a COMPLETE candidate, not a permanently checkpointed one.
 	if !fixture.state(runID).projection.CandidateComplete {
 		t.Fatal("a completed zero-delta continuation left its candidate incomplete")
+	}
+}
+
+// TestContinuationCanCompleteAfterFurtherMutation proves the positive side of
+// #379's point that mutation and completion are independent facts: a
+// continuation that mutates the candidate further AND states an explicit
+// checkpoint-completion claim, bound to the exact checkpoint revision and
+// tree it inherited, is promoted to a finished candidate exactly as a
+// zero-delta one is. It is not enough for the runtime to stop crediting
+// mutation alone (TestContinuationWithoutFurtherMutationStaysIncomplete and
+// its mutating counterpart in fourth_dogfood_test.go) - a continuation that
+// did real work and also stated completion must still be able to finish.
+func TestContinuationCanCompleteAfterFurtherMutation(t *testing.T) {
+	fixture, _, runID := budgetFixture(t,
+		budgetStep{mutate: "first.go"},
+		budgetStep{mutate: "second.go", stop: StopCompleted, resolve: true},
+	)
+	events := journalOf(t, fixture.runtime, runID)
+	if countEvents(events, EventExecutionCompleted) != 1 {
+		t.Fatalf("a mutating continuation with an explicit completion claim was not recorded complete: %v", journalTypes(events))
+	}
+	if !fixture.state(runID).projection.CandidateComplete {
+		t.Fatal("a mutating continuation with an explicit completion claim left its candidate incomplete")
 	}
 }
 
