@@ -893,19 +893,20 @@ const (
 	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
 	// FailureCheckpointContinuationUnresolved is a continuation invocation -
 	// one that inherited a runtime-owned checkpoint, interrupted rather than
-	// finished work - that returned without settling it: the workspace it
-	// left behind is unchanged, and it did not state (or failed to bind) an
-	// explicit no_change_required resolution bound to the exact checkpoint
-	// commit it was shown. See FeedbackResolution.
+	// finished work - that returned without settling it: it did not state (or
+	// failed to bind) an explicit FeedbackResolutionCheckpointComplete claim
+	// bound to the exact checkpoint revision and tree it was shown. See
+	// FeedbackResolution.
 	//
 	// Provider return is not proof of semantic completion (#379, generalizing
 	// #376 from feedback discharge to checkpoint continuation): a continuation
 	// that defers to background work it never finishes, or that simply
 	// misreads the checkpoint, returns exactly this way - indistinguishable
 	// from one that legitimately needed to do nothing further, right up until
-	// it is asked to STATE that rather than have it inferred. So neither shape
-	// is read as success; both are this class, and only a bound, admitted
-	// resolution (or further mutation) escapes it.
+	// it is asked to STATE that rather than have it inferred. Mutation does
+	// NOT escape this class by itself: it proves work happened, not that the
+	// inherited checkpoint is finished, so only a bound, admitted completion
+	// claim escapes it, mutated or not.
 	//
 	// It routes to a bounded RETRY of the SAME execution.invoke operation,
 	// under that operation's existing attempt ceiling - no budget is minted

@@ -1075,41 +1075,44 @@ func providerPrompt(r ExecutionRequest) string {
 
 // feedbackResolutionEnvelope states the REQUIRED OUTPUT when a producer
 // invocation decides none of the admitted feedback above needs a change, or
-// (#379) when a continuation decides the checkpoint it inherited needs no
-// further change.
+// (#379) when a continuation decides the checkpoint it inherited is complete.
 //
 // Provider return is not proof of completion (#376, generalized by #379 from
 // feedback discharge to checkpoint continuation): an invocation that simply
 // leaves the workspace unmodified and exits is indistinguishable from one
-// that ran out of time or deferred unfinished work. So a legitimate no-change
+// that ran out of time or deferred unfinished work, and - for a continuation
+// - so is one that mutates further and exits: mutation proves work happened,
+// not that the inherited checkpoint is finished. So a legitimate completion
 // conclusion has to be WRITTEN, the same way a reviewer's verdict has to be -
-// never left for the runtime to infer from an empty diff.
+// never left for the runtime to infer from a diff, empty or not.
 func feedbackResolutionEnvelope(r ExecutionRequest) string {
 	if r.FeedbackResolutionPath == "" {
 		return ""
 	}
-	if len(r.Feedback) > 0 {
+	if r.Purpose == InvocationContinuation {
 		return fmt.Sprintf(
-			"\n\nIf, having investigated, NONE of the admitted feedback above requires a change to this candidate, "+
-				"that conclusion must be WRITTEN rather than left to be inferred from an unmodified workspace: write a JSON document to %s and make no edit. "+
+			"\n\nThis candidate is a CHECKPOINT: an earlier invocation left this exact work interrupted, not finished. Returning - whether or not "+
+				"you change the candidate further - is not, by itself, evidence that the checkpoint's obligations (including any admitted feedback "+
+				"above) are complete: both are indistinguishable from an invocation that deferred unfinished work and exited. If, having investigated, "+
+				"you conclude the checkpoint is now fully complete, that conclusion must be WRITTEN rather than left to be inferred from the diff: "+
+				"write a JSON document to %s. "+
 				"The document is a JSON object with exactly these members: schema_version (%q), resolution (%q), subject (the exact candidate revision %s), "+
-				"keys (an array naming every admitted feedback key above, exactly - not a subset), and an optional reason. "+
-				"Write this document ONLY when every admitted item needs no change. If any item needs a change, make the change instead and do not write this document. "+
-				"An invocation that neither changes the candidate nor writes this document leaves every item above outstanding, however the invocation otherwise ends.",
-			r.FeedbackResolutionPath, FeedbackResolutionSchemaVersion, FeedbackResolutionNoChangeRequired, r.Candidate.Revision)
+				"tree (the exact candidate tree %s), keys (an array naming every admitted feedback key above, exactly - not a subset - or an empty array "+
+				"if none was delivered), and an optional reason. Write this document ONLY when the checkpoint is actually complete. If further work is "+
+				"still needed, make the change and do not write this document. An invocation that neither finishes the work nor writes this document "+
+				"leaves the checkpoint exactly as interrupted as it was, however the invocation otherwise ends.",
+			r.FeedbackResolutionPath, FeedbackResolutionSchemaVersion, FeedbackResolutionCheckpointComplete, r.Candidate.Revision, r.Candidate.Tree)
 	}
-	if r.Purpose != InvocationContinuation {
+	if len(r.Feedback) == 0 {
 		return ""
 	}
 	return fmt.Sprintf(
-		"\n\nThis candidate is a CHECKPOINT: an earlier invocation left this exact work interrupted, not finished. Returning without changing "+
-			"the candidate is not, by itself, evidence that the checkpoint is complete - that is indistinguishable from an invocation that deferred "+
-			"unfinished work and simply exited. If, having investigated, you conclude this checkpoint already needs no further change, that "+
-			"conclusion must be WRITTEN rather than left to be inferred from an unmodified workspace: write a JSON document to %s and make no edit. "+
+		"\n\nIf, having investigated, NONE of the admitted feedback above requires a change to this candidate, "+
+			"that conclusion must be WRITTEN rather than left to be inferred from an unmodified workspace: write a JSON document to %s and make no edit. "+
 			"The document is a JSON object with exactly these members: schema_version (%q), resolution (%q), subject (the exact candidate revision %s), "+
-			"keys (an empty array), and an optional reason. Write this document ONLY when no further change is needed. If further work is needed, "+
-			"make the change instead and do not write this document. An invocation that neither changes the candidate nor writes this document "+
-			"leaves the checkpoint exactly as interrupted as it was, however the invocation otherwise ends.",
+			"keys (an array naming every admitted feedback key above, exactly - not a subset), and an optional reason. "+
+			"Write this document ONLY when every admitted item needs no change. If any item needs a change, make the change instead and do not write this document. "+
+			"An invocation that neither changes the candidate nor writes this document leaves every item above outstanding, however the invocation otherwise ends.",
 		r.FeedbackResolutionPath, FeedbackResolutionSchemaVersion, FeedbackResolutionNoChangeRequired, r.Candidate.Revision)
 }
 

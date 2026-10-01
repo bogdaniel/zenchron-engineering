@@ -58,12 +58,14 @@ type isolatedProvider struct {
 	mutate   func(dir string) error
 	requests []ExecutionRequest
 	// resolveFeedback, when set, writes a real FeedbackResolution document to
-	// whatever FeedbackResolutionPath the invocation was given, claiming
-	// every delivered key resolved with no change required, and then reads
-	// it back through the production decoder - exactly as an installed CLI
-	// writing the real channel and CLIAgentProvider reading it would. A test
-	// wanting a provider that merely returns without stating a resolution
-	// (the #376 case that must NOT discharge feedback) leaves this unset.
+	// whatever FeedbackResolutionPath the invocation was given, claiming every
+	// delivered key resolved - no_change_required outside a continuation,
+	// checkpoint_complete (bound to the exact tree too) for one (#379) - and
+	// then reads it back through the production decoder - exactly as an
+	// installed CLI writing the real channel and CLIAgentProvider reading it
+	// would. A test wanting a provider that merely returns without stating a
+	// resolution (the #376 case that must NOT discharge feedback) leaves this
+	// unset.
 	resolveFeedback bool
 	// malformedResolutionSubject, when non-empty, writes a resolution through
 	// the same real write/read path as resolveFeedback, but claiming THIS
@@ -115,12 +117,14 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 	if p.malformedResolutionSubject != "" {
 		subject = p.malformedResolutionSubject
 	}
-	document, marshalErr := json.Marshal(FeedbackResolution{
-		SchemaVersion: FeedbackResolutionSchemaVersion,
-		Resolution:    FeedbackResolutionNoChangeRequired,
-		Subject:       subject,
-		Keys:          keys,
-	})
+	claim := FeedbackResolution{SchemaVersion: FeedbackResolutionSchemaVersion, Subject: subject, Keys: keys}
+	if request.Purpose == InvocationContinuation {
+		claim.Resolution = FeedbackResolutionCheckpointComplete
+		claim.Tree = request.Candidate.Tree
+	} else {
+		claim.Resolution = FeedbackResolutionNoChangeRequired
+	}
+	document, marshalErr := json.Marshal(claim)
 	if marshalErr != nil {
 		return result, marshalErr
 	}

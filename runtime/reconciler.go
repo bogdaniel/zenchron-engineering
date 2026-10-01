@@ -172,16 +172,17 @@ type mutationResult struct {
 	// unfinished work and simply exited, which is the exact defect #376
 	// exists to close. Discharge reads this field and nothing else.
 	ResolvedFeedback []string `json:"resolved_feedback,omitempty"`
-	// CheckpointResolved records that AdmitFeedbackResolution admitted a
-	// resolution for this attempt, independent of how many feedback keys (if
-	// any) it named. ResolvedFeedback alone cannot say this: an admitted
-	// resolution naming zero keys - the shape a continuation that inherits a
-	// checkpoint with no feedback obligation writes to state "this checkpoint
-	// needs no further change" - leaves ResolvedFeedback empty exactly like no
-	// resolution was ever admitted at all. This is #379's generalization of
-	// #376 from feedback discharge to checkpoint continuation: a continuation
-	// that neither mutates nor sets this is not evidence the checkpoint it
-	// inherited is complete, whatever the provider otherwise returned.
+	// CheckpointResolved records that AdmitCheckpointCompletion admitted a
+	// FeedbackResolutionCheckpointComplete claim for this attempt, independent
+	// of how many feedback keys (if any) it named and independent of Mutated.
+	// ResolvedFeedback alone cannot say this: an admitted resolution naming
+	// zero keys - the shape a continuation that inherits a checkpoint with no
+	// feedback obligation writes to state "this checkpoint is complete" -
+	// leaves ResolvedFeedback empty exactly like no resolution was ever
+	// admitted at all. This is #379's generalization of #376 from feedback
+	// discharge to checkpoint continuation: a continuation that returns
+	// without setting this is not evidence the checkpoint it inherited is
+	// complete, whether or not it mutated the candidate further.
 	CheckpointResolved bool `json:"checkpoint_resolved,omitempty"`
 }
 

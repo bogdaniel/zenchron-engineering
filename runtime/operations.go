@@ -920,28 +920,50 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// same signal the feedback-delivery record below relies on.
 		ProviderExecuted: execErr == nil || result.Invocation != nil,
 	}
-	// THE EXPLICIT NO-CHANGE RESOLUTION, admitted only against what this
-	// attempt actually left behind. A provider that also mutated the
-	// workspace is not stating "no change required" - it is doing a change -
-	// so a resolution is considered only when the inspected workspace agrees
-	// there is none, never from the provider's own claim that nothing
-	// changed. A resolution that fails to bind (#376: wrong subject, wrong or
-	// partial keys, wrong schema) is simply not admitted; it does not fail
-	// the operation BY ITSELF - see feedbackUnresolved below, which is what
-	// actually fails it - but the exact refusal reason is kept rather than
+	// THE EXPLICIT COMPLETION CLAIM, admitted only against what this attempt
+	// actually was invoked against - never from the provider's own claim that
+	// nothing changed or that it is done.
+	//
+	// A CONTINUATION admits FeedbackResolutionCheckpointComplete, bound to the
+	// exact checkpoint revision AND tree it inherited, independently of
+	// record.Mutated (#379): mutation proves work happened, not that the
+	// inherited checkpoint is finished, so a continuation that goes on to
+	// change the candidate further is not thereby exempted from stating
+	// completion. Every other invocation (feedback delivered, no checkpoint
+	// involved) admits FeedbackResolutionNoChangeRequired exactly as #376
+	// introduced it, and only when the inspected workspace agrees nothing
+	// changed - a provider that also mutated the workspace is not stating "no
+	// change required", it is doing a change.
+	//
+	// A resolution that fails to bind (wrong subject, wrong tree, wrong or
+	// partial keys, wrong schema or wrong value for what this invocation may
+	// state) is simply not admitted; it does not fail the operation BY ITSELF
+	// - see feedbackUnresolved and continuationUnresolved below, which are
+	// what actually fail it - but the exact refusal reason is kept rather than
 	// discarded, so an operator sees why it did not bind instead of a bare
 	// "nothing happened".
 	var resolutionErr error
-	if result.Resolution != nil && !record.Mutated && execErr == nil && result.Failure == nil {
+	if result.Resolution != nil && execErr == nil && result.Failure == nil {
 		deliveredKeys := make([]string, 0, len(feedback))
 		for _, item := range feedback {
 			deliveredKeys = append(deliveredKeys, item.Key)
 		}
-		if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
-			record.ResolvedFeedback = resolved
-			record.CheckpointResolved = true
-		} else {
-			resolutionErr = admitErr
+		switch {
+		case purpose == InvocationContinuation:
+			if resolved, admitErr := AdmitCheckpointCompletion(deliveredKeys, subject.Commit, subject.Tree, result.Resolution); admitErr == nil {
+				record.ResolvedFeedback = resolved
+				record.CheckpointResolved = true
+			} else {
+				resolutionErr = admitErr
+			}
+		case !record.Mutated:
+			if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
+				record.ResolvedFeedback = resolved
+			} else {
+				resolutionErr = admitErr
+			}
+		default:
+			resolutionErr = fmt.Errorf("a no-change resolution was stated by an invocation that mutated the candidate")
 		}
 	}
 	// THE SEMANTIC COMPLETION GATE (#376). An invocation delivered admitted
@@ -973,20 +995,26 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// THE CHECKPOINT CONTINUATION COMPLETION GATE (#379), generalizing #376's
 	// feedback gate from feedback discharge to checkpoint continuation itself.
 	// A continuation inherits a checkpoint - work a prior attempt left
-	// interrupted, not finished - and settles it in exactly one of two ways:
-	// it mutates the candidate further, or it states a resolution that binds
-	// to the exact checkpoint commit it was shown (CheckpointResolved), naming
-	// whatever feedback keys (possibly none) it was delivered. Provider return
-	// with NEITHER is the dogfood shape #379 records: a continuation that ran
-	// out of its own bound, deferred to background work, or simply misread the
-	// checkpoint and exited is indistinguishable from one that is a clean,
-	// successful return, and the EXACT SAME invocation that returned cleanly
-	// is the one event this gate is checked against - a continuation's own
-	// successful provider return is read as nothing more than that. It fails
-	// the OPERATION, the same as feedbackUnresolved, so the checkpoint stays
-	// exactly where it was and the run keeps wanting a successor rather than
-	// promoting interrupted work because nothing went wrong on the way out.
-	continuationUnresolved := purpose == InvocationContinuation && !record.Mutated &&
+	// interrupted, not finished - and settles it in exactly ONE way: it states
+	// a FeedbackResolutionCheckpointComplete resolution that binds to the exact
+	// checkpoint revision AND tree it was shown (CheckpointResolved), naming
+	// whatever feedback keys (possibly none) it was delivered.
+	//
+	// Mutation is deliberately NOT a second way, however the gate used to read.
+	// A continuation that mutates further has done real work, but that proves
+	// only that something happened, not that the checkpoint it inherited is
+	// finished - it may have addressed only part of what was owed and deferred
+	// the rest, which is indistinguishable from a continuation that mutated
+	// nothing and simply exited. Provider return, mutated or not, is the
+	// dogfood shape #379 records: a continuation that ran out of its own
+	// bound, deferred to background work, or simply misread the checkpoint and
+	// exited is indistinguishable from one that is a clean, successful return,
+	// and the EXACT SAME invocation that returned cleanly is the one event
+	// this gate is checked against. It fails the OPERATION, the same as
+	// feedbackUnresolved, so the checkpoint stays exactly where it was and the
+	// run keeps wanting a successor rather than promoting interrupted work
+	// because nothing went wrong on the way out.
+	continuationUnresolved := purpose == InvocationContinuation &&
 		execErr == nil && result.Failure == nil && !record.CheckpointResolved
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := append(attemptProvenance, journalEntry{

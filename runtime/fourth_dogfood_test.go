@@ -202,7 +202,7 @@ type interruptedProducer struct {
 	// resolveAt, when it equals the current invocation index (1-based), has
 	// that invocation state an explicit checkpoint-completion claim (#379)
 	// bound to the exact subject it was shown, instead of merely returning.
-	// It is only meaningful on an invocation that also does not mutate.
+	// It is admitted whether or not the same invocation also mutates.
 	resolveAt int
 }
 
@@ -225,8 +225,9 @@ func (p *interruptedProducer) Execute(_ context.Context, request ExecutionReques
 	if invocation == p.resolveAt {
 		result.Resolution = &FeedbackResolution{
 			SchemaVersion: FeedbackResolutionSchemaVersion,
-			Resolution:    FeedbackResolutionNoChangeRequired,
+			Resolution:    FeedbackResolutionCheckpointComplete,
 			Subject:       request.Candidate.Revision,
+			Tree:          request.Candidate.Tree,
 		}
 	}
 	if p.completeAt > 0 && invocation >= p.completeAt {
@@ -459,6 +460,119 @@ func TestContinuationWithoutFurtherMutationStaysIncomplete(t *testing.T) {
 	var record mutationResult
 	if err := json.Unmarshal(op.Result, &record); err != nil || record.FailureClass != FailureCheckpointContinuationUnresolved {
 		t.Fatalf("wrong failure class recorded: err=%v record=%+v", err, record)
+	}
+}
+
+// TestContinuationThatMutatesWithoutCompletionEvidenceStaysIncomplete is the
+// restored defect #379's own review found in a first remediation attempt:
+// continuationUnresolved used to require !record.Mutated, so a continuation
+// that went on to mutate the candidate further - but never stated an admitted
+// completion claim - was promoted to a finished candidate on provider return
+// alone. Mutation proves work happened; it does not prove the checkpoint it
+// inherited is finished, so this must fail exactly like
+// TestContinuationWithoutFurtherMutationStaysIncomplete does for the
+// zero-delta case. This test must fail against the gate that only checks
+// !record.Mutated.
+func TestContinuationThatMutatesWithoutCompletionEvidenceStaysIncomplete(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	producer := &interruptedProducer{mutate: func(dir string, invocation int) error {
+		name := "README.md"
+		if invocation > 1 {
+			name = "more.go"
+		}
+		return os.WriteFile(filepath.Join(dir, name), []byte("partial\n"), 0600)
+	}}
+	fixture.deps.Provider = producer
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+	fixture.reconcile(runID)
+
+	before := fixture.state(runID)
+	checkpoint := before.projection.CandidateRevision
+	if checkpoint == "" || before.projection.CandidateComplete {
+		t.Fatalf("no checkpoint: %+v", before.projection)
+	}
+
+	// The continuation completes cleanly (Outcome=Succeeded) and mutates the
+	// workspace further, but states no resolution at all.
+	producer.completeAt = len(producer.requests) + 1
+	outcome := fixture.reconcile(runID)
+	if terminalDisposition(outcome.Disposition) {
+		t.Fatalf("a mutating, unresolved continuation terminalized the run on its first unresolved attempt: %+v", outcome)
+	}
+
+	after := fixture.state(runID)
+	if after.projection.CandidateRevision != checkpoint {
+		t.Fatalf("the checkpoint moved: %s, want %s", after.projection.CandidateRevision, checkpoint)
+	}
+	if after.projection.CandidateComplete {
+		t.Fatal("a continuation that mutated further but stated no completion claim promoted the checkpoint")
+	}
+	events := journalOf(t, fixture.runtime, runID)
+	if countType(events, EventExecutionCompleted) != 0 {
+		t.Fatalf("a mutating, unresolved continuation was recorded as a completed execution: %v", journalTypes(events))
+	}
+	op, ok := after.operationByKey(OpExecutionInvoke, invocationContinuationPrefix+checkpoint)
+	if !ok {
+		t.Fatal("no continuation operation was recorded")
+	}
+	if op.State != OperationFailed {
+		t.Fatalf("the continuation operation is %q, want it Failed so its own attempt budget still governs a retry", op.State)
+	}
+	var record mutationResult
+	if err := json.Unmarshal(op.Result, &record); err != nil || record.FailureClass != FailureCheckpointContinuationUnresolved {
+		t.Fatalf("wrong failure class recorded: err=%v record=%+v", err, record)
+	}
+	if !record.Mutated {
+		t.Fatal("test setup error: the continuation under test did not actually mutate the candidate")
+	}
+}
+
+// TestContinuationExhaustionWithMutationButNoCompletionPreservesCheckpoint is
+// #379's exhaustion test: when a continuation keeps mutating the candidate
+// further but never states completion, the run must not hang or be promoted -
+// it stops truthfully once the continuation's own attempt ceiling is spent,
+// and the original checkpoint is preserved exactly as it was, never promoted
+// to a complete candidate.
+func TestContinuationExhaustionWithMutationButNoCompletionPreservesCheckpoint(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	producer := &interruptedProducer{mutate: func(dir string, invocation int) error {
+		name := "README.md"
+		if invocation > 1 {
+			name = "more.go"
+		}
+		return os.WriteFile(filepath.Join(dir, name), []byte("partial\n"), 0600)
+	}}
+	fixture.deps.Provider = producer
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+	fixture.reconcile(runID)
+
+	checkpoint := fixture.state(runID).projection.CandidateRevision
+	// Every invocation from here mutates further and returns clean, without
+	// ever stating completion - the shape that must exhaust, not loop forever.
+	producer.completeAt = len(producer.requests) + 1
+
+	var outcome Outcome
+	for pass := 0; pass < 12; pass++ {
+		outcome = fixture.reconcile(runID)
+		if terminalDisposition(outcome.Disposition) {
+			break
+		}
+	}
+	if outcome.Disposition != Failed {
+		t.Fatalf("a continuation that kept mutating without ever stating completion did not stop the run truthfully: %+v", outcome)
+	}
+	state := fixture.state(runID)
+	if state.projection.CandidateRevision != checkpoint {
+		t.Fatalf("the checkpoint moved during exhaustion: %s, want %s", state.projection.CandidateRevision, checkpoint)
+	}
+	if state.projection.CandidateComplete {
+		t.Fatal("exhaustion promoted an unresolved, mutating continuation to a complete candidate")
+	}
+	events := journalOf(t, fixture.runtime, runID)
+	if countType(events, EventExecutionCompleted) != 0 {
+		t.Fatalf("an unresolved continuation was ever recorded complete: %v", journalTypes(events))
 	}
 }
 
