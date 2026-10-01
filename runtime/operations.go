@@ -727,13 +727,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			}}
 		}
 	}
-	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation and only
-	// when this invocation is being given admitted feedback to address. A
-	// producer that concludes no change is required for it has somewhere to
-	// STATE that; a producer given no feedback has nothing to resolve and is
-	// given no path, so it cannot write a claim that binds to nothing (#376).
+	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation when this
+	// invocation is being given admitted feedback to address, OR when it is a
+	// CONTINUATION of a runtime-owned checkpoint (#379). A producer that
+	// concludes no change is required has somewhere to STATE that in either
+	// case; a producer given neither feedback nor a checkpoint to continue has
+	// nothing to resolve and is given no path, so it cannot write a claim that
+	// binds to nothing (#376).
 	feedbackResolutionPath := ""
-	if len(feedback) > 0 {
+	if len(feedback) > 0 || purpose == InvocationContinuation {
 		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, ExecutionAttemptRef{
 			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 		})
@@ -937,6 +939,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 		if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
 			record.ResolvedFeedback = resolved
+			record.CheckpointResolved = true
 		} else {
 			resolutionErr = admitErr
 		}
@@ -967,6 +970,24 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// for a verdict rather than silently waiting on one that will never come.
 	reviewUnresolved := stage.producesVerdict() && execErr == nil &&
 		result.Failure == nil && result.Review == nil
+	// THE CHECKPOINT CONTINUATION COMPLETION GATE (#379), generalizing #376's
+	// feedback gate from feedback discharge to checkpoint continuation itself.
+	// A continuation inherits a checkpoint - work a prior attempt left
+	// interrupted, not finished - and settles it in exactly one of two ways:
+	// it mutates the candidate further, or it states a resolution that binds
+	// to the exact checkpoint commit it was shown (CheckpointResolved), naming
+	// whatever feedback keys (possibly none) it was delivered. Provider return
+	// with NEITHER is the dogfood shape #379 records: a continuation that ran
+	// out of its own bound, deferred to background work, or simply misread the
+	// checkpoint and exited is indistinguishable from one that is a clean,
+	// successful return, and the EXACT SAME invocation that returned cleanly
+	// is the one event this gate is checked against - a continuation's own
+	// successful provider return is read as nothing more than that. It fails
+	// the OPERATION, the same as feedbackUnresolved, so the checkpoint stays
+	// exactly where it was and the run keeps wanting a successor rather than
+	// promoting interrupted work because nothing went wrong on the way out.
+	continuationUnresolved := purpose == InvocationContinuation && !record.Mutated &&
+		execErr == nil && result.Failure == nil && !record.CheckpointResolved
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := append(attemptProvenance, journalEntry{
 		Type: EventCandidateChanged,
@@ -977,13 +998,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		},
 		Artifacts: result.Artifacts,
 	})
-	// A producer that FINISHED is the only thing that completes an execution.
-	// It is an observation about the producer, not about the work: it makes the
-	// exact subject eligible to be treated as a finished candidate, and it
-	// still proves nothing about whether the change is acceptable. Recording it
-	// on every normal completion is what lets a continuation that finds nothing
-	// left to do promote the checkpoint it inherited, without inventing a
-	// commit no mutation produced.
+	// A producer that FINISHED is the only thing that completes an execution,
+	// and for a CONTINUATION, finishing is exactly what continuationUnresolved
+	// above decides: mutating further, or stating a resolution that binds, not
+	// merely returning (#379). It is an observation about the producer, not
+	// about the work: it makes the exact subject eligible to be treated as a
+	// finished candidate, and it still proves nothing about whether the change
+	// is acceptable.
 	//
 	// A REVIEWER'S VERDICT IS ADMITTED IN THE SAME BREATH, and structurally so:
 	// it is inside this condition rather than beside it, because the two ask the
@@ -1070,13 +1091,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				}})
 			}
 		}
-		// feedbackUnresolved and reviewUnresolved are excluded here
-		// deliberately: neither is a finished execution (#376, #374) even
-		// though the provider itself reported success, so the exact subject
-		// it left behind must not become eligible to be treated as a finished
-		// candidate. The failure path below is what actually settles this
-		// attempt.
-		if !feedbackUnresolved && !reviewUnresolved {
+		// feedbackUnresolved, reviewUnresolved and continuationUnresolved are
+		// excluded here deliberately: none of the three is a finished
+		// execution (#376, #374, #379) even though the provider itself
+		// reported success, so the exact subject it left behind must not
+		// become eligible to be treated as a finished candidate. The failure
+		// path below is what actually settles this attempt.
+		if !feedbackUnresolved && !reviewUnresolved && !continuationUnresolved {
 			events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
 				ProducerID:    producerID,
 				Purpose:       purpose,
@@ -1205,6 +1226,38 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				mutationResult: record,
 				PriorContext:   result.PriorContext,
 				ReviewRefusal:  refusal,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
+	// THE OPERATION FAILS HERE for the same reason #376's feedback gate above
+	// does, generalized to the checkpoint itself (#379): a continuation that
+	// returned clean but neither mutated the candidate nor stated an admitted
+	// resolution bound to the exact checkpoint commit has not settled the
+	// work it inherited. Left Succeeded, this operation would promote the
+	// checkpoint on provider return alone - the exact dogfood shape #379
+	// records: a continuation that deferred to background work it never
+	// finished returned cleanly, and that return alone carried the checkpoint
+	// all the way to assurance and publication. Failing it keeps the SAME
+	// operation (the SAME idempotency key, continuation|<checkpoint>)
+	// eligible for a bounded retry under its own existing attempt ceiling -
+	// no new counter, no reset budget - and when that ceiling is reached the
+	// run stops truthfully with the checkpoint still visibly preserved,
+	// exactly like any other producer failure that never lands.
+	if continuationUnresolved {
+		record.FailureClass = FailureCheckpointContinuationUnresolved
+		cause := errors.New("the continuation neither changed the candidate nor stated an admitted no-change resolution for the checkpoint it inherited")
+		if resolutionErr != nil {
+			cause = fmt.Errorf("the checkpoint resolution did not bind: %w", resolutionErr)
+		}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureCheckpointContinuationUnresolved, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
 				Diagnostic:     diagnostic,
 			},
 		}

@@ -891,6 +891,31 @@ const (
 	// runtime bound mid-task, so the retry gets a fresh invocation rather
 	// than observations from an attempt that said nothing.
 	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
+	// FailureCheckpointContinuationUnresolved is a continuation invocation -
+	// one that inherited a runtime-owned checkpoint, interrupted rather than
+	// finished work - that returned without settling it: the workspace it
+	// left behind is unchanged, and it did not state (or failed to bind) an
+	// explicit no_change_required resolution bound to the exact checkpoint
+	// commit it was shown. See FeedbackResolution.
+	//
+	// Provider return is not proof of semantic completion (#379, generalizing
+	// #376 from feedback discharge to checkpoint continuation): a continuation
+	// that defers to background work it never finishes, or that simply
+	// misreads the checkpoint, returns exactly this way - indistinguishable
+	// from one that legitimately needed to do nothing further, right up until
+	// it is asked to STATE that rather than have it inferred. So neither shape
+	// is read as success; both are this class, and only a bound, admitted
+	// resolution (or further mutation) escapes it.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation,
+	// under that operation's existing attempt ceiling - no budget is minted
+	// or reset, and a continuation that keeps returning unresolved exhausts
+	// its attempts and stops truthfully, exactly like any other producer
+	// failure that never lands. It is deliberately excluded from
+	// PriorAttemptContextEligible: the provider was not cut short by a
+	// runtime bound mid-task, so the retry gets a fresh invocation rather
+	// than observations from an attempt that said nothing.
+	FailureCheckpointContinuationUnresolved FailureClass = "checkpoint_continuation_unresolved"
 	// FailureReviewerProtocolIncomplete is a reviewer-role invocation that
 	// completed - the process exited cleanly, within its bounds - without
 	// crossing the reviewer-result protocol (reviewer_result.go): the result
@@ -950,7 +975,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureReviewerProtocolIncomplete:
+		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
+		FailureReviewerProtocolIncomplete:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess

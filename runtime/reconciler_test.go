@@ -96,7 +96,15 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 	}
 	result, err := p.FakeExecutionProvider.Execute(ctx, request)
 	writeResolution := p.resolveFeedback || p.malformedResolutionSubject != ""
-	if err != nil || !writeResolution || request.FeedbackResolutionPath == "" || len(request.Feedback) == 0 {
+	if err != nil || !writeResolution || request.FeedbackResolutionPath == "" {
+		return result, err
+	}
+	// Zero delivered feedback is only a valid claim for a CONTINUATION (#379):
+	// it is the checkpoint-only shape, naming no feedback key because none was
+	// delivered. Outside a continuation, zero feedback means the path was
+	// never even granted (operations.go only prepares it when feedback exists
+	// or the invocation is a continuation), so this is unreachable there.
+	if len(request.Feedback) == 0 && request.Purpose != InvocationContinuation {
 		return result, err
 	}
 	keys := make([]string, 0, len(request.Feedback))

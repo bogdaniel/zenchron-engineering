@@ -199,6 +199,11 @@ type interruptedProducer struct {
 	requests   []ExecutionRequest
 	mutate     func(dir string, invocation int) error
 	completeAt int
+	// resolveAt, when it equals the current invocation index (1-based), has
+	// that invocation state an explicit checkpoint-completion claim (#379)
+	// bound to the exact subject it was shown, instead of merely returning.
+	// It is only meaningful on an invocation that also does not mutate.
+	resolveAt int
 }
 
 func (p *interruptedProducer) Isolation() ProviderIsolation {
@@ -217,6 +222,13 @@ func (p *interruptedProducer) Execute(_ context.Context, request ExecutionReques
 		}
 	}
 	result := ExecutionResult{ProviderID: "test-provider", Model: "gpt-fixture", Attempt: 1, Outcome: Succeeded}
+	if invocation == p.resolveAt {
+		result.Resolution = &FeedbackResolution{
+			SchemaVersion: FeedbackResolutionSchemaVersion,
+			Resolution:    FeedbackResolutionNoChangeRequired,
+			Subject:       request.Candidate.Revision,
+		}
+	}
 	if p.completeAt > 0 && invocation >= p.completeAt {
 		return result, nil
 	}
@@ -390,10 +402,15 @@ func TestCheckpointContinuesAcrossRestartAndOnlyThenBecomesAssurable(t *testing.
 	}
 }
 
-// TestContinuationWithoutFurtherMutationPromotesTheCheckpoint is case C: the
-// continuation finds nothing left to do and finishes. The checkpoint it
-// inherited becomes the execution-complete candidate, with no invented commit.
-func TestContinuationWithoutFurtherMutationPromotesTheCheckpoint(t *testing.T) {
+// TestContinuationWithoutFurtherMutationStaysIncomplete is case C, corrected
+// by #379. It used to assert the OPPOSITE of what it asserts now: that a
+// continuation which finds nothing left to do and simply returns promotes the
+// checkpoint it inherited to a finished candidate. That was the exact defect
+// #379 records - a clean provider return, with neither a further mutation nor
+// an explicit completion claim, is indistinguishable from a continuation that
+// deferred unfinished background work and exited, so it must not be read as
+// evidence the checkpoint is complete.
+func TestContinuationWithoutFurtherMutationStaysIncomplete(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	producer := &interruptedProducer{mutate: func(dir string, invocation int) error {
 		if invocation > 1 {
@@ -413,18 +430,35 @@ func TestContinuationWithoutFurtherMutationPromotesTheCheckpoint(t *testing.T) {
 	}
 
 	producer.completeAt = len(producer.requests) + 1
-	fixture.reconcile(runID)
+	outcome := fixture.reconcile(runID)
+	if terminalDisposition(outcome.Disposition) {
+		t.Fatalf("an unresolved continuation terminalized the run on its first unresolved attempt: %+v", outcome)
+	}
 
 	after := fixture.state(runID)
-	if !after.projection.CandidateComplete {
-		t.Fatal("a completed continuation did not promote the checkpoint")
-	}
 	if after.projection.CandidateRevision != checkpoint {
-		t.Fatalf("promotion invented a new commit: %s, want the checkpoint %s", after.projection.CandidateRevision, checkpoint)
+		t.Fatalf("the checkpoint moved: %s, want %s", after.projection.CandidateRevision, checkpoint)
+	}
+	if after.projection.CandidateComplete {
+		t.Fatal("a continuation that neither mutated nor stated a resolution promoted the checkpoint")
 	}
 	events := journalOf(t, fixture.runtime, runID)
+	if countType(events, EventExecutionCompleted) != 0 {
+		t.Fatalf("an unresolved continuation was recorded as a completed execution: %v", journalTypes(events))
+	}
 	if countType(events, EventCandidateCheckpointed) != 1 {
-		t.Fatalf("promotion produced another checkpoint: %v", journalTypes(events))
+		t.Fatalf("an unresolved continuation produced another checkpoint: %v", journalTypes(events))
+	}
+	op, ok := after.operationByKey(OpExecutionInvoke, invocationContinuationPrefix+checkpoint)
+	if !ok {
+		t.Fatal("no continuation operation was recorded")
+	}
+	if op.State != OperationFailed {
+		t.Fatalf("the continuation operation is %q, want it Failed so its own attempt budget still governs a retry", op.State)
+	}
+	var record mutationResult
+	if err := json.Unmarshal(op.Result, &record); err != nil || record.FailureClass != FailureCheckpointContinuationUnresolved {
+		t.Fatalf("wrong failure class recorded: err=%v record=%+v", err, record)
 	}
 }
 

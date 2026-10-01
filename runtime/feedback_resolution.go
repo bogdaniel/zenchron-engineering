@@ -24,6 +24,15 @@ package runtime
 // Unbound or partial claims are not admitted, and an unadmitted claim leaves
 // every key it would have discharged outstanding - the same fail-closed
 // default a provider that said nothing at all gets.
+//
+// #379 generalizes the same inference defect from feedback discharge to
+// checkpoint continuation: a continuation invocation that inherits a
+// runtime-owned checkpoint and returns having mutated nothing is exactly as
+// unproven as a remediation that left admitted feedback outstanding, whether
+// or not any feedback is involved. The SAME document, naming the keys (if
+// any) this invocation was delivered and the exact checkpoint commit it was
+// shown, is the one channel for stating either kind of completion; naming
+// zero keys against zero delivered keys is a checkpoint-only claim.
 
 import (
 	"encoding/json"
@@ -170,7 +179,14 @@ func AdmitFeedbackResolution(deliveredKeys []string, subject string, result *Fee
 	if subject == "" || result.Subject != subject {
 		return nil, fmt.Errorf("the resolution claims subject %s and the invocation was shown %s", short12(result.Subject), short12(subject))
 	}
-	if len(result.Keys) == 0 {
+	// Naming zero keys is refused only when this invocation was actually
+	// delivered feedback: a claim that discharges nothing while feedback sits
+	// outstanding is not a resolution of it. Zero keys against zero delivered
+	// keys is not that - it is a continuation's claim that the CHECKPOINT it
+	// inherited (#379), which carried no feedback obligation at all, needs no
+	// further change. The length check just below refuses every other
+	// mismatch between what was claimed and what was actually delivered.
+	if len(result.Keys) == 0 && len(deliveredKeys) > 0 {
 		return nil, fmt.Errorf("a no-change resolution names no feedback key, so it discharges nothing")
 	}
 	if len(result.Keys) > maxFeedbackResolutionKeys {
