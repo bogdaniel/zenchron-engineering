@@ -921,6 +921,66 @@ func TestAVerdictWithANonSucceededOutcomeAndNoFailureIsNeverAdmitted(t *testing.
 	}
 }
 
+// A REVIEWER THAT WRITES NO VERDICT AT ALL is the second half of the #374
+// protocol gap: a prose-only reviewer whose invocation otherwise succeeds.
+// There is no reviewer-result.json to fail to parse - the file simply never
+// exists - and an admission path that only asked "is the file readable"
+// would read that as "nothing to report" and complete the operation anyway,
+// stranding the stage "running" with no further invocation ever planned to
+// ask again. That is the dogfood run #374 names.
+func TestAReviewerThatWritesNoVerdictIsNeverSilentlyAccepted(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	// ZERO verdicts: the first invocation already has index >= len(Verdicts),
+	// so FakeReviewerProvider writes only review-notes.md (the fixture's
+	// stand-in for prose) and returns a SUCCEEDED result with Review nil.
+	inner := reviewerEngine(t, fixture)
+	fixture.approve(t)
+	fixture.reconcile(t)
+
+	producer := planStageState(t, fixture, "implementation").RunID
+	if producer == "" {
+		t.Fatal("the producer stage created no run")
+	}
+	produceCandidate(t, fixture, producer, "package b\n", true)
+	fixture.reconcile(t)
+	fixture.reconcile(t)
+
+	review := planStageState(t, fixture, "review")
+	if review.RunID == "" {
+		t.Fatal("the reviewer stage created no run")
+	}
+
+	// Driven directly rather than through driveReviewer: driveReviewer waits
+	// for EventExecutionCompleted, and a prose-only reviewer never produces
+	// it - the new branch in operations.go fails the operation instead.
+	// Mirrors TestAVerdictFromAnIncompleteInvocationIsNeverAdmitted.
+	engine := fixture.engines["claude"]
+	for i := 0; i < 6; i++ {
+		if _, err := engine.Reconcile(context.Background(), review.RunID); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	// The reviewer DID run and was given a result path - this proves the
+	// scenario is a prose-only reviewer, not one that was never dispatched.
+	if len(inner.Reviewed) == 0 {
+		t.Fatal("the reviewer was never given a result path, so this proves nothing")
+	}
+
+	after := planStageState(t, fixture, "review")
+	if after.Review != nil {
+		t.Fatalf("a verdict was admitted from an invocation that wrote none: %+v", after.Review)
+	}
+	if after.State == PlanStageCompleted {
+		t.Fatal("the reviewer stage was accepted on an invocation that wrote no verdict - #374's stuck-running regression")
+	}
+	if gate := planStageState(t, fixture, "assurance"); gate.State == PlanStageSatisfied {
+		t.Fatal("the assurance gate was satisfied over a verdict nobody wrote")
+	}
+	if status := planStatus(t, fixture); status == PlanStateCompleted {
+		t.Fatal("the plan reported completed over a review stage that never answered")
+	}
+}
+
 // outcomeOnlyFailureReviewerProvider reports a non-succeeded Outcome without
 // pairing it with a Failure and without clearing Review, unlike every in-tree
 // provider. It models a future or third-party adapter that skips that
