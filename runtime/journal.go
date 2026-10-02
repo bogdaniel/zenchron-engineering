@@ -17,14 +17,23 @@ const (
 	// - and every caller of it - keeps meaning exactly what it meant before
 	// plan events existed.
 	sqliteEventColumns = `id, run_id, sequence, type, operation_id, previous_event_id, previous_event_hash, state_before, state_after, event_hash, document`
+	// sqliteEventInsertColumns is sqliteEventColumns plus the durable
+	// cross-stream cursor (#399). global_sequence is store-side bookkeeping,
+	// never part of the hash-chained document, so it is an INSERT-only column
+	// and deliberately absent from sqliteEventColumns and every read list.
+	sqliteEventInsertColumns = sqliteEventColumns + `, global_sequence`
 	// sqlitePlanEventColumns is the PLAN event insert. A plan event states its
 	// stream explicitly because nothing about it can be defaulted: it has no
 	// run, and reading it back as one would put a plan's history inside a run's
 	// hash chain.
 	sqlitePlanEventColumns = `id, run_id, sequence, type, operation_id, previous_event_id, previous_event_hash, state_before, state_after, event_hash, document, stream_kind, plan_id`
+	// sqlitePlanEventInsertColumns is sqlitePlanEventColumns plus global_sequence;
+	// see sqliteEventInsertColumns.
+	sqlitePlanEventInsertColumns = sqlitePlanEventColumns + `, global_sequence`
 	// sqliteEventReadColumns is what every read selects. It carries the stream
 	// columns so a row's stream can be checked against its document rather than
-	// assumed from the query that found it.
+	// assumed from the query that found it. It never carries global_sequence:
+	// no read path needs it except ChangesSince, which queries it directly.
 	sqliteEventReadColumns = sqlitePlanEventColumns
 )
 
@@ -178,10 +187,10 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 			snapshot, err := Reduce(run, events)
 			return snapshot.StateSHA256, err
 		},
-		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string) error {
-			_, err := tx.Exec(`INSERT INTO events (`+sqliteEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string, globalSequence int64) error {
+			_, err := tx.Exec(`INSERT INTO events (`+sqliteEventInsertColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				event.ID, event.RunID, event.Sequence, event.Type, event.OperationID, event.PreviousEventID,
-				event.PreviousEventHash, event.StateBefore, event.StateAfter, event.EventHash, canonical)
+				event.PreviousEventHash, event.StateBefore, event.StateAfter, event.EventHash, canonical, globalSequence)
 			return err
 		},
 	})
@@ -196,7 +205,7 @@ type journalStream struct {
 	bind     func(*sql.Tx) error
 	events   func(*sql.Tx) ([]EngineeringEvent, error)
 	digest   func([]EngineeringEvent) (string, error)
-	insert   func(*sql.Tx, EngineeringEvent, string) error
+	insert   func(*sql.Tx, EngineeringEvent, string, int64) error
 	// allocate finalizes a payload member whose value depends on the events
 	// already in the stream, INSIDE the append transaction and against the
 	// events this append is ordered after.
@@ -282,7 +291,17 @@ func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journal
 	if err != nil {
 		return EngineeringEvent{}, err
 	}
-	if err := stream.insert(tx, e, string(canonical)); err != nil {
+	// global_sequence is allocated the same way the stream-local sequence is:
+	// read under the write lock this transaction already holds, so it is as
+	// gap-free and race-free as the sequence it rides alongside (#399). It is
+	// ONE counter shared by every stream - run or plan - because a fleet-wide
+	// observer's question ("what changed, in what order") spans streams even
+	// though replay never does.
+	var globalSequence int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(global_sequence), 0) + 1 FROM events`).Scan(&globalSequence); err != nil {
+		return EngineeringEvent{}, err
+	}
+	if err := stream.insert(tx, e, string(canonical), globalSequence); err != nil {
 		return EngineeringEvent{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -303,6 +322,74 @@ func (s *SQLiteOperationStore) Events(runID string) ([]EngineeringEvent, error) 
 // the same document/column validation as Events. It does not replay the stream.
 func (s *SQLiteOperationStore) EventsAfter(runID string, sequence int64) ([]EngineeringEvent, error) {
 	return queryStreamEvents(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, streamRun, runID, sequence)
+}
+
+// RunChange names one run whose RUN stream advanced at or before a global
+// cursor position (#399). Sequence is that run's own highest stream-local
+// sequence observed up to Cursor - enough to resume that run's replay through
+// EventsAfter(RunID, Sequence) - so a fleet-wide observer never needs the
+// event payload itself to decide which run to go re-read.
+type RunChange struct {
+	RunID    string
+	Sequence int64
+	Cursor   int64
+}
+
+// ChangesSince answers "which runs changed" without polling every run or
+// replaying the whole journal (#96, #399): it reads at most limit rows from
+// the events_global_sequence index, starting just after cursor, and groups
+// them by run. The global cursor is durable (a plain column, backed by the
+// same SQLite file as everything else) and restart-safe; re-reading from an
+// earlier cursor is deterministic because global_sequence is assigned once,
+// under a write lock, and never reassigned.
+//
+// Only the run stream is reported. EventsAfter - the only durable replay
+// cursor a consumer can resume from - is itself run-scoped, so a plan-stream
+// change is not a position a caller of this method could act on; a plan's
+// effect on a run already surfaces as a run event when that effect occurs.
+//
+// limit bounds the underlying scan, not the number of runs returned: a batch
+// may report fewer than limit runs (several rows for one run collapse into
+// one RunChange) but never touches more than limit rows to produce it. The
+// returned nextCursor is the batch's own last global_sequence, so looping
+// `cursor = nextCursor` until the batch is empty visits every changed run
+// exactly once per advance, in deterministic order, with no gap a crash
+// between calls could reopen: nextCursor is only ever a value already
+// committed to the table.
+func (s *SQLiteOperationStore) ChangesSince(cursor int64, limit int) (changes []RunChange, nextCursor int64, err error) {
+	if limit <= 0 {
+		return nil, cursor, fmt.Errorf("limit must be positive")
+	}
+	rows, err := s.db.Query(`
+		SELECT run_id, MAX(sequence), MAX(global_sequence)
+		FROM (
+			SELECT run_id, sequence, global_sequence FROM events
+			WHERE stream_kind = ? AND global_sequence > ?
+			ORDER BY global_sequence ASC
+			LIMIT ?
+		)
+		GROUP BY run_id
+		ORDER BY MAX(global_sequence) ASC`, streamRun, cursor, limit)
+	if err != nil {
+		return nil, cursor, err
+	}
+	defer rows.Close()
+	out := []RunChange{}
+	next := cursor
+	for rows.Next() {
+		var c RunChange
+		if err := rows.Scan(&c.RunID, &c.Sequence, &c.Cursor); err != nil {
+			return nil, cursor, err
+		}
+		out = append(out, c)
+		if c.Cursor > next {
+			next = c.Cursor
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, cursor, err
+	}
+	return out, next, nil
 }
 
 // Replay rebuilds run state by feeding the persisted events back through the
@@ -339,7 +426,11 @@ func queryPlanEvents(q eventQuerier, planID string) ([]EngineeringEvent, error) 
 // so a row moved between streams by direct database access is refused rather
 // than replayed into the wrong history.
 func queryStreamEvents(q eventQuerier, where string, args ...any) ([]EngineeringEvent, error) {
-	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`, args...)
+	return queryStreamEventsLimited(q, where, "", args...)
+}
+
+func queryStreamEventsLimited(q eventQuerier, where, suffix string, args ...any) ([]EngineeringEvent, error) {
+	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`+suffix, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -424,4 +515,20 @@ func decodeRun(document string) (EngineeringRun, error) {
 		return EngineeringRun{}, fmt.Errorf("decode durable run: %w", err)
 	}
 	return run, nil
+}
+
+// EventsPage uses the run-local sequence, never the fleet global_sequence.
+// The extra row establishes hasMore without reading the unbounded tail.
+func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) (events []EngineeringEvent, hasMore bool, err error) {
+	if after < 0 || limit < 1 || limit > 500 {
+		return nil, false, fmt.Errorf("invalid event page bounds")
+	}
+	events, err = queryStreamEventsLimited(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, ` LIMIT ?`, streamRun, runID, after, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(events) > limit {
+		events, hasMore = events[:limit], true
+	}
+	return events, hasMore, nil
 }

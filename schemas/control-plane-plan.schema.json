@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "revision",
+    "approved_revision",
+    "state",
+    "stages"
+  ],
+  "properties": {
+    "plan_id": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "approved_revision": {
+      "type": "integer"
+    },
+    "state": {
+      "type": "string"
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    }
+  }
+}

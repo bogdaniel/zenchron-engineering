@@ -126,6 +126,15 @@ var eventPayloads = map[string]payloadValidator{
 			required("paths_digest", p.PathsDigest),
 			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
+	EventCandidateQuarantined: payloadSchema(func(p CandidateQuarantinedPayload) error {
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			nonNegative("attempt", p.Attempt),
+			required("subject", p.Subject),
+			nonNegative("path_count", p.PathCount),
+			required("paths_digest", p.PathsDigest),
+			required("location", p.Location))
+	}),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),
@@ -408,6 +417,30 @@ type CandidateChangedPayload struct {
 // CandidateCommittedPayload records the commit/tree identity the runtime
 // created. The changed path set is a count plus a digest over it, so a wide
 // change cannot grow the payload.
+// CandidateQuarantinedPayload identifies the refused material one physical
+// attempt left behind (#390): which operation and attempt produced it, the
+// subject it was produced against, the refusal that settled it, and where the
+// bytes are kept. It carries identity only; the bytes stay on disk.
+type CandidateQuarantinedPayload struct {
+	OperationID   string       `json:"operation_id"`
+	Attempt       int          `json:"attempt"`
+	Subject       string       `json:"subject"`
+	FailureClass  FailureClass `json:"failure_class,omitempty"`
+	PathCount     int          `json:"path_count"`
+	PathsDigest   string       `json:"paths_digest"`
+	ContentDigest string       `json:"content_digest,omitempty"`
+	Location      string       `json:"location"`
+	// Restored says whether the refused paths were returned to Subject. A
+	// complete copy is journalled even when restoration failed, so the
+	// quarantine always has a durable identity; false means the attempt was
+	// stopped because the workspace may still hold part of the material.
+	Restored bool `json:"restored"`
+	// Adopted marks a record journalled by restart adoption: the copy was
+	// completed by an earlier attempt whose controller died before its own
+	// record became durable (#390).
+	Adopted bool `json:"adopted,omitempty"`
+}
+
 type CandidateCommittedPayload struct {
 	Commit      string `json:"commit"`
 	Tree        string `json:"tree"`

@@ -368,8 +368,19 @@ func TestReviewContinuationRejectsLateProviderSuccess(t *testing.T) {
 	if !state.feedbackState().Consumed["pull_request_comment:9530"] || len(state.outstandingReviewKeys()) != 1 {
 		t.Fatal("late invocation lost accepted obligation")
 	}
-	if _, err := os.Stat(filepath.Join(candidateDir, "late.go")); err != nil {
-		t.Fatal("late partial work was orphaned", err)
+	// Late partial work is REFUSED, so it must not stay in the candidate
+	// workspace for the next attempt to inherit (#390) - and it must not be
+	// orphaned either: it is preserved, byte for byte, in the journalled
+	// quarantine.
+	if _, err := os.Stat(filepath.Join(candidateDir, "late.go")); !os.IsNotExist(err) {
+		t.Fatalf("refused late work was left in the workspace for the next attempt (err=%v)", err)
+	}
+	q, ok := state.latestQuarantine()
+	if !ok {
+		t.Fatal("late partial work was orphaned: no quarantine record")
+	}
+	if kept, err := os.ReadFile(filepath.Join(f.stateDir, q.Location, "files", "late.go")); err != nil || string(kept) != "package candidate\n" {
+		t.Fatalf("late partial work was orphaned: quarantine %s holds %q, %v", q.Location, kept, err)
 	}
 	request := f.provider.requests[len(f.provider.requests)-1]
 	if request.Deadline == nil || request.Budgets.WallLimit <= 0 || request.Budgets.WallLimit > 30*time.Minute {

@@ -50,6 +50,13 @@ func Validate(name string, value any) error {
 
 func mustCompile() map[string]*jsonschema.Schema {
 	names := []string{
+		"control-plane-controller",
+		"control-plane-runs",
+		"control-plane-run",
+		"control-plane-run-events",
+		"control-plane-plan",
+		"control-plane-error",
+
 		AuthorityDecision,
 		EngineeringFact,
 		EngineeringPolicy,
