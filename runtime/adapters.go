@@ -720,6 +720,41 @@ const (
 	// continuation-eligible: silence is not interrupted work waiting to be
 	// resumed, and a retry inherits no observations from it.
 	FailureProviderNoProgress FailureClass = "provider_no_progress"
+	// FailureProviderBackgroundWorkUnresolved is a Claude Code invocation that
+	// exited claiming a valid final result after a main-thread Bash call IT
+	// started with the typed run_in_background input (#384, #385; see
+	// claude_stream.go's backgroundStarts comment). Once that happens the
+	// invocation stays unresolved for the rest of the stream: a BashOutput
+	// poll does NOT resolve it, since Claude Code's typed stream exposes no
+	// typed running/completed status for a background shell at all, and
+	// neither does a later KillShell call, since issuing KillShell is only a
+	// request the model made - this parser never reads whether its own
+	// tool_result reported success - and even a successful KillShell names
+	// an identity the typed stream never bound back to a specific start, so
+	// it cannot be proven to correspond to the shell this invocation itself
+	// started.
+	//
+	// Provider return is not proof of semantic completion, the same finding
+	// #376 and #379 made about a provider's own self-report: a process that
+	// backgrounded its verification and then wrote a final answer without
+	// ever checking back is indistinguishable, from the model's own prose
+	// alone, from one that genuinely finished - and the typed stream gives
+	// no field that could tell the two apart. The invocation's process tree
+	// ends with it, so whatever that shell was running - a test suite, most
+	// often - is lost with it: a valid final result here is proof only that
+	// this invocation stopped talking, not that the work it describes
+	// actually happened.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// shape FailureFeedbackUnresolved and FailureCheckpointContinuationUnresolved
+	// already use: no budget is minted or reset, and an invocation that keeps
+	// abandoning its own background work exhausts its attempts and stops
+	// truthfully instead of looping forever on a checkpoint it can never
+	// admit as resolved. It is deliberately NOT continuation-eligible: the
+	// provider was not cut short by a runtime bound, it walked away from work
+	// it started on its own, so the retry gets a fresh invocation rather than
+	// observations from one that said nothing worth keeping.
+	FailureProviderBackgroundWorkUnresolved FailureClass = "provider_background_work_unresolved"
 	// FailureProviderUnavailable is the provider's TRANSPORT being gone, named
 	// by the provider's own diagnostic: DNS did not resolve, the connection was
 	// refused or reset, or the endpoint answered that it is unavailable.
@@ -977,7 +1012,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
 		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
-		FailureReviewerProtocolIncomplete:
+		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
