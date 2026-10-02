@@ -1370,31 +1370,45 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Checkpoint: record.Mutated && (class == FailureExecutionIncomplete ||
 				(class == FailureProviderNoProgress && len(state.outstandingReviewKeys()) > 0)),
 		}
-		// A producer that left real work behind did its bounded job, so the
-		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
-		// is recorded as a checkpoint rather than as an operation failure.
+		// A producer that left real work behind did its bounded job ONLY when
+		// that work is one of the two reasoned-about CHECKPOINT shapes above:
+		// the OPERATION succeeded, the CANDIDATE is incomplete, and that is
+		// recorded as a checkpoint rather than as an operation failure.
 		//
-		// A producer that left nothing behind did not satisfy this operation,
-		// so the operation fails - and with the class above it now fails INTO
-		// the existing attempt budget rather than out of the run. The next
-		// attempt binds to the same identity bindExecutionInvoke already
-		// derives: the trusted base for an initial invocation, and the exact
-		// checkpoint commit for a continuation. Nothing new counts anything:
-		// the scheduler's existing per-operation attempts bound the retries,
-		// and the checkpoint ceiling still bounds how much unfinished work one
-		// run may accumulate, because a zero-delta invocation creates no
-		// checkpoint.
+		// Every other failure classification fails the OPERATION regardless of
+		// Mutated (#390). Mutation is evidence that material exists, not
+		// evidence that the invocation that produced it succeeded: a refused
+		// invocation - one Claude Code background shell it started and never
+		// polled before writing a final answer, a reviewer's incidental
+		// workspace touch, a provider error of any other class - left real
+		// material in the tree exactly as a legitimate checkpoint does, and
+		// "left real work behind" was never the question. Only the two
+		// Checkpoint classes above answer the question this gate actually
+		// asks - is this incomplete work a runtime BOUND reached with real
+		// work in the tree, the shape #328 and #54 reasoned about - and
+		// failing the operation for everything else fails it INTO the
+		// existing attempt budget rather than out of the run, exactly like a
+		// zero-delta failure already did: the next attempt binds to the same
+		// identity bindExecutionInvoke already derives, the scheduler's
+		// existing per-operation attempts bound the retries, and the
+		// classification's own RouteFailure law (unchanged by this) decides
+		// whether that retry happens at all. The workspace change itself is
+		// never discarded by failing the operation - it stays exactly where
+		// the invocation left it, named and held the same way #203 already
+		// holds a succeeded producer's own not-yet-committed change.
 		//
 		// A REVIEWER PROTOCOL FAILURE ALWAYS FAILS THE OPERATION, mutation or
-		// not (#374). "Left real work behind" means something for a producer,
-		// whose deliverable IS candidate content; a reviewer's deliverable is
-		// the verdict, and incidental workspace touches (review notes, a
-		// toolchain's own output) are not that verdict. Letting Mutated excuse
-		// this class would let the runtime's own candidate.commit operation
-		// treat a reviewer's scratch output as a successful execution and
-		// commit it - admitting candidate content from an invocation that
-		// never crossed the protocol it was there to run.
-		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
+		// not (#374), and needs no special case any more: it was never one of
+		// the two Checkpoint classes, so it already fails here. "Left real
+		// work behind" means something for a producer, whose deliverable IS
+		// candidate content; a reviewer's deliverable is the verdict, and
+		// incidental workspace touches (review notes, a toolchain's own
+		// output) are not that verdict. Letting Mutated excuse this class
+		// would let the runtime's own candidate.commit operation treat a
+		// reviewer's scratch output as a successful execution and commit it -
+		// admitting candidate content from an invocation that never crossed
+		// the protocol it was there to run.
+		if !execution.Checkpoint {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())

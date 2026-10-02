@@ -37,9 +37,11 @@ const (
 	HeldCommittedUnverified = "committed_unverified"
 	// HeldCheckpoint is a runtime-owned incomplete checkpoint commit (#54).
 	HeldCheckpoint = "checkpoint"
-	// HeldUncommitted is a succeeded producing operation's workspace change
-	// that the runtime never committed because the budget ended the run
-	// first. It exists only in the candidate workspace.
+	// HeldUncommitted is a producing operation's workspace change that the
+	// runtime never committed: either a succeeded producer's change that the
+	// budget ended the run before candidate.commit could reach, or a
+	// producer's change a failure classification refused outright (#390). It
+	// exists only in the candidate workspace.
 	HeldUncommitted = "uncommitted"
 )
 
@@ -133,17 +135,17 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 	}
 	head := s.projection.CandidateRevision
 	if producing, pending := bindCandidateCommit(s); pending {
-		var record mutationResult
-		// A result that does not decode leaves the identity unknown, never
-		// invented: the kind and the producing operation still stand.
-		_ = json.Unmarshal(s.snapshot.Operations[producing].Result, &record)
-		held.Kind, held.Operation = HeldUncommitted, producing
-		held.PathCount, held.ContentDigest = record.PathCount, record.ContentDigest
-		held.Revision, held.Tree = head, s.projection.CandidateTree
-		if head == "" {
-			held.Revision, held.Tree = s.baseRevision(), ""
-		}
-		return held.bounded()
+		return held.uncommitted(s, producing, head).bounded()
+	}
+	// A failure classification refused a producing operation's change before
+	// candidate.commit ever ran for it (#390): the SAME disposition as a
+	// succeeded producer's not-yet-committed change above, because mutation
+	// proves material exists whether or not the invocation that produced it
+	// was admitted. The refusal, not a budget, is what stopped this specific
+	// change from reaching a commit, but the material is identified and held
+	// exactly the same way, rather than silently going away with the run.
+	if producing, refused := s.refusedMutation(); refused {
+		return held.uncommitted(s, producing.ID, head).bounded()
 	}
 	if head == "" {
 		return nil
@@ -161,6 +163,54 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		held.Kind = HeldCommittedUnverified
 	}
 	return held.bounded()
+}
+
+// uncommitted fills in the HeldUncommitted shape shared by a succeeded
+// producer whose change a budget boundary caught before candidate.commit ran,
+// and a producer a failure classification refused outright (#390): the
+// identity of the material - its producing operation, path count and content
+// digest - and the commit it sits on top of, falling back to the trusted base
+// when no candidate commit exists yet.
+func (h HeldMaterial) uncommitted(s *runState, operation, head string) HeldMaterial {
+	var record mutationResult
+	// A result that does not decode leaves the identity unknown, never
+	// invented: the kind and the producing operation still stand.
+	_ = json.Unmarshal(s.snapshot.Operations[operation].Result, &record)
+	h.Kind, h.Operation = HeldUncommitted, operation
+	h.PathCount, h.ContentDigest = record.PathCount, record.ContentDigest
+	h.Revision, h.Tree = head, s.projection.CandidateTree
+	if head == "" {
+		h.Revision, h.Tree = s.baseRevision(), ""
+	}
+	return h
+}
+
+// refusedMutation reports the most recent FAILED producing operation whose
+// workspace change a failure classification refused to admit (#390): mutation
+// proves material exists, not that the invocation which produced it
+// succeeded, so material a refusal leaves behind is named and held exactly as
+// a succeeded producer's own not-yet-committed change already is, rather than
+// disappearing when the run stops. It is read only after bindCandidateCommit
+// finds nothing pending, so a succeeded mutation awaiting its commit is always
+// reported as that, never as a refusal.
+func (s *runState) refusedMutation() (RunOperation, bool) {
+	var found RunOperation
+	ok := false
+	for _, kind := range []string{OpExecutionInvoke, OpRemediationGofmt} {
+		for _, op := range s.snapshot.Operations {
+			if op.Kind != kind || op.State != OperationFailed {
+				continue
+			}
+			var result mutationResult
+			if len(op.Result) == 0 || json.Unmarshal(op.Result, &result) != nil || !result.Mutated {
+				continue
+			}
+			if !ok || op.CreatedAt.After(found.CreatedAt) {
+				found, ok = op, true
+			}
+		}
+	}
+	return found, ok
 }
 
 // bounded never lets the terminal event become unappendable. Descriptive
