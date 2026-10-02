@@ -230,7 +230,8 @@ var eventPayloads = map[string]payloadValidator{
 			required("class", string(p.Class)),
 			required("reason", p.Reason),
 			required("text_digest", p.TextDigest),
-			bounded("actor", p.Actor))
+			bounded("actor", p.Actor),
+			validFeedbackReviewState(p.Class, p.ReviewState))
 	}),
 	EventExecutionAttemptProvenance: payloadSchema(ExecutionAttemptProvenance.validate),
 	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
@@ -691,6 +692,24 @@ func boundedList(name string, values []string) error {
 func nonNegative(name string, n int) error {
 	if n < 0 {
 		return fmt.Errorf("payload field %q must not be negative", name)
+	}
+	return nil
+}
+
+// validFeedbackReviewState rejects a durable review_state that is neither
+// empty - the only value a non-review class or a legacy event may carry - nor
+// a member of the closed GitHub review-disposition vocabulary. Without this,
+// an adapter bug or a future review state could be written to the journal as
+// a value that looks recognized but was never validated as one.
+func validFeedbackReviewState(class FeedbackClass, state GitHubReviewState) error {
+	if state == "" {
+		return nil
+	}
+	if class != FeedbackReview {
+		return fmt.Errorf("payload field %q is set on a %q item, which carries no review disposition", "review_state", class)
+	}
+	if !validGitHubReviewStates[state] {
+		return fmt.Errorf("payload field %q is %q, outside the closed review-disposition vocabulary", "review_state", state)
 	}
 	return nil
 }

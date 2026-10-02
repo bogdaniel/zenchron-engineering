@@ -18,6 +18,22 @@ import (
 	"time"
 )
 
+// executionAuthoritySpent sums the attempt count and active execution time
+// charged to every execution.invoke operation in the run's current snapshot,
+// so a test can assert that admitting or refusing a review spent none of it -
+// not just that it produced zero provider requests, which a pre-provider
+// planning step could consume without ever reaching the provider.
+func executionAuthoritySpent(state *runState) (attempts int, consumed time.Duration) {
+	for _, op := range state.snapshot.Operations {
+		if op.Kind != OpExecutionInvoke {
+			continue
+		}
+		attempts += op.Attempt
+		consumed += op.ConsumedExecution
+	}
+	return attempts, consumed
+}
+
 func feedbackItem(class FeedbackClass, id int64, login, body string) FeedbackItem {
 	return FeedbackItem{
 		Class: class, ID: id,
@@ -436,12 +452,20 @@ func TestApproveReviewTextNeverBecomesRemediation(t *testing.T) {
 	// Zero provider spend, zero delivery, zero obligation: reconciling finds
 	// nothing to do about a review that was never admitted.
 	calls := len(fixture.provider.requests)
+	attemptsBefore, consumedBefore := executionAuthoritySpent(fixture.state(runID))
 	outcome := fixture.reconcile(runID)
 	if outcome.Disposition == Failed {
 		t.Fatalf("an unadmitted APPROVE review terminalized the run: %+v", outcome)
 	}
 	if len(fixture.provider.requests) != calls {
 		t.Fatalf("an APPROVE review's text invoked the provider: before=%d after=%d", calls, len(fixture.provider.requests))
+	}
+	// Provider request count alone would miss a pre-provider planning step
+	// that reserves attempt identity or active-work time without ever
+	// dispatching: check the execution.invoke authority ledger directly.
+	if attemptsAfter, consumedAfter := executionAuthoritySpent(fixture.state(runID)); attemptsAfter != attemptsBefore || consumedAfter != consumedBefore {
+		t.Fatalf("an APPROVE review's text spent execution attempt/active-work authority: before=(%d,%s) after=(%d,%s)",
+			attemptsBefore, consumedBefore, attemptsAfter, consumedAfter)
 	}
 	state := fixture.state(runID)
 	if countType(state.events, EventFeedbackConsumed) != 0 {
@@ -465,11 +489,16 @@ func TestApproveReviewTextNeverBecomesRemediation(t *testing.T) {
 		t.Fatalf("restart replayed an already-judged review as new: %#v", replayed)
 	}
 	callsAfterRestart := len(fixture.provider.requests)
+	attemptsBeforeRestart, consumedBeforeRestart := executionAuthoritySpent(fixture.state(runID))
 	if outcome := fixture.reconcile(runID); outcome.Disposition == Failed {
 		t.Fatalf("replay of an APPROVE review terminalized the run: %+v", outcome)
 	}
 	if len(fixture.provider.requests) != callsAfterRestart {
 		t.Fatal("replay of an APPROVE review invoked the provider")
+	}
+	if attemptsAfter, consumedAfter := executionAuthoritySpent(fixture.state(runID)); attemptsAfter != attemptsBeforeRestart || consumedAfter != consumedBeforeRestart {
+		t.Fatalf("replay of an APPROVE review spent execution attempt/active-work authority: before=(%d,%s) after=(%d,%s)",
+			attemptsBeforeRestart, consumedBeforeRestart, attemptsAfter, consumedAfter)
 	}
 
 	// The SAME body, as REQUEST_CHANGES, is still ordinary admitted

@@ -833,6 +833,11 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 	return observation, nil
 }
 
+// normalizeReview maps GitHub's wire review state to the closed vocabulary.
+// An unrecognized state - a future GitHub review disposition this runtime
+// does not yet know - is returned as the zero value rather than relabelled
+// GitHubReviewCommented, so the durable record reflects "unknown" instead of
+// falsely claiming a neutral comment was observed.
 func normalizeReview(state string) GitHubReviewState {
 	switch strings.ToUpper(state) {
 	case "APPROVED":
@@ -841,8 +846,10 @@ func normalizeReview(state string) GitHubReviewState {
 		return GitHubReviewChangesRequested
 	case "DISMISSED":
 		return GitHubReviewDismissed
-	default:
+	case "COMMENTED":
 		return GitHubReviewCommented
+	default:
+		return ""
 	}
 }
 
