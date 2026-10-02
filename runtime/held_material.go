@@ -191,12 +191,20 @@ func (s *runState) latestRefusedMaterial() (string, *RefusedMaterialSnapshot) {
 		if len(event.Payload) == 0 || json.Unmarshal(event.Payload, &operation) != nil || operation.Kind != OpExecutionInvoke {
 			continue
 		}
-		if operation.State != OperationFailed {
+		// A later successful execution supersedes refused material from an
+		// earlier attempt: the run now has a legitimate newer result. A later
+		// FAILURE without mutation does not erase an older preserved snapshot;
+		// if the retry budget ends there, those refused bytes are still exactly
+		// the valuable material this run holds.
+		if operation.State == Succeeded {
 			return "", nil
+		}
+		if operation.State != OperationFailed {
+			continue
 		}
 		var record executionRecord
 		if len(operation.Result) == 0 || json.Unmarshal(operation.Result, &record) != nil || record.RefusedMaterial == nil {
-			return "", nil
+			continue
 		}
 		copy := *record.RefusedMaterial
 		return operation.ID, &copy
