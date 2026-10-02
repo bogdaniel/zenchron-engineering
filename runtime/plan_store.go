@@ -344,11 +344,11 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 			snapshot, err := ReducePlan(e.PlanID, events)
 			return snapshot.StateSHA256, err
 		},
-		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string) error {
-			_, err := tx.Exec(`INSERT INTO events (`+sqlitePlanEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string, globalSequence int64) error {
+			_, err := tx.Exec(`INSERT INTO events (`+sqlitePlanEventInsertColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				event.ID, "", event.Sequence, event.Type, event.OperationID, event.PreviousEventID,
 				event.PreviousEventHash, event.StateBefore, event.StateAfter, event.EventHash, canonical,
-				streamPlan, event.PlanID)
+				streamPlan, event.PlanID, globalSequence)
 			return err
 		},
 	})
