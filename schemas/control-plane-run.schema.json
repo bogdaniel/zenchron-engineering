@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "phase",
+    "disposition",
+    "elapsed",
+    "active_elapsed",
+    "external_wait_elapsed",
+    "operation"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "disposition": {
+      "type": "string"
+    },
+    "elapsed": {
+      "type": "integer"
+    },
+    "active_elapsed": {
+      "type": "integer"
+    },
+    "external_wait_elapsed": {
+      "type": "integer"
+    },
+    "operation": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "attempt",
+            "progress_source",
+            "heartbeat_at",
+            "last_progress_at",
+            "silent_for",
+            "inactivity_limit",
+            "inactivity_limit_unknown",
+            "inactivity_suspension"
+          ],
+          "properties": {
+            "state": {
+              "type": "string"
+            },
+            "attempt": {
+              "type": "integer"
+            },
+            "progress_source": {
+              "type": "string",
+              "enum": [
+                "",
+                "row",
+                "journal"
+              ]
+            },
+            "heartbeat_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "last_progress_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "silent_for": {
+              "type": "integer"
+            },
+            "inactivity_limit": {
+              "type": "integer"
+            },
+            "inactivity_limit_unknown": {
+              "type": "boolean"
+            },
+            "inactivity_suspension": {
+              "type": "string",
+              "enum": [
+                "",
+                "active",
+                "unverified"
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "durable_consistency",
+    "serving",
+    "projection",
+    "generation_match",
+    "role",
+    "work_admission"
+  ],
+  "properties": {
+    "durable_consistency": {
+      "type": "string",
+      "enum": [
+        "consistent",
+        "invariant_violation",
+        "snapshot_unstable",
+        "no_activation_recorded"
+      ]
+    },
+    "serving": {
+      "type": "string",
+      "enum": [
+        "serving",
+        "not_serving",
+        "unknown"
+      ]
+    },
+    "projection": {
+      "type": "string",
+      "enum": [
+        "current",
+        "drift",
+        "missing",
+        "invalid"
+      ]
+    },
+    "generation_match": {
+      "type": "string",
+      "enum": [
+        "match",
+        "mismatch",
+        "unknown"
+      ]
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "",
+        "held",
+        "not_held"
+      ]
+    },
+    "work_admission": {
+      "type": "string",
+      "enum": [
+        "",
+        "open",
+        "withheld",
+        "closed"
+      ]
+    }
+  }
+}

@@ -73,6 +73,9 @@ func main() {
 // passes the status to os.Exit unchanged, so the code a handler returns is the
 // code the process reports.
 func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
+	if len(args) > 0 && args[0] == "control-plane" {
+		return controlPlane(args[1:], stdout)
+	}
 	if len(args) == 1 && args[0] == "version" {
 		fmt.Fprintln(stdout, version)
 		return runtime.ExitCompleted, nil
