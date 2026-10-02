@@ -394,6 +394,15 @@ func (s *claudeStream) handle(line []byte) {
 			return
 		}
 		s.sawResult, s.isError = true, *isError
+		// Only this closed provider error envelope is interpreted. Successful
+		// answers and tool transcripts remain untrusted semantic content.
+		if s.isError {
+			var diagnostic string
+			if json.Unmarshal(event.Answer, &diagnostic) == nil &&
+				strings.TrimSpace(strings.ToLower(diagnostic)) == "api error: can't reach the api server — check your internet or dns (enotfound)" {
+				s.retry, s.retrySeq = FailureProviderUnavailable, s.seq
+			}
+		}
 		s.denials = len(event.PermissionDenials)
 		s.deniedTools = deniedToolNames(event.PermissionDenials)
 		// THE SEMANTIC ANSWER, read only off a result the two typed fields above

@@ -90,6 +90,7 @@ var sharedAgentSignals = []diagnosticSignal{
 // network that says nothing is FailureProviderNoProgress, and only a provider
 // that NAMES its transport failure reaches FailureProviderUnavailable.
 var nodeTransportSignals = []diagnosticSignal{
+	{"api error: can't reach the api server — check your internet or dns (enotfound)", FailureProviderUnavailable},
 	{"getaddrinfo enotfound", FailureProviderUnavailable},
 	{"getaddrinfo eai_again", FailureProviderUnavailable},
 	{"econnrefused", FailureProviderUnavailable},

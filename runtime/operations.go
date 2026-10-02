@@ -55,6 +55,9 @@ type effect struct {
 }
 
 func failed(err error) effect {
+	if transientConnectivity(err) {
+		return effect{state: OperationFailed, result: mutationResult{FailureClass: FailureProviderUnavailable}}
+	}
 	return effect{state: OperationFailed, result: struct {
 		Error string `json:"error"`
 	}{boundedDetail(err.Error())}}
@@ -1292,6 +1295,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
+		if transientConnectivity(execErr) {
+			class = FailureProviderUnavailable
+		}
 		if result.Failure != nil {
 			class = result.Failure.Classification
 		}
@@ -1394,7 +1400,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// treat a reviewer's scratch output as a successful execution and
 		// commit it - admitting candidate content from an invocation that
 		// never crossed the protocol it was there to run.
-		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
+		if !record.Mutated || class == FailureReviewerProtocolIncomplete || class == FailureProviderUnavailable {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())

@@ -463,6 +463,8 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(callErr, ctxErr) {
 				stop, detail = cancellationStop(ctxErr)
 				classification = cancellationOwner(ctx)
+			} else if transientConnectivity(callErr) {
+				classification = FailureProviderUnavailable
 			} else {
 				classification = classifyOpenAIFailure(providerCode, raw)
 			}

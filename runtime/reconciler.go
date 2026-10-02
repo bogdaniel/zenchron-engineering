@@ -585,6 +585,10 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
+			var op RunOperation
+			if decodeJSON(event.Payload, &op) == nil && !op.RetryNotBefore.IsZero() && waitingSince.IsZero() {
+				waitingSince = event.OccurredAt
+			}
 			if waitingSince.IsZero() || event.OperationID == "" {
 				continue
 			}
@@ -1057,13 +1061,15 @@ func (s *runState) attemptsFor(kind string) int {
 	}
 }
 
-func bindSourceObserve(s *runState) (string, bool) { return s.epochKey(), true }
+func bindSourceObserve(s *runState) (string, bool) {
+	return s.observationRetryKey(OpSourceObserve), true
+}
 
 func bindGitHubObserve(s *runState) (string, bool) {
 	if !s.published() {
 		return "", false
 	}
-	return s.epochKey(), true
+	return s.observationRetryKey(OpGitHubObserve), true
 }
 
 func bindContractCompile(s *runState) (string, bool) {
@@ -1610,6 +1616,14 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
+		// A durable connectivity wait cannot grant a review continuation or
+		// refresh any authority. Terminal conditions still take precedence.
+		if until := state.connectivityRetryAt(); until.After(r.deps.Clock.Now()) {
+			if live, reason := state.conditions(); terminalDisposition(live) {
+				return r.settle(state, live, reason)
+			}
+			return r.settle(state, Waiting, "execution_provider_unavailable")
+		}
 		if err := r.grantReviewContinuation(state); err != nil {
 			return Outcome{}, err
 		}
@@ -1839,6 +1853,9 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	if finished.State == OperationFailed && failureClassOf(finished.Result) == FailureProviderUnavailable {
+		finished.RetryNotBefore = r.deps.Clock.Now().Add(connectivityBackoff(finished.Attempt))
+	}
 	// The journal is written first and is the authority for reconciliation.
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
@@ -1895,6 +1912,19 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// decides whether to spend the next one.
 	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
 		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
+	if failureClassOf(finished.Result) == FailureProviderUnavailable {
+		if finished.Attempt >= finished.MaxAttempts {
+			// Include this attempt's material and obligations in the terminal record.
+			current, err := r.load(state.run.ID)
+			if err != nil {
+				return false, Outcome{}, err
+			}
+			outcome, err := r.settle(current, Failed, finished.Kind+attemptsExhaustedSuffix)
+			return false, outcome, err
+		}
+		outcome, err := r.settle(state, Waiting, "execution_provider_unavailable")
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {

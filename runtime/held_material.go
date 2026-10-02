@@ -132,6 +132,31 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		held.Successor, held.SuccessorUnavailable = d.Successor, d.SuccessorUnavailable
 	}
 	head := s.projection.CandidateRevision
+	// A transport failure may leave uncommitted work without satisfying the
+	// producer. Preserve that identity without making candidate.commit eligible.
+	for i := len(s.events) - 1; i >= 0; i-- {
+		event := s.events[i]
+		if event.Type != EventOperationAfter {
+			continue
+		}
+		op, ok := s.snapshot.Operations[event.OperationID]
+		if !ok || op.Kind != OpExecutionInvoke {
+			continue
+		}
+		var record mutationResult
+		if op.State == OperationFailed && json.Unmarshal(op.Result, &record) == nil &&
+			record.FailureClass == FailureProviderUnavailable && record.Mutated {
+			held.Kind, held.Operation = HeldUncommitted, op.ID
+			held.PathCount, held.ContentDigest = record.PathCount, record.ContentDigest
+			held.Revision, held.Tree = head, s.projection.CandidateTree
+			if head == "" {
+				held.Revision = s.baseRevision()
+			}
+			held.NextStep = OpExecutionInvoke
+			return held.bounded()
+		}
+		break
+	}
 	if producing, pending := bindCandidateCommit(s); pending {
 		var record mutationResult
 		// A result that does not decode leaves the identity unknown, never
