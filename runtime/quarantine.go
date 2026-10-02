@@ -215,14 +215,23 @@ func restoreRefusedPaths(workspace string, paths []string) error {
 // of invokeExecution passes through after the provider returned. It acts only
 // on a FAILED settlement that left candidate material behind: a Succeeded
 // operation's material is either an admitted execution or a governed
-// checkpoint and is committed by candidate.commit, and a cancelled one is a
-// stop whose material #203 holds in place.
+// checkpoint and is committed by candidate.commit, and an attempt an operator
+// stop ended (interrupted, or classified run_cancelled) is #203's to hold in
+// place.
 //
-// The material is copied out first and restored second. If either step
-// fails, the attempt is re-classified as a stop: the refused bytes are still
-// in the workspace, and no retry may be admitted to run on top of them.
+// ORDER IS THE SAFETY ARGUMENT.
+//
+//  1. Copy. Nothing in the workspace is touched; a failed copy leaves every
+//     refused byte where it was and the attempt becomes a stop.
+//  2. Journal. A complete copy gets its durable identity BEFORE the workspace
+//     is modified, so a restore that fails half way can never orphan it: the
+//     candidate.quarantined event travels with this operation's outcome
+//     whether or not the restore below succeeds.
+//  3. Restore. On failure the attempt becomes a stop - the record says the
+//     copy is complete and the restore is not, and no retry may run on a
+//     workspace that may still hold part of the refused material.
 func (r *EngineeringRuntime) settleRefusedMaterial(out *effect, state *runState, operation RunOperation, attempt int, workspace, subject string, paths []string) {
-	if out.state != OperationFailed || len(paths) == 0 {
+	if out.state != OperationFailed || out.interrupted || len(paths) == 0 {
 		return
 	}
 	var class FailureClass
@@ -236,39 +245,65 @@ func (r *EngineeringRuntime) settleRefusedMaterial(out *effect, state *runState,
 	case mutationResult:
 		class, digest = rec.FailureClass, rec.ContentDigest
 	}
+	if class == FailureRunCancelled {
+		return
+	}
 	location := quarantineDir(state.run.ID, operation.ID, attempt)
 	manifest := QuarantineManifest{
 		OperationID: operation.ID, Attempt: attempt, Subject: subject,
 		FailureClass: class, ContentDigest: digest,
 	}
-	err := quarantineRefusedMaterial(workspace, filepath.Join(r.deps.StateDir, location), manifest, paths)
-	if err == nil {
-		err = restoreRefusedPaths(workspace, paths)
-	}
-	if err != nil {
-		stopRefusedAttempt(out, fmt.Errorf("refused material could not be quarantined at %s: %w", location, err))
+	if err := quarantineRefusedMaterial(workspace, filepath.Join(r.deps.StateDir, location), manifest, paths); err != nil {
+		stopRefusedAttempt(out, fmt.Errorf("refused material could not be copied to quarantine %s; it is still in the workspace: %w", location, err))
 		return
 	}
+	restoreErr := restoreRefusedPaths(workspace, paths)
 	out.events = append(out.events, journalEntry{Type: EventCandidateQuarantined, Payload: CandidateQuarantinedPayload{
 		OperationID: operation.ID, Attempt: attempt, Subject: subject, FailureClass: class,
 		PathCount: len(paths), PathsDigest: pathsDigest(paths), ContentDigest: digest, Location: location,
+		Restored: restoreErr == nil,
 	}})
+	if restoreErr != nil {
+		stopRefusedAttempt(out, fmt.Errorf("refused material is preserved in quarantine %s but the workspace could not be restored to the attempt's subject: %w", location, restoreErr))
+	}
 }
 
-// stopRefusedAttempt turns a failed settlement whose refused material could
-// not be moved aside into a terminal one, keeping everything else it records.
+// stopRefusedAttempt makes a failed settlement whose refused material could
+// not be fully moved aside TERMINAL, whatever result shape the failing path
+// produced. It does not depend on recognising the result type: any result is
+// replaced by an executionRecord carrying FailureUnknown (which routes to
+// stop), with the original result kept, bounded, in the diagnostic message,
+// so no retry can be admitted onto a workspace that may still hold it.
 func stopRefusedAttempt(out *effect, cause error) {
+	record := executionRecord{}
+	original := ""
 	switch rec := out.result.(type) {
 	case executionRecord:
-		rec.FailureClass = FailureUnknown
+		record = rec
 		if rec.Diagnostic != nil {
-			rec.Diagnostic.FailureClass = FailureUnknown
-			rec.Diagnostic.Route = RouteStop
-			rec.Diagnostic.Message = boundedDetail(cause.Error())
+			original = rec.Diagnostic.Message
 		}
-		out.result = rec
 	case mutationResult:
-		rec.FailureClass = FailureUnknown
-		out.result = rec
+		record.mutationResult = rec
+	default:
+		if encoded, err := json.Marshal(rec); err == nil {
+			original = string(encoded)
+		}
 	}
+	record.FailureClass = FailureUnknown
+	record.Checkpoint = false
+	message := cause.Error()
+	if original != "" {
+		message += "; original result: " + original
+	}
+	diagnostic := ExecutionDiagnostic{Stage: execStageCandidateAdmission}
+	if record.Diagnostic != nil {
+		diagnostic = *record.Diagnostic
+	}
+	diagnostic.FailureClass = FailureUnknown
+	diagnostic.Route = RouteStop
+	diagnostic.Message = boundedDetail(message)
+	record.Diagnostic = &diagnostic
+	out.state = OperationFailed
+	out.result = record
 }

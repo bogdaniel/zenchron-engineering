@@ -429,6 +429,11 @@ type CandidateQuarantinedPayload struct {
 	PathsDigest   string       `json:"paths_digest"`
 	ContentDigest string       `json:"content_digest,omitempty"`
 	Location      string       `json:"location"`
+	// Restored says whether the refused paths were returned to Subject. A
+	// complete copy is journalled even when restoration failed, so the
+	// quarantine always has a durable identity; false means the attempt was
+	// stopped because the workspace may still hold part of the material.
+	Restored bool `json:"restored"`
 }
 
 type CandidateCommittedPayload struct {

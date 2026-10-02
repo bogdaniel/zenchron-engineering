@@ -12,6 +12,8 @@ package runtime
 // same binding's next successful attempt committed them as its own.
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +64,7 @@ func assertQuarantinedA(t *testing.T, fixture *phase8Fixture, runID string) {
 		t.Fatalf("journal holds %d candidate.quarantined events, want exactly one: %v", len(quarantined), journalTypes(state.events))
 	}
 	q := quarantined[0]
-	if q.FailureClass != FailureProviderBackgroundWorkUnresolved || q.PathCount != 1 || q.Attempt != 1 {
+	if q.FailureClass != FailureProviderBackgroundWorkUnresolved || q.PathCount != 1 || q.Attempt != 1 || !q.Restored {
 		t.Fatalf("quarantine record = %+v, want attempt 1's one refused path under its refusal class", q)
 	}
 	kept, err := os.ReadFile(filepath.Join(fixture.stateDir, q.Location, "files", "refused.go"))
@@ -216,4 +218,130 @@ func TestQuarantineSurvivesARestart(t *testing.T) {
 		t.Fatalf("quarantine left the workspace metadata outside its trusted baseline: %v", err)
 	}
 	assertQuarantinedA(t, fixture, runID)
+}
+
+// TestAnOperatorStoppedAttemptKeepsItsMaterialInPlace: an attempt an operator
+// stop genuinely ended is #203's - its material is held where the producer left
+// it, never quarantined, even though the provider mutated before the stop.
+func TestAnOperatorStoppedAttemptKeepsItsMaterialInPlace(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	stop := operatorStop(t, f, &runID)
+	var p *blockingProvider
+	p = &blockingProvider{isolatedProvider: f.provider, during: func(context.Context) {
+		dir := p.requests[len(p.requests)-1].CandidateDir
+		if err := os.WriteFile(filepath.Join(dir, "stopped.go"), []byte("package stopped\n"), 0o600); err != nil {
+			t.Error(err)
+		}
+		stop()
+	}}
+	f.runtime.deps.Provider = p
+	var outcome Outcome
+	for pass := 0; pass < 8 && len(p.requests) == 0; pass++ {
+		outcome = f.reconcile(runID)
+	}
+	assertStoppedExecution(t, f, runID, outcome)
+	if n := len(quarantinedEvents(t, f.state(runID).events)); n != 0 {
+		t.Fatalf("a stopped attempt's material was quarantined (%d records); #203 holds it in place", n)
+	}
+	if _, err := os.Stat(filepath.Join(candidateDir(f.stateDir, runID), "stopped.go")); err != nil {
+		t.Fatalf("a stopped attempt's material was moved out of the workspace: %v", err)
+	}
+}
+
+// TestAFailedRestoreKeepsTheQuarantineJournalledAndStops: the copy is complete,
+// the restore cannot finish. The quarantine still has its durable identity
+// (journalled, restored=false) and the attempt is a STOP - no retry runs on a
+// workspace that may still hold the refused material.
+func TestAFailedRestoreKeepsTheQuarantineJournalledAndStops(t *testing.T) {
+	var locked string
+	fixture, provider := newRoutingFixture(t, 3, providerAnswer{
+		result: refusedWrite().result,
+		mutate: func(dir string) error {
+			locked = filepath.Join(dir, "locked")
+			if err := os.MkdirAll(locked, 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(locked, "refused.go"), []byte("package refused // A\n"), 0o600); err != nil {
+				return err
+			}
+			// Readable, so the copy succeeds; not writable, so removing the
+			// refused file during restore fails.
+			return os.Chmod(locked, 0o500)
+		},
+	})
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	runID := fixture.start()
+	fixture.reconcile(runID)
+
+	if provider.calls != 1 {
+		t.Fatalf("an attempt whose restore failed was retried (%d provider calls)", provider.calls)
+	}
+	state := fixture.state(runID)
+	quarantined := quarantinedEvents(t, state.events)
+	if len(quarantined) != 1 || quarantined[0].Restored {
+		t.Fatalf("quarantine records = %+v, want one complete copy journalled with restored=false", quarantined)
+	}
+	kept, err := os.ReadFile(filepath.Join(fixture.stateDir, quarantined[0].Location, "files", "locked", "refused.go"))
+	if err != nil || string(kept) != "package refused // A\n" {
+		t.Fatalf("the journalled quarantine does not hold the refused bytes: %q, %v", kept, err)
+	}
+	op, _ := durableInvoke(t, fixture, runID)
+	if class := durableFailureClass(t, op); RouteFailure(class) != RouteStop {
+		t.Fatalf("a failed restore settled class %q (route %q), want a stop", class, RouteFailure(class))
+	}
+	if n := countType(state.events, EventCandidateCommitted); n != 0 {
+		t.Fatalf("refused material was committed after a failed restore: %v", journalTypes(state.events))
+	}
+}
+
+// TestACopyFailureLeavesTheMaterialAndStops: when the quarantine cannot be
+// written, nothing is removed from the workspace and the attempt stops.
+func TestACopyFailureLeavesTheMaterialAndStops(t *testing.T) {
+	fixture, provider := newRoutingFixture(t, 3, refusedWrite())
+	runID := fixture.start()
+	// The quarantine root is occupied by a FILE, so no quarantine directory
+	// can be created under it.
+	root := filepath.Join(fixture.stateDir, "runs", runID, "quarantine")
+	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.reconcile(runID)
+
+	if provider.calls != 1 {
+		t.Fatalf("an attempt whose material could not be quarantined was retried (%d provider calls)", provider.calls)
+	}
+	state := fixture.state(runID)
+	if n := len(quarantinedEvents(t, state.events)); n != 0 {
+		t.Fatalf("a quarantine that was never written was journalled (%d)", n)
+	}
+	if _, err := os.Stat(filepath.Join(candidateDir(fixture.stateDir, runID), "refused.go")); err != nil {
+		t.Fatalf("a failed copy removed the refused material from the workspace: %v", err)
+	}
+	op, _ := durableInvoke(t, fixture, runID)
+	if class := durableFailureClass(t, op); RouteFailure(class) != RouteStop {
+		t.Fatalf("a failed copy settled class %q, want a stop", class)
+	}
+}
+
+// TestTheFailStopDoesNotDependOnTheResultShape: a generic failed(err) result -
+// the shape a post-provider read failure produces - is still forced into a
+// non-retryable stop, with the original result kept in the diagnostic.
+func TestTheFailStopDoesNotDependOnTheResultShape(t *testing.T) {
+	out := failed(errors.New("execution authority could not be read"))
+	stopRefusedAttempt(&out, errors.New("refused material could not be quarantined"))
+	record, ok := out.result.(executionRecord)
+	if !ok {
+		t.Fatalf("result is %T, want an executionRecord", out.result)
+	}
+	if out.state != OperationFailed || record.FailureClass != FailureUnknown || RouteFailure(record.FailureClass) != RouteStop {
+		t.Fatalf("state %q class %q: want a failed, non-retryable stop", out.state, record.FailureClass)
+	}
+	if record.Diagnostic == nil || record.Diagnostic.Route != RouteStop ||
+		!strings.Contains(record.Diagnostic.Message, "execution authority could not be read") {
+		t.Fatalf("diagnostic = %+v, want route stop with the original result kept", record.Diagnostic)
+	}
 }

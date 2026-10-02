@@ -521,7 +521,17 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// only around Provider.Execute; a stop landing before or after that
 	// window rewrites nothing here.
 	var watch executionWatch
-	defer func() { watch.settle(&out) }()
+	// settleMaterial is the #390 attempt boundary. It runs AFTER watch.settle,
+	// because only then is it known whether an operator stop ended this
+	// attempt - and a stopped attempt's material is #203's to hold in place,
+	// never quarantine's to move.
+	var settleMaterial func(*effect)
+	defer func() {
+		watch.settle(&out)
+		if settleMaterial != nil {
+			settleMaterial(&out)
+		}
+	}()
 	// CAN THIS WORKER ATTEMPT WHAT IT IS ABOUT TO BE OBLIGATED TO DO?
 	//
 	// Asked before the workspace is touched and before any invocation is spent.
@@ -909,9 +919,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// a FAILED settlement with material in the workspace quarantines that
 	// material before the operation is recorded, so the same binding's next
 	// physical attempt starts from the exact subject this one was given.
-	defer func() {
-		r.settleRefusedMaterial(&out, state, operation, physicalAttempt, workspace.Dir, subject.Commit, paths)
-	}()
+	settleMaterial = func(out *effect) {
+		r.settleRefusedMaterial(out, state, operation, physicalAttempt, workspace.Dir, subject.Commit, paths)
+	}
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
 		ContentDigest: workspaceContentDigest(workspace.Dir, paths),
