@@ -37,6 +37,10 @@ const (
 	HeldCommittedUnverified = "committed_unverified"
 	// HeldCheckpoint is a runtime-owned incomplete checkpoint commit (#54).
 	HeldCheckpoint = "checkpoint"
+	// HeldRefused is material produced by an invocation the runtime refused.
+	// It is preserved in a local-only refused-material bundle and is NOT the
+	// candidate head: using it requires a separately governed recovery decision.
+	HeldRefused = "refused"
 	// HeldUncommitted is a succeeded producing operation's workspace change
 	// that the runtime never committed because the budget ended the run
 	// first. It exists only in the candidate workspace.
@@ -79,7 +83,7 @@ type HeldMaterial struct {
 	Disposition          string `json:"disposition"`
 }
 
-var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true}
+var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldRefused: true, HeldUncommitted: true}
 
 func (h HeldMaterial) validate() error {
 	var closed error
@@ -131,6 +135,16 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 	if d := s.projection.ExecutionDiagnostic; d != nil && d.SuccessorUnavailable != "" {
 		held.Successor, held.SuccessorUnavailable = d.Successor, d.SuccessorUnavailable
 	}
+	// A terminal failed invocation may have already isolated its refused bytes
+	// from the retry workspace (#390). The snapshot is the valuable material in
+	// that case: it is exact, durable and local-only, but it is not a candidate
+	// and grants no continuation or publication authority.
+	if operation, refused := s.latestRefusedMaterial(); refused != nil {
+		held.Kind, held.Operation = HeldRefused, operation
+		held.Revision, held.Tree = refused.Commit, refused.Tree
+		held.PathCount, held.ContentDigest = refused.PathCount, refused.ContentDigest
+		return held.bounded()
+	}
 	head := s.projection.CandidateRevision
 	if producing, pending := bindCandidateCommit(s); pending {
 		var record mutationResult
@@ -161,6 +175,33 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		held.Kind = HeldCommittedUnverified
 	}
 	return held.bounded()
+}
+
+// latestRefusedMaterial returns the refused-material identity from the latest
+// completed execution attempt, but only when that latest execution itself is
+// failed. An older refused attempt must not become the held result after a
+// later successful retry produced a legitimate candidate.
+func (s *runState) latestRefusedMaterial() (string, *RefusedMaterialSnapshot) {
+	for i := len(s.events) - 1; i >= 0; i-- {
+		event := s.events[i]
+		if event.Type != EventOperationAfter {
+			continue
+		}
+		var operation RunOperation
+		if len(event.Payload) == 0 || json.Unmarshal(event.Payload, &operation) != nil || operation.Kind != OpExecutionInvoke {
+			continue
+		}
+		if operation.State != OperationFailed {
+			return "", nil
+		}
+		var record executionRecord
+		if len(operation.Result) == 0 || json.Unmarshal(operation.Result, &record) != nil || record.RefusedMaterial == nil {
+			return "", nil
+		}
+		copy := *record.RefusedMaterial
+		return operation.ID, &copy
+	}
+	return "", nil
 }
 
 // bounded never lets the terminal event become unappendable. Descriptive
