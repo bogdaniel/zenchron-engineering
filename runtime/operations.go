@@ -1370,31 +1370,40 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Checkpoint: record.Mutated && (class == FailureExecutionIncomplete ||
 				(class == FailureProviderNoProgress && len(state.outstandingReviewKeys()) > 0)),
 		}
-		// A producer that left real work behind did its bounded job, so the
-		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
-		// is recorded as a checkpoint rather than as an operation failure.
+		// ONLY a continuation-eligible interrupted execution may satisfy this
+		// operation by leaving a checkpoint. Every other provider failure fails
+		// the operation, even when it changed files (#390). Mutation proves
+		// material exists; it does not prove the invocation completed.
 		//
-		// A producer that left nothing behind did not satisfy this operation,
-		// so the operation fails - and with the class above it now fails INTO
-		// the existing attempt budget rather than out of the run. The next
-		// attempt binds to the same identity bindExecutionInvoke already
-		// derives: the trusted base for an initial invocation, and the exact
-		// checkpoint commit for a continuation. Nothing new counts anything:
-		// the scheduler's existing per-operation attempts bound the retries,
-		// and the checkpoint ceiling still bounds how much unfinished work one
-		// run may accumulate, because a zero-delta invocation creates no
-		// checkpoint.
-		//
-		// A REVIEWER PROTOCOL FAILURE ALWAYS FAILS THE OPERATION, mutation or
-		// not (#374). "Left real work behind" means something for a producer,
-		// whose deliverable IS candidate content; a reviewer's deliverable is
-		// the verdict, and incidental workspace touches (review notes, a
-		// toolchain's own output) are not that verdict. Letting Mutated excuse
-		// this class would let the runtime's own candidate.commit operation
-		// treat a reviewer's scratch output as a successful execution and
-		// commit it - admitting candidate content from an invocation that
-		// never crossed the protocol it was there to run.
-		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
+		// A failed attempt that left material behind is preserved before any
+		// later attempt can run. The preservation is OUTSIDE the candidate
+		// workspace and the workspace is restored to the exact subject this
+		// physical attempt was invoked against. This is the attempt boundary:
+		// a retry cannot inherit A and later attribute it to a successful attempt
+		// that produced nothing (or only B).
+		if record.Mutated && !execution.Checkpoint {
+			snapshot, quarantineErr := workspace.QuarantineRefusedMaterial(r.deps.StateDir, ExecutionAttemptRef{
+				RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
+			}, subject)
+			if quarantineErr != nil {
+				// Isolation is a prerequisite for retrying. If preservation/restoration
+				// cannot be proven, fail closed on THIS attempt rather than executing
+				// again in a contaminated workspace. The original provider failure
+				// class remains the provenance; this diagnostic only withholds its
+				// successor because the runtime could not establish the attempt boundary.
+				produced.state = OperationFailed
+				if execution.Diagnostic != nil {
+					execution.Diagnostic.Route = RouteStop
+					execution.Diagnostic.Successor = ""
+					execution.Diagnostic.SuccessorUnavailable = "refused_material_quarantine_failed"
+					execution.Diagnostic.Message = boundedDetail(execution.Diagnostic.Message + "; refused material quarantine failed: " + quarantineErr.Error())
+				}
+				produced.result = execution
+				return produced
+			}
+			execution.RefusedMaterial = &snapshot
+		}
+		if !execution.Checkpoint {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
@@ -1530,8 +1539,9 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 // restarted runtime needs to name a root cause without the process-local error.
 type executionRecord struct {
 	mutationResult
-	Diagnostic    *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
-	ReviewRefusal *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
+	Diagnostic      *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
+	ReviewRefusal   *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
+	RefusedMaterial *RefusedMaterialSnapshot    `json:"refused_material,omitempty"`
 	// PriorContext explains the prior-attempt observations this invocation
 	// inherited, or is absent when it inherited none. It records WHICH earlier
 	// attempts were supplied rather than a copy of what they said, so a replay
