@@ -722,20 +722,26 @@ const (
 	FailureProviderNoProgress FailureClass = "provider_no_progress"
 	// FailureProviderBackgroundWorkUnresolved is a Claude Code invocation that
 	// exited claiming a valid final result while a main-thread Bash call IT
-	// started with the typed run_in_background input was never followed,
-	// before that result, by any main-thread BashOutput or KillShell call
-	// (#384; see claude_stream.go's backgroundOpen).
+	// started with the typed run_in_background input was never, before that
+	// result, explicitly terminated by a matching main-thread KillShell call
+	// (#384, #385; see claude_stream.go's backgroundStarts/backgroundResolved).
+	// A BashOutput poll does NOT resolve this: Claude Code's typed stream
+	// exposes a background shell's identity only on a follow-up call's own
+	// input, never on its start, and exposes no typed running/completed
+	// status at all - only KillShell's own typed name proves a shell reached
+	// a terminal state, since calling it IS that action.
 	//
 	// Provider return is not proof of semantic completion, the same finding
 	// #376 and #379 made about a provider's own self-report: a process that
 	// backgrounded its verification and then wrote a final answer without
 	// ever checking back is indistinguishable, from the model's own prose
 	// alone, from one that genuinely finished - right up until the typed
-	// stream shows the shell it started was never polled or killed. The
-	// invocation's process tree ends with it, so whatever that shell was
-	// running - a test suite, most often - is lost with it: a valid final
-	// result here is proof only that this invocation stopped talking, not
-	// that the work it describes actually happened.
+	// stream shows the shell it started was never killed, nor its own
+	// natural completion provable from any typed field. The invocation's
+	// process tree ends with it, so whatever that shell was running - a
+	// test suite, most often - is lost with it: a valid final result here is
+	// proof only that this invocation stopped talking, not that the work it
+	// describes actually happened.
 	//
 	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
 	// shape FailureFeedbackUnresolved and FailureCheckpointContinuationUnresolved

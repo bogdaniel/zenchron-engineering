@@ -1346,10 +1346,14 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
-	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384) when the
-	// typed stream shows this invocation itself started a background shell -
-	// run_in_background on a main-thread Bash call - and never once polled or
-	// killed it before writing that result. Checked here, before the
+	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385) when
+	// the typed stream shows this invocation itself started a background
+	// shell - run_in_background on a main-thread Bash call - and never
+	// explicitly killed it before writing that result. A BashOutput poll
+	// does not clear this: the typed stream gives no way to tell a poll of a
+	// still-running shell from a poll of a finished one, so only a typed
+	// KillShell naming the shell counts (see claude_stream.go's
+	// backgroundStarts/backgroundResolved). Checked here, before the
 	// structured verdict is trusted below: a reviewer or feedback-resolution
 	// document this invocation wrote is not more credible for having been
 	// produced by a process that abandoned work it started, and every path

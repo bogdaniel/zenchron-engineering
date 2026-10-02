@@ -197,13 +197,16 @@ func claudeBackgroundToolUse(id string) string {
 }
 
 // claudePollToolUse and claudeKillShellToolUse are main-thread calls to
-// Claude's own background-shell follow-up tools (#384).
+// Claude's own background-shell follow-up tools (#384). A poll never
+// resolves outstanding background work (#385: see
+// claudeStream.backgroundStarts/backgroundResolved for why); only a
+// KillShell naming a given shellID does, so its identity is a parameter.
 func claudePollToolUse(id string) string {
 	return `{"type":"tool_use","id":"` + id + `","name":"BashOutput","input":{"bash_id":"bash_1"}}`
 }
 
-func claudeKillShellToolUse(id string) string {
-	return `{"type":"tool_use","id":"` + id + `","name":"KillShell","input":{"shell_id":"bash_1"}}`
+func claudeKillShellToolUse(id, shellID string) string {
+	return `{"type":"tool_use","id":"` + id + `","name":"KillShell","input":{"shell_id":"` + shellID + `"}}`
 }
 
 // claudeAssistant is one assistant line; parent "" is the main thread.
@@ -384,9 +387,14 @@ func TestClaudeOpenToolBookkeeping(t *testing.T) {
 	}
 }
 
-// #384: a main-thread Bash call started with run_in_background is sticky
-// until a BashOutput or KillShell call follows it, never cleared by the
-// ordinary turn-boundary bookkeeping that closes s.open.
+// #384, #385: a main-thread Bash call started with run_in_background stays
+// outstanding - never cleared by the ordinary turn-boundary bookkeeping that
+// closes s.open - until a main-thread KillShell call names that shell's own
+// identity. A BashOutput poll is never enough by itself: the typed stream
+// gives no way to tell a poll of a still-running shell from a poll of a
+// finished one (see claudeStream.backgroundStarts/backgroundResolved), and
+// resolution is tracked per distinct identity, so killing one of several
+// outstanding shells leaves the others unresolved.
 func TestClaudeBackgroundShellBookkeeping(t *testing.T) {
 	unresolved := func(lines ...string) bool {
 		stream := newClaudeStream(1)
@@ -404,13 +412,13 @@ func TestClaudeBackgroundShellBookkeeping(t *testing.T) {
 		{"a background shell with no follow-up at all", []string{
 			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
 			claudeResult(false, "success", 0)}, true},
-		{"a background shell later polled with BashOutput", []string{
+		{"a background shell merely polled with BashOutput stays unresolved", []string{
 			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
 			claudeAssistant("M2", "", claudePollToolUse("Y")), claudeToolResult("Y", ""),
-			claudeResult(false, "success", 0)}, false},
-		{"a background shell later killed with KillShell", []string{
+			claudeResult(false, "success", 0)}, true},
+		{"a background shell later killed with KillShell resolves", []string{
 			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
-			claudeAssistant("M2", "", claudeKillShellToolUse("Y")), claudeToolResult("Y", ""),
+			claudeAssistant("M2", "", claudeKillShellToolUse("Y", "bash_1")), claudeToolResult("Y", ""),
 			claudeResult(false, "success", 0)}, false},
 		{"the flag survives an intervening unrelated turn", []string{
 			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
@@ -420,6 +428,17 @@ func TestClaudeBackgroundShellBookkeeping(t *testing.T) {
 			claudeAssistant("M1", "", claudeToolUse("AGENT")),
 			claudeAssistant("S1", "AGENT", claudeBackgroundToolUse("N")),
 			claudeToolResult("AGENT", "")}, false},
+		{"two background shells, only one explicitly killed, stay unresolved", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudeBackgroundToolUse("X2")), claudeToolResult("X2", ""),
+			claudeAssistant("M3", "", claudeKillShellToolUse("Y", "bash_1")), claudeToolResult("Y", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"two background shells, both explicitly killed, resolve", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudeBackgroundToolUse("X2")), claudeToolResult("X2", ""),
+			claudeAssistant("M3", "", claudeKillShellToolUse("Y", "bash_1")), claudeToolResult("Y", ""),
+			claudeAssistant("M4", "", claudeKillShellToolUse("Y2", "bash_2")), claudeToolResult("Y2", ""),
+			claudeResult(false, "success", 0)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -708,42 +727,53 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 	}
 }
 
-// #384: a zero exit with a valid, non-error final result is STILL not
+// #384, #385: a zero exit with a valid, non-error final result is STILL not
 // success end to end when the typed stream shows this invocation abandoned a
 // background shell it started - the exact shape of "I'll report back once it
-// completes" and then nothing. Resolving it with a BashOutput call restores
-// the ordinary success path.
+// completes" and then nothing. A BashOutput poll alone does not restore
+// success either, since it proves only that Claude looked, never what it
+// saw; only an explicit KillShell naming the shell does.
 func TestAnAbandonedBackgroundShellFailsAValidResult(t *testing.T) {
 	answer := "done"
+	expectUnresolved := func(t *testing.T, transcript string) {
+		t.Helper()
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		fake.outputs = []CommandOutput{{Stdout: []byte(transcript + "\n")}}
+		result, err := provider.Execute(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Outcome != OperationFailed {
+			t.Fatalf("outcome = %q, want OperationFailed", result.Outcome)
+		}
+		if result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
+			t.Fatalf("failure = %#v, want %q", result.Failure, FailureProviderBackgroundWorkUnresolved)
+		}
+	}
+
 	abandoned := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
 		claudeResultWithAnswer(false, answer)
-	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
-	fake.outputs = []CommandOutput{{Stdout: []byte(abandoned + "\n")}}
-	result, err := provider.Execute(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != OperationFailed {
-		t.Fatalf("outcome = %q, want OperationFailed", result.Outcome)
-	}
-	if result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
-		t.Fatalf("failure = %#v, want %q", result.Failure, FailureProviderBackgroundWorkUnresolved)
-	}
+	expectUnresolved(t, abandoned)
 	if RouteFailure(FailureProviderBackgroundWorkUnresolved) != RouteRetry {
 		t.Fatal("an abandoned background shell must route to a bounded retry of the same operation")
 	}
 
-	polled := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
+	polledOnly := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
 		claudeAssistant("M2", "", claudePollToolUse("Y")) + "\n" + claudeToolResult("Y", "") + "\n" +
 		claudeResultWithAnswer(false, answer)
+	expectUnresolved(t, polledOnly)
+
+	killed := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
+		claudeAssistant("M2", "", claudeKillShellToolUse("Y", "bash_1")) + "\n" + claudeToolResult("Y", "") + "\n" +
+		claudeResultWithAnswer(false, answer)
 	provider2, request2, fake2 := agentFixture(t, AgentKindClaudeCode)
-	fake2.outputs = []CommandOutput{{Stdout: []byte(polled + "\n")}}
+	fake2.outputs = []CommandOutput{{Stdout: []byte(killed + "\n")}}
 	resolved, err := provider2.Execute(context.Background(), request2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resolved.Outcome != Succeeded || resolved.Answer != answer {
-		t.Fatalf("a polled background shell must still succeed: %#v", resolved)
+		t.Fatalf("an explicitly killed background shell must still succeed: %#v", resolved)
 	}
 }
 

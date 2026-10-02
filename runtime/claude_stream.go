@@ -66,6 +66,13 @@ var maxClaudeEventBytes = 4 << 20
 // could lose its suspension; raise the cap if live evidence ever shows one.
 const maxClaudeOpenTools = 256
 
+// maxClaudeBackgroundShells bounds the set of distinct background-shell
+// identities a KillShell call can resolve (#385). The same bounded-tracking
+// spirit as maxClaudeOpenTools: identities past the cap are not tracked, so
+// an absurd number of killed shells could lose a resolution; raise the cap if
+// live evidence ever shows one.
+const maxClaudeBackgroundShells = 256
+
 // claudeStream is the incremental parser for one Claude invocation's stdout,
 // and the state the inactivity watch consults.
 //
@@ -104,21 +111,43 @@ type claudeStream struct {
 	open map[string]struct{}
 	turn string
 
-	// backgroundOpen is sticky, unlike open: it is set the instant a
-	// main-thread Bash call is dispatched with the typed run_in_background
-	// input true, and it stays set across turns - a background shell outlives
-	// the tool_use/tool_result pair that started it - until a main-thread
-	// BashOutput or KillShell call is observed, at which point this invocation
-	// is taken to have checked on SOME outstanding background work and the
-	// flag clears (#384).
+	// backgroundStarts counts main-thread Bash calls dispatched with the
+	// typed run_in_background input true, and backgroundResolved is the set
+	// of distinct shell identities a main-thread KillShell call named,
+	// sticky across turns like backgroundStarts - a background shell
+	// outlives the tool_use/tool_result pair that started it (#384, #385).
 	//
-	// This is a coarse, bounded approximation deliberately, in the same spirit
-	// as maxClaudeOpenTools: it does not track WHICH shell a poll resolved, so
-	// polling one of several abandoned shells clears the flag for all of them.
-	// It still catches the dominant failure shape live evidence shows - a
-	// background shell started and never followed by any poll at all before
-	// the final result - without reading a single byte of tool output prose.
-	backgroundOpen bool
+	// INVESTIGATION (#385, Claude Code 2.1.283 structured stream-json): the
+	// Bash tool's typed input carries run_in_background, but never a shell
+	// identity - the id a background shell is given is reported only in
+	// that dispatch's tool_result CONTENT, the same unstructured text every
+	// tool_result carries for the model to read, not a typed JSON field.
+	// BashOutput's and KillShell's own typed INPUT (bash_id / shell_id) is
+	// the only shell identity this parser ever sees typed - and only on a
+	// FOLLOW-UP call, never on the start. Whether a polled shell has
+	// actually reached a terminal state is, symmetrically, stated only in
+	// that poll's tool_result content - unstructured text again - with no
+	// companion typed field anywhere in the event types this parser reads
+	// (assistant content blocks, result, system/api_retry). No structured
+	// run/completed/failed status for a background shell exists in the
+	// typed stream.
+	//
+	// A BashOutput poll is therefore typed evidence Claude looked, never
+	// typed evidence of what it saw: a poll of a still-running shell is
+	// indistinguishable, in the typed stream, from a poll of a finished one.
+	// Per #385 review, treating that observation as resolution would repeat
+	// the false-completion class #384 exists to prevent, so a poll never
+	// resolves anything here. KillShell is different: calling it IS the
+	// terminal action for the shell it names - true from the tool's own
+	// typed name alone, with no tool-result content ever read to know it -
+	// so only a KillShell naming a given identity resolves it. A background
+	// shell that finished on its own and was simply never killed stays
+	// conservatively unresolved; that is the deliberately safe side for this
+	// invariant to err on. Identities are tracked as a set (not a single
+	// sticky bit) specifically so resolving one of several abandoned shells
+	// no longer resolves the others.
+	backgroundStarts   int
+	backgroundResolved map[string]struct{}
 
 	sawResult   bool
 	isError     bool
@@ -264,9 +293,10 @@ type claudeContentBlock struct {
 	ToolUseID string `json:"tool_use_id"`
 	// Name and Input are read ONLY for a tool_use block, and ONLY their typed
 	// shape: the tool's own NAME, and - off Input - the typed boolean
-	// run_in_background flag the Bash tool's schema defines. Never the
-	// command string, never the tool's prose result. See
-	// claudeStartsBackgroundShell.
+	// run_in_background flag the Bash tool's schema defines, or the typed
+	// shell_id a KillShell call names. Never the command string, never the
+	// tool's prose result. See claudeStartsBackgroundShell and
+	// claudeKilledShellID.
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
 }
@@ -318,16 +348,26 @@ func (s *claudeStream) handle(line []byte) {
 				if block.ID != "" && len(s.open) < maxClaudeOpenTools {
 					s.open[block.ID] = struct{}{}
 				}
-				// THE TYPED SHAPE ONLY (#384): a tool NAME and, off Bash's own
-				// input schema, a typed boolean. Never the command, never any
-				// later tool_result prose.
+				// THE TYPED SHAPE ONLY (#384, #385): a tool NAME and, off
+				// Bash's or KillShell's own input schema, a typed boolean or
+				// identity string. Never the command, never any tool_result
+				// content - see the backgroundStarts/backgroundResolved
+				// comment for why a BashOutput poll is deliberately absent
+				// here: it carries no typed terminal signal to act on.
 				switch block.Name {
 				case "Bash":
 					if claudeStartsBackgroundShell(block.Input) {
-						s.backgroundOpen = true
+						s.backgroundStarts++
 					}
-				case "BashOutput", "KillShell":
-					s.backgroundOpen = false
+				case "KillShell":
+					if id, ok := claudeKilledShellID(block.Input); ok {
+						if s.backgroundResolved == nil {
+							s.backgroundResolved = map[string]struct{}{}
+						}
+						if _, tracked := s.backgroundResolved[id]; tracked || len(s.backgroundResolved) < maxClaudeBackgroundShells {
+							s.backgroundResolved[id] = struct{}{}
+						}
+					}
 				}
 			}
 		}
@@ -451,11 +491,15 @@ type claudeStreamOutcome struct {
 	// FinalResult reports that a valid final result was read. The denial
 	// count and DeniedTools come from it, so without one they are unknown.
 	FinalResult bool
-	// UnresolvedBackgroundWork reports that a main-thread Bash call this
-	// invocation dispatched with run_in_background was never followed by a
-	// main-thread BashOutput or KillShell call before the stream ended (#384).
-	// It is read from typed tool names and the Bash tool's typed
-	// run_in_background input only; see claudeStartsBackgroundShell.
+	// UnresolvedBackgroundWork reports that this invocation dispatched more
+	// main-thread Bash calls with run_in_background than it named distinct
+	// shell identities in a main-thread KillShell call before the stream
+	// ended (#384, #385). A BashOutput poll never counts as resolving one:
+	// see the backgroundStarts/backgroundResolved comment for why the typed
+	// stream gives no way to tell a poll of a still-running shell from a
+	// poll of a finished one. It is read from typed tool names and the Bash
+	// tool's typed run_in_background input, and KillShell's typed shell_id
+	// input, only; see claudeStartsBackgroundShell and claudeKilledShellID.
 	UnresolvedBackgroundWork bool
 	// DeniedTools is the bounded set of typed tool identifiers the final
 	// result's permission_denials named.
@@ -492,7 +536,7 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
 		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
-		UnresolvedBackgroundWork: s.backgroundOpen,
+		UnresolvedBackgroundWork: s.backgroundStarts > len(s.backgroundResolved),
 		Answer:                   s.answer, AnswerObserved: s.hasAnswer,
 	}
 }
@@ -507,6 +551,23 @@ func claudeStartsBackgroundShell(input json.RawMessage) bool {
 		RunInBackground bool `json:"run_in_background"`
 	}
 	return json.Unmarshal(input, &decoded) == nil && decoded.RunInBackground
+}
+
+// claudeKilledShellID reads ONLY the KillShell tool's own typed shell_id
+// input off a tool_use block - the one typed signal this parser trusts as
+// proof a specific background shell reached a terminal state (#385; see the
+// backgroundStarts/backgroundResolved comment). A missing, type-drifted or
+// empty value reports no identity to resolve, the same fail-closed reading
+// claudeStartsBackgroundShell uses for a flag that would otherwise let a
+// malformed call wrongly clear outstanding background work.
+func claudeKilledShellID(input json.RawMessage) (string, bool) {
+	var decoded struct {
+		ShellID string `json:"shell_id"`
+	}
+	if json.Unmarshal(input, &decoded) != nil || decoded.ShellID == "" {
+		return "", false
+	}
+	return decoded.ShellID, true
 }
 
 // deniedToolNames reads ONLY the typed tool_name of each permission denial:
