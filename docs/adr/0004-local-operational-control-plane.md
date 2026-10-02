@@ -1,6 +1,6 @@
 # ADR-0004: Local Operational Control Plane
 
-- Status: Proposed (candidate; not adopted)
+- Status: Accepted
 - Date: 2026-10-02
 - Issue: #392 (S0 — this ADR and the reconciliation it requires). Parent tracker
   for the implementation slices that follow it.
@@ -73,13 +73,19 @@ and adds nothing to what may be authorized:
   reads that take no lease and no ownership — rendered as a projection rather
   than re-derived as a second source of truth.
 - **The existing control socket plus controller identity proof for
-  mutations.** Any action that is not a pure read (`drain`, `shutdown`,
-  `stop`, `authorize`, `agent set`, ...) goes through the same owner-only
-  `<state_dir>/serve.sock` endpoint `docs/supervisor.md` already documents, and
-  the same `ControlSession`/`ProveControllerIdentity` mechanism the runtime
-  uses for controller succession today (`runtime/control_session.go`). No new
+  mutations.** Any action that is not a pure read goes through the same
+  owner-only `<state_dir>/serve.sock` endpoint `docs/supervisor.md` already
+  documents, limited to that endpoint's closed command vocabulary as it exists
+  in the runtime today (`submit`, `status`, `agents`, `drain`, `shutdown`,
+  `stop`, `stop-all`, `ping`, `controller.snapshot`, `plan-approve`,
+  `plan-reject`, `plan-revise` — `runtime/control_endpoint.go`), through the
+  same `ControlSession`/`ProveControllerIdentity` mechanism the runtime uses
+  for controller succession today (`runtime/control_session.go`). No new
   mutation path, no new authority boundary, and no privilege the CLI does not
-  already have.
+  already have. This ADR names no verb the socket does not already accept:
+  a later action becomes console-visible only once its owning runtime
+  semantics exist on the socket (for example, an explicit journalled release —
+  #344), never because the console or this ADR names it first.
 - **Go stdlib `net/http` + `html/template` + `embed`, plus small plain
   JavaScript.** Consistent with the three direct dependencies this module
   already carries (`go.mod`): nothing web-framework-shaped is added to reach
@@ -94,15 +100,27 @@ and adds nothing to what may be authorized:
   contract `autonomy events` already relies on — pushed over Server-Sent
   Events rather than polled, instead of a new subscription mechanism.
 - **Loopback-only by default, with a bearer token in the state directory at
-  mode `0600`.** The console's HTTP listener is a distinct surface from
-  `serve.sock` (it speaks HTTP to a browser, not the control-session protocol
-  to a CLI) and is not covered by that socket's filesystem-permission
-  argument, so it carries its own credential rather than relying on
-  loopback-only binding alone. It is issued and stored the same way other
-  owner-only runtime secrets already are: inside the `0700` state directory,
-  at `0600`, never in repository configuration, exactly as
-  `docs/supervisor.md`'s control-endpoint floor already requires for the
-  existing socket.
+  mode `0600`, plus same-origin enforcement on every mutating request.**
+  `serve.sock` authenticates by filesystem access alone —
+  `docs/supervisor.md` is explicit that nothing authenticating is stored
+  beside it, because an owner-only Unix-domain socket path already is the
+  credential, and a token file there would only add something to leak. The
+  console's HTTP listener is a different transport with a different threat
+  surface: a loopback socket a browser can reach does not inherit that
+  filesystem authentication, so this ADR deliberately introduces a new,
+  owner-only local credential for *this* surface, rather than claiming to
+  reuse an existing-socket argument that does not apply to it. That token is
+  generated locally, is not configurable from repository state, lives inside
+  the `0700` state directory at `0600`, and is never exposed in a URL, a log
+  line, or an API payload; S1 owns its exact filename and rotation.
+
+  Read requests require that token. Mutating requests require it too, and
+  additionally enforce same-origin/CSRF protections, per #392's binding
+  decision that mutating requests enforce same-origin protections and
+  server-side authority: a browser's claimed origin, or the token's presence
+  alone, is never treated as sufficient, and authority/eligibility for a
+  mutation is revalidated server-side — through the same control-session
+  identity proof above — never inferred from what the browser sent.
 - **JSON Schema for public API contracts.** The console's HTTP responses are
   described by schemas validated with the `santhosh-tekuri/jsonschema`
   dependency already in `go.mod`, consistent with every other canonical
@@ -140,7 +158,7 @@ it does not reopen #72 or choose organization identity/RBAC.
   performs.
 - The mutation boundary does not grow. Reusing the control socket and
   controller-identity proof means the console can request `drain`, `stop`, or
-  `authorize` with exactly the authority an operator's own CLI already has,
+  `plan-approve` with exactly the authority an operator's own CLI already has,
   never more.
 - No new runtime dependency is incurred to reach first-slice acceptance:
   stdlib HTTP/templating/embed and the two contract libraries already vendored
@@ -169,8 +187,14 @@ it does not reopen #72 or choose organization identity/RBAC.
 - The local Control Plane projects runtime state; it does not become a second
   source of truth for it.
 - Every mutation the console can request, the operator's CLI could already
-  request, through the same control socket and the same controller-identity
-  proof.
+  request, through the same control socket, the same closed command
+  vocabulary, and the same controller-identity proof. The console introduces
+  no socket verb the runtime does not already define.
+- Read requests against the console's HTTP listener require the local HTTP
+  credential (the state-directory token). Mutating HTTP requests require that
+  credential and additionally enforce same-origin/CSRF protections; authority
+  and eligibility are revalidated server-side and are never inferred from the
+  browser's claimed origin or from token possession alone.
 - No organization identity, cross-repository scope, or shared policy is
   introduced under #392. That is #72, and reopening it is out of scope here.
 - A build toolchain (Node, a bundler, a frontend framework) is added only when
