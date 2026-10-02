@@ -1,0 +1,24 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{block "title" .Data}}control plane{{end}} :: zenchron-engineering</title>
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/overview">zenchron-engineering</a>
+  <nav>
+    <a href="/overview">overview</a>
+    <a href="/runs">runs</a>
+  </nav>
+  <span id="live-indicator" class="live" data-observed-at="{{.ObservedAt.UTC.Format "2006-01-02T15:04:05Z"}}">live</span>
+</header>
+<main>
+{{template "content" .Data}}
+</main>
+<script src="/static/console.js"></script>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,15 @@
+{{define "title"}}sign in{{end}}
+{{define "content"}}
+<section class="panel login">
+  <h1>sign in</h1>
+  <p>this console requires the bearer token <span class="mono">control-plane</span> printed the path to when it started.</p>
+  <p class="muted">read that file (you already have the filesystem access it requires) and paste its contents below.</p>
+  {{if .Error}}<p class="banner error">{{.Error}}</p>{{end}}
+  <form class="login-form" method="post" action="/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label for="token">token</label>
+    <input id="token" name="token" type="password" autocomplete="off" autofocus>
+    <button type="submit">sign in</button>
+  </form>
+</section>
+{{end}}

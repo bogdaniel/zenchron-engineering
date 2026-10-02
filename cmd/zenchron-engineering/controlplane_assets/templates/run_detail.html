@@ -1,0 +1,147 @@
+{{define "title"}}{{.Detail.Summary.RunID}}{{end}}
+{{define "content"}}
+{{$d := .Detail}}
+{{$s := $d.Summary}}
+<section class="panel" data-run-id="{{$s.RunID}}">
+  <p class="breadcrumb"><a href="/runs">runs</a> / <span class="mono">{{$s.RunID}}</span></p>
+  <h1 class="mono">{{$s.RunID}}</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · {{$s.Repository}}{{if $s.Issue}} #{{$s.Issue}}{{end}}</p>
+
+  <div class="grid stats">
+    <div class="stat"><span class="label">phase</span><span class="value" data-state="{{$s.Phase}}">{{$s.Phase}}</span></div>
+    <div class="stat"><span class="label">disposition</span><span class="value" data-state="{{$s.Disposition}}">{{$s.Disposition}}</span></div>
+    <div class="stat"><span class="label">elapsed</span><span class="value">{{fmtDuration $s.Elapsed}}</span></div>
+  </div>
+  {{if $s.Reason}}<p class="banner" data-state="{{$s.Disposition}}">waiting on: {{$s.Reason}}</p>{{end}}
+  {{if $s.Error}}<p class="banner error">replay error: {{$s.Error}}</p>{{end}}
+
+  <table class="kv">
+    <tr><th>agent</th><td>{{if $s.Agent}}{{$s.Agent}}{{else}}<span class="muted">unknown</span>{{end}} {{if $s.ProviderKind}}<span class="muted">({{$s.ProviderKind}}{{if $s.Model}} · {{$s.Model}}{{end}})</span>{{end}}</td></tr>
+    <tr><th>candidate</th><td>
+      {{if $s.Branch}}<span class="mono">{{$s.Branch}}</span>{{else}}<span class="muted">unknown branch</span>{{end}}
+      {{if $s.CandidateRevision}}<div class="mono muted">rev {{$s.CandidateRevision}}</div>{{end}}
+      {{if $s.CandidateTree}}<div class="mono muted">tree {{$s.CandidateTree}}</div>{{end}}
+      <div class="muted">{{if $d.CandidateComplete}}candidate complete{{else}}candidate incomplete (checkpointed){{end}}{{if $d.Checkpoints}}, {{$d.Checkpoints}} checkpoint(s){{end}}</div>
+    </td></tr>
+    <tr><th>workspace</th><td>{{if $s.Workspace}}<span class="mono">{{$s.Workspace}}</span>{{else}}<span class="muted">unknown</span>{{end}}</td></tr>
+    <tr><th>pull request</th><td>
+      {{if $s.PullRequest}}
+        <a href="#" class="mono">#{{$s.PullRequest}}</a> <span data-state="{{$s.PRState}}">{{$s.PRState}}</span>
+        {{if $s.CI}} · CI <span data-state="{{$s.CI}}">{{$s.CI}}</span>{{end}}
+        {{if $s.Review}} · review <span data-state="{{$s.Review}}">{{$s.Review}}</span>{{end}}
+      {{else}}<span class="muted">none linked</span>{{end}}
+    </td></tr>
+    <tr><th>feedback</th><td>{{$s.FeedbackAdmitted}} admitted, {{$s.FeedbackPending}} pending</td></tr>
+    <tr><th>attempts</th><td>
+      {{if $s.Attempts}}{{range $kind, $n := $s.Attempts}}<span class="pill">{{$kind}}: {{$n}}</span> {{end}}{{else}}<span class="muted">none recorded</span>{{end}}
+    </td></tr>
+    {{with $d.Budgets}}
+    <tr><th>budgets</th><td>
+      wall limit {{fmtDuration .WallLimit}}
+      {{if .LifecycleDeadline}} · lifecycle deadline {{fmtDuration .LifecycleDeadline}}{{end}}
+      · max execution attempts {{.MaxExecutionAttempts}}
+      {{if .MaxExecutionContinuations}} · max continuations {{.MaxExecutionContinuations}}{{end}}
+    </td></tr>
+    {{end}}
+  </table>
+</section>
+
+<section class="panel" id="operation-panel" data-run-id="{{$s.RunID}}">
+  <h2>current operation</h2>
+  {{with $d.Operation}}
+  <div class="grid stats">
+    <div class="stat"><span class="label">kind</span><span class="value">{{.Kind}} #{{.Attempt}}/{{.MaxAttempts}}</span></div>
+    <div class="stat"><span class="label">state</span><span class="value" data-field="state" data-state="{{.State}}">{{.State}}</span></div>
+    <div class="stat"><span class="label">source</span><span class="value"><span class="badge {{if eq .ProgressSource "row"}}live{{else}}journal{{end}}" data-field="progress-source">{{.ProgressSource}}</span></span></div>
+  </div>
+  <table class="kv">
+    <tr><th>started</th><td>{{fmtTimePtr .StartedAt}}</td></tr>
+    <tr><th>last progress</th><td><span data-field="last-progress-at">{{fmtTimePtr .LastProgressAt}}</span> <span class="muted">(silent for <span data-field="silent-for">{{fmtDuration .SilentFor}}</span>)</span></td></tr>
+    {{if .HeartbeatAt}}<tr><th>heartbeat</th><td>{{fmtTimePtr .HeartbeatAt}}</td></tr>{{end}}
+    {{if .Deadline}}<tr><th>deadline</th><td>{{fmtTimePtr .Deadline}}{{if .DeadlineBound}} <span class="muted">({{.DeadlineBound}})</span>{{end}}</td></tr>{{end}}
+  </table>
+  {{else}}
+  <p class="muted">no operation is currently bounded for this run.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <h2>held material, assurance &amp; authority</h2>
+  <table class="kv">
+    <tr><th>held material</th><td>
+      {{with $d.HeldMaterial}}
+        <span class="badge held" data-state="held">{{.Kind}}</span>
+        {{if .Revision}}<div class="mono muted">rev {{.Revision}}</div>{{end}}
+        <div class="muted">blocked by {{.BlockedBy}}{{if .NextStep}}, next step {{.NextStep}}{{end}}</div>
+        {{if .Successor}}<div class="muted">successor {{.Successor}}{{if .SuccessorUnavailable}}, unavailable: {{.SuccessorUnavailable}}{{end}}</div>{{end}}
+      {{else}}<span class="muted">none</span>{{end}}
+    </td></tr>
+    <tr><th>assurance</th><td>
+      {{with $d.Assurance}}<span data-state="{{if .Passed}}passed{{else}}failed{{end}}">{{if .Passed}}passed{{else}}failed{{end}}</span>{{if .FailureClass}} <span class="muted">({{.FailureClass}})</span>{{end}}{{if .Stale}} <span class="muted">stale</span>{{end}}{{else}}<span class="muted">not observed</span>{{end}}
+    </td></tr>
+    <tr><th>semantic assurance</th><td>
+      {{with $d.SemanticAssurance}}<span data-state="{{if .Passed}}passed{{else}}failed{{end}}">{{if .Passed}}passed{{else}}failed{{end}}</span>{{if .FailureClass}} <span class="muted">({{.FailureClass}})</span>{{end}}{{else}}<span class="muted">not observed</span>{{end}}
+    </td></tr>
+    <tr><th>publication authority</th><td>
+      {{with $d.PublicationAuthority}}<span data-state="{{.Status}}">{{.Status}}</span>{{else}}<span class="muted">no decision recorded</span>{{end}}
+    </td></tr>
+    {{if $d.AuthorityDecisions}}
+    <tr><th>authority decisions</th><td>
+      {{range $key, $decision := $d.AuthorityDecisions}}<div><span class="mono muted">{{$key}}</span> <span data-state="{{$decision.Status}}">{{$decision.Status}}</span></div>{{end}}
+    </td></tr>
+    {{end}}
+    {{with $d.ExecutionDiagnostic}}
+    <tr><th>execution diagnostic</th><td>
+      stage {{.Stage}}{{if .FailureClass}}, class {{.FailureClass}}{{end}}{{if .Code}}, code {{.Code}}{{end}}
+      {{if .Message}}<div class="muted">{{.Message}}</div>{{end}}
+      {{if .Successor}}<div class="muted">successor {{.Successor}}{{if .SuccessorUnavailable}}, unavailable: {{.SuccessorUnavailable}}{{end}}</div>{{end}}
+    </td></tr>
+    {{end}}
+  </table>
+</section>
+
+<section class="panel">
+  <h2>causal event timeline</h2>
+  <p class="meta"><span data-field="event-count">{{len .Events}}</span> event(s), journal order</p>
+  <ol class="timeline" id="timeline" data-run-id="{{$s.RunID}}">
+    {{range .Events}}
+    <li data-sequence="{{.Sequence}}">
+      <details>
+        <summary>
+          <span class="mono muted">#{{.Sequence}}</span>
+          <span class="event-type">{{.Type}}</span>
+          <span class="muted">{{fmtTime .OccurredAt}}</span>
+          <span class="muted">by {{.Actor}}</span>
+          {{if .StateBefore}}<span class="mono muted">{{.StateBefore}} → {{.StateAfter}}</span>{{end}}
+        </summary>
+        <div class="event-body">
+          {{with .Subject}}
+          <table class="kv">
+            {{if .Commit}}<tr><th>commit</th><td class="mono">{{.Commit}}</td></tr>{{end}}
+            {{if .Tree}}<tr><th>tree</th><td class="mono">{{.Tree}}</td></tr>{{end}}
+            {{if .Action}}<tr><th>action</th><td>{{.Action}}</td></tr>{{end}}
+            {{with .Candidate}}<tr><th>candidate</th><td class="mono">{{.Branch}} @ {{.Revision}}</td></tr>{{end}}
+            {{with .Contract}}<tr><th>contract</th><td class="mono">{{.ID}} @ {{.Revision}}</td></tr>{{end}}
+          </table>
+          {{end}}
+          {{if .Artifacts}}
+          <table class="kv">
+            {{range .Artifacts}}
+            <tr><th>artifact</th><td class="mono">{{.Path}} <span class="muted">sha256:{{.SHA256}}{{if .LocalOnly}} local-only{{end}}{{if .Sanitized}} sanitized{{end}}</span></td></tr>
+            {{end}}
+          </table>
+          {{end}}
+          {{if .PayloadSummary}}
+          <p class="muted">payload withheld: {{.PayloadSummary.Bytes}} bytes, sha256:{{.PayloadSummary.SHA256}}</p>
+          {{else if .Payload}}
+          <pre class="payload">{{jsonText .Payload}}</pre>
+          {{end}}
+        </div>
+      </details>
+    </li>
+    {{else}}
+    <li class="empty">no events recorded</li>
+    {{end}}
+  </ol>
+</section>
+{{end}}

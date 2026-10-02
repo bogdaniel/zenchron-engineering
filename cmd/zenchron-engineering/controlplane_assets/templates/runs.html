@@ -1,0 +1,86 @@
+{{define "title"}}runs{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>runs</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · {{.Fleet.Executing}} / {{.Fleet.Capacity}} executing · {{.Fleet.Active}} active</p>
+
+  <nav class="filters" aria-label="status filter">
+    <a href="{{runsLink "" .Filter.Source}}" {{if eq .Filter.Status ""}}class="active" aria-current="true"{{end}}>all</a>
+    <a href="{{runsLink "active" .Filter.Source}}" {{if eq .Filter.Status "active"}}class="active" aria-current="true"{{end}} data-state="active">active</a>
+    <a href="{{runsLink "waiting" .Filter.Source}}" {{if eq .Filter.Status "waiting"}}class="active" aria-current="true"{{end}} data-state="waiting">waiting</a>
+    <a href="{{runsLink "failed" .Filter.Source}}" {{if eq .Filter.Status "failed"}}class="active" aria-current="true"{{end}} data-state="failed">failed</a>
+    <a href="{{runsLink "completed" .Filter.Source}}" {{if eq .Filter.Status "completed"}}class="active" aria-current="true"{{end}} data-state="completed">completed</a>
+    <a href="{{runsLink "cancelled" .Filter.Source}}" {{if eq .Filter.Status "cancelled"}}class="active" aria-current="true"{{end}} data-state="cancelled">cancelled</a>
+    <a href="{{runsLink "held" .Filter.Source}}" {{if eq .Filter.Status "held"}}class="active" aria-current="true"{{end}} data-state="held">held material</a>
+  </nav>
+
+  <form class="source-filter" method="get" action="/runs">
+    <input type="hidden" name="status" value="{{.Filter.Status}}">
+    <label for="source">source issue</label>
+    <input id="source" name="source" type="text" placeholder="owner/repo#123 or 123" value="{{.Filter.Source}}">
+    <button type="submit">filter</button>
+    {{if .Filter.Source}}<a href="{{runsLink .Filter.Status ""}}">clear</a>{{end}}
+  </form>
+
+  <table class="runs">
+    <thead>
+      <tr>
+        <th>run</th>
+        <th>lifecycle</th>
+        <th>operation</th>
+        <th>agent</th>
+        <th>candidate</th>
+        <th>elapsed</th>
+        <th>attempts</th>
+        <th>held</th>
+        <th>authority</th>
+        <th>PR</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Runs}}
+      {{$s := .Summary}}
+      <tr>
+        <td>
+          <a class="mono" href="/runs/{{$s.RunID}}">{{$s.RunID}}</a>
+          <div class="muted">{{$s.Repository}}{{if $s.Issue}} #{{$s.Issue}}{{end}}</div>
+        </td>
+        <td>
+          <span data-state="{{$s.Phase}}">{{$s.Phase}}</span> / <span data-state="{{$s.Disposition}}">{{$s.Disposition}}</span>
+          {{if $s.Reason}}<div class="muted">{{$s.Reason}}</div>{{end}}
+        </td>
+        <td>
+          {{if $s.Operation}}{{$s.Operation}} #{{$s.Attempt}}{{if $s.Executing}} <span class="badge live">live</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+          {{with .Operation}}<div class="muted">{{.ProgressSource}} · silent {{fmtDuration .SilentFor}}</div>{{end}}
+        </td>
+        <td>
+          {{if $s.Agent}}{{$s.Agent}}{{else}}<span class="muted">—</span>{{end}}
+          {{if $s.ProviderKind}}<div class="muted">{{$s.ProviderKind}}{{if $s.Model}} · {{$s.Model}}{{end}}</div>{{end}}
+        </td>
+        <td>
+          {{if $s.Branch}}<span class="mono">{{$s.Branch}}</span>{{else}}<span class="muted">—</span>{{end}}
+          {{if $s.CandidateRevision}}<div class="muted mono">{{$s.CandidateRevision}}</div>{{end}}
+        </td>
+        <td>{{fmtDuration $s.Elapsed}}</td>
+        <td>
+          {{if $s.Attempts}}{{range $kind, $n := $s.Attempts}}<div>{{$kind}}: {{$n}}</div>{{end}}{{else}}<span class="muted">—</span>{{end}}
+          {{if .Checkpoints}}<div class="muted">{{.Checkpoints}} checkpoint(s){{if not .CandidateComplete}}, incomplete{{end}}</div>{{end}}
+        </td>
+        <td>
+          {{with .HeldMaterial}}<span class="badge held" data-state="held">{{.Kind}}</span>{{else}}<span class="muted">—</span>{{end}}
+        </td>
+        <td>
+          {{with .PublicationAuthority}}<span data-state="{{.Status}}">{{.Status}}</span>{{else}}<span class="muted">—</span>{{end}}
+          {{with .Assurance}}<div class="muted">assurance {{if .Passed}}passed{{else}}failed{{end}}</div>{{end}}
+        </td>
+        <td>
+          {{if $s.PullRequest}}<span>#{{$s.PullRequest}}</span>{{if $s.PRState}} <span class="muted">{{$s.PRState}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="10" class="empty">no runs match this filter</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
