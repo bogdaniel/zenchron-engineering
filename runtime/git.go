@@ -313,6 +313,159 @@ type CommitResult struct {
 	Excluded []string
 }
 
+// RefusedMaterialSnapshot is the durable identity of candidate bytes a provider
+// produced on an invocation the runtime REFUSED. It is deliberately not a
+// Candidate and never moves the candidate head: the bundle is local-only
+// preservation, while SubjectCommit/SubjectTree are the exact governed subject
+// the retry is restored to.
+//
+// The bundle contains a Git stash commit and its parents. It therefore preserves
+// additions, modifications, deletions and untracked files without making any of
+// them execution-complete candidate material. ID is derived solely from the
+// runtime-owned physical attempt identity, so no provider-controlled path can
+// choose where it is written.
+type RefusedMaterialSnapshot struct {
+	ID            string `json:"id"`
+	Commit        string `json:"commit"`
+	Tree          string `json:"tree"`
+	SubjectCommit string `json:"subject_commit"`
+	SubjectTree   string `json:"subject_tree"`
+	BundleSHA256  string `json:"bundle_sha256"`
+	PathCount     int    `json:"path_count"`
+	ContentDigest string `json:"content_digest,omitempty"`
+}
+
+func refusedMaterialBundlePath(stateDir, id string) string {
+	return filepath.Join(stateDir, "refused-material", id+".bundle")
+}
+
+// QuarantineRefusedMaterial preserves a refused attempt's dirty work OUTSIDE the
+// candidate workspace, then returns that workspace to the exact subject the
+// attempt was invoked against.
+//
+// It uses Git's stash object only as a local snapshot format. refs/stash is
+// temporary: after the bundle is atomically installed it is dropped, so the
+// candidate repository's durable refs and HEAD are exactly what they were
+// before the quarantine. The final integrity digest must therefore equal the
+// caller's trusted baseline. If any step cannot establish that, the function
+// fails closed and no retry may be admitted.
+func (w *CandidateWorkspace) QuarantineRefusedMaterial(stateDir string, attempt ExecutionAttemptRef, subject CommitResult) (RefusedMaterialSnapshot, error) {
+	if strings.TrimSpace(stateDir) == "" {
+		return RefusedMaterialSnapshot{}, fmt.Errorf("state directory is required")
+	}
+	if err := attempt.Validate(); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if subject.Commit == "" || subject.Tree == "" {
+		return RefusedMaterialSnapshot{}, fmt.Errorf("refused material requires an exact subject")
+	}
+	if err := w.AssertIntegrity(); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	observed, err := w.head()
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if observed.Commit != subject.Commit || observed.Tree != subject.Tree {
+		return RefusedMaterialSnapshot{}, &WorkspaceIntegrityError{Detail: "refused material workspace no longer matches its invocation subject"}
+	}
+	paths, err := candidateChangedPaths(w.Dir)
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if len(paths) == 0 {
+		return RefusedMaterialSnapshot{}, fmt.Errorf("refused material quarantine requested for a clean workspace")
+	}
+	contentDigest := workspaceContentDigest(w.Dir, paths)
+	before := w.TrustedMetadata
+
+	identity := sha256.Sum256([]byte(attempt.RunID + "\x00" + attempt.OperationID + "\x00" + fmt.Sprintf("%d", attempt.Attempt)))
+	id := hex.EncodeToString(identity[:])
+	dir := filepath.Dir(refusedMaterialBundlePath(stateDir, id))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	finalPath := refusedMaterialBundlePath(stateDir, id)
+	if _, err := os.Stat(finalPath); err == nil {
+		return RefusedMaterialSnapshot{}, fmt.Errorf("refused material snapshot %s already exists", id)
+	} else if !os.IsNotExist(err) {
+		return RefusedMaterialSnapshot{}, err
+	}
+
+	// A runtime-owned candidate clone must never carry an unrelated stash. If
+	// it does, overwriting refs/stash would destroy material whose ownership we
+	// cannot establish.
+	if _, err := gitOutput(w.Dir, "rev-parse", "--verify", "refs/stash"); err == nil {
+		return RefusedMaterialSnapshot{}, fmt.Errorf("candidate workspace already has refs/stash; refusing to overwrite it")
+	}
+
+	if _, err := runGit(w.Dir, "stash", "push", "--include-untracked", "--message", "zenchron refused material "+id); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	stashCommit, err := gitOutput(w.Dir, "rev-parse", "refs/stash")
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	stashTree, err := gitOutput(w.Dir, "rev-parse", "refs/stash^{tree}")
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+
+	tmp := finalPath + ".tmp"
+	_ = os.Remove(tmp)
+	if _, err := runGit(w.Dir, "bundle", "create", tmp, "refs/stash"); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	defer os.Remove(tmp)
+	if err := os.Chmod(tmp, 0600); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	bundle, err := os.ReadFile(tmp)
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	bundleSum := sha256.Sum256(bundle)
+	if err := os.Rename(tmp, finalPath); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if _, err := runGit(w.Dir, "stash", "drop", "--quiet"); err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+
+	after, err := w.head()
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if after.Commit != subject.Commit || after.Tree != subject.Tree {
+		return RefusedMaterialSnapshot{}, &WorkspaceIntegrityError{Detail: "quarantine did not restore the exact invocation subject"}
+	}
+	remaining, err := candidateChangedPaths(w.Dir)
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if len(remaining) != 0 {
+		return RefusedMaterialSnapshot{}, &WorkspaceIntegrityError{Detail: "quarantine left candidate material in the retry workspace"}
+	}
+	metadata, err := gitMetadataDigest(w.Dir)
+	if err != nil {
+		return RefusedMaterialSnapshot{}, err
+	}
+	if before != "" && metadata != before {
+		return RefusedMaterialSnapshot{}, &WorkspaceIntegrityError{Detail: "quarantine changed trusted Git metadata"}
+	}
+	w.TrustedMetadata = metadata
+
+	return RefusedMaterialSnapshot{
+		ID: id, Commit: strings.TrimSpace(stashCommit), Tree: strings.TrimSpace(stashTree),
+		SubjectCommit: subject.Commit, SubjectTree: subject.Tree,
+		BundleSHA256: hex.EncodeToString(bundleSum[:]),
+		PathCount: len(paths), ContentDigest: contentDigest,
+	}, nil
+}
+
 func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResult, error) {
 	if err := w.AssertIntegrity(); err != nil {
 		return CommitResult{}, err
