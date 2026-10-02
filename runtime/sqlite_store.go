@@ -442,6 +442,51 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	return &SQLiteOperationStore{db: db}, nil
 }
 
+// OpenSQLiteOperationStoreReadOnly opens an EXISTING <stateDir>/runtime.db for
+// reads only: it creates nothing, migrates nothing, and the SQLite connection
+// itself is opened "mode=ro", so a handler bug in a caller cannot write
+// through it even if it tried.
+//
+// A console that merely projects runtime state must not become the thing
+// that provisions it: calling OpenSQLiteOperationStore here would create an
+// empty database the moment someone pointed a browser at a state directory
+// `serve` had never touched, and would attempt to upgrade an older on-disk
+// schema out from under whatever wrote it. Both are refused instead: a
+// missing database is reported as absent, and a schema this binary cannot
+// read is reported as UnsupportedSchemaError, exactly as a write-capable open
+// would refuse a newer one.
+func OpenSQLiteOperationStoreReadOnly(stateDir string) (*SQLiteOperationStore, error) {
+	if stateDir == "" {
+		return nil, fmt.Errorf("state directory is required")
+	}
+	path := filepath.Join(stateDir, "runtime.db")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no runtime database at %s: nothing has run `serve` against this state directory yet", path)
+		}
+		return nil, err
+	}
+	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(5000)&_pragma=query_only(true)&mode=ro"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version > sqliteSchemaVersion {
+		db.Close()
+		return nil, UnsupportedSchemaError{Found: version, Supported: sqliteSchemaVersion}
+	}
+	return &SQLiteOperationStore{db: db}, nil
+}
+
 // sqliteFileURI is the one way a filesystem path becomes a SQLite "file:" URI.
 // SQLite percent-decodes the URI, so a raw "file:"+path opens a DIFFERENT file
 // whenever the path holds a '%', '?' or '#' (#331); url.URL escapes them.

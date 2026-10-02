@@ -311,7 +311,19 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 }
 
 func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {
-	summary := RunSummary{
+	summary, _, _ := summarizeRunState(store, stateDir, run, now)
+	return summary
+}
+
+// summarizeRunState is summarizeRun's body, additionally returning the
+// replayed runState a deeper per-run view needs - held material, assurance,
+// authority, the live operation overlay - so that a console answering those
+// questions is a second READ of the journal, never a second, independently
+// maintained implementation of the first one. ok is false exactly when
+// summary.Error is set: the replay did not reach a state deep enough to
+// describe, and state is nil.
+func summarizeRunState(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) (summary RunSummary, state *runState, ok bool) {
+	summary = RunSummary{
 		RunID: run.ID, Repository: run.Repository, Agent: run.AgentID,
 		Phase: run.Phase, Disposition: run.Disposition, Reason: run.Reason,
 		Branch: run.Candidate.Branch, Elapsed: now.Sub(run.CreatedAt),
@@ -325,25 +337,25 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	events, err := store.Events(run.ID)
 	if err != nil {
 		summary.Error = boundedDetail(err.Error())
-		return summary
+		return summary, nil, false
 	}
 	snapshot, err := Reduce(run, events)
 	if err != nil {
 		summary.Error = boundedDetail(err.Error())
-		return summary
+		return summary, nil, false
 	}
 	projection, err := Project(events)
 	if err != nil {
 		summary.Error = boundedDetail(err.Error())
-		return summary
+		return summary, nil, false
 	}
 	// The journal is the authority for the agent binding; the row is only a
 	// projection of it, so a row that somehow disagrees loses.
-	state := &runState{run: run, snapshot: snapshot, events: events, projection: projection}
+	state = &runState{run: run, snapshot: snapshot, events: events, projection: projection}
 	agent, err := state.recordedAgent()
 	if err != nil {
 		summary.Error = boundedDetail(err.Error())
-		return summary
+		return summary, nil, false
 	}
 	if agent.AgentID != "" {
 		summary.Agent, summary.ProviderKind = agent.AgentID, agent.Kind
@@ -372,7 +384,7 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 		}
 	}
 	summary.FeedbackPending = len(feedback.Pending(projection.Head()))
-	return summary
+	return summary, state, true
 }
 
 func dirExists(path string) bool {

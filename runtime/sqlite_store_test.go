@@ -333,6 +333,58 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	}
 }
 
+// A console reading a state directory `serve` has never touched must not
+// provision one: the read-only opener refuses a missing database rather than
+// creating it, which is exactly the behavior that makes it safe to point at
+// a state directory nothing has run against yet.
+func TestSQLiteReadOnlyRefusesAMissingDatabase(t *testing.T) {
+	dir := t.TempDir()
+	_, err := OpenSQLiteOperationStoreReadOnly(dir)
+	if err == nil {
+		t.Fatal("expected an error for a state directory with no runtime.db")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "runtime.db")); !os.IsNotExist(statErr) {
+		t.Fatal("the read-only opener created a database")
+	}
+}
+
+// The read-only opener reads exactly what a write-capable handle already
+// wrote - same rows, same journal - and its own connection cannot write: an
+// attempted write through it fails at the driver rather than silently
+// succeeding against a store a console is supposed to be unable to mutate.
+func TestSQLiteReadOnlyOpenerReadsWhatWasWritten(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := EngineeringRun{ID: "run-1", Repository: "acme/repo", SchemaVersion: SchemaVersion, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := writer.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenSQLiteOperationStoreReadOnly(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	got, found, err := reader.Run("run-1")
+	if err != nil || !found {
+		t.Fatalf("Run(run-1) = found=%v err=%v", found, err)
+	}
+	if got.Repository != "acme/repo" {
+		t.Fatalf("repository = %q, want acme/repo", got.Repository)
+	}
+
+	if err := reader.PutRun(EngineeringRun{ID: "run-2", Repository: "acme/repo", SchemaVersion: SchemaVersion}); err == nil {
+		t.Fatal("expected a write through the read-only connection to fail")
+	}
+}
+
 func TestProcessOwnerLivenessIsConservative(t *testing.T) {
 	liveness := NewProcessOwnerLiveness()
 	if !liveness.Alive(NewRuntimeOwner()) {
