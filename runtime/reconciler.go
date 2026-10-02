@@ -476,6 +476,11 @@ var externalWaitReasons = map[string]bool{
 	// would fix the detection and keep the accounting lie.
 	"execution_provider_unavailable":   true,
 	"assurance_dependency_unavailable": true,
+	// The forge could not be reached or refused with its own retryable
+	// condition (#380). This is the same kind of external unavailability as
+	// execution_provider_unavailable, just for GitHub rather than the coding
+	// CLI, so it pauses the clock for the same reason.
+	"github_transient": true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
