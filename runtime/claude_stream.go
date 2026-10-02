@@ -104,9 +104,15 @@ type claudeStream struct {
 	open map[string]struct{}
 	turn string
 
-	// backgroundStarts counts main-thread Bash calls dispatched with the
-	// typed run_in_background input true. Once positive it is never cleared
-	// back down for the life of the stream (#384, #385).
+	// backgroundStarts counts main-thread Bash calls that became background
+	// work through EITHER of the two typed transitions this parser
+	// recognizes: the model's own request (the Bash tool's typed
+	// run_in_background input true, #384, #385), or the CLI's own automatic
+	// detachment after ITS foreground tool timeout elapsed, stated on that
+	// call's own tool_result via the typed tool_use_result.backgroundTaskId
+	// field (#388; see claudeAutoDetachesBackground). Once positive it is
+	// never cleared back down for the life of the stream, for either
+	// transition and regardless of which one tripped it.
 	//
 	// INVESTIGATION (#385, Claude Code 2.1.283 structured stream-json): the
 	// Bash tool's typed input carries run_in_background, but never a shell
@@ -147,6 +153,20 @@ type claudeStream struct {
 	// run_in_background, this parser can never re-establish completion from
 	// typed evidence: it stays unresolved for the rest of the stream,
 	// regardless of any later BashOutput or KillShell call.
+	//
+	// #388 (follow-up to #384/#385, live evidence run-4f5323b99bfedb6081e1dfc2568cd2dd,
+	// PR #387): a foreground Bash call dispatched with NO run_in_background
+	// input at all can still end up backgrounded, because Claude Code's own
+	// Bash tool applies a foreground timeout (120000ms by default) and moves
+	// a call that exceeds it to the background automatically, mid-invocation,
+	// with no model request involved. The typed stream states this exactly
+	// where it states everything else about a tool call's outcome: on that
+	// call's own tool_result, as a sibling tool_use_result object carrying
+	// backgroundTaskId. Reading that field is the same kind of typed-only
+	// read claudeStartsBackgroundShell performs on a dispatch; see
+	// claudeAutoDetachesBackground. It is read on the RESULT rather than the
+	// call because that is the only place the CLI states the transition -
+	// there is no typed field on the dispatch itself that could predict it.
 	backgroundStarts int
 
 	sawResult   bool
@@ -278,6 +298,12 @@ type claudeEvent struct {
 	// which it allocates before it discovers the mismatch).
 	IsError           json.RawMessage   `json:"is_error"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
+	// ToolUseResult is Claude Code's own typed metadata about a just-delivered
+	// tool_result, carried as a sibling of "message" on the SAME "user" event
+	// rather than inside the content block the model reads (#388). It is read
+	// ONLY for claudeAutoDetachesBackground's one typed field; see the
+	// backgroundStarts comment.
+	ToolUseResult json.RawMessage `json:"tool_use_result"`
 	// Answer is the JSON field literally named "result" on a result event: this
 	// invocation's SEMANTIC final answer, exactly as Claude wrote it before the
 	// stream-json transport wrapped it in this event's own JSON encoding. It
@@ -371,6 +397,19 @@ func (s *claudeStream) handle(line []byte) {
 			if mainThread {
 				delete(s.open, block.ToolUseID)
 			}
+		}
+		// THE SECOND TYPED TRANSITION (#388): a main-thread tool_result whose
+		// OWN typed tool_use_result names a backgroundTaskId means Claude
+		// Code's Bash tool detached this call automatically, with no model
+		// request and no typed signal on the dispatch that could have
+		// predicted it - see the backgroundStarts comment. It is sticky for
+		// the same reason an explicit run_in_background start is: nothing
+		// later in the typed stream can prove the detached shell ever
+		// reached a terminal state. A nested/subagent result is deliberately
+		// excluded, matching claudeStartsBackgroundShell's own
+		// main-thread-only reading.
+		if mainThread && results > 0 && claudeAutoDetachesBackground(event.ToolUseResult) {
+			s.backgroundStarts++
 		}
 		if results > 0 {
 			s.progress()
@@ -540,6 +579,23 @@ func claudeStartsBackgroundShell(input json.RawMessage) bool {
 	return json.Unmarshal(input, &decoded) == nil && decoded.RunInBackground
 }
 
+// claudeAutoDetachesBackground reads ONLY the typed backgroundTaskId off a
+// tool_result's own tool_use_result metadata (#388). Its mere presence is
+// Claude Code's own typed statement that this call was moved to the
+// background by the CLI itself - timedOutAfterMs and interrupted are not
+// read, because this parser does not need to interpret WHY the CLI
+// detached the call, only THAT it did. A missing, empty or type-drifted
+// value is "no" - the same fail-closed reading claudeStartsBackgroundShell
+// applies to run_in_background, for the same reason: misreading an
+// ordinary tool_result as an abandoned background shell would falsely
+// accuse a clean invocation of leaving work behind.
+func claudeAutoDetachesBackground(raw json.RawMessage) bool {
+	var decoded struct {
+		BackgroundTaskID string `json:"backgroundTaskId"`
+	}
+	return json.Unmarshal(raw, &decoded) == nil && decoded.BackgroundTaskID != ""
+}
+
 // deniedToolNames reads ONLY the typed tool_name of each permission denial:
 // never its input, its arguments or any denial text. The result is a sorted,
 // de-duplicated set of at most domain.MaxPermissionDeniedTools identifiers, and
@@ -595,6 +651,77 @@ func claudeBackgroundWaitEnv(window time.Duration) ([]string, error) {
 		return nil, fmt.Errorf("provider inactivity window %s is too small to derive a positive Claude background-wait ceiling below it", window)
 	}
 	return []string{fmt.Sprintf("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=%d", ceiling)}, nil
+}
+
+// claudeBashForegroundTimeoutEnv sets BASH_DEFAULT_TIMEOUT_MS and
+// BASH_MAX_TIMEOUT_MS so Claude Code's OWN foreground Bash tool timeout -
+// 120000ms by default, confirmed against the installed 2.1.283 CLI's
+// documented environment controls - can never fire before the attached-work
+// interval Zenchron permits for this attempt elapses (#388). A timeout that
+// fires first is exactly the live #387 defect: the tool detaches the call
+// automatically, Claude reports it as "still running in the background", and
+// the invocation ends claiming a valid result for work it never observed
+// finish.
+//
+// Both variables are set, not just the default: BASH_DEFAULT_TIMEOUT_MS
+// governs a Bash call that specifies no timeout of its own, but
+// BASH_MAX_TIMEOUT_MS is the CEILING a model-specified timeout is clamped to,
+// and raising only the default would leave an explicit request still capped
+// below the window.
+//
+// window is the per-attempt interval Zenchron allows ATTACHED foreground work
+// to run under; wall is this invocation's own wall bound (whichever of
+// Deadline or Budgets.WallLimit actually governs it). The derived timeout is
+// clamped to wall - never longer - so Claude's internal tool timeout can
+// never outlive Zenchron's own attempt authority and become a second,
+// unbounded execution authority: wall already ends the whole process, so
+// capping the tool timeout AT wall is the largest value that still cannot
+// outlive it, which is also the value least likely to fire ahead of
+// attached work that is legitimately still running. Deliberately absent is
+// any repository-specific duration - hardcoding this repository's own test
+// runtime would only relocate #388 to the next repository with a longer
+// suite.
+//
+// A window already larger than the wall it is supposed to fit under is a
+// caller defect this function refuses outright, rather than silently
+// shortening the floor below what the window promises or silently widening
+// the ceiling past the wall: neither is a value this function could derive
+// honestly.
+func claudeBashForegroundTimeoutEnv(window, wall time.Duration) ([]string, error) {
+	if window <= 0 {
+		return nil, nil
+	}
+	timeout := window
+	if wall > 0 {
+		if window > wall {
+			return nil, fmt.Errorf("provider inactivity window %s exceeds this invocation's wall bound %s, so no Claude Bash timeout can be derived that is both at least the window and within the wall", window, wall)
+		}
+		timeout = wall
+	}
+	ms := timeout.Milliseconds()
+	if ms < 1 {
+		return nil, fmt.Errorf("derived Claude Bash foreground timeout %s is too small to express in milliseconds", timeout)
+	}
+	return []string{
+		fmt.Sprintf("BASH_DEFAULT_TIMEOUT_MS=%d", ms),
+		fmt.Sprintf("BASH_MAX_TIMEOUT_MS=%d", ms),
+	}, nil
+}
+
+// claudeInvocationEnv composes every invocation-only control this adapter
+// derives for Claude: the background-wait ceiling (claudeBackgroundWaitEnv)
+// and the foreground Bash timeout floor (claudeBashForegroundTimeoutEnv,
+// #388). Both are derived from Zenchron's own bounds alone.
+func claudeInvocationEnv(window, wall time.Duration) ([]string, error) {
+	waitCeiling, err := claudeBackgroundWaitEnv(window)
+	if err != nil {
+		return nil, err
+	}
+	bashTimeout, err := claudeBashForegroundTimeoutEnv(window, wall)
+	if err != nil {
+		return nil, err
+	}
+	return append(waitCeiling, bashTimeout...), nil
 }
 
 // withInvocationEnv appends a spec's invocation-only variables to the

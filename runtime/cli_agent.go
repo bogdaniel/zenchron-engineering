@@ -245,11 +245,14 @@ type cliAgentSpec struct {
 	// failure class.
 	InactivityNonProgress []string
 	// InvocationEnv returns non-secret provider controls for the MAIN
-	// invocation only, from the CONFIGURED per-attempt inactivity window
-	// (ProviderBudget.InactivityWindow), never from a remainder.
+	// invocation only: inactivityWindow is the CONFIGURED per-attempt
+	// inactivity window (ProviderBudget.InactivityWindow), never a remainder,
+	// and wall is this invocation's own wall bound - the absolute Deadline
+	// expressed as a remaining duration where one was carried, else
+	// ProviderBudget.WallLimit, zero when neither bounds this invocation.
 	// Probes never receive them, and withInvocationEnv refuses any credential-
 	// shaped name or any name the allowlisted environment already sets.
-	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
+	InvocationEnv func(inactivityWindow, wall time.Duration) ([]string, error)
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
@@ -1060,7 +1063,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		if window <= 0 {
 			window = request.Budgets.InactivityLimit
 		}
-		extra, err := spec.InvocationEnv(window)
+		// THE SAME WALL THAT WILL ACTUALLY BOUND THIS PROCESS, below: the
+		// instant wins over the duration exactly as it does there, so a
+		// derived provider control (#388) can never disagree with what the
+		// context deadline this invocation runs under actually is.
+		var wall time.Duration
+		if request.Deadline != nil {
+			wall = time.Until(*request.Deadline)
+		} else {
+			wall = request.Budgets.WallLimit
+		}
+		extra, err := spec.InvocationEnv(window, wall)
 		if err == nil {
 			env, err = withInvocationEnv(env, extra)
 		}
@@ -1346,9 +1359,11 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
-	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385) when
-	// the typed stream shows this invocation itself started a background
-	// shell - run_in_background on a main-thread Bash call. Neither a
+	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385, #388)
+	// when the typed stream shows a main-thread Bash call became background
+	// work - whether the model asked for that with run_in_background, or the
+	// CLI's own Bash tool detached the call automatically after its
+	// foreground timeout elapsed with no model request at all. Neither a
 	// BashOutput poll nor a KillShell call clears this: the typed stream
 	// gives no way to tell a poll of a still-running shell from a poll of a
 	// finished one, and no way to bind a KillShell call back to the specific
