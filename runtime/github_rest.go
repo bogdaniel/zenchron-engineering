@@ -184,6 +184,17 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 	}
 	response, err := a.HTTP.Do(request)
 	if err != nil {
+		// A REQUEST THAT NEVER REACHED THE FORGE IS TRANSIENT BY NATURE - the
+		// same rule the GitHub App credential's own request already applies
+		// (see (*GitHubAppCredential).do) - unless this process's OWN context
+		// is what ended it. A controller shutdown or an operator stop must
+		// keep its own meaning and must never be read back as "the forge is
+		// unreachable, wait and retry" (#380): only a failure this process did
+		// not cause - DNS not resolving, a refused or reset connection, a dial
+		// that never completed - is recognized as the recoverable kind.
+		if ctx.Err() == nil {
+			return 0, nil, nil, &GitHubTransientError{Detail: "the GitHub API endpoint could not be reached"}
+		}
 		return 0, nil, nil, fmt.Errorf("github request failed: %w", err)
 	}
 	defer response.Body.Close()

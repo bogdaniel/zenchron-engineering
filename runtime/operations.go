@@ -60,6 +60,31 @@ func failed(err error) effect {
 	}{boundedDetail(err.Error())}}
 }
 
+// failedGitHub is failed() for a GitHub adapter call, and the one place every
+// operation handler that calls one routes its error through.
+//
+// A *GitHubTransientError is the adapter's own typed statement that nothing
+// here failed - the forge was unreached or refused for a reason expected to
+// clear by itself (github.go) - so it is recorded as FailureGitHubTransient,
+// which RouteFailure sends to a bounded external wait instead of the ordinary
+// attempt budget (#380). Before this, every caller here discarded that typed
+// fact at the handler boundary and fell back to an unclassified failure: the
+// scheduler's bare attempt<max_attempts rule then re-ran the SAME observation
+// against the SAME outage on the very next pass, with no backoff between
+// tries, so a run spent its whole attempt ceiling in under a second against a
+// condition no attempt of theirs could change.
+//
+// Every other GitHub failure - an auth refusal, a malformed response, an
+// ordinary non-2xx status - is unchanged: it stays unclassified and bounded
+// by the operation's own attempt budget exactly as before.
+func failedGitHub(err error) effect {
+	var transient *GitHubTransientError
+	if errors.As(err, &transient) {
+		return effect{state: OperationFailed, result: mutationResult{FailureClass: FailureGitHubTransient}}
+	}
+	return failed(err)
+}
+
 func boundedDetail(detail string) string { return boundedField(detail) }
 
 // boundedField truncates to the payload field bound WITHOUT splitting a rune.
@@ -124,11 +149,11 @@ func (r *EngineeringRuntime) observeSource(ctx context.Context, state *runState,
 	}
 	issue, err := r.deps.GitHub.Issue(ctx, r.repo, number)
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	baseObservation, err := r.deps.GitHub.RefSHA(ctx, r.repo, r.deps.Repository.DefaultBranch)
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	if !baseObservation.Exists {
 		return failed(fmt.Errorf("default branch %q not found in %s", r.deps.Repository.DefaultBranch, r.repo))
@@ -2349,8 +2374,10 @@ func (r *EngineeringRuntime) pushCandidate(ctx context.Context, state *runState,
 	if err != nil {
 		// The observation failed - auth, network, rate limit, a 5xx. That is
 		// UNKNOWN, never absence: falling through to a retry here could race a
-		// push this process simply could not see land.
-		return failed(err)
+		// push this process simply could not see land. A recognized transient
+		// forge condition is still classified (#380), so a lost connection
+		// waits instead of re-asking the same unreachable forge on every pass.
+		return failedGitHub(err)
 	}
 	remote := strings.TrimSpace(observation.SHA)
 	switch {
@@ -2407,7 +2434,7 @@ func (r *EngineeringRuntime) createPullRequest(ctx context.Context, state *runSt
 	branch, base := candidateBranch(state.run.ID), r.deps.Repository.DefaultBranch
 	existing, err := r.deps.GitHub.FindPullRequests(ctx, r.repo, branch, base)
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	if len(existing) > 1 {
 		return failed(fmt.Errorf("%d pull requests are bound to %s -> %s; refusing to guess", len(existing), branch, base))
@@ -2427,7 +2454,11 @@ func (r *EngineeringRuntime) createPullRequest(ctx context.Context, state *runSt
 		Title: r.publicationTitle(state), Body: body,
 	})
 	if err != nil {
-		return failed(err)
+		// A transient failure here is still safe to wait on: the crash
+		// reconciliation above is what this operation re-derives into on its
+		// next attempt, so a create that actually landed despite a lost
+		// response is found and recorded, never duplicated.
+		return failedGitHub(err)
 	}
 	return effect{state: Succeeded, events: []journalEntry{prObservation(created)}}
 }
@@ -2440,7 +2471,7 @@ func (r *EngineeringRuntime) updatePullRequest(ctx context.Context, state *runSt
 	}
 	updated, err := r.deps.GitHub.UpdatePullRequest(ctx, r.repo, state.projection.PullRequest.Number, GitHubPullRequestUpdate{Body: body})
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	return effect{state: Succeeded, events: []journalEntry{prObservation(updated)}}
 }
@@ -2559,7 +2590,7 @@ func (r *EngineeringRuntime) observeGitHub(ctx context.Context, state *runState,
 	number := state.projection.PullRequest.Number
 	pr, err := r.deps.GitHub.PullRequest(ctx, r.repo, number)
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	produced := effect{state: Succeeded}
 	entry := prObservation(pr)
@@ -2581,7 +2612,7 @@ func (r *EngineeringRuntime) observeGitHub(ctx context.Context, state *runState,
 	}
 	checks, err := r.deps.GitHub.Checks(ctx, r.repo, head)
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	ci := GitHubCIObservedPayload{
 		HeadRevision: head,
@@ -2602,7 +2633,7 @@ func (r *EngineeringRuntime) observeGitHub(ctx context.Context, state *runState,
 	}
 	reviews, err := r.deps.GitHub.Reviews(ctx, r.repo, number, head)
 	if err != nil {
-		return failed(err)
+		return failedGitHub(err)
 	}
 	review := GitHubReviewObservedPayload{
 		HeadRevision: head,

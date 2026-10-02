@@ -86,11 +86,21 @@ var sharedAgentSignals = []diagnosticSignal{
 // indistinguishable from a slow provider, and the second wraps every transport
 // outcome including ones that are not connectivity at all.
 //
+// The token is matched BARE, not prefixed with "getaddrinfo" (#380). A live
+// outage recorded Claude Code's own higher-level wording for the identical
+// resolver failure - "API Error: Can't reach the API server - check your
+// internet or DNS (ENOTFOUND)" - which carries the token without that prefix,
+// so the narrower match left a real outage unrecognized and fell to
+// FailureUnknown, which stops the run instead of waiting for connectivity. The
+// bare token is still exactly the specific, unambiguous signal the comment
+// above already relies on; only the literal substring matched against it
+// changed.
+//
 // Silence is NOT here, and that is the boundary #238 draws: a host with no
 // network that says nothing is FailureProviderNoProgress, and only a provider
 // that NAMES its transport failure reaches FailureProviderUnavailable.
 var nodeTransportSignals = []diagnosticSignal{
-	{"getaddrinfo enotfound", FailureProviderUnavailable},
+	{"enotfound", FailureProviderUnavailable},
 	{"getaddrinfo eai_again", FailureProviderUnavailable},
 	{"econnrefused", FailureProviderUnavailable},
 	{"econnreset", FailureProviderUnavailable},

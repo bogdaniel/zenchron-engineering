@@ -1992,6 +1992,11 @@ var waitReasons = map[FailureClass]string{
 	// operator repairs the installation; nothing about the work is wrong.
 	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
 	FailureControllerShutdown:        "controller_shutdown",
+	// The forge, not the execution provider, is what could not be reached or
+	// answered with its own retryable refusal (#380). Reported separately for
+	// the same reason FailureProviderUnavailable is: the operator action is
+	// about GitHub's reachability, not the coding CLI's.
+	FailureGitHubTransient: "github_transient",
 }
 
 func waitReason(class FailureClass) string {

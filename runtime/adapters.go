@@ -773,6 +773,29 @@ const (
 	// interval must not be charged to the active-work budget, and the same run
 	// continues once connectivity returns.
 	FailureProviderUnavailable FailureClass = "provider_unavailable"
+	// FailureGitHubTransient is the GITHUB FORGE's transport being gone rather
+	// than any answer it gave: a request that never reached it (DNS did not
+	// resolve, the connection was refused or reset) or a response it did send
+	// naming its own retryable refusal (a 5xx, a 429, a secondary rate limit) -
+	// everything *GitHubTransientError already recognizes as "needs nothing
+	// but bounded backoff" (see github.go).
+	//
+	// It is the forge's counterpart to FailureProviderUnavailable: the
+	// credential is fine and there is nothing for an operator to repair in
+	// GitHub itself, only its reachability or its own momentary refusal. An
+	// observation operation - source.observe chief among them (#380) - that
+	// loses connectivity used to record no class at all, which left it a
+	// budget-only retry: three attempts spent in under a second against a
+	// network that was not coming back that fast, and the run terminalized on
+	// an attempt ceiling rather than waiting for the external condition to
+	// clear.
+	//
+	// It routes to a bounded external WAIT under the same #83 accounting
+	// FailureProviderUnavailable uses: a host that cannot reach GitHub is not
+	// performing engineering work, so the interval is not charged to the
+	// active-work budget, and the same run continues once connectivity or the
+	// forge's own refusal clears.
+	FailureGitHubTransient FailureClass = "github_transient"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -1026,7 +1049,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureGitHubTransient:
 		return RouteWait
 	default:
 		return RouteStop

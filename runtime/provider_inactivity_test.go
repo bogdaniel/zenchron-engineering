@@ -36,16 +36,20 @@ func TestRecognizedConnectivityDiagnosticsRouteToABoundedWait(t *testing.T) {
 		diagnostic string
 	}{
 		// Codex is a Rust binary over reqwest/hyper.
-		"codex dns":            {codexSpec, "stream error: error sending request for url (https://chatgpt.com/backend-api/codex/responses): dns error: failed to lookup address information: nodename nor servname provided"},
-		"codex refused":        {codexSpec, "error sending request for url: tcp connect error: Connection refused (os error 61)"},
-		"codex reset":          {codexSpec, "request failed: connection reset by peer (os error 54)"},
-		"codex unreachable":    {codexSpec, "error sending request: network is unreachable (os error 51)"},
-		"claude enotfound":     {claudeSpec, "API Error: request to https://api.anthropic.com/v1/messages failed, reason: getaddrinfo ENOTFOUND api.anthropic.com"},
-		"claude econnrefused":  {claudeSpec, "TypeError: fetch failed\n  cause: Error: connect ECONNREFUSED 127.0.0.1:443"},
-		"claude enetunreach":   {claudeSpec, "connect ENETUNREACH 2606:4700::6810:84e5:443"},
-		"claude dns temporary": {claudeSpec, "getaddrinfo EAI_AGAIN api.anthropic.com"},
-		"gemini econnreset":    {geminiSpec, "FetchError: read ECONNRESET"},
-		"qwen ehostunreach":    {qwenSpec, "connect EHOSTUNREACH 140.82.121.5:443"},
+		"codex dns":         {codexSpec, "stream error: error sending request for url (https://chatgpt.com/backend-api/codex/responses): dns error: failed to lookup address information: nodename nor servname provided"},
+		"codex refused":     {codexSpec, "error sending request for url: tcp connect error: Connection refused (os error 61)"},
+		"codex reset":       {codexSpec, "request failed: connection reset by peer (os error 54)"},
+		"codex unreachable": {codexSpec, "error sending request: network is unreachable (os error 51)"},
+		"claude enotfound":  {claudeSpec, "API Error: request to https://api.anthropic.com/v1/messages failed, reason: getaddrinfo ENOTFOUND api.anthropic.com"},
+		// Observed live (#380): Claude Code's own higher-level wording for the
+		// identical resolver failure, which carries the ENOTFOUND token without
+		// the "getaddrinfo" prefix the narrower match required.
+		"claude cannot reach api server": {claudeSpec, "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"},
+		"claude econnrefused":            {claudeSpec, "TypeError: fetch failed\n  cause: Error: connect ECONNREFUSED 127.0.0.1:443"},
+		"claude enetunreach":             {claudeSpec, "connect ENETUNREACH 2606:4700::6810:84e5:443"},
+		"claude dns temporary":           {claudeSpec, "getaddrinfo EAI_AGAIN api.anthropic.com"},
+		"gemini econnreset":              {geminiSpec, "FetchError: read ECONNRESET"},
+		"qwen ehostunreach":              {qwenSpec, "connect EHOSTUNREACH 140.82.121.5:443"},
 		// HTTP's own vocabulary, shared because it is not any vendor's.
 		"gateway": {codexSpec, "unexpected status 503 Service Unavailable"},
 	} {
