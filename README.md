@@ -454,7 +454,7 @@ cmd/zenchron-engineering/       CLI entry point and composition root
 
 ## Non-goals
 
-Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC.
+Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC. The local operational console authorized by [ADR-0004](docs/adr/0004-local-operational-control-plane.md) is not an exception carved into this non-goal: it is a narrow, read-mostly projection over the already-implemented runtime's own store and journal, bounded to one operator on one machine, and it is not the later organization [`Control Plane`](ROADMAP.md) at M6 (#72).
 
 Nor, at this milestone: an AI agent router, a raw-LLM coding harness, a hosted
 control plane, remote worker federation, autonomous merge, or the engineering
