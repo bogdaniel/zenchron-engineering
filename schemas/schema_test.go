@@ -94,11 +94,10 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every schema is either a document type with fixtures, or the shared
-	// vocabulary those documents reference. A file that is neither is a schema
-	// nothing validates against and nothing refers to.
-	if want := len(fixtureSchemas) + 1; len(files) != want {
-		t.Fatalf("found %d schemas, want %d (the document types plus the planning vocabulary)", len(files), want)
+	// Document fixtures and the shared vocabulary are joined by six Control
+	// Plane contracts, validated against actual HTTP bytes in controlplane.
+	if want := len(fixtureSchemas) + 1 + 6; len(files) != want {
+		t.Fatalf("found %d schemas, want %d (documents, vocabulary and Control Plane wire contracts)", len(files), want)
 	}
 
 	for _, file := range files {

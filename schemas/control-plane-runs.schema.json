@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "runs",
+    "offset",
+    "has_more"
+  ],
+  "properties": {
+    "runs": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "phase",
+          "disposition",
+          "executing"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "disposition": {
+            "type": "string"
+          },
+          "executing": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "offset": {
+      "type": "integer"
+    },
+    "has_more": {
+      "type": "boolean"
+    }
+  }
+}

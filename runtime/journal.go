@@ -426,7 +426,11 @@ func queryPlanEvents(q eventQuerier, planID string) ([]EngineeringEvent, error) 
 // so a row moved between streams by direct database access is refused rather
 // than replayed into the wrong history.
 func queryStreamEvents(q eventQuerier, where string, args ...any) ([]EngineeringEvent, error) {
-	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`, args...)
+	return queryStreamEventsLimited(q, where, "", args...)
+}
+
+func queryStreamEventsLimited(q eventQuerier, where, suffix string, args ...any) ([]EngineeringEvent, error) {
+	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`+suffix, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -511,4 +515,20 @@ func decodeRun(document string) (EngineeringRun, error) {
 		return EngineeringRun{}, fmt.Errorf("decode durable run: %w", err)
 	}
 	return run, nil
+}
+
+// EventsPage uses the run-local sequence, never the fleet global_sequence.
+// The extra row establishes hasMore without reading the unbounded tail.
+func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) (events []EngineeringEvent, hasMore bool, err error) {
+	if after < 0 || limit < 1 || limit > 500 {
+		return nil, false, fmt.Errorf("invalid event page bounds")
+	}
+	events, err = queryStreamEventsLimited(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, ` LIMIT ?`, streamRun, runID, after, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(events) > limit {
+		events, hasMore = events[:limit], true
+	}
+	return events, hasMore, nil
 }

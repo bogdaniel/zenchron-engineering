@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "type": "string",
+      "enum": [
+        "unauthorized",
+        "method_not_allowed",
+        "not_found",
+        "invalid_page",
+        "read_failed"
+      ]
+    }
+  }
+}
