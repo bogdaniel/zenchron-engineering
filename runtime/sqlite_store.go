@@ -406,6 +406,41 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	return &SQLiteOperationStore{db: db}, nil
 }
 
+// OpenSQLiteOperationStoreReadOnly opens an EXISTING <stateDir>/runtime.db for
+// reads only. Unlike OpenSQLiteOperationStore it creates nothing - a missing
+// state directory or database is refused rather than materialized - and no
+// migration ever runs on this connection. A control-plane reader built on top
+// of it therefore cannot mutate the durable store it serves, structurally: it
+// never opens a write-capable connection in the first place.
+func OpenSQLiteOperationStoreReadOnly(stateDir string) (*SQLiteOperationStore, error) {
+	if stateDir == "" {
+		return nil, fmt.Errorf("state directory is required")
+	}
+	path := filepath.Join(stateDir, "runtime.db")
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("runtime database: %w", err)
+	}
+	dsn := sqliteFileURI(path) + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version > sqliteSchemaVersion {
+		db.Close()
+		return nil, UnsupportedSchemaError{Found: version, Supported: sqliteSchemaVersion}
+	}
+	return &SQLiteOperationStore{db: db}, nil
+}
+
 // sqliteFileURI is the one way a filesystem path becomes a SQLite "file:" URI.
 // SQLite percent-decodes the URI, so a raw "file:"+path opens a DIFFERENT file
 // whenever the path holds a '%', '?' or '#' (#331); url.URL escapes them.

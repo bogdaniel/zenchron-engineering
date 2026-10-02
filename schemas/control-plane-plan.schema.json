@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/control-plane-plan.schema.json",
+  "title": "Control plane: GET /v1/plans/{plan_id}",
+  "description": "runtime.PlanSnapshot exactly as store.ReplayPlan rebuilds it from the durable plan journal. The top-level shape is strict; approval/validation/stage/consumption sub-objects are intentionally permissive here, because their own shapes are PlanApproval/PlanValidation/PlanStageProjection/domain.PlanConsumption - already-established runtime types this endpoint reuses rather than re-specifies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan_id", "revision", "digest", "approval", "stages", "consumed", "journal_cursor", "state_sha256"],
+  "properties": {
+    "plan_id": { "type": "string" },
+    "revision": { "type": "integer" },
+    "digest": { "type": "string" },
+    "objective_digest": { "type": "string" },
+    "reasoning": { "type": "object", "additionalProperties": true },
+    "approval": { "type": "object", "additionalProperties": true },
+    "approved": { "type": "object", "additionalProperties": true },
+    "rejected": { "type": "object", "additionalProperties": { "type": "boolean" } },
+    "retired_runs": { "type": "array", "items": { "type": "string" } },
+    "governed": { "type": "array", "items": { "type": "integer" } },
+    "validation": { "type": "object", "additionalProperties": true },
+    "validations": { "type": "object", "additionalProperties": true },
+    "references": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "attempts": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "stages": { "type": "object", "additionalProperties": true },
+    "superseded": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "consumed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["child_runs", "provider_invocations", "wall_seconds", "cost_known"],
+      "properties": {
+        "child_runs": { "type": "integer" },
+        "provider_invocations": { "type": "integer" },
+        "wall_seconds": { "type": "integer" },
+        "cost_micros": { "type": "integer" },
+        "cost_known": { "type": "boolean" }
+      }
+    },
+    "stage_consumed": { "type": "object", "additionalProperties": true },
+    "run_consumed": { "type": "object", "additionalProperties": true },
+    "journal_cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["last_sequence", "last_event_id"],
+      "properties": {
+        "last_sequence": { "type": "integer" },
+        "last_event_id": { "type": "string" },
+        "last_event_hash": { "type": "string" }
+      }
+    },
+    "state_sha256": { "type": "string" }
+  }
+}

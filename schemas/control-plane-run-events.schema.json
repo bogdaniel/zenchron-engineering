@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/control-plane-run-events.schema.json",
+  "title": "Control plane: GET /v1/runs/{run_id}/events",
+  "description": "A bounded, paginated page of runtime.EngineeringEvent for one run's journal. limit is always populated and clamped; truncated says whether more events exist after next_after. payload is per-event-type data and is deliberately NOT a credential or a raw transcript (runtime/credential_boundary.go), so it is validated here only as arbitrary JSON.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "after", "limit", "events", "truncated"],
+  "properties": {
+    "run_id": { "type": "string" },
+    "after": { "type": "integer", "minimum": 0 },
+    "limit": { "type": "integer", "minimum": 1 },
+    "next_after": { "type": "integer" },
+    "truncated": { "type": "boolean" },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "id", "run_id", "sequence", "type", "occurred_at"],
+        "properties": {
+          "schema_version": { "type": "string" },
+          "id": { "type": "string" },
+          "run_id": { "type": "string" },
+          "plan_id": { "type": "string" },
+          "sequence": { "type": "integer" },
+          "type": { "type": "string" },
+          "occurred_at": { "type": "string", "format": "date-time" },
+          "operation_id": { "type": "string" },
+          "previous_event_id": { "type": "string" },
+          "previous_event_hash": { "type": "string" },
+          "payload": {},
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "sha256", "media_type", "local_only", "sanitized", "publishable"],
+              "properties": {
+                "path": { "type": "string" },
+                "sha256": { "type": "string" },
+                "media_type": { "type": "string" },
+                "local_only": { "type": "boolean" },
+                "sanitized": { "type": "boolean" },
+                "publishable": { "type": "boolean" }
+              }
+            }
+          },
+          "state_before": { "type": "string" },
+          "state_after": { "type": "string" },
+          "event_hash": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/control-plane-runs.schema.json",
+  "title": "Control plane: GET /v1/runs",
+  "description": "runtime.Fleet, exactly as runtime.FleetStatus computes it: every run and the plan-level summaries beside it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["at", "capacity", "executing", "active", "runs", "supervisor_running"],
+  "properties": {
+    "at": { "type": "string", "format": "date-time" },
+    "capacity": { "type": "integer" },
+    "executing": { "type": "integer" },
+    "active": { "type": "integer" },
+    "supervisor_running": { "type": "boolean" },
+    "control_endpoint": { "type": "string" },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "repository", "phase", "disposition", "elapsed"],
+        "properties": {
+          "run_id": { "type": "string" },
+          "repository": { "type": "string" },
+          "issue": { "type": "integer" },
+          "agent": { "type": "string" },
+          "provider_kind": { "type": "string" },
+          "trust_mode": { "type": "string" },
+          "model": { "type": "string" },
+          "phase": { "type": "string" },
+          "disposition": { "type": "string" },
+          "reason": { "type": "string" },
+          "operation": { "type": "string" },
+          "attempt": { "type": "integer" },
+          "executing": { "type": "boolean" },
+          "elapsed": { "type": "integer" },
+          "branch": { "type": "string" },
+          "candidate_revision": { "type": "string" },
+          "candidate_tree": { "type": "string" },
+          "workspace": { "type": "string" },
+          "pull_request": { "type": "integer" },
+          "pull_request_state": { "type": "string" },
+          "ci": { "type": "string" },
+          "review": { "type": "string" },
+          "feedback_admitted": { "type": "integer" },
+          "feedback_pending": { "type": "integer" },
+          "attempts": { "type": "object", "additionalProperties": { "type": "integer" } },
+          "error": { "type": "string" }
+        }
+      }
+    },
+    "plans": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["plan_id", "revision", "state", "consumed"],
+        "properties": {
+          "plan_id": { "type": "string" },
+          "revision": { "type": "integer" },
+          "approved_revision": { "type": "integer" },
+          "state": {
+            "type": "string",
+            "enum": ["awaiting_approval", "rejected", "executing", "completed", "blocked"]
+          },
+          "stages": { "type": "object", "additionalProperties": { "type": "integer" } },
+          "runs": { "type": "array", "items": { "type": "string" } },
+          "consumed": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["child_runs", "provider_invocations", "wall_seconds", "cost_known"],
+            "properties": {
+              "child_runs": { "type": "integer" },
+              "provider_invocations": { "type": "integer" },
+              "wall_seconds": { "type": "integer" },
+              "cost_micros": { "type": "integer" },
+              "cost_known": { "type": "boolean" }
+            }
+          },
+          "error": { "type": "string" }
+        }
+      }
+    }
+  }
+}

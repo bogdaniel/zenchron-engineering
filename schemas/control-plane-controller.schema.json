@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/control-plane-controller.schema.json",
+  "title": "Control plane: GET /v1/controller",
+  "description": "runtime.ControllerStatus, returned exactly as runtime.DescribeControllerStatus computes it. The three verdicts (durable_consistency, serving, projection.state) are independent and MUST NOT be collapsed into one flag by a client.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "observed_at", "durable_active", "live", "projection", "durable_consistency", "serving"],
+  "properties": {
+    "schema": { "const": "zenchron.controller-status/v1" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "durable_active": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "generation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string" },
+            "version": { "type": "string" },
+            "source_revision": { "type": "string" },
+            "source_tree": { "type": "string" },
+            "binary_sha256": { "type": "string" }
+          }
+        },
+        "handoff_id": { "type": "string" },
+        "phase": { "type": "string" },
+        "artifact_dir": { "type": "string" },
+        "authority": { "type": "string" },
+        "authority_ref": { "type": "string" },
+        "source": { "type": "string" }
+      }
+    },
+    "live": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reachable", "source"],
+      "properties": {
+        "reachable": { "type": "boolean" },
+        "detail": { "type": "string" },
+        "snapshot": {
+          "description": "runtime.LiveControllerSnapshot, kept permissive here: its own shape is not the contract of this endpoint, only its presence/absence is.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "source": { "type": "string" }
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "path", "source"],
+      "properties": {
+        "state": { "type": "string", "enum": ["current", "drift", "missing", "invalid"] },
+        "path": { "type": "string" },
+        "target": { "type": "string" },
+        "source": { "type": "string" }
+      }
+    },
+    "durable_consistency": {
+      "type": "string",
+      "enum": ["consistent", "invariant_violation", "snapshot_unstable", "no_activation_recorded"]
+    },
+    "serving": { "type": "string", "enum": ["serving", "not_serving", "unknown"] },
+    "findings": { "type": "array", "items": { "type": "string" } }
+  }
+}
