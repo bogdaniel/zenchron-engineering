@@ -141,6 +141,62 @@ func TestStaleHeadFeedbackIsNotApplicable(t *testing.T) {
 	}
 }
 
+// TestReviewDispositionGatesTextAdmission is the live defect this closes: an
+// APPROVE (or COMMENT) review's disposition decides admission before its text
+// does, so explanatory prose attached to a non-blocking review can never
+// become remediation feedback. Only a REQUEST_CHANGES review's text is ever
+// admitted.
+func TestReviewDispositionGatesTextAdmission(t *testing.T) {
+	policy := FeedbackPolicy{PublicationIdentityResolved: true}
+	permissions := map[string]GitHubPermission{"maintainer": PermissionWrite}
+
+	reviewItem := func(id int64, state GitHubReviewState, body string) FeedbackItem {
+		return FeedbackItem{
+			Class: FeedbackReview, ID: id, Actor: GitHubActor{Login: "maintainer", ID: 7},
+			Body: UntrustedText(body), ReviewState: state,
+		}
+	}
+
+	approvedWithText := reviewItem(1, GitHubReviewApproved, "nice work, consider renaming the helper though")
+	approvedEmpty := reviewItem(2, GitHubReviewApproved, "")
+	changesRequested := reviewItem(3, GitHubReviewChangesRequested, "please rename the helper")
+	commented := reviewItem(4, GitHubReviewCommented, "just a thought: maybe rename the helper")
+
+	decisions := map[int64]FeedbackDecision{}
+	for _, decision := range AdmitFeedback(
+		[]FeedbackItem{approvedWithText, approvedEmpty, changesRequested, commented},
+		policy, permissions, "",
+	) {
+		for _, item := range []FeedbackItem{approvedWithText, approvedEmpty, changesRequested, commented} {
+			if item.Key() == decision.Key {
+				decisions[item.ID] = decision
+			}
+		}
+	}
+
+	// An APPROVE carrying explanatory, actionable-looking text is still never
+	// admitted, and refused for its disposition - not for permission or
+	// staleness, both of which this item would otherwise clear.
+	if d := decisions[approvedWithText.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview {
+		t.Fatalf("an APPROVE review's text became remediation feedback: %#v", d)
+	}
+	// An APPROVE with no text keeps its prior reason: the fix must not change
+	// what was already correct.
+	if d := decisions[approvedEmpty.ID]; d.Admitted || d.Reason != feedbackRefusedEmpty {
+		t.Fatalf("an empty APPROVE review's refusal reason regressed: %#v", d)
+	}
+	// REQUEST_CHANGES is untouched: an actionable review from a permitted
+	// actor is still admitted.
+	if d := decisions[changesRequested.ID]; !d.Admitted || d.Reason != feedbackAdmittedPermitted {
+		t.Fatalf("a REQUEST_CHANGES review was not admitted: %#v", d)
+	}
+	// COMMENT is explicitly pinned to the same non-blocking policy as
+	// APPROVE, rather than silently inheriting REQUEST_CHANGES semantics.
+	if d := decisions[commented.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview {
+		t.Fatalf("a neutral COMMENT review became blocking remediation: %#v", d)
+	}
+}
+
 // TestUnresolvedPermissionIsNeverAnAdmission proves the gate fails closed when
 // the forge cannot answer. A lookup that failed is not consent.
 func TestUnresolvedPermissionIsNeverAnAdmission(t *testing.T) {

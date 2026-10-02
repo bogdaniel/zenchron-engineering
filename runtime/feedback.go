@@ -13,7 +13,7 @@ package runtime
 // visible as GitHub state and fully auditable here; it simply never enters an
 // agent's context.
 //
-// Four rules shape the design.
+// Five rules shape the design.
 //
 //   - Admission is decided by the ACTOR's current repository permission, not by
 //     what the comment says. Text is never the gate.
@@ -27,6 +27,12 @@ package runtime
 //   - Feedback applies to the CURRENT head of the ACTIVE generation. A review
 //     of a superseded commit is history, and a frozen generation never wakes up
 //     because someone commented on its old pull request.
+//   - A pull-request review's own DISPOSITION is decided before its text is.
+//     An APPROVE or COMMENT review is non-blocking by GitHub's own semantics,
+//     so its body is never a remediation obligation, however actionable it
+//     reads; only a REQUEST_CHANGES review's text is ever admitted. This is
+//     the same actor-not-text principle as the first rule, applied to the one
+//     feedback class that carries its own disposition.
 
 import (
 	"crypto/sha256"
@@ -175,8 +181,19 @@ type FeedbackItem struct {
 	Path   string
 	Commit string
 	// Bot marks an actor GitHub reports as an App or bot account.
-	Bot       bool
-	CreatedAt time.Time
+	Bot bool
+	// ReviewState is the submitted disposition of a FeedbackReview item -
+	// approved, changes requested, commented, or dismissed. It is meaningless
+	// for every other class, which carries no disposition of their own.
+	//
+	// It exists because disposition and text are admitted independently
+	// otherwise: a GitHub APPROVE review that carries explanatory text would
+	// pass every other check - a real collaborator, non-empty body, current
+	// head - and be admitted as if it were a blocking review, even though
+	// GitHub itself treats an approval as non-blocking regardless of what its
+	// text says.
+	ReviewState GitHubReviewState
+	CreatedAt   time.Time
 }
 
 // Key is the durable identity of one item: its class and its forge id. It is
@@ -228,6 +245,13 @@ const (
 	feedbackRefusedEmpty        = "carries no text, so there is nothing to deliver"
 	feedbackAdmittedAllowedBot  = "authored by an operator-allowlisted automation account"
 	feedbackRefusedUnauthorized = "actor has no permission on this repository"
+	// feedbackRefusedNonBlockingReview is the review-disposition rule: a
+	// pull-request review's own GitHub disposition, not what its text says,
+	// decides whether it is a remediation obligation. An APPROVE or COMMENT
+	// review is non-blocking by GitHub's own semantics, so its text is
+	// observable history, never engineering feedback - however explanatory or
+	// actionable that text reads.
+	feedbackRefusedNonBlockingReview = "a pull-request review's disposition does not request changes, so its text is not a remediation obligation"
 	// The runtime could not establish which account it publishes as, so it
 	// cannot recognize its own comments and admits nothing at all.
 	feedbackRefusedUnidentifiedRuntime = "the runtime's own publication identity is unresolved, so its own comments could not be told apart from anyone else's"
@@ -284,6 +308,11 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 			decision.Reason = feedbackRefusedBot
 		case strings.TrimSpace(string(item.Body)) == "":
 			decision.Reason = feedbackRefusedEmpty
+		case item.Class == FeedbackReview && item.ReviewState != GitHubReviewChangesRequested:
+			// Checked ahead of staleness and permission: disposition is part
+			// of admission semantics, not a tiebreaker applied only once
+			// everything else would otherwise admit the item.
+			decision.Reason = feedbackRefusedNonBlockingReview
 		case !decision.Applicable:
 			decision.Reason = feedbackRefusedStale
 		default:
