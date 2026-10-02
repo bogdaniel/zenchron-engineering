@@ -231,3 +231,43 @@ func TestRefusedMaterialQuarantineSurvivesWorkspaceReconstruction(t *testing.T) 
 		t.Fatalf("preserved bundle does not name refused snapshot commit %s: %s", snapshot.Commit, listed)
 	}
 }
+
+
+// A later failed retry that produces nothing must not erase the refused
+// material an earlier failed attempt preserved. The run still exhausts its
+// ordinary attempt budget; its terminal held-material record simply names what
+// remains valuable rather than pretending the earlier bytes disappeared.
+func TestRetryExhaustionStillHoldsEarlierRefusedMaterial(t *testing.T) {
+	first := providerAnswer{
+		result: ExecutionResult{
+			ProviderID: "test-provider", Outcome: OperationFailed,
+			Failure: &ProviderFailure{Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: "first"},
+		},
+		mutate: func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "a.txt"), []byte("refused-A\n"), 0600)
+		},
+	}
+	fixture, _ := newRoutingFixture(t, 2, first, classifiedFailure(FailureTransientProvider))
+	runID := fixture.start()
+	outcome := fixture.reconcile(runID)
+	if outcome.Disposition != Failed || outcome.Reason != OpExecutionInvoke+"_attempts_exhausted" {
+		t.Fatalf("outcome = %#v, want ordinary retry-budget exhaustion", outcome)
+	}
+	state := fixture.state(runID)
+	held := state.snapshot.HeldMaterial
+	if held == nil || held.Kind != HeldRefused || held.PathCount != 1 || held.ContentDigest == "" {
+		t.Fatalf("earlier refused material disappeared at retry exhaustion: %+v", held)
+	}
+	if _, err := os.Stat(refusedMaterialBundlePath(fixture.stateDir, strings.TrimPrefix(filepath.Base(refusedMaterialBundlePath(fixture.stateDir, "")), ""))); err == nil {
+		// No assertion here: the exact bundle identity is checked below from the
+		// journal. This branch only avoids deriving a path from HeldMaterial,
+		// whose Revision is the stash commit rather than the snapshot id.
+	}
+	refused := firstRefusedMaterial(t, state.events)
+	if held.Revision != refused.Commit || held.Tree != refused.Tree {
+		t.Fatalf("held identity = %s/%s, want refused snapshot %s/%s", held.Revision, held.Tree, refused.Commit, refused.Tree)
+	}
+	if _, err := os.Stat(refusedMaterialBundlePath(fixture.stateDir, refused.ID)); err != nil {
+		t.Fatalf("terminal held material has no preserved bundle: %v", err)
+	}
+}
