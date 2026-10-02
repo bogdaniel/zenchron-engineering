@@ -1392,6 +1392,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				// class remains the provenance; this diagnostic only withholds its
 				// successor because the runtime could not establish the attempt boundary.
 				produced.state = OperationFailed
+				execution.ProviderFailureClass = class
+				execution.mutationResult.FailureClass = FailureWorkspaceIntegrity
 				if execution.Diagnostic != nil {
 					execution.Diagnostic.Route = RouteStop
 					execution.Diagnostic.Successor = ""
@@ -1541,7 +1543,8 @@ type executionRecord struct {
 	mutationResult
 	Diagnostic      *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
 	ReviewRefusal   *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
-	RefusedMaterial *RefusedMaterialSnapshot    `json:"refused_material,omitempty"`
+	RefusedMaterial       *RefusedMaterialSnapshot `json:"refused_material,omitempty"`
+	ProviderFailureClass  FailureClass             `json:"provider_failure_class,omitempty"`
 	// PriorContext explains the prior-attempt observations this invocation
 	// inherited, or is absent when it inherited none. It records WHICH earlier
 	// attempts were supplied rather than a copy of what they said, so a replay
