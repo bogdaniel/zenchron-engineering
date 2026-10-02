@@ -557,6 +557,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
 	}
+	// ORPHANED QUARANTINES ARE ADOPTED BEFORE ANY PROVIDER RUNS (#390). A
+	// controller that died after a quarantine copy completed but before its
+	// candidate.quarantined event was journalled left a complete copy with no
+	// durable identity and a workspace that may still be partly restored.
+	// Adoption re-applies the idempotent restore and journals the record with
+	// THIS invocation's outcome; a restore that fails stops the attempt before
+	// a provider can run on top of refused material.
+	adopted, adoptErr := r.adoptOrphanQuarantines(state, operation, operation.AttemptIdentity, workspace.Dir)
+	if adoptErr != nil {
+		out := failed(adoptErr)
+		stopRefusedAttempt(&out, adoptErr)
+		out.events = adopted
+		return out
+	}
+	if len(adopted) > 0 {
+		defer func() { out.events = append(append([]journalEntry(nil), adopted...), out.events...) }()
+	}
 	// THE SUBJECT, re-proven immediately before the provider runs.
 	//
 	// A plan stage that consumes an unpublished upstream candidate had it

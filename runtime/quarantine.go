@@ -121,7 +121,14 @@ func quarantineRefusedMaterial(workspace, dest string, manifest QuarantineManife
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dest, "manifest.json"), document, 0o600)
+	// The manifest is the completeness marker restart adoption trusts, so it
+	// appears atomically: a crash mid-write leaves no manifest, never a torn
+	// one.
+	temporary := filepath.Join(dest, ".manifest.json.tmp")
+	if err := os.WriteFile(temporary, document, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, filepath.Join(dest, "manifest.json"))
 }
 
 func copyRegular(src, dst string, perm os.FileMode) error {
@@ -306,4 +313,84 @@ func stopRefusedAttempt(out *effect, cause error) {
 	record.Diagnostic = &diagnostic
 	out.state = OperationFailed
 	out.result = record
+}
+
+// adoptOrphanQuarantines finds every COMPLETE quarantine copy under this run
+// that no candidate.quarantined event names, and gives it its durable
+// identity. Completeness is the manifest: quarantineRefusedMaterial writes it
+// last, so a directory without one is a copy the crash interrupted, and the
+// workspace was never touched for it. For each orphan the refused paths are
+// restored again - restoreRefusedPaths is idempotent, so paths already
+// restored are simply confirmed - and an event is returned recording whether
+// that succeeded. Any restore failure is returned as an error alongside the
+// events already produced, so the caller can journal them and stop.
+//
+// ADOPTION IS BOUND TO THIS DISPATCH. Only a quarantine of THIS operation,
+// from an EARLIER physical attempt, at exactly the location that operation
+// and attempt derive, is adopted. A manifest anywhere else - another
+// operation's, a later or equal attempt's, or a directory whose name does not
+// match what it claims - is not this dispatch's crashed predecessor and is
+// left alone: a manifest alone grants nothing.
+func (r *EngineeringRuntime) adoptOrphanQuarantines(state *runState, operation RunOperation, attempt int, workspace string) ([]journalEntry, error) {
+	root := filepath.Join(r.deps.StateDir, "runs", state.run.ID, "quarantine")
+	// No quarantine directory means no copy was ever completed here; a root
+	// that is not a directory cannot hold one either.
+	if info, err := os.Stat(root); errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for _, e := range state.events {
+		if e.Type != EventCandidateQuarantined {
+			continue
+		}
+		var p CandidateQuarantinedPayload
+		if json.Unmarshal(e.Payload, &p) == nil {
+			known[p.Location] = true
+		}
+	}
+	var events []journalEntry
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		location := filepath.Join("runs", state.run.ID, "quarantine", entry.Name())
+		if known[location] {
+			continue
+		}
+		document, err := os.ReadFile(filepath.Join(r.deps.StateDir, location, "manifest.json"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return events, err
+		}
+		var manifest QuarantineManifest
+		if err := json.Unmarshal(document, &manifest); err != nil {
+			return events, fmt.Errorf("quarantine %s has an unreadable manifest: %w", location, err)
+		}
+		if manifest.OperationID != operation.ID || manifest.Attempt >= attempt ||
+			quarantineDir(state.run.ID, manifest.OperationID, manifest.Attempt) != location {
+			continue
+		}
+		paths := make([]string, 0, len(manifest.Paths))
+		for path := range manifest.Paths {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		restoreErr := restoreRefusedPaths(workspace, paths)
+		events = append(events, journalEntry{Type: EventCandidateQuarantined, Payload: CandidateQuarantinedPayload{
+			OperationID: manifest.OperationID, Attempt: manifest.Attempt, Subject: manifest.Subject,
+			FailureClass: manifest.FailureClass, PathCount: len(paths), PathsDigest: pathsDigest(paths),
+			ContentDigest: manifest.ContentDigest, Location: location,
+			Restored: restoreErr == nil, Adopted: true,
+		}})
+		if restoreErr != nil {
+			return events, fmt.Errorf("orphaned quarantine %s could not be restored out of the workspace: %w", location, restoreErr)
+		}
+	}
+	return events, nil
 }

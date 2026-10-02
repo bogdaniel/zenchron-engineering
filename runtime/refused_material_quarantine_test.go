@@ -13,6 +13,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -343,5 +344,113 @@ func TestTheFailStopDoesNotDependOnTheResultShape(t *testing.T) {
 	if record.Diagnostic == nil || record.Diagnostic.Route != RouteStop ||
 		!strings.Contains(record.Diagnostic.Message, "execution authority could not be read") {
 		t.Fatalf("diagnostic = %+v, want route stop with the original result kept", record.Diagnostic)
+	}
+}
+
+// plantAtDispatch runs plant with the execution operation exactly as it is
+// leased, before its handler runs - the moment a recovered controller would
+// re-dispatch a crashed attempt.
+type plantAtDispatch struct {
+	OperationStore
+	plant func(RunOperation)
+	fired bool
+}
+
+func (p *plantAtDispatch) PutOperation(op RunOperation, revision int64) (int64, bool, error) {
+	next, written, err := p.OperationStore.PutOperation(op, revision)
+	if !p.fired && written && err == nil && op.Kind == OpExecutionInvoke && op.State == Running {
+		p.fired = true
+		p.plant(op)
+	}
+	return next, written, err
+}
+
+// TestAnOrphanedQuarantineIsAdoptedAfterACrash reproduces the crash seam: a
+// controller died after attempt N's quarantine copy completed and before its
+// candidate.quarantined event was journalled, leaving a complete copy with no
+// durable identity and the refused material A still in the workspace. The
+// re-dispatch of THAT operation must adopt the orphan - restore A out of the
+// workspace BEFORE any provider runs, and journal the quarantine - so the
+// successful attempt commits B and only B.
+func TestAnOrphanedQuarantineIsAdoptedAfterACrash(t *testing.T) {
+	sawA := false
+	fixture, provider := newRoutingFixture(t, 3, providerAnswer{
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		mutate: func(dir string) error {
+			if _, err := os.Stat(filepath.Join(dir, "refused.go")); err == nil {
+				sawA = true
+			}
+			return writesCandidate(dir)
+		},
+	})
+	runID := fixture.start()
+	var location string
+	hook := &plantAtDispatch{OperationStore: fixture.runtime.scheduler.Store, plant: func(op RunOperation) {
+		// The crashed EARLIER attempt of this very operation.
+		crashed := op.AttemptIdentity - 1
+		location = quarantineDir(runID, op.ID, crashed)
+		workspace := candidateDir(fixture.stateDir, runID)
+		if err := os.WriteFile(filepath.Join(workspace, "refused.go"), []byte("package refused // A\n"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		manifest := QuarantineManifest{OperationID: op.ID, Attempt: crashed, Subject: "unknown", FailureClass: FailureProviderBackgroundWorkUnresolved}
+		if err := quarantineRefusedMaterial(workspace, filepath.Join(fixture.stateDir, location), manifest, []string{"refused.go"}); err != nil {
+			t.Error(err)
+		}
+	}}
+	fixture.runtime.scheduler.Store = hook
+	fixture.reconcile(runID)
+
+	if !hook.fired || provider.calls != 1 {
+		t.Fatalf("the crash state was not planted before the dispatch (fired=%v, calls=%d)", hook.fired, provider.calls)
+	}
+	if sawA {
+		t.Fatal("the provider ran on a workspace still holding the orphaned refused material A")
+	}
+	state := fixture.state(runID)
+	quarantined := quarantinedEvents(t, state.events)
+	if len(quarantined) != 1 || !quarantined[0].Adopted || !quarantined[0].Restored || quarantined[0].Location != location {
+		t.Fatalf("quarantine records = %+v, want the orphan at %s adopted and restored", quarantined, location)
+	}
+	if !committedTreeHas(t, fixture, runID, "candidate.go") || committedTreeHas(t, fixture, runID, "refused.go") {
+		t.Fatal("the committed candidate does not carry exactly B after adopting the orphaned quarantine")
+	}
+}
+
+// TestAnUnrelatedQuarantineIsNotAdopted: a manifest alone grants nothing. A
+// quarantine of another operation, one from this operation's current (not
+// earlier) attempt, and one whose directory does not match what its manifest
+// claims are all left alone by this dispatch.
+func TestAnUnrelatedQuarantineIsNotAdopted(t *testing.T) {
+	fixture, provider := newRoutingFixture(t, 3, providerAnswer{
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		mutate: writesCandidate,
+	})
+	runID := fixture.start()
+	hook := &plantAtDispatch{OperationStore: fixture.runtime.scheduler.Store, plant: func(op RunOperation) {
+		plant := func(location string, manifest QuarantineManifest) {
+			dest := filepath.Join(fixture.stateDir, location)
+			if err := os.MkdirAll(filepath.Join(dest, "files"), 0o700); err != nil {
+				t.Error(err)
+			}
+			document, _ := json.Marshal(manifest)
+			if err := os.WriteFile(filepath.Join(dest, "manifest.json"), document, 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		other := "another-operation"
+		plant(quarantineDir(runID, other, 0), QuarantineManifest{OperationID: other, Attempt: 0, Paths: map[string]string{"x.go": "file"}})
+		plant(quarantineDir(runID, op.ID, op.AttemptIdentity), QuarantineManifest{OperationID: op.ID, Attempt: op.AttemptIdentity, Paths: map[string]string{"x.go": "file"}})
+		plant(filepath.Join("runs", runID, "quarantine", "mislabelled"), QuarantineManifest{OperationID: op.ID, Attempt: 0, Paths: map[string]string{"x.go": "file"}})
+	}}
+	fixture.runtime.scheduler.Store = hook
+	fixture.reconcile(runID)
+
+	if !hook.fired || provider.calls != 1 {
+		t.Fatalf("dispatch was not reached or was refused (fired=%v, calls=%d)", hook.fired, provider.calls)
+	}
+	if n := len(quarantinedEvents(t, fixture.state(runID).events)); n != 0 {
+		t.Fatalf("%d unrelated quarantine(s) were adopted by a dispatch they do not belong to", n)
 	}
 }

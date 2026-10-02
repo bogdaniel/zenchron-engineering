@@ -434,6 +434,10 @@ type CandidateQuarantinedPayload struct {
 	// quarantine always has a durable identity; false means the attempt was
 	// stopped because the workspace may still hold part of the material.
 	Restored bool `json:"restored"`
+	// Adopted marks a record journalled by restart adoption: the copy was
+	// completed by an earlier attempt whose controller died before its own
+	// record became durable (#390).
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 type CandidateCommittedPayload struct {
