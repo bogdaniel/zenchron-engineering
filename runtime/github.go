@@ -148,6 +148,31 @@ const (
 	GitHubReviewDismissed        GitHubReviewState = "dismissed"
 )
 
+// validGitHubReviewStates is the closed vocabulary a review disposition must
+// belong to before it is written to a durable record. An unrecognized value -
+// a forge adapter bug, or a future GitHub state this runtime does not yet
+// know - is never treated as any of them, least of all
+// GitHubReviewChangesRequested: admission already fails closed on anything
+// that is not an exact match to that one state, and this closes the same
+// door for what the audit trail records.
+var validGitHubReviewStates = map[GitHubReviewState]bool{
+	GitHubReviewApproved:         true,
+	GitHubReviewChangesRequested: true,
+	GitHubReviewCommented:        true,
+	GitHubReviewDismissed:        true,
+}
+
+// normalized reports s unchanged when it belongs to the closed vocabulary,
+// and the zero value otherwise - fail-closed, so a disposition this runtime
+// does not recognize is persisted as "unknown" rather than silently adopting
+// the spelling of a state it was never confirmed to be.
+func (s GitHubReviewState) normalized() GitHubReviewState {
+	if validGitHubReviewStates[s] {
+		return s
+	}
+	return ""
+}
+
 // GitHubReview is one submitted review of one exact commit.
 type GitHubReview struct {
 	ID          int64
