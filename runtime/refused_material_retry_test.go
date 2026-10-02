@@ -258,11 +258,6 @@ func TestRetryExhaustionStillHoldsEarlierRefusedMaterial(t *testing.T) {
 	if held == nil || held.Kind != HeldRefused || held.PathCount != 1 || held.ContentDigest == "" {
 		t.Fatalf("earlier refused material disappeared at retry exhaustion: %+v", held)
 	}
-	if _, err := os.Stat(refusedMaterialBundlePath(fixture.stateDir, strings.TrimPrefix(filepath.Base(refusedMaterialBundlePath(fixture.stateDir, "")), ""))); err == nil {
-		// No assertion here: the exact bundle identity is checked below from the
-		// journal. This branch only avoids deriving a path from HeldMaterial,
-		// whose Revision is the stash commit rather than the snapshot id.
-	}
 	refused := firstRefusedMaterial(t, state.events)
 	if held.Revision != refused.Commit || held.Tree != refused.Tree {
 		t.Fatalf("held identity = %s/%s, want refused snapshot %s/%s", held.Revision, held.Tree, refused.Commit, refused.Tree)
