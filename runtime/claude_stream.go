@@ -104,6 +104,22 @@ type claudeStream struct {
 	open map[string]struct{}
 	turn string
 
+	// backgroundOpen is sticky, unlike open: it is set the instant a
+	// main-thread Bash call is dispatched with the typed run_in_background
+	// input true, and it stays set across turns - a background shell outlives
+	// the tool_use/tool_result pair that started it - until a main-thread
+	// BashOutput or KillShell call is observed, at which point this invocation
+	// is taken to have checked on SOME outstanding background work and the
+	// flag clears (#384).
+	//
+	// This is a coarse, bounded approximation deliberately, in the same spirit
+	// as maxClaudeOpenTools: it does not track WHICH shell a poll resolved, so
+	// polling one of several abandoned shells clears the flag for all of them.
+	// It still catches the dominant failure shape live evidence shows - a
+	// background shell started and never followed by any poll at all before
+	// the final result - without reading a single byte of tool output prose.
+	backgroundOpen bool
+
 	sawResult   bool
 	isError     bool
 	denials     int
@@ -246,6 +262,13 @@ type claudeContentBlock struct {
 	Type      string `json:"type"`
 	ID        string `json:"id"`
 	ToolUseID string `json:"tool_use_id"`
+	// Name and Input are read ONLY for a tool_use block, and ONLY their typed
+	// shape: the tool's own NAME, and - off Input - the typed boolean
+	// run_in_background flag the Bash tool's schema defines. Never the
+	// command string, never the tool's prose result. See
+	// claudeStartsBackgroundShell.
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // handle applies one complete line. Called with s.mu held.
@@ -289,8 +312,22 @@ func (s *claudeStream) handle(line []byte) {
 				s.turn = id
 			}
 			for _, block := range blocks {
-				if block.Type == "tool_use" && block.ID != "" && len(s.open) < maxClaudeOpenTools {
+				if block.Type != "tool_use" {
+					continue
+				}
+				if block.ID != "" && len(s.open) < maxClaudeOpenTools {
 					s.open[block.ID] = struct{}{}
+				}
+				// THE TYPED SHAPE ONLY (#384): a tool NAME and, off Bash's own
+				// input schema, a typed boolean. Never the command, never any
+				// later tool_result prose.
+				switch block.Name {
+				case "Bash":
+					if claudeStartsBackgroundShell(block.Input) {
+						s.backgroundOpen = true
+					}
+				case "BashOutput", "KillShell":
+					s.backgroundOpen = false
 				}
 			}
 		}
@@ -414,6 +451,12 @@ type claudeStreamOutcome struct {
 	// FinalResult reports that a valid final result was read. The denial
 	// count and DeniedTools come from it, so without one they are unknown.
 	FinalResult bool
+	// UnresolvedBackgroundWork reports that a main-thread Bash call this
+	// invocation dispatched with run_in_background was never followed by a
+	// main-thread BashOutput or KillShell call before the stream ended (#384).
+	// It is read from typed tool names and the Bash tool's typed
+	// run_in_background input only; see claudeStartsBackgroundShell.
+	UnresolvedBackgroundWork bool
 	// DeniedTools is the bounded set of typed tool identifiers the final
 	// result's permission_denials named.
 	DeniedTools []string
@@ -449,8 +492,21 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
 		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
-		Answer: s.answer, AnswerObserved: s.hasAnswer,
+		UnresolvedBackgroundWork: s.backgroundOpen,
+		Answer:                   s.answer, AnswerObserved: s.hasAnswer,
 	}
+}
+
+// claudeStartsBackgroundShell reads ONLY the Bash tool's own typed
+// run_in_background boolean off a tool_use block's input. A missing,
+// type-drifted or false value is "no" - the fail-closed reading for a flag
+// that, misread as true, would wrongly accuse an ordinary foreground command
+// of being abandoned background work.
+func claudeStartsBackgroundShell(input json.RawMessage) bool {
+	var decoded struct {
+		RunInBackground bool `json:"run_in_background"`
+	}
+	return json.Unmarshal(input, &decoded) == nil && decoded.RunInBackground
 }
 
 // deniedToolNames reads ONLY the typed tool_name of each permission denial:
