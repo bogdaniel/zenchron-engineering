@@ -590,8 +590,7 @@ func withInvocationEnv(env, extra []string) ([]string, error) {
 }
 
 // claudeDetachedToolResult reads provider metadata, never tool-result prose.
-// A background identity itself proves detachment, including when timeout
-// metadata is absent. A positive timeout also conservatively refuses it.
+// Automatic detachment requires the typed identity and positive timeout together.
 func claudeDetachedToolResult(raw json.RawMessage) bool {
 	var fields struct {
 		BackgroundTaskID json.RawMessage `json:"backgroundTaskId"`
@@ -602,6 +601,19 @@ func claudeDetachedToolResult(raw json.RawMessage) bool {
 	}
 	var id string
 	var timeout int64
-	return (json.Unmarshal(fields.BackgroundTaskID, &id) == nil && id != "") ||
+	return (json.Unmarshal(fields.BackgroundTaskID, &id) == nil && id != "") &&
 		(json.Unmarshal(fields.TimedOutAfterMS, &timeout) == nil && timeout > 0)
+}
+
+// claudeBashTimeoutEnv uses the remaining absolute attempt authority, not the
+// inactivity window (which is suspended while foreground tools are attached).
+// Reserve one millisecond for delivery and round down; never emit zero, which
+// could acquire provider-specific unlimited semantics. Explicit shorter model
+// timeouts remain possible and the typed detachment detector is authoritative.
+func claudeBashTimeoutEnv(remaining time.Duration) ([]string, error) {
+	timeout := (remaining - time.Millisecond).Milliseconds()
+	if timeout < 1 {
+		return nil, fmt.Errorf("remaining attempt authority %s cannot bound Claude Bash", remaining)
+	}
+	return []string{fmt.Sprintf("BASH_DEFAULT_TIMEOUT_MS=%d", timeout), fmt.Sprintf("BASH_MAX_TIMEOUT_MS=%d", timeout)}, nil
 }

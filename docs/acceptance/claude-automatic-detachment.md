@@ -1,32 +1,32 @@
 # Claude automatic Bash detachment (#388)
 
 The parser correlates main-thread Bash tool-use IDs with user tool-result
-blocks, then reads the top-level `tool_use_result.backgroundTaskId` and
-`timedOutAfterMs` metadata. Either a nonempty typed background identity or a
-positive typed timeout makes the invocation sticky unresolved. Prose, nested
-results and other tools cannot trigger this rule. Existing refusal and candidate
-quarantine apply equally to explicit and automatic detachment.
+blocks. Automatic detachment requires BOTH a nonempty typed
+`tool_use_result.backgroundTaskId` and positive typed `timedOutAfterMs`.
+The refusal remains sticky through final answers and process success. Prose,
+nested results, unknown IDs and other tools cannot trigger this rule. Explicit
+`run_in_background=true` remains a separate dispatch-time refusal path.
+Both paths use candidate quarantine and prevent admission of refused mutations.
 
-## Timeout control verification remains open
+## Timeout controls and evidence
 
-The supplied #387 evidence identifies Claude Code 2.1.283 and a 120000 ms
-foreground timeout. The workspace contains no implementation or authoritative
-control documentation for that version. Its checked-in CLI help fixture is
-2.1.282 and does not establish Bash timeout controls. Network and outside-path
-access were prohibited during this change. Consequently neither
-`BASH_DEFAULT_TIMEOUT_MS` nor `BASH_MAX_TIMEOUT_MS` has been verified here;
-this is not evidence that supported controls do not exist. No speculative
-control is passed by this change, and the liveness requirement remains open.
+The admitted owner review for #417 (pull_request_review 5397793007) supplies
+direct Claude Code 2.1.283 evidence: `BASH_DEFAULT_TIMEOUT_MS` controls the default
+foreground timeout and `BASH_MAX_TIMEOUT_MS` caps an explicit model timeout.
+This implementation relies on that admitted evidence; it does not claim a new
+local binary verification. A model can still request a shorter explicit timeout.
+Typed detachment detection therefore remains authoritative.
 
-Before completing #388, verify both default and maximum timeout semantics
-against 2.1.283, including explicit Bash timeout inputs. Derive invocation-local
-controls from the effective runtime attempt deadline (including a tighter parent
-or stage deadline), reserve bounded time for result delivery, and test that
-values remain strictly below the attempt wall. Do not derive them from the
-inactivity window: an attached main-thread tool suspends that window.
-A fresh live generation with foreground work exceeding 120 seconds is still
-required after adoption.
+At main invocation dispatch, both controls use the remaining effective context
+deadline, including a tighter parent or stage deadline. They reserve one
+millisecond and round down to milliseconds, remaining strictly within the
+attempt wall. Insufficient remaining authority refuses dispatch. Unbounded
+callers receive no timeout override. Probes receive neither variable.
+The inactivity window is not used: attached main-thread work suspends it.
+No repository-specific test duration enters the calculation.
+
+Fresh live acceptance after merge/adoption remains required: foreground work
+longer than 120 seconds must stay attached and deliver its actual result.
 
 This change does not expand provider permissions or filesystem authorization.
-It retains only bounded in-memory tool IDs and a sticky count; background task
-IDs, commands and result prose are not added to durable records.
+Background task IDs, commands and result prose are not added to durable records.

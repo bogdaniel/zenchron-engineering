@@ -1132,6 +1132,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	if p.Agent.Kind == AgentKindClaudeCode {
+		if deadline, bounded := ctx.Deadline(); bounded {
+			extra, err := claudeBashTimeoutEnv(time.Until(deadline))
+			if err == nil {
+				env, err = withInvocationEnv(env, extra)
+			}
+			if err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+	}
 	if progressMode == progressByteOutputExcludingTransportChatter {
 		ctx = withTransportChatter(ctx, transportChatterPatterns(spec))
 	}

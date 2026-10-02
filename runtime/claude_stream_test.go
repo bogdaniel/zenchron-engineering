@@ -1235,11 +1235,11 @@ func TestClaudeAutomaticDetachmentTypedCorrelation(t *testing.T) {
 		want                             bool
 	}{
 		{"automatic", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, true},
-		{"identity alone", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe"}`, true},
-		{"timeout alone", "Bash", "X", "", `{"timedOutAfterMs":120000}`, true},
-		{"wrong tool", "Read", "X", "", `{"backgroundTaskId":"bielbpgpe"}`, false},
-		{"unknown id", "Bash", "Y", "", `{"backgroundTaskId":"bielbpgpe"}`, false},
-		{"nested result", "Bash", "X", "agent", `{"backgroundTaskId":"bielbpgpe"}`, false},
+		{"identity alone", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe"}`, false},
+		{"timeout alone", "Bash", "X", "", `{"timedOutAfterMs":120000}`, false},
+		{"wrong tool", "Read", "X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, false},
+		{"unknown id", "Bash", "Y", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, false},
+		{"nested result", "Bash", "X", "agent", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, false},
 		{"wrong types", "Bash", "X", "", `{"backgroundTaskId":true,"timedOutAfterMs":"120000"}`, false},
 		{"empty", "Bash", "X", "", `{"backgroundTaskId":"","timedOutAfterMs":0}`, false},
 		{"null", "Bash", "X", "", `null`, false},
@@ -1278,5 +1278,50 @@ func TestClaudeAutomaticDetachmentOutranksFailedFinalResults(t *testing.T) {
 				t.Fatalf("plan=%v processFailed=%v: outcome=%v failure=%+v", plan, processFailed, result.Outcome, result.Failure)
 			}
 		}
+	}
+}
+
+func TestClaudeBashTimeoutUsesEffectiveAttemptAuthority(t *testing.T) {
+	for _, parentLimit := range []time.Duration{time.Hour, 30 * time.Second} {
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		request.Budgets.WallLimit = 5 * time.Minute
+		deadline := time.Now().Add(2 * time.Minute)
+		request.Deadline = &deadline
+		ctx, cancel := context.WithTimeout(context.Background(), parentLimit)
+		defer cancel()
+		result, err := provider.Execute(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var values []string
+		for _, entry := range fake.execution(t).env {
+			if strings.HasPrefix(entry, "BASH_DEFAULT_TIMEOUT_MS=") || strings.HasPrefix(entry, "BASH_MAX_TIMEOUT_MS=") {
+				_, value, _ := strings.Cut(entry, "=")
+				values = append(values, value)
+			}
+		}
+		if len(values) != 2 || values[0] != values[1] {
+			t.Fatalf("timeout controls: %v", values)
+		}
+		var ms int64
+		if _, err := fmt.Sscan(values[0], &ms); err != nil {
+			t.Fatal(err)
+		}
+		remaining := result.Invocation.Deadline.Sub(*result.Invocation.StartedAt)
+		if ms <= 0 || time.Duration(ms)*time.Millisecond >= remaining || remaining-time.Duration(ms)*time.Millisecond > time.Second {
+			t.Fatalf("timeout %dms does not use remaining authority %s", ms, remaining)
+		}
+		for _, call := range fake.calls {
+			if last := call.args[len(call.args)-1]; last == "--help" || last == "--version" {
+				for _, entry := range call.env {
+					if strings.HasPrefix(entry, "BASH_") {
+						t.Fatalf("probe timeout: %s", entry)
+					}
+				}
+			}
+		}
+	}
+	if _, err := claudeBashTimeoutEnv(time.Millisecond); err == nil {
+		t.Fatal("tiny authority accepted")
 	}
 }
