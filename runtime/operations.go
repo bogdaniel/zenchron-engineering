@@ -1541,10 +1541,10 @@ func assertExecutionSubject(state *runState, workspace *CandidateWorkspace, purp
 // restarted runtime needs to name a root cause without the process-local error.
 type executionRecord struct {
 	mutationResult
-	Diagnostic      *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
-	ReviewRefusal   *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
-	RefusedMaterial       *RefusedMaterialSnapshot `json:"refused_material,omitempty"`
-	ProviderFailureClass  FailureClass             `json:"provider_failure_class,omitempty"`
+	Diagnostic           *ExecutionDiagnostic        `json:"diagnostic,omitempty"`
+	ReviewRefusal        *ReviewerResultRefusedError `json:"review_refusal,omitempty"`
+	RefusedMaterial      *RefusedMaterialSnapshot    `json:"refused_material,omitempty"`
+	ProviderFailureClass FailureClass                `json:"provider_failure_class,omitempty"`
 	// PriorContext explains the prior-attempt observations this invocation
 	// inherited, or is absent when it inherited none. It records WHICH earlier
 	// attempts were supplied rather than a copy of what they said, so a replay
