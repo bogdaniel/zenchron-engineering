@@ -232,7 +232,6 @@ func TestRefusedMaterialQuarantineSurvivesWorkspaceReconstruction(t *testing.T) 
 	}
 }
 
-
 // A later failed retry that produces nothing must not erase the refused
 // material an earlier failed attempt preserved. The run still exhausts its
 // ordinary attempt budget; its terminal held-material record simply names what
