@@ -37,6 +37,19 @@ type invalidExpectation struct {
 	keyword          string
 }
 
+// The Control Plane's read endpoints are typed response projections, not
+// document types: nothing stores or round-trips a fixture of them, so they
+// have no entry in fixtureSchemas. They still belong under schemas/ (every
+// external response shape must have one) and TestSchemasCompile still proves
+// they compile; they are just not part of the fixture-validated set below.
+var responseSchemas = []string{
+	"control-plane-controller.schema.json",
+	"control-plane-plan.schema.json",
+	"control-plane-run.schema.json",
+	"control-plane-run-events.schema.json",
+	"control-plane-runs.schema.json",
+}
+
 var invalidExpectations = map[string]invalidExpectation{
 	"string-material.engineering-policy.json":                   {"/rules/RULE-REVIEW/effect/obligations/review/material", "type"},
 	"ambiguous-unknown.engineering-fact.json":                   {"/value", "oneOf"},
@@ -94,11 +107,12 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every schema is either a document type with fixtures, or the shared
-	// vocabulary those documents reference. A file that is neither is a schema
-	// nothing validates against and nothing refers to.
-	if want := len(fixtureSchemas) + 1; len(files) != want {
-		t.Fatalf("found %d schemas, want %d (the document types plus the planning vocabulary)", len(files), want)
+	// Every schema is a document type with fixtures, the shared vocabulary
+	// those documents reference, or a Control Plane response projection. A
+	// file that is none of those is a schema nothing validates against and
+	// nothing refers to.
+	if want := len(fixtureSchemas) + 1 + len(responseSchemas); len(files) != want {
+		t.Fatalf("found %d schemas, want %d (the document types, the planning vocabulary, and the control plane response schemas)", len(files), want)
 	}
 
 	for _, file := range files {
