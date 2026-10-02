@@ -1661,6 +1661,14 @@ func resequenceEvents(t *testing.T, fixture *phase8Fixture, runID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The deleted rows freed their global_sequence values, but global_sequence
+	// is a table-wide counter (#399), not a per-run one: reinserted rows still
+	// need values that don't collide with any other run's events, so the next
+	// one is read fresh rather than reused from the deleted rows.
+	var nextGlobalSequence int64
+	if err := db.QueryRow(`SELECT COALESCE(MAX(global_sequence), 0) + 1 FROM events`).Scan(&nextGlobalSequence); err != nil {
+		t.Fatal(err)
+	}
 	var replayed []EngineeringEvent
 	for _, document := range documents {
 		var e EngineeringEvent
@@ -1690,11 +1698,12 @@ func resequenceEvents(t *testing.T, fixture *phase8Fixture, runID string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`INSERT INTO events (`+sqliteEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		if _, err := db.Exec(`INSERT INTO events (`+sqliteEventInsertColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.RunID, e.Sequence, e.Type, e.OperationID, e.PreviousEventID, e.PreviousEventHash,
-			e.StateBefore, e.StateAfter, e.EventHash, string(canonical)); err != nil {
+			e.StateBefore, e.StateAfter, e.EventHash, string(canonical), nextGlobalSequence); err != nil {
 			t.Fatal(err)
 		}
+		nextGlobalSequence++
 		replayed = append(replayed, e)
 	}
 }
