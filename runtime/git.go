@@ -462,7 +462,7 @@ func (w *CandidateWorkspace) QuarantineRefusedMaterial(stateDir string, attempt 
 		ID: id, Commit: strings.TrimSpace(stashCommit), Tree: strings.TrimSpace(stashTree),
 		SubjectCommit: subject.Commit, SubjectTree: subject.Tree,
 		BundleSHA256: hex.EncodeToString(bundleSum[:]),
-		PathCount: len(paths), ContentDigest: contentDigest,
+		PathCount:    len(paths), ContentDigest: contentDigest,
 	}, nil
 }
 
