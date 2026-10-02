@@ -343,6 +343,42 @@ WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed',
 -- The controller-effective configuration a plan was first claimed under (#307).
 -- Empty for plans that predate it; see planConfigurationHold.
 ALTER TABLE plans ADD COLUMN config_digest TEXT NOT NULL DEFAULT '';
+`, `
+-- A durable, monotonically increasing CROSS-STREAM cursor (#399).
+--
+-- Every stream's own sequence column already orders that one run's (or
+-- plan's) history, but nothing orders events ACROSS runs: a fleet-wide
+-- observer asking "which runs changed since X" had no answer but polling
+-- every run or replaying the whole table (#96). global_sequence is that total
+-- order - one counter shared by every stream, allocated inside the same
+-- write-locked append transaction that allocates the stream-local sequence
+-- (appendToStream), so the two can never disagree about which event came
+-- first.
+--
+-- It is never part of the hash-chained document: a run's chain and digests
+-- are defined entirely by that run's own stream, and a fleet-wide numbering
+-- scheme is not something a run's history should need to know about, or be
+-- able to invalidate, to stay verifiable.
+--
+-- Existing rows are backfilled in ROWID order. That order already agrees with
+-- every stream's sequence order - appendToStream commits each row strictly
+-- after the rows before it in that stream, so ROWID order and per-stream
+-- sequence order are the same order seen through two different columns - so
+-- backfilling by it gives historical rows a global order consistent with the
+-- history they already have, not a renumbering of it.
+ALTER TABLE events ADD COLUMN global_sequence INTEGER NOT NULL DEFAULT 0;
+UPDATE events SET global_sequence = ranked.ord
+FROM (SELECT rowid AS rid, ROW_NUMBER() OVER (ORDER BY rowid) AS ord FROM events) AS ranked
+WHERE events.rowid = ranked.rid;
+CREATE UNIQUE INDEX events_global_sequence ON events(global_sequence);
+-- ChangesSince filters by stream_kind and orders by global_sequence. Without
+-- this index SQLite's planner prefers the existing (stream_kind, run_id,
+-- plan_id, sequence) index for the equality filter and then sorts the result
+-- in a temp B-tree before LIMIT applies - a scan of every matching row, which
+-- is exactly the unbounded cost #399 exists to avoid. This composite index
+-- answers the filter AND the ordering from one range scan, so LIMIT bounds
+-- the rows actually touched.
+CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequence);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
