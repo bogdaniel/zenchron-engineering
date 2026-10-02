@@ -521,7 +521,17 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// only around Provider.Execute; a stop landing before or after that
 	// window rewrites nothing here.
 	var watch executionWatch
-	defer func() { watch.settle(&out) }()
+	// settleMaterial is the #390 attempt boundary. It runs AFTER watch.settle,
+	// because only then is it known whether an operator stop ended this
+	// attempt - and a stopped attempt's material is #203's to hold in place,
+	// never quarantine's to move.
+	var settleMaterial func(*effect)
+	defer func() {
+		watch.settle(&out)
+		if settleMaterial != nil {
+			settleMaterial(&out)
+		}
+	}()
 	// CAN THIS WORKER ATTEMPT WHAT IT IS ABOUT TO BE OBLIGATED TO DO?
 	//
 	// Asked before the workspace is touched and before any invocation is spent.
@@ -546,6 +556,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
+	}
+	// ORPHANED QUARANTINES ARE ADOPTED BEFORE ANY PROVIDER RUNS (#390). A
+	// controller that died after a quarantine copy completed but before its
+	// candidate.quarantined event was journalled left a complete copy with no
+	// durable identity and a workspace that may still be partly restored.
+	// Adoption re-applies the idempotent restore and journals the record with
+	// THIS invocation's outcome; a restore that fails stops the attempt before
+	// a provider can run on top of refused material.
+	adopted, adoptErr := r.adoptOrphanQuarantines(state, operation, operation.AttemptIdentity, workspace.Dir)
+	if adoptErr != nil {
+		out := failed(adoptErr)
+		stopRefusedAttempt(&out, adoptErr)
+		out.events = adopted
+		return out
+	}
+	if len(adopted) > 0 {
+		defer func() { out.events = append(append([]journalEntry(nil), adopted...), out.events...) }()
 	}
 	// THE SUBJECT, re-proven immediately before the provider runs.
 	//
@@ -904,6 +931,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	paths, pathErr := candidateChangedPaths(workspace.Dir)
 	if pathErr != nil {
 		return recorded(failed(pathErr))
+	}
+	// THE ATTEMPT BOUNDARY (#390). Whatever path below settles this attempt,
+	// a FAILED settlement with material in the workspace quarantines that
+	// material before the operation is recorded, so the same binding's next
+	// physical attempt starts from the exact subject this one was given.
+	settleMaterial = func(out *effect) {
+		r.settleRefusedMaterial(out, state, operation, physicalAttempt, workspace.Dir, subject.Commit, paths)
 	}
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
@@ -1394,7 +1428,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// treat a reviewer's scratch output as a successful execution and
 		// commit it - admitting candidate content from an invocation that
 		// never crossed the protocol it was there to run.
-		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
+		//
+		// A FAILURE CLASSIFICATION IS AUTHORITATIVE FOR THE INVOCATION (#390).
+		// The one way a provider failure leaves the operation Succeeded is the
+		// governed checkpoint above: a runtime bound ended a producer that left
+		// real work, and that work is preserved as an INCOMPLETE head (#54,
+		// #328, #379). Any other failure with mutation - a refusal such as
+		// provider_background_work_unresolved, a quota or provider error, an
+		// unknown failure - used to fall through as Succeeded+mutated, and
+		// candidate.commit then committed bytes the runtime had just refused
+		// as a completed candidate. Mutation proves material exists; it is
+		// not evidence the execution succeeded. Such an operation fails, and
+		// its material is quarantined at this attempt boundary (see
+		// settleRefusedMaterial) rather than left for the next attempt.
+		if !execution.Checkpoint {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())

@@ -41,6 +41,10 @@ const (
 	// that the runtime never committed because the budget ended the run
 	// first. It exists only in the candidate workspace.
 	HeldUncommitted = "uncommitted"
+	// HeldQuarantined is material a REFUSED invocation left behind (#390):
+	// moved out of the candidate workspace into a runtime-owned quarantine,
+	// never committed and never inherited by a retry. Location names it.
+	HeldQuarantined = "quarantined"
 )
 
 // HeldDisposition is the one disposition #203 records: preserved in place,
@@ -67,6 +71,9 @@ type HeldMaterial struct {
 	Operation     string `json:"operation,omitempty"`
 	PathCount     int    `json:"path_count,omitempty"`
 	ContentDigest string `json:"content_digest,omitempty"`
+	// Location is where quarantined material is kept, relative to the state
+	// directory. It is set only for HeldQuarantined.
+	Location string `json:"location,omitempty"`
 	// NextStep is the lifecycle operation the planner selects next, and
 	// BlockedBy is the terminal reason that step is not admissible.
 	NextStep  string `json:"next_step,omitempty"`
@@ -79,7 +86,7 @@ type HeldMaterial struct {
 	Disposition          string `json:"disposition"`
 }
 
-var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true}
+var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true, HeldQuarantined: true}
 
 func (h HeldMaterial) validate() error {
 	var closed error
@@ -146,6 +153,15 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		return held.bounded()
 	}
 	if head == "" {
+		// Nothing was committed. What a refused attempt produced is still
+		// preserved, so the terminal record names the latest quarantine
+		// rather than reporting that nothing is held.
+		if q, ok := s.latestQuarantine(); ok {
+			held.Kind, held.Operation, held.Location = HeldQuarantined, q.OperationID, q.Location
+			held.PathCount, held.ContentDigest = q.PathCount, q.ContentDigest
+			held.Revision = q.Subject
+			return held.bounded()
+		}
 		return nil
 	}
 	if pr := s.projection.PullRequest; pr != nil && pr.HeadRevision == head {
@@ -171,7 +187,7 @@ func (h HeldMaterial) bounded() *HeldMaterial {
 	for _, field := range []*string{&h.NextStep, &h.BlockedBy, &h.Successor, &h.SuccessorUnavailable} {
 		*field = boundedField(*field)
 	}
-	for _, field := range []*string{&h.Revision, &h.Tree, &h.Operation, &h.ContentDigest} {
+	for _, field := range []*string{&h.Revision, &h.Tree, &h.Operation, &h.ContentDigest, &h.Location} {
 		if boundedField(*field) != *field {
 			*field = ""
 		}
@@ -261,4 +277,19 @@ func workspaceContentDigest(dir string, paths []string) string {
 		b.WriteString(path + "\x00" + identity + "\n")
 	}
 	return textDigest(b.String())
+}
+
+// latestQuarantine is the most recent candidate.quarantined record the run
+// journalled, read back rather than re-derived.
+func (s *runState) latestQuarantine() (CandidateQuarantinedPayload, bool) {
+	for i := len(s.events) - 1; i >= 0; i-- {
+		if s.events[i].Type != EventCandidateQuarantined {
+			continue
+		}
+		var p CandidateQuarantinedPayload
+		if json.Unmarshal(s.events[i].Payload, &p) == nil {
+			return p, true
+		}
+	}
+	return CandidateQuarantinedPayload{}, false
 }
