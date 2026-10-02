@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zenchron.engineering/schemas/v0.1/control-plane-error.schema.json",
+  "title": "Control plane: shared error response",
+  "description": "The one error body shape every control plane endpoint returns for 400/401/404/500 - never a second, endpoint-specific error shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": { "type": "string" },
+    "message": { "type": "string" }
+  }
+}

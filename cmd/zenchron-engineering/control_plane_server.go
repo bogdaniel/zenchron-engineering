@@ -161,7 +161,11 @@ func (s *controlPlaneServer) handleRunEvents(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	events, err := s.store.EventsAfter(runID, after)
+	// EventsPage is bounded at the SQL layer itself (ORDER BY sequence ASC
+	// LIMIT ?): a run with a large tail never has more than limit+1 rows read
+	// out of SQLite to answer one page, unlike slicing an EventsAfter result
+	// that already materialized the whole remaining stream.
+	events, err := s.store.EventsPage(runID, after, limit)
 	if err != nil {
 		writeControlPlaneError(w, http.StatusInternalServerError, "events_unavailable", err.Error())
 		return

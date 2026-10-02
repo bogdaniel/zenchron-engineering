@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +42,115 @@ func TestEventsAfterCursorAndValidation(t *testing.T) {
 	}
 	if _, err := store.EventsAfter("r", 0); err == nil {
 		t.Fatal("accepted inconsistent row")
+	}
+}
+
+// recordingEventQuerier wraps a real *sql.DB and remembers the last query
+// text and arguments it was asked to run, so a test can inspect what was
+// actually sent to SQLite rather than only the Go-level result.
+type recordingEventQuerier struct {
+	db        *sql.DB
+	lastQuery string
+	lastArgs  []any
+}
+
+func (r *recordingEventQuerier) Query(query string, args ...any) (*sql.Rows, error) {
+	r.lastQuery = query
+	r.lastArgs = args
+	return r.db.Query(query, args...)
+}
+
+// TestEventsPageCarriesTheBoundIntoSQL proves the bound is a property of the
+// query SQLite executes, not a slice applied to an already-fetched result:
+// the statement itself carries "ORDER BY sequence ASC LIMIT ?", and the limit
+// argument is one more than the page size (fetching one extra row is how the
+// caller learns whether the page was truncated without a second query).
+func TestEventsPageCarriesTheBoundIntoSQL(t *testing.T) {
+	_, store := openJournal(t)
+	for _, event := range journalFixture(t, "r") {
+		if _, err := store.AppendEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorder := &recordingEventQuerier{db: store.db}
+	events, err := queryStreamEventsLimit(recorder, 3, `stream_kind = ? AND run_id = ? AND sequence > ?`, streamRun, "r", int64(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recorder.lastQuery, "ORDER BY sequence ASC LIMIT ?") {
+		t.Fatalf("query did not carry a SQL-level LIMIT: %q", recorder.lastQuery)
+	}
+	if len(recorder.lastArgs) == 0 || recorder.lastArgs[len(recorder.lastArgs)-1] != 3 {
+		t.Fatalf("LIMIT argument = %v, want 3 as the final bound parameter", recorder.lastArgs)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want the 3-row bound honored", len(events))
+	}
+}
+
+// TestEventsPageOnALargeTailOnlyMaterializesTheBoundedPage seeds a run with a
+// tail far larger than any one page and proves two things: a single call
+// never returns more than limit+1 rows regardless of how much history exists
+// behind the cursor, and walking the whole tail page by page via NextAfter
+// visits every sequence exactly once - no gaps, no duplicates.
+func TestEventsPageOnALargeTailOnlyMaterializesTheBoundedPage(t *testing.T) {
+	_, store := openJournal(t)
+	const total = 237
+	for i := 0; i < total; i++ {
+		if _, err := store.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion,
+			ID:            fmt.Sprintf("tail-%d", i),
+			RunID:         "r",
+			Type:          EventRunCreated,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const limit = 10
+	var after int64
+	seen := map[int64]bool{}
+	pages := 0
+	for {
+		page, err := store.EventsPage("r", after, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) > limit+1 {
+			t.Fatalf("page returned %d rows, want at most limit+1=%d", len(page), limit+1)
+		}
+		truncated := len(page) > limit
+		if truncated {
+			page = page[:limit]
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, event := range page {
+			if event.Sequence <= after {
+				t.Fatalf("page returned sequence %d at or before cursor %d", event.Sequence, after)
+			}
+			if seen[event.Sequence] {
+				t.Fatalf("sequence %d returned twice across pages", event.Sequence)
+			}
+			seen[event.Sequence] = true
+		}
+		after = page[len(page)-1].Sequence
+		pages++
+		if !truncated {
+			break
+		}
+		if pages > total {
+			t.Fatal("cursor chaining did not converge")
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("walked %d distinct sequences, want %d", len(seen), total)
+	}
+	for seq := int64(1); seq <= int64(total); seq++ {
+		if !seen[seq] {
+			t.Fatalf("sequence %d was never visited: gap in cursor chaining", seq)
+		}
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
+	"github.com/bogdaniel/zenchron-engineering/schemas"
 )
 
 func newControlPlaneFixture(t *testing.T) (string, *runtime.SQLiteOperationStore) {
@@ -64,6 +65,22 @@ func doControlPlaneGet(t *testing.T, ts *httptest.Server, path, token string) (i
 	return resp.StatusCode, body
 }
 
+// validateAgainstSchema proves the ACTUAL bytes a handler wrote - not a
+// struct the test happens to decode them back into - satisfy the declared
+// contract for that response shape. Every schema in schemas/ has
+// additionalProperties:false, so this is what catches a runtime projection
+// growing a field the schema was never updated to allow.
+func validateAgainstSchema(t *testing.T, name string, body []byte) {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("response is not valid JSON: %v\n%s", err, body)
+	}
+	if err := schemas.Validate(name, value); err != nil {
+		t.Fatalf("response did not satisfy the %s schema: %v\n%s", name, err, body)
+	}
+}
+
 // THERE IS NO EXEMPT ROUTE. A missing token, a wrong one, and the real one are
 // three different outcomes, and only the last admits the request.
 func TestControlPlaneRefusesUnauthorizedRequests(t *testing.T) {
@@ -73,12 +90,18 @@ func TestControlPlaneRefusesUnauthorizedRequests(t *testing.T) {
 
 	if status, body := doControlPlaneGet(t, ts, "/v1/runs", ""); status != http.StatusUnauthorized {
 		t.Fatalf("no token: status = %d, want 401: %s", status, body)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body)
 	}
 	if status, body := doControlPlaneGet(t, ts, "/v1/runs", "not-the-token"); status != http.StatusUnauthorized {
 		t.Fatalf("wrong token: status = %d, want 401: %s", status, body)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body)
 	}
 	if status, body := doControlPlaneGet(t, ts, "/v1/runs", "the-real-token"); status != http.StatusOK {
 		t.Fatalf("correct token: status = %d, want 200: %s", status, body)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneRuns, body)
 	}
 }
 
@@ -104,6 +127,7 @@ func TestControlPlaneRunsAndRunDetailReuseFleetStatus(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", status, body)
 	}
+	validateAgainstSchema(t, schemas.ControlPlaneRuns, body)
 	var got runtime.Fleet
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
@@ -139,6 +163,7 @@ func TestControlPlaneRunsAndRunDetailReuseFleetStatus(t *testing.T) {
 	if status3 != http.StatusOK {
 		t.Fatalf("run detail status = %d, body = %s", status3, body3)
 	}
+	validateAgainstSchema(t, schemas.ControlPlaneRun, body3)
 	var gotRun runtime.RunSummary
 	if err := json.Unmarshal(body3, &gotRun); err != nil {
 		t.Fatal(err)
@@ -149,6 +174,8 @@ func TestControlPlaneRunsAndRunDetailReuseFleetStatus(t *testing.T) {
 
 	if status4, body4 := doControlPlaneGet(t, ts, "/v1/runs/no-such-run", "tok"); status4 != http.StatusNotFound {
 		t.Fatalf("unknown run: status = %d, want 404: %s", status4, body4)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body4)
 	}
 }
 
@@ -177,6 +204,7 @@ func TestControlPlaneRunEventsIsPaginatedAndBounded(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", status, body)
 	}
+	validateAgainstSchema(t, schemas.ControlPlaneRunEvents, body)
 	var page controlPlaneRunEvents
 	if err := json.Unmarshal(body, &page); err != nil {
 		t.Fatal(err)
@@ -198,6 +226,7 @@ func TestControlPlaneRunEventsIsPaginatedAndBounded(t *testing.T) {
 	if status2 != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", status2, body2)
 	}
+	validateAgainstSchema(t, schemas.ControlPlaneRunEvents, body2)
 	var page2 controlPlaneRunEvents
 	if err := json.Unmarshal(body2, &page2); err != nil {
 		t.Fatal(err)
@@ -221,14 +250,20 @@ func TestControlPlaneRunEventsIsPaginatedAndBounded(t *testing.T) {
 		t.Fatalf("limit = %d, want the clamp %d", page3.Limit, controlPlaneMaxEventLimit)
 	}
 
-	if status4, _ := doControlPlaneGet(t, ts, "/v1/runs/run-events/events?after=-1", "tok"); status4 != http.StatusBadRequest {
+	if status4, body4 := doControlPlaneGet(t, ts, "/v1/runs/run-events/events?after=-1", "tok"); status4 != http.StatusBadRequest {
 		t.Fatalf("negative after: status = %d, want 400", status4)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body4)
 	}
-	if status5, _ := doControlPlaneGet(t, ts, "/v1/runs/run-events/events?limit=0", "tok"); status5 != http.StatusBadRequest {
+	if status5, body5 := doControlPlaneGet(t, ts, "/v1/runs/run-events/events?limit=0", "tok"); status5 != http.StatusBadRequest {
 		t.Fatalf("zero limit: status = %d, want 400", status5)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body5)
 	}
-	if status6, _ := doControlPlaneGet(t, ts, "/v1/runs/no-such-run/events", "tok"); status6 != http.StatusNotFound {
+	if status6, body6 := doControlPlaneGet(t, ts, "/v1/runs/no-such-run/events", "tok"); status6 != http.StatusNotFound {
 		t.Fatalf("unknown run: status = %d, want 404", status6)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body6)
 	}
 }
 
@@ -286,6 +321,7 @@ func TestControlPlaneControllerReusesDescribeControllerStatusAndRepresentsGenera
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", status, body)
 	}
+	validateAgainstSchema(t, schemas.ControlPlaneController, body)
 	var got runtime.ControllerStatus
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
@@ -295,6 +331,55 @@ func TestControlPlaneControllerReusesDescribeControllerStatusAndRepresentsGenera
 	}
 	if got.DurableConsistency != runtime.DurableViolation {
 		t.Fatalf("the generation mismatch is not represented explicitly: durable_consistency = %q", got.DurableConsistency)
+	}
+}
+
+// THE PLAN ENDPOINT IS store.ReplayPlan, and its wire bytes satisfy the
+// declared control-plane-plan schema exactly as every other endpoint's do.
+func TestControlPlanePlanDetailReusesReplayPlanAndMatchesSchema(t *testing.T) {
+	dir, store := newControlPlaneFixture(t)
+	now := time.Unix(1700000000, 0).UTC()
+
+	plan := domain.EngineeringPlan{
+		SchemaVersion: domain.SchemaVersion, ID: "plan-detail", Revision: 1,
+		Objective: "fixture objective",
+		Subject:   domain.Subject{Repository: "acme/repo", Revision: "rev-a"},
+	}
+	digest, err := plan.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Digest = digest
+	if ok, err := store.ClaimPlan(plan, now); err != nil || !ok {
+		t.Fatalf("HARNESS PRECONDITION: could not seed the plan: ok=%v err=%v", ok, err)
+	}
+
+	want, err := store.ReplayPlan("plan-detail")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := newControlPlaneServer(store, dir, 1, "tok")
+	server.now = func() time.Time { return now }
+	ts := startControlPlane(t, server)
+
+	status, body := doControlPlaneGet(t, ts, "/v1/plans/plan-detail", "tok")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+	validateAgainstSchema(t, schemas.ControlPlanePlan, body)
+	var got runtime.PlanSnapshot
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("GET /v1/plans/plan-detail diverged from store.ReplayPlan:\nwant %+v\ngot  %+v", want, got)
+	}
+
+	if status2, body2 := doControlPlaneGet(t, ts, "/v1/plans/no-such-plan", "tok"); status2 != http.StatusNotFound {
+		t.Fatalf("unknown plan: status = %d, want 404: %s", status2, body2)
+	} else {
+		validateAgainstSchema(t, schemas.ControlPlaneError, body2)
 	}
 }
 

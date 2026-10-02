@@ -32,6 +32,19 @@ const (
 	// the role and capability catalogues, referenced by the schemas that used
 	// to restate them, and it is compiled here so those references resolve.
 	PlanningVocabulary = "planning-vocabulary"
+	// The Control Plane's read endpoints. These are typed response
+	// projections, not document types - nothing stores or round-trips a
+	// fixture of them - so acceptance tests validate actual wire response
+	// bytes against these directly rather than through the fixture corpus.
+	ControlPlaneController = "control-plane-controller"
+	ControlPlanePlan       = "control-plane-plan"
+	ControlPlaneRun        = "control-plane-run"
+	ControlPlaneRunEvents  = "control-plane-run-events"
+	ControlPlaneRuns       = "control-plane-runs"
+	// ControlPlaneError is the one shared error body every control plane
+	// endpoint returns for 400/401/404/500 - never a second, endpoint-specific
+	// error shape.
+	ControlPlaneError = "control-plane-error"
 )
 
 //go:embed *.schema.json
@@ -64,6 +77,12 @@ func mustCompile() map[string]*jsonschema.Schema {
 		InstructionPack,
 		PlanRevisionProposal,
 		PlanningVocabulary,
+		ControlPlaneController,
+		ControlPlanePlan,
+		ControlPlaneRun,
+		ControlPlaneRunEvents,
+		ControlPlaneRuns,
+		ControlPlaneError,
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()

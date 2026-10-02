@@ -48,6 +48,10 @@ var responseSchemas = []string{
 	"control-plane-run.schema.json",
 	"control-plane-run-events.schema.json",
 	"control-plane-runs.schema.json",
+	// The shared error body every control plane endpoint returns for
+	// 400/401/404/500 - every external response shape has a schema, and an
+	// error is a response shape.
+	"control-plane-error.schema.json",
 }
 
 var invalidExpectations = map[string]invalidExpectation{

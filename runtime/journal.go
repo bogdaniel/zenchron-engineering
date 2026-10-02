@@ -301,8 +301,25 @@ func (s *SQLiteOperationStore) Events(runID string) ([]EngineeringEvent, error) 
 
 // EventsAfter returns only rows newer than the exclusive sequence cursor, with
 // the same document/column validation as Events. It does not replay the stream.
+//
+// This is unbounded by design: callers that must replay or otherwise consume
+// an entire tail (operator.go's follow loop, for one) depend on that. A caller
+// that wants a bounded page - the control plane's event endpoint - uses
+// EventsPage instead rather than slicing this result after the fact, which
+// would still have read the whole tail from SQLite first.
 func (s *SQLiteOperationStore) EventsAfter(runID string, sequence int64) ([]EngineeringEvent, error) {
 	return queryStreamEvents(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, streamRun, runID, sequence)
+}
+
+// EventsPage returns at most limit+1 rows newer than the exclusive sequence
+// cursor, in sequence order, with the same document/column validation as
+// Events. The bound is enforced by the SQL query itself (LIMIT), not by
+// slicing an already-materialized result, so a run with a large tail never
+// has more than limit+1 rows read out of SQLite for one page. Fetching one
+// extra row lets the caller learn whether the page was truncated without a
+// second query.
+func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) ([]EngineeringEvent, error) {
+	return queryStreamEventsLimit(s.db, limit+1, `stream_kind = ? AND run_id = ? AND sequence > ?`, streamRun, runID, after)
 }
 
 // Replay rebuilds run state by feeding the persisted events back through the
@@ -339,7 +356,20 @@ func queryPlanEvents(q eventQuerier, planID string) ([]EngineeringEvent, error) 
 // so a row moved between streams by direct database access is refused rather
 // than replayed into the wrong history.
 func queryStreamEvents(q eventQuerier, where string, args ...any) ([]EngineeringEvent, error) {
-	rows, err := q.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE `+where+` ORDER BY sequence ASC`, args...)
+	return queryStreamEventsLimit(q, 0, where, args...)
+}
+
+// queryStreamEventsLimit is queryStreamEvents with an optional SQL-level cap:
+// limit <= 0 reads the whole matching stream, exactly as queryStreamEvents
+// always has; limit > 0 appends `LIMIT ?` to the query itself; so a bounded
+// caller never has SQLite return, decode, or validate a row beyond the bound.
+func queryStreamEventsLimit(q eventQuerier, limit int, where string, args ...any) ([]EngineeringEvent, error) {
+	query := `SELECT ` + sqliteEventReadColumns + ` FROM events WHERE ` + where + ` ORDER BY sequence ASC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -282,6 +282,9 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	}
 	fleet := Fleet{
 		At: now, Capacity: capacity,
+		// Runs has no `omitempty`: it is required JSON, not an optional one, so
+		// an empty fleet must still encode it as `[]`, never as `null`.
+		Runs:              []RunSummary{},
 		SupervisorRunning: SupervisorRunning(stateDir),
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
