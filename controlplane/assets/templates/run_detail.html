@@ -1,10 +1,10 @@
-{{define "title"}}{{.Status.RunID}}{{end}}
+{{define "title"}}{{.Status.ID}}{{end}}
 {{define "content"}}
 {{$s := .Status}}
-<section class="panel" data-run-id="{{$s.RunID}}">
-  <p class="breadcrumb"><a href="/runs">runs</a> / <span class="mono">{{$s.RunID}}</span></p>
-  <h1 class="mono">{{$s.RunID}}</h1>
-  <p class="meta">observed {{fmtTime .ObservedAt}} · {{$s.Repository}}{{if $s.Source.Issue}} #{{$s.Source.Issue}}{{end}}</p>
+<section class="panel" data-run-id="{{$s.ID}}">
+  <p class="breadcrumb"><a href="/runs">runs</a> / <span class="mono">{{$s.ID}}</span></p>
+  <h1 class="mono">{{$s.ID}}</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · {{$s.Repository}}{{with $s.Source}}{{if .Issue}} #{{.Issue}}{{end}}{{end}}</p>
 
   <div class="grid stats">
     <div class="stat"><span class="label">phase</span><span class="value" data-state="{{$s.Phase}}">{{$s.Phase}}</span></div>
@@ -14,23 +14,30 @@
   </div>
   <table class="kv">
     <tr><th>source</th><td>
-      {{if $s.Source.URL}}<a href="{{$s.Source.URL}}">{{$s.Source.Repository}}#{{$s.Source.Issue}}</a>{{else}}<span class="muted">not an issue-sourced run</span>{{end}}
-      {{if $s.Source.IntentChanged}}<span class="badge held" data-state="held">source moved since pinned</span>{{end}}
+      {{with $s.Source}}{{if .URL}}<a href="{{.URL}}">{{.Repository}}#{{.Issue}}</a>{{else}}<span class="muted">not an issue-sourced run</span>{{end}}
+      {{if .IntentChanged}}<span class="badge held" data-state="held">source moved since pinned</span>{{end}}
+      {{else}}<span class="muted">not an issue-sourced run</span>{{end}}
     </td></tr>
     <tr><th>worker</th><td>
-      {{if $s.Worker.Agent}}{{$s.Worker.Agent}}{{else}}<span class="muted">unknown</span>{{end}}
-      {{if $s.Worker.ProviderKind}}<span class="muted">({{$s.Worker.ProviderKind}}{{if $s.Worker.Model}} · {{$s.Worker.Model}}{{end}}{{if $s.Worker.TrustMode}} · {{$s.Worker.TrustMode}}{{end}})</span>{{end}}
+      {{with $s.Worker}}
+      {{if .Agent}}{{.Agent}}{{else}}<span class="muted">unknown</span>{{end}}
+      {{if .ProviderKind}}<span class="muted">({{.ProviderKind}}{{if .Model}} · {{.Model}}{{end}}{{if .TrustMode}} · {{.TrustMode}}{{end}})</span>{{end}}
+      {{else}}<span class="muted">unknown</span>{{end}}
     </td></tr>
     <tr><th>candidate</th><td>
-      {{if $s.Candidate.Branch}}<span class="mono">{{$s.Candidate.Branch}}</span>{{else}}<span class="muted">unknown branch</span>{{end}}
-      {{if $s.Candidate.Revision}}<div class="mono muted">rev {{$s.Candidate.Revision}}</div>{{end}}
-      {{if $s.Candidate.Tree}}<div class="mono muted">tree {{$s.Candidate.Tree}}</div>{{end}}
+      {{with $s.Candidate}}
+      {{if .Branch}}<span class="mono">{{.Branch}}</span>{{else}}<span class="muted">unknown branch</span>{{end}}
+      {{if .Revision}}<div class="mono muted">rev {{.Revision}}</div>{{end}}
+      {{if .Tree}}<div class="mono muted">tree {{.Tree}}</div>{{end}}
+      {{end}}
     </td></tr>
-    <tr><th>workspace</th><td>{{if $s.Worker.Workspace}}<span class="mono">{{$s.Worker.Workspace}}</span>{{else}}<span class="muted">unknown</span>{{end}}</td></tr>
-    <tr><th>base / contract</th><td><span class="mono">{{$s.Base.ID}} @ {{$s.Base.Revision}}</span><div class="mono muted">contract {{$s.Contract.ID}} @ {{$s.Contract.Revision}}</div></td></tr>
+    <tr><th>workspace</th><td>{{with $s.Worker}}{{if .WorkspaceBound}}<span class="muted">bound</span>{{else}}<span class="muted">unknown</span>{{end}}{{else}}<span class="muted">unknown</span>{{end}}</td></tr>
+    <tr><th>base / contract</th><td>{{with $s.Base}}<span class="mono">{{.ID}} @ {{.Revision}}</span>{{end}}{{with $s.Contract}}<div class="mono muted">contract {{.ID}} @ {{.Revision}}</div>{{end}}</td></tr>
     <tr><th>controller</th><td>
-      <span class="mono">{{$s.Controller.Build.Kind}} {{$s.Controller.Build.Version}}</span>
-      {{if $s.Controller.Changed}}<span class="badge held" data-state="held">different controller than this one</span>{{end}}
+      {{with $s.Controller}}
+      <span class="mono">{{.BuildKind}} {{.BuildVersion}}</span>
+      {{if .Changed}}<span class="badge held" data-state="held">different controller than this one</span>{{end}}
+      {{end}}
     </td></tr>
     <tr><th>pull request</th><td>
       {{with $s.PullRequest}}
@@ -50,12 +57,12 @@
       · max assurance attempts {{.MaxAssuranceAttempts}}
     </td></tr>
     {{else}}
-    <tr><th>budgets</th><td><span class="muted">unknown{{if $s.RunPolicy.Unverifiable}} (unverifiable: {{range $s.RunPolicy.Unverifiable}}{{.}} {{end}}){{end}}</span></td></tr>
+    <tr><th>budgets</th><td><span class="muted">unknown{{if $s.BudgetsUnverifiable}} (unverifiable: {{range $s.BudgetsUnverifiable}}{{.}} {{end}}){{end}}</span></td></tr>
     {{end}}
   </table>
 </section>
 
-<section class="panel" id="operation-panel" data-run-id="{{$s.RunID}}">
+<section class="panel" id="operation-panel" data-run-id="{{$s.ID}}">
   <h2>current operation</h2>
   {{with $s.Operation}}
   <div class="grid stats">
@@ -90,7 +97,7 @@
       {{with $s.Assurance}}<span data-state="{{if .Passed}}passed{{else}}failed{{end}}">{{if .Passed}}passed{{else}}failed{{end}}</span>{{if .FailureClass}} <span class="muted">({{.FailureClass}})</span>{{end}}{{if .Stale}} <span class="muted">stale</span>{{end}}{{else}}<span class="muted">not observed</span>{{end}}
     </td></tr>
     <tr><th>publication authority</th><td>
-      {{with $s.PublicationAuthority}}<span data-state="{{.Status}}">{{.Status}}</span> <span class="muted">({{.Action.Type}} {{.Action.Target}})</span>{{else}}<span class="muted">no decision recorded</span>{{end}}
+      {{with $s.PublicationAuthority}}<span data-state="{{.Status}}">{{.Status}}</span> <span class="muted">({{.ActionType}} {{.ActionTarget}})</span>{{else}}<span class="muted">no decision recorded</span>{{end}}
     </td></tr>
     <tr><th>authority request</th><td>
       {{with $s.AuthorityRequest}}
@@ -103,7 +110,6 @@
     {{with $s.ExecutionDiagnostic}}
     <tr><th>last execution diagnostic</th><td>
       stage {{.Stage}}{{if .FailureClass}}, class {{.FailureClass}}{{end}}{{if .Bound}}, bound {{.Bound}}{{end}}
-      {{if .Message}}<div class="muted">{{.Message}}</div>{{end}}
       {{if .Successor}}<div class="muted">successor {{.Successor}}{{if .SuccessorUnavailable}}, unavailable: {{.SuccessorUnavailable}}{{end}}</div>{{end}}
     </td></tr>
     {{end}}
@@ -116,7 +122,7 @@
 <section class="panel">
   <h2>causal event timeline</h2>
   <p class="meta"><span data-field="event-count">{{len .Events}}</span> event(s) from sequence {{.After}}{{if .HasMore}}, more available{{end}}</p>
-  <ol class="timeline" id="timeline" data-run-id="{{$s.RunID}}" data-after="{{.NextAfter}}">
+  <ol class="timeline" id="timeline" data-run-id="{{$s.ID}}" data-after="{{.NextAfter}}">
     {{range .Events}}
     <li data-sequence="{{.Sequence}}">
       <span class="mono muted">#{{.Sequence}}</span>
@@ -127,6 +133,6 @@
     <li class="empty">no events recorded</li>
     {{end}}
   </ol>
-  {{if .HasMore}}<p><a href="/runs/{{$s.RunID}}?after={{.NextAfter}}">next page (newer) →</a></p>{{end}}
+  {{if .HasMore}}<p><a href="/runs/{{$s.ID}}?after={{.NextAfter}}">next page (newer) →</a></p>{{end}}
 </section>
 {{end}}

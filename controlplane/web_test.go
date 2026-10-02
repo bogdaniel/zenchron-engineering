@@ -28,6 +28,14 @@ func getWeb(t *testing.T, w *Web, path string, cookie string, status int) []byte
 	if bytes.Contains(out.Body.Bytes(), []byte("SECRET")) {
 		t.Fatalf("secret escaped: %s", out.Body.String())
 	}
+	// httptest.ResponseRecorder keeps the FIRST WriteHeader call, so a
+	// template that panics partway through still records 200: the page
+	// already started streaming before render()'s error path called
+	// http.Error. Scanning the body for render()'s own fixed error text is
+	// what actually catches a broken template field reference.
+	if bytes.Contains(out.Body.Bytes(), []byte("render failed")) {
+		t.Fatalf("template execution failed mid-render: %s", out.Body.String())
+	}
 	return out.Body.Bytes()
 }
 

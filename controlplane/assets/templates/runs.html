@@ -40,7 +40,7 @@
       {{range .Runs}}
       <tr>
         <td>
-          <a class="mono" href="/runs/{{.RunID}}">{{.RunID}}</a>
+          <a class="mono" href="/runs/{{.ID}}">{{.ID}}</a>
           <div class="muted">{{.Repository}}{{if .Issue}} #{{.Issue}}{{end}}</div>
         </td>
         <td>
@@ -68,7 +68,7 @@
           {{if .PullRequest}}<span>#{{.PullRequest}}</span>{{if .PRState}} <span class="muted">{{.PRState}}</span>{{end}}{{if .CI}} · CI <span data-state="{{.CI}}">{{.CI}}</span>{{end}}{{if .Review}} · review <span data-state="{{.Review}}">{{.Review}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
         </td>
       </tr>
-      {{if .Error}}<tr><td colspan="9" class="banner error">{{.RunID}}: could not be replayed</td></tr>{{end}}
+      {{if .Unavailable}}<tr><td colspan="9" class="banner error">{{.ID}}: could not be replayed</td></tr>{{end}}
       {{else}}
       <tr><td colspan="9" class="empty">no runs match this filter</td></tr>
       {{end}}

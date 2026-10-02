@@ -20,11 +20,17 @@
 // a request carries, exactly where the existing bearer credential already
 // travels for every other client.
 //
-// Templates render runtime.RunSummary and runtime.StatusReport directly, but
-// never their Reason or Error members: both are free-form diagnostic prose
-// (runtime/fleet.go, runtime/controller.go), the exact category API's own
-// doc comment already excludes, and rendering it here would relax a
-// boundary S1 drew rather than build on it.
+// Templates render ONLY controlplane's own sanitized DTOs - Fleet, Run,
+// RunDetail, Controller, Plan, Event - never runtime.RunSummary,
+// runtime.StatusReport, runtime.ControllerStatus or runtime.Fleet
+// themselves. Every handler below converts through the identical projection
+// functions (runProjection, runDetailProjection, controllerProjection,
+// fleetProjection, eventProjection) api.go's own JSON handlers call, so the
+// HTML surface and the /v1/* JSON surface are two presentations of the same
+// sanitized read, never two independent readers of the rich runtime
+// structs. That is what keeps a local workspace path, a raw diagnostic
+// message or a control-endpoint socket path from ever reaching a template
+// (#397 review 5397796709).
 package controlplane
 
 import (
@@ -131,43 +137,11 @@ func (w *Web) handleRoot(rw http.ResponseWriter, r *http.Request) {
 // Overview
 // ---------------------------------------------------------------------------
 
-// webCounts is the fleet's disposition breakdown, computed here from the
-// same RunSummary rows the Runs list renders: Fleet reports Active and
-// Executing because only those two are judged against the concurrency
-// ceiling (runtime/fleet.go), not because the per-disposition counts an
-// overview needs do not exist in its Runs slice.
-type webCounts struct {
-	Active, Waiting, Failed, Completed, Cancelled, Held int
-}
-
-func countWebRuns(runs []rt.RunSummary) webCounts {
-	var c webCounts
-	for _, run := range runs {
-		switch run.Disposition {
-		case rt.Active:
-			c.Active++
-		case rt.Waiting:
-			c.Waiting++
-		case rt.Failed:
-			c.Failed++
-		case rt.Completed:
-			c.Completed++
-		case rt.Cancelled:
-			c.Cancelled++
-		}
-		if run.Held {
-			c.Held++
-		}
-	}
-	return c
-}
-
 type overviewData struct {
 	ObservedAt    time.Time
-	Controller    rt.ControllerStatus
-	ControllerErr string
-	Fleet         rt.Fleet
-	Counts        webCounts
+	Controller    Controller
+	ControllerErr bool
+	Fleet         Fleet
 }
 
 func (w *Web) handleOverview(rw http.ResponseWriter, r *http.Request) {
@@ -175,17 +149,16 @@ func (w *Web) handleOverview(rw http.ResponseWriter, r *http.Request) {
 	data := overviewData{ObservedAt: now}
 	status, err := w.Store.Controller(w.ControllerRoot, w.Observe, now)
 	if err != nil {
-		data.ControllerErr = err.Error()
+		data.ControllerErr = true
 	} else {
-		data.Controller = status
+		data.Controller = controllerProjection(status)
 	}
 	fleet, err := w.Store.Fleet(now)
 	if err != nil {
 		w.renderError(rw, err)
 		return
 	}
-	data.Fleet = fleet
-	data.Counts = countWebRuns(fleet.Runs)
+	data.Fleet = fleetProjection(fleet)
 	w.render(rw, overviewTemplate, data)
 }
 
@@ -211,9 +184,9 @@ func runsFilterFromQuery(values map[string][]string) runsFilter {
 }
 
 // matches reports whether one run satisfies the filter. "held" is not a
-// Disposition: it asks RunSummary.Held directly, independent of which
-// terminal disposition a held run settled into.
-func (f runsFilter) matches(s rt.RunSummary) bool {
+// Disposition: it asks Run.Held directly, independent of which terminal
+// disposition a held run settled into.
+func (f runsFilter) matches(s Run) bool {
 	if f.Status != "" {
 		if f.Status == "held" {
 			if !s.Held {
@@ -232,7 +205,7 @@ func (f runsFilter) matches(s rt.RunSummary) bool {
 // matchesSource accepts either "owner/repo#123" or a bare issue number: an
 // operator watching one issue rarely remembers which repository it was filed
 // against and should not have to type it to filter on it.
-func matchesSource(s rt.RunSummary, source string) bool {
+func matchesSource(s Run, source string) bool {
 	if repo, issue, ok := strings.Cut(source, "#"); ok {
 		number, err := strconv.Atoi(strings.TrimSpace(issue))
 		return err == nil && s.Repository == repo && s.Issue == number
@@ -243,8 +216,8 @@ func matchesSource(s rt.RunSummary, source string) bool {
 	return false
 }
 
-func filterWebRuns(runs []rt.RunSummary, filter runsFilter) []rt.RunSummary {
-	out := make([]rt.RunSummary, 0, len(runs))
+func filterWebRuns(runs []Run, filter runsFilter) []Run {
+	out := make([]Run, 0, len(runs))
 	for _, run := range runs {
 		if filter.matches(run) {
 			out = append(out, run)
@@ -255,8 +228,8 @@ func filterWebRuns(runs []rt.RunSummary, filter runsFilter) []rt.RunSummary {
 
 type runsData struct {
 	ObservedAt time.Time
-	Fleet      rt.Fleet
-	Runs       []rt.RunSummary
+	Fleet      Fleet
+	Runs       []Run
 	Filter     runsFilter
 }
 
@@ -267,8 +240,9 @@ func (w *Web) handleRuns(rw http.ResponseWriter, r *http.Request) {
 		w.renderError(rw, err)
 		return
 	}
+	projected := fleetProjection(fleet)
 	filter := runsFilterFromQuery(r.URL.Query())
-	data := runsData{ObservedAt: now, Fleet: fleet, Runs: filterWebRuns(fleet.Runs, filter), Filter: filter}
+	data := runsData{ObservedAt: now, Fleet: projected, Runs: filterWebRuns(projected.Runs, filter), Filter: filter}
 	w.render(rw, runsTemplate, data)
 }
 
@@ -283,8 +257,8 @@ const webEventPageLimit = 200
 
 type runDetailData struct {
 	ObservedAt time.Time
-	Status     rt.StatusReport
-	Events     []rt.EngineeringEvent
+	Status     RunDetail
+	Events     []Event
 	After      int64
 	NextAfter  int64
 	HasMore    bool
@@ -316,9 +290,13 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 		w.renderError(rw, err)
 		return
 	}
-	data := runDetailData{ObservedAt: now, Status: status, Events: events, After: after, HasMore: hasMore, NextAfter: after}
-	if len(events) > 0 {
-		data.NextAfter = events[len(events)-1].Sequence
+	data := runDetailData{ObservedAt: now, Status: runDetailProjection(status), After: after, HasMore: hasMore, NextAfter: after}
+	data.Events = make([]Event, 0, len(events))
+	for _, e := range events {
+		data.Events = append(data.Events, eventProjection(e))
+	}
+	if len(data.Events) > 0 {
+		data.NextAfter = data.Events[len(data.Events)-1].Sequence
 	}
 	w.render(rw, runDetailTemplate, data)
 }
