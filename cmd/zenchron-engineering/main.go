@@ -108,6 +108,12 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 1 && args[0] == "serve" {
 		return serveCommand(args[1:], autonomyOverrides{}, stdout)
 	}
+	// `control-plane` is top level for the same reason `serve` is: it is a
+	// separate, independently started process (ADR-0004), not one more
+	// operation `autonomy` performs on a run.
+	if len(args) >= 1 && args[0] == "control-plane" {
+		return controlPlaneCommand(args[1:], stdout)
+	}
 	if len(args) >= 3 && args[0] == "selfhost" && args[1] == "issue" {
 		models, err := parseModelFlags(args[3:])
 		if err != nil {
@@ -124,7 +130,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|controller re-adopt --reason <text>|controller install [--bin-dir <dir>] [--config <path>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|control-plane [--config <path>] [--addr host:port]|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|controller re-adopt --reason <text>|controller install [--bin-dir <dir>] [--config <path>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
 }
 
 func parseModelFlags(args []string) ([]string, error) {

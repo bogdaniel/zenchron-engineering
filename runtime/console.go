@@ -37,10 +37,10 @@ type ConsoleOperation struct {
 	// ProgressSource is "row" while a live SQLite operation row for this exact
 	// attempt is readable, and "journal" otherwise - the same split
 	// docs/supervisor.md documents for `autonomy status`/`logs`.
-	ProgressSource string        `json:"progress_source"`
-	HeartbeatAt    *time.Time    `json:"heartbeat_at,omitempty"`
-	Deadline       *time.Time    `json:"deadline,omitempty"`
-	DeadlineBound  AttemptBound  `json:"deadline_bound,omitempty"`
+	ProgressSource string       `json:"progress_source"`
+	HeartbeatAt    *time.Time   `json:"heartbeat_at,omitempty"`
+	Deadline       *time.Time   `json:"deadline,omitempty"`
+	DeadlineBound  AttemptBound `json:"deadline_bound,omitempty"`
 }
 
 // RunDetail is one run's console view: the RunSummary every fleet row

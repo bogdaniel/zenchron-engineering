@@ -1,0 +1,72 @@
+{{define "title"}}overview{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>overview</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}}</p>
+
+  {{if .ControllerErr}}
+  <p class="banner error">controller status unavailable: {{.ControllerErr}}</p>
+  {{else}}
+  {{with .Controller}}
+  <div class="grid stats">
+    <div class="stat"><span class="label">durable consistency</span><span class="value" data-state="{{.DurableConsistency}}">{{.DurableConsistency}}</span></div>
+    <div class="stat"><span class="label">serving</span><span class="value" data-state="{{.Serving}}">{{.Serving}}</span></div>
+    <div class="stat"><span class="label">projection</span><span class="value" data-state="{{.Projection.State}}">{{.Projection.State}}</span></div>
+  </div>
+
+  <table class="kv">
+    <tr>
+      <th>durable generation</th>
+      <td>
+        {{with .Durable.Generation}}{{.Kind}} {{.Version}} <span class="muted">({{.SourceRevision}})</span>{{else}}<span class="muted">unknown</span>{{end}}
+      </td>
+    </tr>
+    <tr>
+      <th>projection target</th>
+      <td>{{if .Projection.Target}}{{.Projection.Target}}{{else}}<span class="muted">unknown</span>{{end}} <span class="muted">{{.Projection.Path}}</span></td>
+    </tr>
+    <tr>
+      <th>live endpoint</th>
+      <td>
+        {{if .Live.Reachable}}
+          <span data-state="reachable">reachable</span>
+          {{with .Live.Snapshot}}
+            · identity {{.Identity.Build.Kind}} {{.Identity.Build.Version}} <span class="muted">({{.Identity.Build.SourceRevision}})</span>
+            · role <span data-state="{{.Role}}">{{if .Role}}{{.Role}}{{else}}unknown{{end}}</span>
+            · admission <span data-state="{{.WorkAdmission}}">{{if .WorkAdmission}}{{.WorkAdmission}}{{else}}unknown{{end}}</span>
+            · digest <span class="mono">{{if .Identity.Measured}}{{.Identity.Measured}}{{else}}unknown{{end}}</span>
+          {{end}}
+        {{else}}
+          <span data-state="not_reachable">not reachable</span>{{if .Live.Detail}} <span class="muted">({{.Live.Detail}})</span>{{end}}
+        {{end}}
+      </td>
+    </tr>
+  </table>
+
+  {{if .Findings}}
+  <ul class="findings">
+    {{range .Findings}}<li>{{.}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{end}}
+  {{end}}
+</section>
+
+<section class="panel">
+  <h2>fleet</h2>
+  <div class="grid stats counts">
+    <a class="stat" href="{{runsLink "active" ""}}"><span class="label">active</span><span class="value" data-state="active">{{.Counts.Active}}</span></a>
+    <a class="stat" href="{{runsLink "waiting" ""}}"><span class="label">waiting</span><span class="value" data-state="waiting">{{.Counts.Waiting}}</span></a>
+    <a class="stat" href="{{runsLink "failed" ""}}"><span class="label">failed</span><span class="value" data-state="failed">{{.Counts.Failed}}</span></a>
+    <a class="stat" href="{{runsLink "completed" ""}}"><span class="label">completed</span><span class="value" data-state="completed">{{.Counts.Completed}}</span></a>
+    <a class="stat" href="{{runsLink "cancelled" ""}}"><span class="label">cancelled</span><span class="value" data-state="cancelled">{{.Counts.Cancelled}}</span></a>
+    <a class="stat" href="{{runsLink "held" ""}}"><span class="label">held material</span><span class="value" data-state="held">{{.Counts.Held}}</span></a>
+  </div>
+  <table class="kv">
+    <tr><th>capacity</th><td>{{.Fleet.Executing}} / {{.Fleet.Capacity}} executing, {{.Fleet.Active}} active</td></tr>
+    <tr><th>supervisor</th><td>{{if .Fleet.SupervisorRunning}}<span data-state="active">running</span>{{else}}<span data-state="not_reachable">not running</span>{{end}}</td></tr>
+    <tr><th>control endpoint</th><td>{{if .Fleet.ControlEndpoint}}<span class="mono">{{.Fleet.ControlEndpoint}}</span>{{else}}<span class="muted">unknown</span>{{end}}</td></tr>
+  </table>
+  <p><a href="/runs">open the runs list →</a></p>
+</section>
+{{end}}

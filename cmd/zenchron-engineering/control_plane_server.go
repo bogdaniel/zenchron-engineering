@@ -368,11 +368,11 @@ func (s *controlPlaneServer) handleRunDetailAPI(w http.ResponseWriter, r *http.R
 }
 
 type runEventsPage struct {
-	RunID     string                     `json:"run_id"`
-	After     int64                      `json:"after"`
-	Events    []eventView                `json:"events"`
-	NextAfter *int64                     `json:"next_after,omitempty"`
-	Truncated bool                       `json:"truncated"`
+	RunID     string      `json:"run_id"`
+	After     int64       `json:"after"`
+	Events    []eventView `json:"events"`
+	NextAfter *int64      `json:"next_after,omitempty"`
+	Truncated bool        `json:"truncated"`
 }
 
 func (s *controlPlaneServer) handleRunEventsAPI(w http.ResponseWriter, r *http.Request) {
