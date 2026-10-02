@@ -229,8 +229,20 @@ type FeedbackDecision struct {
 	// delivered when the candidate moves to head B, and the remainder of a
 	// batch larger than the per-invocation bound, whose own delivery advances
 	// the head past the items it left behind.
-	Commit    string `json:"commit,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+	Commit string `json:"commit,omitempty"`
+	// ReviewState is the normalized GitHub disposition a FeedbackReview
+	// decision was judged against - approved, changes_requested, commented or
+	// dismissed - restricted to that closed vocabulary. It is empty for every
+	// other feedback class, which carries no disposition of its own, and for
+	// a review whose reported state this runtime did not recognize.
+	//
+	// It is persisted, not just consulted, so the durable audit record can
+	// say WHICH disposition governed a refusal: without it, an APPROVE
+	// refusal, a COMMENT refusal and a DISMISSED refusal are indistinguishable
+	// in the journal, all collapsing to the same generic
+	// feedbackRefusedNonBlockingReview reason.
+	ReviewState GitHubReviewState `json:"review_state,omitempty"`
+	CreatedAt   string            `json:"created_at,omitempty"`
 }
 
 // Admission reasons. They are a closed vocabulary so an operator reading a
@@ -277,8 +289,9 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 				Key: item.Key(), Class: item.Class,
 				Actor: item.Actor.Login, ActorID: item.Actor.ID,
 				HeadRevision: head, Commit: item.Commit,
-				Applicable: feedbackApplies(item, head),
-				Reason:     feedbackRefusedUnidentifiedRuntime,
+				Applicable:  feedbackApplies(item, head),
+				Reason:      feedbackRefusedUnidentifiedRuntime,
+				ReviewState: reviewDisposition(item),
 			}
 			if !item.CreatedAt.IsZero() {
 				decision.CreatedAt = item.CreatedAt.UTC().Format(time.RFC3339)
@@ -290,6 +303,7 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 			Key: item.Key(), Class: item.Class,
 			Actor: item.Actor.Login, ActorID: item.Actor.ID,
 			HeadRevision: head, Commit: item.Commit,
+			ReviewState: reviewDisposition(item),
 		}
 		if !item.CreatedAt.IsZero() {
 			decision.CreatedAt = item.CreatedAt.UTC().Format(time.RFC3339)
@@ -308,7 +322,7 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 			decision.Reason = feedbackRefusedBot
 		case strings.TrimSpace(string(item.Body)) == "":
 			decision.Reason = feedbackRefusedEmpty
-		case item.Class == FeedbackReview && item.ReviewState != GitHubReviewChangesRequested:
+		case item.Class == FeedbackReview && item.ReviewState.normalized() != GitHubReviewChangesRequested:
 			// Checked ahead of staleness and permission: disposition is part
 			// of admission semantics, not a tiebreaker applied only once
 			// everything else would otherwise admit the item.
@@ -346,6 +360,17 @@ func feedbackApplies(item FeedbackItem, head string) bool {
 		return true
 	}
 	return head != "" && item.Commit == head
+}
+
+// reviewDisposition is the normalized disposition to persist on a decision:
+// the item's own, restricted to the closed vocabulary, for a FeedbackReview
+// item, and the zero value for every other class, which carries no
+// disposition of its own.
+func reviewDisposition(item FeedbackItem) GitHubReviewState {
+	if item.Class != FeedbackReview {
+		return ""
+	}
+	return item.ReviewState.normalized()
 }
 
 // FeedbackObservedPayload is the journalled admission record for one item. It

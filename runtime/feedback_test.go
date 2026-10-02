@@ -161,13 +161,15 @@ func TestReviewDispositionGatesTextAdmission(t *testing.T) {
 	approvedEmpty := reviewItem(2, GitHubReviewApproved, "")
 	changesRequested := reviewItem(3, GitHubReviewChangesRequested, "please rename the helper")
 	commented := reviewItem(4, GitHubReviewCommented, "just a thought: maybe rename the helper")
+	// A disposition outside the closed vocabulary - a forge adapter bug, or a
+	// future GitHub state this runtime does not yet recognize - must never be
+	// treated as REQUEST_CHANGES merely because it also isn't APPROVE.
+	unrecognized := reviewItem(5, GitHubReviewState("superseded"), "please rename the helper")
 
+	allItems := []FeedbackItem{approvedWithText, approvedEmpty, changesRequested, commented, unrecognized}
 	decisions := map[int64]FeedbackDecision{}
-	for _, decision := range AdmitFeedback(
-		[]FeedbackItem{approvedWithText, approvedEmpty, changesRequested, commented},
-		policy, permissions, "",
-	) {
-		for _, item := range []FeedbackItem{approvedWithText, approvedEmpty, changesRequested, commented} {
+	for _, decision := range AdmitFeedback(allItems, policy, permissions, "") {
+		for _, item := range allItems {
 			if item.Key() == decision.Key {
 				decisions[item.ID] = decision
 			}
@@ -176,9 +178,10 @@ func TestReviewDispositionGatesTextAdmission(t *testing.T) {
 
 	// An APPROVE carrying explanatory, actionable-looking text is still never
 	// admitted, and refused for its disposition - not for permission or
-	// staleness, both of which this item would otherwise clear.
-	if d := decisions[approvedWithText.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview {
-		t.Fatalf("an APPROVE review's text became remediation feedback: %#v", d)
+	// staleness, both of which this item would otherwise clear. The refusal
+	// durably records WHICH disposition governed it.
+	if d := decisions[approvedWithText.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview || d.ReviewState != GitHubReviewApproved {
+		t.Fatalf("an APPROVE review's text became remediation feedback, or its disposition was not persisted: %#v", d)
 	}
 	// An APPROVE with no text keeps its prior reason: the fix must not change
 	// what was already correct.
@@ -186,14 +189,28 @@ func TestReviewDispositionGatesTextAdmission(t *testing.T) {
 		t.Fatalf("an empty APPROVE review's refusal reason regressed: %#v", d)
 	}
 	// REQUEST_CHANGES is untouched: an actionable review from a permitted
-	// actor is still admitted.
-	if d := decisions[changesRequested.ID]; !d.Admitted || d.Reason != feedbackAdmittedPermitted {
-		t.Fatalf("a REQUEST_CHANGES review was not admitted: %#v", d)
+	// actor is still admitted, and its disposition is recorded as such.
+	if d := decisions[changesRequested.ID]; !d.Admitted || d.Reason != feedbackAdmittedPermitted || d.ReviewState != GitHubReviewChangesRequested {
+		t.Fatalf("a REQUEST_CHANGES review was not admitted, or its disposition was not persisted: %#v", d)
 	}
 	// COMMENT is explicitly pinned to the same non-blocking policy as
-	// APPROVE, rather than silently inheriting REQUEST_CHANGES semantics.
-	if d := decisions[commented.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview {
-		t.Fatalf("a neutral COMMENT review became blocking remediation: %#v", d)
+	// APPROVE, rather than silently inheriting REQUEST_CHANGES semantics, and
+	// its own disposition - distinct from APPROVE's - is what gets persisted.
+	if d := decisions[commented.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview || d.ReviewState != GitHubReviewCommented {
+		t.Fatalf("a neutral COMMENT review became blocking remediation, or its disposition was not persisted: %#v", d)
+	}
+	// An unrecognized disposition is refused exactly like a non-blocking one,
+	// and is persisted as unknown (empty) rather than adopting a spelling it
+	// was never confirmed to be.
+	if d := decisions[unrecognized.ID]; d.Admitted || d.Reason != feedbackRefusedNonBlockingReview || d.ReviewState != "" {
+		t.Fatalf("an unrecognized review disposition was not fail-closed: %#v", d)
+	}
+	// A non-review class never carries a disposition, however it is judged.
+	comment := feedbackItem(FeedbackPullRequestComment, 6, "maintainer", "please rename the helper")
+	for _, decision := range AdmitFeedback([]FeedbackItem{comment}, policy, permissions, "") {
+		if decision.ReviewState != "" {
+			t.Fatalf("a non-review class was given a review disposition: %#v", decision)
+		}
 	}
 }
 
@@ -379,6 +396,125 @@ func TestGitHubFeedbackReachesTheWorkerExactlyOnce(t *testing.T) {
 	}
 	if keys := state.outstandingReviewKeys(); len(keys) != 0 {
 		t.Fatalf("an addressed, republished review stayed outstanding: %v", keys)
+	}
+}
+
+// TestApproveReviewTextNeverBecomesRemediation is the restored #383 defect,
+// driven through the real observation/journal/reconcile path rather than only
+// against AdmitFeedback in isolation (that pure-function proof is
+// TestReviewDispositionGatesTextAdmission). The live incident it closes: an
+// external APPROVE review that happened to carry explanatory text was
+// admitted as if it were a blocking review, invoked a remediation provider
+// that produced no mutation and no resolution, and terminalized an otherwise
+// accepted, mergeable run.
+//
+// A REQUEST_CHANGES review with the EXACT SAME body is then proven to still
+// take the normal #376 path, so this closes the gap without weakening it.
+func TestApproveReviewTextNeverBecomesRemediation(t *testing.T) {
+	fixture, runID := feedbackFixtureWithWallLimit(t, time.Hour)
+	number := fixture.state(runID).projection.PullRequest.Number
+	head := fixture.state(runID).projection.CandidateRevision
+	fixture.forge.Permissions["reviewer"] = PermissionWrite
+	body := "nice work overall, but you should still rename the helper and add a test"
+
+	fixture.forge.ReviewsByHead[head] = GitHubReviewObservation{Reviews: []GitHubReview{{
+		ID: 1, Author: GitHubActor{Login: "reviewer", ID: 9},
+		State: GitHubReviewApproved, Body: UntrustedText(body), CommitSHA: head,
+	}}}
+
+	observed, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Admitted != 0 || observed.Refused != 1 || len(observed.Decisions) != 1 {
+		t.Fatalf("an APPROVE review with text was admitted as remediation: %#v", observed)
+	}
+	if d := observed.Decisions[0]; d.Reason != feedbackRefusedNonBlockingReview || d.ReviewState != GitHubReviewApproved {
+		t.Fatalf("the APPROVE refusal did not record its governing disposition: %#v", d)
+	}
+
+	// Zero provider spend, zero delivery, zero obligation: reconciling finds
+	// nothing to do about a review that was never admitted.
+	calls := len(fixture.provider.requests)
+	outcome := fixture.reconcile(runID)
+	if outcome.Disposition == Failed {
+		t.Fatalf("an unadmitted APPROVE review terminalized the run: %+v", outcome)
+	}
+	if len(fixture.provider.requests) != calls {
+		t.Fatalf("an APPROVE review's text invoked the provider: before=%d after=%d", calls, len(fixture.provider.requests))
+	}
+	state := fixture.state(runID)
+	if countType(state.events, EventFeedbackConsumed) != 0 {
+		t.Fatalf("a refused review was delivered: %v", journalTypes(state.events))
+	}
+	if countType(state.events, EventReviewContinuationGranted) != 0 {
+		t.Fatalf("a refused review spent review-continuation authority: %v", journalTypes(state.events))
+	}
+	if keys := state.outstandingReviewKeys(); len(keys) != 0 {
+		t.Fatalf("a refused review left an outstanding obligation: %v", keys)
+	}
+
+	// Restart and re-poll: replay from the durable journal makes the exact
+	// same admission decision and invokes nothing new.
+	reopen(t, fixture)
+	replayed, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.New != 0 {
+		t.Fatalf("restart replayed an already-judged review as new: %#v", replayed)
+	}
+	callsAfterRestart := len(fixture.provider.requests)
+	if outcome := fixture.reconcile(runID); outcome.Disposition == Failed {
+		t.Fatalf("replay of an APPROVE review terminalized the run: %+v", outcome)
+	}
+	if len(fixture.provider.requests) != callsAfterRestart {
+		t.Fatal("replay of an APPROVE review invoked the provider")
+	}
+
+	// The SAME body, as REQUEST_CHANGES, is still ordinary admitted
+	// remediation feedback: the fix narrows admission by disposition, not by
+	// text, and must not touch the REQUEST_CHANGES path at all.
+	fixture.forge.ReviewsByHead[head] = GitHubReviewObservation{Reviews: []GitHubReview{
+		fixture.forge.ReviewsByHead[head].Reviews[0],
+		{ID: 2, Author: GitHubActor{Login: "reviewer", ID: 9}, State: GitHubReviewChangesRequested, Body: UntrustedText(body), CommitSHA: head},
+	}}
+	blocking, err := fixture.runtime.ObserveFeedback(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocking.Admitted != 1 || blocking.New != 1 {
+		t.Fatalf("a REQUEST_CHANGES review with the same body was not admitted: %#v", blocking)
+	}
+	if d := blocking.Decisions[0]; !d.Admitted || d.Reason != feedbackAdmittedPermitted || d.ReviewState != GitHubReviewChangesRequested {
+		t.Fatalf("the REQUEST_CHANGES admission did not record its governing disposition: %#v", d)
+	}
+
+	fixture.provider.mutate = func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, "candidate.go"), []byte("package candidate\n// helper renamed\n"), 0600)
+	}
+	fixture.inject(func(call GitHubCall) error {
+		if call.Method == "UpdatePullRequest" {
+			pr := fixture.forge.PullRequests[number]
+			pr.HeadSHA = fixture.forge.Refs[candidateBranch(runID)]
+			fixture.forge.PullRequests[number] = pr
+		}
+		return nil
+	})
+	before := len(fixture.provider.requests)
+	outcome = fixture.reconcile(runID)
+	if len(fixture.provider.requests) <= before {
+		t.Fatal("the REQUEST_CHANGES review did not drive remediation (#376 path broke)")
+	}
+	if outcome.Disposition != Waiting || outcome.Reason != ReasonGoalStateReached {
+		t.Fatalf("the REQUEST_CHANGES remediation did not complete: %+v", outcome)
+	}
+	final := fixture.state(runID)
+	if keys := final.outstandingReviewKeys(); len(keys) != 0 {
+		t.Fatalf("addressed REQUEST_CHANGES feedback stayed outstanding: %v", keys)
+	}
+	if !final.feedbackState().Consumed["pull_request_review:2"] {
+		t.Fatal("the REQUEST_CHANGES review was not delivered")
 	}
 }
 
