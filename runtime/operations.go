@@ -1873,7 +1873,18 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 		if op, ok := state.snapshot.Operations[producing]; ok {
 			var record executionRecord
 			if len(op.Result) > 0 && json.Unmarshal(op.Result, &record) == nil {
-				checkpoint = record.Checkpoint
+				// record.Checkpoint alone is NARROWER than "this attempt was
+				// refused": it is also fed to admitSuccessor as the signal that
+				// selects a continuation successor over a same-binding retry
+				// (#54), and only a closed set of classes is continuation-
+				// eligible. A refused invocation's FailureClass is independently
+				// and always authoritative for THIS decision (#390): mutated
+				// material a refused attempt left behind is never promoted to an
+				// execution-complete commit, whatever class refused it and
+				// whatever routing that class selects. Checking FailureClass
+				// here, beside Checkpoint, holds that material as a checkpoint
+				// without touching the routing decision at all.
+				checkpoint = record.Checkpoint || record.FailureClass != ""
 			}
 		}
 	}

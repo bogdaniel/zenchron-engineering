@@ -316,6 +316,87 @@ func TestIterationBudgetStopCheckpointsInsteadOfCompleting(t *testing.T) {
 	}
 }
 
+// refusedMutationProducer always mutates the candidate workspace and then
+// reports an explicit provider failure with no process-level error - the
+// shape most refusals report, including #384's background-work detector,
+// which classifies a result from a stream that itself returned cleanly.
+type refusedMutationProducer struct {
+	class FailureClass
+}
+
+func (p *refusedMutationProducer) Isolation() ProviderIsolation {
+	return ProviderIsolation{
+		FilesystemRead: IsolationProven, FilesystemWrite: IsolationProven,
+		NetworkDenied: IsolationProven, CredentialScope: IsolationProven,
+	}
+}
+
+func (p *refusedMutationProducer) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	if err := os.WriteFile(filepath.Join(request.CandidateDir, "README.md"), []byte("refused\n"), 0600); err != nil {
+		return ExecutionResult{}, err
+	}
+	return ExecutionResult{
+		ProviderID: "test-provider", Model: "gpt-fixture", Attempt: 1,
+		Outcome: OperationFailed,
+		Failure: &ProviderFailure{Classification: p.class, RawDiagnosticRef: "artifacts/transcript.log"},
+	}, nil
+}
+
+// TestRefusedInvocationWithMutatedMaterialIsHeldNotPromoted is #390: a
+// FailureClass on an invocation's result is authoritative for that
+// invocation, whatever Mutated says. #384's detector produces exactly this
+// shape - a Claude Code invocation that exited claiming a valid result after
+// starting unresolved background work, classified
+// provider_background_work_unresolved, with the workspace it left behind
+// still mutated - and the live run that exposed it committed, assured,
+// authorized and published that material anyway, because candidate.commit
+// read only a narrower Checkpoint flag that this class never set. The fix is
+// general across failure classes (not a special case for
+// provider_background_work_unresolved), so this runs the same proof against
+// a second, unrelated class too.
+func TestRefusedInvocationWithMutatedMaterialIsHeldNotPromoted(t *testing.T) {
+	for _, class := range []FailureClass{FailureProviderBackgroundWorkUnresolved, FailureUnknown} {
+		t.Run(string(class), func(t *testing.T) {
+			fixture := newPhase8Fixture(t)
+			fixture.deps.Provider = &refusedMutationProducer{class: class}
+			fixture.runtime = fixture.newRuntime(fixture.deps)
+			runID := fixture.start()
+			fixture.reconcile(runID)
+
+			events := journalOf(t, fixture.runtime, runID)
+			if countType(events, EventCandidateCommitted) != 0 {
+				t.Fatalf("%s: a refused invocation's mutated material was committed as execution-complete: %v", class, journalTypes(events))
+			}
+			if countType(events, EventCandidateCheckpointed) != 1 {
+				t.Fatalf("%s: a refused invocation's mutated material was not held as a checkpoint: %v", class, journalTypes(events))
+			}
+			if countType(events, EventExecutionCompleted) != 0 {
+				t.Fatalf("%s: a refused invocation was recorded as having completed: %v", class, journalTypes(events))
+			}
+
+			state := fixture.state(runID)
+			if state.projection.CandidateRevision == "" || state.projection.CandidateTree == "" {
+				t.Fatalf("%s: the held material has no exact identity: %+v", class, state.projection)
+			}
+			if state.projection.CandidateComplete {
+				t.Fatalf("%s: a refused invocation's checkpoint reported itself execution-complete", class)
+			}
+			if _, wanted := bindAssuranceGo(state); wanted {
+				t.Fatalf("%s: assurance is eligible for a refused invocation's held material", class)
+			}
+			if countType(events, EventAssuranceObserved) != 0 {
+				t.Fatalf("%s: assurance ran on a refused invocation's held material: %v", class, journalTypes(events))
+			}
+			if len(state.projection.AuthorityDecisions) != 0 {
+				t.Fatalf("%s: a refused invocation's held material produced an authority decision: %#v", class, state.projection.AuthorityDecisions)
+			}
+			if state.authorizedForPublication() {
+				t.Fatalf("%s: a refused invocation's held material authorized publication", class)
+			}
+		})
+	}
+}
+
 // TestCheckpointContinuesAcrossRestartAndOnlyThenBecomesAssurable is the full
 // mandatory restart proof, in the ten steps the repair specifies.
 func TestCheckpointContinuesAcrossRestartAndOnlyThenBecomesAssurable(t *testing.T) {
