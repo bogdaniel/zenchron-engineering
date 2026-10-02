@@ -1,0 +1,177 @@
+/* zenchron-engineering control plane: a dense operator console, not a
+   marketing dashboard. Monospace, high information density, explicit about
+   state rather than decorative about it. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0b0d10;
+  --panel: #12151a;
+  --line: #262b33;
+  --text: #d8dee8;
+  --muted: #7a8494;
+  --accent: #5fb3ff;
+  --ok: #4fd38a;
+  --warn: #e8b84b;
+  --bad: #f06a6a;
+  --live: #4fd38a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover, a:focus { text-decoration: underline; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.topbar .brand { font-weight: 700; color: var(--text); }
+.topbar nav { display: flex; gap: 1rem; }
+.topbar #live-indicator {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--live);
+  color: var(--live);
+  border-radius: 3px;
+}
+.topbar #live-indicator.stale {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.panel h1 { margin: 0 0 0.25rem; font-size: 1.1rem; }
+.panel h2 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+.meta, .muted { color: var(--muted); }
+.mono { font-family: inherit; }
+.breadcrumb { color: var(--muted); margin: 0 0 0.5rem; }
+
+.banner {
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--warn);
+  background: rgba(232, 184, 75, 0.08);
+  margin: 0.5rem 0;
+}
+.banner.error { border-color: var(--bad); background: rgba(240, 106, 106, 0.08); }
+
+.grid.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.5rem;
+  margin: 0.5rem 0 1rem;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+a.stat { color: inherit; }
+a.stat:hover { border-color: var(--accent); text-decoration: none; }
+.stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.stat .value { font-size: 1.1rem; }
+
+table.kv { width: 100%; border-collapse: collapse; margin: 0.5rem 0; }
+table.kv th, table.kv td { text-align: left; vertical-align: top; padding: 0.3rem 0.5rem; border-top: 1px solid var(--line); }
+table.kv th { width: 180px; color: var(--muted); font-weight: 400; }
+
+table.runs { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.runs th, table.runs td { text-align: left; vertical-align: top; padding: 0.4rem 0.5rem; border-top: 1px solid var(--line); }
+table.runs thead th { color: var(--muted); font-weight: 400; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+table.runs td.empty { text-align: center; color: var(--muted); padding: 1.5rem; }
+
+.findings { margin: 0.5rem 0 0; padding-left: 1.2rem; color: var(--warn); }
+
+.filters { display: flex; gap: 0.75rem; margin: 0.5rem 0; flex-wrap: wrap; }
+.filters a { padding: 0.2rem 0.5rem; border: 1px solid var(--line); border-radius: 3px; color: var(--text); }
+.filters a.active { border-color: var(--accent); color: var(--accent); }
+
+.source-filter { display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0 1rem; flex-wrap: wrap; }
+.source-filter input {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  padding: 0.25rem 0.4rem; border-radius: 3px; font: inherit;
+}
+.source-filter button {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  padding: 0.25rem 0.6rem; border-radius: 3px; font: inherit; cursor: pointer;
+}
+.source-filter button:hover { border-color: var(--accent); }
+
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--line);
+}
+.badge.live { color: var(--live); border-color: var(--live); animation: pulse 2s ease-in-out infinite; }
+.badge.journal { color: var(--muted); }
+.badge.held { color: var(--warn); border-color: var(--warn); }
+
+.pill {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  margin: 0 0.2rem 0.2rem 0;
+  border-radius: 3px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+/* Dimensional verdicts are colored by data-state rather than by a class per
+   value: the vocabulary (phase/disposition/role/admission/...) is
+   open-ended, and a lookup table here would silently go stale against the
+   runtime's own enums. */
+[data-state="active"], [data-state="running"], [data-state="leased"],
+[data-state="passed"], [data-state="granted"], [data-state="consistent"],
+[data-state="reachable"], [data-state="held"], [data-state="row"],
+[data-state="completed"], [data-state="satisfied"], [data-state="open"] { color: var(--ok); }
+[data-state="waiting"], [data-state="withheld"], [data-state="drift"],
+[data-state="pending"], [data-state="awaiting_approval"] { color: var(--warn); }
+[data-state="failed"], [data-state="invariant_violation"], [data-state="not_reachable"],
+[data-state="denied"], [data-state="cancelled"], [data-state="blocked"] { color: var(--bad); }
+[data-state=""] { color: var(--muted); }
+
+ol.timeline { list-style: none; margin: 0; padding: 0; }
+ol.timeline li { border-top: 1px solid var(--line); padding: 0.35rem 0.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
+ol.timeline li.empty { padding: 1rem; color: var(--muted); border-top: none; }
+.event-type { color: var(--text); font-weight: 600; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}

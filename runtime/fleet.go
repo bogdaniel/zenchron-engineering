@@ -86,6 +86,11 @@ type RunSummary struct {
 	FeedbackPending  int `json:"feedback_pending,omitempty"`
 	// Attempts is the per-operation-kind attempt tally.
 	Attempts map[string]int `json:"attempts,omitempty"`
+	// Held reports that a budget-ended run is holding valuable material
+	// (#203). It is independent of Disposition: a terminal run may hold
+	// material or may not, and an operator triaging a fleet needs to find the
+	// ones that do without opening each one's detail.
+	Held bool `json:"held,omitempty"`
 	// Error is set when this run's state could not be replayed. One unreadable
 	// run must not hide the rest of the fleet.
 	Error string `json:"error,omitempty"`
@@ -352,6 +357,7 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	summary.Disposition, summary.Reason = snapshot.Disposition, snapshot.Reason
 	summary.CandidateRevision, summary.CandidateTree = projection.CandidateRevision, projection.CandidateTree
 	summary.Attempts = projection.Attempts
+	summary.Held = snapshot.HeldMaterial != nil
 	if operation, ok := state.currentOperation(); ok {
 		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
 	}

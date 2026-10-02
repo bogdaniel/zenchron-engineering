@@ -1,0 +1,132 @@
+{{define "title"}}{{.Status.RunID}}{{end}}
+{{define "content"}}
+{{$s := .Status}}
+<section class="panel" data-run-id="{{$s.RunID}}">
+  <p class="breadcrumb"><a href="/runs">runs</a> / <span class="mono">{{$s.RunID}}</span></p>
+  <h1 class="mono">{{$s.RunID}}</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · {{$s.Repository}}{{if $s.Source.Issue}} #{{$s.Source.Issue}}{{end}}</p>
+
+  <div class="grid stats">
+    <div class="stat"><span class="label">phase</span><span class="value" data-state="{{$s.Phase}}">{{$s.Phase}}</span></div>
+    <div class="stat"><span class="label">disposition</span><span class="value" data-state="{{$s.Disposition}}">{{$s.Disposition}}</span></div>
+    <div class="stat"><span class="label">elapsed</span><span class="value">{{fmtDuration $s.Elapsed}}</span></div>
+    <div class="stat"><span class="label">active / external wait</span><span class="value">{{fmtDuration $s.ActiveElapsed}} / {{fmtDuration $s.ExternalWaitElapsed}}</span></div>
+  </div>
+  <table class="kv">
+    <tr><th>source</th><td>
+      {{if $s.Source.URL}}<a href="{{$s.Source.URL}}">{{$s.Source.Repository}}#{{$s.Source.Issue}}</a>{{else}}<span class="muted">not an issue-sourced run</span>{{end}}
+      {{if $s.Source.IntentChanged}}<span class="badge held" data-state="held">source moved since pinned</span>{{end}}
+    </td></tr>
+    <tr><th>worker</th><td>
+      {{if $s.Worker.Agent}}{{$s.Worker.Agent}}{{else}}<span class="muted">unknown</span>{{end}}
+      {{if $s.Worker.ProviderKind}}<span class="muted">({{$s.Worker.ProviderKind}}{{if $s.Worker.Model}} · {{$s.Worker.Model}}{{end}}{{if $s.Worker.TrustMode}} · {{$s.Worker.TrustMode}}{{end}})</span>{{end}}
+    </td></tr>
+    <tr><th>candidate</th><td>
+      {{if $s.Candidate.Branch}}<span class="mono">{{$s.Candidate.Branch}}</span>{{else}}<span class="muted">unknown branch</span>{{end}}
+      {{if $s.Candidate.Revision}}<div class="mono muted">rev {{$s.Candidate.Revision}}</div>{{end}}
+      {{if $s.Candidate.Tree}}<div class="mono muted">tree {{$s.Candidate.Tree}}</div>{{end}}
+    </td></tr>
+    <tr><th>workspace</th><td>{{if $s.Worker.Workspace}}<span class="mono">{{$s.Worker.Workspace}}</span>{{else}}<span class="muted">unknown</span>{{end}}</td></tr>
+    <tr><th>base / contract</th><td><span class="mono">{{$s.Base.ID}} @ {{$s.Base.Revision}}</span><div class="mono muted">contract {{$s.Contract.ID}} @ {{$s.Contract.Revision}}</div></td></tr>
+    <tr><th>controller</th><td>
+      <span class="mono">{{$s.Controller.Build.Kind}} {{$s.Controller.Build.Version}}</span>
+      {{if $s.Controller.Changed}}<span class="badge held" data-state="held">different controller than this one</span>{{end}}
+    </td></tr>
+    <tr><th>pull request</th><td>
+      {{with $s.PullRequest}}
+        <span class="mono">#{{.Number}}</span> <span data-state="{{.State}}">{{.State}}</span>{{if .Merged}} <span class="muted">merged</span>{{end}}{{if .Stale}} <span class="muted">stale</span>{{end}}
+      {{else}}<span class="muted">none linked</span>{{end}}
+    </td></tr>
+    <tr><th>attempts</th><td>
+      {{if $s.Attempts}}{{range $kind, $n := $s.Attempts}}<span class="pill">{{$kind}}: {{$n}}</span> {{end}}{{else}}<span class="muted">none recorded</span>{{end}}
+    </td></tr>
+    {{with $s.Budgets}}
+    <tr><th>budgets</th><td>
+      wall limit {{fmtDuration .WallLimit}}
+      {{if .LifecycleDeadline}} · lifecycle deadline {{fmtDuration .LifecycleDeadline}}{{end}}
+      · max execution attempts {{.MaxExecutionAttempts}}
+      {{if .MaxExecutionContinuations}} · max continuations {{.MaxExecutionContinuations}}{{end}}
+      · max remediation attempts {{.MaxRemediationAttempts}}
+      · max assurance attempts {{.MaxAssuranceAttempts}}
+    </td></tr>
+    {{else}}
+    <tr><th>budgets</th><td><span class="muted">unknown{{if $s.RunPolicy.Unverifiable}} (unverifiable: {{range $s.RunPolicy.Unverifiable}}{{.}} {{end}}){{end}}</span></td></tr>
+    {{end}}
+  </table>
+</section>
+
+<section class="panel" id="operation-panel" data-run-id="{{$s.RunID}}">
+  <h2>current operation</h2>
+  {{with $s.Operation}}
+  <div class="grid stats">
+    <div class="stat"><span class="label">kind</span><span class="value">{{.Kind}} #{{.Attempt}}/{{.MaxAttempts}}</span></div>
+    <div class="stat"><span class="label">state</span><span class="value" data-field="state" data-state="{{.State}}">{{.State}}</span></div>
+    <div class="stat"><span class="label">source</span><span class="value"><span class="badge {{if eq .ProgressSource "row"}}live{{else}}journal{{end}}" data-field="progress-source">{{if .ProgressSource}}{{.ProgressSource}}{{else}}journal{{end}}</span></span></div>
+  </div>
+  <table class="kv">
+    <tr><th>started</th><td>{{fmtTimePtr .StartedAt}}</td></tr>
+    <tr><th>last progress</th><td><span data-field="last-progress-at">{{fmtTimePtr .LastProgressAt}}</span> <span class="muted">(silent for <span data-field="silent-for">{{fmtDuration .SilentFor}}</span>)</span></td></tr>
+    {{if .HeartbeatAt}}<tr><th>heartbeat</th><td>{{fmtTimePtr .HeartbeatAt}}</td></tr>{{end}}
+    {{if .InactivitySuspension}}<tr><th>inactivity suspension</th><td>{{.InactivitySuspension}}</td></tr>{{end}}
+    {{if .Deadline}}<tr><th>deadline</th><td>{{fmtTimePtr .Deadline}}{{if .DeadlineBound}} <span class="muted">({{.DeadlineBound}})</span>{{end}}</td></tr>{{end}}
+  </table>
+  {{else}}
+  <p class="muted">no operation is currently bounded for this run. this is journal history, not a live attempt.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <h2>candidate, assurance &amp; authority</h2>
+  <table class="kv">
+    <tr><th>held material</th><td>
+      {{with $s.HeldMaterial}}
+        <span class="badge held" data-state="held">{{.Kind}}</span>
+        {{if .Revision}}<div class="mono muted">rev {{.Revision}}</div>{{end}}
+        <div class="muted">blocked by {{.BlockedBy}}{{if .NextStep}}, next step {{.NextStep}}{{end}}</div>
+        {{if .Successor}}<div class="muted">successor {{.Successor}}{{if .SuccessorUnavailable}}, unavailable: {{.SuccessorUnavailable}}{{end}}</div>{{end}}
+      {{else}}<span class="muted">none</span>{{end}}
+    </td></tr>
+    <tr><th>assurance</th><td>
+      {{with $s.Assurance}}<span data-state="{{if .Passed}}passed{{else}}failed{{end}}">{{if .Passed}}passed{{else}}failed{{end}}</span>{{if .FailureClass}} <span class="muted">({{.FailureClass}})</span>{{end}}{{if .Stale}} <span class="muted">stale</span>{{end}}{{else}}<span class="muted">not observed</span>{{end}}
+    </td></tr>
+    <tr><th>publication authority</th><td>
+      {{with $s.PublicationAuthority}}<span data-state="{{.Status}}">{{.Status}}</span> <span class="muted">({{.Action.Type}} {{.Action.Target}})</span>{{else}}<span class="muted">no decision recorded</span>{{end}}
+    </td></tr>
+    <tr><th>authority request</th><td>
+      {{with $s.AuthorityRequest}}
+        <span data-state="{{.Status}}">{{.Status}}</span>
+        {{if .Requires}}<div class="muted">requires: {{range .Requires}}{{.}} {{end}}</div>{{end}}
+        {{if .Missing}}<div class="muted">missing: {{range .Missing}}{{.}} {{end}}</div>{{end}}
+        {{if .Stale}}<div class="muted">stale: {{range .Stale}}{{.}} {{end}}</div>{{end}}
+      {{else}}<span class="muted">none outstanding</span>{{end}}
+    </td></tr>
+    {{with $s.ExecutionDiagnostic}}
+    <tr><th>last execution diagnostic</th><td>
+      stage {{.Stage}}{{if .FailureClass}}, class {{.FailureClass}}{{end}}{{if .Bound}}, bound {{.Bound}}{{end}}
+      {{if .Message}}<div class="muted">{{.Message}}</div>{{end}}
+      {{if .Successor}}<div class="muted">successor {{.Successor}}{{if .SuccessorUnavailable}}, unavailable: {{.SuccessorUnavailable}}{{end}}</div>{{end}}
+    </td></tr>
+    {{end}}
+    {{if $s.CandidateDiscardRefusals}}
+    <tr><th>candidate discard refusals</th><td>{{$s.CandidateDiscardRefusals}}{{if $s.CandidateDiscardRefused}} <span class="muted">({{$s.CandidateDiscardRefused}})</span>{{end}}</td></tr>
+    {{end}}
+  </table>
+</section>
+
+<section class="panel">
+  <h2>causal event timeline</h2>
+  <p class="meta"><span data-field="event-count">{{len .Events}}</span> event(s) from sequence {{.After}}{{if .HasMore}}, more available{{end}}</p>
+  <ol class="timeline" id="timeline" data-run-id="{{$s.RunID}}" data-after="{{.NextAfter}}">
+    {{range .Events}}
+    <li data-sequence="{{.Sequence}}">
+      <span class="mono muted">#{{.Sequence}}</span>
+      <span class="event-type">{{.Type}}</span>
+      <span class="muted">{{fmtTime .OccurredAt}}</span>
+    </li>
+    {{else}}
+    <li class="empty">no events recorded</li>
+    {{end}}
+  </ol>
+  {{if .HasMore}}<p><a href="/runs/{{$s.RunID}}?after={{.NextAfter}}">next page (newer) →</a></p>{{end}}
+</section>
+{{end}}

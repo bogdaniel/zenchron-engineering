@@ -1,4 +1,4 @@
-# Local Control Plane read API
+# Local Control Plane read API and console
 
 Start the separate process against an existing runtime state directory:
 
@@ -51,3 +51,28 @@ Run-list and plan projections currently reuse the runtime fleet projection,
 which may replay more state internally than the bounded HTTP response holds.
 S1 bounds the SQLite event-page query as well as its response. It does not
 introduce an independently maintained projection cache.
+
+## Console
+
+The same process also serves a server-rendered operator console on every
+other path, behind the identical bearer token, listener and store this
+document already describes - there is no second HTTP server, token lifecycle
+or SQLite handle for it:
+
+| Route | Shows |
+| --- | --- |
+| `/overview` | controller dimensions (durable consistency, serving, projection, role, admission), fleet counts by disposition and held material, plans |
+| `/runs` | the fleet, filterable by `?status=active\|waiting\|failed\|completed\|cancelled\|held` and `?source=owner/repo#123` |
+| `/runs/{id}` | one run's full detail: worker, candidate, controller identity, current operation (live vs. journal), held material, assurance, publication authority, authority request, budgets and attempts, and a paginated causal event timeline (`?after=`, via the same bounded `EventsPage`) |
+
+A browser cannot attach `Authorization` on a plain navigation, so the console
+accepts the same token via a cookie instead: open any console page, paste
+the token from `control-plane.token` into the sign-in form, and the page's
+own JavaScript sets the cookie and nothing else - the token is never placed
+in a URL, a query parameter, or a log line. The console's own live-refresh
+script polls this page's `/v1/*` routes above with that same token as an
+`Authorization` header; it introduces no additional read surface.
+
+Event payloads and free-form run/plan diagnostic text (`reason`, replay
+`error`) are not rendered, for the same reason API's own response types
+exclude them: they are unbounded prose, not a stable projection.
