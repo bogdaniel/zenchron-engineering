@@ -757,6 +757,11 @@ func TestAnAbandonedBackgroundShellFailsAValidResult(t *testing.T) {
 		}
 	}
 
+	automatic := claudeAssistant("M1", "", claudeToolUse("X")) + "\n" +
+		claudeAutomaticResult("X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000,"interrupted":false}`) + "\n" +
+		claudeResultWithAnswer(false, "go test ./... is still running in the background and I will confirm once it completes.")
+	expectUnresolved(t, automatic)
+
 	abandoned := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
 		claudeResultWithAnswer(false, answer)
 	expectUnresolved(t, abandoned)
@@ -1217,5 +1222,61 @@ func TestErrorMaxTurnsFailsClosedAsUnknown(t *testing.T) {
 	}
 	if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != FailureUnknown {
 		t.Fatalf("error_max_turns ended %q with %#v, want a fail-closed unknown", result.Outcome, result.Failure)
+	}
+}
+
+func claudeAutomaticResult(id, parent, metadata string) string {
+	return strings.TrimSuffix(claudeToolResult(id, parent), "}") + `,"tool_use_result":` + metadata + `}`
+}
+
+func TestClaudeAutomaticDetachmentTypedCorrelation(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, id, parent, metadata string
+		want                             bool
+	}{
+		{"automatic", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, true},
+		{"identity alone", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe"}`, true},
+		{"timeout alone", "Bash", "X", "", `{"timedOutAfterMs":120000}`, true},
+		{"wrong tool", "Read", "X", "", `{"backgroundTaskId":"bielbpgpe"}`, false},
+		{"unknown id", "Bash", "Y", "", `{"backgroundTaskId":"bielbpgpe"}`, false},
+		{"nested result", "Bash", "X", "agent", `{"backgroundTaskId":"bielbpgpe"}`, false},
+		{"wrong types", "Bash", "X", "", `{"backgroundTaskId":true,"timedOutAfterMs":"120000"}`, false},
+		{"empty", "Bash", "X", "", `{"backgroundTaskId":"","timedOutAfterMs":0}`, false},
+		{"null", "Bash", "X", "", `null`, false},
+		{"prose only", "Bash", "X", "", `{"stdout":"moved to the background (ID: bielbpgpe)"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := newClaudeStream(1)
+			feed(stream, claudeAssistant("M1", "", strings.Replace(claudeToolUse("X"), `"Bash"`, fmt.Sprintf("%q", tc.tool), 1)),
+				claudeAutomaticResult(tc.id, tc.parent, tc.metadata),
+				claudeAssistant("M2", "", claudeKillShellToolUse("K", "bielbpgpe")), claudeToolResult("K", ""),
+				claudeResultWithAnswer(false, "all finished"))
+			if got := stream.outcome(true).UnresolvedBackgroundWork; got != tc.want {
+				t.Fatalf("unresolved = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeAutomaticDetachmentOutranksFailedFinalResults(t *testing.T) {
+	for _, plan := range []bool{false, true} {
+		for _, processFailed := range []bool{false, true} {
+			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+			if plan {
+				request = planningRequest(request)
+			}
+			if processFailed {
+				fake.err = errors.New("provider exited unsuccessfully")
+			}
+			fake.outputs = []CommandOutput{{Stdout: []byte(strings.Join([]string{
+				claudeAssistant("M1", "", claudeToolUse("X")),
+				claudeAutomaticResult("X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`),
+				claudeResult(true, "error_during_execution", 0),
+			}, "\n") + "\n")}}
+			result, _ := provider.Execute(context.Background(), request)
+			if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
+				t.Fatalf("plan=%v processFailed=%v: outcome=%v failure=%+v", plan, processFailed, result.Outcome, result.Failure)
+			}
+		}
 	}
 }
