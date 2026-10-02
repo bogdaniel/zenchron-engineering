@@ -245,17 +245,36 @@ type cliAgentSpec struct {
 	// failure class.
 	InactivityNonProgress []string
 	// InvocationEnv returns non-secret provider controls for the MAIN
-	// invocation only, from the CONFIGURED per-attempt inactivity window
-	// (ProviderBudget.InactivityWindow), never from a remainder.
+	// invocation only, derived from invocationBudget - which is built from
+	// Zenchron's own configured per-attempt bounds and nothing else: never a
+	// repository-specific duration, and never derived from a remainder.
 	// Probes never receive them, and withInvocationEnv refuses any credential-
 	// shaped name or any name the allowlisted environment already sets.
-	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
+	InvocationEnv func(invocationBudget) ([]string, error)
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
 	// untrusted third-party text and can be large - never enters a durable
 	// payload while every security-relevant flag does.
 	PromptArgFromEnd int
+}
+
+// invocationBudget is what a spec's InvocationEnv hook may derive a
+// provider-internal control from. Both fields come from Zenchron's own
+// configured per-attempt bounds (ProviderBudget and the invocation's own
+// deadline, #328) - never a repository-specific duration, and never derived
+// from a run's remainder rather than its configured shape.
+type invocationBudget struct {
+	// InactivityWindow is the configured per-attempt progress window
+	// (ProviderBudget.InactivityWindow, or InactivityLimit where no window is
+	// stated separately). Zero means none is configured.
+	InactivityWindow time.Duration
+	// AttemptWall is the remaining duration until this invocation's own
+	// bound: time.Until the carried Deadline where one is set (the same
+	// instant #328's context.WithDeadline below binds the process to), else
+	// the configured WallLimit. Zero means no wall bound is configured for
+	// this invocation.
+	AttemptWall time.Duration
 }
 
 // cliReadOnlyMode is a provider's own enforceable non-mutating mode.
@@ -1060,7 +1079,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		if window <= 0 {
 			window = request.Budgets.InactivityLimit
 		}
-		extra, err := spec.InvocationEnv(window)
+		// THE SAME INSTANT THE PROCESS WILL ACTUALLY BE BOUND TO, below: a
+		// carried Deadline wins, exactly as it does there, so the derived
+		// control and the bound it must stay subordinate to can never
+		// disagree about which duration they mean (#388).
+		attemptWall := request.Budgets.WallLimit
+		if request.Deadline != nil {
+			if remaining := time.Until(*request.Deadline); remaining > 0 {
+				attemptWall = remaining
+			}
+		}
+		extra, err := spec.InvocationEnv(invocationBudget{InactivityWindow: window, AttemptWall: attemptWall})
 		if err == nil {
 			env, err = withInvocationEnv(env, extra)
 		}
@@ -1346,17 +1375,21 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
-	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385) when
-	// the typed stream shows this invocation itself started a background
-	// shell - run_in_background on a main-thread Bash call. Neither a
-	// BashOutput poll nor a KillShell call clears this: the typed stream
-	// gives no way to tell a poll of a still-running shell from a poll of a
-	// finished one, and no way to bind a KillShell call back to the specific
-	// shell a start produced, since a start never carries a typed identity
-	// (see claude_stream.go's backgroundStarts comment). Checked here, before the
-	// structured verdict is trusted below: a reviewer or feedback-resolution
-	// document this invocation wrote is not more credible for having been
-	// produced by a process that abandoned work it started, and every path
+	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385, #388)
+	// when the typed stream shows a main-thread Bash call ended up detached
+	// into a background task - whether the MODEL asked for it
+	// (run_in_background) or the TOOL's own foreground timeout moved it there
+	// on its own, unasked (#388's exact #387 shape: a plain foreground `go
+	// test ./...` that outlived Claude Code's own wait and was auto-detached).
+	// Neither a BashOutput poll nor a KillShell call clears this: the typed
+	// stream gives no way to tell a poll of a still-running shell from a poll
+	// of a finished one, and no way to bind a KillShell call back to the
+	// specific shell a start produced, since a start never carries a typed
+	// identity (see claude_stream.go's backgroundStarts comment). Checked
+	// here, before the structured verdict is trusted below: a reviewer or
+	// feedback-resolution document this invocation wrote is not more
+	// credible for having been produced by a process that abandoned work it
+	// started - or that was abandoned out from under it - and every path
 	// past this point treats the invocation as having actually finished.
 	if streamed.UnresolvedBackgroundWork {
 		result.Outcome = OperationFailed

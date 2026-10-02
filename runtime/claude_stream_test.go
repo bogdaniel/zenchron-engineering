@@ -223,6 +223,18 @@ func claudeToolResult(toolID, parent string) string {
 		`","content":"ok"}]},"parent_tool_use_id":` + claudeParent(parent) + `,"session_id":"s"}`
 }
 
+// claudeAutoDetachedToolResult is a main-thread Bash tool_result whose own
+// typed tool_use_result companion field reports the TOOL's own foreground
+// timeout moved an ordinary call to the background, unasked (#388; the exact
+// #387 live shape). The call this answers never carried run_in_background -
+// callers pair it with plain claudeToolUse, never claudeBackgroundToolUse.
+func claudeAutoDetachedToolResult(toolID, parent, backgroundTaskID string) string {
+	return `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + toolID +
+		`","content":"Command running in background with ID: ` + backgroundTaskID + `"}]},"parent_tool_use_id":` +
+		claudeParent(parent) + `,"session_id":"s","tool_use_result":{"backgroundTaskId":"` + backgroundTaskID +
+		`","timedOutAfterMs":120000,"interrupted":false}}`
+}
+
 func claudeParent(parent string) string {
 	if parent == "" {
 		return "null"
@@ -443,6 +455,24 @@ func TestClaudeBackgroundShellBookkeeping(t *testing.T) {
 			claudeAssistant("M3", "", claudeKillShellToolUse("Y", "bash_1")), claudeToolResult("Y", ""),
 			claudeAssistant("M4", "", claudeKillShellToolUse("Y2", "bash_2")), claudeToolResult("Y2", ""),
 			claudeResult(false, "success", 0)}, true},
+		// #388: the call itself never asked for run_in_background - it is an
+		// ordinary claudeToolUse - and the typed tool_use_result on its OWN
+		// result is the only place the detachment is ever reported.
+		{"an ordinary foreground call auto-detached by the tool's own timeout is flagged", []string{
+			claudeAssistant("M1", "", claudeToolUse("X")), claudeAutoDetachedToolResult("X", "", "bielbpgpe"),
+			claudeResultWithAnswer(false, "still running in the background")}, true},
+		{"an auto-detached result survives an intervening unrelated turn", []string{
+			claudeAssistant("M1", "", claudeToolUse("X")), claudeAutoDetachedToolResult("X", "", "bielbpgpe"),
+			claudeAssistant("M2", "", claudeToolUse("Z")), claudeToolResult("Z", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"a nested subagent's own auto-detached result never sets the main-thread flag", []string{
+			claudeAssistant("M1", "", claudeToolUse("AGENT")),
+			claudeAssistant("S1", "AGENT", claudeToolUse("N")),
+			claudeAutoDetachedToolResult("N", "AGENT", "bielbpgpe"),
+			claudeToolResult("AGENT", "")}, false},
+		{"a tool_result with no backgroundTaskId is an ordinary result, not a detachment", []string{
+			claudeAssistant("M1", "", claudeToolUse("X")), claudeToolResult("X", ""),
+			claudeResult(false, "success", 0)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -785,6 +815,33 @@ func TestAnAbandonedBackgroundShellFailsAValidResult(t *testing.T) {
 	expectUnresolved(t, killedStaleID)
 }
 
+// #388: the SECOND typed route into the same unresolved shape, reproducing
+// the exact #387 live sequence #384's detector missed - a foreground Bash
+// call with no run_in_background at all, auto-detached by the Bash tool's
+// OWN timeout, and a final result that still reports success. Must fail
+// (route to provider_background_work_unresolved, never admit a candidate)
+// exactly as the explicit-request route does.
+func TestAnAutoDetachedBashCallFailsAValidResult(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	transcript := claudeAssistant("M1", "", claudeToolUse("X")) + "\n" +
+		claudeAutoDetachedToolResult("X", "", "bielbpgpe") + "\n" +
+		claudeResultWithAnswer(false, "go test ./... is still running in the background and I'll confirm once it completes.")
+	fake.outputs = []CommandOutput{{Stdout: []byte(transcript + "\n")}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OperationFailed {
+		t.Fatalf("outcome = %q, want OperationFailed: an auto-detached foreground call must not admit a candidate", result.Outcome)
+	}
+	if result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
+		t.Fatalf("failure = %#v, want %q", result.Failure, FailureProviderBackgroundWorkUnresolved)
+	}
+	if RouteFailure(FailureProviderBackgroundWorkUnresolved) != RouteRetry {
+		t.Fatal("an auto-detached background call must route to a bounded retry of the same operation")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // A (continued). The invocation-only background-wait ceiling
 // ---------------------------------------------------------------------------
@@ -837,6 +894,85 @@ func TestClaudeBackgroundWaitCeilingSitsInsideTheWindow(t *testing.T) {
 	if envOf(codexFake.execution(t)) != "" {
 		t.Fatal("codex received Claude's invocation env")
 	}
+}
+
+// #388: the Bash tool's own documented foreground-timeout controls, derived
+// from the attempt wall alone - never a repository-specific duration.
+func TestClaudeBashTimeoutTracksTheAttemptWall(t *testing.T) {
+	if env, err := claudeBashTimeoutEnv(0); err != nil || env != nil {
+		t.Fatalf("no wall bound: env=%v err=%v, want nil,nil", env, err)
+	}
+	env, err := claudeBashTimeoutEnv(90 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"BASH_DEFAULT_TIMEOUT_MS=90000", "BASH_MAX_TIMEOUT_MS=90000"}
+	if !reflect.DeepEqual(env, want) {
+		t.Fatalf("env = %v, want %v", env, want)
+	}
+	if _, err := claudeBashTimeoutEnv(time.Microsecond); err == nil {
+		t.Fatal("a wall too small to derive a positive millisecond value dispatched silently")
+	}
+}
+
+// The derived timeout control is applied at Execute from whichever bound
+// actually governs this invocation's process - a carried Deadline (#328)
+// when one is set, else the configured WallLimit - so it can never claim a
+// ceiling looser than Zenchron's own.
+func TestClaudeBashTimeoutEnvAppliedFromTheWallOrTheDeadline(t *testing.T) {
+	envOf := func(call recordedCommand, key string) string {
+		for _, entry := range call.env {
+			if strings.HasPrefix(entry, key+"=") {
+				return entry
+			}
+		}
+		return ""
+	}
+	t.Run("from WallLimit when no deadline is carried", func(t *testing.T) {
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		request.Budgets.WallLimit = 90 * time.Second
+		if _, err := provider.Execute(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		call := fake.execution(t)
+		if got := envOf(call, "BASH_DEFAULT_TIMEOUT_MS"); got != "BASH_DEFAULT_TIMEOUT_MS=90000" {
+			t.Fatalf("BASH_DEFAULT_TIMEOUT_MS = %q", got)
+		}
+		if got := envOf(call, "BASH_MAX_TIMEOUT_MS"); got != "BASH_MAX_TIMEOUT_MS=90000" {
+			t.Fatalf("BASH_MAX_TIMEOUT_MS = %q", got)
+		}
+	})
+	t.Run("a carried deadline wins over a looser WallLimit, and stays within it", func(t *testing.T) {
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		request.Budgets.WallLimit = time.Hour
+		deadline := time.Now().Add(30 * time.Second)
+		request.Deadline = &deadline
+		if _, err := provider.Execute(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		got := envOf(fake.execution(t), "BASH_MAX_TIMEOUT_MS")
+		if got == "" {
+			t.Fatal("no BASH_MAX_TIMEOUT_MS derived from a carried deadline")
+		}
+		var ms int64
+		if _, err := fmt.Sscanf(got, "BASH_MAX_TIMEOUT_MS=%d", &ms); err != nil {
+			t.Fatal(err)
+		}
+		if ms <= 0 || ms > 30000 {
+			t.Fatalf("BASH_MAX_TIMEOUT_MS = %dms, want a positive value bounded by the 30s deadline, not the 1h WallLimit", ms)
+		}
+	})
+	t.Run("no wall bound at all leaves Claude's own default", func(t *testing.T) {
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		if _, err := provider.Execute(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"} {
+			if got := envOf(fake.execution(t), key); got != "" {
+				t.Fatalf("%s set with no configured wall: %q", key, got)
+			}
+		}
+	})
 }
 
 func TestTheInvocationEnvHookCannotCarryCredentialsOrReplaceTheAllowlist(t *testing.T) {

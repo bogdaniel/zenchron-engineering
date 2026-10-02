@@ -38,9 +38,10 @@ import (
 // that it substituted no credential of its own.
 //
 // A spec MAY contribute narrowly approved, non-secret invocation variables
-// through InvocationEnv - Claude's CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is the
-// one today - applied to the main invocation only, never to probes. API-key
-// and credential variables remain forbidden, always: withInvocationEnv refuses
+// through InvocationEnv - Claude's CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS,
+// BASH_DEFAULT_TIMEOUT_MS and BASH_MAX_TIMEOUT_MS (#388) are the ones today -
+// applied to the main invocation only, never to probes. API-key and
+// credential variables remain forbidden, always: withInvocationEnv refuses
 // any credential-shaped name and any name the allowlist already sets.
 
 // diagnosticSignal maps one RECOGNIZED provider diagnostic onto a typed
@@ -241,7 +242,7 @@ var claudeSpec = cliAgentSpec{
 	Permission:                      cliPermissionModes{Safe: "acceptEdits", Bypass: "bypassPermissions"},
 	SuppressesWorkspaceInstructions: true,
 	ProgressMode:                    progressStructuredClaudeEvents,
-	InvocationEnv:                   claudeBackgroundWaitEnv,
+	InvocationEnv:                   claudeInvocationEnv,
 	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},
