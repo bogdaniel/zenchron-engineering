@@ -1348,12 +1348,12 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	}
 	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385) when
 	// the typed stream shows this invocation itself started a background
-	// shell - run_in_background on a main-thread Bash call - and never
-	// explicitly killed it before writing that result. A BashOutput poll
-	// does not clear this: the typed stream gives no way to tell a poll of a
-	// still-running shell from a poll of a finished one, so only a typed
-	// KillShell naming the shell counts (see claude_stream.go's
-	// backgroundStarts/backgroundResolved). Checked here, before the
+	// shell - run_in_background on a main-thread Bash call. Neither a
+	// BashOutput poll nor a KillShell call clears this: the typed stream
+	// gives no way to tell a poll of a still-running shell from a poll of a
+	// finished one, and no way to bind a KillShell call back to the specific
+	// shell a start produced, since a start never carries a typed identity
+	// (see claude_stream.go's backgroundStarts comment). Checked here, before the
 	// structured verdict is trusted below: a reviewer or feedback-resolution
 	// document this invocation wrote is not more credible for having been
 	// produced by a process that abandoned work it started, and every path
