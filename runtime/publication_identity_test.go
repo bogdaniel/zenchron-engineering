@@ -202,7 +202,7 @@ func TestAnUnresolvedPublicationIdentityAdmitsNothing(t *testing.T) {
 	// ...and a human is still admitted, so this is fail-closed rather than
 	// refuse-everything.
 	human := FeedbackItem{
-		Class: FeedbackReview, ID: 2,
+		Class: FeedbackReview, ID: 2, State: GitHubReviewChangesRequested,
 		Actor: GitHubActor{Login: "operator", ID: 7}, Body: "please change this", Commit: "head-sha",
 	}
 	permissions["operator"] = PermissionWrite

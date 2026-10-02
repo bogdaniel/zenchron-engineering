@@ -27,6 +27,11 @@ package runtime
 //   - Feedback applies to the CURRENT head of the ACTIVE generation. A review
 //     of a superseded commit is history, and a frozen generation never wakes up
 //     because someone commented on its old pull request.
+//   - A submitted review's DISPOSITION is part of admission, not just its text.
+//     An approval that carries explanatory prose is still an approval: only a
+//     changes-requested review's text can become a remediation obligation. A
+//     comment or a dismissal is pinned to that same answer explicitly, so
+//     neither can silently inherit changes-requested's semantics.
 
 import (
 	"crypto/sha256"
@@ -177,6 +182,10 @@ type FeedbackItem struct {
 	// Bot marks an actor GitHub reports as an App or bot account.
 	Bot       bool
 	CreatedAt time.Time
+	// State is the submitted review's disposition - approved, changes
+	// requested, commented, dismissed. It is meaningful only for FeedbackReview;
+	// every other class is a comment, not a verdict, and carries the zero value.
+	State GitHubReviewState
 }
 
 // Key is the durable identity of one item: its class and its forge id. It is
@@ -228,6 +237,13 @@ const (
 	feedbackRefusedEmpty        = "carries no text, so there is nothing to deliver"
 	feedbackAdmittedAllowedBot  = "authored by an operator-allowlisted automation account"
 	feedbackRefusedUnauthorized = "actor has no permission on this repository"
+	// feedbackRefusedApproval and feedbackRefusedReviewNoDisposition gate a
+	// submitted review on its disposition, before its text is ever considered.
+	// Only a changes-requested review reaches the text-and-permission checks
+	// below; an approval or a neutral review is refused on disposition alone,
+	// however actionable its prose reads.
+	feedbackRefusedApproval            = "the review's disposition is an approval, and an approval's text creates no remediation obligation"
+	feedbackRefusedReviewNoDisposition = "the review's disposition did not request changes, and only a changes-requested review's text creates a remediation obligation"
 	// The runtime could not establish which account it publishes as, so it
 	// cannot recognize its own comments and admits nothing at all.
 	feedbackRefusedUnidentifiedRuntime = "the runtime's own publication identity is unresolved, so its own comments could not be told apart from anyone else's"
@@ -284,6 +300,8 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 			decision.Reason = feedbackRefusedBot
 		case strings.TrimSpace(string(item.Body)) == "":
 			decision.Reason = feedbackRefusedEmpty
+		case item.Class == FeedbackReview && !reviewDispositionAdmitsText(item.State):
+			decision.Reason = reviewDispositionRefusal(item.State)
 		case !decision.Applicable:
 			decision.Reason = feedbackRefusedStale
 		default:
@@ -306,6 +324,25 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 	}
 	sort.SliceStable(decisions, func(i, j int) bool { return decisions[i].Key < decisions[j].Key })
 	return decisions
+}
+
+// reviewDispositionAdmitsText reports whether a submitted review's disposition
+// lets its text become remediation feedback. Disposition is the gate: a
+// changes-requested review's text may become feedback regardless of what it
+// says, and no other disposition's text may, however actionable it reads.
+func reviewDispositionAdmitsText(state GitHubReviewState) bool {
+	return state == GitHubReviewChangesRequested
+}
+
+// reviewDispositionRefusal names the rule a non-blocking review's disposition
+// was refused under. Approval gets its own reason because it is the live
+// case; comment and dismissal are pinned to the same explicit answer rather
+// than falling through unclassified.
+func reviewDispositionRefusal(state GitHubReviewState) string {
+	if state == GitHubReviewApproved {
+		return feedbackRefusedApproval
+	}
+	return feedbackRefusedReviewNoDisposition
 }
 
 // feedbackApplies reports whether an item still describes the run's current

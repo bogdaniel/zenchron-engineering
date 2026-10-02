@@ -270,7 +270,7 @@ func (r *EngineeringRuntime) collectFeedback(ctx context.Context, state *runStat
 				items = append(items, FeedbackItem{
 					Class: FeedbackReview, ID: review.ID, Actor: review.Author,
 					Body: review.Body, Commit: review.CommitSHA, Bot: review.Author.Bot,
-					CreatedAt: review.SubmittedAt,
+					CreatedAt: review.SubmittedAt, State: review.State,
 				})
 			}
 			for _, comment := range reviews.Comments {

@@ -141,6 +141,70 @@ func TestStaleHeadFeedbackIsNotApplicable(t *testing.T) {
 	}
 }
 
+// TestReviewDispositionGatesTextNotJustBody proves that a submitted review's
+// disposition - not its text - decides whether it can become remediation
+// feedback. An APPROVE that carries explanatory, even actionable-looking,
+// prose must never be admitted: only a changes-requested review's text may
+// be. A comment (neutral) review is pinned to the same non-admission answer
+// explicitly, rather than inheriting changes-requested's semantics by falling
+// through unclassified.
+func TestReviewDispositionGatesTextNotJustBody(t *testing.T) {
+	policy := FeedbackPolicy{PublicationIdentityResolved: true}
+	permissions := map[string]GitHubPermission{"maintainer": PermissionWrite}
+	review := func(id int64, state GitHubReviewState, body string) FeedbackItem {
+		return FeedbackItem{
+			Class: FeedbackReview, ID: id, State: state,
+			Actor: GitHubActor{Login: "maintainer", ID: 1}, Body: UntrustedText(body),
+		}
+	}
+
+	approvedWithText := review(1, GitHubReviewApproved, "nice work, consider renaming this helper though")
+	changesRequested := review(2, GitHubReviewChangesRequested, "nice work, consider renaming this helper though")
+	approvedEmpty := review(3, GitHubReviewApproved, "")
+	commented := review(4, GitHubReviewCommented, "just a thought: tighten the docs")
+	dismissed := review(5, GitHubReviewDismissed, "this review no longer applies")
+
+	decisions := map[int64]FeedbackDecision{}
+	for _, decision := range AdmitFeedback(
+		[]FeedbackItem{approvedWithText, changesRequested, approvedEmpty, commented, dismissed},
+		policy, permissions, "",
+	) {
+		var id int64
+		switch decision.Key {
+		case approvedWithText.Key():
+			id = 1
+		case changesRequested.Key():
+			id = 2
+		case approvedEmpty.Key():
+			id = 3
+		case commented.Key():
+			id = 4
+		case dismissed.Key():
+			id = 5
+		}
+		decisions[id] = decision
+	}
+
+	if d := decisions[1]; d.Admitted || d.Reason != feedbackRefusedApproval {
+		t.Fatalf("an approval with explanatory text was admitted as remediation feedback: %#v", d)
+	}
+	if d := decisions[2]; !d.Admitted || d.Reason != feedbackAdmittedPermitted {
+		t.Fatalf("a changes-requested review with the SAME text was not admitted: %#v", d)
+	}
+	// Preserving prior behavior: an approval with no text is still refused for
+	// having nothing to deliver, not reclassified onto the new disposition
+	// reason.
+	if d := decisions[3]; d.Admitted || d.Reason != feedbackRefusedEmpty {
+		t.Fatalf("an empty approval changed its refusal reason: %#v", d)
+	}
+	if d := decisions[4]; d.Admitted || d.Reason != feedbackRefusedReviewNoDisposition {
+		t.Fatalf("a neutral comment review was not pinned to its explicit non-admission reason: %#v", d)
+	}
+	if d := decisions[5]; d.Admitted || d.Reason != feedbackRefusedReviewNoDisposition {
+		t.Fatalf("a dismissed review was not pinned to its explicit non-admission reason: %#v", d)
+	}
+}
+
 // TestUnresolvedPermissionIsNeverAnAdmission proves the gate fails closed when
 // the forge cannot answer. A lookup that failed is not consent.
 func TestUnresolvedPermissionIsNeverAnAdmission(t *testing.T) {
