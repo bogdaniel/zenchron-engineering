@@ -37,9 +37,9 @@ const (
 	HeldCommittedUnverified = "committed_unverified"
 	// HeldCheckpoint is a runtime-owned incomplete checkpoint commit (#54).
 	HeldCheckpoint = "checkpoint"
-	// HeldUncommitted is a succeeded producing operation's workspace change
-	// that the runtime never committed because the budget ended the run
-	// first. It exists only in the candidate workspace.
+	// HeldUncommitted is a producing operation's workspace change that was
+	// never admitted or committed before the run stopped. It exists only
+	// in the candidate workspace.
 	HeldUncommitted = "uncommitted"
 )
 
@@ -124,15 +124,28 @@ func BudgetBoundary(disposition Disposition, reason string) bool {
 	return disposition == Failed && (budgetReasons[reason] || strings.HasSuffix(reason, attemptsExhaustedSuffix))
 }
 
-// heldMaterial names the valuable material the run holds when a budget ends
-// it, or nil when it holds none. It is pure: replayed state only.
+// heldMaterial names preserved work when a budget or invocation failure ends
+// the run, or nil when it holds none. It is pure: replayed state only.
 func (s *runState) heldMaterial(reason string) *HeldMaterial {
 	held := HeldMaterial{BlockedBy: reason, Disposition: HeldDisposition, NextStep: s.nextLifecycleStep()}
 	if d := s.projection.ExecutionDiagnostic; d != nil && d.SuccessorUnavailable != "" {
 		held.Successor, held.SuccessorUnavailable = d.Successor, d.SuccessorUnavailable
 	}
 	head := s.projection.CandidateRevision
-	if producing, pending := bindCandidateCommit(s); pending {
+	producing, pending := bindCandidateCommit(s)
+	if !pending {
+		// Refused invocations are not candidate-commit inputs. Their material
+		// nevertheless needs the same durable identity and GC protection.
+		for _, op := range sortOperations(mapValues(s.snapshot.Operations)) {
+			var record mutationResult
+			if op.Kind == OpExecutionInvoke && op.State == OperationFailed &&
+				json.Unmarshal(op.Result, &record) == nil && record.Mutated &&
+				!s.satisfied(OpCandidateCommit, op.ID) {
+				producing, pending = op.ID, true
+			}
+		}
+	}
+	if pending {
 		var record mutationResult
 		// A result that does not decode leaves the identity unknown, never
 		// invented: the kind and the producing operation still stand.

@@ -1087,6 +1087,10 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	if key, wanted := bindCandidateCreate(s); !wanted || !s.satisfied(OpCandidateCreate, key) {
 		return "", false
 	}
+	// Preserve an eligible incomplete checkpoint before selecting its successor.
+	if _, pending := bindCandidateCommit(s); pending {
+		return "", false
+	}
 	// Initial implementation: no candidate commit exists yet.
 	if s.projection.CandidateRevision == "" {
 		return "initial|" + s.contractRevision() + "|" + s.pinnedBase(), true
@@ -1305,14 +1309,23 @@ func bindCandidateCommit(s *runState) (string, bool) {
 	return "", false
 }
 
-// mutations are the succeeded producing operations that actually changed the
-// candidate workspace, in durable order.
+// mutations are completed producer changes and explicitly eligible incomplete
+// checkpoints, in durable order. A failure alone never admits candidate work.
 func (s *runState) mutations() []RunOperation {
 	var out []RunOperation
 	for _, kind := range []string{OpExecutionInvoke, OpRemediationGofmt} {
-		for _, op := range s.succeeded(kind) {
-			var result mutationResult
+		for _, op := range s.snapshot.Operations {
+			if op.Kind != kind {
+				continue
+			}
+			var result executionRecord
 			if len(op.Result) == 0 || json.Unmarshal(op.Result, &result) != nil || !result.Mutated {
+				continue
+			}
+			if op.State != Succeeded && !(op.State == OperationFailed && result.Checkpoint) {
+				continue
+			}
+			if result.FailureClass != "" && !result.Checkpoint {
 				continue
 			}
 			out = append(out, op)
@@ -2078,7 +2091,7 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 		if !ok {
 			return fmt.Errorf("no journal event for disposition %q", disposition)
 		}
-		// A budget boundary names what the run is holding (#203) in the SAME
+		// A budget boundary or refused mutation names held work (#203) in the SAME
 		// event that ends it, so the terminal fact and the held material can
 		// never be journalled apart, and replay reads the record back rather
 		// than re-deriving it.
@@ -2088,8 +2101,12 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 		var held *HeldMaterial
 		if disposition == Failed {
 			held = state.snapshot.HeldMaterial
-			if held == nil && BudgetBoundary(disposition, reason) {
-				held = state.heldMaterial(reason)
+			if held == nil {
+				candidate := state.heldMaterial(reason)
+				if BudgetBoundary(disposition, reason) ||
+					(candidate != nil && candidate.Kind == HeldUncommitted) {
+					held = candidate
+				}
 			}
 		}
 		payload := dispositionRecord{Reason: reason, HeldMaterial: held}

@@ -1370,33 +1370,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Checkpoint: record.Mutated && (class == FailureExecutionIncomplete ||
 				(class == FailureProviderNoProgress && len(state.outstandingReviewKeys()) > 0)),
 		}
-		// A producer that left real work behind did its bounded job, so the
-		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
-		// is recorded as a checkpoint rather than as an operation failure.
-		//
-		// A producer that left nothing behind did not satisfy this operation,
-		// so the operation fails - and with the class above it now fails INTO
-		// the existing attempt budget rather than out of the run. The next
-		// attempt binds to the same identity bindExecutionInvoke already
-		// derives: the trusted base for an initial invocation, and the exact
-		// checkpoint commit for a continuation. Nothing new counts anything:
-		// the scheduler's existing per-operation attempts bound the retries,
-		// and the checkpoint ceiling still bounds how much unfinished work one
-		// run may accumulate, because a zero-delta invocation creates no
-		// checkpoint.
-		//
-		// A REVIEWER PROTOCOL FAILURE ALWAYS FAILS THE OPERATION, mutation or
-		// not (#374). "Left real work behind" means something for a producer,
-		// whose deliverable IS candidate content; a reviewer's deliverable is
-		// the verdict, and incidental workspace touches (review notes, a
-		// toolchain's own output) are not that verdict. Letting Mutated excuse
-		// this class would let the runtime's own candidate.commit operation
-		// treat a reviewer's scratch output as a successful execution and
-		// commit it - admitting candidate content from an invocation that
-		// never crossed the protocol it was there to run.
-		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
-			produced.state = OperationFailed
-		}
+		// Mutation proves material exists, never that the invocation completed.
+		// Checkpoint eligibility controls preservation separately from failure.
+		produced.state = OperationFailed
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
 		produced.result = execution
 	}
