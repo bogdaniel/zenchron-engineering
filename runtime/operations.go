@@ -905,6 +905,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if pathErr != nil {
 		return recorded(failed(pathErr))
 	}
+	// THE ATTEMPT BOUNDARY (#390). Whatever path below settles this attempt,
+	// a FAILED settlement with material in the workspace quarantines that
+	// material before the operation is recorded, so the same binding's next
+	// physical attempt starts from the exact subject this one was given.
+	defer func() {
+		r.settleRefusedMaterial(&out, state, operation, physicalAttempt, workspace.Dir, subject.Commit, paths)
+	}()
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
 		ContentDigest: workspaceContentDigest(workspace.Dir, paths),
@@ -1394,7 +1401,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// treat a reviewer's scratch output as a successful execution and
 		// commit it - admitting candidate content from an invocation that
 		// never crossed the protocol it was there to run.
-		if !record.Mutated || class == FailureReviewerProtocolIncomplete {
+		//
+		// A FAILURE CLASSIFICATION IS AUTHORITATIVE FOR THE INVOCATION (#390).
+		// The one way a provider failure leaves the operation Succeeded is the
+		// governed checkpoint above: a runtime bound ended a producer that left
+		// real work, and that work is preserved as an INCOMPLETE head (#54,
+		// #328, #379). Any other failure with mutation - a refusal such as
+		// provider_background_work_unresolved, a quota or provider error, an
+		// unknown failure - used to fall through as Succeeded+mutated, and
+		// candidate.commit then committed bytes the runtime had just refused
+		// as a completed candidate. Mutation proves material exists; it is
+		// not evidence the execution succeeded. Such an operation fails, and
+		// its material is quarantined at this attempt boundary (see
+		// settleRefusedMaterial) rather than left for the next attempt.
+		if !execution.Checkpoint {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
