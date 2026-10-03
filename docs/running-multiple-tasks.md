@@ -162,9 +162,12 @@ turn per poll interval, and a slot freed between passes is handed on at once
 rather than at the next poll, so ten parked runs cost a runnable one seconds,
 not ten passes. This decides only who goes first, never what a run may do.
 
-**At a ceiling of one this is still a queue.** One long-running task holds the
-single slot until it is done and nothing else moves, which is what the default
-ceiling of one means; raise `max_concurrent_runs` to work on several tasks at
+**At a ceiling of one, work is still a queue.** One long-running task holds the
+single work slot until it is done and no other run does work, which is what the
+default ceiling of one means. Observation is not queued behind it: it has its
+own ceiling, `max_concurrent_observations` (default 2), so a run waiting on
+review still notices the review and shows as runnable until the slot frees
+(see [capacity classes](supervisor.md#capacity-classes)); raise `max_concurrent_runs` to work on several tasks at
 once. Above one, the ceiling is a rate limit on how many run at a time and never
 a fixed ordering. The scheduler enforces the same ceiling durably; the
 supervisor bound exists so the process does not start work it cannot lease. A per-run failure is REPORTED inside the tick report and
@@ -263,14 +266,15 @@ zenchron-engineering autonomy stop-all --reason "..."     # actually cancel ever
 | --- | --- | --- |
 | `drain` | accepts no submissions and starts nothing new; work already inside a reconcile finishes | no |
 | `shutdown` | stops scheduling and unwinds in-flight work through the cancellation providers and the Docker sandbox already honour; every run stays exactly as resumable as its journal says | no |
-| `stop-all` | cancels every non-terminal run, journalled per run through the same single cancellation path `stop RUN` uses | yes |
+| `stop-all` | cancels every non-terminal run, journalled per run through the same single cancellation path `stop RUN` uses; a run that completed or failed, even one that finished after the listing, is skipped and keeps its outcome | yes |
 
 `drain` and `shutdown` are instructions TO a supervisor and are refused with `no
 supervisor is running on <state_dir>; start one with
 zenchron-engineering serve` when there is none — saying so is better than
 silently succeeding. `stop-all` works either way: with a supervisor it is
 delegated so the process holding the leases performs it, without one it runs
-through the same cancellation path locally. A drain is not reversible except by
+through the same cancellation path locally. `stop RUN` on a completed or
+failed run is refused with exit status 64 and never rewrites its outcome. A drain is not reversible except by
 restarting the supervisor, which is deliberate: un-draining silently would make
 the instruction meaningless.
 

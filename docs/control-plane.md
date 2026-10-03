@@ -24,6 +24,7 @@ All routes are GET-only:
 | `/v1/runs?offset=0&limit=100` | Runtime fleet run summaries |
 | `/v1/runs/{id}` | Runtime status, lifecycle times, operation progress and its source |
 | `/v1/runs/{id}/events?after=0&limit=100` | Run-local event metadata |
+| `/v1/runs/{id}/stream` | Per-run SSE: snapshot, then events (below) |
 | `/v1/plans/{id}` | Plan summary, revisions and stage counts |
 
 Limits are 1–500. Event pages return `next_after` and `has_more`; pass
@@ -31,6 +32,81 @@ Limits are 1–500. Event pages return `next_after` and `has_more`; pass
 rows. This cursor is the run's `sequence`, **not** the fleet journal's
 `global_sequence`. There is no fleet change feed in S1. Run-list offsets are
 not a stable cross-request snapshot during concurrent runtime changes.
+
+### Per-run event stream
+
+`GET /v1/runs/{id}/stream[?limit=1-500]` is a Server-Sent Events stream for
+one run, behind the same Bearer token (so a browser `EventSource`, which cannot
+send that header, is not a client). Each frame is `id: <sequence>` plus one
+`data:` JSON object validated by `control-plane-run-stream.schema.json`:
+
+- `snapshot`: on a fresh connect only, the same `run` projection as
+  `GET /v1/runs/{id}`; its `id` is the run's latest `sequence`.
+- `event`: the same metadata as `/events`, in `sequence` order.
+- `heartbeat`: liveness only; its `id` is the last delivered `sequence`.
+- `stale` (`reason: read_failed`): a read failed after the stream opened.
+  The server closes the stream; reconnect to resume.
+
+Resume with `Last-Event-ID: <n>` (preferred) or `?after=<n>`: no snapshot is
+sent, and events with `sequence > n` replay in LIMIT-sized pages. A resume
+position beyond the run's latest `sequence` is refused with `400
+invalid_page`. Read failures before the stream opens are ordinary JSON errors.
+
+The fresh-connect cursor is read before the snapshot. An event that commits
+between the two may therefore be reflected in the snapshot and still arrive
+as an `event` frame. That duplicate is permitted; dedupe by `sequence`. An
+event is never skipped.
+
+There is no "live" boundary frame marking the end of replay, and only journal
+events are streamed: a change to an operation row without a new event (for
+example, heartbeat or progress timestamps) is not pushed. Re-read
+`GET /v1/runs/{id}` for that state. Concurrent streams are not capped, which
+is acceptable on the loopback, token-gated listener.
+
+#### Measured read cost
+
+`BenchmarkStreamReadCost` in `controlplane/stream_bench_test.go` measures the
+stream against a real-shaped journal. The journal has one run of 100,000 events
+(a repeating `operation.planned`, `before` and `after` cycle with full
+`RunOperation` payloads over 50 operations, plus `run.waiting`), and 100 other
+runs of 40 events each.
+
+The fleet and the run's first 400 events go through `AppendEvent`. The rest
+of the run is inserted in one transaction, with the real sequence, hash
+chain, `EventDigest` and canonical document, so `Status`'s full `Reduce`
+verifies them like appended rows. Only `state_before` and `state_after` are
+format-only sha256 values. `AppendEvent` itself took 31.7 ms per append at
+run length 400, and that cost grows with run length, so 100k appends would be
+quadratic.
+
+Run it with:
+
+```
+go test ./controlplane -run '^$' -bench BenchmarkStreamReadCost -benchmem -benchtime 5x
+```
+
+The results below are from an Apple M3 (darwin/arm64) with go1.27.1, 5
+iterations each:
+
+| Operation | Time/op | Memory/op | Allocs/op |
+| --- | --- | --- | --- |
+| Fresh connect (cursor + `Status` snapshot + first drain) | 3.50 s | 1.97 GB | 33.9 M |
+| `Status` alone | 3.75 s | 1.97 GB | 33.9 M |
+| `LatestSequence` alone | 84 µs | 672 B | 19 |
+| Resume from sequence 50,000 (100 pages of 500) | 397 ms | 229 MB | 2.0 M |
+| Steady-state poll, nothing new | 59 µs | 1.9 KB | 48 |
+
+Fresh connect is dominated by `Status`, the full `Reduce` of all 100k events
+that the S1 `GET /v1/runs/{id}` already pays. A cached run snapshot is #96's
+scope, not this route's.
+
+Replay and polling are bounded. A page is at most 500 rows, and a request for
+501 is refused. A steady-state poll allocates a fixed 48 times; the benchmark
+fails above 1,000. `TestStreamReadQueriesAreIndexSeeks` pins both stream
+queries to an index range seek. Before that fix, the queries left `plan_id`
+unbound, so SQLite searched only `(stream_kind, run_id)` and sorted the
+remaining rows in a temporary B-tree on every page. A poll cost 17.1 ms,
+`LatestSequence` 14.2 ms, and the 50k resume 3.45 s.
 
 Response contracts are `schemas/control-plane-*.schema.json`, including the
 shared error shape. Empty lists are arrays. Internal errors become a fixed

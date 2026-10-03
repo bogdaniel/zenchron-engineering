@@ -61,12 +61,6 @@ const (
 	OpGitHubObserve     = "github.observe"
 )
 
-// observationKinds are the operations that only READ external state. They are
-// the only operations a waiting run may perform: a waiting run must still be
-// able to notice that its pull request was merged, but it must not execute,
-// mutate, verify, authorize, or publish anything while it waits.
-var observationKinds = map[string]bool{OpSourceObserve: true, OpGitHubObserve: true}
-
 // publicationKinds are the operations that change protected remote state.
 // Every one of them is gated on a current, authorized #7 decision.
 var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true}
@@ -588,6 +582,16 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
+			// The after record is durable before run.waiting. A crash in that
+			// gap must preserve external-wait accounting as well as the deadline.
+			if waitingSince.IsZero() {
+				var op RunOperation
+				if decodeJSON(event.Payload, &op) == nil {
+					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
+						waitingSince = event.OccurredAt
+					}
+				}
+			}
 			if waitingSince.IsZero() || event.OperationID == "" {
 				continue
 			}
@@ -1060,13 +1064,32 @@ func (s *runState) attemptsFor(kind string) int {
 	}
 }
 
-func bindSourceObserve(s *runState) (string, bool) { return s.epochKey(), true }
+// A retry disposition with finite attempt authority changes status, not the
+// observation being retried. Keep its binding so status events cannot mint a
+// fresh attempt budget, through to the last attempt.
+func observationBinding(s *runState, kind string) string {
+	var latest *RunOperation
+	for _, op := range s.snapshot.Operations {
+		if op.Kind == kind && (latest == nil || op.CreatedAt.After(latest.CreatedAt) || (op.CreatedAt.Equal(latest.CreatedAt) && op.ID > latest.ID)) {
+			copy := op
+			latest = &copy
+		}
+	}
+	if latest != nil && latest.State == OperationFailed && retryDispositions[latest.RetryDisposition].FiniteAttemptAuthority {
+		return bindingOf(*latest)
+	}
+	return s.epochKey()
+}
+
+func bindSourceObserve(s *runState) (string, bool) {
+	return observationBinding(s, OpSourceObserve), true
+}
 
 func bindGitHubObserve(s *runState) (string, bool) {
 	if !s.published() {
 		return "", false
 	}
-	return s.epochKey(), true
+	return observationBinding(s, OpGitHubObserve), true
 }
 
 func bindContractCompile(s *runState) (string, bool) {
@@ -1543,13 +1566,17 @@ func (s *runState) validate(desired desiredOperation, live Disposition) error {
 	if terminalDisposition(live) {
 		return &OperationRefusedError{desired.kind, "run reached a terminal condition"}
 	}
-	if live == Waiting && !observationKinds[desired.kind] {
+	// Observation-class operations only READ external state, so they are the
+	// only ones a waiting run may perform: it must still notice that its pull
+	// request was merged, but it must not execute, mutate, verify, authorize
+	// or publish anything while it waits.
+	if live == Waiting && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "a waiting run performs observation only"}
 	}
 	if s.projection.SourceIntentChanged && desired.kind == OpContractCompile {
 		return &OperationRefusedError{desired.kind, "the pinned source moved; new intent is never silently compiled"}
 	}
-	if s.projection.ObservedExternalHead != "" && !observationKinds[desired.kind] {
+	if s.projection.ObservedExternalHead != "" && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "an unexpected external head is never overwritten"}
 	}
 	if publicationKinds[desired.kind] && !s.authorizedForPublication() {
@@ -1610,6 +1637,14 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := r.reconcileStoreLag(state); err != nil {
 			return Outcome{}, err
 		}
+		// Another live driver is operating this run. The store would refuse
+		// every acquisition anyway (a run holds at most one active operation),
+		// so this pass journals NOTHING - no planned operation, no run.waiting
+		// over a run someone else is driving. The reason is not journalled; it
+		// tells the caller why this pass did nothing.
+		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: ReasonDrivenElsewhere}, err
+		}
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
@@ -1627,7 +1662,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		// is recorded BY an observation, which then makes the next two passes
 		// re-observe at the new epoch, so counting them would exhaust the
 		// budget before the producer could ever be planned.
-		if !wanted || !observationKinds[desired.kind] {
+		if !wanted || OperationCapacityClass(desired.kind) != CapacityObservation {
 			if fingerprint, failing := state.failureFingerprint(); failing && !progress.Allow(fingerprint) {
 				return r.settle(state, Failed, "no_progress")
 			}
@@ -1660,6 +1695,32 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 	return r.settle(state, Waiting, "reconcile_pass_limit")
 }
 
+// ReasonDrivenElsewhere is the Outcome reason of a Reconcile pass that found
+// another live driver operating the run. It is never journalled.
+const ReasonDrivenElsewhere = "driven_elsewhere"
+
+// drivenElsewhere reports whether a DIFFERENT owner holds a lease on one of the
+// run's operations that this driver may not take over: the owner is alive, or
+// its lease has not expired. The driver's own leftover lease is not
+// "elsewhere"; it is recovered by the ordinary takeover in Scheduler.Next.
+func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
+	s := r.scheduler.defaults()
+	operations, err := s.Store.Operations(runID)
+	if err != nil {
+		return false, err
+	}
+	now := s.Clock.Now()
+	for _, op := range operations {
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.Lease.Owner == s.Owner {
+			continue
+		}
+		if !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func waitingOr(live, fallback Disposition) Disposition {
 	if live == Waiting {
 		return Waiting
@@ -1688,7 +1749,18 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 		if !ok || (journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled) {
 			continue
 		}
-		if _, err := r.scheduler.Finish(journalled.ID, journalled.State); err != nil {
+		// The attempt ended when its after record was journalled; the
+		// controller's downtime since then is not execution. Only an after
+		// record of the SAME attempt the store holds says when that ended.
+		var ended time.Time
+		if journalled.Attempt == stored.Attempt {
+			for _, event := range state.events {
+				if event.Type == EventOperationAfter && event.OperationID == stored.ID {
+					ended = event.OccurredAt
+				}
+			}
+		}
+		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore, journalled.RetryDisposition, ended); err != nil {
 			return err
 		}
 	}
@@ -1729,6 +1801,11 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	}
 	if planned.Attempt >= planned.MaxAttempts {
 		outcome, err := r.settle(state, Failed, desired.kind+attemptsExhaustedSuffix)
+		return false, outcome, err
+	}
+	if r.deps.Clock.Now().Before(planned.RetryNotBefore) {
+		// The timestamp only says "not yet"; the journalled record says why.
+		outcome, err := r.settle(state, Waiting, waitReasonOf(state.snapshot.Operations[planned.ID]))
 		return false, outcome, err
 	}
 	leased, err := r.scheduler.Next(state.run.ID)
@@ -1830,6 +1907,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// itself writes to the scheduler row - so journal and store agree, and the
 	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
+	finished.RetryNotBefore, finished.RetryDisposition = time.Time{}, ""
 	finished.State = produced.state
 	if interrupted {
 		finished.State = OperationCancelled
@@ -1842,11 +1920,20 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	// The disposition is recorded from the class; the wait and its timing only
+	// while a successor attempt exists, so the last attempt stops truthfully.
+	if finished.State == OperationFailed {
+		finished.RetryDisposition = retryDispositionFor(failureClassOf(finished.Result))
+	}
+	disposition, awaiting := awaitsRetry(finished)
+	if awaiting && disposition.Delay != nil {
+		finished.RetryNotBefore = r.deps.Clock.Now().Add(disposition.Delay(started.Attempt))
+	}
 	// The journal is written first and is the authority for reconciliation.
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.Finish(started.ID, finished.State); err != nil {
+	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore, finished.RetryDisposition, time.Time{}); err != nil {
 		// The stop may already have finished the row. That is accepted only for
 		// an interrupted execution and only when the row durably reads
 		// OperationCancelled - the one state CancelRun writes. Every other
@@ -1898,6 +1985,15 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// decides whether to spend the next one.
 	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
 		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
+	if awaiting {
+		if !disposition.SpendsAttempt {
+			if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
+				return false, Outcome{}, err
+			}
+		}
+		outcome, err := r.settle(state, Waiting, disposition.Reason)
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {

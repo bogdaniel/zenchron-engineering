@@ -1523,7 +1523,17 @@ func terminalDiagnostic(stderr []byte) string {
 	if len(stderr) > maxTerminalDiagnosticBytes {
 		stderr = stderr[len(stderr)-maxTerminalDiagnosticBytes:]
 	}
-	return strings.ToLower(string(stderr))
+	// A CLI may print its statement with a typographic apostrophe (U+2019);
+	// the signals are written in ASCII. Observed live (#87): Codex's quota
+	// statement used U+2019, so the configured quota signal never matched and
+	// the run stopped as unknown instead of waiting.
+	return normalizeDiagnostic(string(stderr))
+}
+
+// normalizeDiagnostic is the one comparison form for a CLI's own statements:
+// lower case, with a typographic apostrophe (U+2019) read as ASCII.
+func normalizeDiagnostic(text string) string {
+	return strings.ReplaceAll(strings.ToLower(text), "\u2019", "'")
 }
 
 // classifyAgentFailure classifies a failed native-CLI invocation from the

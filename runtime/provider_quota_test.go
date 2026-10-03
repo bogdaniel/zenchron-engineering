@@ -11,6 +11,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -122,9 +123,31 @@ func TestUnrecognizedProviderDiagnosticsAreNotGuessedIntoCapacity(t *testing.T) 
 		"unexpected end of JSON input",
 		"the model produced an invalid patch",
 		"quota", // a bare word is not one of the recognized signals
+		// An ordinary failure in typographic prose that mentions a quota but
+		// states no provider condition: normalizing U+2019 must not widen it.
+		"FAIL: TestQuota \u2014 you\u2019ve exceeded the fixture\u2019s disk quota",
 	} {
 		if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(diagnostic))); got == FailureProviderQuota || got == FailureProviderRateLimited {
 			t.Fatalf("%q was guessed into %q", diagnostic, got)
 		}
+	}
+}
+
+// TestCodexQuotaWithTypographicApostropheWaits pins the #87 live shape with a
+// synthetic fixture: Codex ended a failed invocation with ERROR lines stating
+// its usage limit using U+2019 rather than an ASCII apostrophe, repeated, a few
+// hundred bytes from the end of the stream and after unrelated output. The
+// configured ASCII signal never matched, so the run stopped as unknown.
+func TestCodexQuotaWithTypographicApostropheWaits(t *testing.T) {
+	stderr := []byte(strings.Repeat("--- FAIL: TestSomething (0.00s)\n", 200) +
+		"FAIL\n" +
+		"ERROR: You\u2019ve hit your usage limit. Try again at 1:00 AM.\n" +
+		"ERROR: You\u2019ve hit your usage limit. Try again at 1:00 AM.\n")
+	got := classifyAgentFailure(codexSpec, terminalDiagnostic(stderr))
+	if got != FailureProviderQuota {
+		t.Fatalf("classified as %q, want %q", got, FailureProviderQuota)
+	}
+	if RouteFailure(got) != RouteWait {
+		t.Fatalf("%s routes to %q, want a wait", got, RouteFailure(got))
 	}
 }

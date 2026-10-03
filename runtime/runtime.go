@@ -380,13 +380,18 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
-	SchemaVersion  string         `json:"schema_version"`
-	ID             string         `json:"id"`
-	RunID          string         `json:"run_id"`
-	Kind           string         `json:"kind"`
-	IdempotencyKey string         `json:"idempotency_key"`
-	State          OperationState `json:"state"`
-	Attempt        int            `json:"attempt"`
+	// RetryNotBefore is purely "not eligible before"; it survives restart and
+	// carries no meaning of its own. RetryDisposition says why and how the
+	// wait is accounted (retryDispositions).
+	RetryNotBefore   time.Time        `json:"retry_not_before,omitzero"`
+	RetryDisposition RetryDisposition `json:"retry_disposition,omitempty"`
+	SchemaVersion    string           `json:"schema_version"`
+	ID               string           `json:"id"`
+	RunID            string           `json:"run_id"`
+	Kind             string           `json:"kind"`
+	IdempotencyKey   string           `json:"idempotency_key"`
+	State            OperationState   `json:"state"`
+	Attempt          int              `json:"attempt"`
 	// AttemptIdentity is the highest PHYSICAL attempt identity allocated for
 	// this operation. It is an identity, not a count of anything, and it only
 	// ever moves forward.
@@ -638,6 +643,9 @@ func StableOperationKey(runID, kind string, bindings ...string) string {
 	return strings.Join(append([]string{runID, kind}, bindings...), ":")
 }
 func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
+	if now.Before(op.RetryNotBefore) {
+		return false
+	}
 	if op.State == Succeeded || op.State == OperationCancelled {
 		return false
 	}

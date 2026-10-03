@@ -195,8 +195,25 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 		return EngineeringEvent{}, fmt.Errorf("event type %q belongs to the plan stream and cannot be appended to a run", e.Type)
 	}
 	var run EngineeringRun
+	var allocate func([]EngineeringEvent, EngineeringEvent) (EngineeringEvent, error)
+	if e.Type == EventRunCancelled {
+		// A stop never rewrites a completed or failed run's outcome (#439).
+		// Decided HERE, against the events this append is ordered after and
+		// under the transaction's write lock, so a run.completed or run.failed
+		// that commits concurrently with a stop is seen rather than overwritten.
+		allocate = func(existing []EngineeringEvent, ev EngineeringEvent) (EngineeringEvent, error) {
+			snapshot, err := Reduce(run, existing)
+			if err != nil {
+				return ev, err
+			}
+			if snapshot.Disposition == Completed || snapshot.Disposition == Failed {
+				return ev, &RunTerminalError{RunID: run.ID, Disposition: snapshot.Disposition, Reason: snapshot.Reason}
+			}
+			return ev, nil
+		}
+	}
 	return s.appendToStream(e, journalStream{
-		kind: streamRun, id: e.RunID,
+		kind: streamRun, id: e.RunID, allocate: allocate,
 		// The run row is read INSIDE the transaction. That read is what the
 		// dropped foreign key used to guarantee: an event may not be journalled
 		// against a run that does not exist.
@@ -548,13 +565,22 @@ func decodeRun(document string) (EngineeringRun, error) {
 	return run, nil
 }
 
+const (
+	eventsPageWhere     = `stream_kind = ? AND run_id = ? AND plan_id = '' AND sequence > ?`
+	latestSequenceQuery = `SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_kind = ? AND run_id = ? AND plan_id = ''`
+)
+
 // EventsPage uses the run-local sequence, never the fleet global_sequence.
 // The extra row establishes hasMore without reading the unbounded tail.
+// Binding plan_id to the empty string (true of every run event) binds every column of the
+// UNIQUE(stream_kind, run_id, plan_id, sequence) index before sequence, so
+// the page is a range seek; without it SQLite walks the run's whole index
+// range on every page and every steady-state poll (#396 measurement).
 func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) (events []EngineeringEvent, hasMore bool, err error) {
 	if after < 0 || limit < 1 || limit > 500 {
 		return nil, false, fmt.Errorf("invalid event page bounds")
 	}
-	events, err = queryStreamEventsLimited(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, ` LIMIT ?`, streamRun, runID, after, limit+1)
+	events, err = queryStreamEventsLimited(s.db, eventsPageWhere, ` LIMIT ?`, streamRun, runID, after, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -562,4 +588,15 @@ func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) 
 		events, hasMore = events[:limit], true
 	}
 	return events, hasMore, nil
+}
+
+// LatestSequence returns the run's highest run-stream sequence, or 0 if it has
+// none yet. It is a single indexed seek - the same (stream_kind, run_id,
+// plan_id, sequence) prefix EventsPage filters by - never a scan, so a per-run
+// SSE snapshot can bound its live tail to events after this cursor without
+// reading the run's history to find it.
+func (s *SQLiteOperationStore) LatestSequence(runID string) (int64, error) {
+	var sequence int64
+	err := s.db.QueryRow(latestSequenceQuery, streamRun, runID).Scan(&sequence)
+	return sequence, err
 }

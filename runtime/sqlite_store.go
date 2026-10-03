@@ -609,7 +609,21 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // database. Scheduler.reclaimAbandoned retires an abandoned operation before
 // this count is taken, so what is counted here is always durable state - and
 // never a durable row plus a live opinion about it.
-func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
+//
+// The count is PER CAPACITY CLASS (#85): only other runs holding an active
+// operation of the class being acquired are counted, against that class's
+// ceiling. The class is read from the canonical document's kind - the one the
+// runtime decodes - and never from the denormalized kind column, which nothing
+// verifies; the observation kinds are bound parameters generated from
+// OperationCapacityClass, so there is no second list. A row whose document
+// carries no kind is counted as work, which is the closed direction.
+//
+// The same statement also refuses an operation while ANOTHER operation of the
+// same run holds a lease. That is what makes "a run holds at most one active
+// operation" a durable fact rather than a property of whoever drives it: a
+// second process can never observe a run beside the work another process is
+// doing on it.
+func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -617,19 +631,34 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
-	args := []any{string(document), op.ID, expected, op.RunID}
+	args := []any{string(document), op.ID, expected, op.RunID, op.ID, op.RunID}
 	for _, disposition := range terminalDispositions {
 		args = append(args, string(disposition))
 	}
-	args = append(args, op.RunID, maxRuns)
+	observation := observationKindList()
+	ceiling, acquiringObservation := maxRuns, 0
+	if OperationCapacityClass(op.Kind) == CapacityObservation {
+		ceiling, acquiringObservation = maxObservations, 1
+	}
+	args = append(args, op.RunID)
+	for _, kind := range observation {
+		args = append(args, kind)
+	}
+	args = append(args, acquiringObservation, ceiling)
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
+	kinds := strings.TrimSuffix(strings.Repeat("?,", len(observation)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM run_operations AS other
+		       WHERE other.run_id = ? AND other.id <> ?
+		         AND json_extract(other.document, '$.state') IN ('leased', 'running')
+		         AND json_extract(other.document, '$.lease') IS NOT NULL)
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
 		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
-		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
+		         AND json_extract(document, '$.lease') IS NOT NULL
+		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?`,
 		args...)
 	if err != nil {
 		return 0, false, err
