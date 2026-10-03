@@ -386,8 +386,12 @@ unproven_head          the candidate head moved to a commit no candidate.commit
                        tree are that head as observed. It is NOT a runtime
                        commit: author, message and parent prove nothing, so it
                        is never adopted, observed or assured, and only operator
-                       release (#344) can resolve it. A runtime commit lost to
-                       process loss before any journal record lands here too
+                       release (#344) can resolve it: its next step is
+                       operator_release, and it names no producing operation.
+                       A runtime commit lost to process loss before any journal
+                       record lands here too. A moved head takes precedence
+                       over a recorded runtime commit; that commit's identity
+                       then appears only in the journal (runtime_commit)
 uncommitted            a succeeded producer's change the budget stopped before
                        candidate.commit; identified by producing operation, path
                        count and a content digest taken when the producer

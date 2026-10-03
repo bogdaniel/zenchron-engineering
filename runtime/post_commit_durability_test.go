@@ -240,7 +240,8 @@ func TestARestartAfterAnUnjournalledCommitHoldsItAsUnproven(t *testing.T) {
 	}
 	notPublished(t, fixture, runID)
 	held := fixture.state(runID).snapshot.HeldMaterial
-	if held == nil || held.Kind != HeldUnprovenHead || held.Revision != head || held.Tree != tree || held.ContentDigest != "" {
+	if held == nil || held.Kind != HeldUnprovenHead || held.Revision != head || held.Tree != tree || held.ContentDigest != "" ||
+		held.Operation != "" || held.PathCount != 0 || held.NextStep != HeldNextOperatorRelease {
 		t.Fatalf("held %+v, want unproven_head at %s", held, head)
 	}
 }
@@ -327,7 +328,8 @@ func TestAProviderForgedRuntimeCommitIsNeverAdopted(t *testing.T) {
 	if got := mustGit(t, dir, "rev-parse", "HEAD"); got != forged {
 		t.Fatalf("the forged commit was not preserved: head %s, was %s", got, forged)
 	}
-	if held := fixture.state(runID).snapshot.HeldMaterial; held == nil || held.Kind != HeldUnprovenHead || held.Revision != forged {
+	if held := fixture.state(runID).snapshot.HeldMaterial; held == nil || held.Kind != HeldUnprovenHead || held.Revision != forged ||
+		held.Operation != "" || held.NextStep != HeldNextOperatorRelease {
 		t.Fatalf("held %+v, want unproven_head at %s", held, forged)
 	}
 }

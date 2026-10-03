@@ -51,6 +51,9 @@ const (
 	// adopted, observed or assured, and only operator release (#344) can
 	// resolve it.
 	HeldUnprovenHead = "unproven_head"
+	// HeldNextOperatorRelease is the next step of material no lifecycle
+	// operation can advance: only an operator's governed release (#344).
+	HeldNextOperatorRelease = "operator_release"
 	// HeldQuarantined is material a REFUSED invocation left behind (#390):
 	// moved out of the candidate workspace into a runtime-owned quarantine,
 	// never committed and never inherited by a retry. Location names it.
@@ -165,9 +168,13 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		// A moved head no attempt recorded is named as exactly that: unproven,
 		// with none of the producer's identity claimed for its content.
 		if op, ok := s.operationByKey(OpCandidateCommit, producing); ok {
+			// It takes precedence over a recorded runtime commit: the head IS
+			// what the workspace holds, and that commit's identity stays in the
+			// journal. No lifecycle step applies, so the next step is release.
 			if unproven := s.unprovenHead(op.ID); unproven != nil {
 				held.Kind, held.Revision, held.Tree = HeldUnprovenHead, unproven.Commit, unproven.Tree
-				held.PathCount, held.ContentDigest = 0, ""
+				held.Operation, held.PathCount, held.ContentDigest = "", 0, ""
+				held.NextStep = HeldNextOperatorRelease
 			} else if made := s.runtimeCommit(op.ID); made != nil {
 				held.Kind, held.Revision, held.Tree, held.PathCount = HeldCommittedUnobserved, made.Commit, made.Tree, made.PathCount
 			}
