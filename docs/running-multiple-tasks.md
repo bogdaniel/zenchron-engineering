@@ -150,15 +150,17 @@ make the oldest runs the only ones ever driven. The rotation sweeps the whole
 active fleet and steps over whatever is in flight, which is what gives every run
 a turn.
 
-A free slot goes first to runs that are MOVING: runs this supervisor has not
-driven yet, and runs whose journal advanced since their last turn. A run whose
-last turn changed nothing - a parked evidence generation, a pull request
-waiting for review - is QUIET. It gets leftover room only, and is retried after
-1, 2, 4 and then at most 8 poll intervals, so ten parked runs no longer make a
-runnable one wait ten passes. A quiet run whose journal moves is moving again on
-the next pass, with no `resume` needed. This decides only who goes first, never
-what a run may do. It is held in memory, so after a restart every run is
-reconsidered once.
+A free slot goes first to runs that are MOVING: runs whose journal moved within
+the last two poll intervals, and runs that have not had a first turn yet. A run
+that has been driven before and whose journal has not moved since is QUIET - a
+parked evidence generation, a pull request waiting for review. Both are read
+from the durable journal, so the order is the same right after a restart as in
+steady state. A quiet run gets a turn at most every 4 poll intervals, and once it
+has waited that long it competes with the moving runs, so every run is observed
+at least every 4 polls however busy its siblings are. Each run gets at most one
+turn per poll interval, and a slot freed between passes is handed on at once
+rather than at the next poll, so ten parked runs cost a runnable one seconds,
+not ten passes. This decides only who goes first, never what a run may do.
 
 **At a ceiling of one this is still a queue.** One long-running task holds the
 single slot until it is done and nothing else moves, which is what the default

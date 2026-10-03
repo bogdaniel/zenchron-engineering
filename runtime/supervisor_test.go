@@ -2236,7 +2236,7 @@ func TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots(t *testing.T) {
 				delete(supervisor.inflight, id)
 			}
 		}
-		for _, run := range supervisor.admit(active, map[string]int64{}, time.Time{}) {
+		for _, run := range supervisor.admit(active, nil, time.Time{}) {
 			remaining[run.ID] = passesInFlight[run.ID]
 			started[run.ID]++
 		}
@@ -2341,108 +2341,172 @@ func TestEveryActiveRunGetsATurnWhileAnotherIsExecuting(t *testing.T) {
 	}
 }
 
-// TestParkedRunsDoNotDiluteARunnableOnesTurn is #401's acceptance at the one
-// place the decision is made. Ten nonterminal runs sit parked - driven, but
-// their journals never move - beside a ceiling of one at a one-minute poll.
-//
-// Before #401 every nonterminal run took an equal turn, so a run submitted
-// into that fleet waited up to ten passes for the rotation to reach it. Now it
-// starts on the very next pass; each parked run is retried on a doubling
-// backoff instead of every minute; and a parked run whose journal moves is
-// moving again on the next pass, without an operator resume.
-func TestParkedRunsDoNotDiluteARunnableOnesTurn(t *testing.T) {
-	supervisor := &Supervisor{
-		deps:     SupervisorDependencies{MaxConcurrentRuns: 1, PollInterval: time.Minute},
-		inflight: map[string]struct{}{},
-	}
+// parkedFleet is #401's acceptance shape: ten runs whose journals last moved
+// an hour ago and one whose journal moved seconds ago, as the durable journal
+// reports them. Nothing about it lives in a supervisor's memory.
+func parkedFleet(now time.Time) ([]EngineeringRun, map[string]time.Time) {
 	var active []EngineeringRun
+	activity := map[string]time.Time{}
 	for i := 0; i < 10; i++ {
-		active = append(active, EngineeringRun{ID: fmt.Sprintf("parked-%02d", i)})
+		id := fmt.Sprintf("parked-%02d", i)
+		active = append(active, EngineeringRun{ID: id})
+		activity[id] = now.Add(-time.Hour)
 	}
-	now := time.Unix(0, 0)
-	heads := map[string]int64{}
-	driven := map[string]int{}
-	pass := func() []EngineeringRun {
-		now = now.Add(time.Minute)
-		started := supervisor.admit(active, heads, now)
-		for _, run := range started {
-			driven[run.ID]++
-			delete(supervisor.inflight, run.ID) // each turn returns within its pass
-		}
-		return started
-	}
-	for i := 0; i < 60; i++ {
-		pass()
-	}
-
-	// 3. Parked runs are not driven every minute when nothing changed: the
-	// one slot is not spent on all ten every pass.
-	for id, n := range driven {
-		if n > 15 {
-			t.Fatalf("%s was driven %d times in 60 quiet passes; a parked run must back off", id, n)
-		}
-	}
-	if len(driven) != 10 {
-		t.Fatalf("every parked run must still be reconsidered, drove only %v", driven)
-	}
-
-	// 1. A runnable run starts on the next scheduling opportunity.
 	active = append(active, EngineeringRun{ID: "runnable"})
-	if started := pass(); len(started) != 1 || started[0].ID != "runnable" {
-		t.Fatalf("the runnable run must start on the next pass, got %v", started)
-	}
+	activity["runnable"] = now.Add(-10 * time.Second)
+	return active, activity
+}
 
-	// 4. A parked run whose journal moves re-enters the moving tier at once.
-	heads["parked-03"] = 7
-	if started := pass(); len(started) != 1 || started[0].ID != "parked-03" {
-		t.Fatalf("a parked run whose journal advanced must be driven next, got %v", started)
+// TestAProgressingRunGoesFirstOnAColdStart is the review finding on PR #424:
+// eligibility learned only from a supervisor's own history made all eleven
+// runs look alike to a FRESH supervisor - the first one after every restart -
+// so the runnable run waited behind the ring again. Read from the journal,
+// the order is the same with or without history.
+func TestAProgressingRunGoesFirstOnAColdStart(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	active, activity := parkedFleet(now)
+	for restart := 0; restart < 3; restart++ {
+		fresh := &Supervisor{deps: SupervisorDependencies{MaxConcurrentRuns: 1, PollInterval: time.Minute}, inflight: map[string]struct{}{}}
+		if started := fresh.admit(active, activity, now); len(started) != 1 || started[0].ID != "runnable" {
+			t.Fatalf("restart %d: a fresh supervisor must start the progressing run first, got %v", restart, started)
+		}
 	}
 }
 
-// TestQuietnessIsReadFromTheJournalNotTheRunDocument is #424's review
-// finding pinned against a real store: the run document carries no journal
-// cursor (replay derives it), so a quiet signal read from the document
-// called every run quiet forever and throttled runs that were progressing.
-func TestQuietnessIsReadFromTheJournalNotTheRunDocument(t *testing.T) {
+// TestParkedRunsAreSpacedButStillObserved: a parked run does not take a turn
+// every poll (criterion 3), yet every one is still driven - and so its pull
+// request re-observed - at least every quietSpacing polls (criterion 4).
+func TestParkedRunsAreSpacedButStillObserved(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	active, activity := parkedFleet(now)
+	active = active[:10] // parked only
+	supervisor := &Supervisor{deps: SupervisorDependencies{MaxConcurrentRuns: 10, PollInterval: time.Minute}, inflight: map[string]struct{}{}}
+	turns := map[string][]int{}
+	for pass := 0; pass < 60; pass++ {
+		now = now.Add(time.Minute)
+		for _, run := range supervisor.admit(active, activity, now) {
+			turns[run.ID] = append(turns[run.ID], pass)
+			delete(supervisor.inflight, run.ID)
+		}
+	}
+	for _, run := range active {
+		got := turns[run.ID]
+		if len(got) > 60/quietSpacing+1 {
+			t.Fatalf("%s took %d turns in 60 quiet polls; a parked run must be spaced", run.ID, len(got))
+		}
+		for i := 1; i < len(got); i++ {
+			if gap := got[i] - got[i-1]; gap > quietSpacing {
+				t.Fatalf("%s went %d polls unobserved; at most %d", run.ID, gap, quietSpacing)
+			}
+		}
+	}
+}
+
+// TestJournalActivityIsDurableAndDecidesTheTier pins the signal against a
+// real store: the run document carries no journal cursor, so tiers come from
+// the events themselves, and a parked run whose journal moves is moving on
+// the very next admission.
+func TestJournalActivityIsDurableAndDecidesTheTier(t *testing.T) {
 	store, err := OpenSQLiteOperationStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	at := time.Unix(100, 0).UTC()
-	if err := store.PutRun(EngineeringRun{SchemaVersion: SchemaVersion, ID: "r", Repository: "example/repo", Phase: Execute, Disposition: Active, ControllerSHA256: strings.Repeat("4", 64), CreatedAt: at, UpdatedAt: at}); err != nil {
+	old := time.Unix(1_000_000, 0).UTC()
+	for _, id := range []string{"parked", "other"} {
+		if err := store.PutRun(EngineeringRun{SchemaVersion: SchemaVersion, ID: id, Repository: "example/repo", Phase: Execute, Disposition: Waiting, ControllerSHA256: strings.Repeat("4", 64), CreatedAt: old, UpdatedAt: old}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: id + "-created", RunID: id, Type: EventRunCreated, OccurredAt: old}); err != nil {
+			t.Fatal(err)
+		}
+		// Both have been driven before: a run with no operation is waiting for
+		// its first turn and is never quiet.
+		if _, _, err := store.PutOperation(RunOperation{SchemaVersion: SchemaVersion, ID: id + "-op", RunID: id, Kind: "source.observe", IdempotencyKey: id, State: Succeeded, Attempt: 1, MaxAttempts: 1}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.PutRun(EngineeringRun{SchemaVersion: SchemaVersion, ID: "fresh", Repository: "example/repo", Phase: Execute, Disposition: Waiting, ControllerSHA256: strings.Repeat("4", 64), CreatedAt: old.Add(time.Second), UpdatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
-	appendEvent := func(id, kind string) {
-		if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: id, RunID: "r", Type: kind, OccurredAt: at}); err != nil {
-			t.Fatal(err)
-		}
+	now := old.Add(time.Hour)
+	if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "parked-moved", RunID: "parked", Type: EventRunWaiting, OccurredAt: now.Add(-time.Second)}); err != nil {
+		t.Fatal(err)
 	}
-	appendEvent("created", EventRunCreated)
+	activity, err := store.RunJournalActivity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !activity["parked"].Equal(now.Add(-time.Second)) || !activity["other"].Equal(old) {
+		t.Fatalf("activity must be each run's newest event time, got %v", activity)
+	}
+	if _, listed := activity["fresh"]; listed {
+		t.Fatal("a run never driven is waiting for its first turn and must not be classed by age")
+	}
+	active, err := store.ActiveRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
 	supervisor := &Supervisor{deps: SupervisorDependencies{MaxConcurrentRuns: 1, PollInterval: time.Minute}, inflight: map[string]struct{}{}}
-	now := at
-	pass := func() int {
-		now = now.Add(time.Second) // well inside any quiet backoff
-		active, err := store.ActiveRuns()
+	if started := supervisor.admit(active, activity, now); len(started) != 1 || started[0].ID != "parked" {
+		t.Fatalf("the run whose journal just moved must go first, got %v", started)
+	}
+}
+
+// TestAFreedSlotIsHandedOnWithoutWaitingForThePoll is the other half of
+// #401 through the real loop. With an hour-long poll and a ceiling of one,
+// the old loop gave exactly one run a turn per hour however quickly it
+// returned; now each finished turn hands its slot on at once.
+func TestAFreedSlotIsHandedOnWithoutWaitingForThePoll(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	var runIDs []string
+	for i := 0; i < 3; i++ {
+		issue := phase8Issue + 60 + i
+		fixture.forge.Issues[issue] = GitHubIssue{
+			Number: issue, URL: "https://github.com/acme/repo/issues/3",
+			Title: "work", Body: "body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+		}
+		outcome, err := fixture.runtime.StartIssueRun(context.Background(), issue, AdoptCompatibleGeneration)
 		if err != nil {
 			t.Fatal(err)
 		}
-		heads, err := store.RunJournalHeads()
-		if err != nil {
-			t.Fatal(err)
-		}
-		started := supervisor.admit(active, heads, now)
-		for _, run := range started {
-			delete(supervisor.inflight, run.ID)
-		}
-		return len(started)
+		runIDs = append(runIDs, outcome.RunID)
 	}
-	pass()
-	appendEvent("waiting", EventRunWaiting) // the turn journaled progress
-	if pass() != 1 {
-		t.Fatal("a run whose journal advanced since its last turn must be driven, not backed off")
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if pass() != 0 {
-		t.Fatal("a run whose journal did not move must wait out its backoff")
+	supervisor, err := NewSupervisor(SupervisorDependencies{
+		Store: fixture.store, Clock: RealClock{}, Owner: "owner-1",
+		StateDir: fixture.stateDir, Repositories: []GitHubRepo{repo},
+		MaxConcurrentRuns: 1, PollInterval: time.Hour, Agents: supervisorRegistry(t),
+		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) { return fixture.runtime, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loop := make(chan error, 1)
+	go func() { loop <- supervisor.Run(ctx, nil) }()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		waiting := 0
+		for _, runID := range runIDs {
+			if operationsForRun(t, fixture.store, runID) == 0 {
+				waiting++
+			}
+		}
+		if waiting == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d runs never got a turn inside one hour-long poll interval: a freed slot waited for the poll", waiting, len(runIDs))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	if err := <-loop; err != nil {
+		t.Fatal(err)
 	}
 }

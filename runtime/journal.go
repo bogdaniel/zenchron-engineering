@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // The journal lives in the same runtime.db as run_operations and advances the
@@ -118,27 +119,34 @@ func (s *SQLiteOperationStore) ActiveRuns() ([]EngineeringRun, error) {
 	return s.queryRuns(` WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled')`)
 }
 
-// RunJournalHeads returns each run's last journal sequence. The run document
-// carries no cursor - replay derives it from the events - so this is how the
-// supervisor tells whether a run's journal moved since its last turn (#401).
-// ponytail: scans every run's head via the covering index; restrict to the
-// active set if the run table grows large.
-func (s *SQLiteOperationStore) RunJournalHeads() (map[string]int64, error) {
-	rows, err := s.db.Query(`SELECT run_id, MAX(sequence) FROM events WHERE stream_kind = ? GROUP BY run_id`, streamRun)
+// RunJournalActivity returns when each run's journal last moved: the time of
+// its newest event. The run document carries no cursor - replay derives it
+// from the events - so this is the durable answer to "has this run been
+// making progress", and it survives a restart (#401). A run that has never
+// planned an operation is omitted: it is waiting for its first turn, which is
+// work to do, not a run gone quiet.
+// ponytail: one row per run ever created; restrict to the active set if the
+// run table grows large.
+func (s *SQLiteOperationStore) RunJournalActivity() (map[string]time.Time, error) {
+	rows, err := s.db.Query(`SELECT run_id, MAX(sequence), json_extract(document, '$.occurred_at') FROM events WHERE stream_kind = ? AND run_id IN (SELECT run_id FROM run_operations) GROUP BY run_id`, streamRun)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	heads := map[string]int64{}
+	activity := map[string]time.Time{}
 	for rows.Next() {
-		var id string
-		var head int64
-		if err := rows.Scan(&id, &head); err != nil {
+		var id, at string
+		var sequence int64
+		if err := rows.Scan(&id, &sequence, &at); err != nil {
 			return nil, err
 		}
-		heads[id] = head
+		when, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			return nil, err
+		}
+		activity[id] = when
 	}
-	return heads, rows.Err()
+	return activity, rows.Err()
 }
 
 func (s *SQLiteOperationStore) queryRuns(where string) ([]EngineeringRun, error) {
