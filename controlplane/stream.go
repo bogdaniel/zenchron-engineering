@@ -133,12 +133,24 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	if !resuming {
-		detail, err := a.runDetail(id)
+		// The durable cursor must be read BEFORE the point-in-time snapshot is
+		// built, never after: if an event committed between the two reads, a
+		// cursor taken afterward would advance past state the snapshot never
+		// observed, and a client resuming from that cursor would silently skip
+		// it. Reading the cursor first means the worst case is the opposite,
+		// conservative direction - the snapshot may or may not reflect that
+		// event, but drain() below replays anything after the cursor regardless,
+		// so the event is delivered either way, at most once as a harmless
+		// duplicate inside the snapshot's reduced state.
+		seq, err := a.Store.LatestSequence(id)
 		if err != nil {
 			_ = writeSSE(w, flusher, cursor, StreamMessage{Type: "stale", Reason: "read_failed"})
 			return
 		}
-		seq, err := a.Store.LatestSequence(id)
+		if a.afterCursorRead != nil {
+			a.afterCursorRead()
+		}
+		detail, err := a.runDetail(id)
 		if err != nil {
 			_ = writeSSE(w, flusher, cursor, StreamMessage{Type: "stale", Reason: "read_failed"})
 			return

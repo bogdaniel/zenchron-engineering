@@ -87,6 +87,11 @@ type API struct {
 	// rather than real seconds.
 	StreamPollInterval      time.Duration
 	StreamHeartbeatInterval time.Duration
+
+	// afterCursorRead runs once, between the fresh-connect cursor read and the
+	// snapshot reduction, exactly the window a race regression needs to force
+	// an event append into. It is nil in every production path.
+	afterCursorRead func()
 }
 
 func (a *API) Handler() http.Handler {

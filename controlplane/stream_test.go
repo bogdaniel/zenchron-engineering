@@ -164,6 +164,35 @@ func TestStreamSnapshotThenLiveTail(t *testing.T) {
 	}
 }
 
+// TestStreamFreshConnectCursorIsReadBeforeSnapshotSoARaceEventIsNeverSkipped
+// forces an event to commit in the exact window between the fresh-connect
+// cursor read and the point-in-time snapshot reduction, via the
+// afterCursorRead test seam. If the cursor were taken after the snapshot
+// (the bug this guards against), the emitted id would advance past the race
+// event and a reconnect from that id would never see it. Reading the cursor
+// first means the race event must still arrive, replayed as an incremental
+// frame right after the snapshot.
+func TestStreamFreshConnectCursorIsReadBeforeSnapshotSoARaceEventIsNeverSkipped(t *testing.T) {
+	write, srv, api := streamFixture(t)
+	api.afterCursorRead = func() {
+		e := rt.EngineeringEvent{ID: "race", Type: rt.EventRunWaiting, Payload: json.RawMessage(`{"reason":"race"}`), SchemaVersion: rt.SchemaVersion, RunID: "r", OccurredAt: time.Unix(150, 0).UTC()}
+		if _, err := write.AppendEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn := dialStream(t, srv, api.Token, "/v1/runs/r/stream", "")
+
+	id, msg := conn.next()
+	if id != "3" || msg.Type != "snapshot" {
+		t.Fatalf("expected baseline snapshot at id 3 (unchanged by the race event), got id=%s msg=%+v", id, msg)
+	}
+
+	id, msg = conn.next()
+	if id != "4" || msg.Type != "event" || msg.Event == nil || msg.Event.Sequence != 4 {
+		t.Fatalf("race event committed between cursor read and snapshot must still be delivered, got id=%s msg=%+v", id, msg)
+	}
+}
+
 func TestStreamResumeFromLastEventIDSkipsSnapshotAndPaginatesBacklog(t *testing.T) {
 	_, srv, api := streamFixture(t)
 	conn := dialStream(t, srv, api.Token, "/v1/runs/r/stream?limit=1", "1")
