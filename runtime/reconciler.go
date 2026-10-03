@@ -1990,7 +1990,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 				return false, Outcome{}, err
 			}
 		}
-		outcome, err := r.settle(state, Waiting, disposition.Reason)
+		outcome, err := r.settle(state, Waiting, waitReasonOf(finished))
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {

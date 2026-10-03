@@ -128,8 +128,10 @@ func TestAProviderRetryGetsItsOwnTranscriptIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// THE RESUME. Before the repair this returned operation_refused, because
-	// the second invocation addressed the first one's transcript.
+	// THE RESUME, at the durable probe time (#87). Before the repair this
+	// returned operation_refused, because the second invocation addressed the
+	// first one's transcript.
+	fixture.clock.at = first.RetryNotBefore
 	resumed, err := engine.Reconcile(context.Background(), runID)
 	if err != nil {
 		t.Fatalf("resume after a provider quota wait failed: %v", err)
@@ -209,6 +211,7 @@ func TestARestartBetweenAttemptsComputesTheSameNextIdentity(t *testing.T) {
 		t.Fatalf("first pass = %#v, want a wait", outcome)
 	}
 	firstAttempt := provider.attempts[0]
+	fixture.clock.at = executionOperation(t, fixture.store, runID).RetryNotBefore
 
 	// THE RESTART. A new runtime over the same durable state, exactly as a
 	// supervisor coming back up reads it.
@@ -323,6 +326,7 @@ func TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt(t *testing.T) {
 	// THE CRASHING DISPATCH. The identity it receives must be past the seeded
 	// evidence, and must be durable before the provider is reached.
 	restarted := fixture.newRuntime(deps)
+	fixture.clock.at = operation.RetryNotBefore // the durable probe time (#87)
 	provider.crashes = 2
 	if _, err := restarted.Reconcile(context.Background(), runID); err != nil {
 		t.Fatal(err)
@@ -344,6 +348,7 @@ func TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt(t *testing.T) {
 	// store still reports its slot free. Only the reservation stops it being
 	// handed out a second time.
 	afterCrash := fixture.newRuntime(deps)
+	fixture.clock.at = reserved.RetryNotBefore // the durable probe time (#87)
 	if _, err := afterCrash.Reconcile(context.Background(), runID); err != nil {
 		t.Fatal(err)
 	}

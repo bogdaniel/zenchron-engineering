@@ -118,8 +118,8 @@ type RetryDisposition string
 
 const (
 	DispositionTransportBackoff RetryDisposition = "transport_backoff"
-	// Reserved for #87. Declared so the vocabulary is closed and its accounting
-	// is frozen here; nothing produces them yet.
+	// The provider waits (#87): an external prerequisite, refunded, probed at
+	// a fixed durable cadence until it clears and the same run resumes.
 	DispositionProviderPrerequisiteWait RetryDisposition = "provider_prerequisite_wait"
 	DispositionRateLimitWait            RetryDisposition = "rate_limit_wait"
 	DispositionAccountWait              RetryDisposition = "account_wait"
@@ -153,17 +153,27 @@ var retryDispositions = map[RetryDisposition]dispositionSemantics{
 		ResumeCondition: "retry_not_before has passed", Reason: ReasonConnectivityBackoff,
 		Delay: connectivityBackoff,
 	},
-	DispositionProviderPrerequisiteWait: {ResumeCondition: "an operator restores the provider prerequisite", Reason: "execution_provider_prerequisite_unavailable"},
-	DispositionRateLimitWait:            {ResumeCondition: "the provider's stated retry time has passed", Reason: "execution_provider_rate_limited"},
-	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account", Reason: "execution_provider_account_unavailable"},
+	DispositionProviderPrerequisiteWait: {ResumeCondition: "an operator restores the provider prerequisite", Reason: "execution_provider_prerequisite_unavailable", Delay: providerWaitProbe},
+	DispositionRateLimitWait:            {ResumeCondition: "the provider's stated retry time has passed", Reason: "execution_provider_rate_limited", Delay: providerWaitProbe},
+	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account", Reason: "execution_provider_account_unavailable", Delay: providerWaitProbe},
 }
 
+// providerWaitProbe is the fixed cadence of a provider wait. The attempt is
+// refunded, so an attempt-keyed backoff would never grow.
+func providerWaitProbe(int) time.Duration { return 5 * time.Minute }
+
 // retryDispositionFor is the ONE owner of which failure class carries a
-// disposition. Only transport loss does today; every other class keeps the
-// route RouteFailure gives it.
+// disposition. Every other class keeps the route RouteFailure gives it.
 func retryDispositionFor(class FailureClass) RetryDisposition {
-	if class == FailureConnectivity {
+	switch class {
+	case FailureConnectivity:
 		return DispositionTransportBackoff
+	case FailureProviderAccountUnavailable:
+		return DispositionAccountWait
+	case FailureProviderQuota, FailureProviderRateLimited:
+		return DispositionRateLimitWait
+	case FailureProviderUnavailable:
+		return DispositionProviderPrerequisiteWait
 	}
 	return ""
 }
@@ -178,13 +188,14 @@ func init() {
 }
 
 // waitReasonOf names the wait a not-yet-eligible operation is in: its
-// disposition's reason, else its wait-routed class's. Never its timestamp.
+// wait-routed class's stated reason (quota and rate limit share a disposition
+// but not an operator action), else its disposition's. Never its timestamp.
 func waitReasonOf(op RunOperation) string {
-	if s, ok := retryDispositions[op.RetryDisposition]; ok {
-		return s.Reason
-	}
 	if class, waiting := waitRoutedFailure(op.Result); waiting {
 		return waitReason(class)
+	}
+	if s, ok := retryDispositions[op.RetryDisposition]; ok {
+		return s.Reason
 	}
 	return "operation_unavailable"
 }

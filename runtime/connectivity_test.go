@@ -594,8 +594,8 @@ func TestConnectivityRetryNotBeforeOmittedWhenZero(t *testing.T) {
 	}
 }
 
-// Endpoint capacity has one owner and one rule: provider_unavailable routes to
-// the refunded wait and carries no retry disposition.
+// Endpoint capacity (#87): provider_unavailable keeps its reason and its
+// refunded wait, now probed through provider_prerequisite_wait.
 func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
@@ -605,8 +605,8 @@ func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 		t.Fatalf("capacity: %+v", out)
 	}
 	for _, op := range f.state(runID).snapshot.Operations {
-		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != "" || !op.RetryNotBefore.IsZero()) {
-			t.Fatalf("capacity acquired a disposition: %+v", op)
+		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != DispositionProviderPrerequisiteWait || !op.RetryNotBefore.Equal(f.clock.Now().Add(5*time.Minute))) {
+			t.Fatalf("capacity probe: %s", retryRow(op))
 		}
 	}
 	ops, err := f.store.Operations(runID)
@@ -690,11 +690,15 @@ func TestConnectivityStoreLagUsesTheJournalledEnd(t *testing.T) {
 	}
 }
 
-// G6: the #87 rows are declared, not produced. No failure class maps to them,
-// and nothing outside this table names them or their reasons.
-func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
-	reserved := map[string]bool{
-		"DispositionProviderPrerequisiteWait": true, "DispositionRateLimitWait": true, "DispositionAccountWait": true,
+// #87 slice 2: the provider dispositions are produced by exactly the four
+// provider wait classes, and every other class keeps its route alone.
+func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing.T) {
+	want := map[FailureClass]RetryDisposition{
+		FailureConnectivity:               DispositionTransportBackoff,
+		FailureProviderAccountUnavailable: DispositionAccountWait,
+		FailureProviderQuota:              DispositionRateLimitWait,
+		FailureProviderRateLimited:        DispositionRateLimitWait,
+		FailureProviderUnavailable:        DispositionProviderPrerequisiteWait,
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -711,25 +715,20 @@ func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
 			t.Fatal(err)
 		}
 		ast.Inspect(parsed, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.Ident:
-				if reserved[n.Name] && file != "connectivity.go" {
-					t.Errorf("%s names reserved disposition %s", fset.Position(n.Pos()), n.Name)
-				}
-			case *ast.ValueSpec:
-				if typ, ok := n.Type.(*ast.Ident); ok && typ.Name == "FailureClass" {
-					for _, value := range n.Values {
-						if lit, ok := value.(*ast.BasicLit); ok {
-							classes++
-							if d := retryDispositionFor(FailureClass(strings.Trim(lit.Value, `"`))); d != "" && d != DispositionTransportBackoff {
-								t.Errorf("class %s produces reserved disposition %s", lit.Value, d)
-							}
-						}
+			spec, ok := n.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			if typ, ok := spec.Type.(*ast.Ident); !ok || typ.Name != "FailureClass" {
+				return true
+			}
+			for _, value := range spec.Values {
+				if lit, ok := value.(*ast.BasicLit); ok {
+					classes++
+					class := FailureClass(strings.Trim(lit.Value, `"`))
+					if got := retryDispositionFor(class); got != want[class] {
+						t.Errorf("class %s produces %q, want %q", class, got, want[class])
 					}
-				}
-			case *ast.BasicLit:
-				if n.Value == `"execution_provider_prerequisite_unavailable"` && file != "connectivity.go" {
-					t.Errorf("%s uses the reserved prerequisite reason", fset.Position(n.Pos()))
 				}
 			}
 			return true
@@ -738,10 +737,82 @@ func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
 	if classes < 20 {
 		t.Fatalf("found only %d failure classes; the scan is not reading the declarations", classes)
 	}
-	// The reserved reason is registered as external wait only through the
-	// table, ready for #87, and is otherwise unreachable today.
-	if !externalWaitReasons["execution_provider_prerequisite_unavailable"] {
-		t.Fatal("the reserved prerequisite reason is not registered from the table")
+	for class, d := range want {
+		s := retryDispositions[d]
+		if d == DispositionTransportBackoff {
+			continue
+		}
+		// The accounting the frozen table states: refunded, external, no
+		// finite attempt authority, a fixed 5 minute probe whatever the attempt.
+		if RouteFailure(class) != RouteWait || s.SpendsAttempt || s.SpendsActiveWork || s.FiniteAttemptAuthority || s.Delay == nil || s.Delay(1) != 5*time.Minute || s.Delay(9) != 5*time.Minute {
+			t.Errorf("%s/%s: accounting %+v", class, d, s)
+		}
+	}
+}
+
+// #87 slice 2: a quota wait is durable. Its probe time survives a store
+// reopen and a new runtime, nothing invokes the provider before it, no attempt
+// or active work is spent, and the SAME operation resumes once it passes.
+func TestConnectivityProviderQuotaWaitIsDurable(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+		t.Fatalf("quota: %+v", out)
+	}
+	var waiting RunOperation
+	ops, err := f.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Kind == OpExecutionInvoke {
+			waiting = op
+		}
+	}
+	if waiting.State != OperationFailed || waiting.Attempt != 0 || waiting.RetryDisposition != DispositionRateLimitWait ||
+		!waiting.RetryNotBefore.Equal(f.clock.Now().Add(5*time.Minute)) {
+		t.Fatalf("quota wait not durable or not refunded: %s", retryRow(waiting))
+	}
+	report, err := f.runtime.Status(runID)
+	if err != nil || report.Retry == nil || report.Retry.Operation != waiting.ID || !report.Retry.NotBefore.Equal(waiting.RetryNotBefore) ||
+		report.Retry.Disposition != DispositionRateLimitWait || report.Retry.ResumeCondition != "the provider's stated retry time has passed" {
+		t.Fatalf("status: %+v %v", report.Retry, err)
+	}
+	calls := len(f.provider.requests)
+	active := f.state(runID).activeElapsed(f.clock.Now())
+
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteOperationStore(f.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	f.store, f.deps.Store = reopened, reopened
+	f.runtime = f.newRuntime(f.deps)
+	f.clock.at = waiting.RetryNotBefore.Add(-time.Nanosecond)
+	for i := 0; i < 3; i++ {
+		if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+			t.Fatalf("early probe: %+v", out)
+		}
+	}
+	stored, _, _, err := f.store.Operation(waiting.ID)
+	if err != nil || !reflect.DeepEqual(stored, waiting) || len(f.provider.requests) != calls {
+		t.Fatalf("restart re-probed early: calls %d->%d %s / %s %v", calls, len(f.provider.requests), retryRow(waiting), retryRow(stored), err)
+	}
+	if got := f.state(runID).activeElapsed(f.clock.Now()); got != active {
+		t.Fatalf("the wait was charged as active work: %s -> %s", active, got)
+	}
+
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	recovered, _, _, err := f.store.Operation(waiting.ID)
+	if err != nil || recovered.State != Succeeded || recovered.Attempt != 1 || !recovered.RetryNotBefore.IsZero() || recovered.RetryDisposition != "" || len(f.provider.requests) != calls+1 {
+		t.Fatalf("same operation did not resume: %s calls=%d %v", retryRow(recovered), len(f.provider.requests)-calls, err)
 	}
 }
 

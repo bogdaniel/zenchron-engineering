@@ -327,9 +327,9 @@ all read from the disposition, and never from whether a timestamp is set.
 | Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
 |---|---|---|---|---|---|---|
 | `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
-| `provider_prerequisite_wait` | declared; produced by #87 | no | no | no | an operator restores the provider prerequisite | `execution_provider_prerequisite_unavailable` |
-| `rate_limit_wait` | declared; produced by #87 | no | no | no | the provider's stated retry time has passed | `execution_provider_rate_limited` |
-| `account_wait` | declared; produced by #87 | no | no | no | an operator restores the provider account | `execution_provider_account_unavailable` |
+| `provider_prerequisite_wait` | `provider_unavailable` | no | no | no | an operator restores the provider prerequisite; probed every 5 min | `execution_provider_unavailable` (class reason) |
+| `rate_limit_wait` | `provider_quota`, `provider_rate_limited` | no | no | no | the provider's stated retry time has passed; probed every 5 min | `execution_provider_quota` / `execution_provider_rate_limited` (class reasons) |
+| `account_wait` | `provider_account_unavailable` | no | no | no | an operator restores the provider account; probed every 5 min | `execution_provider_account_unavailable` |
 
 Further rules:
 
@@ -358,8 +358,19 @@ Further rules:
     typed DNS not-found failing closed does not extend to it. Text is compared
     in lower case, with U+2019 read as an ASCII apostrophe.
 - **Endpoint capacity.** An overloaded endpoint or a 502, 503 or 504 is
-  `provider_unavailable`, routed `wait` with no disposition. That is the
-  existing refunded wait, unchanged until #87 assigns it a disposition.
+  `provider_unavailable`, routed `wait` under `provider_prerequisite_wait`.
+- **Provider waits (#87).** The four provider classes keep `RouteWait`. Their
+  disposition refunds the attempt (and the execution time when no provider
+  ran), is external wait, and sets `retry_not_before` to a fixed 5 minutes
+  after each probe: an attempt-keyed backoff would never grow, because the
+  attempt is given back. The probe time is on the operation row and in its
+  journalled `operation.after`, so a restart before it invokes nothing, and
+  `resume` honours it. Once it passes, the same operation of the same run is
+  invoked again. The total wait is bounded only by `lifecycle_deadline`.
+  A wait-routed class with a stated reason keeps it (quota and rate limit share
+  a disposition but not an operator action); the disposition's own reason
+  applies only where the class states none. Status reports the next probe time
+  and the disposition's resume condition.
 
 Effective patience with the defaults: an execution (`max_execution_attempts`
 2) waits once, for 30 s, before stopping. An observation (3 attempts) waits

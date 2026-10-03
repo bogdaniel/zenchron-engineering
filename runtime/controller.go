@@ -1089,6 +1089,9 @@ type StatusReport struct {
 	Candidate   Candidate        `json:"candidate"`
 	Contract    Ref              `json:"contract"`
 	Operation   *OperationStatus `json:"operation,omitempty"`
+	// Retry is the durable retry a waiting run is held by (#87), read from
+	// the journalled operation; nil when none.
+	Retry *RetryStatus `json:"retry,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	Now       time.Time `json:"now"`
@@ -1242,6 +1245,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		request = nil
 	}
 	report.AuthorityRequest = request
+	report.Retry = retryStatus(state)
 	if op, ok := state.currentOperation(); ok {
 		status := OperationStatus{
 			ID: op.ID, Kind: op.Kind, State: op.State,
@@ -1279,6 +1283,29 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		report.Operation = &status
 	}
 	return report, nil
+}
+
+// RetryStatus is a waiting run's next probe: RetryNotBefore, with the
+// disposition that accounts for it and what makes it eligible again.
+type RetryStatus struct {
+	Operation       string           `json:"operation"`
+	NotBefore       time.Time        `json:"not_before"`
+	Disposition     RetryDisposition `json:"disposition"`
+	ResumeCondition string           `json:"resume_condition"`
+}
+
+// retryStatus is the latest operation awaiting a disposition's retry.
+func retryStatus(s *runState) *RetryStatus {
+	if s.snapshot.Disposition != Waiting {
+		return nil
+	}
+	var out *RetryStatus
+	for _, op := range sortOperations(mapValues(s.snapshot.Operations)) {
+		if d, ok := awaitsRetry(op); ok && !op.RetryNotBefore.IsZero() {
+			out = &RetryStatus{Operation: op.ID, NotBefore: op.RetryNotBefore, Disposition: op.RetryDisposition, ResumeCondition: d.ResumeCondition}
+		}
+	}
+	return out
 }
 
 // liveOperationRow is the durable row of op's CURRENT attempt, read by status
