@@ -1243,6 +1243,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		// uses, and the SAME PATH a real shell would resolve.
 		ControllerRoot:    controllerRoot(),
 		EntrypointPathEnv: os.Getenv("PATH"),
+		GoEnvFile:         runtime.OperatorGoEnvFile(os.Getenv("GOENV")),
 	}
 	// The running binary's own provenance. A resolution failure is carried
 	// through as itself rather than discarded: doctor must be able to say "I
