@@ -126,6 +126,17 @@ remotes, config, or other protected Git metadata is a
 Base drift rebases before publication; after publication it is integrated by a
 merge-from-base and never a runtime force-push. Conflicts are typed outcomes.
 
+The runtime commit carries exactly the tree its gates judged. It writes the
+staged index to a tree once (`write-tree`), takes the blob list from
+`diff-tree -r --raw --no-renames <parent> <tree>`, runs the commit gates and
+the raw-worktree backstop over those blobs, then builds the commit with
+`commit-tree <tree> -p <parent>` and moves HEAD with
+`update-ref HEAD <commit> <parent>`. It never reads the index again, so an index
+rewritten after gating cannot change what is committed. A HEAD that moved from
+the gated parent is refused as a `workspace_integrity_violation` and no commit
+is reported. Whether the worktree still matches the commit after it is made is
+not covered by this rule (#437).
+
 The trusted Git metadata baseline is persisted rather than re-derived. Every
 runtime-owned Git operation that succeeds journals the digest of the
 runtime-owned Git metadata it established, and integrity is asserted against
