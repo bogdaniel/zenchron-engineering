@@ -269,9 +269,12 @@ func (p *ownedPipes) closeReaders() {
 // KILL sequence as any other stop, so it never refuses the next attempt. Only
 // a holder that survives that left the group, and that is reported.
 //
-// ponytail: signals the group by its recorded id after the root was reaped; a
-// group id reused in that window would be signalled too. Linux's owned set is
-// already closed here; carrying it through is the upgrade if that matters.
+// A group that no longer exists (ESRCH) is not signalled at all: its holder is
+// necessarily outside it, and its id may already be someone else's.
+//
+// ponytail: a group id reused while the old group still had members cannot be
+// told apart here. Linux's owned set is already closed; carrying it through is
+// the upgrade if that matters.
 func releaseCandidateWriter(lock *os.File, pgid int, grace time.Duration) (escaped bool) {
 	if grace <= 0 {
 		grace = 5 * time.Second
@@ -289,9 +292,16 @@ func releaseCandidateWriter(lock *os.File, pgid int, grace time.Duration) (escap
 		}
 		return false
 	}
+	groupGone := func() bool { return syscall.Kill(-pgid, 0) == syscall.ESRCH }
+	if groupGone() {
+		return true
+	}
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	if freed() {
 		return false
+	}
+	if groupGone() {
+		return !candidateWriterFree(path)
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	return !freed()

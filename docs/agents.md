@@ -511,8 +511,10 @@ guard cannot reach (#168).
   the default guard grace) and is then refused before anything touches the
   candidate as `candidate_writer_alive`: a typed, non-spending wait an
   operator clears by stopping the stale writer (`lsof <candidate>.writer.lock`
-  names it). A lock that cannot be checked at all is
-  `candidate_guard_unavailable`.
+  names it). The settle is paid once: a run already waiting on
+  `candidate_writer_alive` re-probes once per pass without sleeping, and a
+  stop or shutdown ends the settle at once. A lock that cannot be checked at
+  all is `candidate_guard_unavailable`.
 - When a provider returns normally, a lock still held by its own process
   group (a backgrounded command) is stopped with the usual TERM-then-KILL, so
   an attempt's own leftovers never refuse the next attempt. A holder that

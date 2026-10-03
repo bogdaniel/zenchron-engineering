@@ -67,7 +67,7 @@ func TestEscapedWriterOwnerHelper(t *testing.T) {
 	if dir == "" {
 		t.Skip("owner helper entry point, driven by TestAWriterThatEscapedItsDeadOwnerBlocksTheNextAttempt")
 	}
-	lock, err := claimCandidateWriter(dir)
+	lock, err := claimCandidateWriter(context.Background(), dir, candidateWriterSettle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestAWriterThatEscapedItsDeadOwnerBlocksTheNextAttempt(t *testing.T) {
 		t.Fatal("precondition: the escaped writer did not survive its owner, so this proves nothing")
 	}
 
-	_, err := claimCandidateWriter(candidate)
+	_, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 	if class, ok := candidateGuardFailureClass(err); !ok || class != FailureCandidateWriterAlive || RouteFailure(class) != RouteWait {
 		t.Fatalf("a new attempt was allowed beside a dead owner's live writer: %q %v (%v)", class, ok, err)
 	}
@@ -122,7 +122,7 @@ func TestAWriterThatEscapedItsDeadOwnerBlocksTheNextAttempt(t *testing.T) {
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		lock, err := claimCandidateWriter(candidate)
+		lock, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 		if err == nil {
 			_ = lock.Close()
 			break
@@ -142,7 +142,7 @@ func TestAProvidersOwnLeftoverIsStoppedButAnEscapeeIsAttributed(t *testing.T) {
 
 	t.Run("in-group leftover", func(t *testing.T) {
 		candidate := candidateUnder(t)
-		lock, err := claimCandidateWriter(candidate)
+		lock, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,7 +156,7 @@ func TestAProvidersOwnLeftoverIsStoppedButAnEscapeeIsAttributed(t *testing.T) {
 		if out.EscapedWriter {
 			t.Fatal("a leftover inside the provider's own group was reported as an escaped writer")
 		}
-		next, err := claimCandidateWriter(candidate)
+		next, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 		if err != nil {
 			t.Fatalf("the previous attempt's own leftover refused the next attempt: %v", err)
 		}
@@ -165,7 +165,7 @@ func TestAProvidersOwnLeftoverIsStoppedButAnEscapeeIsAttributed(t *testing.T) {
 
 	t.Run("escaped leftover", func(t *testing.T) {
 		candidate := candidateUnder(t)
-		lock, err := claimCandidateWriter(candidate)
+		lock, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +196,7 @@ func TestAnEscapedWriterIsBackgroundWorkThisAttemptAbandoned(t *testing.T) {
 func TestAProviderIsNotDispatchedIntoALockedCandidate(t *testing.T) {
 	shortWriterSettle(t)
 	provider, request, fake := agentFixture(t, AgentKindCodexCLI)
-	held, err := claimCandidateWriter(request.CandidateDir)
+	held, err := claimCandidateWriter(context.Background(), request.CandidateDir, candidateWriterSettle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestARetriedExecutionIsNotRefusedByItsOwnRunsClaim(t *testing.T) {
 
 // L1: a lock that cannot be checked is the controller's own setup failure.
 func TestAnUncheckableWriterLockIsAGuardFailureNotALiveWriter(t *testing.T) {
-	_, err := claimCandidateWriter(filepath.Join(t.TempDir(), "missing-parent", "candidate"))
+	_, err := claimCandidateWriter(context.Background(), filepath.Join(t.TempDir(), "missing-parent", "candidate"), candidateWriterSettle)
 	if class, ok := candidateGuardFailureClass(err); !ok || class != FailureCandidateGuardUnavailable {
 		t.Fatalf("an uncheckable lock classified as %q %v (%v)", class, ok, err)
 	}
@@ -290,7 +290,7 @@ func TestALiveWriterIsAWaitBeforeTheCandidateIsJudged(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A live holder that is not this process: what an escaped writer is.
-	lock, err := claimCandidateWriter(candidate)
+	lock, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,6 +322,74 @@ func TestALiveWriterIsAWaitBeforeTheCandidateIsJudged(t *testing.T) {
 	}
 }
 
+// The settle is paid on first encounter only. A run already waiting on a held
+// lock re-probes once per pass: a pass that slept the settle would hold a work
+// slot for it and be charged as active time by foldExternalWait, whose work
+// span is exactly the operation's before/after interval.
+func TestAWaitingRunReprobesWithoutSettling(t *testing.T) {
+	requireBoundedProcess(t)
+	restore := candidateWriterSettle
+	candidateWriterSettle = 2 * time.Second
+	t.Cleanup(func() { candidateWriterSettle = restore })
+	fixture := newPhase8Fixture(t)
+	provider := &countingProvider{}
+	fixture.deps.Provider = provider
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+	candidate := candidateDir(fixture.deps.StateDir, runID)
+	if err := os.MkdirAll(filepath.Dir(candidate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := claimCandidateWriter(context.Background(), candidate, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	for pass := 0; pass < 10; pass++ {
+		fixture.reconcile(runID)
+		if class, found := executionFailureClass(t, fixture.state(runID)); found {
+			if class != FailureCandidateWriterAlive {
+				t.Fatalf("execution failure class = %q", class)
+			}
+			break
+		}
+	}
+	if class, _ := executionFailureClass(t, fixture.state(runID)); class != FailureCandidateWriterAlive {
+		t.Fatalf("the run never waited on the held lock: %q", class)
+	}
+	for pass := 0; pass < 3; pass++ {
+		started := time.Now()
+		fixture.reconcile(runID)
+		if elapsed := time.Since(started); elapsed > candidateWriterSettle/2 {
+			t.Fatalf("waiting pass %d took %s: it settled again instead of probing once", pass, elapsed)
+		}
+	}
+	if provider.calls != 0 {
+		t.Fatalf("provider was invoked %d time(s) beside a held lock", provider.calls)
+	}
+}
+
+// A stop or shutdown ends the settle at once rather than after it.
+func TestACancelledContextEndsTheSettle(t *testing.T) {
+	candidate := candidateUnder(t)
+	held, err := claimCandidateWriter(context.Background(), candidate, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	started := time.Now()
+	_, err = claimCandidateWriter(ctx, candidate, 10*time.Second)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("a cancelled claim kept settling for %s", elapsed)
+	}
+	if class, ok := candidateGuardFailureClass(err); !ok || class != FailureCandidateWriterAlive {
+		t.Fatalf("a cancelled claim on a held lock returned %q %v (%v)", class, ok, err)
+	}
+}
+
 // L2: GC does not delete a candidate under a live writer, and removes the
 // lock file with the candidate.
 func TestGCLeavesACandidateWithALiveWriterAndRemovesItsLock(t *testing.T) {
@@ -330,7 +398,7 @@ func TestGCLeavesACandidateWithALiveWriterAndRemovesItsLock(t *testing.T) {
 	f.createRun("run-old")
 	m := f.material("run-old")
 	f.settle("run-old", EventRunCompleted)
-	lock, err := claimCandidateWriter(m.candidate)
+	lock, err := claimCandidateWriter(context.Background(), m.candidate, candidateWriterSettle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,12 +421,12 @@ func TestAClaimWaitsOutABrieflyHeldLock(t *testing.T) {
 	candidateWriterSettle = 5 * time.Second
 	t.Cleanup(func() { candidateWriterSettle = restore })
 	candidate := candidateUnder(t)
-	held, err := claimCandidateWriter(candidate)
+	held, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 	if err != nil {
 		t.Fatal(err)
 	}
 	time.AfterFunc(200*time.Millisecond, func() { _ = held.Close() })
-	lock, err := claimCandidateWriter(candidate)
+	lock, err := claimCandidateWriter(context.Background(), candidate, candidateWriterSettle)
 	if err != nil {
 		t.Fatalf("a lock released within the settle bound was refused: %v", err)
 	}
@@ -375,7 +443,7 @@ func TestAPlannerRefusalBeforeDispatchIsTyped(t *testing.T) {
 	if !errors.As(err, &refused) || !strings.Contains(refused.Detail, string(FailureCandidateWriterAlive)) {
 		t.Fatalf("a pre-dispatch refusal reached the planner untyped: %T %v", err, err)
 	}
-	lock, err := claimCandidateWriter(input.Workspace.Dir)
+	lock, err := claimCandidateWriter(context.Background(), input.Workspace.Dir, candidateWriterSettle)
 	if err != nil {
 		t.Fatal(err)
 	}

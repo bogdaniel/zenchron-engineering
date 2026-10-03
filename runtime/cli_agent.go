@@ -1159,7 +1159,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// hands it over; any other caller (the planner, an embedder) is claimed
 	// for here.
 	if writer == nil {
-		claimed, err := claimCandidateWriter(request.CandidateDir)
+		claimed, err := claimCandidateWriter(ctx, request.CandidateDir, candidateWriterSettle)
 		if err != nil {
 			return ExecutionResult{}, err
 		}

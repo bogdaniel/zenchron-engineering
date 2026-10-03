@@ -397,7 +397,7 @@ func (c Collector) prove(root string, target GCTarget, now time.Time) string {
 	// A terminal run's candidate can still have a writer a dead supervisor
 	// left behind (#168); deleting under it would race what it writes.
 	if target.Kind == GCCandidateWorkspace && !candidateWriterFree(candidateWriterLockPath(target.Path)) {
-		return "a process still holds the candidate writer lock"
+		return "a process still holds the candidate writer lock; `lsof " + candidateWriterLockPath(target.Path) + "` names it"
 	}
 	if target.Kind == GCRawTranscript && !rawArtifactOf(snapshot, target.Path) {
 		return "ownership cannot be proven: no journalled raw artifact at this path"

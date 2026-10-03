@@ -196,6 +196,15 @@ automatically to make room: trading one active run's evidence for another's
 progress is not a decision a scheduler gets to make. `autonomy gc --dry-run`
 shows what is eligible under `gc.retention_hours`.
 
+**`candidate_writer_alive`, or gc retaining a candidate with `a process still
+holds the candidate writer lock`.** A process from an earlier provider
+invocation, typically one that outlived a killed supervisor, still holds
+`<state>/runs/<run>/candidate.writer.lock` and may still be writing the
+candidate. `lsof <that path>` names it. Stop it: the waiting run re-checks the
+lock on each pass, once and without waiting, and proceeds when it is free; gc
+collects the candidate on its next pass. On a platform without advisory locks
+(Windows) a candidate with a lock file is never collected.
+
 ## Supervisor and submission
 
 **`starting several issues at once needs a supervisor to own them; run

@@ -557,7 +557,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// is a STOP - would charge this run for a writer that is not this
 	// attempt's. A held lock is a wait an operator clears.
 	if dir := candidateDir(r.deps.StateDir, state.run.ID); isDir(dir) {
-		writer, err := claimCandidateWriter(dir)
+		// The settle is paid once, on first encounter. A run already
+		// waiting on a held lock re-probes with no sleep.
+		settle := candidateWriterSettle
+		if last, ok := state.lastFailure(operation.ID); ok && last == FailureCandidateWriterAlive {
+			settle = 0
+		}
+		writer, err := claimCandidateWriter(ctx, dir, settle)
 		if err != nil {
 			class, _ := candidateGuardFailureClass(err)
 			return effect{state: OperationFailed, result: executionRecord{

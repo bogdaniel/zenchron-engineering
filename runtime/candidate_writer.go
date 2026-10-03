@@ -42,21 +42,25 @@ func candidateWriterLockPath(candidateDir string) string {
 	return filepath.Clean(candidateDir) + ".writer.lock"
 }
 
-// candidateWriterSettle is how long a claim waits for a held lock to be
+// candidateWriterSettle is how long a FIRST claim waits for a held lock to be
 // released before refusing: three times the default owner-death guard grace,
 // so a supervisor restarted while its predecessor's guard is still stopping
-// the old group does not wait spuriously. A var only so tests can shorten it.
+// the old group does not wait spuriously. A run already waiting on a held lock
+// probes once and does not settle again: every waiting pass is a work-class
+// operation, and a 15s sleep per pass would hold a work slot and be charged
+// as active time. A var only so tests can shorten it.
 var candidateWriterSettle = 15 * time.Second
 
 // claimCandidateWriter takes the candidate's writer lock before anything
-// touches the candidate for a provider attempt. A lock still held after the
-// settle bound means a process from an earlier invocation may still be
-// writing, and no new attempt runs beside it. A lock that cannot be checked
-// proves nothing and refuses too, as the controller's own setup failure.
-// The caller closes the file when its attempt ends.
-func claimCandidateWriter(candidateDir string) (*os.File, error) {
+// touches the candidate for a provider attempt. A lock still held after settle
+// means a process from an earlier invocation may still be writing, and no new
+// attempt runs beside it. A lock that cannot be checked proves nothing and
+// refuses too, as the controller's own setup failure. The settle ends early
+// when ctx does: a stop or shutdown never waits on it. The caller closes the
+// file when its attempt ends.
+func claimCandidateWriter(ctx context.Context, candidateDir string, settle time.Duration) (*os.File, error) {
 	path := candidateWriterLockPath(candidateDir)
-	deadline := time.Now().Add(candidateWriterSettle)
+	deadline := time.Now().Add(settle)
 	for {
 		lock, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
 		if err != nil {
@@ -70,10 +74,14 @@ func claimCandidateWriter(candidateDir string) (*os.File, error) {
 		if err != nil {
 			return nil, &CandidateWriterAliveError{Lock: path, Cause: err}
 		}
-		if time.Now().After(deadline) {
+		if !time.Now().Before(deadline) {
 			return nil, &CandidateWriterAliveError{Lock: path}
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, &CandidateWriterAliveError{Lock: path}
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }
 
