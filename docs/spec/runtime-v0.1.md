@@ -327,9 +327,9 @@ all read from the disposition, and never from whether a timestamp is set.
 | Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
 |---|---|---|---|---|---|---|
 | `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
-| `provider_prerequisite_wait` | reserved (#87) | no | no | no | an operator restores the provider prerequisite | `execution_provider_prerequisite_unavailable` |
-| `rate_limit_wait` | reserved (#87) | no | no | no | the provider's stated retry time has passed | `execution_provider_rate_limited` |
-| `account_wait` | reserved (#87) | no | no | no | an operator restores the provider account | `execution_provider_account_unavailable` |
+| `provider_prerequisite_wait` | declared; produced by #87 | no | no | no | an operator restores the provider prerequisite | `execution_provider_prerequisite_unavailable` |
+| `rate_limit_wait` | declared; produced by #87 | no | no | no | the provider's stated retry time has passed | `execution_provider_rate_limited` |
+| `account_wait` | declared; produced by #87 | no | no | no | an operator restores the provider account | `execution_provider_account_unavailable` |
 
 Further rules:
 
@@ -340,15 +340,23 @@ Further rules:
   Every forge adapter (REST, GitHub App token exchange, governance) routes its
   failed exchange through that one classification and keeps the cause on a
   typed transport error.
-  - Only transport loss is `connectivity_unavailable`: a temporary DNS failure,
-    a timeout, an unreachable host or network, a reset, or a refused
-    connection.
+  - Only transport loss is `connectivity_unavailable`: a temporary or timed-out
+    typed DNS error, `ETIMEDOUT`, an unreachable host or network, a reset, or
+    a refused connection. These are the only timeouts that count as loss. An
+    `http.Client.Timeout` surfaces as a context deadline and is classified
+    `caller_cancelled`.
   - These fail closed rather than backing off: DNS not-found, TLS or
     certificate failures, proxy configuration, and the caller's own
     cancellation or deadline.
-  - A provider CLI reaches the same class only by naming transport loss in its
-    terminal diagnostic. For Claude Code, that includes an `is_error` result
-    whose whole text is the CLI's own "Can't reach the API server" envelope.
+  - **Explicit exception: provider CLI text.** A provider CLI has no typed
+    errors to read, so it reaches `connectivity_unavailable` by naming transport
+    loss in its own terminal diagnostic, matched against a closed signal list.
+    That list includes NXDOMAIN-like text such as Node's
+    `getaddrinfo ENOTFOUND`, Codex's `dns error`, and Claude Code's `is_error`
+    result whose whole text is the CLI's "Can't reach the API server … (ENOTFOUND)"
+    envelope. For a CLI that text is how it reports losing the network, so a
+    typed DNS not-found failing closed does not extend to it. Text is compared
+    in lower case, with U+2019 read as an ASCII apostrophe.
 - **Endpoint capacity.** An overloaded endpoint or a 502, 503 or 504 is
   `provider_unavailable`, routed `wait` with no disposition. That is the
   existing refunded wait, unchanged until #87 assigns it a disposition.

@@ -659,12 +659,13 @@ func (s Scheduler) RecordProviderProgress(id string, attempt int, progress Provi
 }
 
 func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error) {
-	return s.finishAt(id, state, time.Time{}, time.Time{})
+	return s.finishAt(id, state, time.Time{}, "", time.Time{})
 }
 
-// finishAt also records retryAt (purely "not eligible before") and, for
-// store-lag recovery, when the attempt actually ended; zero means now.
-func (s Scheduler) finishAt(id string, state OperationState, retryAt, endedAt time.Time) (RunOperation, error) {
+// finishAt also records retryAt (purely "not eligible before") with the
+// disposition that accounts for it, so the store row and the journal agree,
+// and, for store-lag recovery, when the attempt actually ended; zero is now.
+func (s Scheduler) finishAt(id string, state OperationState, retryAt time.Time, disposition RetryDisposition, endedAt time.Time) (RunOperation, error) {
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")
 	}
@@ -673,7 +674,7 @@ func (s Scheduler) finishAt(id string, state OperationState, retryAt, endedAt ti
 			return fmt.Errorf("operation is not active")
 		}
 		op.State = state
-		op.RetryNotBefore = retryAt
+		op.RetryNotBefore, op.RetryDisposition = retryAt, disposition
 		op.Lease = nil
 		// What this attempt ACTUALLY executed joins the durable counter, and
 		// the operation stops being active. Anything that happens between now

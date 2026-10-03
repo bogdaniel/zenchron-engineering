@@ -1715,14 +1715,17 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 			continue
 		}
 		// The attempt ended when its after record was journalled; the
-		// controller's downtime since then is not execution.
+		// controller's downtime since then is not execution. Only an after
+		// record of the SAME attempt the store holds says when that ended.
 		var ended time.Time
-		for _, event := range state.events {
-			if event.Type == EventOperationAfter && event.OperationID == stored.ID {
-				ended = event.OccurredAt
+		if journalled.Attempt == stored.Attempt {
+			for _, event := range state.events {
+				if event.Type == EventOperationAfter && event.OperationID == stored.ID {
+					ended = event.OccurredAt
+				}
 			}
 		}
-		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore, ended); err != nil {
+		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore, journalled.RetryDisposition, ended); err != nil {
 			return err
 		}
 	}
@@ -1895,7 +1898,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore, time.Time{}); err != nil {
+	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore, finished.RetryDisposition, time.Time{}); err != nil {
 		// The stop may already have finished the row. That is accepted only for
 		// an interrupted execution and only when the row durably reads
 		// OperationCancelled - the one state CancelRun writes. Every other

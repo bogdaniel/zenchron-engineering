@@ -382,7 +382,7 @@ func (s *claudeStream) handle(line []byte) {
 			if !s.isError {
 				s.answer, s.hasAnswer = *answer, true
 			} else {
-				s.unreachable = strings.ToLower(strings.TrimSpace(*answer)) == "api error: "+claudeUnreachableEnvelope
+				s.unreachable = normalizeDiagnostic(strings.TrimSpace(*answer)) == "api error: "+claudeUnreachableEnvelope
 			}
 		}
 		// The final result ends every turn. An oversized last tool_result line

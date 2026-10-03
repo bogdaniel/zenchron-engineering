@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/http"
 	"net/url"
@@ -82,7 +85,7 @@ func TestConnectivityBackoffSurvivesSerialization(t *testing.T) {
 	op := plannedExecution(t, s, time.Hour)
 	clock.at = clock.at.Add(time.Second)
 	deadline := clock.at.Add(connectivityBackoff(op.Attempt))
-	finished, err := s.finishAt(op.ID, OperationFailed, deadline, time.Time{})
+	finished, err := s.finishAt(op.ID, OperationFailed, deadline, DispositionTransportBackoff, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +134,7 @@ func TestConnectivityDeadlinePersistsAcrossSQLiteRestart(t *testing.T) {
 	s.Store = store
 	op := plannedExecution(t, s, time.Hour)
 	deadline := clock.at.Add(time.Minute)
-	if _, err := s.finishAt(op.ID, OperationFailed, deadline, time.Time{}); err != nil {
+	if _, err := s.finishAt(op.ID, OperationFailed, deadline, DispositionTransportBackoff, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -248,7 +251,7 @@ func TestConnectivityJournalStoreGapIsExternalWait(t *testing.T) {
 		t.Fatalf("journal lost external wait: %s %s", openSince, work)
 	}
 	clock.at = clock.at.Add(time.Hour)
-	settled, err := s.finishAt(op.ID, OperationFailed, retryAt, observed)
+	settled, err := s.finishAt(op.ID, OperationFailed, retryAt, DispositionTransportBackoff, observed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,6 +490,7 @@ func TestConnectivityClaudeIncidentResultEnvelope(t *testing.T) {
 		want   FailureClass
 	}{
 		"zero exit":         {claudeResultWithAnswer(true, incident), FailureConnectivity},
+		"typographic quote": {claudeResultWithAnswer(true, strings.ReplaceAll(incident, "'", "\u2019")), FailureConnectivity},
 		"quoted in prose":   {claudeResultWithAnswer(true, "I saw: "+incident), FailureUnknown},
 		"model text":        {claudeAssistant("m", "", `{"type":"text","text":"`+incident+`"}`) + "\n" + claudeResult(true, "success", 0), FailureUnknown},
 		"not an error":      {claudeResultWithAnswer(false, incident), ""},
@@ -613,5 +617,152 @@ func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 		if op.Kind == OpExecutionInvoke && op.Attempt != 0 {
 			t.Fatalf("capacity attempt not refunded: %+v", op)
 		}
+	}
+}
+
+// retryRow is what the store row and the journal must agree on about a retry.
+func retryRow(op RunOperation) string {
+	return fmt.Sprintf("%s|%d/%d|%s|%s", op.State, op.Attempt, op.MaxAttempts, op.RetryNotBefore.UTC().Format(time.RFC3339Nano), op.RetryDisposition)
+}
+
+// G1: the disposition is persisted on the store row as well as the journal.
+func TestConnectivityStoreRowCarriesTheDisposition(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.inject(func(GitHubCall) error { return fmt.Errorf("request: %w", syscall.ENETUNREACH) })
+	f.reconcile(runID)
+	checked := 0
+	for id, journal := range f.state(runID).snapshot.Operations {
+		if journal.Kind != OpSourceObserve {
+			continue
+		}
+		stored, _, _, err := f.store.Operation(id)
+		if err != nil || journal.RetryDisposition != DispositionTransportBackoff || retryRow(stored) != retryRow(journal) {
+			t.Fatalf("store %q != journal %q (%v)", retryRow(stored), retryRow(journal), err)
+		}
+		checked++
+	}
+	if checked != 1 {
+		t.Fatalf("checked %d observations", checked)
+	}
+}
+
+// G2(a): store-lag recovery charges the attempt up to its journalled after
+// record, not the controller's downtime, and only for the SAME attempt; the
+// recovered row carries the journal's retry fields.
+func TestConnectivityStoreLagUsesTheJournalledEnd(t *testing.T) {
+	for name, tc := range map[string]struct {
+		attemptSkew int
+		want        time.Duration
+	}{
+		"same attempt":      {0, time.Second},
+		"different attempt": {1, time.Second + time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, store := openJournal(t)
+			if err := store.PutRun(newJournalRun("run-1")); err != nil {
+				t.Fatal(err)
+			}
+			s, clock := deadlineScheduler(t)
+			s.Store = store
+			op := plannedExecution(t, s, time.Hour)
+			clock.at = clock.at.Add(time.Second)
+			after := op
+			after.State, after.Lease = OperationFailed, nil
+			after.Attempt += tc.attemptSkew
+			after.RetryNotBefore, after.RetryDisposition = clock.at.Add(connectivityBackoff(op.Attempt)), DispositionTransportBackoff
+			events := []EngineeringEvent{{Type: EventOperationAfter, OperationID: op.ID, OccurredAt: clock.at, Payload: mustMarshal(t, after)}}
+			clock.at = clock.at.Add(time.Hour) // the controller was down
+			engine := EngineeringRuntime{deps: Dependencies{Store: store}, scheduler: s}
+			state := &runState{run: newJournalRun(op.RunID), snapshot: RunSnapshot{Operations: map[string]RunOperation{op.ID: after}}, events: events}
+			if err := engine.reconcileStoreLag(state); err != nil {
+				t.Fatal(err)
+			}
+			stored, _, _, err := s.Store.Operation(op.ID)
+			if err != nil || stored.ConsumedExecution != tc.want {
+				t.Fatalf("consumed %s, want %s (%v)", stored.ConsumedExecution, tc.want, err)
+			}
+			if stored.RetryDisposition != after.RetryDisposition || !stored.RetryNotBefore.Equal(after.RetryNotBefore) {
+				t.Fatalf("store-lag lost the retry fields: %q vs %q", retryRow(stored), retryRow(after))
+			}
+		})
+	}
+}
+
+// G6: the #87 rows are declared, not produced. No failure class maps to them,
+// and nothing outside this table names them or their reasons.
+func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
+	reserved := map[string]bool{
+		"DispositionProviderPrerequisiteWait": true, "DispositionRateLimitWait": true, "DispositionAccountWait": true,
+	}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	classes := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.Ident:
+				if reserved[n.Name] && file != "connectivity.go" {
+					t.Errorf("%s names reserved disposition %s", fset.Position(n.Pos()), n.Name)
+				}
+			case *ast.ValueSpec:
+				if typ, ok := n.Type.(*ast.Ident); ok && typ.Name == "FailureClass" {
+					for _, value := range n.Values {
+						if lit, ok := value.(*ast.BasicLit); ok {
+							classes++
+							if d := retryDispositionFor(FailureClass(strings.Trim(lit.Value, `"`))); d != "" && d != DispositionTransportBackoff {
+								t.Errorf("class %s produces reserved disposition %s", lit.Value, d)
+							}
+						}
+					}
+				}
+			case *ast.BasicLit:
+				if n.Value == `"execution_provider_prerequisite_unavailable"` && file != "connectivity.go" {
+					t.Errorf("%s uses the reserved prerequisite reason", fset.Position(n.Pos()))
+				}
+			}
+			return true
+		})
+	}
+	if classes < 20 {
+		t.Fatalf("found only %d failure classes; the scan is not reading the declarations", classes)
+	}
+	// The reserved reason is registered as external wait only through the
+	// table, ready for #87, and is otherwise unreachable today.
+	if !externalWaitReasons["execution_provider_prerequisite_unavailable"] {
+		t.Fatal("the reserved prerequisite reason is not registered from the table")
+	}
+}
+
+// G5: an http.Client.Timeout is a deadline the caller set, not transport loss.
+func TestConnectivityClientTimeoutIsCallerCancelled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close() // accept and never answer
+		}
+	}()
+	_, err = (&http.Client{Timeout: 100 * time.Millisecond}).Get("http://" + listener.Addr().String())
+	if cause := transportCause(err); cause != TransportCallerCancelled {
+		t.Fatalf("client timeout %v classified %q", err, cause)
 	}
 }
