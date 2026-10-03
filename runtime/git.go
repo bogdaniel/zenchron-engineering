@@ -357,23 +357,13 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
 		return CommitResult{}, fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded))
 	}
-	// THE COMMIT GATES COVER WHAT THE COMMIT WILL HOLD, and nothing else. A
-	// sensitive-looking basename and the size ceiling are both statements about
-	// the object being published, so a path already excluded from it cannot
-	// veto it.
-	if err := GuardCandidateCommitContent(w.Dir, eligible, maxBytes); err != nil {
-		return CommitResult{}, err
-	}
-	// The OUTPUT half of the credential boundary. Admission proved the
-	// workspace was clean before the producer was shown it; this proves the
-	// producer did not introduce a credential value into what is about to
-	// become a runtime-owned commit. A value found here is REFUSED, not
-	// redacted and not ignored: redacting it would commit a rewritten version
-	// of the producer's work, and ignoring it would publish the secret. It asks
-	// about the eligible paths for the same reason the gates above do - the
-	// bytes of an excluded path are not bytes this commit publishes - and
-	// nothing about the check on candidate work is weakened.
-	if err := scanPathsForCredentialValues(w.Dir, eligible); err != nil {
+	// AN INDEX FLAG HIDES CONTENT FROM THE GATES BELOW (#435). The gates read
+	// worktree files; the commit carries index blobs. skip-worktree and
+	// assume-unchanged both make `add -A` leave an index entry alone, so its
+	// blob can differ from - or exist without - the file the gates inspect.
+	// The runtime does not unset them: it refuses, because a flag it did not
+	// set is a claim about the commit it has not checked.
+	if err := refuseIndexFlags(w.Dir); err != nil {
 		return CommitResult{}, err
 	}
 	// THE EXCLUSION IS AN INDEX WRITE, NEVER A WORKTREE WRITE.
@@ -413,6 +403,35 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		if _, err := runGit(w.Dir, "rm", "--cached", "-q", "-f", "--ignore-unmatch", "--", p); err != nil {
 			return CommitResult{}, err
 		}
+	}
+	// THE COMMIT GATES COVER WHAT THE COMMIT WILL HOLD, and nothing else (#435).
+	// They run AFTER staging, over the staged paths, because the index - not
+	// the status list - decides what is committed: a staged gitlink turned
+	// directory carries files status never named. stagedCommitPaths first
+	// proves every staged blob is the worktree file the gates read. A refusal
+	// here commits nothing; the staged entries are the same leftover an
+	// interrupted attempt leaves, which the `rm --cached -f` above expects.
+	staged, err := stagedCommitPaths(w.Dir)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	// A sensitive-looking basename and the size ceiling are both statements
+	// about the object being published, so a path already excluded from it
+	// cannot veto it.
+	if err := GuardCandidateCommitContent(w.Dir, staged, maxBytes); err != nil {
+		return CommitResult{}, err
+	}
+	// The OUTPUT half of the credential boundary. Admission proved the
+	// workspace was clean before the producer was shown it; this proves the
+	// producer did not introduce a credential value into what is about to
+	// become a runtime-owned commit. A value found here is REFUSED, not
+	// redacted and not ignored: redacting it would commit a rewritten version
+	// of the producer's work, and ignoring it would publish the secret. It asks
+	// about the staged paths for the same reason the gates above do - the
+	// bytes of an excluded path are not bytes this commit publishes - and
+	// nothing about the check on candidate work is weakened.
+	if err := scanPathsForCredentialValues(w.Dir, staged); err != nil {
+		return CommitResult{}, err
 	}
 	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", message); err != nil {
 		return CommitResult{}, err
@@ -665,6 +684,58 @@ func quotedPaths(paths []string) string {
 	}
 	sort.Strings(named)
 	return strings.Join(named, ", ")
+}
+
+// refuseIndexFlags refuses any index entry marked skip-worktree (tag S, or s
+// when also assume-unchanged) or assume-unchanged (any lowercase tag) in
+// `git ls-files -v`.
+func refuseIndexFlags(dir string) error {
+	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	if err != nil {
+		return err
+	}
+	for _, rec := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
+		if len(rec) < 3 {
+			continue
+		}
+		if tag := rec[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", rec[2:])
+		}
+	}
+	return nil
+}
+
+// stagedCommitPaths lists every path the commit would change and proves the
+// worktree gates read its committed bytes: each staged addition or
+// modification must be a regular-file blob that hashes the same as its
+// worktree file. Deletions carry no bytes, but are listed so the name gate
+// still sees them.
+func stagedCommitPaths(dir string) ([]string, error) {
+	out, err := gitOutput(dir, "diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	// -z raw records are ":srcmode dstmode srcsha dstsha status\0path\0".
+	records := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
+	var paths []string
+	for i := 0; i+1 < len(records); i += 2 {
+		fields, p := strings.Fields(records[i]), records[i+1]
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unreadable staged candidate path %q", p)
+		}
+		paths = append(paths, p)
+		if fields[4] == "D" {
+			continue
+		}
+		if !strings.HasPrefix(fields[1], "100") {
+			return nil, fmt.Errorf("staged candidate path %q is not a regular file the commit gates can read", p)
+		}
+		worktree, err := gitOutput(dir, "hash-object", "--", p)
+		if err != nil || strings.TrimSpace(worktree) != fields[3] {
+			return nil, fmt.Errorf("staged candidate path %q differs from the worktree the commit gates inspected", p)
+		}
+	}
+	return paths, nil
 }
 
 func changedPaths(dir string) ([]string, error) { return statusPaths(dir, true) }
