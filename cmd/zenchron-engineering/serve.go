@@ -448,7 +448,7 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		shutdown()
 		return controlOK(map[string]bool{"shutting_down": true})
 	case runtime.ControlStop:
-		scheduler := runtime.Scheduler{Store: c.store, Clock: runtime.RealClock{}, Owner: c.owner}
+		scheduler := runtime.Scheduler{Store: c.store, Clock: runtime.RealClock{}, Owner: c.owner, Liveness: runtime.NewLockOwnerLiveness(c.config.StateDir)}
 		outcome, err := runtime.CancelRun(c.store, scheduler, time.Now().UTC(), request.RunID, stopReason)
 		if err != nil {
 			return controlError(err)
@@ -1043,15 +1043,14 @@ func autonomyStopAll(flags autonomyFlags, overrides autonomyOverrides, stdout io
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	var outcomes []runtime.Outcome
 	for _, run := range runs {
 		if run.Disposition == runtime.Completed || run.Disposition == runtime.Failed || run.Disposition == runtime.Cancelled {
 			continue
 		}
 		outcome, err := runtime.CancelRun(built.store, scheduler, time.Now().UTC(), run.ID, reason)
-		var terminal *runtime.RunTerminalError
-		if errors.As(err, &terminal) {
+		if runtime.IsRunTerminal(err) {
 			continue // finished after the listing; its outcome stands
 		}
 		if err != nil {

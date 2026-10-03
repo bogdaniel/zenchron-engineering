@@ -437,10 +437,13 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // a second stop still finishes whatever operations the first one left active,
 // because a stop whose later writes failed is exactly the case an operator
 // retries.
-// A COMPLETED or FAILED run is refused with a RunTerminalError and nothing is
-// written (#439): its outcome is history, not something a stop may rewrite.
-// The refusal is made by the run.cancelled append itself, so it holds against a
-// completion that commits while this stop is in flight.
+//
+// A COMPLETED or FAILED run is refused with a RunTerminalError (#439): its
+// outcome is history, not something a stop may rewrite, so neither the journal
+// nor the run row is written. The refusal is made by the run.cancelled append
+// itself, so it holds against a completion that commits while this stop is in
+// flight. The operation loop still runs, restricted to leases dead-owner
+// reclaim would release, so a stale lease such a run left is given back.
 func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, runID, reason string) (Outcome, error) {
 	run, found, err := store.Run(runID)
 	if err != nil {
@@ -461,6 +464,10 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 	// would try - short-circuited on the disposition it had already written and
 	// repaired nothing. It is also the state every database already carrying
 	// this defect is in, and those are healed by the same fall-through.
+	// refused is set when the run already completed or failed (#439). Its
+	// outcome is not rewritten, but a lease its dead owner left behind is still
+	// given back below, and then the refusal is returned.
+	var refused error
 	if run.Disposition == Cancelled {
 		outcome.Reason = run.Reason
 	} else {
@@ -481,20 +488,30 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 			Type:       EventRunCancelled,
 			OccurredAt: now,
 			Payload:    payload,
-		}); err != nil {
+		}); IsRunTerminal(err) {
+			refused = err
+		} else if err != nil {
 			return Outcome{}, err
-		}
-		run.Disposition, run.Reason, run.UpdatedAt = Cancelled, reason, now
-		if err := store.PutRun(run); err != nil {
-			return Outcome{}, err
+		} else {
+			run.Disposition, run.Reason, run.UpdatedAt = Cancelled, reason, now
+			if err := store.PutRun(run); err != nil {
+				return Outcome{}, err
+			}
 		}
 	}
+	liveness := scheduler.defaults().Liveness
 	operations, err := store.Operations(runID)
 	if err != nil {
 		return Outcome{}, err
 	}
 	for _, op := range operations {
 		if op.State != Leased && op.State != Running {
+			continue
+		}
+		// On a refused stop only what dead-owner reclaim would release is
+		// touched: a live owner's lease on a run that ended without this stop
+		// is not the operator's to take.
+		if refused != nil && op.Lease != nil && !CanAcquire(op, now, liveness.Alive(op.Lease.Owner)) {
 			continue
 		}
 		// Cancellation is REQUESTED first, so a driver that is mid-flight on
@@ -522,6 +539,9 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 			}
 		}
 	}
+	if refused != nil {
+		return Outcome{}, refused
+	}
 	return outcome, nil
 }
 
@@ -537,9 +557,9 @@ func (e *RunTerminalError) Error() string {
 	return fmt.Sprintf("run %q is already %s (%s); stop never rewrites a terminal outcome", e.RunID, e.Disposition, e.Reason)
 }
 
-// isRunTerminal reports a CancelRun refused because the run already finished:
+// IsRunTerminal reports a CancelRun refused because the run already finished:
 // a bulk or plan-driven stop treats that run as settled, not as a failure.
-func isRunTerminal(err error) bool {
+func IsRunTerminal(err error) bool {
 	var terminal *RunTerminalError
 	return errors.As(err, &terminal)
 }

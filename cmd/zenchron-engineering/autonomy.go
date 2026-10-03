@@ -85,8 +85,7 @@ func exitFor(err error, fallback int) int {
 		return runtime.ExitInvalid
 	}
 	var config *runtime.ConfigError
-	var terminal *runtime.RunTerminalError
-	if errors.As(err, &config) || errors.As(err, &terminal) {
+	if errors.As(err, &config) || runtime.IsRunTerminal(err) {
 		return runtime.ExitInvalid
 	}
 	return fallback
@@ -1402,6 +1401,6 @@ func cancelRun(built *composition, runID, reason string) (runtime.Outcome, error
 	if _, err := requireRun(built, runID); err != nil {
 		return runtime.Outcome{}, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	return runtime.CancelRun(built.store, scheduler, time.Now().UTC(), runID, reason)
 }

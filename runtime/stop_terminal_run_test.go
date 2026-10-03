@@ -121,3 +121,57 @@ func TestStopAllSkipsARunThatFinishesAfterTheListing(t *testing.T) {
 	}
 	assertUntouched(t, store, "b", Completed)
 }
+
+// TestARetiredStageRunThatAlreadyFinishedIsSettled: a plan-owned run that has
+// journalled run.completed while its row still reads active is not retired as
+// a failure - stopRetiredRun reports it settled (false, nil) and writes nothing.
+func TestARetiredStageRunThatAlreadyFinishedIsSettled(t *testing.T) {
+	_, store := openJournal(t)
+	run := newJournalRun("stage-run")
+	run.Plan = &RunPlanBinding{PlanID: "plan", Revision: 1, PlanDigest: "digest", StageID: "stage", AssignmentID: "assignment"}
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]string{"reason": "outcome-stage-run"})
+	if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "stage-run-end", RunID: run.ID, Type: EventRunCompleted, OccurredAt: run.CreatedAt, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := PlanReconciler{Store: store, Clock: &fakeClock{now: time.Unix(200, 0)}}
+	stopped, err := reconciler.stopRetiredRun(run.ID, "plan_revision_superseded")
+	if stopped || err != nil {
+		t.Fatalf("stopRetiredRun = (%v, %v), want (false, nil)", stopped, err)
+	}
+	assertUntouched(t, store, run.ID, Completed)
+}
+
+// TestARefusedStopStillReleasesADeadOwnersLease: a failed run left one
+// operation leased by a dead owner and one by a live owner. The stop is
+// refused and the outcome is kept, but the dead owner's lease is given back;
+// the live owner's lease is not the stop's to take.
+func TestARefusedStopStillReleasesADeadOwnersLease(t *testing.T) {
+	_, store := openJournal(t)
+	seedTerminal(t, store, "broken", EventRunFailed, Failed, true)
+	c := &fakeClock{now: time.Unix(200, 0)}
+	for _, owner := range []string{"dead", "live"} {
+		if _, created, err := store.PutOperation(RunOperation{
+			SchemaVersion: SchemaVersion, ID: "op-" + owner, RunID: "broken", Kind: "external.work",
+			IdempotencyKey: owner, State: Leased, Attempt: 1, MaxAttempts: 1, CreatedAt: c.Now(),
+			Lease: &Lease{Owner: owner, HeartbeatAt: c.Now().Add(-2 * time.Minute), ExpiresAt: c.Now().Add(-time.Minute)},
+		}, 0); err != nil || !created {
+			t.Fatalf("seeding op-%s: created=%v err=%v", owner, created, err)
+		}
+	}
+	scheduler := Scheduler{Store: store, Clock: c, Owner: "op", Liveness: deadOwner("dead")}
+	if _, err := CancelRun(store, scheduler, c.Now(), "broken", "operator/stop"); !IsRunTerminal(err) {
+		t.Fatalf("err=%v, want a RunTerminalError", err)
+	}
+	assertUntouched(t, store, "broken", Failed)
+	dead, _, _, _ := store.Operation("op-dead")
+	if dead.State != OperationCancelled || dead.Lease != nil {
+		t.Fatalf("the dead owner's lease was not released: %+v", dead)
+	}
+	live, _, _, _ := store.Operation("op-live")
+	if live.State != Leased || live.Lease == nil {
+		t.Fatalf("a live owner's lease was taken: %+v", live)
+	}
+}

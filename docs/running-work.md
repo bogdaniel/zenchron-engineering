@@ -214,6 +214,10 @@ the successor generation in the same command.
 
 `stop` is the only thing that cancels a run WITHOUT replacing it. It is durable, idempotent, and
 journalled with the reason `operator_stop`; a second stop appends nothing.
+`stop` on a run that already `completed` or `failed` is refused with exit
+status 64 and never rewrites that outcome: nothing is journalled and the run
+keeps its disposition and reason. It only releases a lease whose owner is
+provably dead.
 Killing the process, closing the terminal, or shutting down a supervisor cancels
 nothing.
 

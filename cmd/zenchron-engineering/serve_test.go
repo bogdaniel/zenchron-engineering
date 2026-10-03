@@ -429,6 +429,51 @@ func TestStopNeverRewritesAFinishedRun(t *testing.T) {
 	}
 }
 
+// TestStopOnAFailedRunReleasesItsStaleLease: the refused stop keeps the failed
+// outcome, exits 64, and still gives back a lease whose owner is provably dead
+// (an owner whose instance lock nobody holds).
+func TestStopOnAFailedRunReleasesItsStaleLease(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+	t.Chdir(dir)
+	stateDir := activeRun(t, configPath, dir, "broken")
+	store, err := runtime.OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(runtime.EngineeringEvent{SchemaVersion: runtime.SchemaVersion, ID: "broken-failed", RunID: "broken", Type: runtime.EventRunFailed}); err != nil {
+		t.Fatal(err)
+	}
+	host := strings.SplitN(runtime.NewRuntimeOwner(), "/", 2)[0]
+	dead := host + "/999999999/gone"
+	past := time.Now().UTC().Add(-time.Hour)
+	if _, created, err := store.PutOperation(runtime.RunOperation{
+		SchemaVersion: runtime.SchemaVersion, ID: "op-stale", RunID: "broken", Kind: "external.work",
+		IdempotencyKey: "stale", State: runtime.Leased, Attempt: 1, MaxAttempts: 1, CreatedAt: past,
+		Lease: &runtime.Lease{Owner: dead, HeartbeatAt: past, ExpiresAt: past.Add(time.Minute)},
+	}, 0); err != nil || !created {
+		t.Fatalf("seeding the stale lease: created=%v err=%v", created, err)
+	}
+	store.Close()
+	before := len(journalOf(t, stateDir, "broken"))
+
+	code, err := autonomy([]string{"stop", "broken", "--config", configPath}, offlineOverrides(), &bytes.Buffer{})
+	if !runtime.IsRunTerminal(err) || code != runtime.ExitInvalid {
+		t.Fatalf("stop on a failed run: code=%d err=%v, want a RunTerminalError and %d", code, err, runtime.ExitInvalid)
+	}
+	if after := len(journalOf(t, stateDir, "broken")); after != before {
+		t.Fatalf("a refused stop wrote to the journal: %d -> %d", before, after)
+	}
+	store, err = runtime.OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	op, _, _, err := store.Operation("op-stale")
+	if err != nil || op.State != runtime.OperationCancelled || op.Lease != nil {
+		t.Fatalf("the stale lease was not released: %+v err=%v", op, err)
+	}
+}
+
 // TestAgentSetRefusesAndSaysWhatToDoInstead is the governed transition at the
 // command line.
 func TestAgentSetRefusesAndSaysWhatToDoInstead(t *testing.T) {
