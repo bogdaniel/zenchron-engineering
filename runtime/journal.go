@@ -532,3 +532,14 @@ func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) 
 	}
 	return events, hasMore, nil
 }
+
+// LatestSequence returns the run's highest run-stream sequence, or 0 if it has
+// none yet. It is a single indexed aggregate - the same (stream_kind, run_id,
+// sequence) prefix EventsPage filters by - never a table scan, so a per-run
+// SSE snapshot can bound its live tail to events after this cursor without
+// reading the run's history to find it.
+func (s *SQLiteOperationStore) LatestSequence(runID string) (int64, error) {
+	var sequence int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_kind = ? AND run_id = ?`, streamRun, runID).Scan(&sequence)
+	return sequence, err
+}

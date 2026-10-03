@@ -81,6 +81,17 @@ type API struct {
 	ControllerRoot string
 	Observe        func() (rt.LiveControllerSnapshot, error)
 	Now            func() time.Time
+	// StreamPollInterval and StreamHeartbeatInterval govern the per-run SSE
+	// stream's tail-poll and liveness cadence. Zero means the production
+	// default; tests shorten them so a stream test finishes in milliseconds
+	// rather than real seconds.
+	StreamPollInterval      time.Duration
+	StreamHeartbeatInterval time.Duration
+
+	// afterCursorRead runs once, between the fresh-connect cursor read and the
+	// snapshot reduction, exactly the window a race regression needs to force
+	// an event append into. It is nil in every production path.
+	afterCursorRead func()
 }
 
 func (a *API) Handler() http.Handler {
@@ -89,6 +100,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs", a.runs)
 	mux.HandleFunc("GET /v1/runs/{id}", a.run)
 	mux.HandleFunc("GET /v1/runs/{id}/events", a.events)
+	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -168,19 +180,30 @@ func (a *API) exists(w http.ResponseWriter, id string) bool {
 	}
 	return ok
 }
+
+// runDetail is the one canonical run projection, shared by the point-in-time
+// GET and the SSE stream's initial snapshot: a reader resuming from either
+// must land on the identical reduced state.
+func (a *API) runDetail(id string) (RunDetail, error) {
+	s, err := a.Store.Status(id, a.now())
+	if err != nil {
+		return RunDetail{}, err
+	}
+	out := RunDetail{ID: s.RunID, Phase: s.Phase, Disposition: s.Disposition, Elapsed: s.Elapsed, ActiveElapsed: s.ActiveElapsed, ExternalWaitElapsed: s.ExternalWaitElapsed}
+	if p := s.Operation; p != nil {
+		out.Operation = &Operation{p.State, p.Attempt, p.ProgressSource, p.HeartbeatAt, p.LastProgressAt, p.SilentFor, p.InactivityLimit, p.InactivityLimitUnknown, p.InactivitySuspension}
+	}
+	return out, nil
+}
 func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !a.exists(w, id) {
 		return
 	}
-	s, err := a.Store.Status(id, a.now())
+	out, err := a.runDetail(id)
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
-	}
-	out := RunDetail{ID: s.RunID, Phase: s.Phase, Disposition: s.Disposition, Elapsed: s.Elapsed, ActiveElapsed: s.ActiveElapsed, ExternalWaitElapsed: s.ExternalWaitElapsed}
-	if p := s.Operation; p != nil {
-		out.Operation = &Operation{p.State, p.Attempt, p.ProgressSource, p.HeartbeatAt, p.LastProgressAt, p.SilentFor, p.InactivityLimit, p.InactivityLimitUnknown, p.InactivitySuspension}
 	}
 	send(w, 200, out)
 }
