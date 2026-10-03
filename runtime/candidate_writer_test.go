@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -221,6 +222,43 @@ func TestASecondExecutionOnOneCandidateIsNotRefused(t *testing.T) {
 		if _, err := provider.Execute(context.Background(), request); err != nil {
 			t.Fatalf("execution %d: %v", i+1, err)
 		}
+	}
+}
+
+// retryingProvider fails its first attempt with a retry-routed class and then
+// succeeds, so the same run invokes execution twice.
+type retryingProvider struct{ countingProvider }
+
+func (p *retryingProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	p.calls++
+	if p.calls == 1 {
+		return ExecutionResult{ProviderID: "counting", Outcome: OperationFailed,
+			Failure: &ProviderFailure{Classification: FailureProviderNoProgress}}, nil
+	}
+	return ExecutionResult{ProviderID: "counting", Outcome: Succeeded}, nil
+}
+
+// M2 through the runtime: a retry of execution on the same run is not refused
+// by the previous attempt's own claim.
+func TestARetriedExecutionIsNotRefusedByItsOwnRunsClaim(t *testing.T) {
+	// An unclosed *os.File is closed by its finalizer at the next garbage
+	// collection, which would hide a leaked claim between attempts. Collection
+	// is held off so the runtime's own Close is what this observes.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	shortWriterSettle(t)
+	fixture := newPhase8Fixture(t)
+	provider := &retryingProvider{}
+	fixture.deps.Provider = provider
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+	for pass := 0; pass < 20 && provider.calls < 2; pass++ {
+		fixture.reconcile(runID)
+		if class, found := executionFailureClass(t, fixture.state(runID)); found && class == FailureCandidateWriterAlive {
+			t.Fatal("the run's own earlier attempt refused its retry")
+		}
+	}
+	if provider.calls < 2 {
+		t.Fatalf("execution was invoked %d time(s); the retry never ran", provider.calls)
 	}
 }
 
