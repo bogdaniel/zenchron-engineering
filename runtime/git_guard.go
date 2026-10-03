@@ -347,5 +347,14 @@ func candidateGuardFailureClass(err error) (FailureClass, bool) {
 	if errors.As(err, &guard) {
 		return FailureCandidateGuardUnavailable, true
 	}
+	// A writer lock that could not be checked is the controller unable to
+	// install its own boundary, not evidence of a live writer.
+	var writer *CandidateWriterAliveError
+	if errors.As(err, &writer) {
+		if writer.Cause != nil {
+			return FailureCandidateGuardUnavailable, true
+		}
+		return FailureCandidateWriterAlive, true
+	}
 	return "", false
 }

@@ -154,7 +154,12 @@ func planningWorkspaceDir(stateDir, planID string) string {
 // Remove deletes the workspace. It is called after the invocation because the
 // workspace is derived state: the exact snapshot it held is recorded in plan
 // provenance, so it can be materialized again from the same two identities.
-func (w *PlanningWorkspace) Remove() error { return os.RemoveAll(w.Dir) }
+func (w *PlanningWorkspace) Remove() error {
+	if err := os.RemoveAll(w.Dir); err != nil {
+		return err
+	}
+	return removeCandidateWriterLock(w.Dir)
+}
 
 // Digest is the runtime's OWN measurement of the workspace contents.
 //
@@ -402,6 +407,11 @@ func InvokePlanner(ctx context.Context, input PlannerInput) (PlannerOutput, erro
 		}
 	}
 	if execErr != nil {
+		// The runtime's own pre-dispatch refusals (a candidate Git guard it
+		// could not install, a writer lock still held) are refusals, typed.
+		if class, ok := candidateGuardFailureClass(execErr); ok {
+			execErr = &PlannerRefusedError{AgentID: input.Agent.ID, Detail: string(class) + ": " + execErr.Error()}
+		}
 		return PlannerOutput{Reasoning: provenance, Artifacts: result.Artifacts}, execErr
 	}
 	if result.Failure != nil {
