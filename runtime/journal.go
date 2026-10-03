@@ -195,8 +195,25 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 		return EngineeringEvent{}, fmt.Errorf("event type %q belongs to the plan stream and cannot be appended to a run", e.Type)
 	}
 	var run EngineeringRun
+	var allocate func([]EngineeringEvent, EngineeringEvent) (EngineeringEvent, error)
+	if e.Type == EventRunCancelled {
+		// A stop never rewrites a completed or failed run's outcome (#439).
+		// Decided HERE, against the events this append is ordered after and
+		// under the transaction's write lock, so a run.completed or run.failed
+		// that commits concurrently with a stop is seen rather than overwritten.
+		allocate = func(existing []EngineeringEvent, ev EngineeringEvent) (EngineeringEvent, error) {
+			snapshot, err := Reduce(run, existing)
+			if err != nil {
+				return ev, err
+			}
+			if snapshot.Disposition == Completed || snapshot.Disposition == Failed {
+				return ev, &RunTerminalError{RunID: run.ID, Disposition: snapshot.Disposition, Reason: snapshot.Reason}
+			}
+			return ev, nil
+		}
+	}
 	return s.appendToStream(e, journalStream{
-		kind: streamRun, id: e.RunID,
+		kind: streamRun, id: e.RunID, allocate: allocate,
 		// The run row is read INSIDE the transaction. That read is what the
 		// dropped foreign key used to guarantee: an event may not be journalled
 		// against a run that does not exist.
