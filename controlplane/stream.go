@@ -42,10 +42,10 @@ func (a *API) heartbeatInterval() time.Duration {
 	return defaultStreamHeartbeat
 }
 
-// streamCursor reads the resume position a client offers. Last-Event-ID is
-// the native browser EventSource reconnect header and takes precedence; an
-// explicit ?after= serves a non-browser client making the same choice by
-// hand. Either one present means this is a resume, not a fresh connect, so
+// streamCursor reads the resume position a client offers. Last-Event-ID (the
+// SSE reconnect header) takes precedence over an explicit ?after=. /v1 is
+// Bearer-only, which a browser EventSource cannot send, so the client here is
+// a Bearer-capable reader that tracks the last id itself. Either one present means this is a resume, not a fresh connect, so
 // the handler skips the canonical snapshot and goes straight to replaying
 // backlog after that exact position - never a second, different reduction of
 // the same run.
@@ -123,6 +123,45 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every read the first frame depends on happens BEFORE the SSE headers, so
+	// a failure there is an ordinary JSON error, never a pre-snapshot stale
+	// frame whose id a client would resume from without ever seeing a
+	// snapshot.
+	//
+	// The durable cursor is read BEFORE the point-in-time snapshot is built,
+	// never after: if an event committed between the two reads, a cursor taken
+	// afterward would advance past state the snapshot never observed, and a
+	// client resuming from it would silently skip that event. Reading the
+	// cursor first means the worst case is the conservative direction - the
+	// snapshot may already reflect the event and drain() replays it anyway, a
+	// harmless duplicate the client dedupes by sequence.
+	seq, err := a.Store.LatestSequence(id)
+	if err != nil {
+		fail(w, 500, "read_failed")
+		return
+	}
+	// A resume position beyond anything this run has committed names no
+	// durable event; it is refused rather than tailed forever.
+	if resuming && cursor > seq {
+		fail(w, 400, "invalid_page")
+		return
+	}
+	var detail RunDetail
+	if !resuming {
+		if a.afterCursorRead != nil {
+			a.afterCursorRead()
+		}
+		s, err := a.Store.Status(id, a.now())
+		if err != nil {
+			fail(w, 500, "read_failed")
+			return
+		}
+		if a.afterSnapshotRead != nil {
+			a.afterSnapshotRead()
+		}
+		detail = runDetailProjection(s)
+	}
+
 	// The server's WriteTimeout bounds one request's write; an SSE stream is
 	// deliberately long-lived, so this connection's deadline is cleared here
 	// rather than widening the timeout for every other, ordinary response.
@@ -133,29 +172,6 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	if !resuming {
-		// The durable cursor must be read BEFORE the point-in-time snapshot is
-		// built, never after: if an event committed between the two reads, a
-		// cursor taken afterward would advance past state the snapshot never
-		// observed, and a client resuming from that cursor would silently skip
-		// it. Reading the cursor first means the worst case is the opposite,
-		// conservative direction - the snapshot may or may not reflect that
-		// event, but drain() below replays anything after the cursor regardless,
-		// so the event is delivered either way, at most once as a harmless
-		// duplicate inside the snapshot's reduced state.
-		seq, err := a.Store.LatestSequence(id)
-		if err != nil {
-			_ = writeSSE(w, flusher, cursor, StreamMessage{Type: "stale", Reason: "read_failed"})
-			return
-		}
-		if a.afterCursorRead != nil {
-			a.afterCursorRead()
-		}
-		s, err := a.Store.Status(id, a.now())
-		if err != nil {
-			_ = writeSSE(w, flusher, cursor, StreamMessage{Type: "stale", Reason: "read_failed"})
-			return
-		}
-		detail := runDetailProjection(s)
 		if err := writeSSE(w, flusher, seq, StreamMessage{Type: "snapshot", Run: &detail}); err != nil {
 			return
 		}

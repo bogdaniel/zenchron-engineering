@@ -180,32 +180,60 @@ func TestStreamSnapshotThenLiveTail(t *testing.T) {
 	}
 }
 
-// TestStreamFreshConnectCursorIsReadBeforeSnapshotSoARaceEventIsNeverSkipped
-// forces an event to commit in the exact window between the fresh-connect
-// cursor read and the point-in-time snapshot reduction, via the
-// afterCursorRead test seam. If the cursor were taken after the snapshot
-// (the bug this guards against), the emitted id would advance past the race
-// event and a reconnect from that id would never see it. Reading the cursor
-// first means the race event must still arrive, replayed as an incremental
-// frame right after the snapshot.
-func TestStreamFreshConnectCursorIsReadBeforeSnapshotSoARaceEventIsNeverSkipped(t *testing.T) {
-	write, srv, api := streamFixture(t)
-	api.afterCursorRead = func() {
+func appendRaceEvent(t *testing.T, write *rt.SQLiteOperationStore) func() {
+	return func() {
 		e := rt.EngineeringEvent{ID: "race", Type: rt.EventRunWaiting, Payload: json.RawMessage(`{"reason":"race"}`), SchemaVersion: rt.SchemaVersion, RunID: "r", OccurredAt: time.Unix(150, 0).UTC()}
 		if _, err := write.AppendEvent(e); err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
 	}
+}
+
+// TestStreamFreshConnectEventAfterSnapshotReadIsNeverSkipped commits event 4
+// right after the snapshot's Status read, so it is in neither the snapshot
+// nor (with the cursor read first) the cursor. It must be the next frame. If
+// the cursor were read after the snapshot - the original bug - the snapshot
+// id would already be 4, drain would start after it, and event 4 would never
+// arrive: the next frame would be the 2s heartbeat instead.
+func TestStreamFreshConnectEventAfterSnapshotReadIsNeverSkipped(t *testing.T) {
+	write, srv, api := streamFixture(t)
+	api.StreamHeartbeatInterval = 2 * time.Second
+	api.afterSnapshotRead = appendRaceEvent(t, write)
 	conn := dialStream(t, srv, api.Token, "/v1/runs/r/stream", "")
 
-	id, msg := conn.next()
-	if id != "3" || msg.Type != "snapshot" {
-		t.Fatalf("expected baseline snapshot at id 3 (unchanged by the race event), got id=%s msg=%+v", id, msg)
+	if _, msg := conn.next(); msg.Type != "snapshot" {
+		t.Fatalf("expected snapshot first, got %+v", msg)
 	}
+	id, msg := conn.next()
+	if msg.Type != "event" || msg.Event == nil || msg.Event.Sequence != 4 {
+		t.Fatalf("event 4 committed after the snapshot read was never delivered; next frame id=%s msg=%+v", id, msg)
+	}
+}
 
-	id, msg = conn.next()
+// TestStreamFreshConnectEventBeforeSnapshotReadMayDuplicate commits event 4
+// between the cursor read and the snapshot's Status read. The snapshot may
+// already reflect it; it is still replayed as an incremental frame - the
+// conservative duplicate the S2 contract permits.
+func TestStreamFreshConnectEventBeforeSnapshotReadMayDuplicate(t *testing.T) {
+	write, srv, api := streamFixture(t)
+	api.afterCursorRead = appendRaceEvent(t, write)
+	conn := dialStream(t, srv, api.Token, "/v1/runs/r/stream", "")
+
+	if _, msg := conn.next(); msg.Type != "snapshot" {
+		t.Fatalf("expected snapshot first, got %+v", msg)
+	}
+	id, msg := conn.next()
 	if id != "4" || msg.Type != "event" || msg.Event == nil || msg.Event.Sequence != 4 {
-		t.Fatalf("race event committed between cursor read and snapshot must still be delivered, got id=%s msg=%+v", id, msg)
+		t.Fatalf("event committed between cursor read and snapshot must still be delivered, got id=%s msg=%+v", id, msg)
+	}
+}
+
+func TestStreamHeartbeatFrame(t *testing.T) {
+	_, srv, api := streamFixture(t)
+	api.StreamHeartbeatInterval = 10 * time.Millisecond
+	conn := dialStream(t, srv, api.Token, "/v1/runs/r/stream", "3")
+	if id, msg := conn.next(); id != "3" || msg.Type != "heartbeat" {
+		t.Fatalf("expected heartbeat at the resume cursor, got id=%s msg=%+v", id, msg)
 	}
 }
 
@@ -251,6 +279,9 @@ func TestStreamRejectsInvalidPageParameters(t *testing.T) {
 		{"/v1/runs/r/stream?limit=0", ""},
 		{"/v1/runs/r/stream?limit=501", ""},
 		{"/v1/runs/r/stream", "not-a-number"},
+		// Resume positions beyond the run's latest sequence (3).
+		{"/v1/runs/r/stream?after=4", ""},
+		{"/v1/runs/r/stream", "99"},
 	} {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+tc.path, nil)
 		req.Header.Set("Authorization", "Bearer "+api.Token)
@@ -261,9 +292,14 @@ func TestStreamRejectsInvalidPageParameters(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		var body any
+		err = json.NewDecoder(resp.Body).Decode(&body)
 		resp.Body.Close()
-		if resp.StatusCode != 400 {
-			t.Fatalf("%+v: status %d", tc, resp.StatusCode)
+		if resp.StatusCode != 400 || err != nil {
+			t.Fatalf("%+v: status %d: %v", tc, resp.StatusCode, err)
+		}
+		if err := schemas.Validate("control-plane-error", body); err != nil || body.(map[string]any)["error"] != "invalid_page" {
+			t.Fatalf("%+v: body %v: %v", tc, body, err)
 		}
 	}
 }
@@ -312,6 +348,13 @@ func TestStreamRequiresAResponseFlusher(t *testing.T) {
 	var out Error
 	if err := json.Unmarshal(rec.rec.Body.Bytes(), &out); err != nil || out.Code != "stream_unsupported" {
 		t.Fatalf("body: %s", rec.rec.Body.String())
+	}
+	var raw any
+	if err := json.Unmarshal(rec.rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := schemas.Validate("control-plane-error", raw); err != nil {
+		t.Fatalf("schema: %v", err)
 	}
 }
 

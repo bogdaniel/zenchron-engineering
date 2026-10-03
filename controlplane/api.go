@@ -255,6 +255,10 @@ type API struct {
 	// snapshot reduction, exactly the window a race regression needs to force
 	// an event append into. It is nil in every production path.
 	afterCursorRead func()
+	// afterSnapshotRead runs once, right after the fresh-connect snapshot's
+	// Status read: an event appended there is in neither the snapshot nor the
+	// cursor, so it must arrive as the next incremental frame.
+	afterSnapshotRead func()
 }
 
 func (a *API) Handler() http.Handler {
