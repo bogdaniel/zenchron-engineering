@@ -113,6 +113,9 @@ table.runs th, table.runs td { text-align: left; vertical-align: top; padding: 0
 table.runs thead th { color: var(--muted); font-weight: 400; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
 table.runs td.empty { text-align: center; color: var(--muted); padding: 1.5rem; }
 
+.stage { border-top: 1px solid var(--line); padding-top: 0.5rem; margin-top: 0.75rem; }
+.stage h3 { margin: 0; font-size: 0.9rem; }
+
 .findings { margin: 0.5rem 0 0; padding-left: 1.2rem; color: var(--warn); }
 
 .filters { display: flex; gap: 0.75rem; margin: 0.5rem 0; flex-wrap: wrap; }

@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 
@@ -40,12 +41,14 @@ type PlanStageDetail struct {
 	ID        string   `json:"stage_id"`
 	Kind      string   `json:"kind"`
 	DependsOn []string `json:"depends_on"`
-	// Role, Profile and ContextPolicy are what the plan REQUIRES; Agent,
-	// ProviderKind and TrustMode are what a started stage was BOUND to. They
-	// are separate facts and stay separate fields.
+	// Role, Profile and ContextPolicy are what the plan REQUIRES;
+	// BoundProfile, Agent, ProviderKind and TrustMode are what a started stage
+	// was BOUND to. EngineeringRole, AgentProfile and ExecutionAgent are three
+	// different facts and stay three different fields.
 	Role          string `json:"role,omitempty"`
 	Profile       string `json:"profile,omitempty"`
 	ContextPolicy string `json:"context_policy,omitempty"`
+	BoundProfile  string `json:"bound_profile,omitempty"`
 	// State is empty when the replayed plan has no record of the stage:
 	// unknown, not "pending".
 	State        string `json:"state,omitempty"`
@@ -55,6 +58,31 @@ type PlanStageDetail struct {
 	TrustMode    string `json:"trust_mode,omitempty"`
 	// RunID is set only for agent stages: a gate never creates a run.
 	RunID string `json:"run_id,omitempty"`
+	// Gate is what durably satisfied a gate stage: the existing evidence
+	// bundle or authority decision and human evidence it references, never a
+	// run of its own.
+	Gate *PlanGateRefs `json:"gate,omitempty"`
+}
+
+type PlanGateRefs struct {
+	Claims          []string `json:"claims,omitempty"`
+	Evidence        *RefDTO  `json:"evidence,omitempty"`
+	Decision        *RefDTO  `json:"decision,omitempty"`
+	HumanEvidenceID string   `json:"human_evidence_id,omitempty"`
+	// ProvenHeads is each proving run at the head it carried, "run@commit".
+	ProvenHeads []string `json:"proven_heads,omitempty"`
+}
+
+type RefDTO struct {
+	ID       string `json:"id"`
+	Revision string `json:"revision"`
+}
+
+func refDTO(r rt.Ref) *RefDTO {
+	if r.ID == "" {
+		return nil
+	}
+	return &RefDTO{ID: r.ID, Revision: r.Revision}
 }
 
 type PlanBudget struct {
@@ -119,8 +147,16 @@ func planDetailProjection(v rt.PlanView) PlanDetail {
 		if p, ok := snapshot.Stages[stage.ID]; ok {
 			s.State, s.AssignmentID = string(p.State), p.AssignmentID
 			s.Agent, s.ProviderKind, s.TrustMode = p.AgentID, p.ProviderKind, p.TrustMode
+			if p.ProfileID != "" {
+				s.BoundProfile = fmt.Sprintf("%s@%d", p.ProfileID, p.ProfileVersion)
+			}
 			if stage.Kind == domain.StageAgent {
 				s.RunID = p.RunID
+			} else if g := p.Gate; g != nil {
+				s.Gate = &PlanGateRefs{
+					Claims: slices.Clone(g.Claims), Evidence: refDTO(g.Evidence), Decision: refDTO(g.Decision),
+					HumanEvidenceID: g.HumanEvidenceID, ProvenHeads: slices.Clone(g.ProvenHeads),
+				}
 			}
 		}
 		out.Stages = append(out.Stages, s)

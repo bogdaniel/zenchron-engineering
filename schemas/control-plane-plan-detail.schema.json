@@ -99,6 +99,62 @@
           },
           "run_id": {
             "type": "string"
+          },
+          "bound_profile": {
+            "type": "string"
+          },
+          "gate": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "claims": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "revision"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string"
+                  }
+                }
+              },
+              "decision": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "revision"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string"
+                  }
+                }
+              },
+              "human_evidence_id": {
+                "type": "string"
+              },
+              "proven_heads": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
