@@ -1,12 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
@@ -357,23 +359,13 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
 		return CommitResult{}, fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded))
 	}
-	// THE COMMIT GATES COVER WHAT THE COMMIT WILL HOLD, and nothing else. A
-	// sensitive-looking basename and the size ceiling are both statements about
-	// the object being published, so a path already excluded from it cannot
-	// veto it.
-	if err := GuardCandidateCommitContent(w.Dir, eligible, maxBytes); err != nil {
-		return CommitResult{}, err
-	}
-	// The OUTPUT half of the credential boundary. Admission proved the
-	// workspace was clean before the producer was shown it; this proves the
-	// producer did not introduce a credential value into what is about to
-	// become a runtime-owned commit. A value found here is REFUSED, not
-	// redacted and not ignored: redacting it would commit a rewritten version
-	// of the producer's work, and ignoring it would publish the secret. It asks
-	// about the eligible paths for the same reason the gates above do - the
-	// bytes of an excluded path are not bytes this commit publishes - and
-	// nothing about the check on candidate work is weakened.
-	if err := scanPathsForCredentialValues(w.Dir, eligible); err != nil {
+	// AN INDEX FLAG HIDES CONTENT FROM THE GATES BELOW (#435). The gates read
+	// worktree files; the commit carries index blobs. skip-worktree and
+	// assume-unchanged both make `add -A` leave an index entry alone, so its
+	// blob can differ from - or exist without - the file the gates inspect.
+	// The runtime does not unset them: it refuses, because a flag it did not
+	// set is a claim about the commit it has not checked.
+	if err := refuseIndexFlags(w.Dir); err != nil {
 		return CommitResult{}, err
 	}
 	// THE EXCLUSION IS AN INDEX WRITE, NEVER A WORKTREE WRITE.
@@ -413,6 +405,28 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		if _, err := runGit(w.Dir, "rm", "--cached", "-q", "-f", "--ignore-unmatch", "--", p); err != nil {
 			return CommitResult{}, err
 		}
+	}
+	// THE COMMIT GATES JUDGE THE BYTES THE COMMIT WILL HOLD, and nothing else
+	// (#435). They run AFTER staging, over the staged blobs, because the index
+	// - not the status list and not the worktree - decides what is committed:
+	// a staged gitlink turned directory carries files status never named, an
+	// attribute conversion makes the blob differ from the worktree file, and a
+	// worktree file can change after it was hashed. An excluded path is not
+	// staged, so it cannot veto the commit. A refusal here commits nothing;
+	// the staged entries are the same leftover an interrupted attempt leaves,
+	// which the `rm --cached -f` above expects.
+	staged, blobs, err := stagedCommitPaths(w.Dir)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if err := guardStagedContent(w.Dir, staged, blobs, maxBytes); err != nil {
+		return CommitResult{}, err
+	}
+	// The fail-closed backstop: everything after the commit (observation,
+	// assurance) reads the worktree, so the worktree must hold the committed
+	// bytes exactly.
+	if err := refuseWorktreeDivergence(w.Dir, blobs); err != nil {
+		return CommitResult{}, err
 	}
 	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", message); err != nil {
 		return CommitResult{}, err
@@ -671,6 +685,195 @@ func quotedPaths(paths []string) string {
 	return strings.Join(named, ", ")
 }
 
+// refuseIndexFlags refuses any index entry marked skip-worktree (tag S, or s
+// when also assume-unchanged) or assume-unchanged (any lowercase tag) in
+// `git ls-files -v`.
+func refuseIndexFlags(dir string) error {
+	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	if err != nil {
+		return err
+	}
+	for _, rec := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
+		if len(rec) < 3 {
+			continue
+		}
+		if tag := rec[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", rec[2:])
+		}
+	}
+	return nil
+}
+
+// stagedBlob is one staged addition or modification: the blob the commit
+// would carry for path, and its size as the object store reports it.
+type stagedBlob struct {
+	path, id string
+	size     int64
+}
+
+// stagedCommitPaths lists every path the commit would change (deletions too,
+// so the name gate still sees them) and the blob each addition or
+// modification would carry. Only regular-file blobs are carried: a symlink or
+// gitlink entry is refused, because the gates judge bytes, not links.
+func stagedCommitPaths(dir string) ([]string, []stagedBlob, error) {
+	out, err := gitOutput(dir, "diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "HEAD")
+	if err != nil {
+		return nil, nil, err
+	}
+	// -z raw records are ":srcmode dstmode srcsha dstsha status\0path\0".
+	records := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
+	var paths []string
+	var blobs []stagedBlob
+	for i := 0; i+1 < len(records); i += 2 {
+		fields, p := strings.Fields(records[i]), records[i+1]
+		if len(fields) != 5 {
+			return nil, nil, fmt.Errorf("unreadable staged candidate path %q", p)
+		}
+		paths = append(paths, p)
+		if fields[4] == "D" {
+			continue
+		}
+		if !strings.HasPrefix(fields[1], "100") {
+			return nil, nil, fmt.Errorf("staged candidate path %q is not a regular file the commit gates can read", p)
+		}
+		blobs = append(blobs, stagedBlob{path: p, id: fields[3]})
+	}
+	return paths, blobs, nil
+}
+
+// guardStagedContent runs the commit gates over the staged blobs: names from
+// the staged paths, sizes from the object store, credential values from the
+// blob bytes. Each rule is the shared one; only the byte source is the index.
+//
+// This is the OUTPUT half of the credential boundary. Admission proved the
+// workspace was clean before the producer was shown it; this proves the
+// producer did not introduce a credential value into what is about to become a
+// runtime-owned commit. A value found here is REFUSED, not redacted and not
+// ignored: redacting it would commit a rewritten version of the producer's
+// work, and ignoring it would publish the secret.
+func guardStagedContent(dir string, paths []string, blobs []stagedBlob, maxBytes int64) error {
+	sizes := make(map[string]int64, len(blobs))
+	if len(blobs) > 0 {
+		out, err := runGitInput(dir, blobIDs(blobs), "cat-file", "--batch-check")
+		if err != nil {
+			return err
+		}
+		lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+		if len(lines) != len(blobs) {
+			return fmt.Errorf("staged candidate blobs are unreadable")
+		}
+		for i, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) != 3 || fields[0] != blobs[i].id || fields[1] != "blob" {
+				return fmt.Errorf("staged candidate path %q has no readable blob", blobs[i].path)
+			}
+			if blobs[i].size, err = strconv.ParseInt(fields[2], 10, 64); err != nil {
+				return fmt.Errorf("staged candidate path %q has no readable blob", blobs[i].path)
+			}
+			if normalized, err := normalizedCandidatePath(blobs[i].path); err == nil {
+				sizes[normalized] = blobs[i].size
+			}
+		}
+	}
+	if err := guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		size, ok := sizes[normalized]
+		return size, ok
+	}); err != nil {
+		return err
+	}
+	// One --batch process reads every blob the scan will judge; a blob above the
+	// scan ceiling is not read, because the shared rule refuses it unread.
+	var scanned []stagedBlob
+	for _, b := range blobs {
+		if b.size <= credentialScanFileLimit {
+			scanned = append(scanned, b)
+		}
+	}
+	contents, err := readBlobs(dir, scanned)
+	if err != nil {
+		return err
+	}
+	for _, b := range blobs {
+		read := func() ([]byte, error) {
+			data, ok := contents[b.id]
+			if !ok {
+				return nil, fmt.Errorf("blob not read")
+			}
+			return data, nil
+		}
+		if err := credentialContentVerdict(b.path, b.size, read, "staged blob is unreadable"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func blobIDs(blobs []stagedBlob) []byte {
+	var in strings.Builder
+	for _, b := range blobs {
+		in.WriteString(b.id + "\n")
+	}
+	return []byte(in.String())
+}
+
+// readBlobs reads blobs through one `git cat-file --batch`, whose output is
+// "<id> blob <size>\n<bytes>\n" per requested object, in request order.
+func readBlobs(dir string, blobs []stagedBlob) (map[string][]byte, error) {
+	contents := make(map[string][]byte, len(blobs))
+	if len(blobs) == 0 {
+		return contents, nil
+	}
+	out, err := runGitInput(dir, blobIDs(blobs), "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range blobs {
+		header, rest, ok := bytes.Cut(out, []byte("\n"))
+		fields := strings.Fields(string(header))
+		if !ok || len(fields) != 3 || fields[0] != b.id || fields[1] != "blob" || fields[2] != strconv.FormatInt(b.size, 10) || int64(len(rest)) < b.size+1 {
+			return nil, fmt.Errorf("staged candidate path %q could not be read from the object store", b.path)
+		}
+		contents[b.id] = rest[:b.size]
+		out = rest[b.size+1:]
+	}
+	return contents, nil
+}
+
+// refuseWorktreeDivergence is the fail-closed backstop: each staged blob must
+// equal its worktree file byte for byte. --no-filters hashes the raw file, so a
+// conversion attribute (working-tree-encoding, eol/CRLF) does not let converted
+// bytes stand in for raw ones - such a repository is refused, not trusted.
+func refuseWorktreeDivergence(dir string, blobs []stagedBlob) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+	var in strings.Builder
+	for _, b := range blobs {
+		// --stdin-paths is line-delimited, so a newline in a path cannot be
+		// named to it. Refused, not worked around.
+		if strings.ContainsAny(b.path, "\n\r") {
+			return fmt.Errorf("staged candidate path %q cannot be compared with its worktree file", b.path)
+		}
+		in.WriteString(b.path + "\n")
+	}
+	out, err := runGitInput(dir, []byte(in.String()), "hash-object", "--no-filters", "--stdin-paths")
+	if err != nil {
+		// A missing or unreadable worktree file. git's stderr is not echoed:
+		// it can carry candidate-controlled text of any length.
+		return fmt.Errorf("staged candidate paths differ from the worktree: a staged path has no readable worktree file")
+	}
+	hashes := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(hashes) != len(blobs) {
+		return fmt.Errorf("staged candidate paths differ from the worktree")
+	}
+	for i, b := range blobs {
+		if hashes[i] != b.id {
+			return fmt.Errorf("staged candidate path %q differs from its worktree file", b.path)
+		}
+	}
+	return nil
+}
+
 func changedPaths(dir string) ([]string, error) { return statusPaths(dir, true) }
 
 // candidateChangedPaths answers "what did the producer change" under the SAME
@@ -824,5 +1027,8 @@ func remoteGit(dir string, identity RemoteIdentity, credentials CredentialProvid
 		Local:  controlPolicy(),
 		Remote: &RemotePolicy{Identity: identity, Credentials: credentials},
 	}
+}
+func runGitInput(dir string, input []byte, args ...string) ([]byte, error) {
+	return RepositoryGitRunner{Dir: dir, Local: controlPolicy(), Input: input}.run(args...)
 }
 func runGitIgnore(dir string, args ...string) error { _, err := runGit(dir, args...); return err }

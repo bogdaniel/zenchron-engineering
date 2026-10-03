@@ -599,6 +599,21 @@ func GuardCandidatePathShape(root string, paths []string) error {
 // candidate, and its bytes are not candidate bytes, because neither reaches the
 // tree. The gates are unchanged for everything that does reach it.
 func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
+	return guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
+	})
+}
+
+// guardCommitNamesAndSizes is the one implementation of the sensitive-name and
+// size-ceiling rules. sizeOf answers for a normalized path, and false means the
+// path carries no bytes (a deletion), so it adds nothing to the total. The
+// worktree form above and the staged-blob form in CandidateWorkspace.Commit
+// differ only in where the size comes from.
+func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normalized string) (int64, bool)) error {
 	var total int64
 	for _, p := range paths {
 		normalized, err := normalizedCandidatePath(p)
@@ -613,11 +628,11 @@ func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) er
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
 			return fmt.Errorf("sensitive candidate path %q", normalized)
 		}
-		info, err := os.Lstat(filepath.Join(root, normalized))
-		if err != nil {
+		size, ok := sizeOf(normalized)
+		if !ok {
 			continue
 		}
-		total += info.Size()
+		total += size
 		if maxBytes > 0 && total > maxBytes {
 			return fmt.Errorf("candidate exceeds size ceiling")
 		}
