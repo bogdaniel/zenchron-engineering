@@ -52,10 +52,11 @@ type effect struct {
 	// stop ended the attempt: no provider was started, or the provider's
 	// executor committed the stop as the owner of its termination (#213).
 	interrupted bool
+	transient   bool
 }
 
 func failed(err error) effect {
-	return effect{state: OperationFailed, result: struct {
+	return effect{state: OperationFailed, transient: transientConnectivity(err), result: struct {
 		Error string `json:"error"`
 	}{boundedDetail(err.Error())}}
 }
