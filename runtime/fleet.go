@@ -114,10 +114,22 @@ type Fleet struct {
 	// produced "Workers: 3 / 2 active" on a fleet with one run parked for
 	// review - true of neither quantity, and reading as though the ceiling had
 	// been breached when it had been enforced exactly.
-	Capacity  int          `json:"capacity"`
-	Executing int          `json:"executing"`
-	Active    int          `json:"active"`
-	Runs      []RunSummary `json:"runs"`
+	Capacity  int `json:"capacity"`
+	Executing int `json:"executing"`
+	Active    int `json:"active"`
+	// The capacity-class view (#85). ObservationCapacity is the observation
+	// ceiling, as Capacity is the work ceiling; zero means a reader that does
+	// not know the configuration (the control plane), and is omitted. The five counts partition the
+	// nonterminal runs exactly: Working + Observing + Runnable + Waiting +
+	// Unavailable == Active. They are read from durable operation rows, never
+	// from a supervisor's memory; see capacityState.
+	ObservationCapacity int          `json:"observation_capacity,omitempty"`
+	Working             int          `json:"working"`
+	Observing           int          `json:"observing"`
+	Runnable            int          `json:"runnable"`
+	Waiting             int          `json:"waiting"`
+	Unavailable         int          `json:"unavailable"`
+	Runs                []RunSummary `json:"runs"`
 	// Plans is the plan-level view beside the runs. An operator with a plan
 	// awaiting their approval is being waited ON, and that has to be visible in
 	// the same place they look to see whether anything is happening.
@@ -287,8 +299,10 @@ func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 // is unreadable: that run reports its own error and the rest are still
 // answered, because a fleet view whose whole value is "show me everything" must
 // not be lost to one bad row.
-func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time) (Fleet, error) {
-	return fleetStatus(store, stateDir, capacity, now, nil)
+func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity, observationCapacity int, now time.Time) (Fleet, error) {
+	fleet, err := fleetStatus(store, stateDir, capacity, now, nil)
+	fleet.ObservationCapacity = observationCapacity
+	return fleet, err
 }
 
 // fleetStatus is FleetStatus with an optional summary cache, which a
@@ -308,10 +322,29 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
 	fleet.Plans = summarizePlans(store)
+	byRun, err := capacityOperations(store)
+	if err != nil {
+		return Fleet{}, err
+	}
 	for _, run := range runs {
 		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
+			switch {
+			case summary.Error != "":
+				fleet.Unavailable++
+			default:
+				switch capacityState(byRun[run.ID], now) {
+				case CapacityWork:
+					fleet.Working++
+				case CapacityObservation:
+					fleet.Observing++
+				case capacityRunnable:
+					fleet.Runnable++
+				default:
+					fleet.Waiting++
+				}
+			}
 		}
 		if summary.Executing {
 			fleet.Executing++
@@ -330,6 +363,88 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		return left.Elapsed < right.Elapsed
 	})
 	return fleet, nil
+}
+
+// capacityOperations reads, per nonterminal run, only the operations that can
+// still decide its count: those not succeeded or cancelled. Decoding every
+// operation of every run on each control-plane read would undo #428. A
+// dependency outside that set (succeeded, in practice) is read by id, so
+// leasable sees exactly what Next sees.
+func capacityOperations(store *SQLiteOperationStore) (map[string]map[string]RunOperation, error) {
+	args := []any{}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
+	}
+	rows, err := store.db.Query(`SELECT document FROM run_operations
+		WHERE json_extract(document, '$.state') NOT IN ('succeeded', 'cancelled')
+		  AND run_id IN (SELECT id FROM runs WHERE json_extract(document, '$.disposition') NOT IN (`+
+		strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`))`, args...)
+	if err != nil {
+		return nil, err
+	}
+	operations, err := scanOperations(rows)
+	if err != nil {
+		return nil, err
+	}
+	byRun := map[string]map[string]RunOperation{}
+	for _, op := range operations {
+		if byRun[op.RunID] == nil {
+			byRun[op.RunID] = map[string]RunOperation{}
+		}
+		byRun[op.RunID][op.ID] = op
+	}
+	for _, all := range byRun {
+		for _, op := range all {
+			for _, id := range op.DependsOn {
+				if _, ok := all[id]; ok {
+					continue
+				}
+				if dependency, _, found, err := store.Operation(id); err != nil {
+					return nil, err
+				} else if found {
+					all[id] = dependency
+				}
+			}
+		}
+	}
+	return byRun, nil
+}
+
+// capacityRunnable and capacityWaiting are the two states of a run holding no
+// active operation. They are not capacity classes; they only share the type
+// so capacityState answers in one value.
+const (
+	capacityRunnable CapacityClass = "runnable"
+	capacityWaiting  CapacityClass = "waiting"
+)
+
+// capacityState places one nonterminal run's durable operations in exactly one
+// operator count (#85). Active means what AcquireOperation counts: leased or
+// running WITH a lease. A run holds at most one, so work-or-observation is a
+// partition; should it ever hold both, work wins, which is the closed side.
+// Runnable is a WORK operation Next would lease now: leasable, the scheduler's
+// own predicate, and not expired. The one approximation is liveness, which a
+// read never probes: an abandoned lease counts as active (Working or
+// Observing) until a scheduler reclaims it.
+func capacityState(all map[string]RunOperation, now time.Time) CapacityClass {
+	active := CapacityClass("")
+	for _, op := range all {
+		if op.Lease != nil && (op.State == Leased || op.State == Running) {
+			if class := OperationCapacityClass(op.Kind); active == "" || class == CapacityWork {
+				active = class
+			}
+		}
+	}
+	if active != "" {
+		return active
+	}
+	for _, op := range all {
+		if op.State != Leased && op.State != Running && OperationCapacityClass(op.Kind) == CapacityWork &&
+			leasable(op, all, now, false) && !OperationExpired(op, now) {
+			return capacityRunnable
+		}
+	}
+	return capacityWaiting
 }
 
 func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {

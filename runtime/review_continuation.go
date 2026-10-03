@@ -149,7 +149,7 @@ func (s *runState) reviewContinuationDelivered() bool {
 		return false
 	}
 	for _, spec := range operationSpecs {
-		if observationKinds[spec.kind] {
+		if OperationCapacityClass(spec.kind) == CapacityObservation {
 			continue
 		}
 		key, wanted := spec.bind(s)

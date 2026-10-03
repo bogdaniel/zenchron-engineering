@@ -61,12 +61,6 @@ const (
 	OpGitHubObserve     = "github.observe"
 )
 
-// observationKinds are the operations that only READ external state. They are
-// the only operations a waiting run may perform: a waiting run must still be
-// able to notice that its pull request was merged, but it must not execute,
-// mutate, verify, authorize, or publish anything while it waits.
-var observationKinds = map[string]bool{OpSourceObserve: true, OpGitHubObserve: true}
-
 // publicationKinds are the operations that change protected remote state.
 // Every one of them is gated on a current, authorized #7 decision.
 var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true}
@@ -1540,13 +1534,17 @@ func (s *runState) validate(desired desiredOperation, live Disposition) error {
 	if terminalDisposition(live) {
 		return &OperationRefusedError{desired.kind, "run reached a terminal condition"}
 	}
-	if live == Waiting && !observationKinds[desired.kind] {
+	// Observation-class operations only READ external state, so they are the
+	// only ones a waiting run may perform: it must still notice that its pull
+	// request was merged, but it must not execute, mutate, verify, authorize
+	// or publish anything while it waits.
+	if live == Waiting && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "a waiting run performs observation only"}
 	}
 	if s.projection.SourceIntentChanged && desired.kind == OpContractCompile {
 		return &OperationRefusedError{desired.kind, "the pinned source moved; new intent is never silently compiled"}
 	}
-	if s.projection.ObservedExternalHead != "" && !observationKinds[desired.kind] {
+	if s.projection.ObservedExternalHead != "" && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "an unexpected external head is never overwritten"}
 	}
 	if publicationKinds[desired.kind] && !s.authorizedForPublication() {
@@ -1607,6 +1605,14 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := r.reconcileStoreLag(state); err != nil {
 			return Outcome{}, err
 		}
+		// Another live driver is operating this run. The store would refuse
+		// every acquisition anyway (a run holds at most one active operation),
+		// so this pass journals NOTHING - no planned operation, no run.waiting
+		// over a run someone else is driving. The reason is not journalled; it
+		// tells the caller why this pass did nothing.
+		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: ReasonDrivenElsewhere}, err
+		}
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
@@ -1624,7 +1630,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		// is recorded BY an observation, which then makes the next two passes
 		// re-observe at the new epoch, so counting them would exhaust the
 		// budget before the producer could ever be planned.
-		if !wanted || !observationKinds[desired.kind] {
+		if !wanted || OperationCapacityClass(desired.kind) != CapacityObservation {
 			if fingerprint, failing := state.failureFingerprint(); failing && !progress.Allow(fingerprint) {
 				return r.settle(state, Failed, "no_progress")
 			}
@@ -1655,6 +1661,32 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		return Outcome{}, err
 	}
 	return r.settle(state, Waiting, "reconcile_pass_limit")
+}
+
+// ReasonDrivenElsewhere is the Outcome reason of a Reconcile pass that found
+// another live driver operating the run. It is never journalled.
+const ReasonDrivenElsewhere = "driven_elsewhere"
+
+// drivenElsewhere reports whether a DIFFERENT owner holds a lease on one of the
+// run's operations that this driver may not take over: the owner is alive, or
+// its lease has not expired. The driver's own leftover lease is not
+// "elsewhere"; it is recovered by the ordinary takeover in Scheduler.Next.
+func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
+	s := r.scheduler.defaults()
+	operations, err := s.Store.Operations(runID)
+	if err != nil {
+		return false, err
+	}
+	now := s.Clock.Now()
+	for _, op := range operations {
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.Lease.Owner == s.Owner {
+			continue
+		}
+		if !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func waitingOr(live, fallback Disposition) Disposition {

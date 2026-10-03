@@ -49,7 +49,11 @@ type OperationStore interface {
 	// attempt a stop interrupts is the provider of a running
 	// execution.invoke, through the execution watcher (#213); every other
 	// started operation runs to completion (#215).
-	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
+	//
+	// The ceiling is PER CAPACITY CLASS (#85): only other runs holding an
+	// active operation of the acquired operation's class are counted, against
+	// maxRuns for work and maxObservations for observation.
+	AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error)
 }
 
 // MemoryOperationStore is the in-process test double for OperationStore. It
@@ -162,7 +166,7 @@ func (s *MemoryOperationStore) PutOperation(op RunOperation, expected int64) (in
 // in test code, which is worth less than the rule it would imitate. The rule is
 // stated against SQLite, where the run document and the acquisition are one
 // statement, by TestSQLiteAStoppedRunsOperationIsNeverAcquired.
-func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
+func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -171,13 +175,22 @@ func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if revision, exists := s.revisions[op.ID]; !exists || revision != expected {
 		return 0, false, nil
 	}
+	class := OperationCapacityClass(op.Kind)
+	ceiling := maxRuns
+	if class == CapacityObservation {
+		ceiling = maxObservations
+	}
 	driven := map[string]bool{}
-	for _, stored := range s.operations {
-		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
+	for id, stored := range s.operations {
+		if stored.RunID == op.RunID && id != op.ID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
+			return 0, false, nil
+		}
+		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) &&
+			OperationCapacityClass(stored.Kind) == class {
 			driven[stored.RunID] = true
 		}
 	}
-	if len(driven) >= maxRuns {
+	if len(driven) >= ceiling {
 		return 0, false, nil
 	}
 	s.operations[op.ID] = copyOperation(op)
@@ -211,6 +224,8 @@ type Scheduler struct {
 	Liveness          OwnerLiveness
 	LeaseDuration     time.Duration
 	MaxConcurrentRuns int
+	// MaxConcurrentObservations is the observation-class ceiling (#85).
+	MaxConcurrentObservations int
 }
 
 func (s Scheduler) defaults() Scheduler {
@@ -230,6 +245,7 @@ func (s Scheduler) defaults() Scheduler {
 	if s.MaxConcurrentRuns <= 0 {
 		s.MaxConcurrentRuns = defaultMaxConcurrentRuns
 	}
+	s.MaxConcurrentObservations = resolveMaxConcurrentObservations(s.MaxConcurrentObservations)
 	return s
 }
 
@@ -301,6 +317,14 @@ func adoptPlanned(prior RunOperation, kind string) (RunOperation, bool, error) {
 	return prior, false, nil
 }
 
+// leasable is the scheduler's eligibility test, shared with the fleet's
+// Runnable count so the two cannot drift: Next tries to lease exactly the
+// operations for which it holds, and retires an expired one instead.
+func leasable(op RunOperation, all map[string]RunOperation, now time.Time, ownerAlive bool) bool {
+	return dependenciesSatisfied(op, all) && op.Attempt < op.MaxAttempts && !op.CancelRequested &&
+		CanAcquire(op, now, ownerAlive)
+}
+
 func dependenciesSatisfied(op RunOperation, all map[string]RunOperation) bool {
 	for _, id := range op.DependsOn {
 		if all[id].State != Succeeded {
@@ -328,31 +352,30 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		return nil, err
 	}
 	now := s.Clock.Now()
-	// This scan is a cheap early exit only. On its own it is a read-then-act
-	// race that two watcher processes both win, so the ceiling is re-checked
-	// inside the durable acquisition below; that check, not this one, is what
-	// makes max=1 hold across processes.
+	// This scan is where an ABANDONED operation is given back, because it is
+	// the only place a run ever looks at a sibling's operations at all.
 	//
-	// It is also where an ABANDONED operation is given back, because it is the
-	// only place a run ever looks at a sibling's operations at all.
-	activeRuns := map[string]bool{}
+	// It is deliberately NOT a capacity check (#85). It used to return early
+	// once every slot was taken, and that early exit was blind to capacity
+	// class: one long execution.invoke at a ceiling of one kept every waiting
+	// run from even observing its review. The ceilings are decided per class,
+	// transactionally, inside AcquireOperation below.
 	for _, op := range allOperations {
 		// A lease-less active row is an attempt nobody is holding - either one
 		// this scan already reclaimed, or one a sibling did. It occupies
-		// nothing, exactly as the durable count below reads it.
-		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.RunID == runID {
+		// nothing, exactly as the durable count reads it.
+		//
+		// The run's OWN abandoned operations are reclaimed too: the store
+		// refuses a second active operation of one run, so an abandoned lease
+		// left on an exhausted operation would otherwise block the run's next
+		// operation forever. reclaimAbandoned applies CanAcquire's liveness and
+		// expiry rule, so a live driver's lease is never touched.
+		if op.Lease == nil || (op.State != Leased && op.State != Running) {
 			continue
 		}
-		reclaimed, err := s.reclaimAbandoned(op, now)
-		if err != nil {
+		if _, err := s.reclaimAbandoned(op, now); err != nil {
 			return nil, err
 		}
-		if !reclaimed {
-			activeRuns[op.RunID] = true
-		}
-	}
-	if len(activeRuns) >= s.MaxConcurrentRuns {
-		return nil, nil
 	}
 	for _, candidate := range ops {
 		op, revision, ok, err := s.Store.Operation(candidate.ID)
@@ -362,11 +385,8 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		if !ok {
 			continue
 		}
-		if !dependenciesSatisfied(op, all) || op.Attempt >= op.MaxAttempts || op.CancelRequested {
-			continue
-		}
 		alive := op.Lease != nil && s.Liveness.Alive(op.Lease.Owner)
-		if !CanAcquire(op, now, alive) {
+		if !leasable(op, all, now, alive) {
 			continue
 		}
 		// Retired on EXECUTION AUTHORITY, not on wall-clock elapsed. The
@@ -388,7 +408,7 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		// compare-and-set are one durable write. A refusal here is either a
 		// lost CAS or a full ceiling; both mean another driver owns the work,
 		// so the scan continues past it exactly as before.
-		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns)
+		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns, s.MaxConcurrentObservations)
 		if err != nil {
 			return nil, err
 		}
