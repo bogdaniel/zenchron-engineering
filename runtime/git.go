@@ -431,14 +431,26 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", message); err != nil {
 		return CommitResult{}, err
 	}
-	commit, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	// FROM HERE THE COMMIT EXISTS AND HEAD HAS MOVED (#402). Every return
+	// below carries whatever identity is already known, so a failure after
+	// this point can never make the caller report the work as uncommitted.
+	head, err := gitOutput(w.Dir, "rev-parse", "HEAD")
 	if err != nil {
 		return CommitResult{}, err
 	}
+	result := CommitResult{Commit: strings.TrimSpace(head), Paths: eligible, Excluded: debris.Excluded}
 	tree, err := gitOutput(w.Dir, "rev-parse", "HEAD^{tree}")
 	if err != nil {
-		return CommitResult{}, err
+		return result, err
 	}
+	result.Tree = strings.TrimSpace(tree)
+	// The baseline is the runtime's own commit, taken before the probe below
+	// so a refused probe still leaves the caller the digest to record.
+	metadata, err := gitMetadataDigest(w.Dir)
+	if err != nil {
+		return result, err
+	}
+	w.TrustedMetadata = metadata
 	// THE CLEANLINESS PROBE ASKS ABOUT CANDIDATE STATE, NOT ABOUT DEBRIS.
 	//
 	// Reading the whole status is what refused commit f0f72ba: one excluded
@@ -450,20 +462,12 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// answer that question either way.
 	residue, err := dirtyPathsOutside(w.Dir, debris.Excluded)
 	if err != nil {
-		return CommitResult{}, err
+		return result, err
 	}
 	if len(residue) > 0 {
-		return CommitResult{}, fmt.Errorf("candidate not clean after runtime commit: %s", quotedPaths(residue))
+		return result, fmt.Errorf("candidate not clean after runtime commit: %s", quotedPaths(residue))
 	}
-	metadata, err := gitMetadataDigest(w.Dir)
-	if err != nil {
-		return CommitResult{}, err
-	}
-	w.TrustedMetadata = metadata
-	return CommitResult{
-		Commit: strings.TrimSpace(commit), Tree: strings.TrimSpace(tree),
-		Paths: eligible, Excluded: debris.Excluded,
-	}, nil
+	return result, nil
 }
 
 // runtimeDebris is the runtime-owned split of a dirty candidate workspace into
