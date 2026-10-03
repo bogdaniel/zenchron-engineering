@@ -661,7 +661,7 @@ func TestClaudeTypedFailureClassification(t *testing.T) {
 		{claudeRetry("overloaded", "529", false), FailureProviderUnavailable},
 		{claudeRetry("server_error", "503", false), FailureProviderUnavailable},
 		{claudeRetry("server_error", "500", false), FailureUnknown},
-		{claudeRetry("unknown", "null", true), FailureProviderUnavailable},
+		{claudeRetry("unknown", "null", true), FailureConnectivity},
 		{claudeRetry("unknown", "null", false), FailureUnknown},
 		{claudeRetry("a_future_category", "418", false), FailureUnknown},
 	} {

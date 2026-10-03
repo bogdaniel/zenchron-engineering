@@ -54,10 +54,22 @@ type effect struct {
 	interrupted bool
 }
 
+// failed records the typed transport cause, and transport loss as
+// FailureConnectivity, so the durable result says why a retry waits (#380).
 func failed(err error) effect {
+	var class FailureClass
+	cause := transportCause(err)
+	if cause.Lost() {
+		class = FailureConnectivity
+	}
+	if cause == TransportUnrecognized {
+		cause = ""
+	}
 	return effect{state: OperationFailed, result: struct {
-		Error string `json:"error"`
-	}{boundedDetail(err.Error())}}
+		Error          string         `json:"error"`
+		FailureClass   FailureClass   `json:"failure_class,omitempty"`
+		TransportCause TransportCause `json:"transport_cause,omitempty"`
+	}{boundedDetail(err.Error()), class, cause}}
 }
 
 func boundedDetail(detail string) string { return boundedField(detail) }
