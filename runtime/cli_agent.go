@@ -1160,6 +1160,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// for here.
 	if writer == nil {
 		claimed, err := claimCandidateWriter(ctx, request.CandidateDir, candidateWriterSettle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			return notStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), notStarted
+		}
 		if err != nil {
 			return ExecutionResult{}, err
 		}

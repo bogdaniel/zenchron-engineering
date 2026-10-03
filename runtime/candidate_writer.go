@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -48,16 +49,21 @@ func candidateWriterLockPath(candidateDir string) string {
 // the old group does not wait spuriously. A run already waiting on a held lock
 // probes once and does not settle again: every waiting pass is a work-class
 // operation, and a 15s sleep per pass would hold a work slot and be charged
-// as active time. A var only so tests can shorten it.
+// as active time. A parent-context cancellation (a controller shutdown) ends
+// the settle; a durable operator stop does not, because it is observed later,
+// just before the provider would start. A var only so tests can shorten it.
 var candidateWriterSettle = 15 * time.Second
 
 // claimCandidateWriter takes the candidate's writer lock before anything
-// touches the candidate for a provider attempt. A lock still held after settle
-// means a process from an earlier invocation may still be writing, and no new
-// attempt runs beside it. A lock that cannot be checked proves nothing and
-// refuses too, as the controller's own setup failure. The settle ends early
-// when ctx does: a stop or shutdown never waits on it. The caller closes the
-// file when its attempt ends.
+// touches the candidate for a provider attempt. It answers exactly one of:
+//
+//   - acquired: the lock, which the caller closes when its attempt ends;
+//   - held by another after settle: *CandidateWriterAliveError, Cause nil;
+//   - unavailable, the lock could not be checked: the same type with Cause;
+//   - cancelled: ctx ended first, returned as ctx.Err() wrapped.
+//
+// What a cancellation MEANS - a controller shutdown, a deadline - is the
+// caller's to say; this primitive never reports one as a live writer.
 func claimCandidateWriter(ctx context.Context, candidateDir string, settle time.Duration) (*os.File, error) {
 	path := candidateWriterLockPath(candidateDir)
 	deadline := time.Now().Add(settle)
@@ -74,14 +80,13 @@ func claimCandidateWriter(ctx context.Context, candidateDir string, settle time.
 		if err != nil {
 			return nil, &CandidateWriterAliveError{Lock: path, Cause: err}
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("claiming the candidate writer lock %s: %w", path, err)
+		}
 		if !time.Now().Before(deadline) {
 			return nil, &CandidateWriterAliveError{Lock: path}
 		}
-		select {
-		case <-ctx.Done():
-			return nil, &CandidateWriterAliveError{Lock: path}
-		case <-time.After(50 * time.Millisecond):
-		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

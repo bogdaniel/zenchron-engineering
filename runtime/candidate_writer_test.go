@@ -370,7 +370,8 @@ func TestAWaitingRunReprobesWithoutSettling(t *testing.T) {
 	}
 }
 
-// A stop or shutdown ends the settle at once rather than after it.
+// A cancelled context ends the settle at once, and is reported as the
+// cancellation it is - never as a live writer.
 func TestACancelledContextEndsTheSettle(t *testing.T) {
 	candidate := candidateUnder(t)
 	held, err := claimCandidateWriter(context.Background(), candidate, 0)
@@ -385,8 +386,68 @@ func TestACancelledContextEndsTheSettle(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("a cancelled claim kept settling for %s", elapsed)
 	}
-	if class, ok := candidateGuardFailureClass(err); !ok || class != FailureCandidateWriterAlive {
-		t.Fatalf("a cancelled claim on a held lock returned %q %v (%v)", class, ok, err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled claim did not report the cancellation: %v", err)
+	}
+	if class, ok := candidateGuardFailureClass(err); ok {
+		t.Fatalf("a cancelled claim was classified %q", class)
+	}
+}
+
+// A controller shutdown during the settle - the attempt's parent context
+// ending - is recorded as controller_shutdown and leaves the run resumable. It
+// is never recorded as a live writer.
+func TestAShutdownDuringTheSettleIsAControllerShutdown(t *testing.T) {
+	requireBoundedProcess(t)
+	restore := candidateWriterSettle
+	candidateWriterSettle = 10 * time.Second
+	t.Cleanup(func() { candidateWriterSettle = restore })
+	f := newPhase8Fixture(t)
+	provider := &countingProvider{}
+	f.deps.Provider = provider
+	f.runtime = f.newRuntime(f.deps)
+	runID := f.start()
+	candidate := candidateDir(f.deps.StateDir, runID)
+	if err := os.MkdirAll(filepath.Dir(candidate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := claimCandidateWriter(context.Background(), candidate, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	var outcome Outcome
+	for pass := 0; pass < 10; pass++ {
+		ctx, shutdown := context.WithCancel(context.Background())
+		timer := time.AfterFunc(500*time.Millisecond, shutdown)
+		started := time.Now()
+		outcome, err = f.runtime.Reconcile(ctx, runID)
+		elapsed := time.Since(started)
+		timer.Stop()
+		shutdown()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, found := executionFailureClass(t, f.state(runID)); found {
+			if elapsed > 5*time.Second {
+				t.Fatalf("the shutdown waited out the settle: %s", elapsed)
+			}
+			break
+		}
+	}
+	class, found := executionFailureClass(t, f.state(runID))
+	if !found || class != FailureControllerShutdown {
+		t.Fatalf("a shutdown during the settle was recorded as %q (found=%v)", class, found)
+	}
+	if outcome.Disposition != Waiting || outcome.Reason != "controller_shutdown" {
+		t.Fatalf("shutdown settled %+v, want a resumable controller_shutdown wait", outcome)
+	}
+	if countType(f.state(runID).events, EventRunCancelled) != 0 {
+		t.Fatal("a shutdown journalled a cancellation")
+	}
+	if provider.calls != 0 {
+		t.Fatalf("provider was invoked %d time(s)", provider.calls)
 	}
 }
 

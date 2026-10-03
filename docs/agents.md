@@ -512,9 +512,12 @@ guard cannot reach (#168).
   candidate as `candidate_writer_alive`: a typed, non-spending wait an
   operator clears by stopping the stale writer (`lsof <candidate>.writer.lock`
   names it). The settle is paid once: a run already waiting on
-  `candidate_writer_alive` re-probes once per pass without sleeping, and a
-  stop or shutdown ends the settle at once. A lock that cannot be checked at
-  all is `candidate_guard_unavailable`.
+  `candidate_writer_alive` re-probes once per pass without sleeping. A
+  controller shutdown (the attempt's parent context ending) interrupts the
+  settle and is recorded as `controller_shutdown`, never as a live writer. A
+  durable `stop RUN` is not observed during the settle; it is observed just
+  before the provider would start, as for any attempt. A lock that cannot be
+  checked at all is `candidate_guard_unavailable`.
 - When a provider returns normally, a lock still held by its own process
   group (a backgrounded command) is stopped with the usual TERM-then-KILL, so
   an attempt's own leftovers never refuse the next attempt. A holder that

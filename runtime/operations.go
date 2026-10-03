@@ -564,6 +564,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			settle = 0
 		}
 		writer, err := claimCandidateWriter(ctx, dir, settle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			// The PARENT context ended during the claim: the provider is not
+			// started because its context had ended, and that takes exactly
+			// the class the executor's own not-started refusal takes
+			// (controller_shutdown for a shutdown). It is never a live
+			// writer, and never an operator stop - that is a durable act the
+			// execution watcher observes, not a context.
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			result := notStartedResult("", "", "", operation.AttemptIdentity, notStarted)
+			class := result.Failure.Classification
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, class, result, notStarted),
+			}}
+		}
 		if err != nil {
 			class, _ := candidateGuardFailureClass(err)
 			return effect{state: OperationFailed, result: executionRecord{
