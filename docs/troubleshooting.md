@@ -233,6 +233,19 @@ is missing, the daemon is unreachable, or the pinned assurance image is not
 present locally`.** Without it no candidate can be verified, so no run can
 complete. Start the daemon and pull the image by its pinned digest.
 
+**`assurance.verifier_sandbox` FAIL — `the verifier sandbox is unavailable:
+... Docker daemon did not respond within 10s`.** The daemon is installed but
+hung; restart it. Every Docker readiness and identity probe (`docker info`,
+`docker image inspect` of the pinned image, and the daemon-identity lookup
+before a container is created) runs under the caller's context AND a fixed
+10-second probe ceiling, whichever ends first: a shorter caller deadline is
+never replaced. The two endings are kept apart. The ceiling firing means
+Docker readiness is unavailable (`ErrSandboxUnavailable`, a transient
+assurance-infrastructure failure the scheduler retries). The caller's own
+cancellation or deadline, such as a stop or shutdown, propagates as that
+cancellation and is never reported as an unavailable sandbox. Doctor uses the
+same probe, so it reports this diagnostic instead of hanging.
+
 **`assurance.toolchain` FAIL — `the pinned assurance image did not resolve the
 Go toolchain on the runtime sandbox path`.** A reachable daemon holding the
 image proves a container can start, not that it can build. The probe runs with

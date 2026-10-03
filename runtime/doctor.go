@@ -797,7 +797,7 @@ const doctorGroupAssurance = "assurance"
 func doctorAssurance(ctx context.Context, in DoctorInput) []DoctorCheck {
 	// The frozen diagnosis is called exactly once; the three Docker-derived
 	// fields are separate questions and are reported separately.
-	diagnosis := DiagnoseSandbox(in.Codex, in.Sandbox)
+	diagnosis := DiagnoseSandbox(ctx, in.Codex, in.Sandbox)
 	return []DoctorCheck{
 		doctorDockerEndpoint(in),
 		doctorAssuranceImage(in),
@@ -945,6 +945,9 @@ func doctorAssuranceImage(in DoctorInput) DoctorCheck {
 
 func doctorVerifierSandbox(diagnosis SandboxDoctor) DoctorCheck {
 	const id = "assurance.verifier_sandbox"
+	if diagnosis.VerifierSandboxReason != "" {
+		return fail(doctorGroupAssurance, id, "the verifier sandbox is unavailable: "+diagnosis.VerifierSandboxReason+". Without a Docker daemon that answers, no candidate can be verified, so no run can complete.")
+	}
 	if diagnosis.VerifierSandbox != "enforceable" {
 		return fail(doctorGroupAssurance, id, "the verifier sandbox is "+diagnosis.VerifierSandbox+": Docker is missing, the daemon is unreachable, or the pinned assurance image is not present locally. Without it no candidate can be verified, so no run can complete.")
 	}
