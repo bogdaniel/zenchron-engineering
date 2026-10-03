@@ -378,6 +378,9 @@ verified_unpublished   execution-complete commit, assurance passed at it, no
                        pull request carries it
 committed_unverified   execution-complete commit not yet verified
 checkpoint             runtime-owned incomplete checkpoint commit (#54)
+committed_unobserved   a runtime-owned commit candidate.commit made whose
+                       observation or reassessment then failed (#402); the
+                       revision and tree are that commit, never its parent
 uncommitted            a succeeded producer's change the budget stopped before
                        candidate.commit; identified by producing operation, path
                        count and a content digest taken when the producer

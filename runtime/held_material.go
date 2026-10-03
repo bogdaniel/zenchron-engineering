@@ -41,6 +41,10 @@ const (
 	// that the runtime never committed because the budget ended the run
 	// first. It exists only in the candidate workspace.
 	HeldUncommitted = "uncommitted"
+	// HeldCommittedUnobserved is a runtime-owned commit candidate.commit made
+	// whose observation or reassessment then failed (#402). It is neither
+	// execution- nor assurance-complete; Revision and Tree are that commit.
+	HeldCommittedUnobserved = "committed_unobserved"
 	// HeldQuarantined is material a REFUSED invocation left behind (#390):
 	// moved out of the candidate workspace into a runtime-owned quarantine,
 	// never committed and never inherited by a retry. Location names it.
@@ -86,7 +90,7 @@ type HeldMaterial struct {
 	Disposition          string `json:"disposition"`
 }
 
-var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true, HeldQuarantined: true}
+var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true, HeldCommittedUnobserved: true, HeldQuarantined: true}
 
 func (h HeldMaterial) validate() error {
 	var closed error
@@ -149,6 +153,13 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		held.Revision, held.Tree = head, s.projection.CandidateTree
 		if head == "" {
 			held.Revision, held.Tree = s.baseRevision(), ""
+		}
+		// The runtime already made the commit and only what follows it failed
+		// (#402): the material is that commit, not uncommitted work at its parent.
+		if op, ok := s.operationByKey(OpCandidateCommit, producing); ok {
+			if made := s.runtimeCommit(op.ID); made != nil {
+				held.Kind, held.Revision, held.Tree, held.PathCount = HeldCommittedUnobserved, made.Commit, made.Tree, made.PathCount
+			}
 		}
 		return held.bounded()
 	}
