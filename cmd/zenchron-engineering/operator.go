@@ -751,7 +751,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// stated rather than one being left as a missing line.
 	if h := view.HeldMaterial; h != nil {
 		line("held material", fmt.Sprintf("%s %s rev=%s tree=%s", h.Disposition, h.Kind, orUnknown(short(h.Revision)), orUnknown(short(h.Tree))))
-		if h.Kind == runtime.HeldUncommitted {
+		if h.Kind == runtime.HeldUncommitted || h.Kind == runtime.HeldCommittedUnobserved {
 			line("held content", fmt.Sprintf("operation=%s paths=%d digest=%s", h.Operation, h.PathCount, orUnknown(short(h.ContentDigest))))
 		}
 		blocked := h.NextStep
