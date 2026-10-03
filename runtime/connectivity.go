@@ -12,9 +12,9 @@ import (
 func transientConnectivity(err error) bool {
 	var dns *net.DNSError
 	if errors.As(err, &dns) {
-		return dns.IsNotFound || dns.IsTemporary || dns.IsTimeout
+		return !dns.IsNotFound && (dns.IsTemporary || dns.IsTimeout)
 	}
-	for _, code := range []error{syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENETDOWN, syscall.ECONNRESET, syscall.ECONNREFUSED} {
+	for _, code := range []error{syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENETDOWN, syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.ETIMEDOUT} {
 		if errors.Is(err, code) {
 			return true
 		}

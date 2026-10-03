@@ -1,22 +1,28 @@
 package runtime
 
 import (
+	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
 func TestConnectivityClassification(t *testing.T) {
-	for _, err := range []error{&net.DNSError{IsNotFound: true}, fmt.Errorf("request: %w", syscall.ENETUNREACH), syscall.ECONNRESET} {
+	for _, err := range []error{&net.DNSError{IsTemporary: true}, &net.DNSError{IsTimeout: true}, syscall.ETIMEDOUT, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}, fmt.Errorf("request: %w", syscall.ENETUNREACH), syscall.ECONNRESET} {
 		if !failed(err).transient {
 			t.Fatalf("not transient: %v", err)
 		}
 	}
-	for _, err := range []error{errors.New("unknown"), errors.New("ENOTFOUND in test output"), syscall.EACCES} {
+	for _, err := range []error{&net.DNSError{IsNotFound: true}, &net.DNSError{IsNotFound: true, IsTemporary: true}, x509.UnknownAuthorityError{}, errors.New("proxy: invalid configuration"), errors.New("unknown"), errors.New("ENOTFOUND in test output"), syscall.EACCES} {
 		if failed(err).transient {
 			t.Fatalf("guessed transient: %v", err)
 		}
@@ -200,5 +206,132 @@ func TestConnectivityJournalStoreGapIsExternalWait(t *testing.T) {
 	}
 	if settled.ConsumedExecution != time.Second || !settled.RetryNotBefore.Equal(retryAt) {
 		t.Fatalf("store recovery charged downtime: %+v", settled)
+	}
+}
+
+// Existing governed material and review authority must survive a mutating
+// transport refusal, independently of the refused bytes preserved in quarantine.
+func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.T) {
+	f, runID := feedbackFixture(t)
+	f.clock.step = 0
+	before := f.state(runID)
+	subject := before.projection.CandidateRevision
+	number := before.projection.PullRequest.Number
+	f.forge.ConversationComments[number] = []GitHubComment{{ID: 501, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText("add B"), CreatedAt: f.clock.Now()}}
+	if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != 1 {
+		t.Fatalf("admission: %+v %v", observation, err)
+	}
+	pending := f.state(runID).feedbackState().Pending(subject)
+	if len(pending) != 1 {
+		t.Fatalf("missing obligation: %+v", pending)
+	}
+	f.provider.mutate = refusedWrite().mutate
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderUnavailable}}
+	if outcome := f.reconcile(runID); outcome.Disposition != Waiting || outcome.Reason != "connectivity_backoff" {
+		t.Fatalf("outage: %+v", outcome)
+	}
+	var waiting RunOperation
+	ops, err := f.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Kind == OpExecutionInvoke && !op.RetryNotBefore.IsZero() {
+			waiting = op
+		}
+	}
+	if waiting.Attempt != 1 || waiting.RetryNotBefore.IsZero() {
+		t.Fatalf("missing wait: %+v", waiting)
+	}
+	state := f.state(runID)
+	waitEvents := state.events
+	projection := state.projection
+	active := state.activeElapsed(f.clock.Now())
+	budgets := state.budgets()
+	feedback := state.feedbackState()
+	if projection.CandidateRevision != subject || !reflect.DeepEqual(state.feedbackRedeliveryFor(waiting.ID), pending) {
+		t.Fatal("refusal changed candidate or discharged feedback")
+	}
+	quarantine := quarantinedEvents(t, state.events)
+	if len(quarantine) != 1 || quarantine[0].FailureClass != FailureProviderUnavailable || !quarantine[0].Restored || quarantine[0].Attempt != 1 {
+		t.Fatalf("quarantine: %+v", quarantine)
+	}
+	assertA := func() {
+		t.Helper()
+		kept, err := os.ReadFile(filepath.Join(f.stateDir, quarantine[0].Location, "files", "refused.go"))
+		if err != nil || string(kept) != "package refused // A\n" {
+			t.Fatalf("lost A: %q %v", kept, err)
+		}
+		if _, err := os.Stat(filepath.Join(candidateDir(f.stateDir, runID), "refused.go")); !os.IsNotExist(err) {
+			t.Fatalf("A inherited: %v", err)
+		}
+	}
+	assertA()
+	calls := len(f.provider.requests)
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteOperationStore(f.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	f.store, f.deps.Store = reopened, reopened
+	f.runtime = f.newRuntime(f.deps)
+	f.clock.at = waiting.RetryNotBefore.Add(-time.Nanosecond)
+	for i := 0; i < 3; i++ {
+		if out := f.reconcile(runID); out.Disposition != Waiting {
+			t.Fatalf("early recovery: %+v", out)
+		}
+	}
+	restored, _, _, err := f.store.Operation(waiting.ID)
+	if err != nil || !reflect.DeepEqual(restored, waiting) {
+		t.Fatalf("operation authority changed: %+v / %+v: %v", waiting, restored, err)
+	}
+	state = f.state(runID)
+	projection.Attempts = state.projection.Attempts // Observation epochs may advance; execution authority is checked above.
+	if len(f.provider.requests) != calls || !reflect.DeepEqual(state.projection, projection) || !reflect.DeepEqual(state.feedbackState(), feedback) || !reflect.DeepEqual(state.budgets(), budgets) || state.activeElapsed(f.clock.Now()) != active {
+		t.Fatalf("wait changed state: calls=%v projection=%v feedback=%v budgets=%v active=%s/%s", len(f.provider.requests) == calls, reflect.DeepEqual(state.projection, projection), reflect.DeepEqual(state.feedbackState(), feedback), reflect.DeepEqual(state.budgets(), budgets), state.activeElapsed(f.clock.Now()), active)
+	}
+	for _, kind := range []string{EventAssuranceObserved, EventCandidateCommitted, EventCandidateCheckpointed} {
+		if countType(state.events, kind) != countType(before.events, kind) {
+			t.Fatalf("transition during wait: %s", kind)
+		}
+	}
+	for _, kind := range []string{EventAuthorityEvaluated, EventHumanAuthorityRecorded, EventReviewContinuationGranted, EventGitHubPRObserved, EventExecutionCompleted} {
+		if countType(state.events, kind) != countType(waitEvents, kind) {
+			t.Fatalf("transition while waiting: %s", kind)
+		}
+	}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.provider.mutate = func(dir string) error {
+		assertA()
+		head, err := gitOutput(dir, "rev-parse", "HEAD")
+		if err != nil || strings.TrimSpace(head) != subject {
+			t.Fatalf("retry subject: %q %v", head, err)
+		}
+		return os.WriteFile(filepath.Join(dir, "recovered.go"), []byte("package candidate // B\n"), 0600)
+	}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	recovered, _, _, err := f.store.Operation(waiting.ID)
+	if err != nil || recovered.State != Succeeded || recovered.Attempt != 2 || recovered.MaxAttempts != waiting.MaxAttempts || !recovered.RetryNotBefore.IsZero() {
+		t.Fatalf("recovery: %+v %v", recovered, err)
+	}
+	if len(f.provider.requests) != calls+1 || !reflect.DeepEqual(f.provider.requests[calls].Feedback, f.provider.requests[calls-1].Feedback) {
+		t.Fatal("feedback not redelivered to same retry")
+	}
+	assertA()
+	if !committedTreeHas(t, f, runID, "recovered.go") || committedTreeHas(t, f, runID, "refused.go") {
+		t.Fatal("committed material did not separate A and B")
+	}
+	for _, op := range f.state(runID).snapshot.Operations {
+		if op.ID == waiting.ID {
+			recovered = op
+		}
+	}
+	var result mutationResult
+	if err := decodeJSON(recovered.Result, &result); err != nil || result.PathCount != 1 {
+		t.Fatalf("attribution: %+v %v", result, err)
 	}
 }
