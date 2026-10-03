@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "revision",
+    "governing_revision",
+    "shown",
+    "digest",
+    "repository",
+    "base_revision",
+    "stages",
+    "budget"
+  ],
+  "properties": {
+    "plan_id": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "governing_revision": {
+      "type": "integer"
+    },
+    "shown": {
+      "type": "string",
+      "enum": [
+        "governing",
+        "proposed",
+        "superseded",
+        "rejected",
+        "unapproved"
+      ]
+    },
+    "digest": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "base_revision": {
+      "type": "string"
+    },
+    "template": {
+      "type": "string"
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stage_id",
+          "kind",
+          "depends_on"
+        ],
+        "properties": {
+          "stage_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "assurance_gate",
+              "human_decision_gate"
+            ]
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "role": {
+            "type": "string"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "context_policy": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "assignment_id": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "provider_kind": {
+            "type": "string"
+          },
+          "trust_mode": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "bound_profile": {
+            "type": "string"
+          },
+          "gate": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "claims": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "revision"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string"
+                  }
+                }
+              },
+              "decision": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "revision"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string"
+                  }
+                }
+              },
+              "human_evidence_id": {
+                "type": "string"
+              },
+              "proven_heads": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_child_runs",
+        "max_concurrency",
+        "max_provider_invocations",
+        "child_runs",
+        "provider_invocations",
+        "wall_seconds",
+        "cost_known"
+      ],
+      "properties": {
+        "max_child_runs": {
+          "type": "integer"
+        },
+        "max_concurrency": {
+          "type": "integer"
+        },
+        "max_provider_invocations": {
+          "type": "integer"
+        },
+        "max_wall_seconds": {
+          "type": "integer"
+        },
+        "child_runs": {
+          "type": "integer"
+        },
+        "provider_invocations": {
+          "type": "integer"
+        },
+        "wall_seconds": {
+          "type": "integer"
+        },
+        "cost_known": {
+          "type": "boolean"
+        },
+        "cost_micros": {
+          "type": "integer"
+        }
+      }
+    },
+    "invalidated": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "base_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_revision",
+        "from",
+        "to"
+      ],
+      "properties": {
+        "from_revision": {
+          "type": "integer"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

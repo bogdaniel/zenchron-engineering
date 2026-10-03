@@ -55,6 +55,7 @@ func mustCompile() map[string]*jsonschema.Schema {
 		"control-plane-run",
 		"control-plane-run-events",
 		"control-plane-plan",
+		"control-plane-plan-detail",
 		"control-plane-error",
 
 		AuthorityDecision,
