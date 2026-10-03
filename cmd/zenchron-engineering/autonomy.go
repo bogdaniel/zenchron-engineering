@@ -85,7 +85,7 @@ func exitFor(err error, fallback int) int {
 		return runtime.ExitInvalid
 	}
 	var config *runtime.ConfigError
-	if errors.As(err, &config) {
+	if errors.As(err, &config) || runtime.IsRunTerminal(err) {
 		return runtime.ExitInvalid
 	}
 	return fallback
@@ -768,6 +768,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 	if err != nil {
 		return nil, err
 	}
+	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
 		Agent:             agent,
@@ -794,12 +798,13 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
-		// The scheduler is the one place the ceiling is ENFORCED: its
-		// acquisition counts every run holding an operation across the whole
-		// durable store, which is what makes the bound hold between processes
-		// as well as inside one. Everything else that knows the number - the
-		// supervisor's goroutine bound, the watch capacity probe, the fleet
-		// view - is a cheap early exit in front of it.
+		// The scheduler is the one place the ceilings are ENFORCED: its
+		// acquisition counts, per capacity class (#85), every other run holding
+		// an operation of that class across the whole durable store, which is
+		// what makes the bounds hold between processes as well as inside one.
+		// Everything else that knows the numbers - the supervisor's turn
+		// envelope, the fleet view - reports or bounds goroutines; nothing in
+		// front of the scheduler decides capacity.
 		//
 		// Which is why leaving this unset was not a missing second enforcer but
 		// a missing number: the supervisor admitted two runs against the
@@ -810,6 +815,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		// the operator's configuration, so advertised and enforced cannot be
 		// different numbers.
 		OperatorMaxConcurrentRuns: ceiling,
+		MaxConcurrentObservations: observations,
 	})
 }
 
@@ -1401,6 +1407,6 @@ func cancelRun(built *composition, runID, reason string) (runtime.Outcome, error
 	if _, err := requireRun(built, runID); err != nil {
 		return runtime.Outcome{}, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	return runtime.CancelRun(built.store, scheduler, time.Now().UTC(), runID, reason)
 }
