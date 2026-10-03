@@ -104,6 +104,7 @@ var (
 	overviewTemplate    = parseWebTemplate("overview.html")
 	runsTemplate        = parseWebTemplate("runs.html")
 	runDetailTemplate   = parseWebTemplate("run_detail.html")
+	planDetailTemplate  = parseWebTemplate("plan_detail.html")
 	loginTemplate       = parseWebTemplate("login.html")
 	notFoundTemplate    = parseWebTemplate("not_found.html")
 	runNotFoundTemplate = parseWebTemplate("run_not_found.html")

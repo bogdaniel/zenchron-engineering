@@ -97,7 +97,7 @@ func TestHTTPWireSchemasAndSecretBoundary(t *testing.T) {
 	t.Setenv("PROVIDER_API_KEY", "SECRET_ENVIRONMENT")
 	a := fixture(t, true)
 	for _, tc := range []struct{ path, schema string }{
-		{"/v1/controller", "controller"}, {"/v1/runs", "runs"}, {"/v1/runs/r", "run"}, {"/v1/runs/r/events?limit=2", "run-events"}, {"/v1/plans/p", "plan"},
+		{"/v1/controller", "controller"}, {"/v1/runs", "runs"}, {"/v1/runs/r", "run"}, {"/v1/runs/r/events?limit=2", "run-events"}, {"/v1/plans/p", "plan"}, {"/v1/plans/p/detail", "plan-detail"}, {"/v1/plans/p/detail?revision=1", "plan-detail"},
 	} {
 		first := wire(t, a, tc.path, "GET", a.Token, tc.schema, 200)
 		second := wire(t, a, tc.path, "GET", a.Token, tc.schema, 200)
@@ -109,7 +109,7 @@ func TestHTTPWireSchemasAndSecretBoundary(t *testing.T) {
 	if !bytes.Contains(detail, []byte(`"progress_source":"row"`)) {
 		t.Fatalf("lost live progress semantics: %s", detail)
 	}
-	for _, path := range []string{"/v1/runs", "/v1/controller", "/v1/runs/r", "/v1/runs/r/events", "/v1/plans/p"} {
+	for _, path := range []string{"/v1/runs", "/v1/controller", "/v1/runs/r", "/v1/runs/r/events", "/v1/plans/p", "/v1/plans/p/detail"} {
 		wire(t, a, path, "GET", "", "error", 401)
 		wire(t, a, path, "GET", "wrong", "error", 401)
 	}
@@ -119,6 +119,9 @@ func TestHTTPWireSchemasAndSecretBoundary(t *testing.T) {
 	wire(t, a, "/missing", "GET", a.Token, "error", 404)
 	wire(t, a, "/v1/runs/missing", "GET", a.Token, "error", 404)
 	wire(t, a, "/v1/plans/missing", "GET", a.Token, "error", 404)
+	wire(t, a, "/v1/plans/missing/detail", "GET", a.Token, "error", 404)
+	wire(t, a, "/v1/plans/p/detail?revision=9", "GET", a.Token, "error", 404)
+	wire(t, a, "/v1/plans/p/detail?revision=-1", "GET", a.Token, "error", 400)
 	wire(t, a, "/v1/runs", "POST", a.Token, "error", 405)
 	wire(t, a, "/v1/runs/r/events?after=999", "GET", a.Token, "run-events", 200)
 	a.Store.Close()
