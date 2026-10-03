@@ -222,7 +222,7 @@ func (s *runState) verifiedAt(head string) bool {
 // is always re-wanted at a fresh epoch and says nothing about the material.
 func (s *runState) nextLifecycleStep() string {
 	for _, spec := range operationSpecs {
-		if observationKinds[spec.kind] {
+		if OperationCapacityClass(spec.kind) == CapacityObservation {
 			continue
 		}
 		if key, wanted := spec.bind(s); wanted && key != "" && !s.satisfied(spec.kind, key) {

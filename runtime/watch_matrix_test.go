@@ -490,13 +490,16 @@ func heldLease(t *testing.T, store *SQLiteOperationStore, runID string) RunOpera
 
 // drivenRunCount is the durable global ceiling as the database sees it: how
 // many distinct runs currently hold a run-driving slot.
-func drivenRunCount(store *SQLiteOperationStore) int {
+func drivenRunCount(store *SQLiteOperationStore, workOnly bool) int {
 	ops, err := store.AllOperations()
 	if err != nil {
 		return 0
 	}
 	runs := map[string]bool{}
 	for _, op := range ops {
+		if workOnly && OperationCapacityClass(op.Kind) != CapacityWork {
+			continue
+		}
 		if (op.State == Leased || op.State == Running) && op.Lease != nil {
 			runs[op.RunID] = true
 		}
@@ -504,12 +507,15 @@ func drivenRunCount(store *SQLiteOperationStore) int {
 	return len(runs)
 }
 
-func (p *watchPeer) holdsALease() bool {
+func (p *watchPeer) holdsALease(workOnly bool) bool {
 	ops, err := p.store.AllOperations()
 	if err != nil {
 		return false
 	}
 	for _, op := range ops {
+		if workOnly && OperationCapacityClass(op.Kind) != CapacityWork {
+			continue
+		}
 		if (op.State == Leased || op.State == Running) && op.Lease != nil && op.Lease.Owner == p.owner {
 			return true
 		}
@@ -523,6 +529,9 @@ func (p *watchPeer) holdsALease() bool {
 type ceilingProbe struct {
 	mu  sync.Mutex
 	max int
+	// work restricts the probe to the WORK class (#85): it counts and parks
+	// on work leases only, because observation has its own ceiling.
+	work bool
 }
 
 func (c *ceilingProbe) record(n int) {
@@ -547,14 +556,14 @@ func (c *ceilingProbe) peak() int {
 func (p *watchPeer) park(probe *ceilingProbe) {
 	parked := false
 	p.forge.before = func(string) {
-		probe.record(drivenRunCount(p.store))
-		if parked || !p.holdsALease() {
+		probe.record(drivenRunCount(p.store, probe.work))
+		if parked || !p.holdsALease(probe.work) {
 			return
 		}
 		parked = true
 		deadline := time.Now().Add(matrixWindow)
 		for time.Now().Before(deadline) {
-			if n := drivenRunCount(p.store); n > 1 {
+			if n := drivenRunCount(p.store, probe.work); n > 1 {
 				probe.record(n)
 				return
 			}
@@ -574,9 +583,9 @@ func (p *watchPeer) unpark() { p.forge.before, p.forge.after = nil, nil }
 // EngineeringRuns for one source" unrepresentable, and the process that LOST
 // the claim must adopt the winner's row rather than replace it.
 //
-// A live foreign owner holds the single run-driving slot throughout, so this is
-// about claiming and nothing else: both watchers observe and claim, neither
-// drives.
+// Both watchers are intake-only, so this is about claiming and nothing else:
+// both observe and claim, neither drives. (Before #85 a foreign lease on the
+// single run slot did this; capacity is no longer a watch-level gate.)
 //
 // The first phase claims from durable watch state - the observation a completed
 // poll leaves behind, and the state two restarted watchers come up into. It is
@@ -597,8 +606,8 @@ func TestWatchMatrixA_ConcurrentDiscoveryClaimsOneRun(t *testing.T) {
 	for _, issue := range sources {
 		optIn(m.forge, issue, time.Unix(1_700_000_000, 0).UTC())
 	}
-	occupyGlobalSlot(t, m.phase8Fixture)
 	first, second := m.pair(t)
+	first.watcher.deps.IntakeOnly, second.watcher.deps.IntakeOnly = true, true
 
 	seeded := m.clock.at
 	if _, ok, err := first.store.PutWatchState(WatchState{
@@ -769,9 +778,9 @@ func TestWatchMatrixC_TwoEligibleRunsShareOneGlobalSlot(t *testing.T) {
 	optIn(m.forge, watchSecondIssue, at)
 	first, second := m.pair(t)
 
-	// A live foreign owner holds the only slot, so this tick claims both
-	// sources and drives neither.
-	occupyGlobalSlot(t, m.phase8Fixture)
+	// Live foreign owners hold every slot of both classes, so this tick
+	// claims both sources and drives neither.
+	occupyEverySlot(t, m.phase8Fixture)
 	if observed := only(t, tickOf(t, first)); observed.Discovered != 2 {
 		t.Fatalf("the claiming tick discovered %d issues, want 2 (%q)", observed.Discovered, observed.Detail)
 	}
@@ -785,9 +794,11 @@ func TestWatchMatrixC_TwoEligibleRunsShareOneGlobalSlot(t *testing.T) {
 			t.Fatalf("run %s was driven while the slot was taken: %v", runID, owners)
 		}
 	}
-	releaseGlobalSlot(t, m.phase8Fixture)
+	releaseEverySlot(t, m.phase8Fixture)
 
-	probe := &ceilingProbe{}
+	// The work ceiling is one. Observation has its own ceiling, so two runs
+	// may observe at once; two may never hold work at once.
+	probe := &ceilingProbe{work: true}
 	first.park(probe)
 	second.park(probe)
 	concurrently(t, first, second)
@@ -795,7 +806,7 @@ func TestWatchMatrixC_TwoEligibleRunsShareOneGlobalSlot(t *testing.T) {
 	second.unpark()
 
 	if peak := probe.peak(); peak != 1 {
-		t.Fatalf("%d runs held a run-driving slot at once, want exactly 1", peak)
+		t.Fatalf("%d runs held a work slot at once, want exactly 1", peak)
 	}
 	// Delayed, never starved: with one slot, both runs are still driven.
 	for _, runID := range []string{runA, runB} {
@@ -837,14 +848,16 @@ func TestWatchMatrixD_ALiveWatchersExpiredLeaseIsNotStolen(t *testing.T) {
 		t.Fatal("a process holding its ownership lock must be reported alive")
 	}
 
-	// The successor's own scheduler must refuse the operation, and its watcher
-	// must not drive the run at all.
+	// The successor's own scheduler must refuse the operation. Its watcher
+	// may reconcile the run - capacity is no longer a watch-level gate (#85) -
+	// but the per-run lease keeps it from operating the run: nothing it does
+	// may take the lease or invoke anything.
 	if got, err := second.engine.scheduler.Next(runID); err != nil || got != nil {
 		t.Fatalf("the expired lease of a LIVE watcher was acquired: %v %v", got, err)
 	}
-	report := only(t, tickOf(t, second))
-	if len(report.Driven) != 0 {
-		t.Fatalf("the second watcher drove %v while the first still owns the run", report.Driven)
+	only(t, tickOf(t, second))
+	if len(second.provider.requests) != 0 {
+		t.Fatalf("the second watcher invoked a provider while the first still owns the run")
 	}
 	after := heldLease(t, second.store, runID)
 	if after.Lease.Owner != holder.owner || after.Attempt != stalled.Attempt {

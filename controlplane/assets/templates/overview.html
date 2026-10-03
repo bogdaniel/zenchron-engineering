@@ -60,6 +60,7 @@
   </div>
   <table class="kv">
     <tr><th>capacity</th><td>{{.Fleet.Executing}} / {{.Fleet.Capacity}} executing, {{.Fleet.Active}} active</td></tr>
+    <tr><th>runs by capacity</th><td>{{.Fleet.Classes.Working}} working, {{.Fleet.Classes.Observing}} observing, {{.Fleet.Classes.Runnable}} runnable, {{.Fleet.Classes.Waiting}} waiting, {{.Fleet.Classes.Unavailable}} unavailable</td></tr>
     <tr><th>supervisor</th><td>{{if .Fleet.SupervisorRunning}}<span data-state="active">running</span>{{else}}<span data-state="not_reachable">not running</span>{{end}}</td></tr>
   </table>
   <p><a href="/runs">open the runs list →</a></p>

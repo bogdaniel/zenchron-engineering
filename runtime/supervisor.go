@@ -67,10 +67,13 @@ type SupervisorDependencies struct {
 	// anything else is refused: enrolment is operator authority, and a local
 	// control request must not be able to introduce a repository.
 	Repositories []GitHubRepo
-	// MaxConcurrentRuns is the operator-authorized ceiling on runs driven at
-	// once. The scheduler enforces the same ceiling durably; this bounds the
-	// goroutines so the process does not start work it cannot lease.
-	MaxConcurrentRuns int
+	// MaxConcurrentRuns is the operator-authorized ceiling on runs doing WORK
+	// at once, and MaxConcurrentObservations the ceiling on runs observing at
+	// once (#85). The scheduler enforces both durably, per capacity class; the
+	// supervisor only bounds its goroutines by their sum, so it never has to
+	// predict which class a run's next operation is.
+	MaxConcurrentRuns         int
+	MaxConcurrentObservations int
 	// PollInterval is how often a quiet supervisor looks again.
 	PollInterval time.Duration
 	// Discovery is the OPTIONAL automatic issue-intake policy. Nil means
@@ -196,7 +199,8 @@ type Supervisor struct {
 	// the pass that started it. The durable count in AcquireOperation remains
 	// the authority on concurrency; this bounds the goroutines, which is the
 	// same thing MaxConcurrentRuns always bounded, counted over the right
-	// interval.
+	// interval. Its bound is turns(): a turn whose next operation's class is
+	// full is refused by the store and returns.
 	inflight map[string]struct{}
 	// lastTurn is when this process last started each run. It spaces turns -
 	// at most one per poll interval, and one per quietSpacing intervals for a
@@ -274,6 +278,7 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// supervisor can never drive more runs at once than the operator
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
+	d.MaxConcurrentObservations = resolveMaxConcurrentObservations(d.MaxConcurrentObservations)
 	return &Supervisor{
 		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}, lastTurn: map[string]time.Time{}, freed: make(chan struct{}, 1),
 		// A supervisor admits work from the start unless it is the successor
@@ -822,7 +827,7 @@ func (s *Supervisor) admit(active []EngineeringRun, activity map[string]time.Tim
 			delete(s.lastTurn, id)
 		}
 	}
-	room := s.deps.MaxConcurrentRuns - len(s.inflight)
+	room := s.deps.MaxConcurrentRuns + s.deps.MaxConcurrentObservations - len(s.inflight)
 	if room <= 0 || len(active) == 0 {
 		// The cursor does NOT advance on a pass that started nothing. Advancing
 		// past runs it never considered is how a sweep skips one.

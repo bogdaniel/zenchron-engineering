@@ -768,6 +768,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 	if err != nil {
 		return nil, err
 	}
+	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
 		Agent:             agent,
@@ -810,6 +814,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		// the operator's configuration, so advertised and enforced cannot be
 		// different numbers.
 		OperatorMaxConcurrentRuns: ceiling,
+		MaxConcurrentObservations: observations,
 	})
 }
 

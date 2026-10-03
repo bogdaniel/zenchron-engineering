@@ -61,12 +61,6 @@ const (
 	OpGitHubObserve     = "github.observe"
 )
 
-// observationKinds are the operations that only READ external state. They are
-// the only operations a waiting run may perform: a waiting run must still be
-// able to notice that its pull request was merged, but it must not execute,
-// mutate, verify, authorize, or publish anything while it waits.
-var observationKinds = map[string]bool{OpSourceObserve: true, OpGitHubObserve: true}
-
 // publicationKinds are the operations that change protected remote state.
 // Every one of them is gated on a current, authorized #7 decision.
 var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true}
@@ -1540,13 +1534,17 @@ func (s *runState) validate(desired desiredOperation, live Disposition) error {
 	if terminalDisposition(live) {
 		return &OperationRefusedError{desired.kind, "run reached a terminal condition"}
 	}
-	if live == Waiting && !observationKinds[desired.kind] {
+	// Observation-class operations only READ external state, so they are the
+	// only ones a waiting run may perform: it must still notice that its pull
+	// request was merged, but it must not execute, mutate, verify, authorize
+	// or publish anything while it waits.
+	if live == Waiting && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "a waiting run performs observation only"}
 	}
 	if s.projection.SourceIntentChanged && desired.kind == OpContractCompile {
 		return &OperationRefusedError{desired.kind, "the pinned source moved; new intent is never silently compiled"}
 	}
-	if s.projection.ObservedExternalHead != "" && !observationKinds[desired.kind] {
+	if s.projection.ObservedExternalHead != "" && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "an unexpected external head is never overwritten"}
 	}
 	if publicationKinds[desired.kind] && !s.authorizedForPublication() {
@@ -1624,7 +1622,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		// is recorded BY an observation, which then makes the next two passes
 		// re-observe at the new epoch, so counting them would exhaust the
 		// budget before the producer could ever be planned.
-		if !wanted || !observationKinds[desired.kind] {
+		if !wanted || OperationCapacityClass(desired.kind) != CapacityObservation {
 			if fingerprint, failing := state.failureFingerprint(); failing && !progress.Allow(fingerprint) {
 				return r.settle(state, Failed, "no_progress")
 			}

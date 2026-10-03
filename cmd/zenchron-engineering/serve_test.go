@@ -470,8 +470,9 @@ func TestSelectingACLIAgentNeverBuildsTheAPIAdapter(t *testing.T) {
 // The configured ceiling is enforced, not only advertised
 // ---------------------------------------------------------------------------
 
-// concurrencyWorkspace is one operator installation whose ceiling is `ceiling`,
-// holding `held` OTHER runs that each already own a leased operation, plus one
+// concurrencyWorkspace is one operator installation whose ceilings - work and
+// observation (#85) - are both `ceiling`, holding `held` OTHER runs that each
+// already own a leased operation of kind `kind`, plus one
 // run of its own waiting to be driven. It returns the outcome of driving that
 // run through the SAME composition `serve` drives it through, and whether the
 // run actually acquired an operation.
@@ -479,10 +480,10 @@ func TestSelectingACLIAgentNeverBuildsTheAPIAdapter(t *testing.T) {
 // The held leases are the point. A run that acquires while `held` others are
 // leased is a run executing AT THE SAME TIME as they are, which is the claim;
 // counting a number passed between structs would not have been.
-func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, bool) {
+func concurrencyWorkspace(t *testing.T, ceiling, held int, kind string) (runtime.Outcome, bool) {
 	t.Helper()
 	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git", func(config map[string]any) {
-		config["supervisor"] = map[string]any{"max_concurrent_runs": ceiling}
+		config["supervisor"] = map[string]any{"max_concurrent_runs": ceiling, "max_concurrent_observations": ceiling}
 	})
 	t.Chdir(dir)
 	built, err := newComposition(autonomyFlags{Config: configPath, Repo: "zenchron/seeded"}, offlineOverrides())
@@ -500,6 +501,9 @@ func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, boo
 	if advertised != ceiling {
 		t.Fatalf("the operator ceiling was advertised as %d, want %d", advertised, ceiling)
 	}
+	if observations, err := built.maxConcurrentObservations(); err != nil || observations != ceiling {
+		t.Fatalf("the observation ceiling was advertised as %d (%v), want %d", observations, err, ceiling)
+	}
 	now := time.Now().UTC()
 	for i := 0; i < held; i++ {
 		// A held slot belongs to a REAL non-terminal run. The ceiling counts
@@ -511,7 +515,7 @@ func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, boo
 		seedRun(t, built.store, elsewhere, "zenchron/seeded#99", now)
 		if _, created, err := built.store.PutOperation(runtime.RunOperation{
 			SchemaVersion: runtime.SchemaVersion, ID: id, RunID: elsewhere,
-			Kind: "external.work", IdempotencyKey: id, State: runtime.Leased,
+			Kind: kind, IdempotencyKey: id, State: runtime.Leased,
 			Attempt: 1, MaxAttempts: 1, CreatedAt: now,
 			Lease: &runtime.Lease{Owner: "another-owner", HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)},
 		}, 0); err != nil || !created {
@@ -560,20 +564,28 @@ func concurrencyWorkspace(t *testing.T, ceiling, held int) (runtime.Outcome, boo
 // What is asserted is occupancy: under a ceiling of two, a run acquires an
 // operation while another run already holds one, and under a ceiling of one the
 // same run is refused.
+//
+// Since #85 the ceiling is per capacity class. The run under test begins with
+// source.observe, which is observation, so the occupancy cases hold OBSERVATION
+// leases; the last case holds the only WORK slot and proves the run still
+// observes. Work-class occupancy is proven against the store and the
+// scheduler in package runtime.
 func TestTheConfiguredCeilingIsWhatTheSchedulerEnforces(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
 		ceiling  int
 		held     int
+		kind     string
 		acquires bool
 	}{
-		{name: "two runs work at once under a ceiling of two", ceiling: 2, held: 1, acquires: true},
-		{name: "a third is refused under a ceiling of two", ceiling: 2, held: 2, acquires: false},
-		{name: "a ceiling of one still admits the first", ceiling: 1, held: 0, acquires: true},
-		{name: "a ceiling of one serialises the second", ceiling: 1, held: 1, acquires: false},
+		{name: "two runs observe at once under a ceiling of two", ceiling: 2, held: 1, kind: runtime.OpGitHubObserve, acquires: true},
+		{name: "a third is refused under a ceiling of two", ceiling: 2, held: 2, kind: runtime.OpGitHubObserve, acquires: false},
+		{name: "a ceiling of one still admits the first", ceiling: 1, held: 0, kind: runtime.OpGitHubObserve, acquires: true},
+		{name: "a ceiling of one serialises the second", ceiling: 1, held: 1, kind: runtime.OpGitHubObserve, acquires: false},
+		{name: "a full work slot does not stop observation", ceiling: 1, held: 1, kind: runtime.OpExecutionInvoke, acquires: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			outcome, acquired := concurrencyWorkspace(t, testCase.ceiling, testCase.held)
+			outcome, acquired := concurrencyWorkspace(t, testCase.ceiling, testCase.held, testCase.kind)
 			if acquired != testCase.acquires {
 				t.Fatalf("with %d of %d slots already held the run acquired=%v, want %v (settled %s/%s)",
 					testCase.held, testCase.ceiling, acquired, testCase.acquires, outcome.Disposition, outcome.Reason)

@@ -227,14 +227,25 @@ type FleetCounts struct {
 	Cancelled int `json:"cancelled"`
 	Held      int `json:"held"`
 }
+
+// FleetClasses is the capacity-class partition of the nonterminal runs (#85):
+// exactly one of these holds for each, so they sum to Active.
+type FleetClasses struct {
+	Working     int `json:"working"`
+	Observing   int `json:"observing"`
+	Runnable    int `json:"runnable"`
+	Waiting     int `json:"waiting"`
+	Unavailable int `json:"unavailable"`
+}
 type Fleet struct {
-	Capacity          int         `json:"capacity"`
-	Executing         int         `json:"executing"`
-	Active            int         `json:"active"`
-	SupervisorRunning bool        `json:"supervisor_running"`
-	Counts            FleetCounts `json:"counts"`
-	Runs              []Run       `json:"runs,omitempty"`
-	Plans             []Plan      `json:"plans,omitempty"`
+	Capacity          int          `json:"capacity"`
+	Executing         int          `json:"executing"`
+	Active            int          `json:"active"`
+	SupervisorRunning bool         `json:"supervisor_running"`
+	Counts            FleetCounts  `json:"counts"`
+	Classes           FleetClasses `json:"classes"`
+	Runs              []Run        `json:"runs,omitempty"`
+	Plans             []Plan       `json:"plans,omitempty"`
 }
 
 // API owns only a read capability. Observe must issue controller.snapshot only.
@@ -564,7 +575,8 @@ func fleetCounts(runs []Run) FleetCounts {
 // reports ControlEndpoint - a literal local socket path concatenated with its
 // mechanism description (#397 review 5397796709).
 func fleetProjection(f rt.Fleet) Fleet {
-	out := Fleet{Capacity: f.Capacity, Executing: f.Executing, Active: f.Active, SupervisorRunning: f.SupervisorRunning}
+	out := Fleet{Capacity: f.Capacity, Executing: f.Executing, Active: f.Active, SupervisorRunning: f.SupervisorRunning,
+		Classes: FleetClasses{Working: f.Working, Observing: f.Observing, Runnable: f.Runnable, Waiting: f.Waiting, Unavailable: f.Unavailable}}
 	out.Runs = make([]Run, 0, len(f.Runs))
 	for _, run := range f.Runs {
 		out.Runs = append(out.Runs, runProjection(run))

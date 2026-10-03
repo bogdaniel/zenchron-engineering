@@ -154,6 +154,7 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"watch.label",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
+		"watch.max_concurrent_observations",
 		"gc.retention_hours",
 		"operator.id",
 		"operator.require_configured_id",
@@ -191,6 +192,7 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// watch bounds by taking the stricter of the two, so stating one can
 		// never loosen the other.
 		"supervisor.max_concurrent_runs",
+		"supervisor.max_concurrent_observations",
 		"supervisor.poll_interval_seconds",
 	})
 }
@@ -245,14 +247,15 @@ func TestRepositoryLayerReachesOnlyTightenableBounds(t *testing.T) {
 		"budgets.attempt_wall_limit_seconds",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
+		"watch.max_concurrent_observations",
 	})
 	// The pre-decode allowlists must describe that same surface. They are the
 	// enforcement; the struct is only the shape.
 	if !reflect.DeepEqual(sortedKeys(repositoryScope), []string{"budgets", "watch"}) {
 		t.Fatalf("repositoryScope = %v, want exactly [budgets watch]", sortedKeys(repositoryScope))
 	}
-	if !reflect.DeepEqual(sortedKeys(repositoryWatchScope), []string{"max_concurrent_runs", "poll_interval_seconds"}) {
-		t.Fatalf("repositoryWatchScope = %v, want exactly [max_concurrent_runs poll_interval_seconds]", sortedKeys(repositoryWatchScope))
+	if !reflect.DeepEqual(sortedKeys(repositoryWatchScope), []string{"max_concurrent_observations", "max_concurrent_runs", "poll_interval_seconds"}) {
+		t.Fatalf("repositoryWatchScope = %v, want exactly [max_concurrent_observations max_concurrent_runs poll_interval_seconds]", sortedKeys(repositoryWatchScope))
 	}
 }
 
@@ -318,7 +321,7 @@ func TestRepositoryCannotNameAnOperatorDimension(t *testing.T) {
 // to an explicit value, so all six cases below meet the same ceiling.
 func latticeOperator(t *testing.T, dir string) string {
 	t.Helper()
-	return operatorConfigWithWatch(t, dir, `{"repositories": ["owner/name"], "poll_interval_seconds": 120, "max_concurrent_runs": 2}`)
+	return operatorConfigWithWatch(t, dir, `{"repositories": ["owner/name"], "poll_interval_seconds": 120, "max_concurrent_runs": 2, "max_concurrent_observations": 2}`)
 }
 
 func latticeWatchSeconds(t *testing.T, config Config) int {
@@ -337,6 +340,15 @@ func latticeWatchRuns(t *testing.T, config Config) int {
 		t.Fatal(err)
 	}
 	return settings.MaxConcurrentRuns
+}
+
+func latticeWatchObservations(t *testing.T, config Config) int {
+	t.Helper()
+	settings, err := config.WatchSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings.MaxConcurrentObservations
 }
 
 // TestTightenLatticePerDimension is the §16 table. Every dimension a
@@ -397,6 +409,12 @@ func TestTightenLatticePerDimension(t *testing.T) {
 			`{"watch": {"max_concurrent_runs": 3}}`,
 			`{"watch": {"max_concurrent_runs": 0}}`,
 			latticeWatchRuns,
+		},
+		{
+			"watch.max_concurrent_observations", `{"watch": {"max_concurrent_observations": 1}}`, 1,
+			`{"watch": {"max_concurrent_observations": 3}}`,
+			`{"watch": {"max_concurrent_observations": 0}}`,
+			latticeWatchObservations,
 		},
 	} {
 		// Tighter wins, and is the value the effective configuration reports.
