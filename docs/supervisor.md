@@ -444,19 +444,54 @@ and not merely across goroutines. A repository may tighten it and can never
 raise it; where both `supervisor.max_concurrent_runs` and the older
 `watch.max_concurrent_runs` are stated, the stricter value wins.
 
-What the ceiling bounds is **whole-run reconciliation**, not specifically the
-expensive part of it. A run being reconciled holds a slot whether it is invoking
-a coding agent or performing a cheap forge observation, so the bound is coarser
-than "N concurrent provider invocations". A slot is held for as long as the run
+### Capacity classes
+
+The ceiling is per **capacity class** (#85), decided transactionally by the
+scheduler's durable acquisition:
+
+| class | operations | ceiling |
+| --- | --- | --- |
+| work | every kind except the two below, including any kind added later | `max_concurrent_runs` (default 1) |
+| observation | `source.observe`, `github.observe` | `max_concurrent_observations` (default 2) |
+
+Observation reads the forge and journals what it saw; it invokes no provider or
+verifier and mutates no candidate, remote or forge state. So with
+`max_concurrent_runs = 1` and one run inside a long provider call, a run parked
+on review still observes, discovers the review, and becomes **runnable** - and
+takes the work slot only when it is released. A run holds at most one active
+operation at a time, and the same durable acquisition enforces that too: no
+process can observe a run beside the work another process is doing on it, and
+a pass that finds a run another live driver is operating writes nothing to it.
+That holds for every `Reconcile` caller - supervisor, watch, or an operator
+command: when another owner holds one of the run's operations and may not be
+taken over (it is alive, or its lease has not expired), the pass returns the
+run unchanged with the reason `driven_elsewhere`, which is never journalled.
+
+The supervisor starts at most `max_concurrent_runs + max_concurrent_observations`
+turns at once. That bounds goroutines only: a turn whose next operation's class
+is full is refused by the store and returns.
+
+`status` shows the fleet as five mutually exclusive counts over nonterminal
+runs: **working** (holds a work operation), **observing** (holds an observation),
+**runnable** (holds nothing and has a pending work operation the scheduler could
+lease), **waiting** (holds nothing and is not runnable) and **unavailable** (its
+journal could not be replayed). They are read from durable operation rows, so
+they are the same after a restart. Runnable uses the scheduler's own
+eligibility test; the one approximation is liveness, which a read never probes,
+so an abandoned lease counts as working or observing until a scheduler
+reclaims it.
+
+What the work ceiling bounds is **reconciliation work**, not specifically the
+expensive part of it: assurance, commits and publication are work too, so the
+bound is coarser than "N concurrent provider invocations". A slot is held for as long as the run
 is being driven, which is usually several polling intervals: a tick is a
 scheduling PASS that starts work and returns, so a run whose provider takes half
 an hour keeps its slot across every pass in that half hour, and the remaining
 slots stay available to anything an operator submits meanwhile. The alternative
 - a pass that waits for everything it started - made admission as slow as the
-slowest run and is what #202 records. If a deployment ever needs the finer bound - N expensive
-operations rather than N runs - that is a per-operation-kind concurrency class
-in the scheduler, and it is deliberately not built on speculation about which
-kinds would need one.
+slowest run and is what #202 records. If a deployment ever needs a finer bound - N expensive
+operations rather than N runs - that is one more capacity class, not a
+scheduler redesign.
 
 ## Shared observation
 

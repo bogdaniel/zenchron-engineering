@@ -295,6 +295,15 @@ parallel work must raise it. The polling floor is 30 seconds and it is a floor,
 not a clamp: a faster interval is refused rather than silently replaced. The
 default interval is 60 seconds.
 
+`supervisor.max_concurrent_observations` and `watch.max_concurrent_observations`
+bound how many runs may OBSERVE at once (`source.observe`, `github.observe`),
+with exactly the same rules: the stricter stated value wins, zero means
+unstated, a negative operator value is refused, and the default is 2. The two
+ceilings are separate capacity classes (#85): an observation never occupies a
+run slot, so a run waiting on review still notices its review while another
+run's long work holds every run slot. Every other operation kind, including
+any kind added later, is work and counts against `max_concurrent_runs`.
+
 ### Discovery
 
 `watch.repositories` is the complete set the runtime may observe. There is no
@@ -346,6 +355,7 @@ May name:
 | `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
 | `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or the operator `wall_limit_seconds` when the operator states none) |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
+| `watch.max_concurrent_observations` | at least 1, at or below the effective operator observation ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 
 May not name, and is refused with `repository configuration may not set "X": it
