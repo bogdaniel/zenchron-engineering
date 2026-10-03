@@ -14,12 +14,19 @@ package runtime
 // supervisor owns them.
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"hash"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -281,7 +288,17 @@ func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 // answered, because a fleet view whose whole value is "show me everything" must
 // not be lost to one bad row.
 func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time) (Fleet, error) {
+	return fleetStatus(store, stateDir, capacity, now, nil)
+}
+
+// fleetStatus is FleetStatus with an optional summary cache, which a
+// long-lived reader passes and a one-shot CLI does not.
+func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time, cache *summaryCache) (Fleet, error) {
 	runs, err := store.Runs()
+	if err != nil {
+		return Fleet{}, err
+	}
+	journals, err := runJournalDigests(store, cache)
 	if err != nil {
 		return Fleet{}, err
 	}
@@ -292,7 +309,7 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	}
 	fleet.Plans = summarizePlans(store)
 	for _, run := range runs {
-		summary := summarizeRun(store, stateDir, run, now)
+		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
 		}
@@ -378,6 +395,118 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 		}
 	}
 	summary.FeedbackPending = len(feedback.Pending(projection.Head()))
+	return summary
+}
+
+// summaryCache memoizes the replayed part of each RunSummary for a long-lived
+// reader such as the control plane, which re-reads the whole fleet every few
+// seconds. Decoding, canonicalizing and hash-verifying every journal on every
+// read cost ~8ms a run - about a second at 93 runs.
+//
+// The key is the run row plus a SHA-256 over exactly the event bytes replay
+// reads: the same columns, the same WHERE, the same order as Events. Replay is
+// a pure function of those inputs, so a hit returns what replaying would
+// return - including for a journal edited in place, which changes the bytes,
+// misses, replays, and is refused by the chain check exactly as an uncached
+// read would refuse it (#428 review). What depends on the clock or on the
+// process - elapsed, executing right now, workspace - is recomputed on every
+// read, and failed summaries are never cached.
+type summaryCache struct {
+	mu      sync.Mutex
+	entries map[string]cachedSummary
+}
+
+type cachedSummary struct {
+	run     EngineeringRun
+	journal [sha256.Size]byte
+	summary RunSummary
+}
+
+// runJournalDigests hashes, per run, every column of every event row replay
+// would read, or nothing when there is no cache to key. Reading the raw bytes
+// is a fraction of replaying them: no JSON decoding, no canonical encoding.
+func runJournalDigests(store *SQLiteOperationStore, cache *summaryCache) (map[string][sha256.Size]byte, error) {
+	if cache == nil {
+		return nil, nil
+	}
+	rows, err := store.db.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE stream_kind = ? ORDER BY run_id ASC, sequence ASC`, streamRun)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	raw := make([]sql.RawBytes, len(columns))
+	dest := make([]any, len(columns))
+	for i := range raw {
+		dest[i] = &raw[i]
+	}
+	digests := map[string][sha256.Size]byte{}
+	var current string
+	var h hash.Hash
+	flush := func() {
+		if h != nil {
+			var sum [sha256.Size]byte
+			copy(sum[:], h.Sum(nil))
+			digests[current] = sum
+		}
+	}
+	var length [8]byte
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if runID := string(raw[1]); h == nil || runID != current {
+			flush()
+			current, h = runID, sha256.New()
+		}
+		for _, column := range raw {
+			// Length-prefixed, so no two different rows hash alike by shifting
+			// bytes between adjacent columns.
+			binary.BigEndian.PutUint64(length[:], uint64(len(column)))
+			h.Write(length[:])
+			h.Write(column)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return digests, nil
+}
+
+func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, run EngineeringRun, journal [sha256.Size]byte, now time.Time) RunSummary {
+	if c == nil {
+		return summarizeRun(store, stateDir, run, now)
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[run.ID]
+	c.mu.Unlock()
+	if ok && entry.journal == journal && reflect.DeepEqual(entry.run, run) {
+		summary := entry.summary
+		summary.Attempts = maps.Clone(summary.Attempts)
+		summary.Elapsed = now.Sub(run.CreatedAt)
+		summary.Executing = executingNow(store, run.ID)
+		summary.Workspace = ""
+		if dir := candidateDir(stateDir, run.ID); dirExists(dir) {
+			summary.Workspace = dir
+		}
+		return summary
+	}
+	// journal was digested before this replay, so a journal that changes in
+	// between is cached under the older digest and simply replayed again next
+	// time: the cache can be conservative, never stale.
+	summary := summarizeRun(store, stateDir, run, now)
+	if summary.Error == "" {
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]cachedSummary{}
+		}
+		c.entries[run.ID] = cachedSummary{run: run, journal: journal, summary: summary}
+		c.mu.Unlock()
+	}
 	return summary
 }
 
