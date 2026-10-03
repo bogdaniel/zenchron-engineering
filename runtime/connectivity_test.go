@@ -2,11 +2,14 @@ package runtime
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,16 +25,16 @@ func TestConnectivityClassification(t *testing.T) {
 		t.Fatal("fixture is not a typed network timeout")
 	}
 	for _, err := range []error{&net.DNSError{IsTemporary: true}, &net.DNSError{IsTimeout: true}, syscall.ETIMEDOUT, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}, fmt.Errorf("request: %w", syscall.ENETUNREACH), syscall.ECONNRESET} {
-		if !failed(err).transient {
+		if !transientConnectivity(err) {
 			t.Fatalf("not transient: %v", err)
 		}
 	}
 	for _, err := range []error{&net.DNSError{IsNotFound: true}, &net.DNSError{IsNotFound: true, IsTemporary: true}, x509.UnknownAuthorityError{}, errors.New("proxy: invalid configuration"), errors.New("unknown"), errors.New("ENOTFOUND in test output"), syscall.EACCES, context.DeadlineExceeded, context.Canceled} {
-		if failed(err).transient {
+		if transientConnectivity(err) {
 			t.Fatalf("guessed transient: %v", err)
 		}
 	}
-	if got := classifyAgentFailure(claudeSpec, "api error: can't reach the api server — check your internet or dns (enotfound)"); got != FailureProviderUnavailable {
+	if got := classifyAgentFailure(claudeSpec, "api error: can't reach the api server — check your internet or dns (enotfound)"); got != FailureConnectivity {
 		t.Fatalf("incident classified %s", got)
 	}
 }
@@ -146,16 +149,19 @@ func TestConnectivitySourceObservationKeepsFiniteAttempts(t *testing.T) {
 	if stored.Attempt != 1 || !stored.RetryNotBefore.Equal(failedOp.RetryNotBefore) {
 		t.Fatalf("restart spent authority: %+v", stored)
 	}
+	var last Outcome
 	for attempt := 2; attempt <= failedOp.MaxAttempts; attempt++ {
 		f.clock.at = stored.RetryNotBefore
-		f.reconcile(runID)
+		last = f.reconcile(runID)
 		stored, _, _, _ = f.store.Operation(failedOp.ID)
 		if stored.Attempt != attempt {
 			t.Fatalf("attempt %d: %+v", attempt, stored)
 		}
 	}
-	if outcome := f.reconcile(runID); outcome.Disposition != Failed {
-		t.Fatalf("exhausted authority did not stop: %+v", outcome)
+	// The last attempt has no successor, so it neither backs off nor reports
+	// a connectivity wait: it stops truthfully in the same pass.
+	if last.Disposition != Failed || last.Reason != OpSourceObserve+attemptsExhaustedSuffix || !stored.RetryNotBefore.IsZero() {
+		t.Fatalf("exhausted authority did not stop: %+v %+v", last, stored)
 	}
 }
 
@@ -194,7 +200,7 @@ func TestConnectivityJournalStoreGapIsExternalWait(t *testing.T) {
 	observed := clock.at
 	retryAt := observed.Add(connectivityBackoff(op.Attempt))
 	after := op
-	after.State, after.RetryNotBefore = OperationFailed, retryAt
+	after.State, after.RetryNotBefore, after.Result = OperationFailed, retryAt, json.RawMessage(`{"failure_class":"connectivity_unavailable"}`)
 	raw, err := json.Marshal(after)
 	if err != nil {
 		t.Fatal(err)
@@ -229,8 +235,21 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 	if len(pending) != 1 {
 		t.Fatalf("missing obligation: %+v", pending)
 	}
+	publication := func(s *runState) map[string]RunOperation {
+		ops := map[string]RunOperation{}
+		for id, op := range s.snapshot.Operations {
+			if op.Kind == OpCandidatePush || op.Kind == OpPullRequestCreate || op.Kind == OpPullRequestUpdate {
+				ops[id] = op
+			}
+		}
+		return ops
+	}
+	admitted := f.state(runID)
+	if len(quarantinedEvents(t, admitted.events)) != 0 {
+		t.Fatal("quarantine before the outage")
+	}
 	f.provider.mutate = refusedWrite().mutate
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderUnavailable}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureConnectivity}}
 	if outcome := f.reconcile(runID); outcome.Disposition != Waiting || outcome.Reason != "connectivity_backoff" {
 		t.Fatalf("outage: %+v", outcome)
 	}
@@ -257,8 +276,11 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 		t.Fatal("refusal changed candidate or discharged feedback")
 	}
 	quarantine := quarantinedEvents(t, state.events)
-	if len(quarantine) != 1 || quarantine[0].FailureClass != FailureProviderUnavailable || !quarantine[0].Restored || quarantine[0].Attempt != 1 {
+	if len(quarantine) != 1 || quarantine[0].FailureClass != FailureConnectivity || !quarantine[0].Restored || quarantine[0].Attempt != 1 {
 		t.Fatalf("quarantine: %+v", quarantine)
+	}
+	if !reflect.DeepEqual(publication(state), publication(admitted)) {
+		t.Fatal("attempt 1 changed publication operations")
 	}
 	assertA := func() {
 		t.Helper()
@@ -307,6 +329,9 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 			t.Fatalf("transition while waiting: %s", kind)
 		}
 	}
+	if !reflect.DeepEqual(publication(state), publication(admitted)) || len(quarantinedEvents(t, state.events)) != 1 {
+		t.Fatal("wait changed publication or quarantine")
+	}
 	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
 	f.provider.mutate = func(dir string) error {
 		assertA()
@@ -322,8 +347,23 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 	if err != nil || recovered.State != Succeeded || recovered.Attempt != 2 || recovered.MaxAttempts != waiting.MaxAttempts || !recovered.RetryNotBefore.IsZero() {
 		t.Fatalf("recovery: %+v %v", recovered, err)
 	}
-	if len(f.provider.requests) != calls+1 || !reflect.DeepEqual(f.provider.requests[calls].Feedback, f.provider.requests[calls-1].Feedback) {
+	if len(f.provider.requests) != calls+1 || len(f.provider.requests[calls].Feedback) == 0 || !reflect.DeepEqual(f.provider.requests[calls].Feedback, f.provider.requests[calls-1].Feedback) {
 		t.Fatal("feedback not redelivered to same retry")
+	}
+	// Attempt 1 recorded its delivery; the redelivered feedback is consumed
+	// exactly once more, by B's attempt, under the same operation.
+	var consumed []FeedbackConsumedPayload
+	for _, e := range f.state(runID).events[len(waitEvents):] {
+		if e.Type == EventFeedbackConsumed {
+			var p FeedbackConsumedPayload
+			if err := decodeJSON(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			consumed = append(consumed, p)
+		}
+	}
+	if len(consumed) != 1 || consumed[0].OperationID != waiting.ID || consumed[0].Attempt != 2 || len(consumed[0].Keys) != 1 || consumed[0].Keys[0] != pending[0].Key {
+		t.Fatalf("feedback consumption after B: %+v", consumed)
 	}
 	assertA()
 	if !committedTreeHas(t, f, runID, "recovered.go") || committedTreeHas(t, f, runID, "refused.go") {
@@ -337,5 +377,142 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 	var result mutationResult
 	if err := decodeJSON(recovered.Result, &result); err != nil || result.PathCount != 1 {
 		t.Fatalf("attribution: %+v %v", result, err)
+	}
+}
+
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The App token exchange is a transport boundary too: only a typed
+// connectivity failure there acquires backoff; TLS, proxy configuration and
+// the caller's own cancellation fail closed.
+func TestConnectivityGitHubAppTransportFailsClosed(t *testing.T) {
+	path, _ := appKeyFile(t, 0o600)
+	for name, tc := range map[string]struct {
+		err       error
+		cancel    bool
+		transient bool
+	}{
+		"refused": {err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, transient: true},
+		"tls":     {err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}},
+		"proxy":   {err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("invalid proxy configuration")}},
+		"cancel":  {err: context.Canceled, cancel: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			credential := &GitHubAppCredential{AppID: 11, InstallationID: 22, PrivateKeyPath: path,
+				HTTP: doerFunc(func(r *http.Request) (*http.Response, error) {
+					return nil, &url.Error{Op: r.Method, URL: r.URL.String(), Err: tc.err}
+				})}
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			}
+			defer cancel()
+			_, err := credential.AppIdentity(ctx)
+			var forge *GitHubTransientError
+			if err == nil || errors.As(err, &forge) != tc.transient || transientConnectivity(err) != tc.transient {
+				t.Fatalf("App transport %s: transient=%v err=%v", name, transientConnectivity(err), err)
+			}
+		})
+	}
+}
+
+// The incident's provider surface: the Claude CLI reports the outage as the
+// whole text of an is_error stream-json result, not on stderr.
+func TestConnectivityClaudeIncidentResultEnvelope(t *testing.T) {
+	incident := "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"
+	t.Run("process exit 1", func(t *testing.T) {
+		// A quoted heredoc writes the exact line: no shell quoting to escape.
+		provider, request := claudeProcess(t, "cat <<'EOF'\n"+claudeResultWithAnswer(true, incident)+"\nEOF\nexit 1\n")
+		result, _ := provider.Execute(context.Background(), request)
+		if result.Failure == nil || result.Failure.Classification != FailureConnectivity || result.Invocation == nil || !result.Invocation.FinalResultObserved {
+			t.Fatalf("incident failure = %#v %#v", result.Failure, result.Invocation)
+		}
+	})
+	for name, tc := range map[string]struct {
+		stdout string
+		want   FailureClass
+	}{
+		"zero exit":         {claudeResultWithAnswer(true, incident), FailureConnectivity},
+		"quoted in prose":   {claudeResultWithAnswer(true, "I saw: "+incident), FailureUnknown},
+		"model text":        {claudeAssistant("m", "", `{"type":"text","text":"`+incident+`"}`) + "\n" + claudeResult(true, "success", 0), FailureUnknown},
+		"not an error":      {claudeResultWithAnswer(false, incident), ""},
+		"generic ENOTFOUND": {claudeResultWithAnswer(true, "ENOTFOUND"), FailureUnknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+			fake.outputs = []CommandOutput{{Stdout: []byte(tc.stdout + "\n")}}
+			result, err := provider.Execute(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got FailureClass
+			if result.Failure != nil {
+				got = result.Failure.Classification
+			}
+			if got != tc.want {
+				t.Fatalf("classified %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// RetryNotBefore is not the connectivity flag (#87): a wait of another class
+// that carries one keeps its own reason and its refund.
+func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+		t.Fatalf("quota: %+v", out)
+	}
+	var quota RunOperation
+	ops, err := f.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Kind == OpExecutionInvoke {
+			quota = op
+		}
+	}
+	stored, version, _, err := f.store.Operation(quota.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.RetryNotBefore = f.clock.Now().Add(time.Hour)
+	if _, _, err := f.store.PutOperation(stored, version); err != nil {
+		t.Fatal(err)
+	}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+		t.Fatalf("quota wait relabelled: %+v", out)
+	}
+	after, _, _, _ := f.store.Operation(quota.ID)
+	if after.Attempt != stored.Attempt {
+		t.Fatalf("refund lost: %d -> %d", stored.Attempt, after.Attempt)
+	}
+	journalled := f.state(runID).snapshot.Operations[quota.ID]
+	journalled.RetryNotBefore = stored.RetryNotBefore
+	raw, err := json.Marshal(journalled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, open, _ := foldExternalWait([]EngineeringEvent{{Type: EventOperationAfter, OperationID: quota.ID, OccurredAt: f.clock.Now(), Payload: raw}}); !open.IsZero() {
+		t.Fatal("a quota RetryNotBefore opened a connectivity wait")
+	}
+}
+
+// omitzero: an operation with no deadline serializes none, and a legacy
+// zero-valued record still replays as none.
+func TestConnectivityRetryNotBeforeOmittedWhenZero(t *testing.T) {
+	raw, err := json.Marshal(RunOperation{ID: "op"})
+	if err != nil || strings.Contains(string(raw), "retry_not_before") {
+		t.Fatalf("zero deadline serialized: %s %v", raw, err)
+	}
+	var legacy RunOperation
+	if err := json.Unmarshal([]byte(`{"id":"op","retry_not_before":"0001-01-01T00:00:00Z"}`), &legacy); err != nil || !legacy.RetryNotBefore.IsZero() {
+		t.Fatalf("legacy replay: %+v %v", legacy, err)
 	}
 }

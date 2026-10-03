@@ -381,7 +381,7 @@ type RunPlanBinding struct {
 
 type RunOperation struct {
 	// RetryNotBefore is journalled with the failed attempt and survives restart.
-	RetryNotBefore time.Time      `json:"retry_not_before,omitempty"`
+	RetryNotBefore time.Time      `json:"retry_not_before,omitzero"`
 	SchemaVersion  string         `json:"schema_version"`
 	ID             string         `json:"id"`
 	RunID          string         `json:"run_id"`

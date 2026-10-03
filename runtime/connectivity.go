@@ -23,6 +23,18 @@ func transientConnectivity(err error) bool {
 	return errors.As(err, &forge)
 }
 
+// ReasonConnectivityBackoff is the run's external wait while a connectivity
+// failure's RetryNotBefore has not passed.
+const ReasonConnectivityBackoff = "connectivity_backoff"
+
+// connectivityWait is the ONE decision that a failed attempt waits out a
+// durable backoff. It reads the recorded class, never RetryNotBefore, so a
+// future wait of another class (#87) that sets RetryNotBefore keeps its own
+// reason and refund.
+func connectivityWait(op RunOperation) bool {
+	return op.State == OperationFailed && failureClassOf(op.Result) == FailureConnectivity
+}
+
 func connectivityBackoff(attempt int) time.Duration {
 	delay := 30 * time.Second
 	for n := 1; n < attempt && delay < 5*time.Minute; n++ {

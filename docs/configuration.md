@@ -274,13 +274,20 @@ heartbeat, or a clock tick. A CLI
 that is legitimately thinking in silence is why the bound is a window of minutes
 rather than an immediate failure, and why reaching it is a bounded retry rather
 than a terminal failure. An invocation the policy terminates is recorded as
-`provider_no_progress`; a provider that emits an explicit connectivity
-diagnostic is `provider_unavailable` and waits instead, without spending the
-active-work budget. Silence is never classified as offline, and neither is
+`provider_no_progress`. A provider that names endpoint capacity (overloaded,
+502/503/504) is `provider_unavailable` and waits without spending the attempt or
+the active-work budget. One that names transport loss (DNS, refused, reset,
+unreachable) is `connectivity_unavailable`: the attempt is spent and the retry
+waits out a durable bounded backoff (`connectivity_backoff`, external wait; 30 s
+doubling to 5 min; none after the last attempt). With the default
+`max_execution_attempts` of 2 an execution waits once for 30 s before stopping;
+an observation (3 attempts) waits 30 s and then 60 s. Silence is never classified as offline, and neither is
 anything a worker merely wrote: a typed provider condition is read only from the
 bounded tail of the CLI's own diagnostic stream, or - for Claude Code - from the
 typed fields of its stream-json events (`api_retry.error`, `error_status`,
-`no_response`, the final `result`'s `is_error` and `subtype`), never from the
+`no_response`, the final `result`'s `is_error` and `subtype`, and an
+`is_error` result whose whole text is the CLI's own "Can't reach the API
+server" envelope), never from the
 session output a model and its tools control. A retry condition counts only if
 no accepted progress followed it.
 

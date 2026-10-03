@@ -536,7 +536,7 @@ func TestSessionOutputCannotCreateAnExternalProviderWait(t *testing.T) {
 				t.Fatal("a failed invocation recorded no failure")
 			}
 			switch result.Failure.Classification {
-			case FailureProviderUnavailable, FailureProviderQuota, FailureProviderRateLimited, FailureProviderAccountUnavailable:
+			case FailureProviderUnavailable, FailureConnectivity, FailureProviderQuota, FailureProviderRateLimited, FailureProviderAccountUnavailable:
 				t.Fatalf("session output asserted the provider condition %q; a transcript is evidence, not an assertion",
 					result.Failure.Classification)
 			}
@@ -574,11 +574,11 @@ func TestAGenuineTransportDiagnosticStillReachesABoundedWait(t *testing.T) {
 	if err == nil {
 		t.Fatal("a non-zero exit returned no error")
 	}
-	if result.Failure == nil || result.Failure.Classification != FailureProviderUnavailable {
-		t.Fatalf("failure = %#v, want %q from the provider's own terminal diagnostic", result.Failure, FailureProviderUnavailable)
+	if result.Failure == nil || result.Failure.Classification != FailureConnectivity {
+		t.Fatalf("failure = %#v, want %q from the provider's own terminal diagnostic", result.Failure, FailureConnectivity)
 	}
-	if RouteFailure(result.Failure.Classification) != RouteWait {
-		t.Fatal("a genuine transport failure no longer waits")
+	if RouteFailure(result.Failure.Classification) != RouteRetry {
+		t.Fatal("a genuine transport failure no longer retries under backoff")
 	}
 }
 
@@ -607,7 +607,7 @@ func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
 		route      FailureRoute
 	}{
 		"quota then silence":             {AgentKindGeminiCLI, "Error: RESOURCE_EXHAUSTED: quota exceeded", FailureProviderQuota, RouteWait},
-		"unavailable then silence":       {AgentKindGeminiCLI, "Error: getaddrinfo ENOTFOUND generativelanguage.googleapis.com", FailureProviderUnavailable, RouteWait},
+		"unavailable then silence":       {AgentKindGeminiCLI, "Error: getaddrinfo ENOTFOUND generativelanguage.googleapis.com", FailureConnectivity, RouteRetry},
 		"codex quota then silence":       {AgentKindCodexCLI, "ERROR: You've hit your usage limit.", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
 		"codex unavailable then silence": {AgentKindCodexCLI, "ERROR: error sending request: dns error", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
 		"codex account then silence":     {AgentKindCodexCLI, "ERROR: your refresh token was revoked", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},

@@ -455,7 +455,7 @@ const ReasonGoalStateReached = "goal_state_reached"
 const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
 
 var externalWaitReasons = map[string]bool{
-	"connectivity_backoff": true,
+	ReasonConnectivityBackoff: true,
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
@@ -590,7 +590,7 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 			// gap must preserve external-wait accounting as well as the deadline.
 			if waitingSince.IsZero() {
 				var op RunOperation
-				if decodeJSON(event.Payload, &op) == nil && op.State == OperationFailed && !op.RetryNotBefore.IsZero() {
+				if decodeJSON(event.Payload, &op) == nil && connectivityWait(op) && !op.RetryNotBefore.IsZero() {
 					waitingSince = event.OccurredAt
 				}
 			}
@@ -1076,7 +1076,7 @@ func observationBinding(s *runState, kind string) string {
 			latest = &copy
 		}
 	}
-	if latest != nil && latest.State == OperationFailed && !latest.RetryNotBefore.IsZero() {
+	if latest != nil && connectivityWait(*latest) {
 		return bindingOf(*latest)
 	}
 	return s.epochKey()
@@ -1756,7 +1756,11 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	if r.deps.Clock.Now().Before(planned.RetryNotBefore) {
-		outcome, err := r.settle(state, Waiting, "connectivity_backoff")
+		reason := ReasonConnectivityBackoff
+		if last := state.snapshot.Operations[planned.ID]; !connectivityWait(last) {
+			reason = waitReason(failureClassOf(last.Result))
+		}
+		outcome, err := r.settle(state, Waiting, reason)
 		return false, outcome, err
 	}
 	leased, err := r.scheduler.Next(state.run.ID)
@@ -1871,7 +1875,9 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
-	if produced.transient || failureClassOf(finished.Result) == FailureProviderUnavailable {
+	// No backoff once no attempt remains: the next pass stops truthfully.
+	backoff := connectivityWait(finished) && started.Attempt < started.MaxAttempts
+	if backoff {
 		finished.RetryNotBefore = r.deps.Clock.Now().Add(connectivityBackoff(started.Attempt))
 	}
 	// The journal is written first and is the authority for reconciliation.
@@ -1932,8 +1938,8 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
 		return false, outcome, err
 	}
-	if !finished.RetryNotBefore.IsZero() {
-		outcome, err := r.settle(state, Waiting, "connectivity_backoff")
+	if backoff {
+		outcome, err := r.settle(state, Waiting, ReasonConnectivityBackoff)
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {

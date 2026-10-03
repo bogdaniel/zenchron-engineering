@@ -52,13 +52,19 @@ type effect struct {
 	// stop ended the attempt: no provider was started, or the provider's
 	// executor committed the stop as the owner of its termination (#213).
 	interrupted bool
-	transient   bool
 }
 
+// failed records a typed transport error as FailureConnectivity, so the
+// durable result itself carries why the retry waits (#380).
 func failed(err error) effect {
-	return effect{state: OperationFailed, transient: transientConnectivity(err), result: struct {
-		Error string `json:"error"`
-	}{boundedDetail(err.Error())}}
+	var class FailureClass
+	if transientConnectivity(err) {
+		class = FailureConnectivity
+	}
+	return effect{state: OperationFailed, result: struct {
+		Error        string       `json:"error"`
+		FailureClass FailureClass `json:"failure_class,omitempty"`
+	}{boundedDetail(err.Error()), class}}
 }
 
 func boundedDetail(detail string) string { return boundedField(detail) }

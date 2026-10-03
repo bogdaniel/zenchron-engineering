@@ -88,17 +88,22 @@ var sharedAgentSignals = []diagnosticSignal{
 //
 // Silence is NOT here, and that is the boundary #238 draws: a host with no
 // network that says nothing is FailureProviderNoProgress, and only a provider
-// that NAMES its transport failure reaches FailureProviderUnavailable.
+// that NAMES its transport failure reaches FailureConnectivity.
 var nodeTransportSignals = []diagnosticSignal{
-	{"getaddrinfo enotfound", FailureProviderUnavailable},
-	{"can't reach the api server — check your internet or dns (enotfound)", FailureProviderUnavailable},
-	{"getaddrinfo eai_again", FailureProviderUnavailable},
-	{"econnrefused", FailureProviderUnavailable},
-	{"econnreset", FailureProviderUnavailable},
-	{"enetunreach", FailureProviderUnavailable},
-	{"ehostunreach", FailureProviderUnavailable},
-	{"enetdown", FailureProviderUnavailable},
+	{"getaddrinfo enotfound", FailureConnectivity},
+	{claudeUnreachableEnvelope, FailureConnectivity},
+	{"getaddrinfo eai_again", FailureConnectivity},
+	{"econnrefused", FailureConnectivity},
+	{"econnreset", FailureConnectivity},
+	{"enetunreach", FailureConnectivity},
+	{"ehostunreach", FailureConnectivity},
+	{"enetdown", FailureConnectivity},
 }
+
+// claudeUnreachableEnvelope is the Claude CLI's own message for the #380
+// incident, matched exactly: on stderr through nodeTransportSignals, and as the
+// whole text of an is_error final result (claude_stream.go).
+const claudeUnreachableEnvelope = "can't reach the api server — check your internet or dns (enotfound)"
 
 // codexSpec drives the installed Codex CLI.
 //
@@ -137,11 +142,11 @@ var codexSpec = cliAgentSpec{
 		// transport that never completed as "error sending request". Both are
 		// statements that no exchange happened, which is what separates them
 		// from a provider that answered badly.
-		{"dns error", FailureProviderUnavailable},
-		{"error sending request", FailureProviderUnavailable},
-		{"connection refused", FailureProviderUnavailable},
-		{"connection reset by peer", FailureProviderUnavailable},
-		{"network is unreachable", FailureProviderUnavailable},
+		{"dns error", FailureConnectivity},
+		{"error sending request", FailureConnectivity},
+		{"connection refused", FailureConnectivity},
+		{"connection reset by peer", FailureConnectivity},
+		{"network is unreachable", FailureConnectivity},
 	},
 	// CODEX'S RECONNECT LOOP IS NOT PROGRESS (#314). Recorded from the #317
 	// attempt that spent its wall envelope reconnecting: these lines, together

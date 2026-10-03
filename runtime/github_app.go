@@ -325,9 +325,13 @@ func (c *GitHubAppCredential) do(ctx context.Context, method, path, assertion st
 	request.Header.Set("Authorization", "Bearer "+assertion)
 	response, err := c.HTTP.Do(request)
 	if err != nil {
-		// A transport failure is transient by nature, and the error is not
-		// quoted: it is built from a request that carries the assertion.
-		return 0, nil, nil, &GitHubTransientError{Detail: "the GitHub App endpoint could not be reached"}
+		// Only a typed connectivity failure is transient (#380); TLS, proxy
+		// configuration and the caller's own cancellation fail closed. The
+		// error is not quoted: it is built from a request carrying the assertion.
+		if transientConnectivity(err) {
+			return 0, nil, nil, &GitHubTransientError{Detail: "the GitHub App endpoint could not be reached"}
+		}
+		return 0, nil, nil, &GitHubAPIError{Detail: "the GitHub App request failed in transport"}
 	}
 	defer response.Body.Close()
 	raw, err := readBoundedBody(response)
