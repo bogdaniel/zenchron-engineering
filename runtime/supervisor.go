@@ -198,6 +198,16 @@ type Supervisor struct {
 	// same thing MaxConcurrentRuns always bounded, counted over the right
 	// interval.
 	inflight map[string]struct{}
+	// quiet remembers, per run, the journal cursor it had when this process
+	// last drove it. A run still at that cursor made no progress and is
+	// QUIET: it yields to runs that are moving and is retried on a doubling
+	// backoff (#401). This is scheduling order only - it decides which run
+	// gets a turn first, never whether a run may act - and it is in memory,
+	// so a restart forgets it and every run is reconsidered once.
+	quiet map[string]quietRun
+	// quietCursor rotates the quiet tier exactly as cursor rotates the
+	// moving one, so quiet runs are served fairly among themselves.
+	quietCursor int
 	// landed is the outcomes of runs that finished driving and have not been
 	// reported yet, with the feedback observations that came with them. A run
 	// whose provider spans several passes is reported by the pass it finished
@@ -259,7 +269,7 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
 	return &Supervisor{
-		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{},
+		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}, quiet: map[string]quietRun{},
 		// A supervisor admits work from the start unless it is the successor
 		// half of a handoff, which holds the scheduler while it proves itself
 		// and is opened by EnableWorkAdmission once the durable record says it
@@ -676,7 +686,7 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	// deterministic within a pass; only the entry point moves.
 	sort.SliceStable(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
 
-	for _, run := range s.admit(active) {
+	for _, run := range s.admit(active, now) {
 		s.driving.Add(1)
 		go func(run EngineeringRun) {
 			defer s.driving.Done()
@@ -697,6 +707,18 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	return report, nil
 }
 
+// quietRun is what admit remembers about one run between passes.
+type quietRun struct {
+	cursor Cursor
+	streak int
+	next   time.Time
+}
+
+// maxQuietBackoff caps a quiet run's retry interval at 8 poll intervals:
+// long enough that a fleet of parked runs stops diluting every pass, short
+// enough that a review left on a parked pull request is still noticed.
+const maxQuietBackoff = 3
+
 // admit decides which runs this pass starts, and reserves their slots. It is
 // the whole fairness mechanism: no priority, no weighting, no starvation.
 //
@@ -705,43 +727,79 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 // would admit past the ceiling now that driving outlives a pass. What is left
 // is the room the ceiling still has, and this sweep fills it.
 //
-// The cursor indexes the ACTIVE ring - every non-terminal run - and the sweep
-// STEPS OVER the ones already in flight. It is deliberately not an index into
-// the dispatchable subset, which is the same mistake as walking a list while
-// deleting from it: that subset shrinks and grows by the in-flight set every
-// pass, so the same integer names a different run each time and (cursor, size)
-// can settle into a cycle that never lands on one of them. Four runs at a
-// ceiling of two, with stable per-run durations - three polling, two executing,
-// the ordinary mixed fleet - starved one poller forever while every pass had
-// room and handed it to somebody else. The active ring changes only when a run
-// is created or settles, so the windows tile it and every run is reached within
-// one sweep of it.
+// Room goes first to MOVING runs - new to this process, or whose journal
+// advanced since they were last driven - and only then to QUIET runs whose
+// backoff has elapsed. Without that split, every nonterminal run took an
+// equal turn, so ten parked runs made a runnable one wait ten passes (#401).
+// A quiet run is never excluded: it is retried every 1, 2, 4, then 8 poll
+// intervals, and the moment its journal moves it is moving again.
+//
+// Each tier's cursor indexes the ACTIVE ring - every non-terminal run - and the
+// sweep STEPS OVER the runs that are in flight or in the other tier. It is
+// deliberately not an index into the dispatchable subset, which is the same
+// mistake as walking a list while deleting from it: that subset shrinks and
+// grows by the in-flight set every pass, so the same integer names a different
+// run each time and (cursor, size) can settle into a cycle that never lands on
+// one of them. Four runs at a ceiling of two, with stable per-run durations -
+// three polling, two executing, the ordinary mixed fleet - starved one poller
+// forever while every pass had room and handed it to somebody else. The active
+// ring changes only when a run is created or settles, so the windows tile it
+// and every run is reached within one sweep of it.
 //
 // Selecting and reserving happen under one lock because they are one decision.
-func (s *Supervisor) admit(active []EngineeringRun) []EngineeringRun {
+func (s *Supervisor) admit(active []EngineeringRun, now time.Time) []EngineeringRun {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.quiet == nil {
+		s.quiet = map[string]quietRun{}
+	}
+	live := make(map[string]bool, len(active))
+	for _, run := range active {
+		live[run.ID] = true
+	}
+	for id := range s.quiet {
+		if !live[id] {
+			delete(s.quiet, id)
+		}
+	}
 	room := s.deps.MaxConcurrentRuns - len(s.inflight)
 	if room <= 0 || len(active) == 0 {
 		// The cursor does NOT advance on a pass that started nothing. Advancing
 		// past runs it never considered is how a sweep skips one.
 		return nil
 	}
-	start := s.cursor % len(active)
 	selected := make([]EngineeringRun, 0, room)
-	considered := 0
-	for i := 0; i < len(active) && len(selected) < room; i++ {
-		considered = i + 1
-		run := active[(start+i)%len(active)]
-		if _, busy := s.inflight[run.ID]; busy {
-			continue
+	sweep := func(cursor *int, want func(EngineeringRun) bool) {
+		start := *cursor % len(active)
+		considered := 0
+		for i := 0; i < len(active) && len(selected) < room; i++ {
+			considered = i + 1
+			run := active[(start+i)%len(active)]
+			if _, busy := s.inflight[run.ID]; busy || !want(run) {
+				continue
+			}
+			selected = append(selected, run)
+			s.inflight[run.ID] = struct{}{}
 		}
-		selected = append(selected, run)
-		s.inflight[run.ID] = struct{}{}
+		// The next pass resumes after the last run this one LOOKED AT, whether
+		// it started that run or stepped over it, so the sweep keeps moving.
+		*cursor = (start + considered) % len(active)
 	}
-	// The next pass resumes after the last run this one LOOKED AT, whether it
-	// started that run or stepped over it, so the sweep keeps moving forward.
-	s.cursor = (start + considered) % len(active)
+	isQuiet := func(run EngineeringRun) bool {
+		q, ok := s.quiet[run.ID]
+		return ok && q.cursor == run.Cursor
+	}
+	sweep(&s.cursor, func(run EngineeringRun) bool { return !isQuiet(run) })
+	if len(selected) < room {
+		sweep(&s.quietCursor, func(run EngineeringRun) bool { return isQuiet(run) && !now.Before(s.quiet[run.ID].next) })
+	}
+	for _, run := range selected {
+		streak := 0
+		if isQuiet(run) {
+			streak = min(s.quiet[run.ID].streak+1, maxQuietBackoff)
+		}
+		s.quiet[run.ID] = quietRun{cursor: run.Cursor, streak: streak, next: now.Add(s.deps.PollInterval << streak)}
+	}
 	return selected
 }
 

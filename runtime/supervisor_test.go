@@ -2236,7 +2236,7 @@ func TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots(t *testing.T) {
 				delete(supervisor.inflight, id)
 			}
 		}
-		for _, run := range supervisor.admit(active) {
+		for _, run := range supervisor.admit(active, time.Time{}) {
 			remaining[run.ID] = passesInFlight[run.ID]
 			started[run.ID]++
 		}
@@ -2338,5 +2338,62 @@ func TestEveryActiveRunGetsATurnWhileAnotherIsExecuting(t *testing.T) {
 		}
 	case <-time.After(60 * time.Second):
 		t.Fatalf("shutdown never finished draining run %s", long)
+	}
+}
+
+// TestParkedRunsDoNotDiluteARunnableOnesTurn is #401's acceptance at the one
+// place the decision is made. Ten nonterminal runs sit parked - driven, but
+// their journals never move - beside a ceiling of one at a one-minute poll.
+//
+// Before #401 every nonterminal run took an equal turn, so a run submitted
+// into that fleet waited up to ten passes for the rotation to reach it. Now it
+// starts on the very next pass; each parked run is retried on a doubling
+// backoff instead of every minute; and a parked run whose journal moves is
+// moving again on the next pass, without an operator resume.
+func TestParkedRunsDoNotDiluteARunnableOnesTurn(t *testing.T) {
+	supervisor := &Supervisor{
+		deps:     SupervisorDependencies{MaxConcurrentRuns: 1, PollInterval: time.Minute},
+		inflight: map[string]struct{}{},
+	}
+	var active []EngineeringRun
+	for i := 0; i < 10; i++ {
+		active = append(active, EngineeringRun{ID: fmt.Sprintf("parked-%02d", i)})
+	}
+	now := time.Unix(0, 0)
+	driven := map[string]int{}
+	pass := func() []EngineeringRun {
+		now = now.Add(time.Minute)
+		started := supervisor.admit(active, now)
+		for _, run := range started {
+			driven[run.ID]++
+			delete(supervisor.inflight, run.ID) // each turn returns within its pass
+		}
+		return started
+	}
+	for i := 0; i < 60; i++ {
+		pass()
+	}
+
+	// 3. Parked runs are not driven every minute when nothing changed: the
+	// one slot is not spent on all ten every pass.
+	for id, n := range driven {
+		if n > 15 {
+			t.Fatalf("%s was driven %d times in 60 quiet passes; a parked run must back off", id, n)
+		}
+	}
+	if len(driven) != 10 {
+		t.Fatalf("every parked run must still be reconsidered, drove only %v", driven)
+	}
+
+	// 1. A runnable run starts on the next scheduling opportunity.
+	active = append(active, EngineeringRun{ID: "runnable"})
+	if started := pass(); len(started) != 1 || started[0].ID != "runnable" {
+		t.Fatalf("the runnable run must start on the next pass, got %v", started)
+	}
+
+	// 4. A parked run whose journal moves re-enters the moving tier at once.
+	active[3].Cursor = Cursor{LastSequence: 7}
+	if started := pass(); len(started) != 1 || started[0].ID != "parked-03" {
+		t.Fatalf("a parked run whose journal advanced must be driven next, got %v", started)
 	}
 }
