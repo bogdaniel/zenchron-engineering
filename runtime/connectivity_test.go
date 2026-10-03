@@ -17,12 +17,16 @@ import (
 )
 
 func TestConnectivityClassification(t *testing.T) {
+	// Timeout is transient through typed transport errors, not only DNS.
+	if timeout := net.Error(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}); !timeout.Timeout() {
+		t.Fatal("fixture is not a typed network timeout")
+	}
 	for _, err := range []error{&net.DNSError{IsTemporary: true}, &net.DNSError{IsTimeout: true}, syscall.ETIMEDOUT, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}, fmt.Errorf("request: %w", syscall.ENETUNREACH), syscall.ECONNRESET} {
 		if !failed(err).transient {
 			t.Fatalf("not transient: %v", err)
 		}
 	}
-	for _, err := range []error{&net.DNSError{IsNotFound: true}, &net.DNSError{IsNotFound: true, IsTemporary: true}, x509.UnknownAuthorityError{}, errors.New("proxy: invalid configuration"), errors.New("unknown"), errors.New("ENOTFOUND in test output"), syscall.EACCES} {
+	for _, err := range []error{&net.DNSError{IsNotFound: true}, &net.DNSError{IsNotFound: true, IsTemporary: true}, x509.UnknownAuthorityError{}, errors.New("proxy: invalid configuration"), errors.New("unknown"), errors.New("ENOTFOUND in test output"), syscall.EACCES, context.DeadlineExceeded, context.Canceled} {
 		if failed(err).transient {
 			t.Fatalf("guessed transient: %v", err)
 		}
@@ -134,7 +138,7 @@ func TestConnectivitySourceObservationKeepsFiniteAttempts(t *testing.T) {
 	}
 	f.runtime = f.newRuntime(f.deps)
 	for i := 0; i < 3; i++ {
-		if outcome := f.reconcile(runID); outcome.Disposition != Waiting {
+		if outcome := f.reconcile(runID); outcome.Disposition != Waiting || outcome.Reason != "connectivity_backoff" {
 			t.Fatalf("restart: %+v", outcome)
 		}
 	}
@@ -280,7 +284,7 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 	f.runtime = f.newRuntime(f.deps)
 	f.clock.at = waiting.RetryNotBefore.Add(-time.Nanosecond)
 	for i := 0; i < 3; i++ {
-		if out := f.reconcile(runID); out.Disposition != Waiting {
+		if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "connectivity_backoff" {
 			t.Fatalf("early recovery: %+v", out)
 		}
 	}
