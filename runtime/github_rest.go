@@ -112,6 +112,10 @@ func (a GitHubRESTAdapter) token(repo GitHubRepo) (string, error) {
 		if errors.As(err, &transient) {
 			return "", transient
 		}
+		var transport *TransportError
+		if errors.As(err, &transport) {
+			return "", transport
+		}
 		return "", &GitHubAuthError{Detail: "credential resolution failed"}
 	}
 	if strings.TrimSpace(secret) == "" {
@@ -184,7 +188,7 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 	}
 	response, err := a.HTTP.Do(request)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("github request failed: %w", err)
+		return 0, nil, nil, transportFailure(err, true)
 	}
 	defer response.Body.Close()
 	raw, err := readBoundedBody(response)

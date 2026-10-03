@@ -273,14 +273,22 @@ func TestSupervisorDrivesSeveralRunsUnderTheOperatorCeiling(t *testing.T) {
 		t.Fatal("two runs share one candidate workspace")
 	}
 
-	// A ceiling of one drives one, whatever is queued.
+	// Turns are bounded by the envelope of both class ceilings (#85), whatever
+	// is queued; the work ceiling itself is enforced by the store.
 	bounded := supervisorFixture(t, fixture, 1)
+	bounded.deps.MaxConcurrentObservations = 1
+	fixture.issue = phase8Issue + 2
+	fixture.forge.Issues[fixture.issue] = GitHubIssue{
+		Number: fixture.issue, URL: "https://github.com/acme/repo/issues/43",
+		Title: "third", Body: "third body", State: GitHubOpen, UpdatedAt: fixture.clock.Now(),
+	}
+	fixture.start()
 	limited, err := bounded.Tick(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(limited.Driven) != 1 {
-		t.Fatalf("the operator ceiling was exceeded: %d runs driven", len(limited.Driven))
+	if len(limited.Driven) != 2 {
+		t.Fatalf("the turn envelope of two was not what bounded the pass: %d runs driven", len(limited.Driven))
 	}
 }
 
@@ -841,7 +849,7 @@ func TestEveryActiveRunGetsATurnUnderACeiling(t *testing.T) {
 	driven := map[string]int{}
 	supervisor, err := NewSupervisor(SupervisorDependencies{
 		Store: fixture.store, Clock: fixture.clock, Owner: "owner-1",
-		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 1,
+		Repositories: []GitHubRepo{repo}, MaxConcurrentRuns: 1, MaxConcurrentObservations: 1,
 		PollInterval: time.Minute, Agents: registry,
 		Runtime: func(GitHubRepo, ResolvedAgent) (*EngineeringRuntime, error) {
 			return fixture.runtime, nil
@@ -855,14 +863,18 @@ func TestEveryActiveRunGetsATurnUnderACeiling(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Driven) != 1 {
-			t.Fatalf("tick %d drove %d runs, want the ceiling of one", tick, len(report.Driven))
+		// The turn envelope is work + observation (#85): one plus one.
+		if len(report.Driven) != 2 {
+			t.Fatalf("tick %d drove %d runs, want the turn envelope of two", tick, len(report.Driven))
 		}
 		mu.Lock()
-		driven[report.Driven[0].RunID]++
+		for _, outcome := range report.Driven {
+			driven[outcome.RunID]++
+		}
 		mu.Unlock()
 	}
-	// Three ticks at a ceiling of one must have reached three distinct runs.
+	// Three ticks under an envelope smaller than the fleet must have reached
+	// every run.
 	if len(driven) != len(runIDs) {
 		t.Fatalf("only %d of %d active runs were ever driven: %#v", len(driven), len(runIDs), driven)
 	}

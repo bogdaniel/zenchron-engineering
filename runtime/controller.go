@@ -282,6 +282,9 @@ type Dependencies struct {
 	// "raise the ceiling" is structurally unreachable from anything a
 	// repository can influence.
 	OperatorMaxConcurrentRuns int
+	// MaxConcurrentObservations is the operator's observation-class ceiling
+	// (#85). Zero means the default.
+	MaxConcurrentObservations int
 }
 
 // Outcome is what one Reconcile settled on. It is the CLI's whole answer.
@@ -441,8 +444,9 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		agents: d.Agents,
 		scheduler: Scheduler{
 			Store: d.Store, Clock: d.Clock, Owner: d.Owner, Liveness: d.Liveness,
-			LeaseDuration:     time.Minute,
-			MaxConcurrentRuns: resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
+			LeaseDuration:             time.Minute,
+			MaxConcurrentRuns:         resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
+			MaxConcurrentObservations: d.MaxConcurrentObservations,
 		},
 		flow:       KernelFlow{},
 		repo:       repo,

@@ -207,6 +207,15 @@ plain `go env -w` from a worker is discarded (#430). That is not a boundary: a
 worker that overrides `GOENV` or writes the file itself still can, because
 workers share your `HOME`, and isolating `HOME` is out of scope here.
 
+**`candidate_writer_alive`, or gc retaining a candidate with `a process still
+holds the candidate writer lock`.** A process from an earlier provider
+invocation, typically one that outlived a killed supervisor, still holds
+`<state>/runs/<run>/candidate.writer.lock` and may still be writing the
+candidate. `lsof <that path>` names it. Stop it: the waiting run re-checks the
+lock on each pass, once and without waiting, and proceeds when it is free; gc
+collects the candidate on its next pass. On a platform without advisory locks
+(Windows) a candidate with a lock file is never collected.
+
 ## Supervisor and submission
 
 **`starting several issues at once needs a supervisor to own them; run

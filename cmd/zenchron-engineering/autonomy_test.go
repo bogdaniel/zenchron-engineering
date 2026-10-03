@@ -1929,7 +1929,11 @@ func TestOperatorExitStatusIsTheRealProcessStatus(t *testing.T) {
 		}
 	})
 	t.Run("cancelled", func(t *testing.T) {
-		stopDir, stopConfig, stopRun := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+		// The seeded run is FAILED, and stop never rewrites that (#439), so
+		// the run stopped here is a live one.
+		stopDir, stopConfig, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+		stopRun := "run-live"
+		activeRun(t, stopConfig, stopDir, stopRun)
 		if code, out := runCLI(t, stopDir, "autonomy", "stop", stopRun, "--config", stopConfig); code != runtime.ExitCancelled {
 			t.Fatalf("process exited %d, want %d\n%s", code, runtime.ExitCancelled, out)
 		}

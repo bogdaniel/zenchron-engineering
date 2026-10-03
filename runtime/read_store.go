@@ -65,6 +65,7 @@ func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(
 func (s *ReadStore) EventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {
 	return s.store.EventsPage(id, after, limit)
 }
+func (s *ReadStore) LatestSequence(id string) (int64, error) { return s.store.LatestSequence(id) }
 func (s *ReadStore) Controller(root string, observe func() (LiveControllerSnapshot, error), now time.Time) (ControllerStatus, error) {
 	return DescribeControllerStatus(s.store, root, observe, now)
 }
