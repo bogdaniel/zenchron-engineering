@@ -203,7 +203,7 @@ func planRejections(t *testing.T, built *composition, planID string) int {
 // Mutation: drop the governed RefuseUnlessAwaitingDecision check in
 // dispatchControl - the racing pair then appends two rejections.
 func TestGovernedPlanRejectIsDecidedOnceServerSide(t *testing.T) {
-	stateDir, err := os.MkdirTemp("/private/tmp/z398", "g")
+	stateDir, err := os.MkdirTemp("/tmp", "zc")
 	if err != nil {
 		t.Fatal(err)
 	}
