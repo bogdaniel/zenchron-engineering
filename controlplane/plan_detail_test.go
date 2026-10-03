@@ -24,7 +24,7 @@ func TestPlanDetailKeepsGatesRunlessAndProposalsLabelled(t *testing.T) {
 		Snapshot: rt.PlanSnapshot{
 			Approved: rt.PlanApproval{Status: domain.ApprovalApproved, Revision: 2},
 			Stages: map[string]rt.PlanStageProjection{
-				"build":  {State: rt.PlanStageCompleted, RunID: "run-1", ProfileID: "implementer-go", ProfileVersion: 2, AgentID: "claude", ProviderKind: "claude_code", TrustMode: "operator_trusted"},
+				"build": {State: rt.PlanStageCompleted, RunID: "run-1", ProfileID: "implementer-go", ProfileVersion: 2, AgentID: "claude", ProviderKind: "claude_code", TrustMode: "operator_trusted"},
 				"assure": {State: rt.PlanStageSatisfied, RunID: "run-fabricated", Gate: &rt.PlanGateSatisfaction{
 					Kind: domain.StageAssuranceGate, Claims: []string{"claim-validation"},
 					Evidence: rt.Ref{ID: "evidence-run-1", Revision: "abc@1"}, ProvenHeads: []string{"run-1@abc"},
