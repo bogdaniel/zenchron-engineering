@@ -1548,7 +1548,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		// The caller's cancellation is classified exactly as it is for the
 		// verification run below: not a prerequisite verdict (#447).
 		if ctx.Err() != nil {
-			class = FailureUnknown
+			class = cancellationClass(context.Cause(ctx))
 		}
 		return AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), FailureClass: class}, err
 	}
@@ -1585,9 +1585,17 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	}
 	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: &EvidenceBinding{Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy, Producer: Ref{ID: "baseline-go", Revision: v.Definition()}, Environment: Ref{ID: "docker-network-none", Revision: v.Sandbox.Image}}}
 	if runErr != nil || ctx.Err() != nil {
-		result.FailureClass = FailureVerification
-		if ctx.Err() != nil {
-			result.FailureClass = FailureUnknown
+		// Only a verifier that actually ran judged the candidate. A cancelled
+		// context is routed by who cancelled it (FailureUnknown here settled the
+		// operation as satisfied and stranded the run), and an unavailable
+		// sandbox is infrastructure, never a verdict that spends remediation.
+		switch {
+		case ctx.Err() != nil:
+			result.FailureClass = cancellationClass(context.Cause(ctx))
+		case errors.Is(runErr, ErrSandboxUnavailable):
+			result.FailureClass = FailureTransientInfrastructure
+		default:
+			result.FailureClass = FailureVerification
 		}
 	}
 	if tree, err := gitOutput(request.CheckoutDir, "rev-parse", "HEAD^{tree}"); err != nil || strings.TrimSpace(tree) != request.Tree {

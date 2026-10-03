@@ -98,7 +98,11 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 	confirmation.Confirmation = true
 	second, secondErr := provider.Assure(ctx, confirmation)
 	if secondErr != nil {
-		return second, FailureUnknown, secondErr
+		class := FailureUnknown
+		if ctx.Err() != nil {
+			class = cancellationClass(context.Cause(ctx)) // a cancelled confirmation is not unjudged-and-done
+		}
+		return second, class, secondErr
 	}
 	if second.Passed != first.Passed || second.FailureClass != first.FailureClass {
 		return second, FailureFlaky, nil

@@ -240,11 +240,15 @@ hung; restart it. Every Docker readiness and identity probe (`docker info`,
 before a container is created) runs under the caller's context AND a fixed
 10-second probe ceiling, whichever ends first: a shorter caller deadline is
 never replaced. The two endings are kept apart. The ceiling firing means
-Docker readiness is unavailable (`ErrSandboxUnavailable`, a transient
-assurance-infrastructure failure the scheduler retries). The caller's own
-cancellation or deadline, such as a stop or shutdown, propagates as that
-cancellation and is never reported as an unavailable sandbox. Doctor uses the
-same probe, so it reports this diagnostic instead of hanging.
+Docker readiness is unavailable (`ErrSandboxUnavailable`). In either assurance
+phase, dependency preparation or the verification run, that is
+`transient_infrastructure`: the scheduler retries the same assurance, and it is
+never a verdict on the candidate, so it spends no remediation. The caller's own
+cancellation propagates as that cancellation, is never reported as an
+unavailable sandbox, and is classified by who cancelled: a controller shutdown
+leaves assurance unsatisfied and the run waiting on `controller_shutdown`, to
+re-run after restart; an operator stop is `run_cancelled`. Doctor uses the same
+probe, so it reports this diagnostic instead of hanging.
 
 **`assurance.toolchain` FAIL — `the pinned assurance image did not resolve the
 Go toolchain on the runtime sandbox path`.** A reachable daemon holding the
