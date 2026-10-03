@@ -442,3 +442,63 @@ func TestAnUnreadableRunIsUnavailableNotWaiting(t *testing.T) {
 		t.Fatalf("unavailable %d waiting %d active %d, want the unreadable run counted as unavailable", fleet.Unavailable, fleet.Waiting, fleet.Active)
 	}
 }
+
+// TestAnAbandonedOwnLeaseDoesNotBlockTheRun: X's only active operation was
+// abandoned - its owner is dead, its lease expired, its attempts spent - and
+// X's next work operation is pending. With X the only run in the fleet,
+// Next(X) must reclaim the abandoned lease and lease the next operation;
+// otherwise the one-active-operation rule would block X forever.
+func TestAnAbandonedOwnLeaseDoesNotBlockTheRun(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	dead := Scheduler{
+		Store: store, Clock: clock, Owner: "dead", LeaseDuration: time.Minute, Liveness: neverAlive(),
+		MaxConcurrentRuns: 1, MaxConcurrentObservations: 1,
+	}
+	first := planKind(t, dead, "x", OpCandidateCreate)
+	leased := mustNext(t, dead, "x")
+	if leased == nil || leased.ID != first.ID {
+		t.Fatal("fixture: the first operation was not leased")
+	}
+	op, revision, _, err := store.Operation(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.State, op.Attempt = Running, op.MaxAttempts
+	if _, ok, err := store.PutOperation(op, revision); err != nil || !ok {
+		t.Fatalf("fixture: marking the attempt running: %v %v", ok, err)
+	}
+	second := planKind(t, dead, "x", OpExecutionInvoke)
+	clock.now = clock.now.Add(2 * time.Minute)
+	successor := dead
+	successor.Owner = "successor"
+	got := mustNext(t, successor, "x")
+	if got == nil || got.ID != second.ID {
+		t.Fatalf("Next(x) = %v, want the abandoned lease reclaimed and %s leased", got, second.ID)
+	}
+}
+
+// TestAnExpiredPendingOperationIsWaitingNotRunnable: Next retires an operation
+// whose wall budget is spent instead of leasing it, so the fleet must not
+// count its run as Runnable.
+func TestAnExpiredPendingOperationIsWaitingNotRunnable(t *testing.T) {
+	now := time.Unix(100, 0)
+	op := RunOperation{
+		ID: "spent", RunID: "x", Kind: OpExecutionInvoke, State: Pending, MaxAttempts: 2,
+		WallBudget: time.Minute, ConsumedExecution: 2 * time.Minute,
+	}
+	if !OperationExpired(op, now) {
+		t.Fatal("fixture: the operation must be expired")
+	}
+	if got := capacityState(map[string]RunOperation{op.ID: op}, now); got != capacityWaiting {
+		t.Fatalf("a run whose only work is expired counts as %s, want waiting", got)
+	}
+	op.ConsumedExecution = 0
+	if got := capacityState(map[string]RunOperation{op.ID: op}, now); got != capacityRunnable {
+		t.Fatalf("fixture: the same operation with budget left counts as %s, want runnable", got)
+	}
+}

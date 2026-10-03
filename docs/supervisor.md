@@ -448,6 +448,10 @@ takes the work slot only when it is released. A run holds at most one active
 operation at a time, and the same durable acquisition enforces that too: no
 process can observe a run beside the work another process is doing on it, and
 a pass that finds a run another live driver is operating writes nothing to it.
+That holds for every `Reconcile` caller - supervisor, watch, or an operator
+command: when another owner holds one of the run's operations and may not be
+taken over (it is alive, or its lease has not expired), the pass returns the
+run unchanged with the reason `driven_elsewhere`, which is never journalled.
 
 The supervisor starts at most `max_concurrent_runs + max_concurrent_observations`
 turns at once. That bounds goroutines only: a turn whose next operation's class

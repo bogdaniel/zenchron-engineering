@@ -856,6 +856,9 @@ func TestWatchMatrixD_ALiveWatchersExpiredLeaseIsNotStolen(t *testing.T) {
 		t.Fatalf("the expired lease of a LIVE watcher was acquired: %v %v", got, err)
 	}
 	before := len(journalFrom(t, second.store, runID))
+	if outcome, err := second.engine.Reconcile(context.Background(), runID); err != nil || outcome.Reason != ReasonDrivenElsewhere {
+		t.Fatalf("reconciling a run another live owner drives = %+v %v, want reason %q", outcome, err, ReasonDrivenElsewhere)
+	}
 	only(t, tickOf(t, second))
 	if len(second.provider.requests) != 0 {
 		t.Fatalf("the second watcher invoked a provider while the first still owns the run")

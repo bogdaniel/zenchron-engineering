@@ -364,7 +364,13 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		// A lease-less active row is an attempt nobody is holding - either one
 		// this scan already reclaimed, or one a sibling did. It occupies
 		// nothing, exactly as the durable count reads it.
-		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.RunID == runID {
+		//
+		// The run's OWN abandoned operations are reclaimed too: the store
+		// refuses a second active operation of one run, so an abandoned lease
+		// left on an exhausted operation would otherwise block the run's next
+		// operation forever. reclaimAbandoned applies CanAcquire's liveness and
+		// expiry rule, so a live driver's lease is never touched.
+		if op.Lease == nil || (op.State != Leased && op.State != Running) {
 			continue
 		}
 		if _, err := s.reclaimAbandoned(op, now); err != nil {

@@ -1599,18 +1599,19 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err != nil {
 			return Outcome{}, err
 		}
-		// Another live driver is operating this run. The store would refuse
-		// every acquisition anyway (a run holds at most one active operation),
-		// so this pass writes NOTHING - no planned operation, no run.waiting
-		// over a run someone else is driving - and reports the run as it is.
-		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
-			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
-		}
 		// A crash between the journal write and the scheduler write leaves the
 		// store believing an operation is still active. The journal is the
 		// authority; reconcile the store to it before planning.
 		if err := r.reconcileStoreLag(state); err != nil {
 			return Outcome{}, err
+		}
+		// Another live driver is operating this run. The store would refuse
+		// every acquisition anyway (a run holds at most one active operation),
+		// so this pass journals NOTHING - no planned operation, no run.waiting
+		// over a run someone else is driving. The reason is not journalled; it
+		// tells the caller why this pass did nothing.
+		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: ReasonDrivenElsewhere}, err
 		}
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
@@ -1661,6 +1662,10 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 	}
 	return r.settle(state, Waiting, "reconcile_pass_limit")
 }
+
+// ReasonDrivenElsewhere is the Outcome reason of a Reconcile pass that found
+// another live driver operating the run. It is never journalled.
+const ReasonDrivenElsewhere = "driven_elsewhere"
 
 // drivenElsewhere reports whether a DIFFERENT owner holds a lease on one of the
 // run's operations that this driver may not take over: the owner is alive, or
