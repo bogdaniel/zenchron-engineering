@@ -6,11 +6,37 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestOSCommandsOutputSeparatesStderr(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%t", fail), func(t *testing.T) {
+			script := `printf '  {"number":99}\n'; printf 'routine notice\n' >&2`
+			if fail {
+				script += "; exit 7"
+			}
+			output, err := (osCommands{}).Output(t.TempDir(), "sh", "-c", script)
+			if !fail {
+				if err != nil || output != `{"number":99}` {
+					t.Fatalf("Output = %q, %v; want stdout only and no error", output, err)
+				}
+				return
+			}
+			var exitErr *exec.ExitError
+			if output != "" || !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+				t.Fatalf("Output = %q, %v; want empty output and exit code 7", output, err)
+			}
+			if !strings.HasSuffix(err.Error(), ": routine notice") {
+				t.Fatalf("error missing stderr detail: %v", err)
+			}
+		})
+	}
+}
 
 func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	commands := newFakeCommands(t)
