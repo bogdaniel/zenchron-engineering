@@ -2236,7 +2236,7 @@ func TestNoActiveRunIsStarvedWhileSiblingsHoldTheirSlots(t *testing.T) {
 				delete(supervisor.inflight, id)
 			}
 		}
-		for _, run := range supervisor.admit(active, time.Time{}) {
+		for _, run := range supervisor.admit(active, map[string]int64{}, time.Time{}) {
 			remaining[run.ID] = passesInFlight[run.ID]
 			started[run.ID]++
 		}
@@ -2360,10 +2360,11 @@ func TestParkedRunsDoNotDiluteARunnableOnesTurn(t *testing.T) {
 		active = append(active, EngineeringRun{ID: fmt.Sprintf("parked-%02d", i)})
 	}
 	now := time.Unix(0, 0)
+	heads := map[string]int64{}
 	driven := map[string]int{}
 	pass := func() []EngineeringRun {
 		now = now.Add(time.Minute)
-		started := supervisor.admit(active, now)
+		started := supervisor.admit(active, heads, now)
 		for _, run := range started {
 			driven[run.ID]++
 			delete(supervisor.inflight, run.ID) // each turn returns within its pass
@@ -2392,8 +2393,56 @@ func TestParkedRunsDoNotDiluteARunnableOnesTurn(t *testing.T) {
 	}
 
 	// 4. A parked run whose journal moves re-enters the moving tier at once.
-	active[3].Cursor = Cursor{LastSequence: 7}
+	heads["parked-03"] = 7
 	if started := pass(); len(started) != 1 || started[0].ID != "parked-03" {
 		t.Fatalf("a parked run whose journal advanced must be driven next, got %v", started)
+	}
+}
+
+// TestQuietnessIsReadFromTheJournalNotTheRunDocument is #424's review
+// finding pinned against a real store: the run document carries no journal
+// cursor (replay derives it), so a quiet signal read from the document
+// called every run quiet forever and throttled runs that were progressing.
+func TestQuietnessIsReadFromTheJournalNotTheRunDocument(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	at := time.Unix(100, 0).UTC()
+	if err := store.PutRun(EngineeringRun{SchemaVersion: SchemaVersion, ID: "r", Repository: "example/repo", Phase: Execute, Disposition: Active, ControllerSHA256: strings.Repeat("4", 64), CreatedAt: at, UpdatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	appendEvent := func(id, kind string) {
+		if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: id, RunID: "r", Type: kind, OccurredAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEvent("created", EventRunCreated)
+	supervisor := &Supervisor{deps: SupervisorDependencies{MaxConcurrentRuns: 1, PollInterval: time.Minute}, inflight: map[string]struct{}{}}
+	now := at
+	pass := func() int {
+		now = now.Add(time.Second) // well inside any quiet backoff
+		active, err := store.ActiveRuns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		heads, err := store.RunJournalHeads()
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := supervisor.admit(active, heads, now)
+		for _, run := range started {
+			delete(supervisor.inflight, run.ID)
+		}
+		return len(started)
+	}
+	pass()
+	appendEvent("waiting", EventRunWaiting) // the turn journaled progress
+	if pass() != 1 {
+		t.Fatal("a run whose journal advanced since its last turn must be driven, not backed off")
+	}
+	if pass() != 0 {
+		t.Fatal("a run whose journal did not move must wait out its backoff")
 	}
 }

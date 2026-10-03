@@ -198,8 +198,8 @@ type Supervisor struct {
 	// same thing MaxConcurrentRuns always bounded, counted over the right
 	// interval.
 	inflight map[string]struct{}
-	// quiet remembers, per run, the journal cursor it had when this process
-	// last drove it. A run still at that cursor made no progress and is
+	// quiet remembers, per run, the journal head it had when this process
+	// last drove it. A run still at that head made no progress and is
 	// QUIET: it yields to runs that are moving and is retried on a doubling
 	// backoff (#401). This is scheduling order only - it decides which run
 	// gets a turn first, never whether a run may act - and it is in memory,
@@ -686,7 +686,10 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	// deterministic within a pass; only the entry point moves.
 	sort.SliceStable(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
 
-	for _, run := range s.admit(active, now) {
+	// A failed head read makes no run quiet: scheduling falls back to the
+	// plain rotation rather than throttling runs it cannot see moving.
+	heads, _ := s.deps.Store.RunJournalHeads()
+	for _, run := range s.admit(active, heads, now) {
 		s.driving.Add(1)
 		go func(run EngineeringRun) {
 			defer s.driving.Done()
@@ -709,7 +712,7 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 
 // quietRun is what admit remembers about one run between passes.
 type quietRun struct {
-	cursor Cursor
+	head   int64
 	streak int
 	next   time.Time
 }
@@ -747,7 +750,7 @@ const maxQuietBackoff = 3
 // and every run is reached within one sweep of it.
 //
 // Selecting and reserving happen under one lock because they are one decision.
-func (s *Supervisor) admit(active []EngineeringRun, now time.Time) []EngineeringRun {
+func (s *Supervisor) admit(active []EngineeringRun, heads map[string]int64, now time.Time) []EngineeringRun {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.quiet == nil {
@@ -787,7 +790,7 @@ func (s *Supervisor) admit(active []EngineeringRun, now time.Time) []Engineering
 	}
 	isQuiet := func(run EngineeringRun) bool {
 		q, ok := s.quiet[run.ID]
-		return ok && q.cursor == run.Cursor
+		return ok && heads != nil && q.head == heads[run.ID]
 	}
 	sweep(&s.cursor, func(run EngineeringRun) bool { return !isQuiet(run) })
 	if len(selected) < room {
@@ -798,7 +801,7 @@ func (s *Supervisor) admit(active []EngineeringRun, now time.Time) []Engineering
 		if isQuiet(run) {
 			streak = min(s.quiet[run.ID].streak+1, maxQuietBackoff)
 		}
-		s.quiet[run.ID] = quietRun{cursor: run.Cursor, streak: streak, next: now.Add(s.deps.PollInterval << streak)}
+		s.quiet[run.ID] = quietRun{head: heads[run.ID], streak: streak, next: now.Add(s.deps.PollInterval << streak)}
 	}
 	return selected
 }
