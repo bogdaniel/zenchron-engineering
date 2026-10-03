@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // secondStoreHandle is another process's view of the fixture's database.
@@ -209,7 +210,9 @@ func TestAPauseLetsTheInFlightAttemptFinish(t *testing.T) {
 	resumed := afterPause(t, eventsOf(t, f.store, runID))
 	progressed := false
 	for _, e := range resumed {
-		progressed = progressed || (e.OperationID != "" && e.OperationID != invoke)
+		// operation.before, not any event: operation.planned precedes the
+		// acquisition, so it would count a refused lease as progress.
+		progressed = progressed || (e.Type == EventOperationBefore && e.OperationID != invoke)
 	}
 	if !progressed {
 		t.Fatal("unpause did not let the run continue")
@@ -334,5 +337,82 @@ func TestANeverPausedSnapshotDigestIsUnchanged(t *testing.T) {
 	}
 	if strings.Contains(string(canonical), `"paused"`) {
 		t.Fatalf("a never-paused snapshot carries a paused member: %s", canonical)
+	}
+}
+
+// TestSQLAndReplayAgreeOnTheLatestPauseEvent pins "the latest of run.paused
+// and run.unpaused wins" in BOTH readers - the acquisition predicate and
+// replay - over every prefix of an alternating history, so neither can drift
+// into a permanent wedge where unpause never re-admits a lease.
+func TestSQLAndReplayAgreeOnTheLatestPauseEvent(t *testing.T) {
+	_, store, _ := openPair(t)
+	run := newJournalRun("run-a")
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	for i, want := range []bool{false, true, false, true, false, true, false} {
+		if i > 0 {
+			now = now.Add(time.Second)
+			var err error
+			if want {
+				_, err = PauseRun(store, now, run.ID, "step", "bogdan")
+			} else {
+				_, err = UnpauseRun(store, now, run.ID, "bogdan")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		sqlPaused, err := store.RunPaused(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed := JournalPause(eventsOf(t, store, run.ID)) != nil
+		if sqlPaused != want || replayed != want {
+			t.Fatalf("step %d: want paused=%v, SQL says %v, replay says %v", i, want, sqlPaused, replayed)
+		}
+	}
+}
+
+// TestASettlingPausedRunCountsAsItsActiveClass: a run paused while it holds a
+// lease is still consuming that slot, so it counts Working or Observing, not
+// Paused, and the counts still partition Active.
+func TestASettlingPausedRunCountsAsItsActiveClass(t *testing.T) {
+	for _, c := range []struct {
+		kind string
+		got  func(Fleet) int
+	}{
+		{"k", func(f Fleet) int { return f.Working }},
+		{OpSourceObserve, func(f Fleet) int { return f.Observing }},
+	} {
+		t.Run(c.kind, func(t *testing.T) {
+			dir, store, _ := openPair(t)
+			run := newJournalRun("run-a")
+			if err := store.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Unix(100, 0).UTC()
+			s := Scheduler{Store: store, Clock: &fakeClock{now: now}, Owner: "driver", LeaseDuration: time.Minute,
+				Liveness: alwaysAlive(), MaxConcurrentRuns: 2, MaxConcurrentObservations: 2}
+			if _, _, err := s.Plan(RunOperation{RunID: run.ID, Kind: c.kind, IdempotencyKey: "settling", MaxAttempts: 2}); err != nil {
+				t.Fatal(err)
+			}
+			if leased, err := s.Next(run.ID); err != nil || leased == nil {
+				t.Fatalf("lease before the pause: %v %v", leased, err)
+			}
+			view, err := PauseRun(store, now, run.ID, "settle", "bogdan")
+			if err != nil || view.Settling == nil {
+				t.Fatalf("the pause does not report the settling operation: %+v %v", view, err)
+			}
+			fleet, err := FleetStatus(store, dir, 2, 2, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := fleet.Working + fleet.Observing + fleet.Runnable + fleet.Waiting + fleet.Paused + fleet.Unavailable
+			if c.got(fleet) != 1 || fleet.Paused != 0 || fleet.Active != 1 || sum != fleet.Active {
+				t.Fatalf("a settling paused %s run miscounted: %+v", c.kind, fleet)
+			}
+		})
 	}
 }

@@ -125,8 +125,12 @@ Invariants:
 1. Durable and restart-safe: replay, the acquire predicate and status all read
    the journal events, so a restarted `serve`, another process, or a reopened
    store sees the same answer.
-2. Never cancels or terminalizes: no `run.waiting/failed/cancelled/completed`
-   is appended, no operation is finished, no cancellation is requested.
+2. Never cancels or terminalizes: the pause causes no
+   `run.waiting/failed/cancelled/completed`, finishes no operation and
+   requests no cancellation. A pass that already decided before a pause
+   committed mid-pass may still journal those decisions (`operation.planned`,
+   a `run.waiting` or `run.failed` it derived earlier); they are ordered
+   before the pause took effect and are not caused by it.
 3. Never discards material: only the pause event is written; GC already keeps
    a nonterminal run's material.
 4. The store decides atomically (above).
@@ -161,6 +165,17 @@ run and a fleet **paused** count (a paused run holding no active operation),
 taken out of runnable/waiting, so
 `working + observing + runnable + waiting + paused + unavailable == active`. A
 paused run still settling counts as working or observing.
+
+Upgrade and rollback. The binary that introduces pause adds one migration,
+the partial index `events_run_pause`, applied with the schema version bump in
+one transaction (seconds on a large store). Mixed versions fail closed: an
+older binary refuses to open the newer schema version, exactly as for every
+earlier migration. A downgrade therefore needs `DROP INDEX events_run_pause`
+and decrementing `PRAGMA user_version` by one, done by hand with every
+controller stopped. Even then, a run that was EVER paused cannot be replayed
+by an older binary, which does not know `run.paused`/`run.unpaused` and
+refuses the unknown event type; such runs stay unreadable to it until the
+newer binary is restored.
 
 Out of scope: provider interruption on pause, observation while paused (forge
 movement is observed on the first pass after `unpause`), scheduled or automatic

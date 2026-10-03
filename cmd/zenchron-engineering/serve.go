@@ -467,10 +467,8 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		return controlOK(outcome)
 	case runtime.ControlPause, runtime.ControlUnpause:
 		// Applied under the controller role (#86): a generation that has been
-		// superseded cannot accept a pause or an unpause.
-		if c.role == nil {
-			return controlError(errors.New("this process does not hold the controller role, so it applies no pause"))
-		}
+		// superseded - or a process holding no role at all (WithAuthority is
+		// nil-safe and refuses) - cannot accept a pause or an unpause.
 		var view runtime.PauseView
 		if err := c.role.WithAuthority(func() (err error) { view, err = applyPause(c.store, request); return err }); err != nil {
 			return controlError(err)

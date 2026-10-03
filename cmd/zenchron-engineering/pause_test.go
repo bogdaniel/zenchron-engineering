@@ -2,12 +2,69 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
+
+// TestServeAppliesPauseUnderTheControllerRole is the delegated path's server
+// half: the endpoint handler serve installs. Without the controller role it
+// applies nothing; with it, pause and unpause are journalled; a terminal run
+// is refused.
+func TestServeAppliesPauseUnderTheControllerRole(t *testing.T) {
+	dir, configPath := watchWorkspace(t)
+	runID := "run-delegated"
+	stateDir := activeRun(t, configPath, dir, runID)
+	built, err := newComposition(autonomyFlags{Config: configPath}, offlineOverrides())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(built.release)
+	control := func(command string) runtime.ControlResponse {
+		return built.handleControl(context.Background(), nil, func() {}, runtime.ControlRequest{
+			Command: command, RunID: runID, Reason: "delegated", Operator: "requester"})
+	}
+	before := len(journalOf(t, stateDir, runID))
+
+	if response := control(runtime.ControlPause); response.OK || !strings.Contains(response.Error, "controller role") {
+		t.Fatalf("a process without the controller role applied a pause: %+v", response)
+	}
+	if len(journalOf(t, stateDir, runID)) != before {
+		t.Fatal("a refused pause was journalled")
+	}
+
+	role, err := runtime.AcquireControllerRole(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = role.Release() })
+	built.role = role
+	response := control(runtime.ControlPause)
+	var view runtime.PauseView
+	if !response.OK || json.Unmarshal(response.Payload, &view) != nil || !view.Paused || view.Operator != "requester" || view.Reason != "delegated" {
+		t.Fatalf("the delegated pause: %+v", response)
+	}
+	if events := journalOf(t, stateDir, runID); events[len(events)-1].Type != runtime.EventRunPaused {
+		t.Fatal("the delegated pause did not journal run.paused")
+	}
+	if response := control(runtime.ControlUnpause); !response.OK || !strings.Contains(string(response.Payload), `"paused":false`) {
+		t.Fatalf("the delegated unpause: %+v", response)
+	}
+
+	if _, err := cancelRun(built, runID, stopReason); err != nil {
+		t.Fatal(err)
+	}
+	stopped := len(journalOf(t, stateDir, runID))
+	if response := control(runtime.ControlPause); response.OK || !strings.Contains(response.Error, "nothing to pause") {
+		t.Fatalf("a cancelled run was paused through the endpoint: %+v", response)
+	}
+	if len(journalOf(t, stateDir, runID)) != stopped {
+		t.Fatal("a refused pause on a cancelled run was journalled")
+	}
+}
 
 // TestPauseCommandLocalPath drives `autonomy pause/unpause` with no
 // supervisor: written locally, idempotent, resume refused with the unpause
