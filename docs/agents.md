@@ -499,15 +499,39 @@ about the worker, the work, the account or the network is wrong. A deliberately
 unguarded composition — a unit test, a probe, an embedder driving one
 invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
 
-A provider is dispatched holding the candidate's writer lock
-(`<candidate>.writer.lock`), and it inherits that lock's descriptor, so every
-descendant that keeps it keeps the candidate locked — including a tool command
-that left the provider's process group and survived a supervisor killed with
-SIGKILL, which the owner-death guard cannot reach (#168). A later attempt that
-finds the lock still held, or cannot check it, is refused before dispatch as
-`candidate_writer_alive`: a typed wait an operator clears by stopping the stale
-writer (`lsof <candidate>.writer.lock` names it), never a provider fault. A
-descendant that closes every inherited descriptor escapes this check.
+An execution attempt claims the candidate's writer lock
+(`<candidate>.writer.lock`, beside the candidate, never in it) before it reads,
+restores or scans the candidate, and holds it through dispatch. The provider
+inherits the lock's descriptor, so every descendant that keeps it keeps the
+candidate locked — including a tool command that left the provider's process
+group and survived a supervisor killed with SIGKILL, which the owner-death
+guard cannot reach (#168).
+
+- A claim that finds the lock held waits a bounded settle period (three times
+  the default guard grace) and is then refused before anything touches the
+  candidate as `candidate_writer_alive`: a typed, non-spending wait an
+  operator clears by stopping the stale writer (`lsof <candidate>.writer.lock`
+  names it). A lock that cannot be checked at all is
+  `candidate_guard_unavailable`.
+- When a provider returns normally, a lock still held by its own process
+  group (a backgrounded command) is stopped with the usual TERM-then-KILL, so
+  an attempt's own leftovers never refuse the next attempt. A holder that
+  survives that left the group, and is attributed to that attempt as
+  `provider_background_work_unresolved`.
+- Garbage collection does not delete a candidate whose lock is held, and
+  removes the lock file with the candidate.
+
+**It is cooperative, not a security boundary.** It sees only processes that
+kept the inherited descriptor; a provider can release it (`flock -u 3`), close
+it, or, unsandboxed, unlink the lock file. Whether tool commands inherit it is
+a property of each provider:
+
+| Provider kind | Tool commands inherit the lock descriptor |
+|---|---|
+| `codex_cli` | verified in review against codex 0.157.0, including a backgrounded `nohup` command |
+| node-based CLIs | no: node does not pass inherited descriptors to its children |
+| `claude_code` | unverified (a Bun-compiled binary) |
+| others | unverified |
 
 The boundary grants the worker no new command surface. It adds no tool to any
 provider's allowlist, so a stage that was obliged nothing is still obliged

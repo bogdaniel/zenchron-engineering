@@ -550,6 +550,24 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			result: mutationResult{FailureClass: FailureToolchainUnavailable},
 		}
 	}
+	// NO EARLIER WRITER MAY STILL BE ALIVE (#168). Claimed before anything
+	// below reads, restores or scans the candidate, and held through dispatch:
+	// a process a dead supervisor left behind can still be writing it, and
+	// judging that workspace - an inconclusive scan of its half-written cache
+	// is a STOP - would charge this run for a writer that is not this
+	// attempt's. A held lock is a wait an operator clears.
+	if dir := candidateDir(r.deps.StateDir, state.run.ID); isDir(dir) {
+		writer, err := claimCandidateWriter(dir)
+		if err != nil {
+			class, _ := candidateGuardFailureClass(err)
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, ExecutionResult{}, err),
+			}}
+		}
+		defer writer.Close()
+		ctx = withCandidateWriter(ctx, writer)
+	}
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return failed(err)

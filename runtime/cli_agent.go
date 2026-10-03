@@ -944,6 +944,9 @@ func agentPrompt(request ExecutionRequest) string {
 // acceptance claim, and whether the candidate actually changed is established
 // from the workspace by the caller, never from what the worker said.
 func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	// Taken off the context so no probe below is ever handed the lock.
+	writer := candidateWriterFrom(ctx)
+	ctx = withCandidateWriter(ctx, nil)
 	spec, err := p.spec()
 	if err != nil {
 		return ExecutionResult{}, err
@@ -1151,14 +1154,20 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		stream = newClaudeStream(request.Attempt)
 		ctx = withClaudeStream(ctx, stream)
 	}
-	writer, err := claimCandidateWriter(request.CandidateDir)
-	if err != nil {
-		return ExecutionResult{}, err
+	// THE CANDIDATE WRITER LOCK (#168) reaches the provider's own process
+	// only. A runtime attempt claimed it before touching the candidate and
+	// hands it over; any other caller (the planner, an embedder) is claimed
+	// for here.
+	if writer == nil {
+		claimed, err := claimCandidateWriter(request.CandidateDir)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		defer claimed.Close()
+		writer = claimed
 	}
-	defer writer.Close()
-	ctx = withCandidateWriter(ctx, writer)
 	startedAt := time.Now()
-	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, env, p.grace())
+	output, runErr := p.executor().Run(withCandidateWriter(ctx, writer), p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()
 	// WHAT ENDED THE PROCESS is fixed at the instant it exited, and it has
 	// exactly one owner. The contexts stay live while the transcript is stored
@@ -1262,7 +1271,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// No exit status or final result can resolve explicit or tool-owned automatic
 	// Bash detachment (#384, #388). Refuse before trusting a structured verdict
 	// for any invocation purpose; polling and kill requests never clear it.
-	if streamed.UnresolvedBackgroundWork {
+	// A descendant that left the provider's process group and still holds
+	// the candidate writer lock after the group was stopped is background
+	// work this invocation walked away from, writing the candidate (#168).
+	if streamed.UnresolvedBackgroundWork || (output.EscapedWriter && !killed) {
 		result.Outcome = OperationFailed
 		result.Failure = &ProviderFailure{
 			Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: artifacts[0].Path,

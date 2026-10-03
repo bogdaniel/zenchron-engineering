@@ -262,6 +262,41 @@ func (p *ownedPipes) closeReaders() {
 	}
 }
 
+// releaseCandidateWriter ends this process's hold on the candidate writer lock
+// once the provider has returned, and reports whether anything still holds it.
+// A holder still in the provider's process group is this attempt's own
+// leftover - a backgrounded command - and is stopped with the same TERM then
+// KILL sequence as any other stop, so it never refuses the next attempt. Only
+// a holder that survives that left the group, and that is reported.
+//
+// ponytail: signals the group by its recorded id after the root was reaped; a
+// group id reused in that window would be signalled too. Linux's owned set is
+// already closed here; carrying it through is the upgrade if that matters.
+func releaseCandidateWriter(lock *os.File, pgid int, grace time.Duration) (escaped bool) {
+	if grace <= 0 {
+		grace = 5 * time.Second
+	}
+	path := lock.Name()
+	_ = lock.Close()
+	if candidateWriterFree(path) {
+		return false
+	}
+	freed := func() bool {
+		for deadline := time.Now().Add(grace); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if candidateWriterFree(path) {
+				return true
+			}
+		}
+		return false
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	if freed() {
+		return false
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	return !freed()
+}
+
 // probeRootExited is rootExited, as a seam so a test can make the probe
 // misreport and prove the bounded fallback.
 var probeRootExited = rootExited

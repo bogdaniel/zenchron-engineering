@@ -44,6 +44,10 @@ type CommandOutput struct {
 	// process, committed by the executor when it was decided (#213). An
 	// executor that does not decide it leaves OwnerUndecided.
 	Owner TerminationOwner
+	// EscapedWriter reports that, after the process returned and its group
+	// was stopped, something still held the candidate writer lock: a
+	// descendant that left the process group and is still running (#168).
+	EscapedWriter bool
 }
 type CommandExecutor interface {
 	LookPath(string) error
@@ -180,7 +184,8 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 		cmd.Stdout = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, out)
 		cmd.Stderr = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, errOut)
 	}
-	if lock := candidateWriterFrom(ctx); lock != nil {
+	lock := candidateWriterFrom(ctx)
+	if lock != nil {
 		cmd.ExtraFiles = []*os.File{lock}
 	}
 	stopWatch := watch.watchUntilComplete()
@@ -205,73 +210,11 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	if exit, ok := err.(*exec.ExitError); ok {
 		result.ExitCode = exit.ExitCode()
 	}
+	if lock != nil && cmd.Process != nil {
+		result.EscapedWriter = releaseCandidateWriter(lock, cmd.Process.Pid, grace)
+	}
 	return result, err
 }
-
-// A CANDIDATE WRITER LOCK OUTLIVES ITS OWNER FOR AS LONG AS ANY WRITER DOES
-// (#168). The owner-death guard stops the provider's process GROUP, but a
-// descendant that left the group - setsid(2), or a provider that puts each
-// tool command in a group of its own - survives a dead supervisor and keeps
-// writing the candidate. Once its owner is dead its ancestry is gone too, so
-// nothing a new owner can read from the process table says it belongs to this
-// run. What it does still carry is every descriptor it inherited, and a flock
-// belongs to the open file description, not to the process that took it: the
-// provider is handed the lock descriptor, so every descendant that keeps it
-// keeps the candidate locked, however it detached and whoever died.
-//
-// ponytail: refuses rather than terminates, and a descendant that closes every
-// inherited descriptor escapes it; naming and stopping the holders is the
-// upgrade if refusals show up in the field.
-type candidateWriterKey struct{}
-
-func withCandidateWriter(ctx context.Context, lock *os.File) context.Context {
-	return context.WithValue(ctx, candidateWriterKey{}, lock)
-}
-
-func candidateWriterFrom(ctx context.Context) *os.File {
-	lock, _ := ctx.Value(candidateWriterKey{}).(*os.File)
-	return lock
-}
-
-// claimCandidateWriter takes the candidate's writer lock before a provider is
-// dispatched into it. A lock still held means a process from an earlier
-// invocation may still be writing, and no new attempt runs beside it; a lock
-// that cannot be checked proves nothing either way and refuses the same.
-// The caller closes the file once the provider returns: only the inheritors
-// hold it after that.
-func claimCandidateWriter(candidateDir string) (*os.File, error) {
-	path := filepath.Clean(candidateDir) + ".writer.lock"
-	lock, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, &CandidateWriterAliveError{Lock: path, Cause: err}
-	}
-	locked, err := tryLockFile(lock, true)
-	if err != nil || !locked {
-		_ = lock.Close()
-		return nil, &CandidateWriterAliveError{Lock: path, Cause: err}
-	}
-	return lock, nil
-}
-
-// CandidateWriterAliveError is the pre-dispatch refusal for a candidate an
-// earlier invocation's process may still be writing. It is the runtime's own
-// refusal, not a provider fault: nothing was invoked and nothing was touched.
-type CandidateWriterAliveError struct {
-	Lock  string
-	Cause error
-}
-
-func (e *CandidateWriterAliveError) Error() string {
-	if e.Cause != nil {
-		return "refusing to dispatch: the candidate writer lock " + e.Lock + " could not be checked: " + e.Cause.Error() +
-			". No provider was invoked"
-	}
-	return "refusing to dispatch: a process from an earlier invocation still holds the candidate writer lock " + e.Lock +
-		" and may still be writing the candidate workspace; stop it (`lsof " + e.Lock + "` names it) and resume." +
-		" No provider was invoked"
-}
-
-func (e *CandidateWriterAliveError) Unwrap() error { return e.Cause }
 
 func (OSCommandExecutor) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	return OSCommandExecutor{}.Run(ctx, name, args, dir, env, grace)
