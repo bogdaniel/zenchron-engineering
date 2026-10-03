@@ -118,11 +118,12 @@ type Fleet struct {
 	Executing int `json:"executing"`
 	Active    int `json:"active"`
 	// The capacity-class view (#85). ObservationCapacity is the observation
-	// ceiling, as Capacity is the work ceiling. The five counts partition the
+	// ceiling, as Capacity is the work ceiling; zero means a reader that does
+	// not know the configuration (the control plane), and is omitted. The five counts partition the
 	// nonterminal runs exactly: Working + Observing + Runnable + Waiting +
 	// Unavailable == Active. They are read from durable operation rows, never
 	// from a supervisor's memory; see capacityState.
-	ObservationCapacity int          `json:"observation_capacity"`
+	ObservationCapacity int          `json:"observation_capacity,omitempty"`
 	Working             int          `json:"working"`
 	Observing           int          `json:"observing"`
 	Runnable            int          `json:"runnable"`
@@ -321,13 +322,9 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
 	fleet.Plans = summarizePlans(store)
-	operations, err := store.AllOperations()
+	byRun, err := capacityOperations(store)
 	if err != nil {
 		return Fleet{}, err
-	}
-	byRun := map[string][]RunOperation{}
-	for _, op := range operations {
-		byRun[op.RunID] = append(byRun[op.RunID], op)
 	}
 	for _, run := range runs {
 		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
@@ -368,6 +365,51 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	return fleet, nil
 }
 
+// capacityOperations reads, per nonterminal run, only the operations that can
+// still decide its count: those not succeeded or cancelled. Decoding every
+// operation of every run on each control-plane read would undo #428. A
+// dependency outside that set (succeeded, in practice) is read by id, so
+// leasable sees exactly what Next sees.
+func capacityOperations(store *SQLiteOperationStore) (map[string]map[string]RunOperation, error) {
+	args := []any{}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
+	}
+	rows, err := store.db.Query(`SELECT document FROM run_operations
+		WHERE json_extract(document, '$.state') NOT IN ('succeeded', 'cancelled')
+		  AND run_id IN (SELECT id FROM runs WHERE json_extract(document, '$.disposition') NOT IN (`+
+		strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`))`, args...)
+	if err != nil {
+		return nil, err
+	}
+	operations, err := scanOperations(rows)
+	if err != nil {
+		return nil, err
+	}
+	byRun := map[string]map[string]RunOperation{}
+	for _, op := range operations {
+		if byRun[op.RunID] == nil {
+			byRun[op.RunID] = map[string]RunOperation{}
+		}
+		byRun[op.RunID][op.ID] = op
+	}
+	for _, all := range byRun {
+		for _, op := range all {
+			for _, id := range op.DependsOn {
+				if _, ok := all[id]; ok {
+					continue
+				}
+				if dependency, _, found, err := store.Operation(id); err != nil {
+					return nil, err
+				} else if found {
+					all[id] = dependency
+				}
+			}
+		}
+	}
+	return byRun, nil
+}
+
 // capacityRunnable and capacityWaiting are the two states of a run holding no
 // active operation. They are not capacity classes; they only share the type
 // so capacityState answers in one value.
@@ -380,13 +422,13 @@ const (
 // operator count (#85). Active means what AcquireOperation counts: leased or
 // running WITH a lease. A run holds at most one, so work-or-observation is a
 // partition; should it ever hold both, work wins, which is the closed side.
-// Runnable is a pending WORK operation the scheduler would try to lease now:
-// dependencies satisfied, attempts left, not cancelled, and CanAcquire.
-func capacityState(ops []RunOperation, now time.Time) CapacityClass {
+// Runnable is a WORK operation Next would lease now: leasable, the scheduler's
+// own predicate, and not expired. The one approximation is liveness, which a
+// read never probes: an abandoned lease counts as active (Working or
+// Observing) until a scheduler reclaims it.
+func capacityState(all map[string]RunOperation, now time.Time) CapacityClass {
 	active := CapacityClass("")
-	all := map[string]RunOperation{}
-	for _, op := range ops {
-		all[op.ID] = op
+	for _, op := range all {
 		if op.Lease != nil && (op.State == Leased || op.State == Running) {
 			if class := OperationCapacityClass(op.Kind); active == "" || class == CapacityWork {
 				active = class
@@ -396,10 +438,9 @@ func capacityState(ops []RunOperation, now time.Time) CapacityClass {
 	if active != "" {
 		return active
 	}
-	for _, op := range ops {
-		if op.State == Pending && OperationCapacityClass(op.Kind) == CapacityWork &&
-			dependenciesSatisfied(op, all) && op.Attempt < op.MaxAttempts && !op.CancelRequested &&
-			CanAcquire(op, now, false) {
+	for _, op := range all {
+		if op.State != Leased && op.State != Running && OperationCapacityClass(op.Kind) == CapacityWork &&
+			leasable(op, all, now, false) && !OperationExpired(op, now) {
 			return capacityRunnable
 		}
 	}

@@ -617,6 +617,12 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // verifies; the observation kinds are bound parameters generated from
 // OperationCapacityClass, so there is no second list. A row whose document
 // carries no kind is counted as work, which is the closed direction.
+//
+// The same statement also refuses an operation while ANOTHER operation of the
+// same run holds a lease. That is what makes "a run holds at most one active
+// operation" a durable fact rather than a property of whoever drives it: a
+// second process can never observe a run beside the work another process is
+// doing on it.
 func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
@@ -625,7 +631,7 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
-	args := []any{string(document), op.ID, expected, op.RunID}
+	args := []any{string(document), op.ID, expected, op.RunID, op.ID, op.RunID}
 	for _, disposition := range terminalDispositions {
 		args = append(args, string(disposition))
 	}
@@ -643,6 +649,10 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	kinds := strings.TrimSuffix(strings.Repeat("?,", len(observation)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM run_operations AS other
+		       WHERE other.run_id = ? AND other.id <> ?
+		         AND json_extract(other.document, '$.state') IN ('leased', 'running')
+		         AND json_extract(other.document, '$.lease') IS NOT NULL)
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
 		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations

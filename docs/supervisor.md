@@ -444,8 +444,10 @@ Observation reads the forge and journals what it saw; it invokes no provider or
 verifier and mutates no candidate, remote or forge state. So with
 `max_concurrent_runs = 1` and one run inside a long provider call, a run parked
 on review still observes, discovers the review, and becomes **runnable** - and
-takes the work slot only when it is released. A run still holds at most one
-operation at a time, so it never observes beside its own work.
+takes the work slot only when it is released. A run holds at most one active
+operation at a time, and the same durable acquisition enforces that too: no
+process can observe a run beside the work another process is doing on it, and
+a pass that finds a run another live driver is operating writes nothing to it.
 
 The supervisor starts at most `max_concurrent_runs + max_concurrent_observations`
 turns at once. That bounds goroutines only: a turn whose next operation's class
@@ -456,7 +458,10 @@ runs: **working** (holds a work operation), **observing** (holds an observation)
 **runnable** (holds nothing and has a pending work operation the scheduler could
 lease), **waiting** (holds nothing and is not runnable) and **unavailable** (its
 journal could not be replayed). They are read from durable operation rows, so
-they are the same after a restart.
+they are the same after a restart. Runnable uses the scheduler's own
+eligibility test; the one approximation is liveness, which a read never probes,
+so an abandoned lease counts as working or observing until a scheduler
+reclaims it.
 
 What the work ceiling bounds is **reconciliation work**, not specifically the
 expensive part of it: assurance, commits and publication are work too, so the

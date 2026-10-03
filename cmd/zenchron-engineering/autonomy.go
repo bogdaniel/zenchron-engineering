@@ -798,12 +798,13 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
-		// The scheduler is the one place the ceiling is ENFORCED: its
-		// acquisition counts every run holding an operation across the whole
-		// durable store, which is what makes the bound hold between processes
-		// as well as inside one. Everything else that knows the number - the
-		// supervisor's goroutine bound, the watch capacity probe, the fleet
-		// view - is a cheap early exit in front of it.
+		// The scheduler is the one place the ceilings are ENFORCED: its
+		// acquisition counts, per capacity class (#85), every other run holding
+		// an operation of that class across the whole durable store, which is
+		// what makes the bounds hold between processes as well as inside one.
+		// Everything else that knows the numbers - the supervisor's turn
+		// envelope, the fleet view - reports or bounds goroutines; nothing in
+		// front of the scheduler decides capacity.
 		//
 		// Which is why leaving this unset was not a missing second enforcer but
 		// a missing number: the supervisor admitted two runs against the

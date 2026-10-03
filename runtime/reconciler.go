@@ -1599,6 +1599,13 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err != nil {
 			return Outcome{}, err
 		}
+		// Another live driver is operating this run. The store would refuse
+		// every acquisition anyway (a run holds at most one active operation),
+		// so this pass writes NOTHING - no planned operation, no run.waiting
+		// over a run someone else is driving - and reports the run as it is.
+		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
+		}
 		// A crash between the journal write and the scheduler write leaves the
 		// store believing an operation is still active. The journal is the
 		// authority; reconcile the store to it before planning.
@@ -1653,6 +1660,28 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		return Outcome{}, err
 	}
 	return r.settle(state, Waiting, "reconcile_pass_limit")
+}
+
+// drivenElsewhere reports whether a DIFFERENT owner holds a lease on one of the
+// run's operations that this driver may not take over: the owner is alive, or
+// its lease has not expired. The driver's own leftover lease is not
+// "elsewhere"; it is recovered by the ordinary takeover in Scheduler.Next.
+func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
+	s := r.scheduler.defaults()
+	operations, err := s.Store.Operations(runID)
+	if err != nil {
+		return false, err
+	}
+	now := s.Clock.Now()
+	for _, op := range operations {
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.Lease.Owner == s.Owner {
+			continue
+		}
+		if !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func waitingOr(live, fallback Disposition) Disposition {

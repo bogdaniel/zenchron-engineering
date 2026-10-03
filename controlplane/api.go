@@ -237,6 +237,10 @@ type FleetClasses struct {
 	Waiting     int `json:"waiting"`
 	Unavailable int `json:"unavailable"`
 }
+
+// Capacity is the work ceiling, or zero when this reader does not know the
+// operator configuration (the read-only control plane): templates render zero
+// as unknown, never as "/ 0".
 type Fleet struct {
 	Capacity          int          `json:"capacity"`
 	Executing         int          `json:"executing"`

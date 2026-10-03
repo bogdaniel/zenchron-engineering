@@ -849,15 +849,19 @@ func TestWatchMatrixD_ALiveWatchersExpiredLeaseIsNotStolen(t *testing.T) {
 	}
 
 	// The successor's own scheduler must refuse the operation. Its watcher
-	// may reconcile the run - capacity is no longer a watch-level gate (#85) -
-	// but the per-run lease keeps it from operating the run: nothing it does
-	// may take the lease or invoke anything.
+	// may reach the run - capacity is no longer a watch-level gate (#85) - but
+	// a run another live driver is operating is left exactly as it is: no
+	// lease, no provider, and not one event written over it.
 	if got, err := second.engine.scheduler.Next(runID); err != nil || got != nil {
 		t.Fatalf("the expired lease of a LIVE watcher was acquired: %v %v", got, err)
 	}
+	before := len(journalFrom(t, second.store, runID))
 	only(t, tickOf(t, second))
 	if len(second.provider.requests) != 0 {
 		t.Fatalf("the second watcher invoked a provider while the first still owns the run")
+	}
+	if after := journalFrom(t, second.store, runID); len(after) != before {
+		t.Fatalf("the second watcher wrote %v over a run the first still owns", journalTypes(after[before:]))
 	}
 	after := heldLease(t, second.store, runID)
 	if after.Lease.Owner != holder.owner || after.Attempt != stalled.Attempt {

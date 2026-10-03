@@ -124,9 +124,12 @@ type SupervisorReport struct {
 	// Draining reports that the supervisor is finishing started work and
 	// accepting none.
 	Draining bool `json:"draining"`
-	// Capacity is the operator ceiling and how much of it this tick used.
-	Capacity int `json:"capacity"`
-	Active   int `json:"active"`
+	// Capacity is the WORK ceiling (max_concurrent_runs) and ObservationCapacity
+	// the observation ceiling (#85). A tick may drive up to their sum, because
+	// the supervisor bounds turns by both; the store bounds each class.
+	Capacity            int `json:"capacity"`
+	ObservationCapacity int `json:"observation_capacity"`
+	Active              int `json:"active"`
 	// NextEligibleAt is when the supervisor intends to look again.
 	NextEligibleAt time.Time `json:"next_eligible_at"`
 	// Plans is what the plan reconciler did this tick, one entry per plan it
@@ -591,7 +594,7 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	now := s.deps.Clock.Now()
 	report := SupervisorReport{
-		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
+		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns, ObservationCapacity: s.deps.MaxConcurrentObservations,
 		NextEligibleAt: now.Add(s.deps.PollInterval),
 	}
 	// THIS CONTROLLER'S OWN STATE COMES FIRST, AND OUTSIDE THE INTAKE SECTION.
@@ -951,7 +954,7 @@ func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) err
 	defer func() {
 		s.driving.Wait()
 		final := SupervisorReport{
-			At: s.deps.Clock.Now(), Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
+			At: s.deps.Clock.Now(), Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns, ObservationCapacity: s.deps.MaxConcurrentObservations,
 		}
 		s.collect(&final)
 		if report != nil && (len(final.Driven) > 0 || len(final.Observed) > 0) {

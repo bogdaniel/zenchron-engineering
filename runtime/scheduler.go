@@ -181,7 +181,10 @@ func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64,
 		ceiling = maxObservations
 	}
 	driven := map[string]bool{}
-	for _, stored := range s.operations {
+	for id, stored := range s.operations {
+		if stored.RunID == op.RunID && id != op.ID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
+			return 0, false, nil
+		}
 		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) &&
 			OperationCapacityClass(stored.Kind) == class {
 			driven[stored.RunID] = true
@@ -314,6 +317,14 @@ func adoptPlanned(prior RunOperation, kind string) (RunOperation, bool, error) {
 	return prior, false, nil
 }
 
+// leasable is the scheduler's eligibility test, shared with the fleet's
+// Runnable count so the two cannot drift: Next tries to lease exactly the
+// operations for which it holds, and retires an expired one instead.
+func leasable(op RunOperation, all map[string]RunOperation, now time.Time, ownerAlive bool) bool {
+	return dependenciesSatisfied(op, all) && op.Attempt < op.MaxAttempts && !op.CancelRequested &&
+		CanAcquire(op, now, ownerAlive)
+}
+
 func dependenciesSatisfied(op RunOperation, all map[string]RunOperation) bool {
 	for _, id := range op.DependsOn {
 		if all[id].State != Succeeded {
@@ -368,11 +379,8 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		if !ok {
 			continue
 		}
-		if !dependenciesSatisfied(op, all) || op.Attempt >= op.MaxAttempts || op.CancelRequested {
-			continue
-		}
 		alive := op.Lease != nil && s.Liveness.Alive(op.Lease.Owner)
-		if !CanAcquire(op, now, alive) {
+		if !leasable(op, all, now, alive) {
 			continue
 		}
 		// Retired on EXECUTION AUTHORITY, not on wall-clock elapsed. The

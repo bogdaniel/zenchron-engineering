@@ -196,9 +196,12 @@ func TestCapacityStateSurvivesARestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		byRun := map[string][]RunOperation{"waiting": nil}
+		byRun := map[string]map[string]RunOperation{"waiting": nil}
 		for _, op := range ops {
-			byRun[op.RunID] = append(byRun[op.RunID], op)
+			if byRun[op.RunID] == nil {
+				byRun[op.RunID] = map[string]RunOperation{}
+			}
+			byRun[op.RunID][op.ID] = op
 		}
 		out := map[string]CapacityClass{}
 		for run, ops := range byRun {
@@ -246,8 +249,9 @@ func (p *heldProvider) Execute(ctx context.Context, request ExecutionRequest) (E
 	return p.isolatedProvider.Execute(ctx, request)
 }
 
-// TestAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot is #85's decisive
-// case. max_concurrent_runs is one. Run A holds a long execution.invoke. Run B
+// TestEngineAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot is #85's
+// decisive case, driven through the engine every supervisor turn calls
+// (Reconcile), so B's pass is deterministic rather than timed. max_concurrent_runs is one. Run A holds a long execution.invoke. Run B
 // is waiting on review: during A's operation it performs github.observe,
 // discovers the requested change and becomes Runnable - and it does NOT
 // acquire work until A releases the slot. Then it does.
@@ -255,7 +259,7 @@ func (p *heldProvider) Execute(ctx context.Context, request ExecutionRequest) (E
 // Counting observation against max_concurrent_runs in AcquireOperation, or
 // any class-blind early exit in front of it, fails this test: B then never
 // observes the review while A works.
-func TestAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot(t *testing.T) {
+func TestEngineAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	fixture.distinctMutations()
 	fixture.trackPullRequestHeads()
@@ -340,5 +344,101 @@ func TestAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot(t *testing.T) {
 	remediation := fixture.provider.requests[before]
 	if remediation.Purpose != InvocationRemediation || remediation.CandidateDir != candidateDir(fixture.stateDir, b) {
 		t.Fatalf("B's next invocation = %q in %s, want its review remediation", remediation.Purpose, remediation.CandidateDir)
+	}
+}
+
+// TestARunHoldsAtMostOneActiveOperation is frozen invariant 4 made durable:
+// while one driver holds X's execution.invoke, no driver - not even with every
+// ceiling free - may lease X's github.observe beside it. Both stores.
+func TestARunHoldsAtMostOneActiveOperation(t *testing.T) {
+	sqlite, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlite.Close() })
+	for name, store := range map[string]OperationStore{"sqlite": sqlite, "memory": NewMemoryOperationStore()} {
+		first := capacityScheduler(store, "w1", 5, 5)
+		second := capacityScheduler(store, "w2", 5, 5)
+		planKind(t, first, "x", OpExecutionInvoke)
+		if mustNext(t, first, "x") == nil {
+			t.Fatalf("%s: W1 was not granted X's work", name)
+		}
+		planKind(t, second, "x", OpGitHubObserve)
+		if got := mustNext(t, second, "x"); got != nil {
+			t.Fatalf("%s: W2 leased X's %s while W1 holds X's execution.invoke", name, got.Kind)
+		}
+	}
+}
+
+// TestTheTwoCeilingsAreIndependent pins that each class is measured against
+// ITS OWN ceiling: with one work slot and two observation slots, two runs
+// observe at once and a third does not. Equal ceilings would hide a swap.
+func TestTheTwoCeilingsAreIndependent(t *testing.T) {
+	sqlite, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlite.Close() })
+	for name, store := range map[string]OperationStore{"sqlite": sqlite, "memory": NewMemoryOperationStore()} {
+		s := capacityScheduler(store, "owner", 1, 2)
+		planKind(t, s, "worker", OpExecutionInvoke)
+		if mustNext(t, s, "worker") == nil {
+			t.Fatalf("%s: the work slot was not granted", name)
+		}
+		for _, run := range []string{"observer-a", "observer-b"} {
+			planKind(t, s, run, OpSourceObserve)
+			if mustNext(t, s, run) == nil {
+				t.Fatalf("%s: %s was refused one of two observation slots", name, run)
+			}
+		}
+		planKind(t, s, "observer-c", OpSourceObserve)
+		if mustNext(t, s, "observer-c") != nil {
+			t.Fatalf("%s: a third run observed under an observation ceiling of two", name)
+		}
+		planKind(t, s, "second-worker", OpCandidateCommit)
+		if mustNext(t, s, "second-worker") != nil {
+			t.Fatalf("%s: a second run worked under a work ceiling of one", name)
+		}
+	}
+}
+
+func TestTheDefaultObservationCeilingIsTwo(t *testing.T) {
+	if DefaultMaxConcurrentObservations != 2 || resolveMaxConcurrentObservations(0) != 2 {
+		t.Fatalf("the frozen default observation ceiling is 2, got %d", resolveMaxConcurrentObservations(0))
+	}
+}
+
+// TestAnUnreadableRunIsUnavailableNotWaiting: a nonterminal run whose journal
+// cannot be replayed is counted Unavailable and never folded into another
+// count.
+func TestAnUnreadableRunIsUnavailableNotWaiting(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	at := time.Unix(100, 0).UTC()
+	if err := store.PutRun(EngineeringRun{SchemaVersion: SchemaVersion, ID: "r", Repository: "example/repo", Phase: Execute, Disposition: Active, CreatedAt: at, UpdatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []EngineeringEvent{{ID: "created", Type: EventRunCreated}, {ID: "waiting", Type: EventRunWaiting, Payload: []byte(`{"reason":"external_review"}`)}} {
+		e.SchemaVersion, e.RunID, e.OccurredAt = SchemaVersion, "r", at
+		if _, err := store.AppendEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := rawJournalDB(t, dir).Exec(`UPDATE events SET event_hash = ? WHERE run_id = 'r' AND sequence = 2`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	fleet, err := FleetStatus(store, dir, 1, 2, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fleet.Runs[0].Error == "" {
+		t.Fatal("fixture: the tampered journal must not replay")
+	}
+	if fleet.Unavailable != 1 || fleet.Waiting != 0 || fleet.Active != 1 {
+		t.Fatalf("unavailable %d waiting %d active %d, want the unreadable run counted as unavailable", fleet.Unavailable, fleet.Waiting, fleet.Active)
 	}
 }
