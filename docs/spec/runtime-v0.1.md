@@ -327,9 +327,9 @@ all read from the disposition, and never from whether a timestamp is set.
 | Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
 |---|---|---|---|---|---|---|
 | `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
-| `provider_prerequisite_wait` | `provider_unavailable` | no | no | no | an operator restores the provider prerequisite; probed every 5 min | `execution_provider_unavailable` (class reason) |
-| `rate_limit_wait` | `provider_quota`, `provider_rate_limited` | no | no | no | the provider's stated retry time has passed; probed every 5 min | `execution_provider_quota` / `execution_provider_rate_limited` (class reasons) |
-| `account_wait` | `provider_account_unavailable` | no | no | no | an operator restores the provider account; probed every 5 min | `execution_provider_account_unavailable` |
+| `provider_prerequisite_wait` | `provider_unavailable` | no | no | no | the provider endpoint recovers on its own; probed every 5 min | the class's: `execution_provider_unavailable` |
+| `rate_limit_wait` | `provider_quota`, `provider_rate_limited` | no | no | no | the provider allowance returns; probed every 5 min | the class's: `execution_provider_quota` / `execution_provider_rate_limited` |
+| `account_wait` | `provider_account_unavailable` | no | no | no | an operator restores the provider account; probed every 5 min | the class's: `execution_provider_account_unavailable` |
 
 Further rules:
 
@@ -366,11 +366,18 @@ Further rules:
   attempt is given back. The probe time is on the operation row and in its
   journalled `operation.after`, so a restart before it invokes nothing, and
   `resume` honours it. Once it passes, the same operation of the same run is
-  invoked again. The total wait is bounded only by `lifecycle_deadline`.
-  A wait-routed class with a stated reason keeps it (quota and rate limit share
-  a disposition but not an operator action); the disposition's own reason
-  applies only where the class states none. Status reports the next probe time
-  and the disposition's resume condition.
+  invoked again. The waiting itself is external, but a probe that reaches the
+  provider is charged its own execution time, as any refunded wait is, so a
+  long wait spends active work one probe per 5 min and is bounded by the
+  active-work budget as well as `lifecycle_deadline`. Refunding the time of a
+  probe that made no progress is a follow-up. The provider rows state no
+  reason of their own: the run waits under the class's stated reason (quota
+  and rate limit share a disposition but not an operator action). Status
+  reports the next probe time and the disposition's resume condition only
+  for the latest operation of its kind whose reason is the run's.
+  `retry_not_before` is a floor: the supervisor gives a parked run a turn at
+  most every 4 poll intervals, so the effective cadence is 5 min plus up to
+  that quiet-tier re-poll delay.
 
 Effective patience with the defaults: an execution (`max_execution_attempts`
 2) waits once, for 30 s, before stopping. An observation (3 attempts) waits

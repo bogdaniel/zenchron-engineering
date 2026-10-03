@@ -136,7 +136,7 @@ type dispositionSemantics struct {
 	FiniteAttemptAuthority bool
 	// ResumeCondition is what makes the operation eligible again.
 	ResumeCondition string
-	// Reason is the run's waiting reason.
+	// Reason is the run's waiting reason; empty means the class's stated one.
 	Reason string
 	// Delay is the RetryNotBefore schedule; nil sets none.
 	Delay func(attempt int) time.Duration
@@ -153,9 +153,9 @@ var retryDispositions = map[RetryDisposition]dispositionSemantics{
 		ResumeCondition: "retry_not_before has passed", Reason: ReasonConnectivityBackoff,
 		Delay: connectivityBackoff,
 	},
-	DispositionProviderPrerequisiteWait: {ResumeCondition: "an operator restores the provider prerequisite", Reason: "execution_provider_prerequisite_unavailable", Delay: providerWaitProbe},
-	DispositionRateLimitWait:            {ResumeCondition: "the provider's stated retry time has passed", Reason: "execution_provider_rate_limited", Delay: providerWaitProbe},
-	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account", Reason: "execution_provider_account_unavailable", Delay: providerWaitProbe},
+	DispositionProviderPrerequisiteWait: {ResumeCondition: "the provider endpoint recovers on its own; probed every 5 minutes", Delay: providerWaitProbe},
+	DispositionRateLimitWait:            {ResumeCondition: "the provider allowance returns; probed every 5 minutes", Delay: providerWaitProbe},
+	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account; probed every 5 minutes", Delay: providerWaitProbe},
 }
 
 // providerWaitProbe is the fixed cadence of a provider wait. The attempt is
@@ -181,20 +181,21 @@ func retryDispositionFor(class FailureClass) RetryDisposition {
 // A disposition's wait is external wait by its table row, not by a second list.
 func init() {
 	for _, s := range retryDispositions {
-		if !s.SpendsActiveWork {
+		if !s.SpendsActiveWork && s.Reason != "" {
 			externalWaitReasons[s.Reason] = true
 		}
 	}
 }
 
 // waitReasonOf names the wait a not-yet-eligible operation is in: its
-// wait-routed class's stated reason (quota and rate limit share a disposition
-// but not an operator action), else its disposition's. Never its timestamp.
+// wait-routed class's stated reason (the provider rows state none: quota and
+// rate limit share a disposition but not an operator action), else its
+// disposition's. Never its timestamp.
 func waitReasonOf(op RunOperation) string {
 	if class, waiting := waitRoutedFailure(op.Result); waiting {
 		return waitReason(class)
 	}
-	if s, ok := retryDispositions[op.RetryDisposition]; ok {
+	if s, ok := retryDispositions[op.RetryDisposition]; ok && s.Reason != "" {
 		return s.Reason
 	}
 	return "operation_unavailable"

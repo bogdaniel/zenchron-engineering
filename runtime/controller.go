@@ -1294,13 +1294,24 @@ type RetryStatus struct {
 	ResumeCondition string           `json:"resume_condition"`
 }
 
-// retryStatus is the latest operation awaiting a disposition's retry.
+// retryStatus is the retry the run is actually waiting on: the latest
+// operation that awaits its disposition's retry, is still the latest of its
+// kind (a superseded binding's failure is history), and whose wait reason is
+// the run's. Anything else - authority, integrity - is not masked by it.
 func retryStatus(s *runState) *RetryStatus {
 	if s.snapshot.Disposition != Waiting {
 		return nil
 	}
+	ops := sortOperations(mapValues(s.snapshot.Operations))
+	latest := map[string]string{}
+	for _, op := range ops {
+		latest[op.Kind] = op.ID
+	}
 	var out *RetryStatus
-	for _, op := range sortOperations(mapValues(s.snapshot.Operations)) {
+	for _, op := range ops {
+		if latest[op.Kind] != op.ID || waitReasonOf(op) != s.snapshot.Reason {
+			continue
+		}
 		if d, ok := awaitsRetry(op); ok && !op.RetryNotBefore.IsZero() {
 			out = &RetryStatus{Operation: op.ID, NotBefore: op.RetryNotBefore, Disposition: op.RetryDisposition, ResumeCondition: d.ResumeCondition}
 		}

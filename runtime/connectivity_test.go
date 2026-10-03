@@ -566,18 +566,30 @@ func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 		t.Fatal("a bare RetryNotBefore was read as a connectivity wait")
 	}
 	op.RetryDisposition = DispositionAccountWait
+	op.Result = mustMarshal(t, mutationResult{FailureClass: FailureProviderAccountUnavailable})
 	if waitReasonOf(op) != "execution_provider_account_unavailable" || !fold(op) || binding(op) == "kept" {
-		t.Fatal("a reserved disposition lost its own reason or wait")
+		t.Fatal("a provider disposition lost its class's reason or its wait")
 	}
+	op.Result = nil
 	op.RetryDisposition, op.RetryNotBefore = DispositionTransportBackoff, time.Time{}
 	op.Attempt = op.MaxAttempts
 	if binding(op) != "kept" || fold(op) {
 		t.Fatal("the last transport attempt minted a binding or opened a wait")
 	}
 	for d, s := range retryDispositions {
-		if s.Reason == "" || s.ResumeCondition == "" || externalWaitReasons[s.Reason] == s.SpendsActiveWork {
+		if s.ResumeCondition == "" || (s.Reason != "" && externalWaitReasons[s.Reason] == s.SpendsActiveWork) {
 			t.Fatalf("%s: incomplete accounting row %+v", d, s)
 		}
+	}
+	// A row with no reason of its own waits under its classes' stated reasons,
+	// and those must be external exactly as the row says.
+	for class := range waitReasons {
+		if s, ok := retryDispositions[retryDispositionFor(class)]; ok && s.Reason == "" && externalWaitReasons[waitReason(class)] == s.SpendsActiveWork {
+			t.Fatalf("%s: class reason %q does not match its row's accounting", class, waitReason(class))
+		}
+	}
+	if externalWaitReasons["execution_provider_prerequisite_unavailable"] {
+		t.Fatal("a reason nothing produces is registered as external wait")
 	}
 }
 
@@ -750,6 +762,45 @@ func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing
 	}
 }
 
+// #87: status reports only the retry the run is actually waiting on.
+func TestConnectivityRetryStatusIsTheRunsOwnWait(t *testing.T) {
+	at := time.Date(2027, 1, 15, 8, 0, 0, 0, time.UTC)
+	quota := mustMarshal(t, mutationResult{FailureClass: FailureProviderQuota})
+	waitOp := func(id, kind string, created time.Time) RunOperation {
+		return RunOperation{ID: id, Kind: kind, State: OperationFailed, MaxAttempts: 2, CreatedAt: created, Result: quota,
+			RetryDisposition: DispositionRateLimitWait, RetryNotBefore: created.Add(5 * time.Minute)}
+	}
+	state := func(disposition Disposition, reason string, ops ...RunOperation) *runState {
+		s := &runState{snapshot: RunSnapshot{Operations: map[string]RunOperation{}}}
+		s.snapshot.Disposition, s.snapshot.Reason = disposition, reason
+		for _, op := range ops {
+			s.snapshot.Operations[op.ID] = op
+		}
+		return s
+	}
+	stale := waitOp("a", OpExecutionInvoke, at)
+	later := RunOperation{ID: "b", Kind: OpExecutionInvoke, State: Succeeded, CreatedAt: at.Add(time.Hour)}
+	if got := retryStatus(state(Waiting, "awaiting_authority", stale, later)); got != nil {
+		t.Fatalf("a superseded provider wait masked the authority wait: %+v", got)
+	}
+	// Same reason, but the binding moved on: still history.
+	if got := retryStatus(state(Waiting, "execution_provider_quota", stale, later)); got != nil {
+		t.Fatalf("a superseded provider wait was reported: %+v", got)
+	}
+	// Still the latest of its kind, but the run waits on something else.
+	if got := retryStatus(state(Waiting, "awaiting_authority", stale)); got != nil {
+		t.Fatalf("a provider wait masked the run's own reason: %+v", got)
+	}
+	if got := retryStatus(state(Failed, "execution_provider_quota", stale)); got != nil {
+		t.Fatalf("a run that is not waiting reported a probe: %+v", got)
+	}
+	newer := waitOp("c", OpSourceObserve, at.Add(time.Minute))
+	got := retryStatus(state(Waiting, "execution_provider_quota", stale, newer))
+	if got == nil || got.Operation != "c" || !got.NotBefore.Equal(newer.RetryNotBefore) || got.ResumeCondition != "the provider allowance returns; probed every 5 minutes" {
+		t.Fatalf("two awaiting operations did not report the latest: %+v", got)
+	}
+}
+
 // #87 slice 2: a quota wait is durable. Its probe time survives a store
 // reopen and a new runtime, nothing invokes the provider before it, no attempt
 // or active work is spent, and the SAME operation resumes once it passes.
@@ -777,7 +828,7 @@ func TestConnectivityProviderQuotaWaitIsDurable(t *testing.T) {
 	}
 	report, err := f.runtime.Status(runID)
 	if err != nil || report.Retry == nil || report.Retry.Operation != waiting.ID || !report.Retry.NotBefore.Equal(waiting.RetryNotBefore) ||
-		report.Retry.Disposition != DispositionRateLimitWait || report.Retry.ResumeCondition != "the provider's stated retry time has passed" {
+		report.Retry.Disposition != DispositionRateLimitWait || report.Retry.ResumeCondition != "the provider allowance returns; probed every 5 minutes" {
 		t.Fatalf("status: %+v %v", report.Retry, err)
 	}
 	calls := len(f.provider.requests)
