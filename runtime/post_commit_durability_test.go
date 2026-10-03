@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -190,10 +192,12 @@ func TestARetryObservesTheRecordedCommitInsteadOfRecommitting(t *testing.T) {
 }
 
 // INVARIANT (test 5): process loss between the Git commit and any journal
-// record of it. The restarted runtime recognizes its own commit on top of the
-// durable revision and completes it; it neither recommits nor calls it
-// uncommitted.
-func TestARestartAfterAnUnjournalledCommitReconcilesIt(t *testing.T) {
+// record of it. Nothing durable proves the head is the runtime's, so recovery
+// FAILS CLOSED: the restarted runtime never adopts it and never commits again.
+// Every attempt is refused naming the observed head as unproven (never as a
+// runtime commit), the head is preserved, and the run holds unproven_head
+// material for operator release (#344) - not uncommitted work at the base.
+func TestARestartAfterAnUnjournalledCommitHoldsItAsUnproven(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	withFault(fixture, &observationFault{fail: func(n int) bool { return n == 1 }, crash: true})
 	runID := fixture.start()
@@ -205,7 +209,7 @@ func TestARestartAfterAnUnjournalledCommitReconcilesIt(t *testing.T) {
 		}()
 		_, _ = fixture.runtime.Reconcile(t.Context(), runID)
 	}()
-	head, _, count := runtimeCommitsPastBase(t, fixture, runID)
+	head, tree, count := runtimeCommitsPastBase(t, fixture, runID)
 	if count != "1" || journalMentions(journalOf(t, fixture.runtime, runID), EventCandidateCommitted) {
 		t.Fatal("crash scenario did not leave an unjournalled runtime commit")
 	}
@@ -213,13 +217,31 @@ func TestARestartAfterAnUnjournalledCommitReconcilesIt(t *testing.T) {
 	// may take the operation over.
 	fixture.clock.advance(2 * time.Minute)
 	fixture.runtime = fixture.newRuntime(fixture.deps)
-	fixture.reconcile(runID)
-	committed := journalPayloads[CandidateCommittedPayload](t, journalOf(t, fixture.runtime, runID), EventCandidateCommitted)
-	if len(committed) != 1 || committed[0].Commit != head {
-		t.Fatalf("candidate.committed %+v, want the crashed attempt's commit %s", committed, head)
+	outcome := fixture.reconcile(runID)
+	events := journalOf(t, fixture.runtime, runID)
+	if journalMentions(events, EventCandidateCommitted) || len(journalPayloads[AssuranceObservedPayload](t, events, EventAssuranceObserved)) != 0 {
+		t.Fatalf("an unproven head was adopted (outcome %s/%s)", outcome.Disposition, outcome.Reason)
 	}
-	if _, _, count := runtimeCommitsPastBase(t, fixture, runID); count != "1" {
-		t.Fatalf("%s runtime commits past the base after restart, want one", count)
+	if outcome.Disposition != Failed || outcome.Reason != OpCandidateCommit+attemptsExhaustedSuffix {
+		t.Fatalf("outcome %s/%s", outcome.Disposition, outcome.Reason)
+	}
+	attempts := commitAttempts(t, events)
+	if len(attempts) < 2 {
+		t.Fatalf("%d refused attempts after restart, want the retry exercised", len(attempts))
+	}
+	for i, a := range attempts {
+		if a.Stage != commitStageWorkspace || a.RuntimeCommit != nil || a.UnprovenHead == nil ||
+			a.UnprovenHead.Commit != head || a.UnprovenHead.Tree != tree {
+			t.Fatalf("attempt %d recorded %+v / %+v, want a workspace refusal naming %s as unproven", i+1, a, a.UnprovenHead, head)
+		}
+	}
+	if got, _, count := runtimeCommitsPastBase(t, fixture, runID); got != head || count != "1" {
+		t.Fatalf("head %s with %s commits past the base, want %s preserved and never recommitted", got, count, head)
+	}
+	notPublished(t, fixture, runID)
+	held := fixture.state(runID).snapshot.HeldMaterial
+	if held == nil || held.Kind != HeldUnprovenHead || held.Revision != head || held.Tree != tree || held.ContentDigest != "" {
+		t.Fatalf("held %+v, want unproven_head at %s", held, head)
 	}
 }
 
@@ -285,7 +307,7 @@ func TestAProviderForgedRuntimeCommitIsNeverAdopted(t *testing.T) {
 	message = candidateCommitMessage(fixture.state(runID))
 	outcome := fixture.reconcile(runID)
 	forged := mustGit(t, dir, "rev-parse", "HEAD")
-	if mustGit(t, dir, "log", "-1", "--format=%ae", forged) != runtimeCommitEmail || forged == fixture.base {
+	if mustGit(t, dir, "log", "-1", "--format=%ae", forged) != "runtime@zenchron.invalid" || forged == fixture.base {
 		t.Fatal("the forgery did not happen as a runtime-identity commit")
 	}
 	events := journalOf(t, fixture.runtime, runID)
@@ -297,14 +319,27 @@ func TestAProviderForgedRuntimeCommitIsNeverAdopted(t *testing.T) {
 		t.Fatalf("%d failed commit attempts (outcome %s/%s), want the retry exercised", len(attempts), outcome.Disposition, outcome.Reason)
 	}
 	for i, a := range attempts {
-		if a.Stage != commitStageWorkspace || a.RuntimeCommit != nil {
-			t.Fatalf("attempt %d recorded %+v, want a workspace refusal naming no runtime commit", i+1, a)
+		if a.Stage != commitStageWorkspace || a.RuntimeCommit != nil || a.UnprovenHead == nil || a.UnprovenHead.Commit != forged {
+			t.Fatalf("attempt %d recorded %+v / %+v, want a workspace refusal naming %s as unproven", i+1, a, a.UnprovenHead, forged)
 		}
 	}
 	notPublished(t, fixture, runID)
 	if got := mustGit(t, dir, "rev-parse", "HEAD"); got != forged {
 		t.Fatalf("the forged commit was not preserved: head %s, was %s", got, forged)
 	}
+	if held := fixture.state(runID).snapshot.HeldMaterial; held == nil || held.Kind != HeldUnprovenHead || held.Revision != forged {
+		t.Fatalf("held %+v, want unproven_head at %s", held, forged)
+	}
+}
+
+// forgeOutput is forgeGit that returns Git's output.
+func forgeOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // recoveryCase is a real unjournalled runtime commit (a crash right after Git
@@ -313,7 +348,6 @@ type recoveryCase struct {
 	fixture *phase8Fixture
 	dir     string
 	state   *runState
-	opID    string
 	valid   *runtimeCommit // what the crashed attempt would have recorded
 }
 
@@ -326,11 +360,6 @@ func newRecoveryCase(t *testing.T) recoveryCase {
 		defer func() { _ = recover() }()
 		_, _ = fixture.runtime.Reconcile(t.Context(), runID)
 	}()
-	state := fixture.state(runID)
-	op, ok := state.operationByKey(OpCandidateCommit, state.succeeded(OpExecutionInvoke)[0].ID)
-	if !ok {
-		t.Fatal("no candidate.commit operation")
-	}
 	dir := candidateDir(fixture.stateDir, runID)
 	head, tree := mustGit(t, dir, "rev-parse", "HEAD"), mustGit(t, dir, "rev-parse", "HEAD^{tree}")
 	paths, err := diffPaths(dir, fixture.base, head, "--no-renames")
@@ -341,20 +370,14 @@ func newRecoveryCase(t *testing.T) recoveryCase {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return recoveryCase{fixture, dir, state, op.ID, &runtimeCommit{
+	return recoveryCase{fixture, dir, fixture.state(runID), &runtimeCommit{
 		commitRecord: commitRecord{Commit: head, Tree: tree, PathCount: len(paths), MetadataDigest: metadata},
 		PathsDigest:  pathsDigest(paths),
 	}}
 }
 
-// retry models the next attempt beginning: its own operation.before, which
-// leaves the crashed attempt as the one other unmatched start.
-func (c *recoveryCase) retry() {
-	c.state.events = append(c.state.events, EngineeringEvent{Type: EventOperationBefore, OperationID: c.opID})
-}
-
 func (c *recoveryCase) recover(prior *runtimeCommit) (*CommitResult, error) {
-	_, result, err := c.fixture.runtime.recoverRuntimeCommit(c.state, c.opID, prior, &WorkspaceIntegrityError{Detail: "candidate head moved"})
+	_, result, err := c.fixture.runtime.recoverRuntimeCommit(c.state, prior, &WorkspaceIntegrityError{Detail: "candidate head moved"})
 	return result, err
 }
 
@@ -367,18 +390,14 @@ func (c *recoveryCase) amend(t *testing.T, change func()) {
 	forgeGit(t, c.dir, "commit", "-q", "--amend", "--no-edit")
 }
 
-// INVARIANT (#402 review M1): every fact recovery relies on is checked. The
-// untampered commit is adopted, from an interrupted attempt and from a
-// recorded one; each single tampering is refused, with the original integrity
-// error standing and the head left where it was.
-func TestRecoveryRefusesAnyCommitItCannotProveIsItsOwn(t *testing.T) {
-	t.Run("control: interrupted attempt", func(t *testing.T) {
-		c := newRecoveryCase(t)
-		c.retry()
-		if result, err := c.recover(nil); err != nil || result.Commit != c.valid.Commit {
-			t.Fatalf("the runtime's own commit was not recovered: %v", err)
-		}
-	})
+// INVARIANT (#402 review): recovery FAILS CLOSED. With no recorded runtime
+// commit nothing is adopted - not the runtime's own unjournalled commit, and
+// not a forgery whose bytes skip-worktree hides from the worktree (N1) or whose
+// parent a graft rewrites (N2). With a recorded commit, only that exact commit
+// is adopted: a different commit, tampered metadata, a dirty worktree or a
+// record that does not match is refused. Every refusal keeps the original
+// integrity error and leaves the head where it was.
+func TestRecoveryAdoptsOnlyTheRecordedRuntimeCommit(t *testing.T) {
 	t.Run("control: recorded commit", func(t *testing.T) {
 		c := newRecoveryCase(t)
 		if result, err := c.recover(c.valid); err != nil || result.Commit != c.valid.Commit {
@@ -387,54 +406,54 @@ func TestRecoveryRefusesAnyCommitItCannotProveIsItsOwn(t *testing.T) {
 	})
 	for _, tc := range []struct {
 		name   string
-		retry  bool
 		tamper func(t *testing.T, c *recoveryCase) *runtimeCommit // returns the recorded commit, if any
 	}{
-		{"an ordinary failed attempt proves nothing", false, func(*testing.T, *recoveryCase) *runtimeCommit { return nil }},
-		{"a sensitive file", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
+		{"no recorded commit: the runtime's own commit", func(*testing.T, *recoveryCase) *runtimeCommit { return nil }},
+		{"no recorded commit: skip-worktree hides a committed secret", func(t *testing.T, c *recoveryCase) *runtimeCommit {
 			c.amend(t, func() { mustWrite(t, filepath.Join(c.dir, "id_rsa"), pemPrivateKeyBlock()+"\n") })
+			forgeGit(t, c.dir, "update-index", "--skip-worktree", "id_rsa")
+			mustWrite(t, filepath.Join(c.dir, "id_rsa"), "not a key\n")
+			if status := forgeOutput(t, c.dir, "status", "--porcelain"); status != "" {
+				t.Fatalf("the variant is not clean to status: %q", status)
+			}
 			return nil
 		}},
-		{"runtime debris", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
-			nested := filepath.Join(c.dir, "scratch")
-			mustWrite(t, filepath.Join(nested, "f"), "x\n")
-			forgeGit(t, nested, "init", "-q")
-			forgeGit(t, nested, "-c", "user.email=a@b", "-c", "user.name=a", "add", "-A")
-			forgeGit(t, nested, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "x")
-			c.amend(t, func() {})
+		{"no recorded commit: a graft fakes the parent", func(t *testing.T, c *recoveryCase) *runtimeCommit {
+			mustWrite(t, filepath.Join(c.dir, "secret.txt"), awsSecretAssignment()+"\n")
+			forgeGit(t, c.dir, "add", "secret.txt")
+			forgeGit(t, c.dir, "commit", "-q", "-m", "history carrying a secret")
+			forgeGit(t, c.dir, "rm", "-q", "secret.txt")
+			forgeGit(t, c.dir, "commit", "-q", "-m", candidateCommitMessage(c.state))
+			head := forgeOutput(t, c.dir, "rev-parse", "HEAD")
+			mustWrite(t, filepath.Join(c.dir, ".git", "info", "grafts"), head+" "+c.fixture.base+"\n")
+			if parent := forgeOutput(t, c.dir, "log", "-1", "--format=%P", "HEAD"); parent != c.fixture.base {
+				t.Fatalf("the graft did not fake the parent: %s", parent)
+			}
 			return nil
 		}},
-		{"tampered config", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
+		{"a different commit than recorded", func(t *testing.T, c *recoveryCase) *runtimeCommit {
+			c.amend(t, func() { mustWrite(t, filepath.Join(c.dir, "id_rsa"), pemPrivateKeyBlock()+"\n") })
+			return c.valid
+		}},
+		{"tampered config", func(t *testing.T, c *recoveryCase) *runtimeCommit {
 			forgeGit(t, c.dir, "config", "zenchron.tampered", "yes")
-			return nil
+			return c.valid
 		}},
-		{"a wrong parent", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
-			forgeGit(t, c.dir, "commit", "-q", "--allow-empty", "-m", candidateCommitMessage(c.state))
-			return nil
-		}},
-		{"a foreign author", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
-			forgeGit(t, c.dir, "-c", "user.email=someone@example.com", "commit", "-q", "--amend", "--no-edit", "--reset-author")
-			return nil
-		}},
-		{"another message", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
-			forgeGit(t, c.dir, "commit", "-q", "--amend", "-m", "not the candidate commit")
-			return nil
-		}},
-		{"a dirty tree", true, func(t *testing.T, c *recoveryCase) *runtimeCommit {
+		{"a dirty tree", func(t *testing.T, c *recoveryCase) *runtimeCommit {
 			mustWrite(t, filepath.Join(c.dir, "stray.go"), "package stray\n")
-			return nil
+			return c.valid
 		}},
-		{"a mismatched recorded commit", false, func(t *testing.T, c *recoveryCase) *runtimeCommit {
+		{"a mismatched recorded commit", func(t *testing.T, c *recoveryCase) *runtimeCommit {
 			prior := *c.valid
 			prior.Commit = c.fixture.base
 			return &prior
 		}},
-		{"mismatched recorded paths", false, func(t *testing.T, c *recoveryCase) *runtimeCommit {
+		{"mismatched recorded paths", func(t *testing.T, c *recoveryCase) *runtimeCommit {
 			prior := *c.valid
 			prior.PathsDigest = pathsDigest([]string{"elsewhere.go"})
 			return &prior
 		}},
-		{"mismatched recorded metadata", false, func(t *testing.T, c *recoveryCase) *runtimeCommit {
+		{"mismatched recorded metadata", func(t *testing.T, c *recoveryCase) *runtimeCommit {
 			prior := *c.valid
 			prior.MetadataDigest = textDigest("other metadata")
 			return &prior
@@ -443,9 +462,6 @@ func TestRecoveryRefusesAnyCommitItCannotProveIsItsOwn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newRecoveryCase(t)
 			prior := tc.tamper(t, &c)
-			if tc.retry {
-				c.retry()
-			}
 			head := mustGit(t, c.dir, "rev-parse", "HEAD")
 			result, err := c.recover(prior)
 			if err == nil {

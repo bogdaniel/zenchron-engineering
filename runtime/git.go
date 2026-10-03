@@ -188,7 +188,7 @@ func CreateCandidateClone(stateDir, runID, remote, base string, credentials Cred
 	if _, err := runGit(dir, "config", "user.name", "Zenchron Runtime"); err != nil {
 		return CandidateWorkspace{}, err
 	}
-	if _, err := runGit(dir, "config", "user.email", runtimeCommitEmail); err != nil {
+	if _, err := runGit(dir, "config", "user.email", "runtime@zenchron.invalid"); err != nil {
 		return CandidateWorkspace{}, err
 	}
 	d, err := gitMetadataDigest(dir)
@@ -283,19 +283,6 @@ func (w *CandidateWorkspace) FetchBase(remote string) error {
 	return err
 }
 func gitMetadataDigest(dir string) (string, error) {
-	head, err := gitOutput(dir, "rev-parse", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	return metadataDigestAt(dir, strings.TrimSuffix(head, "\n"))
-}
-
-// metadataDigestAt is the digest of this workspace's config and refs with HEAD
-// at revision. A candidate head is detached, so a runtime commit moves HEAD
-// and nothing else: #402 recovery compares this, at the recorded revision,
-// against the durable baseline to prove config and refs are untouched without
-// ever re-seeding the baseline from the live repository.
-func metadataDigestAt(dir, revision string) (string, error) {
 	// --local keeps the baseline on the runtime-owned repository file. System
 	// and global config are switched off for every runtime Git call, and the
 	// runtime's own -c overrides would otherwise appear as "command line:"
@@ -308,16 +295,13 @@ func metadataDigestAt(dir, revision string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// The trailing newline is rev-parse's, kept so existing durable baselines
-	// still match byte for byte.
-	h := sha256.Sum256([]byte(config + "\n" + refs + "\n" + revision + "\n"))
+	head, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256([]byte(config + "\n" + refs + "\n" + head))
 	return hex.EncodeToString(h[:]), nil
 }
-
-// runtimeCommitEmail is the author and committer of every runtime-owned
-// commit. Recovery (#402) reads it back to tell its own commit from anything
-// else that could have moved a candidate head.
-const runtimeCommitEmail = "runtime@zenchron.invalid"
 
 type CommitResult struct {
 	Commit, Tree string
@@ -340,8 +324,56 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if len(paths) == 0 {
 		return CommitResult{}, fmt.Errorf("candidate has no changes")
 	}
-	debris, eligible, err := guardCommitPaths(w.Dir, paths, maxBytes)
+	// THE FILESYSTEM GATE COVERS EVERY OBSERVED PATH, because the runtime is
+	// about to join all of them onto the workspace root and stat them.
+	if err := GuardCandidatePathShape(w.Dir, paths); err != nil {
+		return CommitResult{}, err
+	}
+	// After the path gate, so what is joined onto the workspace root here has
+	// already been proven to be a safe relative path.
+	debris, err := classifyRuntimeDebris(w.Dir, paths)
 	if err != nil {
+		return CommitResult{}, err
+	}
+	eligible := withoutPaths(paths, debris.Excluded)
+	// NOTHING BUT DEBRIS IS NOT A CANDIDATE. Committing here would mint an
+	// empty-tree commit in the name of work nobody did; the workspace is
+	// answered for exactly as an unchanged one is, and the paths that were
+	// left behind are named so the answer is not mistaken for "nothing
+	// happened".
+	if len(eligible) == 0 {
+		return CommitResult{}, fmt.Errorf("candidate holds no change a runtime commit can carry, only runtime-owned scratch: %s", quotedPaths(debris.Excluded))
+	}
+	// THE EXCLUSION HAS TO FIT IN THE RECORD OF IT. Every excluded path is
+	// journalled in full - not truncated, not digested - so a workspace whose
+	// debris exceeds what one payload may carry is refused HERE, before a
+	// commit is written, rather than after: minting a commit whose own event
+	// cannot be journalled is how #191's abandoned commit moved HEAD out from
+	// under the recorded-revision check.
+	//
+	// It is the SAME bound the event schema applies, called through the same
+	// function, so the gate and the schema cannot drift into disagreeing about
+	// what is recordable. It is a deliberate ceiling, and it names every path.
+	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
+		return CommitResult{}, fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded))
+	}
+	// THE COMMIT GATES COVER WHAT THE COMMIT WILL HOLD, and nothing else. A
+	// sensitive-looking basename and the size ceiling are both statements about
+	// the object being published, so a path already excluded from it cannot
+	// veto it.
+	if err := GuardCandidateCommitContent(w.Dir, eligible, maxBytes); err != nil {
+		return CommitResult{}, err
+	}
+	// The OUTPUT half of the credential boundary. Admission proved the
+	// workspace was clean before the producer was shown it; this proves the
+	// producer did not introduce a credential value into what is about to
+	// become a runtime-owned commit. A value found here is REFUSED, not
+	// redacted and not ignored: redacting it would commit a rewritten version
+	// of the producer's work, and ignoring it would publish the secret. It asks
+	// about the eligible paths for the same reason the gates above do - the
+	// bytes of an excluded path are not bytes this commit publishes - and
+	// nothing about the check on candidate work is weakened.
+	if err := scanPathsForCredentialValues(w.Dir, eligible); err != nil {
 		return CommitResult{}, err
 	}
 	// THE EXCLUSION IS AN INDEX WRITE, NEVER A WORKTREE WRITE.
@@ -422,68 +454,6 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return result, fmt.Errorf("candidate not clean after runtime commit: %s", quotedPaths(residue))
 	}
 	return result, nil
-}
-
-// guardCommitPaths is every content gate a runtime-owned commit must pass, in
-// order, over the paths it would carry. It is the ONE definition: Commit runs
-// it before writing a commit, and #402 recovery runs it over the path set of a
-// commit it is asked to adopt, so a commit nobody guarded cannot become a
-// candidate by looking like the runtime's own. It returns the debris split and
-// the paths a commit may carry.
-func guardCommitPaths(dir string, paths []string, maxBytes int64) (runtimeDebris, []string, error) {
-	// THE FILESYSTEM GATE COVERS EVERY OBSERVED PATH, because the runtime is
-	// about to join all of them onto the workspace root and stat them.
-	if err := GuardCandidatePathShape(dir, paths); err != nil {
-		return runtimeDebris{}, nil, err
-	}
-	// After the path gate, so what is joined onto the workspace root here has
-	// already been proven to be a safe relative path.
-	debris, err := classifyRuntimeDebris(dir, paths)
-	if err != nil {
-		return runtimeDebris{}, nil, err
-	}
-	eligible := withoutPaths(paths, debris.Excluded)
-	// NOTHING BUT DEBRIS IS NOT A CANDIDATE. Committing here would mint an
-	// empty-tree commit in the name of work nobody did; the workspace is
-	// answered for exactly as an unchanged one is, and the paths that were
-	// left behind are named so the answer is not mistaken for "nothing
-	// happened".
-	if len(eligible) == 0 {
-		return runtimeDebris{}, nil, fmt.Errorf("candidate holds no change a runtime commit can carry, only runtime-owned scratch: %s", quotedPaths(debris.Excluded))
-	}
-	// THE EXCLUSION HAS TO FIT IN THE RECORD OF IT. Every excluded path is
-	// journalled in full - not truncated, not digested - so a workspace whose
-	// debris exceeds what one payload may carry is refused HERE, before a
-	// commit is written, rather than after: minting a commit whose own event
-	// cannot be journalled is how #191's abandoned commit moved HEAD out from
-	// under the recorded-revision check.
-	//
-	// It is the SAME bound the event schema applies, called through the same
-	// function, so the gate and the schema cannot drift into disagreeing about
-	// what is recordable. It is a deliberate ceiling, and it names every path.
-	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
-		return runtimeDebris{}, nil, fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded))
-	}
-	// THE COMMIT GATES COVER WHAT THE COMMIT WILL HOLD, and nothing else. A
-	// sensitive-looking basename and the size ceiling are both statements about
-	// the object being published, so a path already excluded from it cannot
-	// veto it.
-	if err := GuardCandidateCommitContent(dir, eligible, maxBytes); err != nil {
-		return runtimeDebris{}, nil, err
-	}
-	// The OUTPUT half of the credential boundary. Admission proved the
-	// workspace was clean before the producer was shown it; this proves the
-	// producer did not introduce a credential value into what is about to
-	// become a runtime-owned commit. A value found here is REFUSED, not
-	// redacted and not ignored: redacting it would commit a rewritten version
-	// of the producer's work, and ignoring it would publish the secret. It asks
-	// about the eligible paths for the same reason the gates above do - the
-	// bytes of an excluded path are not bytes this commit publishes - and
-	// nothing about the check on candidate work is weakened.
-	if err := scanPathsForCredentialValues(dir, eligible); err != nil {
-		return runtimeDebris{}, nil, err
-	}
-	return debris, eligible, nil
 }
 
 // runtimeDebris is the runtime-owned split of a dirty candidate workspace into

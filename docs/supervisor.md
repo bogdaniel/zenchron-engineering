@@ -381,6 +381,13 @@ checkpoint             runtime-owned incomplete checkpoint commit (#54)
 committed_unobserved   a runtime-owned commit candidate.commit made whose
                        observation or reassessment then failed (#402); the
                        revision and tree are that commit, never its parent
+unproven_head          the candidate head moved to a commit no candidate.commit
+                       attempt recorded as its own (#402); the revision and
+                       tree are that head as observed. It is NOT a runtime
+                       commit: author, message and parent prove nothing, so it
+                       is never adopted, observed or assured, and only operator
+                       release (#344) can resolve it. A runtime commit lost to
+                       process loss before any journal record lands here too
 uncommitted            a succeeded producer's change the budget stopped before
                        candidate.commit; identified by producing operation, path
                        count and a content digest taken when the producer

@@ -45,6 +45,12 @@ const (
 	// whose observation or reassessment then failed (#402). It is neither
 	// execution- nor assurance-complete; Revision and Tree are that commit.
 	HeldCommittedUnobserved = "committed_unobserved"
+	// HeldUnprovenHead is a candidate head that moved to a commit NO
+	// candidate.commit attempt recorded as its own (#402). Revision and Tree
+	// are that head as observed. It is not a runtime commit, it is never
+	// adopted, observed or assured, and only operator release (#344) can
+	// resolve it.
+	HeldUnprovenHead = "unproven_head"
 	// HeldQuarantined is material a REFUSED invocation left behind (#390):
 	// moved out of the candidate workspace into a runtime-owned quarantine,
 	// never committed and never inherited by a retry. Location names it.
@@ -90,7 +96,7 @@ type HeldMaterial struct {
 	Disposition          string `json:"disposition"`
 }
 
-var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true, HeldCommittedUnobserved: true, HeldQuarantined: true}
+var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true, HeldCommittedUnobserved: true, HeldUnprovenHead: true, HeldQuarantined: true}
 
 func (h HeldMaterial) validate() error {
 	var closed error
@@ -156,8 +162,13 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		}
 		// The runtime already made the commit and only what follows it failed
 		// (#402): the material is that commit, not uncommitted work at its parent.
+		// A moved head no attempt recorded is named as exactly that: unproven,
+		// with none of the producer's identity claimed for its content.
 		if op, ok := s.operationByKey(OpCandidateCommit, producing); ok {
-			if made := s.runtimeCommit(op.ID); made != nil {
+			if unproven := s.unprovenHead(op.ID); unproven != nil {
+				held.Kind, held.Revision, held.Tree = HeldUnprovenHead, unproven.Commit, unproven.Tree
+				held.PathCount, held.ContentDigest = 0, ""
+			} else if made := s.runtimeCommit(op.ID); made != nil {
 				held.Kind, held.Revision, held.Tree, held.PathCount = HeldCommittedUnobserved, made.Commit, made.Tree, made.PathCount
 			}
 		}

@@ -1920,6 +1920,8 @@ type commitRecord struct {
 // before anything is journalled, so every failure after it returns the commit
 // itself in the attempt's durable result, and a later attempt observes that
 // same commit instead of committing again or calling the work uncommitted.
+// Process loss BEFORE that result is written leaves a head nothing durable
+// proves is the runtime's: it is refused and held as unproven, never adopted.
 func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState, op RunOperation) effect {
 	// Which mutation is being committed is the planner's binding, so the
 	// producing operation is re-derived the same way rather than re-encoded
@@ -1939,8 +1941,11 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	workspace, err := r.workspace(state)
 	var recovered *CommitResult
 	if err != nil {
-		if workspace, recovered, err = r.recoverRuntimeCommit(state, op.ID, prior, err); err != nil {
-			return commitFailed(commitStageWorkspace, err, prior)
+		if workspace, recovered, err = r.recoverRuntimeCommit(state, prior, err); err != nil {
+			return effect{state: OperationFailed, result: commitFailure{
+				Error: boundedDetail(err.Error()), Stage: commitStageWorkspace,
+				RuntimeCommit: prior, UnprovenHead: r.refusedHead(state, prior),
+			}}
 		}
 	} else if err := workspace.AssertIntegrity(); err != nil {
 		return commitFailed(commitStageWorkspace, r.restore(workspace, err), prior)
@@ -2036,11 +2041,14 @@ const (
 // commitFailure is a failed candidate.commit attempt's result. RuntimeCommit
 // is set whenever a runtime-owned commit exists for this operation - made by
 // this attempt or recorded by an earlier one - so the journal never says
-// "uncommitted" about a head the runtime already moved.
+// "uncommitted" about a head the runtime already moved. UnprovenHead is a
+// moved head that NO attempt recorded as its own: it is observed, never
+// adopted, and never described as a runtime commit.
 type commitFailure struct {
 	Error         string         `json:"error"`
 	Stage         string         `json:"failure_stage"`
 	RuntimeCommit *runtimeCommit `json:"runtime_commit,omitempty"`
+	UnprovenHead  *observedHead  `json:"unproven_head,omitempty"`
 }
 
 // runtimeCommit is the durable identity of a commit whose candidate.committed
@@ -2052,19 +2060,23 @@ type runtimeCommit struct {
 	Checkpoint  bool   `json:"checkpoint,omitempty"`
 }
 
+// observedHead is a candidate head as read from the workspace, and nothing more.
+type observedHead struct {
+	Commit string `json:"commit"`
+	Tree   string `json:"tree"`
+}
+
 func commitFailed(stage string, err error, made *runtimeCommit) effect {
-	return effect{state: OperationFailed, result: commitFailure{boundedDetail(err.Error()), stage, made}}
+	return effect{state: OperationFailed, result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
 }
 
 func candidateCommitMessage(state *runState) string {
 	return "zenchron: candidate change for " + state.run.Goal
 }
 
-// runtimeCommit is the latest runtime-owned commit an attempt of this
-// candidate.commit operation recorded without completing, read back from the
-// journal so neither a restart nor a later attempt that failed earlier can
-// lose it.
-func (s *runState) runtimeCommit(opID string) *runtimeCommit {
+// commitFailures visits this candidate.commit operation's attempt results,
+// newest first, until visit returns true.
+func (s *runState) commitFailures(opID string, visit func(commitFailure) bool) {
 	for i := len(s.events) - 1; i >= 0; i-- {
 		e := s.events[i]
 		if e.Type != EventOperationAfter || e.OperationID != opID {
@@ -2075,34 +2087,57 @@ func (s *runState) runtimeCommit(opID string) *runtimeCommit {
 			continue
 		}
 		var failure commitFailure
-		if decodeJSON(op.Result, &failure) == nil && failure.RuntimeCommit != nil {
-			return failure.RuntimeCommit
+		if decodeJSON(op.Result, &failure) == nil && visit(failure) {
+			return
 		}
 	}
-	return nil
+}
+
+// runtimeCommit is the latest runtime-owned commit an attempt of this
+// candidate.commit operation recorded without completing, read back from the
+// journal so neither a restart nor a later attempt that failed earlier can
+// lose it.
+func (s *runState) runtimeCommit(opID string) (made *runtimeCommit) {
+	s.commitFailures(opID, func(f commitFailure) bool { made = f.RuntimeCommit; return made != nil })
+	return made
+}
+
+// unprovenHead is the head the LATEST attempt of this operation refused as
+// unproven, or nil.
+func (s *runState) unprovenHead(opID string) (head *observedHead) {
+	s.commitFailures(opID, func(f commitFailure) bool { head = f.UnprovenHead; return true })
+	return head
+}
+
+// readHead reads the candidate head and its tree.
+func readHead(dir string) (observedHead, error) {
+	out, err := gitOutput(dir, "rev-parse", "HEAD", "HEAD^{tree}")
+	if err != nil {
+		return observedHead{}, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return observedHead{}, fmt.Errorf("unreadable candidate head")
+	}
+	return observedHead{fields[0], fields[1]}, nil
 }
 
 // recoverRuntimeCommit answers a candidate head that is not the recorded
-// revision. The one movement it accepts is this operation's own commit from an
-// earlier attempt that never journalled its candidate.committed (#402). Only
-// two facts make that plausible: an earlier attempt RECORDED the commit
-// (prior), or an earlier attempt was interrupted with no operation.after at all
-// (process loss between the commit and the journal). An ordinary failed
-// attempt proves nothing, so it never opens this path.
+// revision. It adopts exactly one thing: the commit an earlier attempt of this
+// operation RECORDED as its own runtime commit and then failed to complete
+// (#402). The recorded hash binds parent, history and tree, and the tree binds
+// content, so what is checked here is only what that binding cannot prove: the
+// path set and Git metadata as recorded, and a worktree holding nothing more.
 //
-// Every fact a forger controls is then checked as if the commit were a
-// stranger's: the runtime identity and exact message, exactly one parent which
-// IS the recorded revision, a clean worktree, config and refs equal to the
-// DURABLE baseline (never re-seeded from the live repository), the recorded
-// commit, tree, path set and metadata when an attempt recorded them, and every
-// content gate Commit itself applies, over exactly what the commit carries.
-//
-// Any refusal leaves the original integrity error standing, exactly as before
-// #402: nothing is adopted, and nothing here writes to the workspace. The
-// commit is preserved, never reset or remade.
-func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, opID string, prior *runtimeCommit, cause error) (*CandidateWorkspace, *CommitResult, error) {
+// It FAILS CLOSED. A head no attempt recorded - including the runtime's own
+// commit after process loss before any journal record - is never adopted:
+// author, message, parent and a clean status are all forgeable by whoever can
+// write the workspace, and are not evidence. The original integrity error
+// stands, nothing here writes to the workspace, and the head is left to the
+// operator release path (#344).
+func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtimeCommit, cause error) (*CandidateWorkspace, *CommitResult, error) {
 	var integrity *WorkspaceIntegrityError
-	if !errors.As(cause, &integrity) || (prior == nil && !state.attemptInterrupted(opID)) {
+	if !errors.As(cause, &integrity) {
 		return nil, nil, cause
 	}
 	refuse := func(why string) (*CandidateWorkspace, *CommitResult, error) {
@@ -2113,94 +2148,56 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, opID string, 
 	if expected == "" {
 		expected = state.baseRevision()
 	}
-	baseline := state.projection.CandidateMetadata
-	if baseline == "" {
-		return refuse("no durable Git metadata baseline to hold it to")
-	}
-	out, err := gitOutput(dir, "log", "-1", "--format=%H%x00%T%x00%P%x00%ae%x00%ce%x00%B", "HEAD")
+	head, err := readHead(dir)
 	if err != nil {
 		return refuse(err.Error())
-	}
-	fields := strings.SplitN(strings.TrimSpace(out), "\x00", 6)
-	if len(fields) != 6 {
-		return refuse("unreadable head commit")
-	}
-	head, tree := fields[0], fields[1]
-	switch {
-	case fields[2] != expected:
-		return refuse("its parent is not the recorded revision " + expected)
-	case fields[3] != runtimeCommitEmail || fields[4] != runtimeCommitEmail:
-		return refuse("it is not authored by the runtime")
-	case strings.TrimSpace(fields[5]) != strings.TrimSpace(candidateCommitMessage(state)):
-		return refuse("it is not this run's candidate commit")
-	case prior != nil && (head != prior.Commit || tree != prior.Tree):
-		return refuse("it is not the recorded commit " + prior.Commit)
-	}
-	// Config and refs exactly as durably trusted; only HEAD may have moved.
-	if at, err := metadataDigestAt(dir, expected); err != nil || at != baseline {
-		return refuse("Git config or refs differ from the durable baseline")
-	}
-	remaining, err := changedPaths(dir)
-	if err != nil {
-		return refuse(err.Error())
-	}
-	debris, err := classifyRuntimeDebris(dir, remaining)
-	if err != nil {
-		return refuse(err.Error())
-	}
-	if left := withoutPaths(remaining, debris.Excluded); len(left) > 0 {
-		return refuse("work is still uncommitted: " + quotedPaths(left))
 	}
 	// No rename detection: the path set Commit records lists both sides.
-	paths, err := diffPaths(dir, expected, head, "--no-renames")
+	paths, err := diffPaths(dir, expected, head.Commit, "--no-renames")
 	if err != nil {
 		return refuse(err.Error())
-	}
-	// The commit-time gates, over what the commit carries. The worktree is
-	// clean, so the bytes they read are the committed bytes.
-	carried, _, err := guardCommitPaths(dir, paths, maxCandidateBytes)
-	if err != nil {
-		return refuse(err.Error())
-	}
-	if debris := append(carried.Excluded, withoutPaths(carried.Unlink, carried.Excluded)...); len(debris) > 0 {
-		return refuse("it carries runtime-owned debris: " + quotedPaths(debris))
 	}
 	metadata, err := gitMetadataDigest(dir)
 	if err != nil {
 		return refuse(err.Error())
 	}
-	excluded := debris.Excluded
-	if prior != nil {
-		if pathsDigest(paths) != prior.PathsDigest || (prior.MetadataDigest != "" && metadata != prior.MetadataDigest) {
-			return refuse("its paths or Git metadata differ from the recorded commit")
-		}
-		excluded = prior.ExcludedPaths
+	if prior == nil {
+		return refuse("no attempt recorded a runtime commit, so the head is unproven")
+	}
+	switch {
+	case head.Commit != prior.Commit || head.Tree != prior.Tree:
+		return refuse("it is not the recorded commit " + prior.Commit)
+	case pathsDigest(paths) != prior.PathsDigest:
+		return refuse("its paths differ from the recorded commit")
+	case metadata != prior.MetadataDigest:
+		return refuse("Git metadata differs from the recorded commit")
+	}
+	residue, err := dirtyPathsOutside(dir, prior.ExcludedPaths)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	if len(residue) > 0 {
+		return refuse("work is still uncommitted: " + quotedPaths(residue))
 	}
 	return &CandidateWorkspace{
 			Dir: dir, BaseRevision: state.baseRevision(), TrustedMetadata: metadata,
 			Remote: r.deps.Remote.URL, Credentials: r.deps.Credentials,
-		}, &CommitResult{Commit: head, Tree: tree, Paths: paths, Excluded: excluded},
+		}, &CommitResult{Commit: head.Commit, Tree: head.Tree, Paths: paths, Excluded: prior.ExcludedPaths},
 		nil
 }
 
-// attemptInterrupted reports whether an EARLIER attempt of this operation
-// began and never recorded its operation.after - the process was lost mid
-// attempt. The current attempt's own operation.before is the one unmatched
-// event that is expected.
-func (s *runState) attemptInterrupted(opID string) bool {
-	unmatched := 0
-	for _, e := range s.events {
-		if e.OperationID != opID {
-			continue
-		}
-		switch e.Type {
-		case EventOperationBefore:
-			unmatched++
-		case EventOperationAfter:
-			unmatched--
-		}
+// refusedHead is the head a refused recovery leaves in place, when it moved
+// and is not the runtime commit the operation recorded.
+func (r *EngineeringRuntime) refusedHead(state *runState, prior *runtimeCommit) *observedHead {
+	head, err := readHead(candidateDir(r.deps.StateDir, state.run.ID))
+	expected := state.projection.CandidateRevision
+	if expected == "" {
+		expected = state.baseRevision()
 	}
-	return unmatched >= 2
+	if err != nil || head.Commit == expected || (prior != nil && head.Commit == prior.Commit) {
+		return nil
+	}
+	return &head
 }
 
 // maxCandidateBytes bounds one runtime-owned commit. It is the candidate size
