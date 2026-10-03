@@ -6,9 +6,9 @@
 // token API does, and cmd/zenchron-engineering/control_plane.go mounts both
 // on one http.Server behind one listener. There is no second SQLite handle,
 // no second token file and no unschematized /api/* surface: the page's own
-// live refresh (web/static/console.js) polls API's existing schema'd
-// /v1/runs/{id} and /v1/runs/{id}/events routes, the same contract any other
-// client of S1 would use.
+// live refresh (assets/static/console.js) re-fetches the page itself and
+// swaps its [data-live] regions, so every refreshed byte comes through the
+// same handler, projection and template as the first render (#420).
 //
 // A browser cannot attach an Authorization header to a plain navigation, so
 // the HTML surface accepts the identical token via a cookie instead of the
@@ -92,6 +92,7 @@ func (w *Web) Handler() http.Handler {
 	mux.HandleFunc("GET /overview", w.handleOverview)
 	mux.HandleFunc("GET /runs", w.handleRuns)
 	mux.HandleFunc("GET /runs/{id}", w.handleRunDetail)
+	mux.HandleFunc("GET /plans/{id}", w.handlePlanDetail)
 	mux.Handle("GET /static/", http.FileServerFS(webStaticFiles))
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Cache-Control", "no-store")
@@ -299,6 +300,27 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 		data.NextAfter = data.Events[len(data.Events)-1].Sequence
 	}
 	w.render(rw, runDetailTemplate, data)
+}
+
+// ---------------------------------------------------------------------------
+// Plan detail
+// ---------------------------------------------------------------------------
+
+type planDetailData struct {
+	ObservedAt time.Time
+	Plan       PlanDetail
+}
+
+func (w *Web) handlePlanDetail(rw http.ResponseWriter, r *http.Request) {
+	detail, status, _ := readPlanDetail(w.Store, r)
+	switch status {
+	case 200:
+		w.render(rw, planDetailTemplate, planDetailData{ObservedAt: w.now(), Plan: detail})
+	case 404, 400:
+		w.renderNotFound(rw)
+	default:
+		w.renderError(rw, nil)
+	}
 }
 
 // ---------------------------------------------------------------------------

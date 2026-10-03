@@ -1,27 +1,24 @@
 // zenchron-engineering control plane console: small plain JavaScript, no
 // framework, no build step.
 //
-// This script does exactly three things, all read-only:
+// This script does exactly two things, all read-only:
 //   1. Bootstraps the session cookie from the login page, entirely in the
 //      browser - the token never travels in a URL, a query string, or a
 //      server log, only in the Cookie header this sets and the Authorization
 //      header requests below attach from it.
-//   2. Keeps the top bar's live/stale indicator honest by polling one of
-//      API's own schema'd /v1/* routes and marking the console STALE the
-//      moment a poll fails - an operator must never read a frozen page as
-//      current.
-//   3. On a run's detail page, patches the current-operation panel and tails
-//      new journal events into the timeline from API's /v1/runs/{id} and
-//      /v1/runs/{id}/events, so the live overlay updates without a reload
-//      losing the operator's place.
+//   2. Keeps every page current by re-fetching its own server render and
+//      swapping the [data-live] regions, and keeps the top bar's live/stale
+//      indicator honest: "live" only while that refresh is succeeding,
+//      "stale" the moment it fails, times out or goes quiet - an operator
+//      must never read a frozen page as current (#420).
 //
-// Every fetch here targets controlplane.API's existing, published /v1/*
-// contract (controlplane/api.go) - never a route this console invents for
-// itself - and nothing here ever issues a mutating request.
+// Every fetch here targets a route the server already serves - the page
+// itself, or API's published /v1/controller for the login check - never a
+// route this console invents, and nothing here ever issues a mutating
+// request.
 (function () {
   "use strict";
 
-  var POLL_MS = 4000;
   var COOKIE_NAME = "zenchron_control_plane_token";
 
   function getCookie(name) {
@@ -70,146 +67,85 @@
   }
 
   // ---------------------------------------------------------------------
-  // Live / stale indicator
+  // Live refresh and the live / stale indicator
   // ---------------------------------------------------------------------
+  // Each tick re-fetches this page's own server render - the same
+  // authenticated GET, the same sanitized projections - and swaps every
+  // [data-live] region by id. One request covers every region, so one panel
+  // can never read fresh while another failed (#420). "live" means the last
+  // full refresh succeeded within STALE_MS; anything else is "stale" with
+  // the age of the data actually on screen.
+  // ponytail: whole-page re-render per tick; switch run detail to #396's
+  // SSE stream and the fleet to #399's change cursor once they land.
+  var POLL_MS = 2000;
+  var TIMEOUT_MS = 3000;
+  var STALE_MS = 5000;
   var indicator = document.getElementById("live-indicator");
+  var freshness = document.getElementById("freshness");
+  var lastGood = Date.parse(freshness && freshness.getAttribute("data-observed-at")) || Date.now();
+  var failure = "";
+  // confirmed is false until one refresh has succeeded in this page. Before
+  // then the server snapshot is all there is, so the badge says "snapshot"
+  // (or "stale" once that snapshot is too old) and never "live" (#421 review).
+  var confirmed = false;
 
-  function markLive() {
+  function render() {
     if (!indicator) return;
-    indicator.textContent = "live";
-    indicator.classList.remove("stale");
-    indicator.removeAttribute("title");
+    var age = Date.now() - lastGood;
+    var live = confirmed && !failure && age <= STALE_MS;
+    if (!confirmed && !failure && age <= STALE_MS) return;
+    indicator.textContent = live ? "live" : "stale";
+    indicator.classList.toggle("stale", !live);
+    indicator.title = live ? "refreshed within the last " + STALE_MS / 1000 + "s" : failure || "no successful refresh for " + Math.round(age / 1000) + "s";
+    if (freshness) freshness.textContent = "updated " + new Date(lastGood).toISOString().slice(11, 19) + "Z" + (live ? "" : " (" + Math.round(age / 1000) + "s ago)");
   }
 
-  function markStale(detail) {
-    if (!indicator) return;
-    indicator.textContent = "stale";
-    indicator.classList.add("stale");
-    if (detail) indicator.title = detail;
-  }
-
-  function pollJSON(url, onData) {
-    fetch(url, { headers: Object.assign({ Accept: "application/json" }, authHeaders()) })
-      .then(function (res) {
-        if (!res.ok) throw new Error("http " + res.status);
-        return res.json();
-      })
-      .then(function (data) {
-        markLive();
-        onData(data);
-      })
-      .catch(function (err) {
-        markStale(err && err.message ? err.message : String(err));
-      });
-  }
-
-  function setField(root, field, value) {
-    var el = root.querySelector('[data-field="' + field + '"]');
-    if (el) el.textContent = value;
-  }
-
-  function setStateField(root, field, value) {
-    var el = root.querySelector('[data-field="' + field + '"]');
-    if (el) {
-      el.textContent = value;
-      el.setAttribute("data-state", value);
+  function swapRegions(doc) {
+    var regions = document.querySelectorAll("[data-live][id]");
+    for (var i = 0; i < regions.length; i++) {
+      if (!doc.getElementById(regions[i].id)) throw new Error("region " + regions[i].id + " missing from refresh");
     }
-  }
-
-  // formatDuration mirrors time.Duration.Round(time.Second).String() closely
-  // enough for a live-patched value: whole seconds, minutes and hours, no
-  // sub-second noise.
-  function formatDuration(nanos) {
-    if (!nanos || nanos <= 0) return "0s";
-    var totalSeconds = Math.round(nanos / 1e9);
-    var hours = Math.floor(totalSeconds / 3600);
-    var minutes = Math.floor((totalSeconds % 3600) / 60);
-    var seconds = totalSeconds % 60;
-    var out = "";
-    if (hours) out += hours + "h";
-    if (hours || minutes) out += minutes + "m";
-    out += seconds + "s";
-    return out;
-  }
-
-  function formatTimestamp(iso) {
-    if (!iso) return "—";
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) return iso;
-    return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
-  }
-
-  function patchOperationPanel(panel, run) {
-    var op = run && run.operation;
-    if (!op) return;
-    setStateField(panel, "state", op.state);
-    setField(panel, "progress-source", op.progress_source || "journal");
-    setField(panel, "last-progress-at", formatTimestamp(op.last_progress_at));
-    setField(panel, "silent-for", formatDuration(op.silent_for));
-  }
-
-  function appendTimelineEntry(list, event) {
-    if (list.querySelector('[data-sequence="' + event.sequence + '"]')) return;
-    var item = document.createElement("li");
-    item.setAttribute("data-sequence", event.sequence);
-
-    var seq = document.createElement("span");
-    seq.className = "mono muted";
-    seq.textContent = "#" + event.sequence;
-    var kind = document.createElement("span");
-    kind.className = "event-type";
-    kind.textContent = event.type;
-    var at = document.createElement("span");
-    at.className = "muted";
-    at.textContent = formatTimestamp(event.occurred_at);
-
-    item.appendChild(seq);
-    item.appendChild(kind);
-    item.appendChild(at);
-    list.appendChild(item);
-  }
-
-  function startRunDetailPolling(runID) {
-    var panel = document.getElementById("operation-panel");
-    var list = document.getElementById("timeline");
-    var after = list ? parseInt(list.getAttribute("data-after") || "0", 10) : 0;
-
-    function tick() {
-      pollJSON("/v1/runs/" + encodeURIComponent(runID), function (run) {
-        if (panel) patchOperationPanel(panel, run);
-      });
-      if (list) {
-        pollJSON("/v1/runs/" + encodeURIComponent(runID) + "/events?after=" + after, function (page) {
-          var events = page.events || [];
-          for (var i = 0; i < events.length; i++) {
-            appendTimelineEntry(list, events[i]);
-          }
-          if (typeof page.next_after === "number") after = page.next_after;
-        });
+    var focused = document.activeElement;
+    for (var j = 0; j < regions.length; j++) {
+      var next = document.importNode(doc.getElementById(regions[j].id), true);
+      var href = regions[j].contains(focused) && focused.getAttribute("href");
+      regions[j].replaceWith(next);
+      if (href) {
+        var again = next.querySelector('[href="' + CSS.escape(href) + '"]');
+        if (again) again.focus();
       }
     }
-
-    tick();
-    return window.setInterval(tick, POLL_MS);
   }
 
-  function startHeartbeat(url) {
-    function tick() {
-      pollJSON(url, function () {});
-    }
-    tick();
-    return window.setInterval(tick, POLL_MS);
+  function refresh() {
+    var ctrl = new AbortController();
+    var timer = window.setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
+    fetch(window.location.href, { headers: { Accept: "text/html" }, credentials: "same-origin", signal: ctrl.signal })
+      .then(function (res) {
+        if (!res.ok) throw new Error("refresh failed: http " + res.status);
+        return res.text();
+      })
+      .then(function (html) {
+        swapRegions(new DOMParser().parseFromString(html, "text/html"));
+        lastGood = Date.now();
+        failure = "";
+        confirmed = true;
+      })
+      .catch(function (err) {
+        failure = err && err.name === "AbortError" ? "refresh timed out after " + TIMEOUT_MS / 1000 + "s" : String(err && err.message || err);
+      })
+      .then(function () {
+        window.clearTimeout(timer);
+        render();
+        // Chained, not setInterval: a slow render never stacks requests.
+        window.setTimeout(refresh, POLL_MS);
+      });
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    var path = window.location.pathname;
-    var runPanel = document.getElementById("operation-panel");
-    if (runPanel && runPanel.dataset.runId) {
-      startRunDetailPolling(runPanel.dataset.runId);
-    } else if (path === "/overview" || path === "/") {
-      startHeartbeat("/v1/controller");
-    } else if (path === "/runs") {
-      startHeartbeat("/v1/runs");
+    if (document.querySelector("[data-live][id]")) {
+      refresh();
+      window.setInterval(render, 1000);
     }
 
     // Keyboard-friendly: "/" focuses the source filter on the runs list,
