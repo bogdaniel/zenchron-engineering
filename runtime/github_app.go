@@ -327,7 +327,7 @@ func (c *GitHubAppCredential) do(ctx context.Context, method, path, assertion st
 	if err != nil {
 		// The typed cause is kept (#380); TransportError never quotes the
 		// request, which carries the assertion.
-		return 0, nil, nil, transportFailure(err)
+		return 0, nil, nil, transportFailure(err, false)
 	}
 	defer response.Body.Close()
 	raw, err := readBoundedBody(response)

@@ -84,19 +84,30 @@ func transportCause(err error) TransportCause {
 }
 
 // TransportError is a forge transport failure with its typed cause kept.
-// Error() never quotes the underlying error: on the App path it is built from
-// a request carrying the signed assertion. Unwrap keeps the chain for callers
-// that test for their own cancellation.
+// Unwrap keeps the chain for callers that test for their own cancellation.
+// Detail is the quoted diagnostic, left empty by an adapter whose request
+// carries a secret it must not risk quoting (the App's signed assertion).
 type TransportError struct {
-	Cause TransportCause
-	Err   error
+	Cause  TransportCause
+	Detail string
+	Err    error
 }
 
-func (e *TransportError) Error() string { return "forge transport failure: " + string(e.Cause) }
+func (e *TransportError) Error() string {
+	if e.Detail == "" {
+		return "forge transport failure: " + string(e.Cause)
+	}
+	return "forge transport failure (" + string(e.Cause) + "): " + e.Detail
+}
 func (e *TransportError) Unwrap() error { return e.Err }
 
-func transportFailure(err error) error {
-	return &TransportError{Cause: transportCause(err), Err: err}
+// transportFailure is how every forge adapter returns an HTTP.Do error.
+func transportFailure(err error, quote bool) error {
+	failure := &TransportError{Cause: transportCause(err), Err: err}
+	if quote {
+		failure.Detail = err.Error()
+	}
+	return failure
 }
 
 // RetryDisposition is the typed accounting of a failed operation's retry,

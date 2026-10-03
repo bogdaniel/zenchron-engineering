@@ -55,7 +55,7 @@ func TestConnectivityClassification(t *testing.T) {
 		if got := transportCause(tc.err); got != tc.want {
 			t.Fatalf("%v: cause %q, want %q", tc.err, got, tc.want)
 		}
-		if got := transportCause(transportFailure(tc.err)); got != tc.want {
+		if got := transportCause(transportFailure(tc.err, false)); got != tc.want {
 			t.Fatalf("%v: TransportError lost the cause: %q", tc.err, got)
 		}
 		lost := tc.want.Lost()
