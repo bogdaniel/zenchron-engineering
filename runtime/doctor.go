@@ -185,9 +185,8 @@ type DoctorInput struct {
 	// is what a real shell would resolve, and answering it from anything else
 	// would not be answering that question.
 	EntrypointPathEnv string
-	// GoEnvFile is the operator's effective Go env file - what `go env GOENV`
-	// prints: $GOENV, else os.UserConfigDir()/go/env - read at the composition
-	// boundary like EntrypointPathEnv. "off" means none; empty means unknown.
+	// GoEnvFile is the Go env file the operator's host processes read, from
+	// OperatorGoEnvFile at the composition boundary. Empty means unknown.
 	GoEnvFile string
 }
 
@@ -403,6 +402,46 @@ func doctorState(in DoctorInput) []DoctorCheck {
 	}
 }
 
+// OperatorGoEnvFile names the Go env file host processes read: goenv (the
+// operator's $GOENV) when it is a real file, else os.UserConfigDir()/go/env.
+// GOENV=off or the null device in THIS process says nothing about the default
+// file every other process still reads - and `go env -w` under off writes it.
+func OperatorGoEnvFile(goenv string) string {
+	if goenv != "" && goenv != "off" && goenv != os.DevNull {
+		return goenv
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "go", "env")
+}
+
+// pathUnder reports whether path is root or inside it. Both sides are
+// symlink-resolved through their longest existing prefix (/tmp vs
+// /private/tmp; a deleted scratch dir under a live state dir), falling back
+// to the cleaned spelling.
+func pathUnder(root, path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	resolve := func(p string) string {
+		p = filepath.Clean(p)
+		for dir, rest := p, ""; ; {
+			if real, err := filepath.EvalSymlinks(dir); err == nil {
+				return filepath.Join(real, rest)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return p
+			}
+			dir, rest = parent, filepath.Join(filepath.Base(dir), rest)
+		}
+	}
+	rel, err := filepath.Rel(resolve(root), resolve(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // doctorStateGoEnv reports (#430) an operator Go env file whose build or module
 // locations point into runtime state: every later Go command on the host would
 // then write into a run directory that retention may delete. It only reads the
@@ -411,8 +450,6 @@ func doctorStateGoEnv(in DoctorInput) DoctorCheck {
 	const id = "state.go_env"
 	file := strings.TrimSpace(in.GoEnvFile)
 	switch {
-	case file == "off":
-		return pass(doctorGroupState, id, "GOENV=off: no global Go env file is in effect")
 	case file == "":
 		return warn(doctorGroupState, id, "the operator's Go env file could not be located, so it was not checked for runtime state paths")
 	case strings.TrimSpace(in.StateDir) == "":
@@ -434,7 +471,7 @@ func doctorStateGoEnv(in DoctorInput) DoctorCheck {
 		switch key {
 		case "GOCACHE", "GOTMPDIR", "GOMODCACHE", "GOPATH":
 			for _, path := range filepath.SplitList(value) {
-				if withinAny(filepath.Clean(path), []string{filepath.Clean(in.StateDir)}) {
+				if pathUnder(in.StateDir, path) {
 					polluted = append(polluted, key)
 					break
 				}

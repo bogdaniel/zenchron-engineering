@@ -200,8 +200,12 @@ shows what is eligible under `gc.retention_hours`.
 `GOCACHE`, `GOTMPDIR`, `GOMODCACHE` or `GOPATH` under the state directory, so
 every Go command on the host writes into runtime state that retention may
 delete. Doctor never edits it; run the `go env -u ...` it names (and remove
-`GOFLAGS` if you did not set it). Workers now always run with `GOENV` at the
-null device, so a worker's `go env -w` persists nowhere (#430).
+`GOFLAGS` if you did not set it). Doctor checks the default file
+(`os.UserConfigDir()/go/env`) even when its own `GOENV` is `off`, because other
+processes still read it. Workers run with `GOENV` at the null device, so a
+plain `go env -w` from a worker is discarded (#430). That is not a boundary: a
+worker that overrides `GOENV` or writes the file itself still can, because
+workers share your `HOME`, and isolating `HOME` is out of scope here.
 
 ## Supervisor and submission
 

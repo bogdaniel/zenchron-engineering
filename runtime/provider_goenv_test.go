@@ -61,6 +61,17 @@ func TestProviderGoEnvWriteCannotReachOperatorConfig(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Setenv("GOENV", operatorFile)
+				// Go telemetry writes into HOME from a lingering child; turned
+				// off here only so TempDir cleanup is not racing it.
+				for _, dir := range []string{filepath.Join(operatorHome, "Library", "Application Support"), filepath.Join(operatorHome, ".config")} {
+					mode := filepath.Join(dir, "go", "telemetry", "mode")
+					if err := os.MkdirAll(filepath.Dir(mode), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(mode, []byte("off"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if scratch {
 					provider.Toolchain = ToolchainConfig{RequiredTools: []string{"go"}}
 					request.ScratchDir = filepath.Join(t.TempDir(), "scratch")

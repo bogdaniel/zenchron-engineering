@@ -678,8 +678,55 @@ func TestDoctorReportsAGoEnvPointingIntoState(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireCheck(t, f.run(), "state.go_env", DoctorPass)
-	f.input.GoEnvFile = "off"
-	requireCheck(t, f.run(), "state.go_env", DoctorPass, "GOENV=off")
+}
+
+// TestDoctorGoEnvEdgeCases: GOENV=off in doctor's own process still checks the
+// default file other processes read; a state path spelled through a symlink
+// (/tmp vs /private/tmp) still matches; unknown or unreadable files WARN.
+func TestDoctorGoEnvEdgeCases(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "real", "state")
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(root, "real"), link); err != nil {
+		t.Fatal(err)
+	}
+	check := func(in DoctorInput) DoctorCheck { return doctorStateGoEnv(in) }
+
+	config := filepath.Join(root, "config")
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("AppData", config)
+	defaultFile := OperatorGoEnvFile("off")
+	if defaultFile == "" || OperatorGoEnvFile(os.DevNull) != defaultFile {
+		t.Fatalf("GOENV=off/null must resolve to the default file, got %q", defaultFile)
+	}
+	if err := os.MkdirAll(filepath.Dir(defaultFile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Spelled through the symlink, while StateDir is the real path.
+	if err := os.WriteFile(defaultFile, []byte("GOTMPDIR="+filepath.Join(link, "state", "runs", "tmp")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(DoctorInput{StateDir: state, GoEnvFile: defaultFile}); got.Status != DoctorWarn || !strings.Contains(got.Reason, "GOTMPDIR") {
+		t.Fatalf("polluted default file under GOENV=off / via symlink: %s %s", got.Status, got.Reason)
+	}
+	// And the reverse spelling: StateDir through the link, file the real path.
+	if err := os.WriteFile(defaultFile, []byte("GOCACHE="+filepath.Join(state, "c")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(DoctorInput{StateDir: filepath.Join(link, "state"), GoEnvFile: defaultFile}); got.Status != DoctorWarn {
+		t.Fatalf("state dir spelled via symlink was not matched: %s %s", got.Status, got.Reason)
+	}
+
+	if got := check(DoctorInput{StateDir: state}); got.Status != DoctorWarn {
+		t.Fatalf("empty Go env path: %s %s", got.Status, got.Reason)
+	}
+	if got := check(DoctorInput{StateDir: state, GoEnvFile: root}); got.Status != DoctorWarn || !strings.Contains(got.Reason, "could not be read") {
+		t.Fatalf("unreadable Go env file: %s %s", got.Status, got.Reason)
+	}
 }
 
 func TestDoctorProvesOwnerLivenessEvidence(t *testing.T) {

@@ -498,11 +498,13 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	env = append(env, p.toolchainEnv()...)
 	// GOENV IS THE NULL DEVICE FOR EVERY WORKER, toolchain or not, scratch or
 	// not (#430). Unset, Go reads and `go env -w` WRITES the operator's own
-	// os.UserConfigDir()/go/env under the HOME below, so one worker command
-	// made a failed run's scratch the host-wide GOCACHE for every later build.
-	// GOENV=off is NOT a write barrier: go1.27.1 `go env -w` under it still
-	// writes that default file (observed on darwin, #430). The null device reads
-	// as empty and swallows every write, so nothing persists anywhere.
+	// os.UserConfigDir()/go/env under the HOME below. GOENV=off did not stop
+	// that either (go1.27.1 on darwin still wrote the default file). With the
+	// null device a plain `go env -w` from a worker is discarded.
+	//
+	// This is hygiene, not a boundary: a worker that sets its own GOENV, or
+	// writes the file directly, still reaches the operator's HOME. Isolating
+	// HOME is out of scope here.
 	env = append(env, "GOENV="+os.DevNull)
 	if home == "" {
 		return env
