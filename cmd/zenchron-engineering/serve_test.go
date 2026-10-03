@@ -389,6 +389,96 @@ func TestStopAllCancelsWithoutASupervisor(t *testing.T) {
 	}
 }
 
+// TestStopNeverRewritesAFinishedRun is #439 at the command line. "finishing"
+// has journalled run.completed but its row still reads active - the window a
+// listing can race - so only the append-time guard protects it: `stop` refuses
+// it, and stop-all skips it while still cancelling the live run.
+func TestStopNeverRewritesAFinishedRun(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+	t.Chdir(dir)
+	stateDir := activeRun(t, configPath, dir, "live")
+	activeRun(t, configPath, dir, "finishing")
+	store, err := runtime.OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(runtime.EngineeringEvent{SchemaVersion: runtime.SchemaVersion, ID: "finishing-done", RunID: "finishing", Type: runtime.EventRunCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	before := len(journalOf(t, stateDir, "finishing"))
+
+	code, err := autonomy([]string{"stop", "finishing", "--config", configPath}, offlineOverrides(), &bytes.Buffer{})
+	var refused *runtime.RunTerminalError
+	if !errors.As(err, &refused) || code != runtime.ExitInvalid {
+		t.Fatalf("stop on a completed run: code=%d err=%v, want a RunTerminalError and %d", code, err, runtime.ExitInvalid)
+	}
+	var out bytes.Buffer
+	if code, err := autonomy([]string{"stop-all", "--config", configPath}, offlineOverrides(), &out); err != nil || code != runtime.ExitCancelled {
+		t.Fatalf("stop-all: code=%d err=%v", code, err)
+	}
+	var outcomes []runtime.Outcome
+	if err := json.Unmarshal(out.Bytes(), &outcomes); err != nil || len(outcomes) != 1 || outcomes[0].RunID != "live" || outcomes[0].Disposition != runtime.Cancelled {
+		t.Fatalf("stop-all outcomes = %s (%v), want only live cancelled", out.String(), err)
+	}
+	if after := journalOf(t, stateDir, "finishing"); len(after) != before {
+		t.Fatalf("a stop wrote to a completed run's journal: %d -> %d", before, len(after))
+	}
+	if run := runDocument(t, stateDir, "finishing"); run.Disposition == runtime.Cancelled {
+		t.Fatal("a stop rewrote a completed run's row as cancelled")
+	}
+}
+
+// TestStopOnAFailedRunReleasesItsStaleLease: the refused stop keeps the failed
+// outcome, exits 64, and reclaims - lease only - an operation whose owner is
+// provably dead. The owner is the live PARENT process with no start token, which
+// the PID probe calls alive; only its unheld instance lock proves it dead, so
+// the test pins that stop decides with lock liveness.
+func TestStopOnAFailedRunReleasesItsStaleLease(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+	t.Chdir(dir)
+	stateDir := activeRun(t, configPath, dir, "broken")
+	store, err := runtime.OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(runtime.EngineeringEvent{SchemaVersion: runtime.SchemaVersion, ID: "broken-failed", RunID: "broken", Type: runtime.EventRunFailed}); err != nil {
+		t.Fatal(err)
+	}
+	host := strings.SplitN(runtime.NewRuntimeOwner(), "/", 2)[0]
+	dead := fmt.Sprintf("%s/%d/", host, os.Getppid())
+	if !runtime.NewProcessOwnerLiveness().Alive(dead) {
+		t.Fatal("precondition: the PID probe must call this owner alive")
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	if _, created, err := store.PutOperation(runtime.RunOperation{
+		SchemaVersion: runtime.SchemaVersion, ID: "op-stale", RunID: "broken", Kind: "external.work",
+		IdempotencyKey: "stale", State: runtime.Leased, Attempt: 1, MaxAttempts: 1, CreatedAt: past,
+		Lease: &runtime.Lease{Owner: dead, HeartbeatAt: past, ExpiresAt: past.Add(time.Minute)},
+	}, 0); err != nil || !created {
+		t.Fatalf("seeding the stale lease: created=%v err=%v", created, err)
+	}
+	store.Close()
+	before := len(journalOf(t, stateDir, "broken"))
+
+	code, err := autonomy([]string{"stop", "broken", "--config", configPath}, offlineOverrides(), &bytes.Buffer{})
+	if !runtime.IsRunTerminal(err) || code != runtime.ExitInvalid {
+		t.Fatalf("stop on a failed run: code=%d err=%v, want a RunTerminalError and %d", code, err, runtime.ExitInvalid)
+	}
+	if after := len(journalOf(t, stateDir, "broken")); after != before {
+		t.Fatalf("a refused stop wrote to the journal: %d -> %d", before, after)
+	}
+	store, err = runtime.OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	op, _, _, err := store.Operation("op-stale")
+	if err != nil || op.State != runtime.Leased || op.Lease != nil || op.CancelRequested {
+		t.Fatalf("the stale lease was not reclaimed lease-only: %+v err=%v", op, err)
+	}
+}
+
 // TestAgentSetRefusesAndSaysWhatToDoInstead is the governed transition at the
 // command line.
 func TestAgentSetRefusesAndSaysWhatToDoInstead(t *testing.T) {

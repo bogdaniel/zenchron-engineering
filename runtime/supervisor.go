@@ -538,13 +538,16 @@ func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	if err != nil {
 		return nil, err
 	}
-	scheduler := Scheduler{Store: s.deps.Store, Clock: s.deps.Clock, Owner: s.deps.Owner}
+	scheduler := Scheduler{Store: s.deps.Store, Clock: s.deps.Clock, Owner: s.deps.Owner, Liveness: s.deps.Liveness}
 	var outcomes []Outcome
 	for _, run := range runs {
 		if terminalDisposition(run.Disposition) {
 			continue
 		}
 		outcome, err := CancelRun(s.deps.Store, scheduler, s.deps.Clock.Now(), run.ID, reason)
+		if IsRunTerminal(err) {
+			continue // finished after the listing; its outcome stands (#439)
+		}
 		if err != nil {
 			return outcomes, err
 		}

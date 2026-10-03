@@ -263,14 +263,15 @@ zenchron-engineering autonomy stop-all --reason "..."     # actually cancel ever
 | --- | --- | --- |
 | `drain` | accepts no submissions and starts nothing new; work already inside a reconcile finishes | no |
 | `shutdown` | stops scheduling and unwinds in-flight work through the cancellation providers and the Docker sandbox already honour; every run stays exactly as resumable as its journal says | no |
-| `stop-all` | cancels every non-terminal run, journalled per run through the same single cancellation path `stop RUN` uses | yes |
+| `stop-all` | cancels every non-terminal run, journalled per run through the same single cancellation path `stop RUN` uses; a run that completed or failed, even one that finished after the listing, is skipped and keeps its outcome | yes |
 
 `drain` and `shutdown` are instructions TO a supervisor and are refused with `no
 supervisor is running on <state_dir>; start one with
 zenchron-engineering serve` when there is none — saying so is better than
 silently succeeding. `stop-all` works either way: with a supervisor it is
 delegated so the process holding the leases performs it, without one it runs
-through the same cancellation path locally. A drain is not reversible except by
+through the same cancellation path locally. `stop RUN` on a completed or
+failed run is refused with exit status 64 and never rewrites its outcome. A drain is not reversible except by
 restarting the supervisor, which is deliberate: un-draining silently would make
 the instruction meaningless.
 
