@@ -8,8 +8,26 @@
     "projection",
     "generation_match",
     "role",
-    "work_admission"
+    "work_admission",
+    "live_reachable"
   ],
+  "$defs": {
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "source_revision": {
+          "type": "string"
+        }
+      }
+    }
+  },
   "properties": {
     "durable_consistency": {
       "type": "string",
@@ -61,6 +79,21 @@
         "withheld",
         "closed"
       ]
+    },
+    "durable_generation": {
+      "$ref": "#/$defs/build"
+    },
+    "live_reachable": {
+      "type": "boolean"
+    },
+    "live_build": {
+      "$ref": "#/$defs/build"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   }
 }

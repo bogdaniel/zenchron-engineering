@@ -59,7 +59,7 @@ func streamFixture(t *testing.T) (write *rt.SQLiteOperationStore, srv *httptest.
 	}
 	t.Cleanup(func() { reader.Close() })
 	api = &API{
-		Store: reader, Token: "test-token",
+		Store: reader, Token: "test-token", Now: func() time.Time { return time.Unix(300, 0).UTC() },
 		StreamPollInterval: 10 * time.Millisecond, StreamHeartbeatInterval: time.Hour,
 	}
 	srv = httptest.NewServer(api.Handler())
@@ -151,6 +151,22 @@ func TestStreamSnapshotThenLiveTail(t *testing.T) {
 	}
 	if msg.Run.ID != "r" || msg.Run.Operation == nil || msg.Run.Operation.ProgressSource != "row" {
 		t.Fatalf("snapshot lost canonical run state: %+v", msg.Run)
+	}
+	// The snapshot is GET /v1/runs/{id}'s own runDetailProjection, byte for
+	// byte, so the two views of one run can never drift (#418 review).
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/runs/r", nil)
+	req.Header.Set("Authorization", "Bearer "+api.Token)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got RunDetail
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if a, b := mustJSON(t, got), mustJSON(t, *msg.Run); a != b {
+		t.Fatalf("SSE snapshot drifted from GET /v1/runs/r:\nGET:  %s\nSSE:  %s", a, b)
 	}
 
 	e := rt.EngineeringEvent{ID: "waiting-2", Type: rt.EventRunWaiting, Payload: json.RawMessage(`{"reason":"second"}`), SchemaVersion: rt.SchemaVersion, RunID: "r", OccurredAt: time.Unix(200, 0).UTC()}
@@ -310,3 +326,12 @@ type noFlushRecorder struct {
 func (r *noFlushRecorder) Header() http.Header         { return r.rec.Header() }
 func (r *noFlushRecorder) Write(b []byte) (int, error) { return r.rec.Write(b) }
 func (r *noFlushRecorder) WriteHeader(status int)      { r.rec.WriteHeader(status) }
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

@@ -40,7 +40,16 @@ func controlPlane(args []string, stdout io.Writer) (int, error) {
 		return 1, err
 	}
 	defer listener.Close()
-	api := &controlplane.API{Store: store, Token: token, ControllerRoot: *root, Observe: observeLiveController(*state)}
-	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	observe := observeLiveController(*state)
+	api := &controlplane.API{Store: store, Token: token, ControllerRoot: *root, Observe: observe}
+	web := &controlplane.Web{Store: store, Token: token, ControllerRoot: *root, Observe: observe}
+	// One listener, one process, one token: the console is a second
+	// presentation of exactly the boundary API owns, mounted beside it on
+	// the same server rather than a second one (see controlplane.Web's own
+	// doc comment).
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", api.Handler())
+	mux.Handle("/", web.Handler())
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	return 1, server.Serve(listener)
 }

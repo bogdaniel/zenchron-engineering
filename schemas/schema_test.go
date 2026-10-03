@@ -94,9 +94,9 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Document fixtures and the shared vocabulary are joined by seven Control
+	// Document fixtures and the shared vocabulary are joined by eight Control
 	// Plane contracts, validated against actual HTTP/SSE bytes in controlplane.
-	if want := len(fixtureSchemas) + 1 + 7; len(files) != want {
+	if want := len(fixtureSchemas) + 1 + 8; len(files) != want {
 		t.Fatalf("found %d schemas, want %d (documents, vocabulary and Control Plane wire contracts)", len(files), want)
 	}
 

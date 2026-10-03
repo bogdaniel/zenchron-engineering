@@ -88,7 +88,7 @@ func (a *API) drain(w http.ResponseWriter, flusher http.Flusher, id string, limi
 			return false
 		}
 		for _, e := range events {
-			ev := Event{e.Sequence, e.Type, e.OccurredAt}
+			ev := eventProjection(e)
 			if err := writeSSE(w, flusher, ev.Sequence, StreamMessage{Type: "event", Event: &ev}); err != nil {
 				return false
 			}
@@ -150,11 +150,12 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 		if a.afterCursorRead != nil {
 			a.afterCursorRead()
 		}
-		detail, err := a.runDetail(id)
+		s, err := a.Store.Status(id, a.now())
 		if err != nil {
 			_ = writeSSE(w, flusher, cursor, StreamMessage{Type: "stale", Reason: "read_failed"})
 			return
 		}
+		detail := runDetailProjection(s)
 		if err := writeSSE(w, flusher, seq, StreamMessage{Type: "snapshot", Run: &detail}); err != nil {
 			return
 		}

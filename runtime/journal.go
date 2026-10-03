@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // The journal lives in the same runtime.db as run_operations and advances the
@@ -116,6 +117,36 @@ func (s *SQLiteOperationStore) Runs() ([]EngineeringRun, error) {
 // the journal remains authoritative when a selected run is loaded.
 func (s *SQLiteOperationStore) ActiveRuns() ([]EngineeringRun, error) {
 	return s.queryRuns(` WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled')`)
+}
+
+// RunJournalActivity returns when each run's journal last moved: the time of
+// its newest event. The run document carries no cursor - replay derives it
+// from the events - so this is the durable answer to "has this run been
+// making progress", and it survives a restart (#401). A run that has never
+// planned an operation is omitted: it is waiting for its first turn, which is
+// work to do, not a run gone quiet.
+// ponytail: one row per run ever created; restrict to the active set if the
+// run table grows large.
+func (s *SQLiteOperationStore) RunJournalActivity() (map[string]time.Time, error) {
+	rows, err := s.db.Query(`SELECT run_id, MAX(sequence), json_extract(document, '$.occurred_at') FROM events WHERE stream_kind = ? AND run_id IN (SELECT run_id FROM run_operations) GROUP BY run_id`, streamRun)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	activity := map[string]time.Time{}
+	for rows.Next() {
+		var id, at string
+		var sequence int64
+		if err := rows.Scan(&id, &sequence, &at); err != nil {
+			return nil, err
+		}
+		when, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			return nil, err
+		}
+		activity[id] = when
+	}
+	return activity, rows.Err()
 }
 
 func (s *SQLiteOperationStore) queryRuns(where string) ([]EngineeringRun, error) {

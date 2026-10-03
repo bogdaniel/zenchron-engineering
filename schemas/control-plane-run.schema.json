@@ -11,8 +11,31 @@
     "external_wait_elapsed",
     "operation"
   ],
+  "$defs": {
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      }
+    },
+    "string_list": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
   "properties": {
     "run_id": {
+      "type": "string"
+    },
+    "repository": {
       "type": "string"
     },
     "phase": {
@@ -29,6 +52,81 @@
     },
     "external_wait_elapsed": {
       "type": "integer"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "issue": {
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        },
+        "intent_changed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "provider_kind": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "trust_mode": {
+          "type": "string"
+        },
+        "workspace_bound": {
+          "type": "boolean"
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "tree": {
+          "type": "string"
+        }
+      }
+    },
+    "base": {
+      "$ref": "#/$defs/ref"
+    },
+    "contract": {
+      "$ref": "#/$defs/ref"
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "build_kind": {
+          "type": "string"
+        },
+        "build_version": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        }
+      }
     },
     "operation": {
       "anyOf": [
@@ -47,10 +145,16 @@
             "inactivity_suspension"
           ],
           "properties": {
+            "kind": {
+              "type": "string"
+            },
             "state": {
               "type": "string"
             },
             "attempt": {
+              "type": "integer"
+            },
+            "max_attempts": {
               "type": "integer"
             },
             "progress_source": {
@@ -60,6 +164,13 @@
                 "row",
                 "journal"
               ]
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
             },
             "heartbeat_at": {
               "type": [
@@ -91,6 +202,16 @@
                 "active",
                 "unverified"
               ]
+            },
+            "deadline": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "deadline_bound": {
+              "type": "string"
             }
           }
         },
@@ -98,6 +219,165 @@
           "type": "null"
         }
       ]
+    },
+    "pull_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "merged": {
+          "type": "boolean"
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      }
+    },
+    "attempts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall_limit": {
+          "type": "integer"
+        },
+        "lifecycle_deadline": {
+          "type": "integer"
+        },
+        "max_execution_attempts": {
+          "type": "integer"
+        },
+        "max_execution_continuations": {
+          "type": "integer"
+        },
+        "max_remediation_attempts": {
+          "type": "integer"
+        },
+        "max_assurance_attempts": {
+          "type": "integer"
+        }
+      }
+    },
+    "budgets_unverifiable": {
+      "$ref": "#/$defs/string_list"
+    },
+    "held_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "blocked_by": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "successor": {
+          "type": "string"
+        },
+        "successor_unavailable": {
+          "type": "string"
+        }
+      }
+    },
+    "assurance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "failure_class": {
+          "type": "string"
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      }
+    },
+    "publication_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "action_type": {
+          "type": "string"
+        },
+        "action_target": {
+          "type": "string"
+        }
+      }
+    },
+    "authority_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "requires": {
+          "$ref": "#/$defs/string_list"
+        },
+        "missing": {
+          "$ref": "#/$defs/string_list"
+        },
+        "stale": {
+          "$ref": "#/$defs/string_list"
+        }
+      }
+    },
+    "execution_diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "failure_class": {
+          "type": "string"
+        },
+        "bound": {
+          "type": "string"
+        },
+        "successor": {
+          "type": "string"
+        },
+        "successor_unavailable": {
+          "type": "string"
+        }
+      }
+    },
+    "candidate_discard_refusals": {
+      "type": "integer"
+    },
+    "candidate_discard_refused": {
+      "type": "string"
     }
   }
 }

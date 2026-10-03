@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,8 +123,23 @@ func (c MutationCoordinator) CommitAndObserve(state KernelState, model domain.Pr
 	if err != nil {
 		return state, result, err
 	}
-	next, err := c.Flow.ObserveCommit(state, model, policy, c.Repository, result)
+	next, err := c.Observe(state, model, policy, result)
 	return next, result, err
+}
+
+// errCommitObservation marks a failure of the observation half: the commit
+// exists, and #8 did not observe it (#402).
+var errCommitObservation = errors.New("post-commit observation failed")
+
+// Observe is the observation half of CommitAndObserve, on its own so a commit
+// an earlier attempt already made is observed through the same bridge rather
+// than being made again.
+func (c MutationCoordinator) Observe(state KernelState, model domain.ProjectModel, policy domain.EngineeringPolicy, result CommitResult) (KernelState, error) {
+	next, err := c.Flow.ObserveCommit(state, model, policy, c.Repository, result)
+	if err != nil {
+		return next, fmt.Errorf("%w: %w", errCommitObservation, err)
+	}
+	return next, nil
 }
 
 // DeterministicGofmt is intentionally narrow. The caller supplies the actual
