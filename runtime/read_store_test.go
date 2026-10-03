@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -189,6 +190,41 @@ func TestBoundedEventReadCostAtAJournalScale(t *testing.T) {
 	t.Logf("read cost at %d run events: LatestSequence=%s; bounded drain across %d pages of %d=%s", total, latestElapsed, pages, page, drainElapsed)
 	if drainElapsed > 5*time.Second {
 		t.Fatalf("bounded drain of a %d-event journal took %s; a LIMIT-paged, indexed read should not scale like this", total, drainElapsed)
+	}
+}
+
+// TestStreamReadQueriesAreIndexSeeks pins the per-run SSE reads to a range
+// seek on the full (stream_kind, run_id, plan_id, sequence) index prefix.
+// Without plan_id bound, SQLite can only seek (stream_kind, run_id) and walks
+// the run's whole index range per page and per steady-state poll - O(run
+// length) per poll even though the rows returned stay bounded (#396).
+func TestStreamReadQueriesAreIndexSeeks(t *testing.T) {
+	_, store := openJournal(t)
+	for _, tc := range []struct {
+		query, want string
+		args        []any
+	}{
+		{`SELECT id FROM events WHERE ` + eventsPageWhere + ` ORDER BY sequence ASC LIMIT 501`, "plan_id=? AND sequence>?", []any{streamRun, "r", 0}},
+		{latestSequenceQuery, "plan_id=?", []any{streamRun, "r"}},
+	} {
+		query, want := tc.query, tc.want
+		var plan strings.Builder
+		rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+query, tc.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail + "\n")
+		}
+		rows.Close()
+		if !strings.Contains(plan.String(), "SEARCH") || !strings.Contains(plan.String(), want) || strings.Contains(plan.String(), "TEMP B-TREE") {
+			t.Fatalf("%s\nplan:\n%s\nwant a SEARCH binding %q with no sort", query, plan.String(), want)
+		}
 	}
 }
 

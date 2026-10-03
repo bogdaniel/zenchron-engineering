@@ -63,6 +63,51 @@ example, heartbeat or progress timestamps) is not pushed. Re-read
 `GET /v1/runs/{id}` for that state. Concurrent streams are not capped, which
 is acceptable on the loopback, token-gated listener.
 
+#### Measured read cost
+
+`BenchmarkStreamReadCost` in `controlplane/stream_bench_test.go` measures the
+stream against a real-shaped journal. The journal has one run of 100,000 events
+(a repeating `operation.planned`, `before` and `after` cycle with full
+`RunOperation` payloads over 50 operations, plus `run.waiting`), and 100 other
+runs of 40 events each.
+
+The fleet and the run's first 400 events go through `AppendEvent`. The rest
+of the run is inserted in one transaction, with the real sequence, hash
+chain, `EventDigest` and canonical document, so `Status`'s full `Reduce`
+verifies them like appended rows. Only `state_before` and `state_after` are
+format-only sha256 values. `AppendEvent` itself took 31.7 ms per append at
+run length 400, and that cost grows with run length, so 100k appends would be
+quadratic.
+
+Run it with:
+
+```
+go test ./controlplane -run '^$' -bench BenchmarkStreamReadCost -benchmem -benchtime 5x
+```
+
+The results below are from an Apple M3 (darwin/arm64) with go1.27.1, 5
+iterations each:
+
+| Operation | Time/op | Memory/op | Allocs/op |
+| --- | --- | --- | --- |
+| Fresh connect (cursor + `Status` snapshot + first drain) | 3.50 s | 1.97 GB | 33.9 M |
+| `Status` alone | 3.75 s | 1.97 GB | 33.9 M |
+| `LatestSequence` alone | 84 µs | 672 B | 19 |
+| Resume from sequence 50,000 (100 pages of 500) | 397 ms | 229 MB | 2.0 M |
+| Steady-state poll, nothing new | 59 µs | 1.9 KB | 48 |
+
+Fresh connect is dominated by `Status`, the full `Reduce` of all 100k events
+that the S1 `GET /v1/runs/{id}` already pays. A cached run snapshot is #96's
+scope, not this route's.
+
+Replay and polling are bounded. A page is at most 500 rows, and a request for
+501 is refused. A steady-state poll allocates a fixed 48 times; the benchmark
+fails above 1,000. `TestStreamReadQueriesAreIndexSeeks` pins both stream
+queries to an index range seek. Before that fix, the queries left `plan_id`
+unbound, so SQLite searched only `(stream_kind, run_id)` and sorted the
+remaining rows in a temporary B-tree on every page. A poll cost 17.1 ms,
+`LatestSequence` 14.2 ms, and the 50k resume 3.45 s.
+
 Response contracts are `schemas/control-plane-*.schema.json`, including the
 shared error shape. Empty lists are arrays. Internal errors become a fixed
 `read_failed` code, never raw exception text. Event payloads, artifact bodies,
