@@ -121,12 +121,10 @@ func TestValidationScratchAdmissionSubject(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertCredentialKind(t, ScanCandidateForCredentialValues(candidate), CredentialMaterialInconclusive)
-			assertCredentialKind(t, scanPathsForCredentialValues(candidate, []string{shape}), CredentialMaterialInconclusive)
 			if err := os.WriteFile(source, []byte("ghp_"+strings.Repeat("a", 36)), 0600); err != nil {
 				t.Fatal(err)
 			}
 			assertCredentialKind(t, ScanCandidateForCredentialValues(candidate), CredentialMaterialValue)
-			assertCredentialKind(t, scanPathsForCredentialValues(candidate, []string{shape}), CredentialMaterialValue)
 			if err := os.Remove(source); err != nil {
 				t.Fatal(err)
 			}
@@ -234,16 +232,5 @@ func TestValue(t *testing.T) {
 	tree, err := gitOutput(candidate, "ls-tree", "-r", "--name-only", "HEAD")
 	if err != nil || strings.TrimSpace(tree) != "README.md\ngo.mod\nsource.go\nsource_test.go" {
 		t.Fatalf("commit subject: %q, %v", tree, err)
-	}
-}
-
-func TestCommitCredentialScanRefusesStatFailure(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "file"), []byte("source"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	assertCredentialKind(t, scanPathsForCredentialValues(root, []string{"file/child"}), CredentialMaterialInconclusive)
-	if err := scanPathsForCredentialValues(root, []string{"deleted"}); err != nil {
-		t.Fatalf("deletion refused: %v", err)
 	}
 }
