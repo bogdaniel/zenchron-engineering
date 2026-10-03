@@ -416,6 +416,12 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	if request.ExpectedController != "" {
 		return c.governedControl(ctx, supervisor, shutdown, request)
 	}
+	return c.dispatchControl(ctx, supervisor, shutdown, request, false)
+}
+
+// dispatchControl executes one verb. governed is set only by governedControl,
+// after the controller binding was proven on this request.
+func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest, governed bool) runtime.ControlResponse {
 	switch request.Command {
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
@@ -461,8 +467,21 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		// Under the reconciler's own lock: a decision and a plan tick both read
 		// a snapshot and then append against it, and interleaving them lets one
 		// decide from state the other is changing.
+		//
+		// A GOVERNED decision also requires the revision to still await one,
+		// checked under the same lock, so a duplicate from another client or
+		// a reject racing an approval appends nothing (#398). The CLI keeps
+		// its semantics: an operator may approve what they rejected.
 		var view runtime.PlanView
-		if err := supervisor.WithPlanLock(func() (err error) { view, err = c.decidePlan(request); return err }); err != nil {
+		if err := supervisor.WithPlanLock(func() (err error) {
+			if governed {
+				if err := (runtime.PlanService{Store: c.store}).RefuseUnlessAwaitingDecision(request.PlanID, request.Revision); err != nil {
+					return err
+				}
+			}
+			view, err = c.decidePlan(request)
+			return err
+		}); err != nil {
 			return controlError(err)
 		}
 		return controlOK(view)
@@ -505,10 +524,9 @@ func (c *composition) governedControl(ctx context.Context, supervisor *runtime.S
 	if binding != request.ExpectedController {
 		return runtime.ControlResponse{Code: runtime.ControlCodeControllerMismatch, Error: "this controller is not the generation the request names"}
 	}
-	request.ExpectedController = ""
 	var response runtime.ControlResponse
 	if err := c.role.WithAuthority(func() error {
-		response = c.handleControl(ctx, supervisor, shutdown, request)
+		response = c.dispatchControl(ctx, supervisor, shutdown, request, true)
 		return nil
 	}); err != nil {
 		return controlError(err)

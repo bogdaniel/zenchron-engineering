@@ -34,6 +34,8 @@ type actionFixture struct {
 	mu     sync.Mutex
 	// reply is what the fake socket does with one request.
 	reply func(rt.ControlRequest) (rt.ControlResponse, error)
+	// observe is the live controller observation.
+	observe func() (rt.LiveControllerSnapshot, error)
 }
 
 func newActionFixture(t *testing.T) *actionFixture {
@@ -64,6 +66,12 @@ func newActionFixture(t *testing.T) *actionFixture {
 	if _, err := store.AppendPlanEvent(rt.EngineeringEvent{SchemaVersion: rt.SchemaVersion, ID: "p-proposed", PlanID: "p", Type: rt.EventPlanProposed, OccurredAt: at, Payload: proposed}); err != nil {
 		t.Fatal(err)
 	}
+	// The serving controller is an attested, role-holding generation that the
+	// durable record names as governing, so actions are offered.
+	build := rt.ControllerBuild{Kind: rt.ControllerAdopted, Version: "v1", SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40), BinarySHA256: strings.Repeat("c", 64)}
+	if _, err := store.ReadoptController(rt.ControllerReadoption{ID: "fixture", Reason: "fixture", Binding: rt.ControllerBinding{Controller: "fixture", Build: &build}, RecordedAt: at}, nil); err != nil {
+		t.Fatal(err)
+	}
 	reader, err := rt.OpenReadStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -71,10 +79,11 @@ func newActionFixture(t *testing.T) *actionFixture {
 	t.Cleanup(func() { reader.Close() })
 	f := &actionFixture{store: store, digest: plan.Digest}
 	f.reply = f.apply
+	f.observe = func() (rt.LiveControllerSnapshot, error) {
+		return rt.LiveControllerSnapshot{Identity: rt.ControllerSelfRecord{Build: build}, Role: rt.RoleHeld, WorkAdmission: rt.AdmissionOpen, ObservedAt: at}, nil
+	}
 	f.api = &API{Store: reader, Token: "test-token", Listen: testListen, ControllerRoot: dir + "/controller", Now: func() time.Time { return at },
-		Observe: func() (rt.LiveControllerSnapshot, error) {
-			return rt.LiveControllerSnapshot{}, fmt.Errorf("unobserved")
-		},
+		Observe: func() (rt.LiveControllerSnapshot, error) { return f.observe() },
 		Send: func(request rt.ControlRequest) (rt.ControlResponse, error) {
 			f.sends.Add(1)
 			f.mu.Lock()
@@ -412,5 +421,68 @@ func TestActionRequestSchema(t *testing.T) {
 		if err := schemas.Validate("control-plane-action-request", v); (err == nil) != valid {
 			t.Errorf("%s: valid=%v err=%v", body, valid, err)
 		}
+	}
+}
+
+// Once a request may have been sent, a failed re-read never turns the outcome
+// into a bare read_failed: the result keeps its outcome, omits state and says
+// why. Mutation: restore fail(w, 500, "read_failed") in reply.
+func TestAFailedReReadAfterSendKeepsTheOutcome(t *testing.T) {
+	f := newActionFixture(t)
+	f.reply = func(r rt.ControlRequest) (rt.ControlResponse, error) {
+		response, err := f.apply(r)
+		f.api.Store.Close() // the effect landed; the control plane can no longer read
+		return response, err
+	}
+	got := post(t, f.api, validRequest("/v1/runs/s/stop", stopBody()), 200)
+	if outcome(got) != OutcomeApplied || got["state"] != nil || got["detail"] != stateUnread {
+		t.Fatalf("applied, then unreadable: %v", got)
+	}
+
+	f = newActionFixture(t)
+	f.reply = func(r rt.ControlRequest) (rt.ControlResponse, error) {
+		_, _ = f.apply(r)
+		f.api.Store.Close()
+		return rt.ControlResponse{}, fmt.Errorf("%w: EOF", rt.ErrControlReplyLost)
+	}
+	lost := post(t, f.api, validRequest("/v1/runs/s/stop", stopBody()), 504)
+	if outcome(lost) != OutcomeUnknown || lost["state"] != nil || !strings.Contains(lost["detail"].(string), stateUnread) {
+		t.Fatalf("lost and unreadable: %v", lost)
+	}
+	if f.sends.Load() != 1 {
+		t.Fatalf("resent: %d", f.sends.Load())
+	}
+}
+
+// The control plane re-observes the controller before sending and refuses
+// what the page would not offer: serve itself enforces only the binding and
+// the role. Mutation: delete the re-observation in act.
+func TestAnActionReObservesTheController(t *testing.T) {
+	f := newActionFixture(t)
+	good := f.observe
+	for name, observe := range map[string]func() (rt.LiveControllerSnapshot, error){
+		"unreachable": func() (rt.LiveControllerSnapshot, error) { return rt.LiveControllerSnapshot{}, errors.New("down") },
+		"role not held": func() (rt.LiveControllerSnapshot, error) {
+			s, err := good()
+			s.Role = rt.RoleNotHeld
+			return s, err
+		},
+		"other generation": func() (rt.LiveControllerSnapshot, error) {
+			s, err := good()
+			s.Identity.Build.Version = "v2"
+			return s, err
+		},
+		"unattested": func() (rt.LiveControllerSnapshot, error) {
+			return rt.LiveControllerSnapshot{Identity: rt.ControllerSelfRecord{Build: rt.ControllerBuild{Kind: rt.ControllerUnattested}, Unattested: true}, Role: rt.RoleHeld}, nil
+		},
+	} {
+		f.observe = observe
+		got := post(t, f.api, validRequest("/v1/runs/s/stop", stopBody()), 409)
+		if code(got) != "controller_not_actionable" || got["detail"] == "" {
+			t.Fatalf("%s: %v", name, got)
+		}
+	}
+	if f.sends.Load() != 0 {
+		t.Fatalf("a non-actionable controller was sent %d request(s)", f.sends.Load())
 	}
 }

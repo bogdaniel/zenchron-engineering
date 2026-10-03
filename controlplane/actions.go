@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bogdaniel/zenchron-engineering/domain"
 	rt "github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
@@ -54,6 +53,8 @@ type ActionResult struct {
 // pre-checked against the durable effect of the first.
 // ponytail: one operator, one process; per-target locks only if that changes.
 var actionMu sync.Mutex
+
+const stateUnread = "durable state could not be re-read: re-read before retrying"
 
 // actionDeadline outlives SendControl's own bound, so the lock is never
 // released while a request it sent may still be applied.
@@ -127,7 +128,7 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case state == nil:
 			return 404, "plan_not_found"
-		case view.Snapshot.Revision != body.Revision || view.Snapshot.Approval.Status != domain.ApprovalPending:
+		case !view.Snapshot.AwaitingDecision(body.Revision):
 			return 409, "not_awaiting_decision"
 		case view.Plan.Digest != body.Digest:
 			return 409, "digest_mismatch"
@@ -149,13 +150,16 @@ func (a *API) act(w http.ResponseWriter, r *http.Request, res ActionResult, bind
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(actionDeadline))
 	actionMu.Lock()
 	defer actionMu.Unlock()
+	// reply ALWAYS reports the outcome. Once anything may have been sent, a
+	// failed re-read must not hide what happened behind a bare read_failed.
 	reply := func(status int) {
-		_, state, err := effect()
-		if err != nil {
-			fail(w, 500, "read_failed")
-			return
+		if _, state, err := effect(); err == nil {
+			res.State = state
+		} else if res.Detail == "" {
+			res.Detail = stateUnread
+		} else {
+			res.Detail += "; " + stateUnread
 		}
-		res.State = state
 		send(w, status, res)
 	}
 	refuse := func(status int, code string) {
@@ -178,6 +182,18 @@ func (a *API) act(w http.ResponseWriter, r *http.Request, res ActionResult, bind
 	}
 	if binding == "" {
 		refuse(409, rt.ControlCodeControllerUnattested)
+		return
+	}
+	// The same observation the page used to offer the action, taken again
+	// now: serving, role, generation match and attestation. serve itself
+	// enforces only the binding and the role.
+	why := "no serving controller is reachable"
+	if status, err := a.Store.Controller(a.ControllerRoot, a.Observe, a.now()); err == nil {
+		why = controllerProjection(status).ActionsDisabled()
+	}
+	if why != "" {
+		res.Detail = why
+		refuse(409, "controller_not_actionable")
 		return
 	}
 	request.ExpectedController = binding

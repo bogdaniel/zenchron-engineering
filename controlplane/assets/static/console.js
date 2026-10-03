@@ -202,8 +202,11 @@
       var headers = authHeaders();
       headers["Content-Type"] = "application/json";
       fetch(pending.action, { method: "POST", headers: headers, body: JSON.stringify(body) })
-        .then(function (res) { return res.json(); })
+        .then(function (res) { return res.json().then(function (r) { r.httpStatus = res.status; return r; }); })
         .then(function (r) {
+          // A bare error body is a boundary refusal (4xx, nothing sent) or a
+          // server failure (5xx) after which nothing about the outcome is known.
+          if (r.error && r.httpStatus >= 500) return settle("unknown", "outcome not confirmed (" + r.error + "): re-read before retrying");
           if (r.error) return settle("refused", "refused before sending: " + r.error);
           settle(r.outcome, r.outcome + (r.code ? " (" + r.code + ")" : "") + (r.detail ? ": " + r.detail : "") + describe(r.state));
         })

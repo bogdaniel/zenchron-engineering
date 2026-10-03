@@ -212,6 +212,7 @@ const (
 	ControlCodeUnsupported          = "unsupported_command"
 	ControlCodeRunTerminal          = "run_terminal"
 	ControlCodePlanRefused          = "plan_refused"
+	ControlCodeNotAwaitingDecision  = "not_awaiting_decision"
 )
 
 // ControlCode is the typed code for an error a control verb returned, or "".
@@ -221,6 +222,8 @@ func ControlCode(err error) string {
 	switch {
 	case IsRunTerminal(err):
 		return ControlCodeRunTerminal
+	case errors.Is(err, ErrPlanNotAwaitingDecision):
+		return ControlCodeNotAwaitingDecision
 	case errors.As(err, &unheld):
 		return ControlCodeRoleNotHeld
 	case errors.As(err, &plan):

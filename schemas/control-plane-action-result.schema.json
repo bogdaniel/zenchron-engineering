@@ -57,7 +57,8 @@
         "run_not_found",
         "plan_not_found",
         "not_awaiting_decision",
-        "digest_mismatch"
+        "digest_mismatch",
+        "controller_not_actionable"
       ]
     },
     "detail": {

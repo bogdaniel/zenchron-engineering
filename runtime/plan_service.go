@@ -441,6 +441,25 @@ func (s PlanService) Reject(planID string, revision int, digest, assignments, op
 	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanRejected)
 }
 
+// ErrPlanNotAwaitingDecision refuses a decision on a revision that is not the
+// one awaiting a decision.
+var ErrPlanNotAwaitingDecision = errors.New("the revision is not awaiting a decision")
+
+// RefuseUnlessAwaitingDecision is the GOVERNED decision's precondition (#398):
+// a second reject, or a reject after a concurrent approval, appends nothing.
+// The caller holds the plan lock across this check and the decision. The CLI
+// does not use it: an operator may still approve what they rejected.
+func (s PlanService) RefuseUnlessAwaitingDecision(planID string, revision int) error {
+	snapshot, err := s.Store.ReplayPlan(planID)
+	if err != nil {
+		return err
+	}
+	if !snapshot.AwaitingDecision(revision) {
+		return fmt.Errorf("%w: plan %s revision %d", ErrPlanNotAwaitingDecision, planID, revision)
+	}
+	return nil
+}
+
 func (s PlanService) decide(planID string, revision int, digest, assignments, operator, note, eventType string) (PlanSnapshot, error) {
 	plan, found, err := s.Store.PlanRevision(planID, revision)
 	if err != nil {

@@ -143,26 +143,49 @@ Open the console at the exact listen address (`http://127.0.0.1:8787`, not
 with unknown fields refused and exactly one JSON value (→ 400
 `invalid_request`). Unknown routes are 404. No CORS headers are ever sent.
 
-### Exactly once
+### Exactly once, and where each guarantee lives
 
-One process-wide mutex serializes actions. Under it, each action:
+One process-wide mutex serializes actions in ONE control-plane process. Under
+it, each action:
 
 1. pre-checks its durable effect - stop: the run is `cancelled`; reject: a
    `plan.rejected` event for that exact revision and digest exists
    (`runtime.DecisionEventFor`, the CLI's lost-reply reconciliation). If
-   present the result is `already_applied` and nothing is sent. This guard is
-   load-bearing: `PlanService.decide` does not deduplicate, so a second reject
-   would append a second `plan.rejected`.
+   present the result is `already_applied` and nothing is sent. A failure of
+   THIS read is the only bare `500 read_failed`: nothing was sent.
 2. narrows: unknown run → 404 `run_not_found`; unknown plan revision → 404
    `plan_not_found`; a revision that is not the latest one awaiting a decision
    → 409 `not_awaiting_decision`; a digest that is not that revision's → 409
    `digest_mismatch`; an empty binding → 409 `controller_unattested`. A stale
-   value is refused, never silently refreshed. Domain validation stays
-   `serve`'s: the control plane only narrows.
-3. sends ONE request.
-4. maps the answer. A reply lost after the request was written
+   value is refused, never silently refreshed.
+3. re-observes the controller exactly as the page did and refuses with 409
+   `controller_not_actionable` (detail: the reason) unless it is reachable,
+   serving, attested, holding the role and matching the durable generation.
+4. sends ONE request.
+5. maps the answer. A reply lost after the request was written
    (`runtime.ErrControlReplyLost`) is never resent: durable state is re-read,
    and the result is `applied` if the effect is there, otherwise `unknown`.
+   Once a request may have been sent, a failed re-read never becomes a bare
+   error: the result keeps its outcome, omits `state`, and `detail` says the
+   durable state could not be re-read. The console shows any 5xx error body as
+   "outcome not confirmed", never as refused.
+
+Which guarantees hold where:
+
+| guarantee | enforced by | scope |
+| --- | --- | --- |
+| controller binding equals serve's own measured, attested identity | `serve` (`governedControl`) | every client |
+| executed under the controller role (`WithAuthority`) | `serve` | every client |
+| only `stop` / `plan-reject` reachable with a binding | `serve` and the HTTP allowlist | every client |
+| a governed reject decides only a revision still awaiting a decision (`PlanService.RefuseUnlessAwaitingDecision`, under the plan lock): a second reject, or a reject after a concurrent approval, appends nothing → `not_awaiting_decision` | `serve` | every client |
+| digest, validation verdict, governing order (`PlanService.decide`); a completed/failed run is never cancelled (#443, `run_terminal`) | `serve` / runtime | every client, CLI included |
+| serving, generation match and work admission at the moment of the action | control-plane re-observation (step 3) | per control-plane process |
+| duplicate stop answered `already_applied` without a send | control-plane mutex + pre-check | per control-plane process; a second process's stop is idempotent in `CancelRun` anyway |
+| Bearer / Host / Origin / content type | control-plane HTTP boundary | per control-plane process |
+
+The CLI's own decisions are unchanged: an ungoverned request (no
+`expected_controller`) may still approve a revision it rejected, and
+`PlanService.decide` itself still does not deduplicate.
 
 | outcome | HTTP | meaning |
 | --- | --- | --- |
@@ -183,8 +206,9 @@ echoed back. Contracts: `schemas/control-plane-action-request.schema.json`,
 An action button is rendered only when the observed controller is reachable,
 serving, attested (non-empty binding), holds the role and matches the durable
 generation, and the target is eligible (run not terminal; revision shown as
-`proposed`/`unapproved`). Otherwise the page states why. The server re-checks
-all of it. A button opens a native `<dialog>` naming the exact target (run id,
+`proposed`/`unapproved`). Otherwise the page states why. The control plane
+re-checks all of it before sending (step 3 above); `serve` itself enforces the
+binding, the role and, for a reject, that the revision still awaits a decision. A button opens a native `<dialog>` naming the exact target (run id,
 or plan id + revision + full digest), the controller generation and binding,
 and the consequence in one sentence; only its confirm sends, once, with the
 Bearer header. The dialog then shows pending, and the outcome with the
