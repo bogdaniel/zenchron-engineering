@@ -11,9 +11,11 @@ package runtime
 
 import (
 	"context"
+	"crypto/x509"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -805,6 +807,13 @@ func TestAPermanentPermissionFailureIsReportedNotDeferred(t *testing.T) {
 		"rate limit is retried later": {
 			failure: &GitHubTransientError{Status: 429, Detail: "rate limited"}, deferred: true,
 		},
+		// #380: transport loss is the same single classification as everywhere.
+		"transport loss is retried later": {
+			failure: &TransportError{Cause: TransportRefused, Err: syscall.ECONNREFUSED}, deferred: true,
+		},
+		"tls transport is surfaced": {
+			failure: &TransportError{Cause: TransportTLS, Err: x509.UnknownAuthorityError{}},
+		},
 		"rejected credential is surfaced": {
 			failure: &GitHubAuthError{Detail: "github rejected the credential with status 401"},
 		},
@@ -830,8 +839,14 @@ func TestAPermanentPermissionFailureIsReportedNotDeferred(t *testing.T) {
 				if err != nil {
 					t.Fatalf("a transient failure was surfaced as a fault: %v", err)
 				}
-				if observation.Deferred != 1 {
-					t.Fatalf("a transient failure was not deferred: %#v", observation)
+				if observation.Deferred != 1 || countType(fixture.state(runID).events, EventFeedbackObserved) != 0 {
+					t.Fatalf("a transient failure was not deferred unjudged: %#v", observation)
+				}
+				// The next tick, with the forge back, admits it.
+				fixture.forge.Fail = nil
+				observation, err = fixture.runtime.ObserveFeedback(context.Background(), runID)
+				if err != nil || observation.Admitted != 1 {
+					t.Fatalf("a deferred item was not admitted on the next tick: %#v %v", observation, err)
 				}
 				return
 			}

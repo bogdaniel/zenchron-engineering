@@ -24,8 +24,8 @@ func TestValidationScratchGrants(t *testing.T) {
 		})
 	}
 	provider := CLIAgentProvider{Toolchain: ToolchainConfig{RequiredTools: []string{"go"}}, ExecScratchDir: scratch}
-	env := strings.Join(provider.toolchainEnv(), "\n")
-	for _, entry := range []string{"TMPDIR=" + scratch, "GOTMPDIR=" + scratch, "GOCACHE=" + filepath.Join(scratch, "cache"), "GOPATH=" + filepath.Join(scratch, "gopath"), "GOENV=off"} {
+	env := strings.Join(provider.env(claudeSpec, ""), "\n")
+	for _, entry := range []string{"TMPDIR=" + scratch, "GOTMPDIR=" + scratch, "GOCACHE=" + filepath.Join(scratch, "cache"), "GOPATH=" + filepath.Join(scratch, "gopath"), "GOENV=" + os.DevNull} {
 		if !strings.Contains(env, entry) {
 			t.Fatalf("missing %q in %s", entry, env)
 		}

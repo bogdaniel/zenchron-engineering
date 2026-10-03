@@ -363,6 +363,58 @@ func TestTheSupervisorBoundClampsARepositoryWatchProposal(t *testing.T) {
 	}
 }
 
+// TestTheStricterObservationBoundWins is #85's lattice for
+// max_concurrent_observations: supervisor and watch both state it, the stricter
+// wins, a repository may only tighten it, and a negative operator value is
+// refused rather than read as unstated.
+func TestTheStricterObservationBoundWins(t *testing.T) {
+	operatorAt := func(t *testing.T, supervisor string) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "config.json"), strings.Replace(operatorConfigJSON(dir), "{\n",
+			"{\n\t\"supervisor\": "+supervisor+",\n", 1))
+		return dir
+	}
+	resolved := func(t *testing.T, dir string) int {
+		t.Helper()
+		config, err := LoadConfig(filepath.Join(dir, "config.json"), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings, err := config.WatchSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return settings.MaxConcurrentObservations
+	}
+	if got := resolved(t, operatorAt(t, `{"max_concurrent_observations": 3}`)); got != 3 {
+		t.Fatalf("supervisor bound = %d, want 3", got)
+	}
+	dir := operatorAt(t, `{"max_concurrent_observations": 3}`)
+	writeFile(t, filepath.Join(dir, RepositoryConfigFile), `{"watch": {"max_concurrent_observations": 1}}`)
+	if got := resolved(t, dir); got != 1 {
+		t.Fatalf("the repository tightened to 1 and the effective bound is %d", got)
+	}
+	dir = operatorAt(t, `{"max_concurrent_observations": 3}`)
+	writeFile(t, filepath.Join(dir, RepositoryConfigFile), `{"watch": {"max_concurrent_observations": 4}}`)
+	configErr := requireConfigError(t, second2(LoadConfig(filepath.Join(dir, "config.json"), dir)))
+	if !strings.Contains(configErr.Detail, "only tighten watch.max_concurrent_observations") {
+		t.Fatalf("expected a tighten-only refusal, got %q", configErr.Detail)
+	}
+	// Stricter of supervisor and watch, in both directions.
+	for _, c := range []struct{ supervisor, watch, want int }{{1, 3, 1}, {3, 1, 1}} {
+		config := OperatorConfig{
+			Supervisor: SupervisorConfig{MaxConcurrentObservations: c.supervisor},
+			Watch:      WatchConfig{MaxConcurrentObservations: c.watch},
+		}
+		settings, err := config.WatchSettings()
+		if err != nil || settings.MaxConcurrentObservations != c.want {
+			t.Fatalf("supervisor %d, watch %d: got %d (%v), want %d", c.supervisor, c.watch, settings.MaxConcurrentObservations, err, c.want)
+		}
+	}
+	requireConfigError(t, second(LoadOperatorConfig(filepath.Join(operatorAt(t, `{"max_concurrent_observations": -1}`), "config.json"))))
+}
+
 func TestRepositoryConfigCannotTightenToNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeOperatorConfig(t, dir)
@@ -543,6 +595,9 @@ func TestWatchDefaultsAreLabelAndOneRun(t *testing.T) {
 	}
 	if settings.MaxConcurrentRuns != 1 {
 		t.Fatalf("watch must default to one concurrent run, got %d", settings.MaxConcurrentRuns)
+	}
+	if settings.MaxConcurrentObservations != DefaultMaxConcurrentObservations {
+		t.Fatalf("observation must default to %d, got %d", DefaultMaxConcurrentObservations, settings.MaxConcurrentObservations)
 	}
 	if settings.PollInterval != DefaultWatchPollSeconds*time.Second {
 		t.Fatalf("unexpected default poll interval %s", settings.PollInterval)

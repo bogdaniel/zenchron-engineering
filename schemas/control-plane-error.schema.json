@@ -17,7 +17,8 @@
         "forbidden_host",
         "forbidden_origin",
         "unsupported_media_type",
-        "invalid_request"
+        "invalid_request",
+        "stream_unsupported"
       ]
     }
   }

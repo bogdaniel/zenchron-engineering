@@ -230,14 +230,29 @@ type FleetCounts struct {
 	Cancelled int `json:"cancelled"`
 	Held      int `json:"held"`
 }
+
+// FleetClasses is the capacity-class partition of the nonterminal runs (#85):
+// exactly one of these holds for each, so they sum to Active.
+type FleetClasses struct {
+	Working     int `json:"working"`
+	Observing   int `json:"observing"`
+	Runnable    int `json:"runnable"`
+	Waiting     int `json:"waiting"`
+	Unavailable int `json:"unavailable"`
+}
+
+// Capacity is the work ceiling, or zero when this reader does not know the
+// operator configuration (the read-only control plane): templates render zero
+// as unknown, never as "/ 0".
 type Fleet struct {
-	Capacity          int         `json:"capacity"`
-	Executing         int         `json:"executing"`
-	Active            int         `json:"active"`
-	SupervisorRunning bool        `json:"supervisor_running"`
-	Counts            FleetCounts `json:"counts"`
-	Runs              []Run       `json:"runs,omitempty"`
-	Plans             []Plan      `json:"plans,omitempty"`
+	Capacity          int          `json:"capacity"`
+	Executing         int          `json:"executing"`
+	Active            int          `json:"active"`
+	SupervisorRunning bool         `json:"supervisor_running"`
+	Counts            FleetCounts  `json:"counts"`
+	Classes           FleetClasses `json:"classes"`
+	Runs              []Run        `json:"runs,omitempty"`
+	Plans             []Plan       `json:"plans,omitempty"`
 }
 
 // API owns a read capability. Observe must issue controller.snapshot only;
@@ -251,6 +266,21 @@ type API struct {
 	Now            func() time.Time
 	Send           func(rt.ControlRequest) (rt.ControlResponse, error)
 	Listen         string
+	// StreamPollInterval and StreamHeartbeatInterval govern the per-run SSE
+	// stream's tail-poll and liveness cadence. Zero means the production
+	// default; tests shorten them so a stream test finishes in milliseconds
+	// rather than real seconds.
+	StreamPollInterval      time.Duration
+	StreamHeartbeatInterval time.Duration
+
+	// afterCursorRead runs once, between the fresh-connect cursor read and the
+	// snapshot reduction, exactly the window a race regression needs to force
+	// an event append into. It is nil in every production path.
+	afterCursorRead func()
+	// afterSnapshotRead runs once, right after the fresh-connect snapshot's
+	// Status read: an event appended there is in neither the snapshot nor the
+	// cursor, so it must arrive as the next incremental frame.
+	afterSnapshotRead func()
 }
 
 func (a *API) Handler() http.Handler {
@@ -259,6 +289,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs", a.runs)
 	mux.HandleFunc("GET /v1/runs/{id}", a.run)
 	mux.HandleFunc("GET /v1/runs/{id}/events", a.events)
+	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
 	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
 	mux.HandleFunc("POST /v1/runs/{id}/stop", a.stop)
@@ -577,7 +608,8 @@ func fleetCounts(runs []Run) FleetCounts {
 // reports ControlEndpoint - a literal local socket path concatenated with its
 // mechanism description (#397 review 5397796709).
 func fleetProjection(f rt.Fleet) Fleet {
-	out := Fleet{Capacity: f.Capacity, Executing: f.Executing, Active: f.Active, SupervisorRunning: f.SupervisorRunning}
+	out := Fleet{Capacity: f.Capacity, Executing: f.Executing, Active: f.Active, SupervisorRunning: f.SupervisorRunning,
+		Classes: FleetClasses{Working: f.Working, Observing: f.Observing, Runnable: f.Runnable, Waiting: f.Waiting, Unavailable: f.Unavailable}}
 	out.Runs = make([]Run, 0, len(f.Runs))
 	for _, run := range f.Runs {
 		out.Runs = append(out.Runs, runProjection(run))
