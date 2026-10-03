@@ -545,6 +545,9 @@ func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 			continue
 		}
 		outcome, err := CancelRun(s.deps.Store, scheduler, s.deps.Clock.Now(), run.ID, reason)
+		if isRunTerminal(err) {
+			continue // finished after the listing; its outcome stands (#439)
+		}
 		if err != nil {
 			return outcomes, err
 		}

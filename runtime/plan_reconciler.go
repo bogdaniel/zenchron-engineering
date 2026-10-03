@@ -450,7 +450,9 @@ func (r PlanReconciler) stopRetiredRun(runID, reason string) (bool, error) {
 		return false, nil
 	}
 	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256}
-	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); err != nil {
+	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); isRunTerminal(err) {
+		return false, nil // finished after the read above: already settled (#439)
+	} else if err != nil {
 		return false, err
 	}
 	return true, nil

@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -534,4 +535,11 @@ type RunTerminalError struct {
 
 func (e *RunTerminalError) Error() string {
 	return fmt.Sprintf("run %q is already %s (%s); stop never rewrites a terminal outcome", e.RunID, e.Disposition, e.Reason)
+}
+
+// isRunTerminal reports a CancelRun refused because the run already finished:
+// a bulk or plan-driven stop treats that run as settled, not as a failure.
+func isRunTerminal(err error) bool {
+	var terminal *RunTerminalError
+	return errors.As(err, &terminal)
 }

@@ -96,3 +96,28 @@ func TestStopAllOverAMixedFleetCancelsOnlyTheActive(t *testing.T) {
 	assertUntouched(t, store, "done", Completed)
 	assertUntouched(t, store, "broken", Failed)
 }
+
+// TestStopAllSkipsARunThatFinishesAfterTheListing: "b" has journalled
+// run.completed but its row still reads active, so StopAll lists it and its
+// CancelRun is refused. That refusal must not abort the bulk stop: "a" and "c"
+// are still cancelled, b keeps its outcome, and StopAll reports no error.
+func TestStopAllSkipsARunThatFinishesAfterTheListing(t *testing.T) {
+	_, store := openJournal(t)
+	for _, id := range []string{"a", "c"} {
+		if err := store.PutRun(newJournalRun(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedTerminal(t, store, "b", EventRunCompleted, Completed, false)
+	c := &fakeClock{now: time.Unix(200, 0)}
+	supervisor := &Supervisor{deps: SupervisorDependencies{Store: store, Clock: c, Owner: "op"}}
+	if _, err := supervisor.StopAll("operator_stop_all"); err != nil {
+		t.Fatalf("a run finishing after the listing aborted stop-all: %v", err)
+	}
+	for _, id := range []string{"a", "c"} {
+		if run, _, _ := store.Run(id); run.Disposition != Cancelled {
+			t.Fatalf("%s was not cancelled: %q", id, run.Disposition)
+		}
+	}
+	assertUntouched(t, store, "b", Completed)
+}
