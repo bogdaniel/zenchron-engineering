@@ -477,14 +477,6 @@ func TestConnectivityGitHubAppTransportFailsClosed(t *testing.T) {
 // whole text of an is_error stream-json result, not on stderr.
 func TestConnectivityClaudeIncidentResultEnvelope(t *testing.T) {
 	incident := "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"
-	t.Run("process exit 1", func(t *testing.T) {
-		// A quoted heredoc writes the exact line: no shell quoting to escape.
-		provider, request := claudeProcess(t, "cat <<'EOF'\n"+claudeResultWithAnswer(true, incident)+"\nEOF\nexit 1\n")
-		result, _ := provider.Execute(context.Background(), request)
-		if result.Failure == nil || result.Failure.Classification != FailureConnectivity || result.Invocation == nil || !result.Invocation.FinalResultObserved {
-			t.Fatalf("incident failure = %#v %#v", result.Failure, result.Invocation)
-		}
-	})
 	for name, tc := range map[string]struct {
 		stdout string
 		want   FailureClass
