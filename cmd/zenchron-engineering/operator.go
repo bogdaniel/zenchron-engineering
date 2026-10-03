@@ -909,14 +909,17 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		switch d.FailureClass {
 		case runtime.FailureProviderAccountUnavailable:
 			failure = "provider account unavailable (" + failure + ")"
-		// The three provider conditions an operator most needs kept apart, and
-		// the ones #238 collapsed into hours of apparent active work. A stall
-		// is a live process that stopped moving; unavailable is a host that
-		// cannot reach the provider; quota is an allowance that will come back.
+		// The provider conditions an operator most needs kept apart, and the
+		// ones #238 collapsed into hours of apparent active work. A stall is a
+		// live process that stopped moving; unavailable is an endpoint that
+		// answered it cannot serve; connectivity is a host that cannot reach
+		// it (#380); quota is an allowance that will come back.
 		case runtime.FailureProviderNoProgress:
 			failure = "provider stalled: terminated by the inactivity policy (" + failure + ")"
 		case runtime.FailureProviderUnavailable:
-			failure = "provider unavailable: the host could not reach the provider (" + failure + ")"
+			failure = "provider unavailable: the endpoint reported it cannot serve (" + failure + ")"
+		case runtime.FailureConnectivity:
+			failure = "connectivity unavailable: the host could not reach the endpoint; retrying after a bounded backoff (" + failure + ")"
 		case runtime.FailureProviderQuota:
 			failure = "provider quota exhausted (" + failure + ")"
 		}
@@ -1240,6 +1243,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		// uses, and the SAME PATH a real shell would resolve.
 		ControllerRoot:    controllerRoot(),
 		EntrypointPathEnv: os.Getenv("PATH"),
+		GoEnvFile:         runtime.OperatorGoEnvFile(os.Getenv("GOENV")),
 	}
 	// The running binary's own provenance. A resolution failure is carried
 	// through as itself rather than discarded: doctor must be able to say "I

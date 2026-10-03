@@ -67,10 +67,13 @@ type SupervisorDependencies struct {
 	// anything else is refused: enrolment is operator authority, and a local
 	// control request must not be able to introduce a repository.
 	Repositories []GitHubRepo
-	// MaxConcurrentRuns is the operator-authorized ceiling on runs driven at
-	// once. The scheduler enforces the same ceiling durably; this bounds the
-	// goroutines so the process does not start work it cannot lease.
-	MaxConcurrentRuns int
+	// MaxConcurrentRuns is the operator-authorized ceiling on runs doing WORK
+	// at once, and MaxConcurrentObservations the ceiling on runs observing at
+	// once (#85). The scheduler enforces both durably, per capacity class; the
+	// supervisor only bounds its goroutines by their sum, so it never has to
+	// predict which class a run's next operation is.
+	MaxConcurrentRuns         int
+	MaxConcurrentObservations int
 	// PollInterval is how often a quiet supervisor looks again.
 	PollInterval time.Duration
 	// Discovery is the OPTIONAL automatic issue-intake policy. Nil means
@@ -121,9 +124,12 @@ type SupervisorReport struct {
 	// Draining reports that the supervisor is finishing started work and
 	// accepting none.
 	Draining bool `json:"draining"`
-	// Capacity is the operator ceiling and how much of it this tick used.
-	Capacity int `json:"capacity"`
-	Active   int `json:"active"`
+	// Capacity is the WORK ceiling (max_concurrent_runs) and ObservationCapacity
+	// the observation ceiling (#85). A tick may drive up to their sum, because
+	// the supervisor bounds turns by both; the store bounds each class.
+	Capacity            int `json:"capacity"`
+	ObservationCapacity int `json:"observation_capacity"`
+	Active              int `json:"active"`
 	// NextEligibleAt is when the supervisor intends to look again.
 	NextEligibleAt time.Time `json:"next_eligible_at"`
 	// Plans is what the plan reconciler did this tick, one entry per plan it
@@ -196,7 +202,8 @@ type Supervisor struct {
 	// the pass that started it. The durable count in AcquireOperation remains
 	// the authority on concurrency; this bounds the goroutines, which is the
 	// same thing MaxConcurrentRuns always bounded, counted over the right
-	// interval.
+	// interval. Its bound is turns(): a turn whose next operation's class is
+	// full is refused by the store and returns.
 	inflight map[string]struct{}
 	// lastTurn is when this process last started each run. It spaces turns -
 	// at most one per poll interval, and one per quietSpacing intervals for a
@@ -274,6 +281,7 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// supervisor can never drive more runs at once than the operator
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
+	d.MaxConcurrentObservations = resolveMaxConcurrentObservations(d.MaxConcurrentObservations)
 	return &Supervisor{
 		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}, lastTurn: map[string]time.Time{}, freed: make(chan struct{}, 1),
 		// A supervisor admits work from the start unless it is the successor
@@ -538,13 +546,16 @@ func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	if err != nil {
 		return nil, err
 	}
-	scheduler := Scheduler{Store: s.deps.Store, Clock: s.deps.Clock, Owner: s.deps.Owner}
+	scheduler := Scheduler{Store: s.deps.Store, Clock: s.deps.Clock, Owner: s.deps.Owner, Liveness: s.deps.Liveness}
 	var outcomes []Outcome
 	for _, run := range runs {
 		if terminalDisposition(run.Disposition) {
 			continue
 		}
 		outcome, err := CancelRun(s.deps.Store, scheduler, s.deps.Clock.Now(), run.ID, reason)
+		if IsRunTerminal(err) {
+			continue // finished after the listing; its outcome stands (#439)
+		}
 		if err != nil {
 			return outcomes, err
 		}
@@ -586,7 +597,7 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	now := s.deps.Clock.Now()
 	report := SupervisorReport{
-		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
+		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns, ObservationCapacity: s.deps.MaxConcurrentObservations,
 		NextEligibleAt: now.Add(s.deps.PollInterval),
 	}
 	// THIS CONTROLLER'S OWN STATE COMES FIRST, AND OUTSIDE THE INTAKE SECTION.
@@ -822,7 +833,7 @@ func (s *Supervisor) admit(active []EngineeringRun, activity map[string]time.Tim
 			delete(s.lastTurn, id)
 		}
 	}
-	room := s.deps.MaxConcurrentRuns - len(s.inflight)
+	room := s.deps.MaxConcurrentRuns + s.deps.MaxConcurrentObservations - len(s.inflight)
 	if room <= 0 || len(active) == 0 {
 		// The cursor does NOT advance on a pass that started nothing. Advancing
 		// past runs it never considered is how a sweep skips one.
@@ -946,7 +957,7 @@ func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) err
 	defer func() {
 		s.driving.Wait()
 		final := SupervisorReport{
-			At: s.deps.Clock.Now(), Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
+			At: s.deps.Clock.Now(), Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns, ObservationCapacity: s.deps.MaxConcurrentObservations,
 		}
 		s.collect(&final)
 		if report != nil && (len(final.Driven) > 0 || len(final.Observed) > 0) {

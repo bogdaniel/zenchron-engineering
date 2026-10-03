@@ -761,9 +761,9 @@ const (
 	// it started on its own, so the retry gets a fresh invocation rather than
 	// observations from one that said nothing worth keeping.
 	FailureProviderBackgroundWorkUnresolved FailureClass = "provider_background_work_unresolved"
-	// FailureProviderUnavailable is the provider's TRANSPORT being gone, named
-	// by the provider's own diagnostic: DNS did not resolve, the connection was
-	// refused or reset, or the endpoint answered that it is unavailable.
+	// FailureProviderUnavailable is the provider's ENDPOINT saying it cannot
+	// serve: overloaded, or a gateway status (502/503/504). The host reached
+	// it; losing the transport itself is FailureConnectivity.
 	//
 	// It is a recognized statement, never an inference from silence. Silence
 	// is FailureProviderNoProgress; only an explicit diagnostic reaches here,
@@ -779,6 +779,13 @@ const (
 	// interval must not be charged to the active-work budget, and the same run
 	// continues once connectivity returns.
 	FailureProviderUnavailable FailureClass = "provider_unavailable"
+	// FailureConnectivity is the host's TRANSPORT being gone (#380), named by a
+	// typed transport error or the provider's own diagnostic: DNS did not
+	// resolve, or the connection was refused, reset or unreachable. It routes
+	// to an attempt-CONSUMING retry that runs only after a durable bounded
+	// backoff (RetryNotBefore), so persistent loss exhausts finite authority
+	// rather than waiting forever on a refunded attempt.
+	FailureConnectivity FailureClass = "connectivity_unavailable"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -906,10 +913,15 @@ const (
 	// executable would destroy work over a condition that is entirely local
 	// and entirely fixable.
 	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
-	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
-	FailureFlaky                     FailureClass = "flaky_verification"
+	// FailureCandidateWriterAlive is a candidate whose writer lock is still
+	// held by a process from an earlier invocation - one that outlived its
+	// supervisor (#168). Refused before dispatch, it waits: an operator stops
+	// the stale writer and the same run continues.
+	FailureCandidateWriterAlive    FailureClass = "candidate_writer_alive"
+	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
+	FailureFlaky                   FailureClass = "flaky_verification"
 	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
 	// that returned without discharging it: the workspace it left behind is
 	// unchanged, and it did not state (or failed to bind) an explicit
@@ -1018,7 +1030,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
 		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
-		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved:
+		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved, FailureConnectivity:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
@@ -1032,7 +1044,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureCandidateWriterAlive:
 		return RouteWait
 	default:
 		return RouteStop
