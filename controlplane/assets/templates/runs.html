@@ -2,7 +2,7 @@
 {{define "content"}}
 <section class="panel">
   <h1>runs</h1>
-  <p class="meta">observed {{fmtTime .ObservedAt}} · {{.Fleet.Executing}} / {{.Fleet.Capacity}} executing · {{.Fleet.Active}} active</p>
+  <p class="meta" id="runs-meta" data-live>observed {{fmtTime .ObservedAt}} · {{.Fleet.Executing}} / {{.Fleet.Capacity}} executing · {{.Fleet.Active}} active</p>
 
   <nav class="filters" aria-label="status filter">
     <a href="{{runsLink "" .Filter.Source}}" {{if eq .Filter.Status ""}}class="active" aria-current="true"{{end}}>all</a>
@@ -22,7 +22,7 @@
     {{if .Filter.Source}}<a href="{{runsLink .Filter.Status ""}}">clear</a>{{end}}
   </form>
 
-  <table class="runs">
+  <table class="runs" id="runs-table" data-live>
     <thead>
       <tr>
         <th>run</th>

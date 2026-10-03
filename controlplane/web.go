@@ -6,9 +6,9 @@
 // token API does, and cmd/zenchron-engineering/control_plane.go mounts both
 // on one http.Server behind one listener. There is no second SQLite handle,
 // no second token file and no unschematized /api/* surface: the page's own
-// live refresh (web/static/console.js) polls API's existing schema'd
-// /v1/runs/{id} and /v1/runs/{id}/events routes, the same contract any other
-// client of S1 would use.
+// live refresh (assets/static/console.js) re-fetches the page itself and
+// swaps its [data-live] regions, so every refreshed byte comes through the
+// same handler, projection and template as the first render (#420).
 //
 // A browser cannot attach an Authorization header to a plain navigation, so
 // the HTML surface accepts the identical token via a cookie instead of the
