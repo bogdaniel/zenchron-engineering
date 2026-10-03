@@ -430,8 +430,10 @@ func TestStopNeverRewritesAFinishedRun(t *testing.T) {
 }
 
 // TestStopOnAFailedRunReleasesItsStaleLease: the refused stop keeps the failed
-// outcome, exits 64, and still gives back a lease whose owner is provably dead
-// (an owner whose instance lock nobody holds).
+// outcome, exits 64, and reclaims - lease only - an operation whose owner is
+// provably dead. The owner is the live PARENT process with no start token, which
+// the PID probe calls alive; only its unheld instance lock proves it dead, so
+// the test pins that stop decides with lock liveness.
 func TestStopOnAFailedRunReleasesItsStaleLease(t *testing.T) {
 	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
 	t.Chdir(dir)
@@ -444,7 +446,10 @@ func TestStopOnAFailedRunReleasesItsStaleLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := strings.SplitN(runtime.NewRuntimeOwner(), "/", 2)[0]
-	dead := host + "/999999999/gone"
+	dead := fmt.Sprintf("%s/%d/", host, os.Getppid())
+	if !runtime.NewProcessOwnerLiveness().Alive(dead) {
+		t.Fatal("precondition: the PID probe must call this owner alive")
+	}
 	past := time.Now().UTC().Add(-time.Hour)
 	if _, created, err := store.PutOperation(runtime.RunOperation{
 		SchemaVersion: runtime.SchemaVersion, ID: "op-stale", RunID: "broken", Kind: "external.work",
@@ -469,8 +474,8 @@ func TestStopOnAFailedRunReleasesItsStaleLease(t *testing.T) {
 	}
 	defer store.Close()
 	op, _, _, err := store.Operation("op-stale")
-	if err != nil || op.State != runtime.OperationCancelled || op.Lease != nil {
-		t.Fatalf("the stale lease was not released: %+v err=%v", op, err)
+	if err != nil || op.State != runtime.Leased || op.Lease != nil || op.CancelRequested {
+		t.Fatalf("the stale lease was not reclaimed lease-only: %+v err=%v", op, err)
 	}
 }
 

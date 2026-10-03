@@ -442,8 +442,8 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // outcome is history, not something a stop may rewrite, so neither the journal
 // nor the run row is written. The refusal is made by the run.cancelled append
 // itself, so it holds against a completion that commits while this stop is in
-// flight. The operation loop still runs, restricted to leases dead-owner
-// reclaim would release, so a stale lease such a run left is given back.
+// flight. A dead owner's abandoned lease on such a run is still reclaimed -
+// the lease only, exactly as dead-owner reclaim does - before the refusal.
 func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, runID, reason string) (Outcome, error) {
 	run, found, err := store.Run(runID)
 	if err != nil {
@@ -466,7 +466,7 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 	// this defect is in, and those are healed by the same fall-through.
 	// refused is set when the run already completed or failed (#439). Its
 	// outcome is not rewritten, but a lease its dead owner left behind is still
-	// given back below, and then the refusal is returned.
+	// reclaimed below, and then the refusal is returned.
 	var refused error
 	if run.Disposition == Cancelled {
 		outcome.Reason = run.Reason
@@ -499,7 +499,6 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 			}
 		}
 	}
-	liveness := scheduler.defaults().Liveness
 	operations, err := store.Operations(runID)
 	if err != nil {
 		return Outcome{}, err
@@ -508,10 +507,14 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 		if op.State != Leased && op.State != Running {
 			continue
 		}
-		// On a refused stop only what dead-owner reclaim would release is
-		// touched: a live owner's lease on a run that ended without this stop
-		// is not the operator's to take.
-		if refused != nil && op.Lease != nil && !CanAcquire(op, now, liveness.Alive(op.Lease.Owner)) {
+		// A refused stop is not a cancellation: it only does what dead-owner
+		// reclaim does - drop a provably abandoned lease and leave the row's
+		// state for reconcileStoreLag to copy from the journal. A live owner's
+		// lease and a lease-less row are left exactly as they are.
+		if refused != nil {
+			if _, err := scheduler.defaults().reclaimAbandoned(op, now); err != nil {
+				return Outcome{}, err
+			}
 			continue
 		}
 		// Cancellation is REQUESTED first, so a driver that is mid-flight on

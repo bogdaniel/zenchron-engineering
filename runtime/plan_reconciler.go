@@ -449,7 +449,7 @@ func (r PlanReconciler) stopRetiredRun(runID, reason string) (bool, error) {
 	if run.Plan == nil || run.Disposition == Cancelled || terminalDisposition(run.Disposition) {
 		return false, nil
 	}
-	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256}
+	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256, Liveness: NewLockOwnerLiveness(r.StateDir)}
 	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); IsRunTerminal(err) {
 		return false, nil // finished after the read above: already settled (#439)
 	} else if err != nil {

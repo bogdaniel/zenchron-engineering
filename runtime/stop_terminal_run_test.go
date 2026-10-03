@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -144,34 +145,51 @@ func TestARetiredStageRunThatAlreadyFinishedIsSettled(t *testing.T) {
 	assertUntouched(t, store, run.ID, Completed)
 }
 
-// TestARefusedStopStillReleasesADeadOwnersLease: a failed run left one
-// operation leased by a dead owner and one by a live owner. The stop is
-// refused and the outcome is kept, but the dead owner's lease is given back;
-// the live owner's lease is not the stop's to take.
-func TestARefusedStopStillReleasesADeadOwnersLease(t *testing.T) {
+// TestARefusedStopOnlyReclaimsADeadOwnersLease: a failed run left an
+// operation running under a dead owner, one leased by a live owner, and one
+// running with no lease at all. The stop is refused and the outcome kept. It
+// does exactly what dead-owner reclaim does - the dead owner's lease is
+// dropped and its state left for the journal to settle - and nothing else.
+func TestARefusedStopOnlyReclaimsADeadOwnersLease(t *testing.T) {
 	_, store := openJournal(t)
 	seedTerminal(t, store, "broken", EventRunFailed, Failed, true)
 	c := &fakeClock{now: time.Unix(200, 0)}
-	for _, owner := range []string{"dead", "live"} {
-		if _, created, err := store.PutOperation(RunOperation{
-			SchemaVersion: SchemaVersion, ID: "op-" + owner, RunID: "broken", Kind: "external.work",
-			IdempotencyKey: owner, State: Leased, Attempt: 1, MaxAttempts: 1, CreatedAt: c.Now(),
-			Lease: &Lease{Owner: owner, HeartbeatAt: c.Now().Add(-2 * time.Minute), ExpiresAt: c.Now().Add(-time.Minute)},
-		}, 0); err != nil || !created {
-			t.Fatalf("seeding op-%s: created=%v err=%v", owner, created, err)
+	for _, seed := range []struct {
+		id    string
+		state OperationState
+		owner string
+	}{{"op-dead", Running, "dead"}, {"op-live", Leased, "live"}, {"op-bare", Running, ""}} {
+		op := RunOperation{SchemaVersion: SchemaVersion, ID: seed.id, RunID: "broken", Kind: "external.work",
+			IdempotencyKey: seed.id, State: seed.state, Attempt: 1, MaxAttempts: 1, CreatedAt: c.Now()}
+		if seed.owner != "" {
+			op.Lease = &Lease{Owner: seed.owner, HeartbeatAt: c.Now().Add(-2 * time.Minute), ExpiresAt: c.Now().Add(-time.Minute)}
+		}
+		if _, created, err := store.PutOperation(op, 0); err != nil || !created {
+			t.Fatalf("seeding %s: created=%v err=%v", seed.id, created, err)
 		}
 	}
+	read := func(id string) (RunOperation, int64) {
+		op, revision, _, err := store.Operation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return op, revision
+	}
+	live, liveRevision := read("op-live")
+	bare, bareRevision := read("op-bare")
+
 	scheduler := Scheduler{Store: store, Clock: c, Owner: "op", Liveness: deadOwner("dead")}
 	if _, err := CancelRun(store, scheduler, c.Now(), "broken", "operator/stop"); !IsRunTerminal(err) {
 		t.Fatalf("err=%v, want a RunTerminalError", err)
 	}
 	assertUntouched(t, store, "broken", Failed)
-	dead, _, _, _ := store.Operation("op-dead")
-	if dead.State != OperationCancelled || dead.Lease != nil {
-		t.Fatalf("the dead owner's lease was not released: %+v", dead)
+	if dead, _ := read("op-dead"); dead.State != Running || dead.Lease != nil || dead.CancelRequested {
+		t.Fatalf("the dead owner's operation was not reclaimed lease-only: %+v", dead)
 	}
-	live, _, _, _ := store.Operation("op-live")
-	if live.State != Leased || live.Lease == nil {
-		t.Fatalf("a live owner's lease was taken: %+v", live)
+	if got, revision := read("op-live"); revision != liveRevision || !reflect.DeepEqual(got, live) {
+		t.Fatalf("a live owner's lease was touched: %+v", got)
+	}
+	if got, revision := read("op-bare"); revision != bareRevision || !reflect.DeepEqual(got, bare) {
+		t.Fatalf("a lease-less operation was rewritten: %+v", got)
 	}
 }
