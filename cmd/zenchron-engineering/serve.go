@@ -413,6 +413,9 @@ func (c *composition) planService() (runtime.PlanService, error) {
 // a command; the endpoint exists so those commands can reach a supervisor that
 // owns the work instead of driving it in a second terminal.
 func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
+	if request.ExpectedController != "" {
+		return c.governedControl(ctx, supervisor, shutdown, request)
+	}
 	switch request.Command {
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
@@ -481,6 +484,36 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	default:
 		return controlError(fmt.Errorf("unknown control command %q", request.Command))
 	}
+}
+
+// governedControl is a request that names the controller it was decided
+// against (#398, docs/control-plane.md "Governed actions"). The identity proof
+// and the act happen in this one request on this one connection: this
+// process's OWN measured identity must have the named binding, and the verb
+// runs inside the controller-role authority section, so a role released
+// meanwhile refuses it. Only the governed verbs are accepted; nothing else is
+// reachable this way.
+func (c *composition) governedControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
+	if request.Command != runtime.ControlStop && request.Command != runtime.ControlPlanReject {
+		return runtime.ControlResponse{Code: runtime.ControlCodeUnsupported, Error: fmt.Sprintf("%q is not a governed control command", request.Command)}
+	}
+	self, err := controllerSelf()
+	binding := runtime.ControllerBuildBinding(self.Build)
+	if err != nil || self.Unattested || binding == "" {
+		return runtime.ControlResponse{Code: runtime.ControlCodeControllerUnattested, Error: "this controller is unattested and cannot prove the generation the request names"}
+	}
+	if binding != request.ExpectedController {
+		return runtime.ControlResponse{Code: runtime.ControlCodeControllerMismatch, Error: "this controller is not the generation the request names"}
+	}
+	request.ExpectedController = ""
+	var response runtime.ControlResponse
+	if err := c.role.WithAuthority(func() error {
+		response = c.handleControl(ctx, supervisor, shutdown, request)
+		return nil
+	}); err != nil {
+		return controlError(err)
+	}
+	return response
 }
 
 // decidePlan applies an operator's approval or rejection inside the supervisor
@@ -674,7 +707,7 @@ func controlOK(payload any) runtime.ControlResponse {
 }
 
 func controlError(err error) runtime.ControlResponse {
-	return runtime.ControlResponse{Error: err.Error()}
+	return runtime.ControlResponse{Error: err.Error(), Code: runtime.ControlCode(err)}
 }
 
 // maxConcurrentRuns is the operator's effective run ceiling, resolved in ONE

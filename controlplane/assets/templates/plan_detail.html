@@ -21,6 +21,15 @@
   {{if $p.GoverningRevision}}{{if ne $p.Revision $p.GoverningRevision}}<p><a href="/plans/{{$p.ID}}?revision={{$p.GoverningRevision}}">show governing revision {{$p.GoverningRevision}} →</a></p>{{end}}{{end}}
 </section>
 
+<section class="panel" id="plan-actions">
+  <h2>operator action</h2>
+  {{if .RejectDisabled}}<p class="muted">reject unavailable: {{.RejectDisabled}}</p>
+  {{else}}{{with .Controller}}<button type="button" class="action" data-action="/v1/plans/{{$p.ID}}/reject" data-binding="{{.ControllerBinding}}"
+    data-revision="{{$p.Revision}}" data-digest="{{$p.Digest}}"
+    data-target="plan {{$p.ID}} revision {{$p.Revision}} digest {{$p.Digest}}" data-generation="{{with .LiveBuild}}{{.Kind}} {{.Version}} @ {{.SourceRevision}}{{end}} · binding {{.ControllerBinding}}"
+    data-consequence="Rejecting records a durable refusal of this revision; the governing revision keeps governing.">reject revision…</button>{{end}}{{end}}
+</section>
+
 <section class="panel">
   <h2>stages</h2>
   {{range $p.Stages}}

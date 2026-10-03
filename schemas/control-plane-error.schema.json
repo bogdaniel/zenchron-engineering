@@ -13,7 +13,11 @@
         "method_not_allowed",
         "not_found",
         "invalid_page",
-        "read_failed"
+        "read_failed",
+        "forbidden_host",
+        "forbidden_origin",
+        "unsupported_media_type",
+        "invalid_request"
       ]
     }
   }

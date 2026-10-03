@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Result of a governed Control Plane action (#398). state is the target's projection re-read from the durable store after the attempt (control-plane-run for stop, control-plane-plan-detail for reject), absent when the target does not exist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "target",
+    "outcome"
+  ],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "stop",
+        "plan-reject"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "applied",
+        "already_applied",
+        "refused",
+        "unreachable",
+        "unknown"
+      ]
+    },
+    "code": {
+      "type": "string",
+      "enum": [
+        "controller_unattested",
+        "controller_mismatch",
+        "role_not_held",
+        "unsupported_command",
+        "run_terminal",
+        "plan_refused",
+        "runtime_refused",
+        "run_not_found",
+        "plan_not_found",
+        "not_awaiting_decision",
+        "digest_mismatch"
+      ]
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "state": {
+      "type": "object"
+    }
+  },
+  "if": {
+    "properties": {
+      "outcome": {
+        "const": "refused"
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "code"
+    ]
+  }
+}

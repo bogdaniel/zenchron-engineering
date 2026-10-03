@@ -1815,3 +1815,35 @@ func (s PlanService) AttemptsView(planID string) (PlanAttemptsView, error) {
 	}
 	return PlanAttemptsView{}, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
 }
+
+// DecisionEventFor finds the durable decision this invocation asked for, by
+// revision, digest and verb. It reads the journal rather than a projection
+// because a projection answers about the present and this question is about the
+// past: a later proposal, a later decision, or a supersession all move the
+// present without unmaking what already happened.
+func DecisionEventFor(events []EngineeringEvent, verb string, revision int, digest string) (PlanApproval, bool) {
+	want := EventPlanApproved
+	status := domain.ApprovalApproved
+	if verb == "reject" {
+		want, status = EventPlanRejected, domain.ApprovalRejected
+	}
+	for _, event := range events {
+		if event.Type != want {
+			continue
+		}
+		var payload PlanDecisionPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			// An unreadable decision record is not this decision. It is also
+			// not a reason to claim one landed.
+			continue
+		}
+		if payload.Revision != revision || payload.Digest != digest {
+			continue
+		}
+		return PlanApproval{
+			Revision: payload.Revision, Digest: payload.Digest,
+			Status: status, Operator: payload.Operator, Note: payload.Note,
+		}, true
+	}
+	return PlanApproval{}, false
+}

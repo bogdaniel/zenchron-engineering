@@ -1,7 +1,7 @@
 // zenchron-engineering control plane console: small plain JavaScript, no
 // framework, no build step.
 //
-// This script does exactly two things, all read-only:
+// This script does exactly three things:
 //   1. Bootstraps the session cookie from the login page, entirely in the
 //      browser - the token never travels in a URL, a query string, or a
 //      server log, only in the Cookie header this sets and the Authorization
@@ -11,11 +11,15 @@
 //      indicator honest: "live" only while that refresh is succeeding,
 //      "stale" the moment it fails, times out or goes quiet - an operator
 //      must never read a frozen page as current (#420).
+//   3. Governed operator actions (#398): a [data-action] button opens a
+//      confirm dialog naming the exact target and controller generation;
+//      only the dialog's confirm sends ONE POST, with the Bearer header, and
+//      shows the outcome and resulting durable state. It never retries.
 //
 // Every fetch here targets a route the server already serves - the page
-// itself, or API's published /v1/controller for the login check - never a
-// route this console invents, and nothing here ever issues a mutating
-// request.
+// itself, API's published /v1/controller for the login check, or one of the
+// two fixed action routes a rendered button names - never a route this
+// console invents.
 (function () {
   "use strict";
 
@@ -140,6 +144,73 @@
         // Chained, not setInterval: a slow render never stacks requests.
         window.setTimeout(refresh, POLL_MS);
       });
+  }
+
+  // ---------------------------------------------------------------------
+  // Governed actions: confirm, send once, show the durable result
+  // ---------------------------------------------------------------------
+  var dialog = document.getElementById("action-dialog");
+  var pending = null;
+  var inflight = false;
+
+  function byId(id) { return document.getElementById(id); }
+
+  function describe(state) {
+    if (!state) return "";
+    if (state.disposition) return "; run is now " + state.disposition;
+    if (state.shown) return "; revision " + state.revision + " is now " + state.shown;
+    return "";
+  }
+
+  function settle(outcome, text) {
+    var result = byId("action-result");
+    result.setAttribute("data-outcome", outcome);
+    result.textContent = text;
+    inflight = false;
+  }
+
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-action]");
+    if (!button || !dialog || inflight) return;
+    // Copied now: the live refresh replaces the button underneath the dialog.
+    pending = Object.assign({}, button.dataset);
+    byId("action-target").textContent = pending.target;
+    byId("action-generation").textContent = pending.generation;
+    byId("action-consequence").textContent = pending.consequence;
+    byId("action-note-field").hidden = !pending.revision;
+    byId("action-note").value = "";
+    byId("action-result").textContent = "";
+    byId("action-result").removeAttribute("data-outcome");
+    byId("action-confirm").disabled = false;
+    dialog.showModal();
+  });
+
+  if (dialog) {
+    byId("action-close").addEventListener("click", function () { if (!inflight) dialog.close(); });
+    dialog.addEventListener("cancel", function (event) { if (inflight) event.preventDefault(); });
+    byId("action-confirm").addEventListener("click", function () {
+      if (!pending || inflight) return;
+      byId("action-confirm").disabled = true; // one dialog, one send
+      settle("pending", "pending: sent once, waiting for the controller...");
+      inflight = true;
+      var body = { controller_binding: pending.binding };
+      if (pending.revision) {
+        body.revision = Number(pending.revision);
+        body.digest = pending.digest;
+        if (byId("action-note").value) body.note = byId("action-note").value;
+      }
+      var headers = authHeaders();
+      headers["Content-Type"] = "application/json";
+      fetch(pending.action, { method: "POST", headers: headers, body: JSON.stringify(body) })
+        .then(function (res) { return res.json(); })
+        .then(function (r) {
+          if (r.error) return settle("refused", "refused before sending: " + r.error);
+          settle(r.outcome, r.outcome + (r.code ? " (" + r.code + ")" : "") + (r.detail ? ": " + r.detail : "") + describe(r.state));
+        })
+        .catch(function () {
+          settle("unknown", "outcome not confirmed: no answer from the control plane; re-read the page before retrying");
+        });
+    });
   }
 
   document.addEventListener("DOMContentLoaded", function () {

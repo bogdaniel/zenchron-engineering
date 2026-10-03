@@ -16,7 +16,7 @@ state directory. The file must be a regular file with mode 0600. Tokens never
 appear in responses or startup output. To rotate, stop the Control Plane,
 remove this file, and restart; existing clients must read the new token.
 
-All routes are GET-only:
+The read routes are GET (the two governed POST routes are in "Governed actions" below):
 
 | Route | Projection |
 | --- | --- |
@@ -42,8 +42,9 @@ remain visible to the authenticated local operator.
 The database opens with SQLite `mode=ro` and `query_only` on each connection.
 Startup neither creates a database nor migrates its schema. A database whose
 schema differs from this binary's schema must be upgraded by the runtime.
-The HTTP process has no mutation methods or operator-action routes. Only
-`controller.snapshot` is sent to the controller's existing local endpoint.
+The HTTP process never writes the store or journal. Reads send only
+`controller.snapshot` to the controller's existing local endpoint; the two
+governed actions below send `stop` and `plan-reject`, and nothing else.
 A missing live observation is unknown; a generation disagreement is explicit,
 and an unstable controller observation cannot claim a generation match.
 
@@ -76,3 +77,116 @@ script polls this page's `/v1/*` routes above with that same token as an
 Event payloads and free-form run/plan diagnostic text (`reason`, replay
 `error`) are not rendered, for the same reason API's own response types
 exclude them: they are unbounded prose, not a stable projection.
+
+## Governed actions (S4a, #398)
+
+This section is the frozen S4a specification: the design reviewed on #398
+("Design for review: S4 governed socket-backed operator actions") with the
+maintainer's decision "S4a approved with one change" applied - `drain` is
+dropped, because it changes live admission and journals nothing, so an
+ambiguous reply could not be settled from durable history. Changing anything
+here is a new review, not an implementation detail.
+
+### Allowlist
+
+Exactly two actions, each a fixed route mapped to a fixed socket command.
+There is no `/{verb}` passthrough and no input field names a command.
+
+| Route | Body | Socket request (the CLI's, plus `expected_controller`) | Binding |
+| --- | --- | --- | --- |
+| `POST /v1/runs/{id}/stop` | `{controller_binding}` | `stop`, `run_id` | the run id |
+| `POST /v1/plans/{id}/reject` | `{controller_binding, revision, digest, note?}` | `plan-reject`, `plan_id`, `revision`, `digest`, `note` | plan id + revision + digest |
+
+Not in S4a, each for a stated reason: `plan-approve` (the control plane cannot
+show or bind the assignment set an approval authorizes; S4b needs a read-only
+`plan.view` socket observation first), `plan-revise` (a long, budget-spending
+provider invocation with no idempotency key), `drain` (journals nothing - see
+above), `shutdown` and `stop-all` (end the only process that executes actions;
+a bulk cancel with no per-target binding), `resume`/`refresh` (not socket
+verbs), `submit` (intake, not a control). Operator attribution of UI actions in
+the journal is the deferred #392 gap: `serve` records its own resolved operator.
+
+### Controller identity
+
+`/v1/controller` carries `controller_binding`: `runtime.ControllerBuildBinding`
+of the live snapshot's build - the digest of kind, version, source revision,
+source tree and measured binary sha256. It is empty for an unattested or
+unobserved controller. Every action POST echoes the binding its page
+rendered, and the control plane forwards THAT value, never a freshly observed
+one, as the socket request's `expected_controller`.
+
+`serve` checks it on the same connection that carries the action
+(`governedControl`): it refuses `controller_unattested` when its own measured
+identity is unattested, `controller_mismatch` when its binding differs, and
+`unsupported_command` for any verb other than `stop`/`plan-reject`; otherwise it
+executes the verb inside `ControllerRoleLease.WithAuthority`, so a released role
+refuses with `role_not_held`. Nothing is journalled by a refusal. A request
+without `expected_controller` - every CLI request - is handled exactly as
+before. `ControlResponse.code` carries the typed refusal so no client matches
+prose; it also types `run_terminal` (#443) and `plan_refused` (any
+`PlanService` refusal).
+
+### HTTP boundary
+
+Before any route runs, a POST must pass, in order, refusing with no socket
+dial and no write:
+
+1. `Authorization: Bearer <token>` (constant-time). The console cookie is never
+   accepted for a POST. → 401 `unauthorized`
+2. `Host` equals the listen address (DNS rebinding). → 403 `forbidden_host`
+3. `Origin` equals `http://<listen address>`, and `Sec-Fetch-Site`, when sent,
+   is `same-origin`. → 403 `forbidden_origin`
+4. `Content-Type: application/json`. → 415 `unsupported_media_type`
+
+Open the console at the exact listen address (`http://127.0.0.1:8787`, not
+`localhost`), or actions are refused by 2-3. Bodies are capped at 8 KiB, decoded
+with unknown fields refused and exactly one JSON value (→ 400
+`invalid_request`). Unknown routes are 404. No CORS headers are ever sent.
+
+### Exactly once
+
+One process-wide mutex serializes actions. Under it, each action:
+
+1. pre-checks its durable effect - stop: the run is `cancelled`; reject: a
+   `plan.rejected` event for that exact revision and digest exists
+   (`runtime.DecisionEventFor`, the CLI's lost-reply reconciliation). If
+   present the result is `already_applied` and nothing is sent. This guard is
+   load-bearing: `PlanService.decide` does not deduplicate, so a second reject
+   would append a second `plan.rejected`.
+2. narrows: unknown run → 404 `run_not_found`; unknown plan revision → 404
+   `plan_not_found`; a revision that is not the latest one awaiting a decision
+   → 409 `not_awaiting_decision`; a digest that is not that revision's → 409
+   `digest_mismatch`; an empty binding → 409 `controller_unattested`. A stale
+   value is refused, never silently refreshed. Domain validation stays
+   `serve`'s: the control plane only narrows.
+3. sends ONE request.
+4. maps the answer. A reply lost after the request was written
+   (`runtime.ErrControlReplyLost`) is never resent: durable state is re-read,
+   and the result is `applied` if the effect is there, otherwise `unknown`.
+
+| outcome | HTTP | meaning |
+| --- | --- | --- |
+| `applied` | 200 | `serve` applied it (or the lost reply was settled by re-read) |
+| `already_applied` | 200 | the durable effect already existed; nothing sent |
+| `refused` | 409 / 404 | `code` says why; nothing applied |
+| `unreachable` | 503 | the socket could not be reached; nothing sent |
+| `unknown` | 504 | sent, reply lost, effect not found: re-read before retrying |
+
+Every result is `{action, target, outcome, code?, detail?, state?}` where
+`state` is the target's projection re-read from the durable store after the
+attempt (`control-plane-run` / `control-plane-plan-detail`), never the request
+echoed back. Contracts: `schemas/control-plane-action-request.schema.json`,
+`schemas/control-plane-action-result.schema.json`.
+
+### Console
+
+An action button is rendered only when the observed controller is reachable,
+serving, attested (non-empty binding), holds the role and matches the durable
+generation, and the target is eligible (run not terminal; revision shown as
+`proposed`/`unapproved`). Otherwise the page states why. The server re-checks
+all of it. A button opens a native `<dialog>` naming the exact target (run id,
+or plan id + revision + full digest), the controller generation and binding,
+and the consequence in one sentence; only its confirm sends, once, with the
+Bearer header. The dialog then shows pending, and the outcome with the
+resulting durable state; it never retries, and closing it is blocked while a
+request is in flight.
