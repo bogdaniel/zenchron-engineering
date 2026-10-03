@@ -12,6 +12,7 @@ import (
 type ReadStore struct {
 	store    *SQLiteOperationStore
 	stateDir string
+	fleet    summaryCache
 }
 
 func OpenReadStore(stateDir string) (*ReadStore, error) {
@@ -38,7 +39,7 @@ func OpenReadStore(stateDir string) (*ReadStore, error) {
 }
 func (s *ReadStore) Close() error { return s.store.Close() }
 func (s *ReadStore) Fleet(now time.Time) (Fleet, error) {
-	f, err := FleetStatus(s.store, s.stateDir, 0, now)
+	f, err := fleetStatus(s.store, s.stateDir, 0, now, &s.fleet)
 	if f.Runs == nil {
 		f.Runs = []RunSummary{}
 	}

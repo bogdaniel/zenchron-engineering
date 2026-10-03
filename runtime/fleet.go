@@ -15,11 +15,14 @@ package runtime
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -281,7 +284,17 @@ func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 // answered, because a fleet view whose whole value is "show me everything" must
 // not be lost to one bad row.
 func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time) (Fleet, error) {
+	return fleetStatus(store, stateDir, capacity, now, nil)
+}
+
+// fleetStatus is FleetStatus with an optional summary cache, which a
+// long-lived reader passes and a one-shot CLI does not.
+func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time, cache *summaryCache) (Fleet, error) {
 	runs, err := store.Runs()
+	if err != nil {
+		return Fleet{}, err
+	}
+	heads, err := runHeads(store, cache)
 	if err != nil {
 		return Fleet{}, err
 	}
@@ -292,7 +305,7 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	}
 	fleet.Plans = summarizePlans(store)
 	for _, run := range runs {
-		summary := summarizeRun(store, stateDir, run, now)
+		summary := cache.summarize(store, stateDir, run, heads[run.ID], now)
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
 		}
@@ -378,6 +391,84 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 		}
 	}
 	summary.FeedbackPending = len(feedback.Pending(projection.Head()))
+	return summary
+}
+
+// summaryCache memoizes the replayed part of each RunSummary for a long-lived
+// reader such as the control plane, which re-reads the whole fleet every few
+// seconds. Replaying and hash-verifying every journal on every read cost ~8ms
+// a run - about a second at 93 runs - and grew with total history rather
+// than with what changed.
+//
+// An entry is reused only while both its run row and its journal head are
+// unchanged. The journal is append-only and hash-chained, so an unchanged
+// head is an unchanged journal, and everything replay derives from it is
+// unchanged too. What depends on the clock or on the process - elapsed time,
+// whether an operation is executing right now, whether the workspace exists
+// - is recomputed on every read. Failed summaries are never cached.
+type summaryCache struct {
+	mu      sync.Mutex
+	entries map[string]cachedSummary
+}
+
+type cachedSummary struct {
+	run     EngineeringRun
+	head    int64
+	summary RunSummary
+}
+
+// runHeads reads each run's last journal sequence in one query, or nothing
+// when there is no cache to key.
+func runHeads(store *SQLiteOperationStore, cache *summaryCache) (map[string]int64, error) {
+	if cache == nil {
+		return nil, nil
+	}
+	rows, err := store.db.Query(`SELECT run_id, MAX(sequence) FROM events WHERE stream_kind = ? GROUP BY run_id`, streamRun)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	heads := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var head int64
+		if err := rows.Scan(&id, &head); err != nil {
+			return nil, err
+		}
+		heads[id] = head
+	}
+	return heads, rows.Err()
+}
+
+func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, run EngineeringRun, head int64, now time.Time) RunSummary {
+	if c == nil {
+		return summarizeRun(store, stateDir, run, now)
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[run.ID]
+	c.mu.Unlock()
+	if ok && entry.head == head && reflect.DeepEqual(entry.run, run) {
+		summary := entry.summary
+		summary.Attempts = maps.Clone(summary.Attempts)
+		summary.Elapsed = now.Sub(run.CreatedAt)
+		summary.Executing = executingNow(store, run.ID)
+		summary.Workspace = ""
+		if dir := candidateDir(stateDir, run.ID); dirExists(dir) {
+			summary.Workspace = dir
+		}
+		return summary
+	}
+	// head was read before this replay, so a journal that grows in between is
+	// cached under the older head and simply replayed again next time.
+	summary := summarizeRun(store, stateDir, run, now)
+	if summary.Error == "" {
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]cachedSummary{}
+		}
+		c.entries[run.ID] = cachedSummary{run: run, head: head, summary: summary}
+		c.mu.Unlock()
+	}
 	return summary
 }
 
