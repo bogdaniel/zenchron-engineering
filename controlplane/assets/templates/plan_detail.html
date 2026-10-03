@@ -1,0 +1,59 @@
+{{define "title"}}{{.Plan.ID}}{{end}}
+{{define "content"}}
+{{$p := .Plan}}
+<div id="plan-live" data-live>
+<section class="panel">
+  <p class="breadcrumb"><a href="/overview">overview</a> / plans / <span class="mono">{{$p.ID}}</span></p>
+  <h1 class="mono">{{$p.ID}}</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · {{$p.Repository}} @ <span class="mono">{{$p.BaseRevision}}</span></p>
+  <div class="grid stats">
+    <div class="stat"><span class="label">showing revision</span><span class="value">{{$p.Revision}}</span></div>
+    <div class="stat"><span class="label">this revision is</span><span class="value" data-state="{{$p.Shown}}">{{$p.Shown}}</span></div>
+    <div class="stat"><span class="label">governing revision</span><span class="value">{{if $p.GoverningRevision}}{{$p.GoverningRevision}}{{else}}<span class="muted">none approved</span>{{end}}</span></div>
+  </div>
+  <table class="kv">
+    <tr><th>digest</th><td class="mono">{{$p.Digest}}</td></tr>
+    <tr><th>template</th><td>{{if $p.Template}}<span class="mono">{{$p.Template}}</span> <span class="muted">(planning input; grants nothing)</span>{{else}}<span class="muted">none</span>{{end}}</td></tr>
+    {{with $p.BaseChange}}<tr><th>base change</th><td><span class="mono">{{.From}}</span> → <span class="mono">{{.To}}</span> <span class="muted">since revision {{.FromRevision}}</span></td></tr>{{end}}
+    {{if eq $p.Shown "proposed"}}<tr><th>approving this would invalidate</th><td>{{range $p.Invalidated}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">no started stage</span>{{end}}</td></tr>{{end}}
+    <tr><th>assignment resolution</th><td><span class="muted">resolved by the governing controller from its own configuration; run <code>plan show {{$p.ID}}</code></span></td></tr>
+  </table>
+  {{if $p.GoverningRevision}}{{if ne $p.Revision $p.GoverningRevision}}<p><a href="/plans/{{$p.ID}}?revision={{$p.GoverningRevision}}">show governing revision {{$p.GoverningRevision}} →</a></p>{{end}}{{end}}
+</section>
+
+<section class="panel">
+  <h2>stages</h2>
+  <table class="runs">
+    <thead><tr><th>stage</th><th>kind</th><th>depends on</th><th>requires (role · profile · context policy)</th><th>state</th><th>bound to (agent · provider · trust)</th><th>run</th></tr></thead>
+    <tbody>
+      {{range $p.Stages}}
+      <tr>
+        <td class="mono">{{.ID}}</td>
+        <td>{{.Kind}}</td>
+        <td>{{range .DependsOn}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">—</span>{{end}}</td>
+        <td>{{if .Role}}{{.Role}}{{else}}<span class="muted">—</span>{{end}}{{if .Profile}} · {{.Profile}}{{end}}{{if .ContextPolicy}} · {{.ContextPolicy}}{{end}}</td>
+        <td>{{if .State}}<span data-state="{{.State}}">{{.State}}</span>{{else}}<span class="muted">not recorded</span>{{end}}</td>
+        <td>{{if .Agent}}{{.Agent}} <span class="muted">· {{.ProviderKind}} · {{.TrustMode}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+        <td>{{if .RunID}}<a class="mono" href="/runs/{{.RunID}}">{{.RunID}}</a>{{else if eq .Kind "agent"}}<span class="muted">none yet</span>{{else}}<span class="muted">gate: no run</span>{{end}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="7" class="empty">this revision has no stages</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>budget envelope</h2>
+  {{with $p.Budget}}
+  <table class="kv">
+    <tr><th>child runs</th><td>{{.ChildRuns}} / {{.MaxChildRuns}}</td></tr>
+    <tr><th>provider invocations</th><td>{{.ProviderInvocations}} / {{.MaxProviderInvocations}}</td></tr>
+    <tr><th>wall time</th><td>{{.WallSeconds}}s{{if .MaxWallSeconds}} / {{.MaxWallSeconds}}s{{else}} <span class="muted">(no wall limit)</span>{{end}}</td></tr>
+    <tr><th>concurrency ceiling</th><td>{{.MaxConcurrency}}</td></tr>
+    <tr><th>cost</th><td>{{if .CostKnown}}{{with .CostMicros}}{{.}} cost micros <span class="muted">(only invocations that reported cost)</span>{{else}}<span class="muted">known, not itemised</span>{{end}}{{else}}<span class="muted">unknown (not reported by every provider)</span>{{end}}</td></tr>
+  </table>
+  {{end}}
+</section>
+</div>
+{{end}}

@@ -54,6 +54,12 @@ func (s *ReadStore) Status(id string, now time.Time) (StatusReport, error) {
 	r := &EngineeringRuntime{deps: Dependencies{Store: s.store, StateDir: s.stateDir, Clock: readClock{now}}}
 	return r.Status(id)
 }
+
+// PlanView is the durable plan view - no assignment resolution; see
+// PlanService.DurableView.
+func (s *ReadStore) PlanView(id string, revision int) (PlanView, error) {
+	return PlanService{Store: s.store}.DurableView(id, revision)
+}
 func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(id); return ok, err }
 func (s *ReadStore) EventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {
 	return s.store.EventsPage(id, after, limit)

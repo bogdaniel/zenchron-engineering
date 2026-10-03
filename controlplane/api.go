@@ -253,6 +253,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}", a.run)
 	mux.HandleFunc("GET /v1/runs/{id}/events", a.events)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
+	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
