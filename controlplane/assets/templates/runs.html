@@ -11,7 +11,7 @@
     <a href="{{runsLink "failed" .Filter.Source}}" {{if eq .Filter.Status "failed"}}class="active" aria-current="true"{{end}} data-state="failed">failed</a>
     <a href="{{runsLink "completed" .Filter.Source}}" {{if eq .Filter.Status "completed"}}class="active" aria-current="true"{{end}} data-state="completed">completed</a>
     <a href="{{runsLink "cancelled" .Filter.Source}}" {{if eq .Filter.Status "cancelled"}}class="active" aria-current="true"{{end}} data-state="cancelled">cancelled</a>
-    <a href="{{runsLink "held" .Filter.Source}}" {{if eq .Filter.Status "held"}}class="active" aria-current="true"{{end}} data-state="held">held material</a>
+    <a href="{{runsLink "held" .Filter.Source}}" {{if eq .Filter.Status "held"}}class="active" aria-current="true"{{end}} data-state="held_material">held material</a>
   </nav>
 
   <form class="source-filter" method="get" action="/runs">
@@ -62,7 +62,7 @@
           {{if .Attempts}}{{range $kind, $n := .Attempts}}<div>{{$kind}}: {{$n}}</div>{{end}}{{else}}<span class="muted">—</span>{{end}}
         </td>
         <td>
-          {{if .Held}}<span class="badge held" data-state="held">held</span>{{else}}<span class="muted">—</span>{{end}}
+          {{if .Held}}<span class="badge held" data-state="held_material">held</span>{{else}}<span class="muted">—</span>{{end}}
         </td>
         <td>
           {{if .PullRequest}}<span>#{{.PullRequest}}</span>{{if .PRState}} <span class="muted">{{.PRState}}</span>{{end}}{{if .CI}} · CI <span data-state="{{.CI}}">{{.CI}}</span>{{end}}{{if .Review}} · review <span data-state="{{.Review}}">{{.Review}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}

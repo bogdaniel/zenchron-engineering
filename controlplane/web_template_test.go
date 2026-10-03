@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"html/template"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +178,37 @@ func TestPagesDeclareLiveRegionsAndNeverRenderLive(t *testing.T) {
 		if !strings.Contains(out, `>snapshot</span>`) || strings.Contains(out, `>live</span>`) {
 			t.Errorf("%s: server render must claim a snapshot, not live", p.name)
 		}
+	}
+}
+
+// TestHeldMaterialIsNotColouredAsHealthy pins the two meanings of "held"
+// apart: the controller role "held" is healthy, held material is waiting on
+// an operator. Sharing one data-state token rendered the overview's
+// held-material count in the healthy colour.
+func TestHeldMaterialIsNotColouredAsHealthy(t *testing.T) {
+	data := overviewData{
+		Controller: Controller{LiveReachable: true, Role: rt.RoleHeld, GenerationMatch: "match"},
+		Fleet:      Fleet{Counts: FleetCounts{Held: 7}},
+	}
+	out := renderTemplate(t, overviewTemplate, data)
+	if !strings.Contains(out, `data-state="held_material">7<`) {
+		t.Fatalf("held material count must carry the held_material state: %s", out)
+	}
+	if !strings.Contains(out, `data-state="held">held<`) {
+		t.Fatalf("the controller role must keep its own healthy held state: %s", out)
+	}
+	css, err := webStaticFiles.Open("static/console.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer css.Close()
+	var b strings.Builder
+	if _, err := io.Copy(&b, css); err != nil {
+		t.Fatal(err)
+	}
+	warn := b.String()[strings.Index(b.String(), `[data-state="waiting"]`):]
+	warn = warn[:strings.Index(warn, "}")]
+	if !strings.Contains(warn, `[data-state="held_material"]`) {
+		t.Fatal("held_material must be in the warn colour rule")
 	}
 }

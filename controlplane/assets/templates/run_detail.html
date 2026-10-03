@@ -16,7 +16,7 @@
   <table class="kv">
     <tr><th>source</th><td>
       {{with $s.Source}}{{if .URL}}<a href="{{.URL}}">{{.Repository}}#{{.Issue}}</a>{{else}}<span class="muted">not an issue-sourced run</span>{{end}}
-      {{if .IntentChanged}}<span class="badge held" data-state="held">source moved since pinned</span>{{end}}
+      {{if .IntentChanged}}<span class="badge held">source moved since pinned</span>{{end}}
       {{else}}<span class="muted">not an issue-sourced run</span>{{end}}
     </td></tr>
     <tr><th>worker</th><td>
@@ -37,7 +37,7 @@
     <tr><th>controller</th><td>
       {{with $s.Controller}}
       <span class="mono">{{.BuildKind}} {{.BuildVersion}}</span>
-      {{if .Changed}}<span class="badge held" data-state="held">different controller than this one</span>{{end}}
+      {{if .Changed}}<span class="badge held">different controller than this one</span>{{end}}
       {{end}}
     </td></tr>
     <tr><th>pull request</th><td>
@@ -88,7 +88,7 @@
   <table class="kv">
     <tr><th>held material</th><td>
       {{with $s.HeldMaterial}}
-        <span class="badge held" data-state="held">{{.Kind}}</span>
+        <span class="badge held" data-state="held_material">{{.Kind}}</span>
         {{if .Revision}}<div class="mono muted">rev {{.Revision}}</div>{{end}}
         <div class="muted">blocked by {{.BlockedBy}}{{if .NextStep}}, next step {{.NextStep}}{{end}}</div>
         {{if .Successor}}<div class="muted">successor {{.Successor}}{{if .SuccessorUnavailable}}, unavailable: {{.SuccessorUnavailable}}{{end}}</div>{{end}}
