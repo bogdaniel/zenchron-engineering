@@ -185,6 +185,10 @@ type DoctorInput struct {
 	// is what a real shell would resolve, and answering it from anything else
 	// would not be answering that question.
 	EntrypointPathEnv string
+	// GoEnvFile is the operator's effective Go env file - what `go env GOENV`
+	// prints: $GOENV, else os.UserConfigDir()/go/env - read at the composition
+	// boundary like EntrypointPathEnv. "off" means none; empty means unknown.
+	GoEnvFile string
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -395,7 +399,53 @@ func doctorState(in DoctorInput) []DoctorCheck {
 		doctorStateSQLite(in),
 		doctorStateLock(in),
 		doctorStateLiveness(in),
+		doctorStateGoEnv(in),
 	}
+}
+
+// doctorStateGoEnv reports (#430) an operator Go env file whose build or module
+// locations point into runtime state: every later Go command on the host would
+// then write into a run directory that retention may delete. It only reads the
+// file; the remedy is the operator's own `go env -u`.
+func doctorStateGoEnv(in DoctorInput) DoctorCheck {
+	const id = "state.go_env"
+	file := strings.TrimSpace(in.GoEnvFile)
+	switch {
+	case file == "off":
+		return pass(doctorGroupState, id, "GOENV=off: no global Go env file is in effect")
+	case file == "":
+		return warn(doctorGroupState, id, "the operator's Go env file could not be located, so it was not checked for runtime state paths")
+	case strings.TrimSpace(in.StateDir) == "":
+		return warn(doctorGroupState, id, "no state directory is configured, so the Go env file "+file+" was not checked against it")
+	}
+	data, err := os.ReadFile(file)
+	if os.IsNotExist(err) {
+		return pass(doctorGroupState, id, "no Go env file exists at "+file)
+	}
+	if err != nil {
+		return warn(doctorGroupState, id, "the Go env file "+file+" could not be read: "+err.Error())
+	}
+	var polluted []string
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "GOCACHE", "GOTMPDIR", "GOMODCACHE", "GOPATH":
+			for _, path := range filepath.SplitList(value) {
+				if withinAny(filepath.Clean(path), []string{filepath.Clean(in.StateDir)}) {
+					polluted = append(polluted, key)
+					break
+				}
+			}
+		}
+	}
+	if len(polluted) > 0 {
+		return warn(doctorGroupState, id, fmt.Sprintf("the operator Go env file %s sets %s under the Zenchron state directory %s, so every Go command on this host writes into runtime state; run `go env -u %s` (not done automatically)",
+			file, strings.Join(polluted, ", "), in.StateDir, strings.Join(polluted, " ")))
+	}
+	return pass(doctorGroupState, id, "the Go env file "+file+" points no build or module location under the state directory")
 }
 
 // doctorStateDir deliberately does not create the directory. A preflight that

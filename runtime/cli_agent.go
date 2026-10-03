@@ -496,6 +496,14 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	env := []string{"PATH=" + p.gitGuard.SearchPath(searchPath)}
 	env = append(env, p.gitGuard.Env()...)
 	env = append(env, p.toolchainEnv()...)
+	// GOENV IS THE NULL DEVICE FOR EVERY WORKER, toolchain or not, scratch or
+	// not (#430). Unset, Go reads and `go env -w` WRITES the operator's own
+	// os.UserConfigDir()/go/env under the HOME below, so one worker command
+	// made a failed run's scratch the host-wide GOCACHE for every later build.
+	// GOENV=off is NOT a write barrier: go1.27.1 `go env -w` under it still
+	// writes that default file (observed on darwin, #430). The null device reads
+	// as empty and swallows every write, so nothing persists anywhere.
+	env = append(env, "GOENV="+os.DevNull)
 	if home == "" {
 		return env
 	}
@@ -1588,7 +1596,7 @@ func (p CLIAgentProvider) toolchainEnv() []string {
 	// alone do not make a directory writable. TMPDIR keeps test fixtures here
 	// too, including temporary repositories that must never become gitlinks.
 	if scratch := strings.TrimSpace(p.ExecScratchDir); scratch != "" {
-		env = append(env, "TMPDIR="+scratch, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"), "GOPATH="+filepath.Join(scratch, "gopath"), "GOENV=off")
+		env = append(env, "TMPDIR="+scratch, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"), "GOPATH="+filepath.Join(scratch, "gopath"))
 	}
 	return env
 }

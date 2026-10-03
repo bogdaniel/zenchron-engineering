@@ -321,6 +321,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// generation, and nothing else on PATH shadowing it.
 		ControllerRoot:    f.controllerRoot,
 		EntrypointPathEnv: f.entrypointBin,
+		GoEnvFile:         filepath.Join(root, "absent-go-env"),
 	}
 	return f
 }
@@ -461,7 +462,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 	// The list is asserted so a check cannot quietly disappear and leave the
 	// preflight passing on a question it stopped asking.
 	want := []string{
-		"state.dir", "state.schema", "state.sqlite", "state.lock", "state.liveness",
+		"state.dir", "state.schema", "state.sqlite", "state.lock", "state.liveness", "state.go_env",
 		"git.binary", "git.features", "git.remote", "git.credential", "git.isolation",
 		"provider.isolation", "provider.credential",
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
@@ -651,6 +652,34 @@ func TestDoctorFailsWhenStateDirIsMissing(t *testing.T) {
 	for _, id := range []string{"state.dir", "state.schema", "state.sqlite", "state.lock", "state.liveness"} {
 		requireCheck(t, report, id, DoctorFail)
 	}
+}
+
+// TestDoctorReportsAGoEnvPointingIntoState is #430: a worker's `go env -w`
+// left GOCACHE/GOTMPDIR naming a run's scratch. Doctor reports it, names the
+// remedy, and leaves the file exactly as it found it.
+func TestDoctorReportsAGoEnvPointingIntoState(t *testing.T) {
+	f := newDoctorFixture(t)
+	scratch := filepath.Join(f.stateDir, "runs", "run-x", "scratch", "attempt-1")
+	polluted := "GOCACHE=" + scratch + "/gocache\nGOFLAGS=-mod=readonly\nGOTMPDIR=" + scratch + "/tmp\nGOPATH=/elsewhere" + string(os.PathListSeparator) + scratch + "/gopath\n"
+	file := filepath.Join(f.root, "go-env")
+	if err := os.WriteFile(file, []byte(polluted), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.input.GoEnvFile = file
+	requireCheck(t, f.run(), "state.go_env", DoctorWarn, "GOCACHE, GOTMPDIR, GOPATH", "go env -u GOCACHE GOTMPDIR GOPATH")
+	if got, _ := os.ReadFile(file); string(got) != polluted {
+		t.Fatalf("doctor edited the operator Go env file: %q", got)
+	}
+
+	// Negative: locations outside state, including a sibling sharing its
+	// prefix, are the operator's own business.
+	clean := "GOCACHE=" + f.stateDir + "-sibling/cache\nGOMODCACHE=/opt/mod\n"
+	if err := os.WriteFile(file, []byte(clean), 0600); err != nil {
+		t.Fatal(err)
+	}
+	requireCheck(t, f.run(), "state.go_env", DoctorPass)
+	f.input.GoEnvFile = "off"
+	requireCheck(t, f.run(), "state.go_env", DoctorPass, "GOENV=off")
 }
 
 func TestDoctorProvesOwnerLivenessEvidence(t *testing.T) {

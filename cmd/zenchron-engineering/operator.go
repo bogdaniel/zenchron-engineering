@@ -1223,6 +1223,19 @@ func autonomyDoctor(args []string, overrides autonomyOverrides, stdout io.Writer
 	return runtime.ExitCompleted, nil
 }
 
+// operatorGoEnvFile resolves the file `go env GOENV` would name, without
+// running go: $GOENV, else os.UserConfigDir()/go/env.
+func operatorGoEnvFile() string {
+	if file := os.Getenv("GOENV"); file != "" {
+		return file
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "go", "env")
+}
+
 // doctorInput is the SAME wiring newComposition performs, assembled without
 // opening the durable store and without taking the state directory's ownership
 // lock: a diagnosis must not take the resource it is diagnosing, and it must
@@ -1240,6 +1253,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		// uses, and the SAME PATH a real shell would resolve.
 		ControllerRoot:    controllerRoot(),
 		EntrypointPathEnv: os.Getenv("PATH"),
+		GoEnvFile:         operatorGoEnvFile(),
 	}
 	// The running binary's own provenance. A resolution failure is carried
 	// through as itself rather than discarded: doctor must be able to say "I

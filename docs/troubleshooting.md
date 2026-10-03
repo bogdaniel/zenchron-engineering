@@ -196,6 +196,13 @@ automatically to make room: trading one active run's evidence for another's
 progress is not a decision a scheduler gets to make. `autonomy gc --dry-run`
 shows what is eligible under `gc.retention_hours`.
 
+**Doctor `state.go_env` WARN.** Your global Go env file (`go env GOENV`) sets
+`GOCACHE`, `GOTMPDIR`, `GOMODCACHE` or `GOPATH` under the state directory, so
+every Go command on the host writes into runtime state that retention may
+delete. Doctor never edits it; run the `go env -u ...` it names (and remove
+`GOFLAGS` if you did not set it). Workers now always run with `GOENV` at the
+null device, so a worker's `go env -w` persists nowhere (#430).
+
 ## Supervisor and submission
 
 **`starting several issues at once needs a supervisor to own them; run
