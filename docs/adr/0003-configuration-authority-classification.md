@@ -1,6 +1,7 @@
 # ADR-0003: Configuration Authority Classification and Freeze Points
 
-- Status: Proposed
+- Status: Accepted
+- Accepted: 2026-10-03
 - Date: 2026-09-28
 - Issue: #329 (Phase A). Inputs: #58, #131, #307, #89, #328, #83, #84, #327.
 
