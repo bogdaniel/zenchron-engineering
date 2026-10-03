@@ -20,18 +20,47 @@ import (
 )
 
 func TestConnectivityClassification(t *testing.T) {
-	// Timeout is transient through typed transport errors, not only DNS.
-	if timeout := net.Error(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}); !timeout.Timeout() {
+	// Timeout is transport loss through typed errors, not only DNS.
+	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}
+	if !net.Error(timeout).Timeout() {
 		t.Fatal("fixture is not a typed network timeout")
 	}
-	for _, err := range []error{&net.DNSError{IsTemporary: true}, &net.DNSError{IsTimeout: true}, syscall.ETIMEDOUT, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ETIMEDOUT}, fmt.Errorf("request: %w", syscall.ENETUNREACH), syscall.ECONNRESET} {
-		if !transientConnectivity(err) {
-			t.Fatalf("not transient: %v", err)
+	wrap := func(err error) error { return &url.Error{Op: "Get", URL: "https://api.github.com", Err: err} }
+	for _, tc := range []struct {
+		err  error
+		want TransportCause
+	}{
+		{&net.DNSError{IsTemporary: true}, TransportDNSTemporary},
+		{&net.DNSError{IsTimeout: true}, TransportDNSTemporary},
+		{syscall.ETIMEDOUT, TransportTimeout},
+		{wrap(timeout), TransportTimeout},
+		{fmt.Errorf("request: %w", syscall.ENETUNREACH), TransportUnreachable},
+		{wrap(&net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}), TransportUnreachable},
+		{syscall.ECONNRESET, TransportReset},
+		{wrap(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), TransportRefused},
+		// Fail closed.
+		{wrap(&net.DNSError{IsNotFound: true}), TransportDNSNotFound},
+		{&net.DNSError{IsNotFound: true, IsTemporary: true}, TransportDNSNotFound},
+		{wrap(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), TransportTLS},
+		{x509.HostnameError{Certificate: &x509.Certificate{}, Host: "h"}, TransportTLS},
+		{wrap(&net.OpError{Op: "proxyconnect", Net: "tcp", Err: syscall.ECONNREFUSED}), TransportProxy},
+		{wrap(context.Canceled), TransportCallerCancelled},
+		{wrap(context.DeadlineExceeded), TransportCallerCancelled},
+		{errors.New("proxy: invalid configuration"), TransportUnrecognized},
+		{errors.New("ENOTFOUND in test output"), TransportUnrecognized},
+		{syscall.EACCES, TransportUnrecognized},
+		// A wrapper type decides nothing: a 503 is capacity, not transport.
+		{&GitHubTransientError{Status: 503}, TransportUnrecognized},
+	} {
+		if got := transportCause(tc.err); got != tc.want {
+			t.Fatalf("%v: cause %q, want %q", tc.err, got, tc.want)
 		}
-	}
-	for _, err := range []error{&net.DNSError{IsNotFound: true}, &net.DNSError{IsNotFound: true, IsTemporary: true}, x509.UnknownAuthorityError{}, errors.New("proxy: invalid configuration"), errors.New("unknown"), errors.New("ENOTFOUND in test output"), syscall.EACCES, context.DeadlineExceeded, context.Canceled} {
-		if transientConnectivity(err) {
-			t.Fatalf("guessed transient: %v", err)
+		if got := transportCause(transportFailure(tc.err)); got != tc.want {
+			t.Fatalf("%v: TransportError lost the cause: %q", tc.err, got)
+		}
+		lost := tc.want.Lost()
+		if class := failureClassOf(mustMarshal(t, failed(tc.err).result)); (class == FailureConnectivity) != lost {
+			t.Fatalf("%v: failed() class %q, lost=%v", tc.err, class, lost)
 		}
 	}
 	if got := classifyAgentFailure(claudeSpec, "api error: can't reach the api server — check your internet or dns (enotfound)"); got != FailureConnectivity {
@@ -39,12 +68,21 @@ func TestConnectivityClassification(t *testing.T) {
 	}
 }
 
+func mustMarshal(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func TestConnectivityBackoffSurvivesSerialization(t *testing.T) {
 	s, clock := deadlineScheduler(t)
 	op := plannedExecution(t, s, time.Hour)
 	clock.at = clock.at.Add(time.Second)
 	deadline := clock.at.Add(connectivityBackoff(op.Attempt))
-	finished, err := s.finishAt(op.ID, OperationFailed, deadline)
+	finished, err := s.finishAt(op.ID, OperationFailed, deadline, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +131,7 @@ func TestConnectivityDeadlinePersistsAcrossSQLiteRestart(t *testing.T) {
 	s.Store = store
 	op := plannedExecution(t, s, time.Hour)
 	deadline := clock.at.Add(time.Minute)
-	if _, err := s.finishAt(op.ID, OperationFailed, deadline); err != nil {
+	if _, err := s.finishAt(op.ID, OperationFailed, deadline, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -200,7 +238,7 @@ func TestConnectivityJournalStoreGapIsExternalWait(t *testing.T) {
 	observed := clock.at
 	retryAt := observed.Add(connectivityBackoff(op.Attempt))
 	after := op
-	after.State, after.RetryNotBefore, after.Result = OperationFailed, retryAt, json.RawMessage(`{"failure_class":"connectivity_unavailable"}`)
+	after.State, after.RetryNotBefore, after.RetryDisposition = OperationFailed, retryAt, DispositionTransportBackoff
 	raw, err := json.Marshal(after)
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +248,7 @@ func TestConnectivityJournalStoreGapIsExternalWait(t *testing.T) {
 		t.Fatalf("journal lost external wait: %s %s", openSince, work)
 	}
 	clock.at = clock.at.Add(time.Hour)
-	settled, err := s.finishAt(op.ID, OperationFailed, retryAt)
+	settled, err := s.finishAt(op.ID, OperationFailed, retryAt, observed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,14 +428,14 @@ func (f doerFunc) Do(r *http.Request) (*http.Response, error) { return f(r) }
 func TestConnectivityGitHubAppTransportFailsClosed(t *testing.T) {
 	path, _ := appKeyFile(t, 0o600)
 	for name, tc := range map[string]struct {
-		err       error
-		cancel    bool
-		transient bool
+		err    error
+		cancel bool
+		want   TransportCause
 	}{
-		"refused": {err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, transient: true},
-		"tls":     {err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}},
-		"proxy":   {err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("invalid proxy configuration")}},
-		"cancel":  {err: context.Canceled, cancel: true},
+		"refused": {err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, want: TransportRefused},
+		"tls":     {err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, want: TransportTLS},
+		"proxy":   {err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("invalid proxy configuration")}, want: TransportProxy},
+		"cancel":  {err: context.Canceled, cancel: true, want: TransportCallerCancelled},
 	} {
 		t.Run(name, func(t *testing.T) {
 			credential := &GitHubAppCredential{AppID: 11, InstallationID: 22, PrivateKeyPath: path,
@@ -410,9 +448,23 @@ func TestConnectivityGitHubAppTransportFailsClosed(t *testing.T) {
 			}
 			defer cancel()
 			_, err := credential.AppIdentity(ctx)
+			var transport *TransportError
 			var forge *GitHubTransientError
-			if err == nil || errors.As(err, &forge) != tc.transient || transientConnectivity(err) != tc.transient {
-				t.Fatalf("App transport %s: transient=%v err=%v", name, transientConnectivity(err), err)
+			if !errors.As(err, &transport) || transport.Cause != tc.want || errors.As(err, &forge) {
+				t.Fatalf("App transport %s: %v", name, err)
+			}
+			// The REST adapter resolving the App credential keeps the cause too.
+			_, err = GitHubRESTAdapter{Credentials: credential}.token(GitHubRepo{Owner: "o", Name: "r"})
+			if transportCause(err) != tc.want && !tc.cancel {
+				t.Fatalf("token path erased %s: %v", name, err)
+			}
+			// And the REST adapter's own HTTP.Do goes through the same function.
+			rest := GitHubRESTAdapter{HTTP: credential.HTTP, Credentials: staticCredential{secret: testToken}}
+			if _, _, restErr := rest.do(ctx, GitHubRepo{Owner: "o", Name: "r"}, http.MethodGet, "/repos/o/r", nil, nil); !errors.As(restErr, &transport) || transport.Cause != tc.want {
+				t.Fatalf("REST transport %s: %v", name, restErr)
+			}
+			if (failureClassOf(mustMarshal(t, failed(err).result)) == FailureConnectivity) != tc.want.Lost() {
+				t.Fatalf("%s: backoff class disagrees with cause", name)
 			}
 		})
 	}
@@ -458,8 +510,8 @@ func TestConnectivityClaudeIncidentResultEnvelope(t *testing.T) {
 	}
 }
 
-// RetryNotBefore is not the connectivity flag (#87): a wait of another class
-// that carries one keeps its own reason and its refund.
+// RetryNotBefore is purely temporal (#87): reason, refund, external wait and
+// observation binding come from the recorded disposition, never the timestamp.
 func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
@@ -493,14 +545,35 @@ func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 	if after.Attempt != stored.Attempt {
 		t.Fatalf("refund lost: %d -> %d", stored.Attempt, after.Attempt)
 	}
-	journalled := f.state(runID).snapshot.Operations[quota.ID]
-	journalled.RetryNotBefore = stored.RetryNotBefore
-	raw, err := json.Marshal(journalled)
-	if err != nil {
-		t.Fatal(err)
+
+	// The same derivations, read directly. A future (#87) disposition carries
+	// its own reason; a bare timestamp carries none.
+	at := f.clock.Now()
+	op := RunOperation{ID: "op", Kind: OpSourceObserve, State: OperationFailed, Attempt: 1, MaxAttempts: 3, RetryNotBefore: at.Add(time.Hour)}
+	fold := func(op RunOperation) bool {
+		_, open, _ := foldExternalWait([]EngineeringEvent{{Type: EventOperationAfter, OperationID: op.ID, OccurredAt: at, Payload: mustMarshal(t, op)}})
+		return !open.IsZero()
 	}
-	if _, open, _ := foldExternalWait([]EngineeringEvent{{Type: EventOperationAfter, OperationID: quota.ID, OccurredAt: f.clock.Now(), Payload: raw}}); !open.IsZero() {
-		t.Fatal("a quota RetryNotBefore opened a connectivity wait")
+	binding := func(op RunOperation) string {
+		return observationBinding(&runState{snapshot: RunSnapshot{Operations: map[string]RunOperation{op.ID: op}}}, OpSourceObserve)
+	}
+	op.IdempotencyKey = "kept"
+	if waitReasonOf(op) == ReasonConnectivityBackoff || fold(op) || binding(op) == "kept" {
+		t.Fatal("a bare RetryNotBefore was read as a connectivity wait")
+	}
+	op.RetryDisposition = DispositionAccountWait
+	if waitReasonOf(op) != "execution_provider_account_unavailable" || !fold(op) || binding(op) == "kept" {
+		t.Fatal("a reserved disposition lost its own reason or wait")
+	}
+	op.RetryDisposition, op.RetryNotBefore = DispositionTransportBackoff, time.Time{}
+	op.Attempt = op.MaxAttempts
+	if binding(op) != "kept" || fold(op) {
+		t.Fatal("the last transport attempt minted a binding or opened a wait")
+	}
+	for d, s := range retryDispositions {
+		if s.Reason == "" || s.ResumeCondition == "" || externalWaitReasons[s.Reason] == s.SpendsActiveWork {
+			t.Fatalf("%s: incomplete accounting row %+v", d, s)
+		}
 	}
 }
 
@@ -514,5 +587,31 @@ func TestConnectivityRetryNotBeforeOmittedWhenZero(t *testing.T) {
 	var legacy RunOperation
 	if err := json.Unmarshal([]byte(`{"id":"op","retry_not_before":"0001-01-01T00:00:00Z"}`), &legacy); err != nil || !legacy.RetryNotBefore.IsZero() {
 		t.Fatalf("legacy replay: %+v %v", legacy, err)
+	}
+}
+
+// Endpoint capacity has one owner and one rule: provider_unavailable routes to
+// the refunded wait and carries no retry disposition.
+func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderUnavailable}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_unavailable" {
+		t.Fatalf("capacity: %+v", out)
+	}
+	for _, op := range f.state(runID).snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != "" || !op.RetryNotBefore.IsZero()) {
+			t.Fatalf("capacity acquired a disposition: %+v", op)
+		}
+	}
+	ops, err := f.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Kind == OpExecutionInvoke && op.Attempt != 0 {
+			t.Fatalf("capacity attempt not refunded: %+v", op)
+		}
 	}
 }

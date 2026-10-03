@@ -659,10 +659,12 @@ func (s Scheduler) RecordProviderProgress(id string, attempt int, progress Provi
 }
 
 func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error) {
-	return s.finishAt(id, state, time.Time{})
+	return s.finishAt(id, state, time.Time{}, time.Time{})
 }
 
-func (s Scheduler) finishAt(id string, state OperationState, retryAt time.Time) (RunOperation, error) {
+// finishAt also records retryAt (purely "not eligible before") and, for
+// store-lag recovery, when the attempt actually ended; zero means now.
+func (s Scheduler) finishAt(id string, state OperationState, retryAt, endedAt time.Time) (RunOperation, error) {
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")
 	}
@@ -679,12 +681,8 @@ func (s Scheduler) finishAt(id string, state OperationState, retryAt time.Time) 
 		// human review - costs nothing, because nothing is executing.
 		if op.ActiveSince != nil {
 			ended := now
-			// A journalled connectivity failure already ended this attempt.
-			// Store-lag recovery must not charge the controller's downtime.
-			if !retryAt.IsZero() {
-				if observed := retryAt.Add(-connectivityBackoff(op.Attempt)); observed.Before(ended) {
-					ended = observed
-				}
+			if !endedAt.IsZero() && endedAt.Before(ended) {
+				ended = endedAt
 			}
 			spent := ended.Sub(*op.ActiveSince)
 			if spent < 0 {

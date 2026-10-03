@@ -280,7 +280,7 @@ func (o GitHubGovernanceObserver) get(ctx context.Context, repo GitHubRepo, path
 	request.Header.Set("Authorization", "Bearer "+secret)
 	response, err := o.HTTP.Do(request)
 	if err != nil {
-		return fmt.Errorf("github governance request failed")
+		return transportFailure(err)
 	}
 	defer response.Body.Close()
 	raw, err := readBoundedBody(response)

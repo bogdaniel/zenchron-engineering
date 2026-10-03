@@ -267,14 +267,14 @@ what keep repeated restarts finite. See
 
 An explicit diagnostic is classified instead, but only when the CLI itself said
 so. Endpoint capacity (overloaded, 502/503/504) is `provider_unavailable`: a
-wait that gives the attempt back. Transport loss (DNS, refused, reset,
+wait that gives the attempt back. Transport loss (temporary DNS, timeout, refused, reset,
 unreachable) is `connectivity_unavailable` (#380): it spends an attempt, but the
 retry runs only after a durable, restart-safe backoff (`retry_not_before`, 30 s
 doubling to a 5 min cap), and the run waits as `connectivity_backoff`, which is
 external wait and not active work. The last attempt does not back off; it
 stops as `<operation>_attempts_exhausted`. With the defaults that is one 30 s
 wait for an execution (`max_execution_attempts` 2) and 30 s + 60 s for an
-observation (3 attempts); the 5 min cap needs five or more attempts.
+observation (3 attempts); the 5 min cap needs six or more attempts. The accounting is frozen in [the runtime spec](spec/runtime-v0.1.md#retry-dispositions).
 A typed provider condition is read from the **terminal diagnostic surface**: the
 bounded tail of the CLI's own diagnostic stream. The session rendering, where
 model text and tool output go, is never consulted. A worker quoting an error, a

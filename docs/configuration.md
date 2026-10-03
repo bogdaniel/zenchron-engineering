@@ -276,12 +276,12 @@ rather than an immediate failure, and why reaching it is a bounded retry rather
 than a terminal failure. An invocation the policy terminates is recorded as
 `provider_no_progress`. A provider that names endpoint capacity (overloaded,
 502/503/504) is `provider_unavailable` and waits without spending the attempt or
-the active-work budget. One that names transport loss (DNS, refused, reset,
+the active-work budget. One that names transport loss (temporary DNS, refused, reset,
 unreachable) is `connectivity_unavailable`: the attempt is spent and the retry
 waits out a durable bounded backoff (`connectivity_backoff`, external wait; 30 s
 doubling to 5 min; none after the last attempt). With the default
 `max_execution_attempts` of 2 an execution waits once for 30 s before stopping;
-an observation (3 attempts) waits 30 s and then 60 s. Silence is never classified as offline, and neither is
+an observation (3 attempts) waits 30 s and then 60 s (see [Retry dispositions](spec/runtime-v0.1.md#retry-dispositions)). Silence is never classified as offline, and neither is
 anything a worker merely wrote: a typed provider condition is read only from the
 bounded tail of the CLI's own diagnostic stream, or - for Claude Code - from the
 typed fields of its stream-json events (`api_retry.error`, `error_status`,

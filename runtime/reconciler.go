@@ -455,7 +455,6 @@ const ReasonGoalStateReached = "goal_state_reached"
 const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
 
 var externalWaitReasons = map[string]bool{
-	ReasonConnectivityBackoff: true,
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
@@ -590,8 +589,10 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 			// gap must preserve external-wait accounting as well as the deadline.
 			if waitingSince.IsZero() {
 				var op RunOperation
-				if decodeJSON(event.Payload, &op) == nil && connectivityWait(op) && !op.RetryNotBefore.IsZero() {
-					waitingSince = event.OccurredAt
+				if decodeJSON(event.Payload, &op) == nil {
+					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
+						waitingSince = event.OccurredAt
+					}
 				}
 			}
 			if waitingSince.IsZero() || event.OperationID == "" {
@@ -1066,8 +1067,9 @@ func (s *runState) attemptsFor(kind string) int {
 	}
 }
 
-// A connectivity wait changes status, not the observation being retried.
-// Keep its original binding so status events cannot mint a fresh attempt budget.
+// A retry disposition with finite attempt authority changes status, not the
+// observation being retried. Keep its binding so status events cannot mint a
+// fresh attempt budget, through to the last attempt.
 func observationBinding(s *runState, kind string) string {
 	var latest *RunOperation
 	for _, op := range s.snapshot.Operations {
@@ -1076,7 +1078,7 @@ func observationBinding(s *runState, kind string) string {
 			latest = &copy
 		}
 	}
-	if latest != nil && connectivityWait(*latest) {
+	if latest != nil && latest.State == OperationFailed && retryDispositions[latest.RetryDisposition].FiniteAttemptAuthority {
 		return bindingOf(*latest)
 	}
 	return s.epochKey()
@@ -1712,7 +1714,15 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 		if !ok || (journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled) {
 			continue
 		}
-		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore); err != nil {
+		// The attempt ended when its after record was journalled; the
+		// controller's downtime since then is not execution.
+		var ended time.Time
+		for _, event := range state.events {
+			if event.Type == EventOperationAfter && event.OperationID == stored.ID {
+				ended = event.OccurredAt
+			}
+		}
+		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore, ended); err != nil {
 			return err
 		}
 	}
@@ -1756,11 +1766,8 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	if r.deps.Clock.Now().Before(planned.RetryNotBefore) {
-		reason := ReasonConnectivityBackoff
-		if last := state.snapshot.Operations[planned.ID]; !connectivityWait(last) {
-			reason = waitReason(failureClassOf(last.Result))
-		}
-		outcome, err := r.settle(state, Waiting, reason)
+		// The timestamp only says "not yet"; the journalled record says why.
+		outcome, err := r.settle(state, Waiting, waitReasonOf(state.snapshot.Operations[planned.ID]))
 		return false, outcome, err
 	}
 	leased, err := r.scheduler.Next(state.run.ID)
@@ -1862,7 +1869,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// itself writes to the scheduler row - so journal and store agree, and the
 	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
-	finished.RetryNotBefore = time.Time{}
+	finished.RetryNotBefore, finished.RetryDisposition = time.Time{}, ""
 	finished.State = produced.state
 	if interrupted {
 		finished.State = OperationCancelled
@@ -1875,16 +1882,20 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
-	// No backoff once no attempt remains: the next pass stops truthfully.
-	backoff := connectivityWait(finished) && started.Attempt < started.MaxAttempts
-	if backoff {
-		finished.RetryNotBefore = r.deps.Clock.Now().Add(connectivityBackoff(started.Attempt))
+	// The disposition is recorded from the class; the wait and its timing only
+	// while a successor attempt exists, so the last attempt stops truthfully.
+	if finished.State == OperationFailed {
+		finished.RetryDisposition = retryDispositionFor(failureClassOf(finished.Result))
+	}
+	disposition, awaiting := awaitsRetry(finished)
+	if awaiting && disposition.Delay != nil {
+		finished.RetryNotBefore = r.deps.Clock.Now().Add(disposition.Delay(started.Attempt))
 	}
 	// The journal is written first and is the authority for reconciliation.
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore); err != nil {
+	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore, time.Time{}); err != nil {
 		// The stop may already have finished the row. That is accepted only for
 		// an interrupted execution and only when the row durably reads
 		// OperationCancelled - the one state CancelRun writes. Every other
@@ -1938,8 +1949,13 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
 		return false, outcome, err
 	}
-	if backoff {
-		outcome, err := r.settle(state, Waiting, ReasonConnectivityBackoff)
+	if awaiting {
+		if !disposition.SpendsAttempt {
+			if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
+				return false, Outcome{}, err
+			}
+		}
+		outcome, err := r.settle(state, Waiting, disposition.Reason)
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {

@@ -314,6 +314,50 @@ stop diagnostically. Every mutation, including `gofmt`, is committed by the
 runtime and flows through normalized observation, #8 reassessment, a current
 contract, and fresh exact-tree assurance.
 
+### Retry dispositions
+
+`RouteFailure` is the only routing table: every failure class has exactly one
+route. Some classes also carry a typed **retry disposition**, persisted on the
+operation as `retry_disposition`, which owns how a retry is accounted. The
+operation's `retry_not_before` is purely temporal ("not eligible before T"). It
+carries no meaning of its own: the waiting reason, any attempt refund, whether
+the wait counts as external, and whether an observation keeps its binding are
+all read from the disposition, and never from whether a timestamp is set.
+
+| Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
+|---|---|---|---|---|---|---|
+| `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
+| `provider_prerequisite_wait` | reserved (#87) | no | no | no | an operator restores the provider prerequisite | `execution_provider_prerequisite_unavailable` |
+| `rate_limit_wait` | reserved (#87) | no | no | no | the provider's stated retry time has passed | `execution_provider_rate_limited` |
+| `account_wait` | reserved (#87) | no | no | no | an operator restores the provider account | `execution_provider_account_unavailable` |
+
+Further rules:
+
+- **Finite attempt authority.** A `transport_backoff` retry draws on the
+  operation's existing `max_attempts`. The final attempt gets no backoff and no
+  `connectivity_backoff` wait. It stops as `<operation>_attempts_exhausted`.
+- **Transport cause.** The cause is classified once, from typed errors only.
+  Every forge adapter (REST, GitHub App token exchange, governance) routes its
+  failed exchange through that one classification and keeps the cause on a
+  typed transport error.
+  - Only transport loss is `connectivity_unavailable`: a temporary DNS failure,
+    a timeout, an unreachable host or network, a reset, or a refused
+    connection.
+  - These fail closed rather than backing off: DNS not-found, TLS or
+    certificate failures, proxy configuration, and the caller's own
+    cancellation or deadline.
+  - A provider CLI reaches the same class only by naming transport loss in its
+    terminal diagnostic. For Claude Code, that includes an `is_error` result
+    whose whole text is the CLI's own "Can't reach the API server" envelope.
+- **Endpoint capacity.** An overloaded endpoint or a 502, 503 or 504 is
+  `provider_unavailable`, routed `wait` with no disposition. That is the
+  existing refunded wait, unchanged until #87 assigns it a disposition.
+
+Effective patience with the defaults: an execution (`max_execution_attempts`
+2) waits once, for 30 s, before stopping. An observation (3 attempts) waits
+30 s and then 60 s. The 5 min cap is reached only by the fifth backoff, so an
+operation needs at least six attempts to wait that long.
+
 The first failing assurance result gets exactly one identical rerun before any
 mutation. A differing result is `flaky_verification`, not pristine passing
 evidence. No-progress uses a deterministic fingerprint over candidate tree,
