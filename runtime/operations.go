@@ -2277,6 +2277,12 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}
+	// An unpassed result that names no class is a verification failure, as
+	// currentHeadFailure reads it, so the stop-route guard below cannot turn it
+	// into a non-retryable stop.
+	if !result.Passed && class == "" {
+		class = FailureVerification
+	}
 	payload := AssuranceObservedPayload{
 		ProviderID:         firstNonEmpty(result.ProviderID, "assurance-provider"),
 		VerifierDefinition: firstNonEmpty(result.VerifierDefinition, "unknown-verifier"),

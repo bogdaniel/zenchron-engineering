@@ -324,6 +324,37 @@ func TestAnErroringConfirmationPassKeepsTheVerifiersClass(t *testing.T) {
 	}
 }
 
+// An unpassed result that names no class is a verification failure, as
+// currentHeadFailure reads it: it remediates exactly as verification_failure
+// does and is never reinterpreted as a non-retryable stop.
+func TestAnUnclassifiedFailedAssuranceRemediatesLikeVerification(t *testing.T) {
+	remediate := func(class FailureClass) (executions int, reasons []string) {
+		f := newPhase8Fixture(t)
+		f.distinctMutations()
+		results := []AssuranceResult{
+			{ProviderID: "test-verifier", VerifierDefinition: "verifier-v1", FailureClass: class},
+			{ProviderID: "test-verifier", VerifierDefinition: "verifier-v1", FailureClass: class},
+		}
+		results = append(results, passingAssurance().Results...)
+		f.useAssurance(&FakeAssuranceProvider{Results: results})
+		runID := f.start()
+		for pass := 0; pass < 30; pass++ {
+			reasons = append(reasons, f.reconcile(runID).Reason)
+		}
+		return len(f.provider.requests), reasons
+	}
+	want, wantReasons := remediate(FailureVerification)
+	got, reasons := remediate("")
+	if want < 2 || got != want {
+		t.Fatalf("an unclassified failure ran %d executions, verification_failure ran %d (want remediation, and the same)", got, want)
+	}
+	for _, reason := range append(reasons, wantReasons...) {
+		if strings.Contains(reason, "not_retryable") {
+			t.Fatalf("a failed assurance was settled as a non-retryable stop: %v", reasons)
+		}
+	}
+}
+
 // A stop-routed class with no verdict and no journalled stop must not satisfy
 // assurance: nothing would ever plan it again, and the run would strand at
 // goal_state_reached.
