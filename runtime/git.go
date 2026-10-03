@@ -441,7 +441,7 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return CommitResult{}, err
 	}
 	if len(staged) == 0 {
-		return CommitResult{}, fmt.Errorf("candidate has no changes")
+		return CommitResult{}, fmt.Errorf("candidate changes stage nothing a runtime commit can carry")
 	}
 	if err := guardStagedContent(w.Dir, staged, blobs, maxBytes); err != nil {
 		return CommitResult{}, err
@@ -468,13 +468,15 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// HEAD moves only from the parent the gates were run against. A HEAD moved
 	// concurrently is refused as the integrity violation a moved HEAD is
 	// everywhere else, and no commit is reported: HEAD never named this one.
-	if _, err := runGit(w.Dir, "update-ref", "HEAD", commit, parent); err != nil {
+	if _, err := runGit(w.Dir, "update-ref", "--no-deref", "HEAD", commit, parent); err != nil {
 		return CommitResult{}, &WorkspaceIntegrityError{Detail: "HEAD moved during the runtime commit"}
 	}
 	// FROM HERE THE COMMIT EXISTS AND HEAD HAS MOVED (#402). Every return
 	// below carries the identity already known, so a failure after this point
 	// can never make the caller report the work as uncommitted.
-	result := CommitResult{Commit: commit, Tree: tree, Paths: eligible, Excluded: debris.Excluded}
+	// Paths is the committed tree diff (--no-renames), the same set #431
+	// recovery recomputes, not the status list.
+	result := CommitResult{Commit: commit, Tree: tree, Paths: staged, Excluded: debris.Excluded}
 	// The baseline is the runtime's own commit, taken before the probe below
 	// so a refused probe still leaves the caller the digest to record.
 	metadata, err := gitMetadataDigest(w.Dir)
