@@ -891,10 +891,15 @@ const (
 	// executable would destroy work over a condition that is entirely local
 	// and entirely fixable.
 	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
-	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
-	FailureFlaky                     FailureClass = "flaky_verification"
+	// FailureCandidateWriterAlive is a candidate whose writer lock is still
+	// held by a process from an earlier invocation - one that outlived its
+	// supervisor (#168). Refused before dispatch, it waits: an operator stops
+	// the stale writer and the same run continues.
+	FailureCandidateWriterAlive    FailureClass = "candidate_writer_alive"
+	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
+	FailureFlaky                   FailureClass = "flaky_verification"
 	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
 	// that returned without discharging it: the workspace it left behind is
 	// unchanged, and it did not state (or failed to bind) an explicit
@@ -1017,7 +1022,7 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureCandidateWriterAlive:
 		return RouteWait
 	default:
 		return RouteStop

@@ -499,6 +499,16 @@ about the worker, the work, the account or the network is wrong. A deliberately
 unguarded composition — a unit test, a probe, an embedder driving one
 invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
 
+A provider is dispatched holding the candidate's writer lock
+(`<candidate>.writer.lock`), and it inherits that lock's descriptor, so every
+descendant that keeps it keeps the candidate locked — including a tool command
+that left the provider's process group and survived a supervisor killed with
+SIGKILL, which the owner-death guard cannot reach (#168). A later attempt that
+finds the lock still held, or cannot check it, is refused before dispatch as
+`candidate_writer_alive`: a typed wait an operator clears by stopping the stale
+writer (`lsof <candidate>.writer.lock` names it), never a provider fault. A
+descendant that closes every inherited descriptor escapes this check.
+
 The boundary grants the worker no new command surface. It adds no tool to any
 provider's allowlist, so a stage that was obliged nothing is still obliged
 nothing.

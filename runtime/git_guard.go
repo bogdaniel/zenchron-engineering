@@ -347,5 +347,9 @@ func candidateGuardFailureClass(err error) (FailureClass, bool) {
 	if errors.As(err, &guard) {
 		return FailureCandidateGuardUnavailable, true
 	}
+	var writer *CandidateWriterAliveError
+	if errors.As(err, &writer) {
+		return FailureCandidateWriterAlive, true
+	}
 	return "", false
 }

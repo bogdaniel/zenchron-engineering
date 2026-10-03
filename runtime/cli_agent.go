@@ -1151,6 +1151,12 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		stream = newClaudeStream(request.Attempt)
 		ctx = withClaudeStream(ctx, stream)
 	}
+	writer, err := claimCandidateWriter(request.CandidateDir)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	defer writer.Close()
+	ctx = withCandidateWriter(ctx, writer)
 	startedAt := time.Now()
 	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()

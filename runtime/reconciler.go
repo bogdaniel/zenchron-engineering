@@ -483,6 +483,9 @@ var externalWaitReasons = map[string]bool{
 	// it performed no execution at all. Nothing is running and an operator has
 	// to repair the installation.
 	"candidate_guard_unavailable": true,
+	// A dead owner's process still holds the candidate (#168); nothing was
+	// dispatched and an operator has to stop it.
+	"candidate_writer_alive": true,
 	// The controller stopped. The run is not working, and it is waiting for a
 	// supervisor to exist again rather than for anything it can do itself.
 	"controller_shutdown":  true,
@@ -1991,6 +1994,7 @@ var waitReasons = map[FailureClass]string{
 	// The controller cannot install its own candidate-Git boundary. An
 	// operator repairs the installation; nothing about the work is wrong.
 	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
+	FailureCandidateWriterAlive:      "candidate_writer_alive",
 	FailureControllerShutdown:        "controller_shutdown",
 }
 
