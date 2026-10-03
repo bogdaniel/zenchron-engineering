@@ -454,3 +454,33 @@ func TestAnUnrelatedQuarantineIsNotAdopted(t *testing.T) {
 		t.Fatalf("%d unrelated quarantine(s) were adopted by a dispatch they do not belong to", n)
 	}
 }
+
+// Restore the live #389/#415 sequence through the real Claude classifier and
+// feed its result into the runtime admission boundary, retaining the mutation.
+func TestClaudeAutomaticDetachmentQuarantinesBeforeAdmission(t *testing.T) {
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.outputs = []CommandOutput{{Stdout: []byte(
+		claudeAssistant("M1", "", claudeToolUse("X")) + "\n" +
+			claudeAutomaticResult("X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000,"interrupted":false}`) + "\n" +
+			claudeResultWithAnswer(false, "go test ./... is still running in the background and I'll confirm once it completes.") + "\n")}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := refusedWrite()
+	answer.result = result
+	fixture, _ := newRoutingFixture(t, 1, answer)
+	runID := fixture.start()
+	fixture.reconcile(runID)
+	op, _ := durableInvoke(t, fixture, runID)
+	if op.State != OperationFailed || durableFailureClass(t, op) != FailureProviderBackgroundWorkUnresolved {
+		t.Fatalf("automatic detachment admitted: %+v", op)
+	}
+	assertQuarantinedA(t, fixture, runID)
+	state := fixture.state(runID)
+	for _, kind := range []string{EventCandidateCommitted, EventCandidateCheckpointed, EventAssuranceObserved, EventGitHubPRObserved} {
+		if countType(state.events, kind) != 0 {
+			t.Fatalf("refused mutation reached %s", kind)
+		}
+	}
+}

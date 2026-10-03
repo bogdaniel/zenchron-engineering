@@ -1,0 +1,12 @@
+{{define "title"}}sign in{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>sign in</h1>
+  <p>paste the bearer token from <span class="mono">&lt;state-dir&gt;/control-plane.token</span>. it is stored only in this browser, as a cookie, and is never sent anywhere but this console.</p>
+  <form id="login-form" class="source-filter">
+    <input id="token" name="token" type="password" placeholder="control plane token" autocomplete="off" autofocus>
+    <button type="submit">connect</button>
+  </form>
+  <p id="login-error" class="banner error" hidden>that token was not accepted.</p>
+</section>
+{{end}}

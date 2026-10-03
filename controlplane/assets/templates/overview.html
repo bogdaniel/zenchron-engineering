@@ -1,0 +1,87 @@
+{{define "title"}}overview{{end}}
+{{define "content"}}
+<div id="overview-live" data-live>
+<section class="panel">
+  <h1>overview</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}}</p>
+
+  {{if .ControllerErr}}
+  <p class="banner error">controller status unavailable</p>
+  {{else}}
+  {{with .Controller}}
+  <div class="grid stats">
+    <div class="stat"><span class="label">durable consistency</span><span class="value" data-state="{{.DurableConsistency}}">{{.DurableConsistency}}</span></div>
+    <div class="stat"><span class="label">serving</span><span class="value" data-state="{{.Serving}}">{{.Serving}}</span></div>
+    <div class="stat"><span class="label">projection</span><span class="value" data-state="{{.Projection}}">{{.Projection}}</span></div>
+  </div>
+
+  <table class="kv">
+    <tr>
+      <th>durable generation</th>
+      <td>
+        {{with .DurableGeneration}}{{.Kind}} {{.Version}} <span class="muted">({{.SourceRevision}})</span>{{else}}<span class="muted">unknown</span>{{end}}
+      </td>
+    </tr>
+    <tr>
+      <th>live endpoint</th>
+      <td>
+        {{if .LiveReachable}}
+          <span data-state="reachable">reachable</span>
+          {{with .LiveBuild}}
+            · identity {{.Kind}} {{.Version}} <span class="muted">({{.SourceRevision}})</span>
+          {{end}}
+          · role <span data-state="{{.Role}}">{{if .Role}}{{.Role}}{{else}}unknown{{end}}</span>
+          · admission <span data-state="{{.WorkAdmission}}">{{if .WorkAdmission}}{{.WorkAdmission}}{{else}}unknown{{end}}</span>
+        {{else}}
+          <span data-state="not_reachable">not reachable</span>
+        {{end}}
+      </td>
+    </tr>
+  </table>
+
+  {{if .Findings}}
+  <ul class="findings">
+    {{range .Findings}}<li>{{.}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{end}}
+  {{end}}
+</section>
+
+<section class="panel">
+  <h2>fleet</h2>
+  <div class="grid stats counts">
+    <a class="stat" href="{{runsLink "active" ""}}"><span class="label">active</span><span class="value" data-state="active">{{.Fleet.Counts.Active}}</span></a>
+    <a class="stat" href="{{runsLink "waiting" ""}}"><span class="label">waiting</span><span class="value" data-state="waiting">{{.Fleet.Counts.Waiting}}</span></a>
+    <a class="stat" href="{{runsLink "failed" ""}}"><span class="label">failed</span><span class="value" data-state="failed">{{.Fleet.Counts.Failed}}</span></a>
+    <a class="stat" href="{{runsLink "completed" ""}}"><span class="label">completed</span><span class="value" data-state="completed">{{.Fleet.Counts.Completed}}</span></a>
+    <a class="stat" href="{{runsLink "cancelled" ""}}"><span class="label">cancelled</span><span class="value" data-state="cancelled">{{.Fleet.Counts.Cancelled}}</span></a>
+    <a class="stat" href="{{runsLink "held" ""}}"><span class="label">held material</span><span class="value" data-state="held_material">{{.Fleet.Counts.Held}}</span></a>
+  </div>
+  <table class="kv">
+    <tr><th>capacity</th><td>{{.Fleet.Executing}} / {{.Fleet.Capacity}} executing, {{.Fleet.Active}} active</td></tr>
+    <tr><th>supervisor</th><td>{{if .Fleet.SupervisorRunning}}<span data-state="active">running</span>{{else}}<span data-state="not_reachable">not running</span>{{end}}</td></tr>
+  </table>
+  <p><a href="/runs">open the runs list →</a></p>
+</section>
+
+{{if .Fleet.Plans}}
+<section class="panel">
+  <h2>plans</h2>
+  <table class="runs">
+    <thead><tr><th>plan</th><th>state</th><th>revision</th><th>stages</th></tr></thead>
+    <tbody>
+      {{range .Fleet.Plans}}
+      <tr>
+        <td class="mono">{{.ID}}</td>
+        <td><span data-state="{{.State}}">{{.State}}</span>{{if .Unavailable}} <span class="muted">(could not be replayed)</span>{{end}}</td>
+        <td>{{.Revision}}{{if .ApprovedRevision}} <span class="muted">(approved {{.ApprovedRevision}})</span>{{end}}</td>
+        <td>{{range $state, $n := .Stages}}<span class="pill">{{$state}}: {{$n}}</span> {{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+</div>
+{{end}}

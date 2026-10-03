@@ -720,20 +720,11 @@ const (
 	// continuation-eligible: silence is not interrupted work waiting to be
 	// resumed, and a retry inherits no observations from it.
 	FailureProviderNoProgress FailureClass = "provider_no_progress"
-	// FailureProviderBackgroundWorkUnresolved is a Claude Code invocation that
-	// exited claiming a valid final result after a main-thread Bash call IT
-	// started with the typed run_in_background input (#384, #385; see
-	// claude_stream.go's backgroundStarts comment). Once that happens the
-	// invocation stays unresolved for the rest of the stream: a BashOutput
-	// poll does NOT resolve it, since Claude Code's typed stream exposes no
-	// typed running/completed status for a background shell at all, and
-	// neither does a later KillShell call, since issuing KillShell is only a
-	// request the model made - this parser never reads whether its own
-	// tool_result reported success - and even a successful KillShell names
-	// an identity the typed stream never bound back to a specific start, so
-	// it cannot be proven to correspond to the shell this invocation itself
-	// started.
+	// FailureProviderBackgroundWorkUnresolved means a main-thread Bash call
+	// detached explicitly or automatically (#384, #388). This stays unresolved
+	// throughout the invocation, regardless of later polls or kill requests.
 	//
+
 	// Provider return is not proof of semantic completion, the same finding
 	// #376 and #379 made about a provider's own self-report: a process that
 	// backgrounded its verification and then wrote a final answer without

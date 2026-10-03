@@ -12,6 +12,7 @@ import (
 type ReadStore struct {
 	store    *SQLiteOperationStore
 	stateDir string
+	fleet    summaryCache
 }
 
 func OpenReadStore(stateDir string) (*ReadStore, error) {
@@ -38,7 +39,7 @@ func OpenReadStore(stateDir string) (*ReadStore, error) {
 }
 func (s *ReadStore) Close() error { return s.store.Close() }
 func (s *ReadStore) Fleet(now time.Time) (Fleet, error) {
-	f, err := FleetStatus(s.store, s.stateDir, 0, now)
+	f, err := fleetStatus(s.store, s.stateDir, 0, now, &s.fleet)
 	if f.Runs == nil {
 		f.Runs = []RunSummary{}
 	}
@@ -53,6 +54,12 @@ func (s *ReadStore) Status(id string, now time.Time) (StatusReport, error) {
 	// ports are created to obtain a status projection.
 	r := &EngineeringRuntime{deps: Dependencies{Store: s.store, StateDir: s.stateDir, Clock: readClock{now}}}
 	return r.Status(id)
+}
+
+// PlanView is the durable plan view - no assignment resolution; see
+// PlanService.DurableView.
+func (s *ReadStore) PlanView(id string, revision int) (PlanView, error) {
+	return PlanService{Store: s.store}.DurableView(id, revision)
 }
 func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(id); return ok, err }
 func (s *ReadStore) EventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {

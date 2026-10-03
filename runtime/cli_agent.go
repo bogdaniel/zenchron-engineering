@@ -1132,6 +1132,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	if p.Agent.Kind == AgentKindClaudeCode {
+		if deadline, bounded := ctx.Deadline(); bounded {
+			extra, err := claudeBashTimeoutEnv(time.Until(deadline))
+			if err == nil {
+				env, err = withInvocationEnv(env, extra)
+			}
+			if err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+	}
 	if progressMode == progressByteOutputExcludingTransportChatter {
 		ctx = withTransportChatter(ctx, transportChatterPatterns(spec))
 	}
@@ -1242,6 +1253,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	if streamed.AnswerObserved {
 		result.Answer = string(redactTranscript([]byte(streamed.Answer)))
 	}
+	// No exit status or final result can resolve explicit or tool-owned automatic
+	// Bash detachment (#384, #388). Refuse before trusting a structured verdict
+	// for any invocation purpose; polling and kill requests never clear it.
+	if streamed.UnresolvedBackgroundWork {
+		result.Outcome = OperationFailed
+		result.Failure = &ProviderFailure{
+			Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: artifacts[0].Path,
+		}
+		return result, runErr
+	}
 	if runErr != nil || killed {
 		result.Outcome = OperationFailed
 		// The typed condition the PROVIDER ITSELF stated, read only from the
@@ -1344,25 +1365,6 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 		result.Outcome = OperationFailed
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
-		return result, nil
-	}
-	// A VALID FINAL RESULT IS STILL NOT PROOF OF COMPLETION (#384, #385) when
-	// the typed stream shows this invocation itself started a background
-	// shell - run_in_background on a main-thread Bash call. Neither a
-	// BashOutput poll nor a KillShell call clears this: the typed stream
-	// gives no way to tell a poll of a still-running shell from a poll of a
-	// finished one, and no way to bind a KillShell call back to the specific
-	// shell a start produced, since a start never carries a typed identity
-	// (see claude_stream.go's backgroundStarts comment). Checked here, before the
-	// structured verdict is trusted below: a reviewer or feedback-resolution
-	// document this invocation wrote is not more credible for having been
-	// produced by a process that abandoned work it started, and every path
-	// past this point treats the invocation as having actually finished.
-	if streamed.UnresolvedBackgroundWork {
-		result.Outcome = OperationFailed
-		result.Failure = &ProviderFailure{
-			Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: artifacts[0].Path,
-		}
 		return result, nil
 	}
 	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.
