@@ -101,6 +101,8 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 		class := FailureUnknown
 		if ctx.Err() != nil {
 			class = cancellationClass(context.Cause(ctx)) // a cancelled confirmation is not unjudged-and-done
+		} else if second.FailureClass != "" {
+			class = second.FailureClass // the verifier said what went wrong
 		}
 		return second, class, secondErr
 	}

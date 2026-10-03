@@ -305,3 +305,50 @@ func TestAVerificationProbeTimeoutRetriesWithoutRemediation(t *testing.T) {
 		t.Fatalf("an infrastructure timeout spent producer remediation: %d -> %d executions", executions, len(f.provider.requests))
 	}
 }
+
+// erroringConfirmation fails its first verification, then its confirmation
+// pass errors with a class of its own and no cancellation.
+type erroringConfirmation struct{ FakeAssuranceProvider }
+
+func (p *erroringConfirmation) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {
+	if !r.Confirmation {
+		return AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", FailureClass: FailureVerification}, nil
+	}
+	return AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", FailureClass: FailureTransientInfrastructure}, ErrSandboxUnavailable
+}
+
+func TestAnErroringConfirmationPassKeepsTheVerifiersClass(t *testing.T) {
+	_, class, err := AssuranceRerun(context.Background(), &erroringConfirmation{}, AssuranceRequest{})
+	if err == nil || class != FailureTransientInfrastructure {
+		t.Fatalf("an erroring confirmation pass classified %q (%v), want the verifier's %q", class, err, FailureTransientInfrastructure)
+	}
+}
+
+// A stop-routed class with no verdict and no journalled stop must not satisfy
+// assurance: nothing would ever plan it again, and the run would strand at
+// goal_state_reached.
+func TestAStopRoutedAssuranceClassDoesNotSatisfyTheOperation(t *testing.T) {
+	f := newPhase8Fixture(t)
+	results := make([]AssuranceResult, 8)
+	for i := range results {
+		results[i] = AssuranceResult{ProviderID: "test-verifier", VerifierDefinition: "verifier-v1", FailureClass: FailureRunCancelled}
+	}
+	verifier := &FakeAssuranceProvider{Results: results}
+	f.useAssurance(verifier)
+	runID := f.start()
+	var outcome Outcome
+	for pass := 0; pass < 20 && len(verifier.Requests) == 0; pass++ {
+		outcome = f.reconcile(runID)
+	}
+	if len(verifier.Requests) == 0 {
+		t.Fatal("assurance never ran")
+	}
+	for pass := 0; pass < 3; pass++ {
+		outcome = f.reconcile(runID)
+	}
+	state := f.state(runID)
+	key, _ := bindAssuranceGo(state)
+	if state.satisfied(OpAssuranceGo, key) || outcome.Reason == "goal_state_reached" {
+		t.Fatalf("a run_cancelled assurance with no stop satisfied the operation: %+v", outcome)
+	}
+}

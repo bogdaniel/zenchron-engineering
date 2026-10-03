@@ -2322,7 +2322,13 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// unsatisfied. Retry is a fault that may clear by itself; wait is one an
 	// operator has to clear. Recording either as a succeeded observation is
 	// defect G, and a wait-routed one would recreate it exactly.
-	if !result.Passed && (RouteFailure(class) == RouteRetry || RouteFailure(class) == RouteWait) {
+	//
+	// A STOP-routed class (run_cancelled, unknown, flaky) is not a verdict
+	// either, and nothing plans an operation for it. Recording it as succeeded
+	// satisfied assurance for this head and stranded the run at
+	// goal_state_reached; failing it lets the reconciler settle the run on the
+	// non-retryable failure instead (#447).
+	if route := RouteFailure(class); !result.Passed && (reattemptable(route) || route == RouteStop) {
 		return effect{
 			state:  OperationFailed,
 			result: assuranceRecord{FailureClass: class, Passed: false},
