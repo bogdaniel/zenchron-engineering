@@ -264,7 +264,7 @@ func (s DockerSandbox) executor() CommandExecutor {
 	}
 	return s.Executor
 }
-func (s DockerSandbox) ready() error {
+func (s DockerSandbox) ready(ctx context.Context) error {
 	if s.Image == "" || !strings.HasPrefix(s.Image, "sha256:") {
 		return ErrSandboxUnavailable
 	}
@@ -274,15 +274,41 @@ func (s DockerSandbox) ready() error {
 	if _, err := s.Endpoint.identity(); err != nil {
 		return ErrSandboxUnavailable
 	}
-	_, err := s.dockerRun(context.Background(), []string{"info", "--format", "{{.ServerVersion}}"})
-	if err != nil {
-		return ErrSandboxUnavailable
+	if _, err := s.dockerProbe(ctx, s.dockerRun, []string{"info", "--format", "{{.ServerVersion}}"}); err != nil {
+		return err
 	}
-	image, err := s.dockerOutput(context.Background(), []string{"image", "inspect", "--format", "{{.Id}}", s.Image})
-	if err != nil || strings.TrimSpace(string(image.Stdout)) != s.Image {
+	image, err := s.dockerProbe(ctx, s.dockerOutput, []string{"image", "inspect", "--format", "{{.Id}}", s.Image})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(image.Stdout)) != s.Image {
 		return ErrSandboxUnavailable
 	}
 	return nil
+}
+
+// dockerProbeCeiling bounds every Docker readiness/identity probe (#447). It is
+// a var only so a test can shorten it; nothing configures it.
+var dockerProbeCeiling = 10 * time.Second
+
+// dockerProbe runs one readiness/identity probe under the CALLER's context and
+// dockerProbeCeiling, whichever ends first, so a shorter caller deadline is
+// never replaced. The two endings stay distinct: the caller's own cancellation
+// or deadline is returned as the caller's cause, never as unavailability; only
+// the ceiling firing, or the probe failing outright, is ErrSandboxUnavailable.
+func (s DockerSandbox) dockerProbe(ctx context.Context, call func(context.Context, []string) (CommandOutput, error), args []string) (CommandOutput, error) {
+	probe, cancel := context.WithTimeout(ctx, dockerProbeCeiling)
+	defer cancel()
+	out, err := call(probe, args)
+	switch {
+	case err == nil:
+		return out, nil
+	case ctx.Err() != nil:
+		return out, context.Cause(ctx)
+	case probe.Err() != nil:
+		return out, fmt.Errorf("%w: Docker daemon did not respond within %s", ErrSandboxUnavailable, dockerProbeCeiling)
+	}
+	return out, ErrSandboxUnavailable
 }
 func (s DockerSandbox) dockerRun(ctx context.Context, args []string) (CommandOutput, error) {
 	bound, err := s.Endpoint.args(args)
@@ -298,15 +324,21 @@ func (s DockerSandbox) dockerOutput(ctx context.Context, args []string) (Command
 	}
 	return s.executor().Output(ctx, "docker", bound, "", []string{}, s.Grace)
 }
-func (s DockerSandbox) daemonIdentity() (string, error) {
-	out, err := s.dockerOutput(context.Background(), []string{"info", "--format", "{{.ID}}"})
-	if err != nil || strings.TrimSpace(string(out.Stdout)) == "" {
-		return "", fmt.Errorf("trusted Docker daemon identity unavailable")
+func (s DockerSandbox) daemonIdentity(ctx context.Context) (string, error) {
+	out, err := s.dockerProbe(ctx, s.dockerOutput, []string{"info", "--format", "{{.ID}}"})
+	if err != nil && !errors.Is(err, ErrSandboxUnavailable) {
+		return "", err // the caller's cancellation, not an identity verdict
+	}
+	if err == nil && strings.TrimSpace(string(out.Stdout)) == "" {
+		err = ErrSandboxUnavailable
+	}
+	if err != nil {
+		return "", fmt.Errorf("trusted Docker daemon identity unavailable: %w", err)
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil
 }
 func (s DockerSandbox) run(ctx context.Context, args []string) (CommandOutput, error) {
-	if err := s.ready(); err != nil {
+	if err := s.ready(ctx); err != nil {
 		return CommandOutput{}, err
 	}
 	if s.Grace <= 0 {
@@ -335,7 +367,7 @@ func (s DockerSandbox) operationRecordPath() (string, error) {
 	return filepath.Join(s.StateDir, "docker-operation-"+hex.EncodeToString(name[:])+".json"), nil
 }
 
-func (s DockerSandbox) operationRecord() (dockerOperationRecord, string, error) {
+func (s DockerSandbox) operationRecord(ctx context.Context) (dockerOperationRecord, string, error) {
 	path, err := s.operationRecordPath()
 	if err != nil {
 		return dockerOperationRecord{}, "", err
@@ -344,7 +376,7 @@ func (s DockerSandbox) operationRecord() (dockerOperationRecord, string, error) 
 	if err != nil {
 		return dockerOperationRecord{}, "", err
 	}
-	daemonID, err := s.daemonIdentity()
+	daemonID, err := s.daemonIdentity(ctx)
 	if err != nil {
 		return dockerOperationRecord{}, "", err
 	}
@@ -467,7 +499,7 @@ func (s DockerSandbox) terminateExact(record dockerOperationRecord, path string)
 }
 
 func (s DockerSandbox) runContainer(ctx context.Context, args []string) (CommandOutput, error) {
-	record, path, err := s.operationRecord()
+	record, path, err := s.operationRecord(ctx)
 	if err != nil {
 		return CommandOutput{}, err
 	}
@@ -549,7 +581,7 @@ const (
 	DockerAmbiguous   DockerReconciliation = "ambiguous"
 )
 
-func (s DockerSandbox) ReconcileDockerOperation() (DockerReconciliation, error) {
+func (s DockerSandbox) ReconcileDockerOperation(ctx context.Context) (DockerReconciliation, error) {
 	path, err := s.operationRecordPath()
 	if err != nil {
 		return DockerNoContainer, err
@@ -563,7 +595,7 @@ func (s DockerSandbox) ReconcileDockerOperation() (DockerReconciliation, error) 
 	}
 	var record dockerOperationRecord
 	endpoint, endpointErr := s.Endpoint.identity()
-	daemonID, daemonErr := s.daemonIdentity()
+	daemonID, daemonErr := s.daemonIdentity(ctx)
 	if err := json.Unmarshal(data, &record); err != nil || endpointErr != nil || daemonErr != nil || record.ContainerName == "" || record.OperationID != s.OperationID || record.Endpoint != endpoint || record.DaemonID != daemonID {
 		return DockerAmbiguous, fmt.Errorf("invalid runtime-owned Docker operation record")
 	}
@@ -598,15 +630,23 @@ func (s DockerSandbox) ReconcileDockerOperation() (DockerReconciliation, error) 
 // string. ProviderSandbox reports the native Codex CLI's proven sandbox
 // capability; the remaining fields report Docker, which isolates assurance.
 // They are separate values because they are separate boundaries.
-type SandboxDoctor struct{ ProviderSandbox, VerifierSandbox, OfflineVerification, DependencyPreparation string }
+type SandboxDoctor struct {
+	ProviderSandbox, VerifierSandbox, OfflineVerification, DependencyPreparation string
+	// VerifierSandboxReason says more than "unavailable" when readiness knows
+	// more: the bounded "Docker daemon did not respond within 10s", or the
+	// caller's own cancellation. Empty otherwise.
+	VerifierSandboxReason string
+}
 
-func DiagnoseSandbox(p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
-	provider, assurance := "unavailable", "unavailable"
+func DiagnoseSandbox(ctx context.Context, p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
+	provider, assurance, reason := "unavailable", "unavailable", ""
 	if p.probe(context.Background()) == nil {
 		provider = "enforceable"
 	}
-	if s.ready() == nil {
+	if err := s.ready(ctx); err == nil {
 		assurance = "enforceable"
+	} else if err != ErrSandboxUnavailable {
+		reason = err.Error()
 	}
 	// DependencyPreparation is NOT an alias of Docker readiness. A reachable
 	// daemon holding the pinned image proves a container can start; it proves
@@ -615,11 +655,11 @@ func DiagnoseSandbox(p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
 	// with FAIL=0 while every Go command inside that exact image exited 127.
 	preparation := "unavailable"
 	if assurance == "enforceable" {
-		if _, err := s.ProbeToolchain(context.Background()); err == nil {
+		if _, err := s.ProbeToolchain(ctx); err == nil {
 			preparation = "enforceable"
 		}
 	}
-	return SandboxDoctor{ProviderSandbox: provider, VerifierSandbox: assurance, OfflineVerification: assurance, DependencyPreparation: preparation}
+	return SandboxDoctor{ProviderSandbox: provider, VerifierSandbox: assurance, OfflineVerification: assurance, DependencyPreparation: preparation, VerifierSandboxReason: reason}
 }
 
 // ProbeToolchain answers one question about the CONFIGURED image: does the
@@ -1505,6 +1545,11 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		if errors.As(err, &unavailable) && unavailable.Transient() {
 			class = FailureTransientInfrastructure
 		}
+		// The caller's cancellation is classified exactly as it is for the
+		// verification run below: not a prerequisite verdict (#447).
+		if ctx.Err() != nil {
+			class = FailureUnknown
+		}
 		return AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), FailureClass: class}, err
 	}
 	args := dockerBase(request.CheckoutDir, true)
@@ -1586,6 +1631,9 @@ func (v BaselineGoVerifier) prepare(ctx context.Context, checkout string) error 
 	out, err := sandbox.run(ctx, args)
 	if err == nil {
 		return nil
+	}
+	if ctx.Err() != nil {
+		return context.Cause(ctx) // cancellation, never a classified prerequisite (#447)
 	}
 	// A daemon or image that is not there is the one genuinely transient case:
 	// no container ran, so there is no output to classify.
