@@ -235,6 +235,7 @@ type FleetClasses struct {
 	Observing   int `json:"observing"`
 	Runnable    int `json:"runnable"`
 	Waiting     int `json:"waiting"`
+	Paused      int `json:"paused"`
 	Unavailable int `json:"unavailable"`
 }
 
@@ -596,7 +597,7 @@ func fleetCounts(runs []Run) FleetCounts {
 // mechanism description (#397 review 5397796709).
 func fleetProjection(f rt.Fleet) Fleet {
 	out := Fleet{Capacity: f.Capacity, Executing: f.Executing, Active: f.Active, SupervisorRunning: f.SupervisorRunning,
-		Classes: FleetClasses{Working: f.Working, Observing: f.Observing, Runnable: f.Runnable, Waiting: f.Waiting, Unavailable: f.Unavailable}}
+		Classes: FleetClasses{Working: f.Working, Observing: f.Observing, Runnable: f.Runnable, Waiting: f.Waiting, Paused: f.Paused, Unavailable: f.Unavailable}}
 	out.Runs = make([]Run, 0, len(f.Runs))
 	for _, run := range f.Runs {
 		out.Runs = append(out.Runs, runProjection(run))

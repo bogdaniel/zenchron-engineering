@@ -174,6 +174,12 @@ func resumeRefusal(run runtime.EngineeringRun, runID string, events []runtime.En
 		return runtime.ExitCancelled, fmt.Sprintf(
 			"run %s was cancelled (%s); explicit operator intent is not withdrawn by asking again. Start new work with `autonomy run issue <number>`", runID, reason), true
 	}
+	// A pause is cleared only by `unpause` (#86); resume never walks over it.
+	if pause := runtime.JournalPause(events); pause != nil {
+		return runtime.ExitWaiting, fmt.Sprintf(
+			"run %s is paused by %s since %s (%s); `autonomy unpause %s` clears it",
+			runID, terminalSafe(pause.Operator), pause.Since.Format(time.RFC3339), terminalSafe(pause.Reason), runID), true
+	}
 	if reason == runtime.WatchWaitingOptInRemoved {
 		return runtime.ExitWaiting, fmt.Sprintf(
 			"run %s is waiting on opt_in_removed: the opt-in label was removed from its source issue, which withdraws consent to work on it. Restore the label; the run then resumes through the ordinary schedule. Resuming does not restore consent", runID), true

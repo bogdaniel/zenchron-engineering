@@ -74,6 +74,17 @@ var eventPayloads = map[string]payloadValidator{
 	EventRunCompleted: dispositionPayload(false),
 	EventRunFailed:    dispositionPayload(true),
 	EventRunCancelled: dispositionPayload(false),
+	// A pause records who asked and why; an unpause records who asked. Neither
+	// carries a disposition, a reason code or any authority (#86).
+	EventRunPaused: payloadSchema(func(p RunPausePayload) error {
+		return errors.Join(required("operator", p.Operator), bounded("reason", p.Reason))
+	}),
+	EventRunUnpaused: payloadSchema(func(p RunPausePayload) error {
+		if p.Reason != "" {
+			return errors.New("an unpause carries no reason")
+		}
+		return required("operator", p.Operator)
+	}),
 
 	EventFeedbackPublicationIdentity: payloadSchema(FeedbackPublicationIdentityPayload.validate),
 

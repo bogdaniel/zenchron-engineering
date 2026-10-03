@@ -1634,6 +1634,14 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := r.reconcileStoreLag(state); err != nil {
 			return Outcome{}, err
 		}
+		// A PAUSED run is returned unchanged (#86): nothing is planned,
+		// settled or journalled, and the Outcome carries the run's own
+		// disposition and reason - a pause is never one. This exit is only the
+		// no-journal guarantee; the gate is AcquireOperation, which refuses a
+		// paused run's lease whatever this pass read.
+		if state.snapshot.Paused != nil {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
+		}
 		// Another live driver is operating this run. The store would refuse
 		// every acquisition anyway (a run holds at most one active operation),
 		// so this pass journals NOTHING - no planned operation, no run.waiting
@@ -1810,6 +1818,12 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, Outcome{}, err
 	}
 	if leased == nil {
+		// A pause that committed after this pass's check is why the store
+		// refused (#86). The run is left as it is rather than settled on the
+		// stale view, so nothing is journalled after run.paused.
+		if paused, err := r.deps.Store.RunPaused(state.run.ID); err != nil || paused {
+			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
+		}
 		outcome, err := r.settle(state, waitingOr(live, Waiting), "operation_unavailable")
 		return false, outcome, err
 	}

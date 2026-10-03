@@ -136,6 +136,13 @@ stop-all    actually CANCEL the selected runs
             `run_cancelled`, never `controller_shutdown`
 ```
 
+`autonomy pause RUN --reason T` is the per-run, durable form of `drain`: the
+run's in-flight operation finishes, nothing new is leased for it - work or
+observation - and nothing is cancelled. It survives restarts and is cleared
+only by `autonomy unpause RUN`. With a supervisor running it is applied by the
+supervisor under its controller role. See
+[`spec/runtime-v0.1.md`](spec/runtime-v0.1.md#operator-pause).
+
 Only the third is run cancellation. Signalling the process, or killing it, is a
 shutdown: no `run.cancelled` is appended, and the journal is left exactly as the
 last completed step wrote it.
@@ -479,11 +486,12 @@ The supervisor starts at most `max_concurrent_runs + max_concurrent_observations
 turns at once. That bounds goroutines only: a turn whose next operation's class
 is full is refused by the store and returns.
 
-`status` shows the fleet as five mutually exclusive counts over nonterminal
+`status` shows the fleet as six mutually exclusive counts over nonterminal
 runs: **working** (holds a work operation), **observing** (holds an observation),
 **runnable** (holds nothing and has a pending work operation the scheduler could
-lease), **waiting** (holds nothing and is not runnable) and **unavailable** (its
-journal could not be replayed). They are read from durable operation rows, so
+lease), **waiting** (holds nothing and is not runnable), **paused** (an operator
+paused it and it holds nothing; a paused run still settling is working or
+observing) and **unavailable** (its journal could not be replayed). They are read from durable operation rows, so
 they are the same after a restart. Runnable uses the scheduler's own
 eligibility test; the one approximation is liveness, which a read never probes,
 so an abandoned lease counts as working or observing until a scheduler
