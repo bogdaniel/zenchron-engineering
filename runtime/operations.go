@@ -562,6 +562,45 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			result: mutationResult{FailureClass: FailureToolchainUnavailable},
 		}
 	}
+	// NO EARLIER WRITER MAY STILL BE ALIVE (#168). Claimed before anything
+	// below reads, restores or scans the candidate, and held through dispatch:
+	// a process a dead supervisor left behind can still be writing it, and
+	// judging that workspace - an inconclusive scan of its half-written cache
+	// is a STOP - would charge this run for a writer that is not this
+	// attempt's. A held lock is a wait an operator clears.
+	if dir := candidateDir(r.deps.StateDir, state.run.ID); isDir(dir) {
+		// The settle is paid once, on first encounter. A run already
+		// waiting on a held lock re-probes with no sleep.
+		settle := candidateWriterSettle
+		if last, ok := state.lastFailure(operation.ID); ok && last == FailureCandidateWriterAlive {
+			settle = 0
+		}
+		writer, err := claimCandidateWriter(ctx, dir, settle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			// The PARENT context ended during the claim: the provider is not
+			// started because its context had ended, and that takes exactly
+			// the class the executor's own not-started refusal takes
+			// (controller_shutdown for a shutdown). It is never a live
+			// writer, and never an operator stop - that is a durable act the
+			// execution watcher observes, not a context.
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			result := notStartedResult("", "", "", operation.AttemptIdentity, notStarted)
+			class := result.Failure.Classification
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, class, result, notStarted),
+			}}
+		}
+		if err != nil {
+			class, _ := candidateGuardFailureClass(err)
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, ExecutionResult{}, err),
+			}}
+		}
+		defer writer.Close()
+		ctx = withCandidateWriter(ctx, writer)
+	}
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return failed(err)
