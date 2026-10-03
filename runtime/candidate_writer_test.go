@@ -307,3 +307,45 @@ func TestGCLeavesACandidateWithALiveWriterAndRemovesItsLock(t *testing.T) {
 	mustNotExist(t, "the candidate workspace", m.candidate)
 	mustNotExist(t, "the candidate writer lock", candidateWriterLockPath(m.candidate))
 }
+
+// M1: a lock released inside the settle bound - a predecessor's guard still
+// stopping its group during a fast restart - is waited out, not refused.
+func TestAClaimWaitsOutABrieflyHeldLock(t *testing.T) {
+	restore := candidateWriterSettle
+	candidateWriterSettle = 5 * time.Second
+	t.Cleanup(func() { candidateWriterSettle = restore })
+	candidate := candidateUnder(t)
+	held, err := claimCandidateWriter(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(200*time.Millisecond, func() { _ = held.Close() })
+	lock, err := claimCandidateWriter(candidate)
+	if err != nil {
+		t.Fatalf("a lock released within the settle bound was refused: %v", err)
+	}
+	_ = lock.Close()
+}
+
+// L2: a planning invocation refused by the runtime before dispatch is a typed
+// planner refusal, and removing the planning workspace removes its lock.
+func TestAPlannerRefusalBeforeDispatchIsTyped(t *testing.T) {
+	input, provider := plannerFixture(t, "")
+	provider.err = &CandidateWriterAliveError{Lock: candidateWriterLockPath(input.Workspace.Dir)}
+	_, err := InvokePlanner(context.Background(), input)
+	var refused *PlannerRefusedError
+	if !errors.As(err, &refused) || !strings.Contains(refused.Detail, string(FailureCandidateWriterAlive)) {
+		t.Fatalf("a pre-dispatch refusal reached the planner untyped: %T %v", err, err)
+	}
+	lock, err := claimCandidateWriter(input.Workspace.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lock.Close()
+	if err := input.Workspace.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(candidateWriterLockPath(input.Workspace.Dir)); !os.IsNotExist(err) {
+		t.Fatalf("the planning workspace's writer lock survived its removal: %v", err)
+	}
+}
