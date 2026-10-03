@@ -42,6 +42,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -250,6 +251,10 @@ type cliAgentSpec struct {
 	// Probes never receive them, and withInvocationEnv refuses any credential-
 	// shaped name or any name the allowlisted environment already sets.
 	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
+	// ControlEnv names this provider's own non-secret control variables, so
+	// invocation provenance records them - present or absent - beside the
+	// runtime's common allowlist (#391). HomeEnv is recorded too.
+	ControlEnv []string
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
@@ -533,6 +538,42 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 		env = append(env, spec.HomeEnv+"="+home)
 	}
 	return env
+}
+
+// providerControlNames is the runtime's NON-SECRET allowlist of the
+// provider-control variables env() and toolchainEnv() can set (#391). Only
+// these, plus the spec's HomeEnv and ControlEnv, are ever recorded; a name
+// that is not here is not recorded whatever the process received.
+var providerControlNames = []string{
+	"PATH", "HOME", "USER", "GOENV", brokeredGitDirEnv,
+	"GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS",
+	"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH",
+}
+
+// providerEnvironment records the allowlisted names from the environment the
+// process was actually given. A name not passed is recorded without a value;
+// values are redacted and bounded exactly as other provenance detail is.
+func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEntry {
+	passed := map[string]string{}
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			passed[name] = value // os/exec keeps the last duplicate too
+		}
+	}
+	names := append(append(slices.Clone(providerControlNames), spec.HomeEnv), spec.ControlEnv...)
+	recorded := make([]domain.EnvironmentEntry, 0, len(names))
+	for _, name := range names {
+		if name == "" || credentialShapedName(name) {
+			continue
+		}
+		entry := domain.EnvironmentEntry{Name: name}
+		if value, ok := passed[name]; ok {
+			bounded := sanitizedDetail(value)
+			entry.Value, entry.Bounded = &bounded, bounded != value
+		}
+		recorded = append(recorded, entry)
+	}
+	return recorded
 }
 
 // probe requires the installed CLI to advertise every capability the runtime
@@ -1180,6 +1221,8 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer claimed.Close()
 		writer = claimed
 	}
+	// Read from the exact slice handed to the process, after every addition.
+	provenance.ProviderEnvironment = providerEnvironment(env, spec)
 	startedAt := time.Now()
 	output, runErr := p.executor().Run(withCandidateWriter(ctx, writer), p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()

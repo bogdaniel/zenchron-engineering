@@ -572,6 +572,18 @@ func claudeBackgroundWaitEnv(window time.Duration) ([]string, error) {
 	return []string{fmt.Sprintf("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=%d", ceiling)}, nil
 }
 
+// credentialShapedName is the one test for an environment NAME that may carry
+// a credential; such a name is never added and never recorded.
+func credentialShapedName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
+		if strings.Contains(upper, secret) {
+			return true
+		}
+	}
+	return false
+}
+
 // withInvocationEnv appends a spec's invocation-only variables to the
 // allowlisted environment. A variable that would replace one the allowlist
 // already set (PATH, HOME, the Git guard) or that is shaped like a credential
@@ -584,11 +596,8 @@ func withInvocationEnv(env, extra []string) ([]string, error) {
 	}
 	for _, entry := range extra {
 		key, _, _ := strings.Cut(entry, "=")
-		upper := strings.ToUpper(key)
-		for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
-			if strings.Contains(upper, secret) {
-				return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
-			}
+		if credentialShapedName(key) {
+			return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
 		}
 		if key == "" || present[key] {
 			return nil, fmt.Errorf("refused invocation environment variable %q: it would replace the runtime's own environment", key)

@@ -900,6 +900,22 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("execution invocation", fmt.Sprintf("%s version=%s permission=%s sandbox=%s auth=%s (%s) elapsed=%s overran_deadline=%t",
 			inv.Executable, orUnknown(inv.Version), orUnknown(inv.PermissionMode), orUnknown(inv.SandboxMode),
 			orUnknown(inv.AuthMode), orUnknown(inv.AuthModeSource), inv.Elapsed, inv.OverranDeadline))
+		// The allowlisted provider-control environment (#391): absent and
+		// empty are printed differently, never collapsed.
+		if len(inv.ProviderEnvironment) > 0 {
+			vars := make([]string, 0, len(inv.ProviderEnvironment))
+			for _, e := range inv.ProviderEnvironment {
+				switch {
+				case e.Value == nil:
+					vars = append(vars, e.Name+" (absent)")
+				case e.Bounded:
+					vars = append(vars, fmt.Sprintf("%s=%q (bounded)", e.Name, *e.Value))
+				default:
+					vars = append(vars, fmt.Sprintf("%s=%q", e.Name, *e.Value))
+				}
+			}
+			line("execution environment", strings.Join(vars, " "))
+		}
 	} else if view.Attempts[runtime.OpExecutionInvoke] > 0 {
 		line("execution attempt", "no invocation provenance recorded: the latest attempt did not reach a provider, or has not ended")
 	}

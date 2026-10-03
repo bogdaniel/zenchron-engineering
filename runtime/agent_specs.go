@@ -248,6 +248,7 @@ var claudeSpec = cliAgentSpec{
 	SuppressesWorkspaceInstructions: true,
 	ProgressMode:                    progressStructuredClaudeEvents,
 	InvocationEnv:                   claudeBackgroundWaitEnv,
+	ControlEnv:                      []string{"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"},
 	Signals: append([]diagnosticSignal{
 		{"usage limit reached", FailureProviderQuota},
 		{"credit balance is too low", FailureProviderAccountUnavailable},

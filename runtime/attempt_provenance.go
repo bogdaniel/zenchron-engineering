@@ -133,7 +133,18 @@ func validateInvocationObservation(o domain.InvocationObservation) error {
 	if len(o.PermissionDeniedTools) > domain.MaxPermissionDeniedTools {
 		return fmt.Errorf("invocation names %d denied tools, above the bound of %d", len(o.PermissionDeniedTools), domain.MaxPermissionDeniedTools)
 	}
+	if len(o.ProviderEnvironment) > domain.MaxProviderEnvironment {
+		return fmt.Errorf("invocation records %d environment variables, above the bound of %d", len(o.ProviderEnvironment), domain.MaxProviderEnvironment)
+	}
 	var errs []error
+	for _, entry := range o.ProviderEnvironment {
+		if !domain.IsInvocationIdentifier(entry.Name) || credentialShapedName(entry.Name) {
+			errs = append(errs, fmt.Errorf("invocation environment name %q is not a non-secret control name", entry.Name))
+		}
+		if entry.Value != nil {
+			errs = append(errs, bounded("invocation.provider_environment[].value", *entry.Value))
+		}
+	}
 	for _, arg := range o.Argv {
 		errs = append(errs, bounded("invocation.argv[]", arg))
 	}

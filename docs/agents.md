@@ -215,6 +215,7 @@ whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
 the security-relevant argv, with the prompt element replaced by the literal
   placeholder [prompt], and the prompt's digest as prompt_sha256
+the effective provider-control environment, as provider_environment (below)
 execution deadline, start, completion, elapsed, and whether it overran
 termination cause (provider_returned, deadline_reached,
   provider_inactivity_limit_reached, run_stopped), process id, and whether it ran
@@ -241,6 +242,31 @@ The prompt text is excluded from the durable record: its argv slot holds the
 placeholder `[prompt]` and its SHA-256 is recorded as `prompt_sha256`. It
 carries untrusted third-party text and is unbounded, while every
 security-relevant flag is short and is kept verbatim.
+
+**`provider_environment` (#391).** The environment the runtime actually passed
+to the provider process, read from the exact slice handed to it after every
+addition (the toolchain grant, the scratch, Claude's deadline-derived Bash
+timeouts), never from the supervisor's own environment. It is restricted to an
+explicit non-secret allowlist and is never the whole environment:
+
+```text
+every native CLI: PATH HOME USER GOENV GIT_DIR GOMODCACHE GOTOOLCHAIN GOPROXY
+                  GOSUMDB GOFLAGS TMPDIR GOTMPDIR GOCACHE GOPATH
+plus the provider's state variable: CODEX_HOME, CLAUDE_CONFIG_DIR, QWEN_HOME
+plus Claude Code's controls: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
+                  BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
+```
+
+It is an ordered list of `{name, value, value_bounded}`, one entry per
+allowlisted name. An entry WITHOUT `value` means the runtime did not pass the
+variable; `"value": ""` means it passed it empty. The two are never collapsed,
+and `status` prints them as `NAME (absent)` and `NAME=""`. A name shaped like a
+credential (containing KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH) is
+never recorded, values pass through the same token redaction and 200-byte field
+bound as every other detail, and `value_bounded` marks a value that was redacted
+or cut (a long PATH typically is). The record stays inside the journal and
+`autonomy status`/`events`; the control-plane HTTP API projects no invocation
+provenance, so these local paths do not cross it.
 
 **Where it is recorded.** For a run attempt - initial execution, remediation or
 continuation, whether it succeeded, failed, hit its deadline, was ended for

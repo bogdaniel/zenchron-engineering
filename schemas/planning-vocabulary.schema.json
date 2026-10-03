@@ -87,6 +87,31 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "provider_environment": {
+          "description": "The effective provider-control environment passed to the process, restricted to the adapter's explicit non-secret allowlist (#391). An entry without value means the variable was not passed; a value of \"\" means it was passed empty.",
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,64}$"
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "value_bounded": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
         "execution_deadline": {
           "type": "string",
           "format": "date-time"
