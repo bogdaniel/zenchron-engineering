@@ -1698,13 +1698,18 @@ func providerOutcome(result ExecutionResult, err error) OperationState {
 // restoreCandidate is the workspace_integrity_violation route: refuse and
 // restore, never adopt. RouteFailure names it; this performs it.
 func (r *EngineeringRuntime) restoreCandidate(workspace *CandidateWorkspace, cause error) effect {
+	return failed(r.restore(workspace, cause))
+}
+
+// restore performs the restore route and returns the error the operation fails with.
+func (r *EngineeringRuntime) restore(workspace *CandidateWorkspace, cause error) error {
 	if RouteFailure(FailureWorkspaceIntegrity) != RouteRestore {
-		return failed(cause)
+		return cause
 	}
 	if err := workspace.RestoreTrusted(); err != nil {
-		return failed(fmt.Errorf("%s; restore failed: %w", cause, err))
+		return fmt.Errorf("%s; restore failed: %w", cause, err)
 	}
-	return failed(cause)
+	return cause
 }
 
 // findings normalizes CURRENT-head external observations into typed findings.
@@ -1938,7 +1943,7 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 			return commitFailed(commitStageWorkspace, err, prior)
 		}
 	} else if err := workspace.AssertIntegrity(); err != nil {
-		return r.restoreCandidate(workspace, err)
+		return commitFailed(commitStageWorkspace, r.restore(workspace, err), prior)
 	}
 	kernel, err := r.buildKernel(state)
 	if err != nil {
@@ -1965,7 +1970,13 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	}
 	if err != nil {
 		if result.Commit == "" {
-			return commitFailed(commitStageCommit, err, prior)
+			// Commit's own integrity check refuses before any commit exists.
+			stage := commitStageCommit
+			var integrity *WorkspaceIntegrityError
+			if errors.As(err, &integrity) {
+				stage = commitStageWorkspace
+			}
+			return commitFailed(stage, err, prior)
 		}
 		stage := commitStageCommit
 		if errors.Is(err, errCommitObservation) {
@@ -2073,15 +2084,25 @@ func (s *runState) runtimeCommit(opID string) *runtimeCommit {
 
 // recoverRuntimeCommit answers a candidate head that is not the recorded
 // revision. The one movement it accepts is this operation's own commit from an
-// earlier attempt that never journalled its candidate.committed (#402): the
-// runtime identity and exact message, exactly one parent which IS the recorded
-// revision, nothing left that a commit could still carry, and - when an
-// attempt recorded the commit - that exact commit, tree, path set and Git
-// metadata. Anything else is the original integrity failure. Nothing here
-// writes to the workspace: the commit is preserved, never reset or remade.
+// earlier attempt that never journalled its candidate.committed (#402). Only
+// two facts make that plausible: an earlier attempt RECORDED the commit
+// (prior), or an earlier attempt was interrupted with no operation.after at all
+// (process loss between the commit and the journal). An ordinary failed
+// attempt proves nothing, so it never opens this path.
+//
+// Every fact a forger controls is then checked as if the commit were a
+// stranger's: the runtime identity and exact message, exactly one parent which
+// IS the recorded revision, a clean worktree, config and refs equal to the
+// DURABLE baseline (never re-seeded from the live repository), the recorded
+// commit, tree, path set and metadata when an attempt recorded them, and every
+// content gate Commit itself applies, over exactly what the commit carries.
+//
+// Any refusal leaves the original integrity error standing, exactly as before
+// #402: nothing is adopted, and nothing here writes to the workspace. The
+// commit is preserved, never reset or remade.
 func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, opID string, prior *runtimeCommit, cause error) (*CandidateWorkspace, *CommitResult, error) {
 	var integrity *WorkspaceIntegrityError
-	if !errors.As(cause, &integrity) || state.attemptsStarted(opID) < 2 {
+	if !errors.As(cause, &integrity) || (prior == nil && !state.attemptInterrupted(opID)) {
 		return nil, nil, cause
 	}
 	refuse := func(why string) (*CandidateWorkspace, *CommitResult, error) {
@@ -2091,6 +2112,10 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, opID string, 
 	expected := state.projection.CandidateRevision
 	if expected == "" {
 		expected = state.baseRevision()
+	}
+	baseline := state.projection.CandidateMetadata
+	if baseline == "" {
+		return refuse("no durable Git metadata baseline to hold it to")
 	}
 	out, err := gitOutput(dir, "log", "-1", "--format=%H%x00%T%x00%P%x00%ae%x00%ce%x00%B", "HEAD")
 	if err != nil {
@@ -2111,6 +2136,10 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, opID string, 
 	case prior != nil && (head != prior.Commit || tree != prior.Tree):
 		return refuse("it is not the recorded commit " + prior.Commit)
 	}
+	// Config and refs exactly as durably trusted; only HEAD may have moved.
+	if at, err := metadataDigestAt(dir, expected); err != nil || at != baseline {
+		return refuse("Git config or refs differ from the durable baseline")
+	}
 	remaining, err := changedPaths(dir)
 	if err != nil {
 		return refuse(err.Error())
@@ -2122,39 +2151,56 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, opID string, 
 	if left := withoutPaths(remaining, debris.Excluded); len(left) > 0 {
 		return refuse("work is still uncommitted: " + quotedPaths(left))
 	}
-	diff, err := gitOutput(dir, "diff", "--name-only", "--no-renames", "-z", expected, head)
+	// No rename detection: the path set Commit records lists both sides.
+	paths, err := diffPaths(dir, expected, head, "--no-renames")
 	if err != nil {
 		return refuse(err.Error())
 	}
-	var paths []string
-	for _, p := range strings.Split(strings.TrimRight(diff, "\x00"), "\x00") {
-		if p != "" {
-			paths = append(paths, p)
-		}
+	// The commit-time gates, over what the commit carries. The worktree is
+	// clean, so the bytes they read are the committed bytes.
+	carried, _, err := guardCommitPaths(dir, paths, maxCandidateBytes)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	if debris := append(carried.Excluded, withoutPaths(carried.Unlink, carried.Excluded)...); len(debris) > 0 {
+		return refuse("it carries runtime-owned debris: " + quotedPaths(debris))
 	}
 	metadata, err := gitMetadataDigest(dir)
 	if err != nil {
 		return refuse(err.Error())
 	}
-	if prior != nil && (pathsDigest(paths) != prior.PathsDigest || (prior.MetadataDigest != "" && metadata != prior.MetadataDigest)) {
-		return refuse("its paths or Git metadata differ from the recorded commit")
+	excluded := debris.Excluded
+	if prior != nil {
+		if pathsDigest(paths) != prior.PathsDigest || (prior.MetadataDigest != "" && metadata != prior.MetadataDigest) {
+			return refuse("its paths or Git metadata differ from the recorded commit")
+		}
+		excluded = prior.ExcludedPaths
 	}
 	return &CandidateWorkspace{
 			Dir: dir, BaseRevision: state.baseRevision(), TrustedMetadata: metadata,
 			Remote: r.deps.Remote.URL, Credentials: r.deps.Credentials,
-		}, &CommitResult{Commit: head, Tree: tree, Paths: paths, Excluded: debris.Excluded},
+		}, &CommitResult{Commit: head, Tree: tree, Paths: paths, Excluded: excluded},
 		nil
 }
 
-// attemptsStarted counts the attempts of one operation the journal saw begin.
-func (s *runState) attemptsStarted(opID string) int {
-	n := 0
+// attemptInterrupted reports whether an EARLIER attempt of this operation
+// began and never recorded its operation.after - the process was lost mid
+// attempt. The current attempt's own operation.before is the one unmatched
+// event that is expected.
+func (s *runState) attemptInterrupted(opID string) bool {
+	unmatched := 0
 	for _, e := range s.events {
-		if e.Type == EventOperationBefore && e.OperationID == opID {
-			n++
+		if e.OperationID != opID {
+			continue
+		}
+		switch e.Type {
+		case EventOperationBefore:
+			unmatched++
+		case EventOperationAfter:
+			unmatched--
 		}
 	}
-	return n
+	return unmatched >= 2
 }
 
 // maxCandidateBytes bounds one runtime-owned commit. It is the candidate size
@@ -3132,7 +3178,13 @@ func (s *runState) assuranceRecordedAt(sequence int64) string {
 // candidatePaths is the observed change: every path that differs between the
 // pinned base and the exact recorded candidate commit.
 func candidatePaths(dir, base, commit string) ([]string, error) {
-	out, err := gitOutput(dir, "diff", "--name-only", "-z", base, commit)
+	return diffPaths(dir, base, commit)
+}
+
+// diffPaths lists, sorted, every path that differs between two revisions.
+func diffPaths(dir, base, commit string, flags ...string) ([]string, error) {
+	args := append(append([]string{"diff", "--name-only", "-z"}, flags...), base, commit)
+	out, err := gitOutput(dir, args...)
 	if err != nil {
 		return nil, err
 	}
