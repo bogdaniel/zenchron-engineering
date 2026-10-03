@@ -1,6 +1,7 @@
 {{define "title"}}{{.Status.ID}}{{end}}
 {{define "content"}}
 {{$s := .Status}}
+<div id="run-live" data-live>
 <section class="panel" data-run-id="{{$s.ID}}">
   <p class="breadcrumb"><a href="/runs">runs</a> / <span class="mono">{{$s.ID}}</span></p>
   <h1 class="mono">{{$s.ID}}</h1>
@@ -67,12 +68,12 @@
   {{with $s.Operation}}
   <div class="grid stats">
     <div class="stat"><span class="label">kind</span><span class="value">{{.Kind}} #{{.Attempt}}/{{.MaxAttempts}}</span></div>
-    <div class="stat"><span class="label">state</span><span class="value" data-field="state" data-state="{{.State}}">{{.State}}</span></div>
-    <div class="stat"><span class="label">source</span><span class="value"><span class="badge {{if eq .ProgressSource "row"}}live{{else}}journal{{end}}" data-field="progress-source">{{if .ProgressSource}}{{.ProgressSource}}{{else}}journal{{end}}</span></span></div>
+    <div class="stat"><span class="label">state</span><span class="value" data-state="{{.State}}">{{.State}}</span></div>
+    <div class="stat"><span class="label">source</span><span class="value"><span class="badge {{if eq .ProgressSource "row"}}live{{else}}journal{{end}}">{{if .ProgressSource}}{{.ProgressSource}}{{else}}journal{{end}}</span></span></div>
   </div>
   <table class="kv">
     <tr><th>started</th><td>{{fmtTimePtr .StartedAt}}</td></tr>
-    <tr><th>last progress</th><td><span data-field="last-progress-at">{{fmtTimePtr .LastProgressAt}}</span> <span class="muted">(silent for <span data-field="silent-for">{{fmtDuration .SilentFor}}</span>)</span></td></tr>
+    <tr><th>last progress</th><td><span>{{fmtTimePtr .LastProgressAt}}</span> <span class="muted">(silent for <span>{{fmtDuration .SilentFor}}</span>)</span></td></tr>
     {{if .HeartbeatAt}}<tr><th>heartbeat</th><td>{{fmtTimePtr .HeartbeatAt}}</td></tr>{{end}}
     {{if .InactivitySuspension}}<tr><th>inactivity suspension</th><td>{{.InactivitySuspension}}</td></tr>{{end}}
     {{if .Deadline}}<tr><th>deadline</th><td>{{fmtTimePtr .Deadline}}{{if .DeadlineBound}} <span class="muted">({{.DeadlineBound}})</span>{{end}}</td></tr>{{end}}
@@ -121,7 +122,7 @@
 
 <section class="panel">
   <h2>causal event timeline</h2>
-  <p class="meta"><span data-field="event-count">{{len .Events}}</span> event(s) from sequence {{.After}}{{if .HasMore}}, more available{{end}}</p>
+  <p class="meta"><span>{{len .Events}}</span> event(s) from sequence {{.After}}{{if .HasMore}}, more available{{end}}</p>
   <ol class="timeline" id="timeline" data-run-id="{{$s.ID}}" data-after="{{.NextAfter}}">
     {{range .Events}}
     <li data-sequence="{{.Sequence}}">
@@ -135,4 +136,5 @@
   </ol>
   {{if .HasMore}}<p><a href="/runs/{{$s.ID}}?after={{.NextAfter}}">next page (newer) →</a></p>{{end}}
 </section>
+</div>
 {{end}}

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"html/template"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,4 +149,33 @@ func TestRunDetailTemplateRendersEveryOptionalField(t *testing.T) {
 func TestRunDetailTemplateRendersWithoutOptionalFields(t *testing.T) {
 	data := runDetailData{ObservedAt: time.Now(), Status: RunDetail{ID: "r", Phase: rt.Execute, Disposition: rt.Active}}
 	renderTemplate(t, runDetailTemplate, data)
+}
+
+// TestPagesDeclareLiveRegionsAndNeverRenderLive pins the contract console.js
+// refreshes against (#420): every data page carries the [data-live] region
+// ids the script swaps, and the server render itself only ever claims a
+// timestamped snapshot - "live" is earned by a successful client refresh,
+// never printed by the template.
+func TestPagesDeclareLiveRegionsAndNeverRenderLive(t *testing.T) {
+	pages := []struct {
+		name string
+		tmpl *template.Template
+		data any
+		ids  []string
+	}{
+		{"overview", overviewTemplate, overviewData{}, []string{"overview-live"}},
+		{"runs", runsTemplate, runsData{}, []string{"runs-meta", "runs-table"}},
+		{"run detail", runDetailTemplate, runDetailData{Status: RunDetail{ID: "r"}}, []string{"run-live"}},
+	}
+	for _, p := range pages {
+		out := renderTemplate(t, p.tmpl, p.data)
+		for _, id := range p.ids {
+			if !strings.Contains(out, `id="`+id+`" data-live`) {
+				t.Errorf("%s: missing live region %q", p.name, id)
+			}
+		}
+		if !strings.Contains(out, `>snapshot</span>`) || strings.Contains(out, `>live</span>`) {
+			t.Errorf("%s: server render must claim a snapshot, not live", p.name)
+		}
+	}
 }
