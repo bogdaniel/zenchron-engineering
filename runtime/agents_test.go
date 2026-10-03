@@ -510,10 +510,12 @@ func TestNativeAgentEnvironmentIsAnAllowlistWithoutBillingOverrides(t *testing.T
 					name, value, _ := strings.Cut(entry, "=")
 					// PATH so tools resolve, HOME so the CLI finds its own
 					// state, USER so a CLI whose credential lives in the OS
-					// keychain knows whose keychain to ask. All three are
-					// non-secret; the list is closed and every addition to it
-					// has to argue for itself here.
-					if name != "PATH" && name != "HOME" && name != "USER" {
+					// keychain knows whose keychain to ask, and GOENV at the
+					// null device so a worker cannot persist Go settings into
+					// the operator's config (#430). All are non-secret; the
+					// list is closed and every addition to it has to argue
+					// for itself here.
+					if name != "PATH" && name != "HOME" && name != "USER" && entry != "GOENV="+os.DevNull {
 						t.Fatalf("environment is not an allowlist: %q reached %s", name, kind)
 					}
 					if strings.Contains(value, "leaked-value-9c3") {

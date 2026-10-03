@@ -25,6 +25,7 @@ package runtime
 // silently - it has to fail this file first.
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -596,7 +597,12 @@ func TestNoConfigurationGrantsCandidateGitHubCredentials(t *testing.T) {
 		// USER is on the allowlist so a CLI whose credential lives in the OS
 		// keychain knows whose keychain to ask. It is an account name, not a
 		// secret, and the credential assertion below still holds.
-		if name != "PATH" && name != "HOME" && name != "USER" && name != "CODEX_HOME" {
+		// GOENV is on the allowlist only as the null device, so a worker's
+		// `go env -w` is discarded and never reaches the operator's file (#430).
+		if name == "GOENV" && value != os.DevNull {
+			t.Fatalf("provider GOENV = %q, want %q", value, os.DevNull)
+		}
+		if name != "PATH" && name != "HOME" && name != "USER" && name != "CODEX_HOME" && name != "GOENV" {
 			t.Fatalf("provider environment carries %q, which is not on the allowlist", name)
 		}
 		if strings.Contains(value, "leaked-secret-value") {
