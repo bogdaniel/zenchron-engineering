@@ -123,6 +123,10 @@ type claudeStream struct {
 	// only the latter is a real (if useless) answer.
 	answer    string
 	hasAnswer bool
+	// unreachable is an is_error final result whose whole text is the CLI's
+	// own #380 connectivity envelope. is_error is set by the CLI, never by the
+	// model, and the match is exact, so no quoted prose can reach it.
+	unreachable bool
 }
 
 func newClaudeStream(attempt int) *claudeStream {
@@ -373,10 +377,12 @@ func (s *claudeStream) handle(line []byte) {
 		// error result must never promote to an answer, so this is reached only
 		// past that gate - and a wrong-typed or missing "result" field simply
 		// leaves hasAnswer false, exactly like every other optional field here.
-		if !s.isError {
-			var answer *string
-			if json.Unmarshal(event.Answer, &answer) == nil && answer != nil {
+		var answer *string
+		if json.Unmarshal(event.Answer, &answer) == nil && answer != nil {
+			if !s.isError {
 				s.answer, s.hasAnswer = *answer, true
+			} else {
+				s.unreachable = normalizeDiagnostic(strings.TrimSpace(*answer)) == "api error: "+claudeUnreachableEnvelope
 			}
 		}
 		// The final result ends every turn. An oversized last tool_result line
@@ -429,9 +435,9 @@ func claudeRetryClass(event claudeEvent) FailureClass {
 		}
 	}
 	// No HTTP response at all, stated as such: the dead-network shape #238
-	// exists to bound.
+	// exists to bound, and transport loss rather than endpoint capacity.
 	if status == nil && len(event.NoResponse) > 0 && string(event.NoResponse) != "null" {
-		return FailureProviderUnavailable
+		return FailureConnectivity
 	}
 	return FailureUnknown
 }
@@ -482,6 +488,9 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 	condition := FailureUnknown
 	if s.retrySeq > s.progressSeq {
 		condition = s.retry
+	}
+	if condition == FailureUnknown && s.sawResult && s.isError && s.unreachable {
+		condition = FailureConnectivity
 	}
 	return claudeStreamOutcome{
 		Condition: condition,
