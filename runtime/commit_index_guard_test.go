@@ -287,3 +287,123 @@ func TestStagedLinkEntriesAreRefused(t *testing.T) {
 		})
 	}
 }
+
+func headOf(t *testing.T, w *CandidateWorkspace) string {
+	t.Helper()
+	head, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head
+}
+
+// TestCommitRefusesAMissingStagedBlob: a blob the gates cannot read is refused
+// by the gates, not left for `git commit` to trip over.
+func TestCommitRefusesAMissingStagedBlob(t *testing.T) {
+	w := commitGateWorkspace(t)
+	before := headOf(t, w)
+	if err := os.WriteFile(filepath.Join(w.Dir, "gone.go"), []byte("package gone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(w.Dir, "add", "--", "gone.go"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := gitOutput(w.Dir, "rev-parse", ":gone.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id = strings.TrimSpace(id)
+	// Removing the object alone is not enough: `add -A` would write it again
+	// from the worktree. An empty object file exists, so nothing rewrites it,
+	// and it cannot be read.
+	object := filepath.Join(w.Dir, ".git", "objects", id[:2], id[2:])
+	if err := os.Remove(object); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(object, nil, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	_, err = w.Commit("missing blob", 1<<20)
+	if err == nil || !strings.Contains(err.Error(), `staged candidate path "gone.go" has no readable blob`) {
+		t.Fatalf("a missing staged blob was not refused by the gate: %v", err)
+	}
+	if after := headOf(t, w); after != before {
+		t.Fatalf("a refused commit moved HEAD from %s to %s", before, after)
+	}
+}
+
+// TestCommitCarriesAStagedDeletion: a deletion has no blob, so neither the
+// gates nor the backstop may refuse it.
+func TestCommitCarriesAStagedDeletion(t *testing.T) {
+	w := commitGateWorkspace(t)
+	if err := os.Remove(filepath.Join(w.Dir, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "added.go"), []byte("package added\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Commit("delete and add", 1<<20); err != nil {
+		t.Fatalf("a staged deletion was refused: %v", err)
+	}
+	tree, err := gitOutput(w.Dir, "ls-tree", "-r", "--name-only", "HEAD")
+	if err != nil || strings.TrimSpace(tree) != "added.go" {
+		t.Fatalf("the commit did not carry the deletion and the addition: %q %v", tree, err)
+	}
+}
+
+// TestCommitCredentialVerdictsOnStagedBlobs: over the scan ceiling is
+// inconclusive (the blob is never read), and a token under a cache-shaped
+// path is a value - no pathname exempts candidate content.
+func TestCommitCredentialVerdictsOnStagedBlobs(t *testing.T) {
+	cases := []struct {
+		name, path string
+		content    []byte
+		kind       CredentialMaterialKind
+		detail     string
+	}{
+		{"over the scan ceiling", "bulk.bin", make([]byte, credentialScanFileLimit+1), CredentialMaterialInconclusive, "file exceeds the deterministic scan ceiling"},
+		{"token under a cache-shaped path", ".test-cache/38/3836bcb5017074e3b9d9e26170671e008544641fe4552451a3736b807d22cf4b-d", []byte(githubClassicTokenValue()), CredentialMaterialValue, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := commitGateWorkspace(t)
+			before := headOf(t, w)
+			full := filepath.Join(w.Dir, filepath.FromSlash(tc.path))
+			if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, tc.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := w.Commit("verdict", 1<<30)
+			var material *CredentialMaterialError
+			if !asCredentialMaterial(err, &material) || material.Kind != tc.kind || material.Path != tc.path || material.Detail != tc.detail {
+				t.Fatalf("want %s refusal of %s, got %v", tc.kind, tc.path, err)
+			}
+			if after := headOf(t, w); after != before {
+				t.Fatalf("a refused commit moved HEAD from %s to %s", before, after)
+			}
+		})
+	}
+}
+
+// TestBackstopRefusesANewlinePath: --stdin-paths cannot name such a path, so it
+// is refused by name rather than silently compared against something else.
+func TestBackstopRefusesANewlinePath(t *testing.T) {
+	w := commitGateWorkspace(t)
+	name := "two\nlines.go"
+	if err := os.WriteFile(filepath.Join(w.Dir, name), []byte("package two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(w.Dir, "add", "--", name); err != nil {
+		t.Fatal(err)
+	}
+	_, blobs, err := stagedCommitPaths(w.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = refuseWorktreeDivergence(w.Dir, blobs)
+	if err == nil || !strings.Contains(err.Error(), `"two\nlines.go" cannot be compared`) {
+		t.Fatalf("a newline path was not refused by name: %v", err)
+	}
+}

@@ -761,10 +761,10 @@ func guardStagedContent(dir string, paths []string, blobs []stagedBlob, maxBytes
 		for i, line := range lines {
 			fields := strings.Fields(line)
 			if len(fields) != 3 || fields[0] != blobs[i].id || fields[1] != "blob" {
-				return fmt.Errorf("staged candidate path %q is not a readable blob", blobs[i].path)
+				return fmt.Errorf("staged candidate path %q has no readable blob", blobs[i].path)
 			}
 			if blobs[i].size, err = strconv.ParseInt(fields[2], 10, 64); err != nil {
-				return fmt.Errorf("staged candidate path %q is not a readable blob", blobs[i].path)
+				return fmt.Errorf("staged candidate path %q has no readable blob", blobs[i].path)
 			}
 			if normalized, err := normalizedCandidatePath(blobs[i].path); err == nil {
 				sizes[normalized] = blobs[i].size
@@ -827,7 +827,7 @@ func readBlobs(dir string, blobs []stagedBlob) (map[string][]byte, error) {
 		header, rest, ok := bytes.Cut(out, []byte("\n"))
 		fields := strings.Fields(string(header))
 		if !ok || len(fields) != 3 || fields[0] != b.id || fields[1] != "blob" || fields[2] != strconv.FormatInt(b.size, 10) || int64(len(rest)) < b.size+1 {
-			return nil, fmt.Errorf("staged candidate path %q is not a readable blob", b.path)
+			return nil, fmt.Errorf("staged candidate path %q could not be read from the object store", b.path)
 		}
 		contents[b.id] = rest[:b.size]
 		out = rest[b.size+1:]
@@ -845,11 +845,18 @@ func refuseWorktreeDivergence(dir string, blobs []stagedBlob) error {
 	}
 	var in strings.Builder
 	for _, b := range blobs {
+		// --stdin-paths is line-delimited, so a newline in a path cannot be
+		// named to it. Refused, not worked around.
+		if strings.ContainsAny(b.path, "\n\r") {
+			return fmt.Errorf("staged candidate path %q cannot be compared with its worktree file", b.path)
+		}
 		in.WriteString(b.path + "\n")
 	}
 	out, err := runGitInput(dir, []byte(in.String()), "hash-object", "--no-filters", "--stdin-paths")
 	if err != nil {
-		return fmt.Errorf("staged candidate paths differ from the worktree: %w", err)
+		// A missing or unreadable worktree file. git's stderr is not echoed:
+		// it can carry candidate-controlled text of any length.
+		return fmt.Errorf("staged candidate paths differ from the worktree: a staged path has no readable worktree file")
 	}
 	hashes := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(hashes) != len(blobs) {
