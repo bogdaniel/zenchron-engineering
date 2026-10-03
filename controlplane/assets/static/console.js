@@ -84,11 +84,16 @@
   var freshness = document.getElementById("freshness");
   var lastGood = Date.parse(freshness && freshness.getAttribute("data-observed-at")) || Date.now();
   var failure = "";
+  // confirmed is false until one refresh has succeeded in this page. Before
+  // then the server snapshot is all there is, so the badge says "snapshot"
+  // (or "stale" once that snapshot is too old) and never "live" (#421 review).
+  var confirmed = false;
 
   function render() {
     if (!indicator) return;
     var age = Date.now() - lastGood;
-    var live = !failure && age <= STALE_MS;
+    var live = confirmed && !failure && age <= STALE_MS;
+    if (!confirmed && !failure && age <= STALE_MS) return;
     indicator.textContent = live ? "live" : "stale";
     indicator.classList.toggle("stale", !live);
     indicator.title = live ? "refreshed within the last " + STALE_MS / 1000 + "s" : failure || "no successful refresh for " + Math.round(age / 1000) + "s";
@@ -124,6 +129,7 @@
         swapRegions(new DOMParser().parseFromString(html, "text/html"));
         lastGood = Date.now();
         failure = "";
+        confirmed = true;
       })
       .catch(function (err) {
         failure = err && err.name === "AbortError" ? "refresh timed out after " + TIMEOUT_MS / 1000 + "s" : String(err && err.message || err);
