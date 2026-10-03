@@ -56,7 +56,7 @@
     <a class="stat" href="{{runsLink "failed" ""}}"><span class="label">failed</span><span class="value" data-state="failed">{{.Fleet.Counts.Failed}}</span></a>
     <a class="stat" href="{{runsLink "completed" ""}}"><span class="label">completed</span><span class="value" data-state="completed">{{.Fleet.Counts.Completed}}</span></a>
     <a class="stat" href="{{runsLink "cancelled" ""}}"><span class="label">cancelled</span><span class="value" data-state="cancelled">{{.Fleet.Counts.Cancelled}}</span></a>
-    <a class="stat" href="{{runsLink "held" ""}}"><span class="label">held material</span><span class="value" data-state="held">{{.Fleet.Counts.Held}}</span></a>
+    <a class="stat" href="{{runsLink "held" ""}}"><span class="label">held material</span><span class="value" data-state="held_material">{{.Fleet.Counts.Held}}</span></a>
   </div>
   <table class="kv">
     <tr><th>capacity</th><td>{{.Fleet.Executing}} / {{.Fleet.Capacity}} executing, {{.Fleet.Active}} active</td></tr>

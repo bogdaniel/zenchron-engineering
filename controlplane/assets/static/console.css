@@ -156,13 +156,17 @@ table.runs td.empty { text-align: center; color: var(--muted); padding: 1.5rem; 
 /* Dimensional verdicts are colored by data-state rather than by a class per
    value: the vocabulary (phase/disposition/role/admission/...) is
    open-ended, and a lookup table here would silently go stale against the
-   runtime's own enums. */
+   runtime's own enums.
+
+   "held" is the controller ROLE (this controller holds the lease: good);
+   held MATERIAL is preserved work waiting on an operator, so it carries its
+   own token rather than sharing one with a healthy state. */
 [data-state="active"], [data-state="running"], [data-state="leased"],
 [data-state="passed"], [data-state="granted"], [data-state="consistent"],
 [data-state="reachable"], [data-state="held"], [data-state="row"],
 [data-state="completed"], [data-state="satisfied"], [data-state="open"] { color: var(--ok); }
 [data-state="waiting"], [data-state="withheld"], [data-state="drift"],
-[data-state="pending"], [data-state="awaiting_approval"] { color: var(--warn); }
+[data-state="pending"], [data-state="awaiting_approval"], [data-state="held_material"] { color: var(--warn); }
 [data-state="failed"], [data-state="invariant_violation"], [data-state="not_reachable"],
 [data-state="denied"], [data-state="cancelled"], [data-state="blocked"] { color: var(--bad); }
 [data-state=""] { color: var(--muted); }
