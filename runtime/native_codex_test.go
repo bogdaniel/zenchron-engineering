@@ -146,7 +146,7 @@ func TestNativeCodexReceivesNoAmbientHostEnvironment(t *testing.T) {
 	// is small: four variables that are not these four would satisfy it, so a
 	// member swapped for another would pass a length check unnoticed. That is
 	// how a test stops being able to fail for the reason it exists.
-	want := map[string]bool{"PATH": true, "HOME": true, "USER": true, "CODEX_HOME": true}
+	want := map[string]bool{"PATH": true, "HOME": true, "USER": true, "CODEX_HOME": true, "GOENV": true}
 	for _, call := range fake.calls {
 		seen := map[string]bool{}
 		for _, entry := range call.env {
@@ -161,6 +161,9 @@ func TestNativeCodexReceivesNoAmbientHostEnvironment(t *testing.T) {
 			// HOME and CODEX_HOME are the PINNED home, not the operator's.
 			if (name == "HOME" || name == "CODEX_HOME") && value != provider.CodexHome {
 				t.Fatalf("%s is %q, want the pinned codex home %q", name, value, provider.CodexHome)
+			}
+			if name == "GOENV" && value != os.DevNull {
+				t.Fatalf("GOENV is %q, want %q (#430)", value, os.DevNull)
 			}
 		}
 	}
