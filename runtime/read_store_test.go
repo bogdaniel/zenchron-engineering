@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,6 +106,125 @@ func TestEventsPageDoesNotDecodeUnboundedTail(t *testing.T) {
 	}
 	if _, _, err := store.EventsPage("r", 2, 2); err == nil {
 		t.Fatal("accepted corrupt document")
+	}
+}
+
+// TestBoundedEventReadCostAtAJournalScale measures - and records in the test
+// log - what the per-run SSE boundary's own read pattern costs against a
+// large, real-shaped journal: LatestSequence for the initial snapshot cursor,
+// then the same bounded, LIMIT-paged EventsPage loop drain() uses to replay
+// backlog. The journal is built by inserting rows directly rather than
+// through AppendEvent, because AppendEvent re-replays the whole run on every
+// call (see its own "ponytail" note) and paying that O(n^2) cost here would
+// measure fixture setup, not the read path this test exists to measure.
+func TestBoundedEventReadCostAtAJournalScale(t *testing.T) {
+	const total = 20_000
+	dir, store := openJournal(t)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := rawJournalDB(t, dir)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO events (` + sqliteEventInsertColumns + `) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1_700_000_000, 0).UTC()
+	for n := int64(1); n <= total; n++ {
+		e := EngineeringEvent{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("e%d", n), RunID: "r", Sequence: n, Type: "synthetic.marker", OccurredAt: at.Add(time.Duration(n) * time.Second)}
+		document, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stmt.Exec(e.ID, e.RunID, e.Sequence, e.Type, e.OperationID, e.PreviousEventID, e.PreviousEventHash, e.StateBefore, e.StateAfter, e.EventHash, string(document), n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	start := time.Now()
+	latest, err := reader.LatestSequence("r")
+	latestElapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != total {
+		t.Fatalf("latest sequence: %d, want %d", latest, total)
+	}
+
+	const page = 100
+	start = time.Now()
+	var cursor int64
+	pages := 0
+	for {
+		events, more, err := reader.EventsPage("r", cursor, page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		for _, e := range events {
+			cursor = e.Sequence
+		}
+		if !more {
+			break
+		}
+	}
+	drainElapsed := time.Since(start)
+	if cursor != total {
+		t.Fatalf("drained to %d, want %d", cursor, total)
+	}
+	t.Logf("read cost at %d run events: LatestSequence=%s; bounded drain across %d pages of %d=%s", total, latestElapsed, pages, page, drainElapsed)
+	if drainElapsed > 5*time.Second {
+		t.Fatalf("bounded drain of a %d-event journal took %s; a LIMIT-paged, indexed read should not scale like this", total, drainElapsed)
+	}
+}
+
+// TestStreamReadQueriesAreIndexSeeks pins the per-run SSE reads to a range
+// seek on the full (stream_kind, run_id, plan_id, sequence) index prefix.
+// Without plan_id bound, SQLite can only seek (stream_kind, run_id) and walks
+// the run's whole index range per page and per steady-state poll - O(run
+// length) per poll even though the rows returned stay bounded (#396).
+func TestStreamReadQueriesAreIndexSeeks(t *testing.T) {
+	_, store := openJournal(t)
+	for _, tc := range []struct {
+		query, want string
+		args        []any
+	}{
+		{`SELECT id FROM events WHERE ` + eventsPageWhere + ` ORDER BY sequence ASC LIMIT 501`, "plan_id=? AND sequence>?", []any{streamRun, "r", 0}},
+		{latestSequenceQuery, "plan_id=?", []any{streamRun, "r"}},
+	} {
+		query, want := tc.query, tc.want
+		var plan strings.Builder
+		rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+query, tc.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail + "\n")
+		}
+		rows.Close()
+		if !strings.Contains(plan.String(), "SEARCH") || !strings.Contains(plan.String(), want) || strings.Contains(plan.String(), "TEMP B-TREE") {
+			t.Fatalf("%s\nplan:\n%s\nwant a SEARCH binding %q with no sort", query, plan.String(), want)
+		}
 	}
 }
 

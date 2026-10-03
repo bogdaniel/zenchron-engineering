@@ -13,7 +13,8 @@
         "method_not_allowed",
         "not_found",
         "invalid_page",
-        "read_failed"
+        "read_failed",
+        "stream_unsupported"
       ]
     }
   }

@@ -244,6 +244,21 @@ type API struct {
 	ControllerRoot string
 	Observe        func() (rt.LiveControllerSnapshot, error)
 	Now            func() time.Time
+	// StreamPollInterval and StreamHeartbeatInterval govern the per-run SSE
+	// stream's tail-poll and liveness cadence. Zero means the production
+	// default; tests shorten them so a stream test finishes in milliseconds
+	// rather than real seconds.
+	StreamPollInterval      time.Duration
+	StreamHeartbeatInterval time.Duration
+
+	// afterCursorRead runs once, between the fresh-connect cursor read and the
+	// snapshot reduction, exactly the window a race regression needs to force
+	// an event append into. It is nil in every production path.
+	afterCursorRead func()
+	// afterSnapshotRead runs once, right after the fresh-connect snapshot's
+	// Status read: an event appended there is in neither the snapshot nor the
+	// cursor, so it must arrive as the next incremental frame.
+	afterSnapshotRead func()
 }
 
 func (a *API) Handler() http.Handler {
@@ -252,6 +267,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs", a.runs)
 	mux.HandleFunc("GET /v1/runs/{id}", a.run)
 	mux.HandleFunc("GET /v1/runs/{id}/events", a.events)
+	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
 	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
