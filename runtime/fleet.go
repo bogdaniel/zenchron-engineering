@@ -14,7 +14,11 @@ package runtime
 // supervisor owns them.
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"hash"
 	"maps"
 	"os"
 	"path/filepath"
@@ -294,7 +298,7 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	if err != nil {
 		return Fleet{}, err
 	}
-	heads, err := runHeads(store, cache)
+	journals, err := runJournalDigests(store, cache)
 	if err != nil {
 		return Fleet{}, err
 	}
@@ -305,7 +309,7 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	}
 	fleet.Plans = summarizePlans(store)
 	for _, run := range runs {
-		summary := cache.summarize(store, stateDir, run, heads[run.ID], now)
+		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
 		}
@@ -396,16 +400,17 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 
 // summaryCache memoizes the replayed part of each RunSummary for a long-lived
 // reader such as the control plane, which re-reads the whole fleet every few
-// seconds. Replaying and hash-verifying every journal on every read cost ~8ms
-// a run - about a second at 93 runs - and grew with total history rather
-// than with what changed.
+// seconds. Decoding, canonicalizing and hash-verifying every journal on every
+// read cost ~8ms a run - about a second at 93 runs.
 //
-// An entry is reused only while both its run row and its journal head are
-// unchanged. The journal is append-only and hash-chained, so an unchanged
-// head is an unchanged journal, and everything replay derives from it is
-// unchanged too. What depends on the clock or on the process - elapsed time,
-// whether an operation is executing right now, whether the workspace exists
-// - is recomputed on every read. Failed summaries are never cached.
+// The key is the run row plus a SHA-256 over exactly the event bytes replay
+// reads: the same columns, the same WHERE, the same order as Events. Replay is
+// a pure function of those inputs, so a hit returns what replaying would
+// return - including for a journal edited in place, which changes the bytes,
+// misses, replays, and is refused by the chain check exactly as an uncached
+// read would refuse it (#428 review). What depends on the clock or on the
+// process - elapsed, executing right now, workspace - is recomputed on every
+// read, and failed summaries are never cached.
 type summaryCache struct {
 	mu      sync.Mutex
 	entries map[string]cachedSummary
@@ -413,41 +418,73 @@ type summaryCache struct {
 
 type cachedSummary struct {
 	run     EngineeringRun
-	head    int64
+	journal [sha256.Size]byte
 	summary RunSummary
 }
 
-// runHeads reads each run's last journal sequence in one query, or nothing
-// when there is no cache to key.
-func runHeads(store *SQLiteOperationStore, cache *summaryCache) (map[string]int64, error) {
+// runJournalDigests hashes, per run, every column of every event row replay
+// would read, or nothing when there is no cache to key. Reading the raw bytes
+// is a fraction of replaying them: no JSON decoding, no canonical encoding.
+func runJournalDigests(store *SQLiteOperationStore, cache *summaryCache) (map[string][sha256.Size]byte, error) {
 	if cache == nil {
 		return nil, nil
 	}
-	rows, err := store.db.Query(`SELECT run_id, MAX(sequence) FROM events WHERE stream_kind = ? GROUP BY run_id`, streamRun)
+	rows, err := store.db.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE stream_kind = ? ORDER BY run_id ASC, sequence ASC`, streamRun)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	heads := map[string]int64{}
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	raw := make([]sql.RawBytes, len(columns))
+	dest := make([]any, len(columns))
+	for i := range raw {
+		dest[i] = &raw[i]
+	}
+	digests := map[string][sha256.Size]byte{}
+	var current string
+	var h hash.Hash
+	flush := func() {
+		if h != nil {
+			var sum [sha256.Size]byte
+			copy(sum[:], h.Sum(nil))
+			digests[current] = sum
+		}
+	}
+	var length [8]byte
 	for rows.Next() {
-		var id string
-		var head int64
-		if err := rows.Scan(&id, &head); err != nil {
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
-		heads[id] = head
+		if runID := string(raw[1]); h == nil || runID != current {
+			flush()
+			current, h = runID, sha256.New()
+		}
+		for _, column := range raw {
+			// Length-prefixed, so no two different rows hash alike by shifting
+			// bytes between adjacent columns.
+			binary.BigEndian.PutUint64(length[:], uint64(len(column)))
+			h.Write(length[:])
+			h.Write(column)
+		}
 	}
-	return heads, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return digests, nil
 }
 
-func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, run EngineeringRun, head int64, now time.Time) RunSummary {
+func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, run EngineeringRun, journal [sha256.Size]byte, now time.Time) RunSummary {
 	if c == nil {
 		return summarizeRun(store, stateDir, run, now)
 	}
 	c.mu.Lock()
 	entry, ok := c.entries[run.ID]
 	c.mu.Unlock()
-	if ok && entry.head == head && reflect.DeepEqual(entry.run, run) {
+	if ok && entry.journal == journal && reflect.DeepEqual(entry.run, run) {
 		summary := entry.summary
 		summary.Attempts = maps.Clone(summary.Attempts)
 		summary.Elapsed = now.Sub(run.CreatedAt)
@@ -458,15 +495,16 @@ func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, r
 		}
 		return summary
 	}
-	// head was read before this replay, so a journal that grows in between is
-	// cached under the older head and simply replayed again next time.
+	// journal was digested before this replay, so a journal that changes in
+	// between is cached under the older digest and simply replayed again next
+	// time: the cache can be conservative, never stale.
 	summary := summarizeRun(store, stateDir, run, now)
 	if summary.Error == "" {
 		c.mu.Lock()
 		if c.entries == nil {
 			c.entries = map[string]cachedSummary{}
 		}
-		c.entries[run.ID] = cachedSummary{run: run, head: head, summary: summary}
+		c.entries[run.ID] = cachedSummary{run: run, journal: journal, summary: summary}
 		c.mu.Unlock()
 	}
 	return summary
