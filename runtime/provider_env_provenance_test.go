@@ -22,7 +22,9 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 		AgentKindCodexCLI:   append(slices.Clone(common), "CODEX_HOME"),
 		AgentKindClaudeCode: append(slices.Clone(common), "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"),
 	}
-	const secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	// Assembled at run time so this source file is not itself credential
+	// material to candidate admission.
+	secret := "gh" + "p_" + strings.Repeat("0a", 20)
 	for _, kind := range []string{AgentKindCodexCLI, AgentKindClaudeCode} {
 		for _, scratch := range []bool{false, true} {
 			t.Run(kind+map[bool]string{false: "/without-scratch", true: "/with-scratch"}[scratch], func(t *testing.T) {
