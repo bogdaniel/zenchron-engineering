@@ -436,6 +436,10 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // a second stop still finishes whatever operations the first one left active,
 // because a stop whose later writes failed is exactly the case an operator
 // retries.
+// A COMPLETED or FAILED run is refused with a RunTerminalError and nothing is
+// written (#439): its outcome is history, not something a stop may rewrite.
+// The refusal is made by the run.cancelled append itself, so it holds against a
+// completion that commits while this stop is in flight.
 func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, runID, reason string) (Outcome, error) {
 	run, found, err := store.Run(runID)
 	if err != nil {
@@ -518,4 +522,16 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 		}
 	}
 	return outcome, nil
+}
+
+// RunTerminalError is CancelRun's refusal to stop a run that already completed
+// or failed. It carries the outcome the run keeps.
+type RunTerminalError struct {
+	RunID       string
+	Disposition Disposition
+	Reason      string
+}
+
+func (e *RunTerminalError) Error() string {
+	return fmt.Sprintf("run %q is already %s (%s); stop never rewrites a terminal outcome", e.RunID, e.Disposition, e.Reason)
 }

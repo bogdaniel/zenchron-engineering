@@ -1050,6 +1050,10 @@ func autonomyStopAll(flags autonomyFlags, overrides autonomyOverrides, stdout io
 			continue
 		}
 		outcome, err := runtime.CancelRun(built.store, scheduler, time.Now().UTC(), run.ID, reason)
+		var terminal *runtime.RunTerminalError
+		if errors.As(err, &terminal) {
+			continue // finished after the listing; its outcome stands
+		}
 		if err != nil {
 			return runtime.ExitFailed, err
 		}

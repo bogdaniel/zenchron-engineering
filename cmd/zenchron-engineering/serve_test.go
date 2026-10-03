@@ -389,6 +389,46 @@ func TestStopAllCancelsWithoutASupervisor(t *testing.T) {
 	}
 }
 
+// TestStopNeverRewritesAFinishedRun is #439 at the command line. "finishing"
+// has journalled run.completed but its row still reads active - the window a
+// listing can race - so only the append-time guard protects it: `stop` refuses
+// it, and stop-all skips it while still cancelling the live run.
+func TestStopNeverRewritesAFinishedRun(t *testing.T) {
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+	t.Chdir(dir)
+	stateDir := activeRun(t, configPath, dir, "live")
+	activeRun(t, configPath, dir, "finishing")
+	store, err := runtime.OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(runtime.EngineeringEvent{SchemaVersion: runtime.SchemaVersion, ID: "finishing-done", RunID: "finishing", Type: runtime.EventRunCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	before := len(journalOf(t, stateDir, "finishing"))
+
+	code, err := autonomy([]string{"stop", "finishing", "--config", configPath}, offlineOverrides(), &bytes.Buffer{})
+	var refused *runtime.RunTerminalError
+	if !errors.As(err, &refused) || code != runtime.ExitInvalid {
+		t.Fatalf("stop on a completed run: code=%d err=%v, want a RunTerminalError and %d", code, err, runtime.ExitInvalid)
+	}
+	var out bytes.Buffer
+	if code, err := autonomy([]string{"stop-all", "--config", configPath}, offlineOverrides(), &out); err != nil || code != runtime.ExitCancelled {
+		t.Fatalf("stop-all: code=%d err=%v", code, err)
+	}
+	var outcomes []runtime.Outcome
+	if err := json.Unmarshal(out.Bytes(), &outcomes); err != nil || len(outcomes) != 1 || outcomes[0].RunID != "live" || outcomes[0].Disposition != runtime.Cancelled {
+		t.Fatalf("stop-all outcomes = %s (%v), want only live cancelled", out.String(), err)
+	}
+	if after := journalOf(t, stateDir, "finishing"); len(after) != before {
+		t.Fatalf("a stop wrote to a completed run's journal: %d -> %d", before, len(after))
+	}
+	if run := runDocument(t, stateDir, "finishing"); run.Disposition == runtime.Cancelled {
+		t.Fatal("a stop rewrote a completed run's row as cancelled")
+	}
+}
+
 // TestAgentSetRefusesAndSaysWhatToDoInstead is the governed transition at the
 // command line.
 func TestAgentSetRefusesAndSaysWhatToDoInstead(t *testing.T) {

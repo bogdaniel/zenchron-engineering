@@ -85,7 +85,8 @@ func exitFor(err error, fallback int) int {
 		return runtime.ExitInvalid
 	}
 	var config *runtime.ConfigError
-	if errors.As(err, &config) {
+	var terminal *runtime.RunTerminalError
+	if errors.As(err, &config) || errors.As(err, &terminal) {
 		return runtime.ExitInvalid
 	}
 	return fallback
