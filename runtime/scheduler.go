@@ -659,6 +659,10 @@ func (s Scheduler) RecordProviderProgress(id string, attempt int, progress Provi
 }
 
 func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error) {
+	return s.finishAt(id, state, time.Time{})
+}
+
+func (s Scheduler) finishAt(id string, state OperationState, retryAt time.Time) (RunOperation, error) {
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")
 	}
@@ -667,13 +671,22 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 			return fmt.Errorf("operation is not active")
 		}
 		op.State = state
+		op.RetryNotBefore = retryAt
 		op.Lease = nil
 		// What this attempt ACTUALLY executed joins the durable counter, and
 		// the operation stops being active. Anything that happens between now
 		// and the next attempt - an operator decision, a funded account, a
 		// human review - costs nothing, because nothing is executing.
 		if op.ActiveSince != nil {
-			spent := now.Sub(*op.ActiveSince)
+			ended := now
+			// A journalled connectivity failure already ended this attempt.
+			// Store-lag recovery must not charge the controller's downtime.
+			if !retryAt.IsZero() {
+				if observed := retryAt.Add(-connectivityBackoff(op.Attempt)); observed.Before(ended) {
+					ended = observed
+				}
+			}
+			spent := ended.Sub(*op.ActiveSince)
 			if spent < 0 {
 				spent = 0
 			}

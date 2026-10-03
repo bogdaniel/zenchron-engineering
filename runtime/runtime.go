@@ -380,6 +380,8 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
+	// RetryNotBefore is journalled with the failed attempt and survives restart.
+	RetryNotBefore time.Time      `json:"retry_not_before,omitempty"`
 	SchemaVersion  string         `json:"schema_version"`
 	ID             string         `json:"id"`
 	RunID          string         `json:"run_id"`
@@ -638,6 +640,9 @@ func StableOperationKey(runID, kind string, bindings ...string) string {
 	return strings.Join(append([]string{runID, kind}, bindings...), ":")
 }
 func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
+	if now.Before(op.RetryNotBefore) {
+		return false
+	}
 	if op.State == Succeeded || op.State == OperationCancelled {
 		return false
 	}

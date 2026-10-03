@@ -455,6 +455,7 @@ const ReasonGoalStateReached = "goal_state_reached"
 const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
 
 var externalWaitReasons = map[string]bool{
+	"connectivity_backoff": true,
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
@@ -585,6 +586,14 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
+			// The after record is durable before run.waiting. A crash in that
+			// gap must preserve external-wait accounting as well as the deadline.
+			if waitingSince.IsZero() {
+				var op RunOperation
+				if decodeJSON(event.Payload, &op) == nil && op.State == OperationFailed && !op.RetryNotBefore.IsZero() {
+					waitingSince = event.OccurredAt
+				}
+			}
 			if waitingSince.IsZero() || event.OperationID == "" {
 				continue
 			}
@@ -1057,13 +1066,31 @@ func (s *runState) attemptsFor(kind string) int {
 	}
 }
 
-func bindSourceObserve(s *runState) (string, bool) { return s.epochKey(), true }
+// A connectivity wait changes status, not the observation being retried.
+// Keep its original binding so status events cannot mint a fresh attempt budget.
+func observationBinding(s *runState, kind string) string {
+	var latest *RunOperation
+	for _, op := range s.snapshot.Operations {
+		if op.Kind == kind && (latest == nil || op.CreatedAt.After(latest.CreatedAt) || (op.CreatedAt.Equal(latest.CreatedAt) && op.ID > latest.ID)) {
+			copy := op
+			latest = &copy
+		}
+	}
+	if latest != nil && latest.State == OperationFailed && !latest.RetryNotBefore.IsZero() {
+		return bindingOf(*latest)
+	}
+	return s.epochKey()
+}
+
+func bindSourceObserve(s *runState) (string, bool) {
+	return observationBinding(s, OpSourceObserve), true
+}
 
 func bindGitHubObserve(s *runState) (string, bool) {
 	if !s.published() {
 		return "", false
 	}
-	return s.epochKey(), true
+	return observationBinding(s, OpGitHubObserve), true
 }
 
 func bindContractCompile(s *runState) (string, bool) {
@@ -1685,7 +1712,7 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 		if !ok || (journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled) {
 			continue
 		}
-		if _, err := r.scheduler.Finish(journalled.ID, journalled.State); err != nil {
+		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore); err != nil {
 			return err
 		}
 	}
@@ -1726,6 +1753,10 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	}
 	if planned.Attempt >= planned.MaxAttempts {
 		outcome, err := r.settle(state, Failed, desired.kind+attemptsExhaustedSuffix)
+		return false, outcome, err
+	}
+	if r.deps.Clock.Now().Before(planned.RetryNotBefore) {
+		outcome, err := r.settle(state, Waiting, "connectivity_backoff")
 		return false, outcome, err
 	}
 	leased, err := r.scheduler.Next(state.run.ID)
@@ -1827,6 +1858,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// itself writes to the scheduler row - so journal and store agree, and the
 	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
+	finished.RetryNotBefore = time.Time{}
 	finished.State = produced.state
 	if interrupted {
 		finished.State = OperationCancelled
@@ -1839,11 +1871,14 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	if produced.transient || failureClassOf(finished.Result) == FailureProviderUnavailable {
+		finished.RetryNotBefore = r.deps.Clock.Now().Add(connectivityBackoff(started.Attempt))
+	}
 	// The journal is written first and is the authority for reconciliation.
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.Finish(started.ID, finished.State); err != nil {
+	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore); err != nil {
 		// The stop may already have finished the row. That is accepted only for
 		// an interrupted execution and only when the row durably reads
 		// OperationCancelled - the one state CancelRun writes. Every other
@@ -1895,6 +1930,10 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// decides whether to spend the next one.
 	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
 		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
+	if !finished.RetryNotBefore.IsZero() {
+		outcome, err := r.settle(state, Waiting, "connectivity_backoff")
 		return false, outcome, err
 	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
