@@ -135,6 +135,19 @@ type ConfigDigest struct {
 	Repository string `json:"repository"`
 }
 
+// ConfigDigestDifference reports the first differing member, checking global
+// before repository. Digests are shortened for operator diagnostics; equality
+// is checked on the full digests. Equal configurations return empty strings.
+func ConfigDigestDifference(local, governing ConfigDigest) (member, localShort, governingShort string) {
+	if local.Global != governing.Global {
+		return "global", short12(local.Global), short12(governing.Global)
+	}
+	if local.Repository != governing.Repository {
+		return "repository", short12(local.Repository), short12(governing.Repository)
+	}
+	return "", "", ""
+}
+
 // RunBudgets bounds one run. WallLimit terminates a run that cannot finish;
 // the attempt ceilings bound each bounded operation kind independently, so a
 // failing verifier cannot consume the execution provider's budget.
