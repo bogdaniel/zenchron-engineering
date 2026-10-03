@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -103,6 +105,90 @@ func TestEventsPageDoesNotDecodeUnboundedTail(t *testing.T) {
 	}
 	if _, _, err := store.EventsPage("r", 2, 2); err == nil {
 		t.Fatal("accepted corrupt document")
+	}
+}
+
+// TestBoundedEventReadCostAtAJournalScale measures - and records in the test
+// log - what the per-run SSE boundary's own read pattern costs against a
+// large, real-shaped journal: LatestSequence for the initial snapshot cursor,
+// then the same bounded, LIMIT-paged EventsPage loop drain() uses to replay
+// backlog. The journal is built by inserting rows directly rather than
+// through AppendEvent, because AppendEvent re-replays the whole run on every
+// call (see its own "ponytail" note) and paying that O(n^2) cost here would
+// measure fixture setup, not the read path this test exists to measure.
+func TestBoundedEventReadCostAtAJournalScale(t *testing.T) {
+	const total = 20_000
+	dir, store := openJournal(t)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := rawJournalDB(t, dir)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO events (` + sqliteEventInsertColumns + `) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1_700_000_000, 0).UTC()
+	for n := int64(1); n <= total; n++ {
+		e := EngineeringEvent{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("e%d", n), RunID: "r", Sequence: n, Type: "synthetic.marker", OccurredAt: at.Add(time.Duration(n) * time.Second)}
+		document, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stmt.Exec(e.ID, e.RunID, e.Sequence, e.Type, e.OperationID, e.PreviousEventID, e.PreviousEventHash, e.StateBefore, e.StateAfter, e.EventHash, string(document), n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	start := time.Now()
+	latest, err := reader.LatestSequence("r")
+	latestElapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != total {
+		t.Fatalf("latest sequence: %d, want %d", latest, total)
+	}
+
+	const page = 100
+	start = time.Now()
+	var cursor int64
+	pages := 0
+	for {
+		events, more, err := reader.EventsPage("r", cursor, page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		for _, e := range events {
+			cursor = e.Sequence
+		}
+		if !more {
+			break
+		}
+	}
+	drainElapsed := time.Since(start)
+	if cursor != total {
+		t.Fatalf("drained to %d, want %d", cursor, total)
+	}
+	t.Logf("read cost at %d run events: LatestSequence=%s; bounded drain across %d pages of %d=%s", total, latestElapsed, pages, page, drainElapsed)
+	if drainElapsed > 5*time.Second {
+		t.Fatalf("bounded drain of a %d-event journal took %s; a LIMIT-paged, indexed read should not scale like this", total, drainElapsed)
 	}
 }
 
