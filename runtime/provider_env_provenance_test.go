@@ -159,6 +159,21 @@ func TestProviderEnvironmentLastWinsAndRedactsUserinfo(t *testing.T) {
 	}
 }
 
+// The userinfo ends at the LAST @ before the first /: a raw @ inside the
+// password must not leave its tail behind, and an @ in a path is not userinfo.
+func TestURLUserinfoRedaction(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://u:p@ss@host/p":                          "https://[REDACTED]@host/p",
+		"https://a:x@h1/p,https://b:y@h2|https://c:z@h3": "https://[REDACTED]@h1/p,https://[REDACTED]@h2|https://[REDACTED]@h3",
+		"https://host/a@b":                               "https://host/a@b",
+		"off":                                            "off",
+	} {
+		if got := urlUserinfo.ReplaceAllString(in, "${1}[REDACTED]@"); got != want {
+			t.Errorf("%q redacted to %q, want %q", in, got, want)
+		}
+	}
+}
+
 // Every spec's allowlist fits the bound validation enforces at append.
 func TestEverySpecProviderEnvironmentFitsTheBound(t *testing.T) {
 	for kind, spec := range cliAgentSpecs {

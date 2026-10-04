@@ -565,8 +565,9 @@ func credentialShapedName(name string) bool {
 
 // urlUserinfo matches the userinfo of a URL (scheme://user:token@host), the
 // shape a credential takes inside an otherwise non-secret value such as a
-// GOPROXY list.
-var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@`)
+// GOPROXY list. The match is greedy up to the LAST @ before the first /, so a
+// raw @ inside a password does not leave the password's tail behind.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]+@`)
 
 // providerEnvironment records the allowlisted names from the environment the
 // process was actually given. A name not passed is recorded without a value;
