@@ -19,6 +19,21 @@ journal cursor, and its hash-chain fields excluded. Event hashes are SHA-256 of
 the canonical event with only `event_hash` excluded, retaining its
 state-before/state-after and chain bindings. The reducer never reads wall time.
 
+An event's `state_before` and `state_after` are recorded transition digests:
+diagnostic compatibility metadata, not replay-verification inputs and not an
+integrity or authority anchor (#453). Replay authority is the event's type,
+stream and sequence, agreement between its indexed columns and its document,
+its link to the previous event, its `event_hash`, the validity of its
+artifacts, and the deterministic fold over its events. Replay does not
+recompute or compare the recorded digests, and no cache, checkpoint, recovery
+path, admission, authority or other runtime decision may trust either field
+in place of replay. Because `event_hash` covers them, changing either field
+without recomputing that hash is corruption and is refused like any other
+tampered event; a value that is arbitrary but chain-consistent is accepted
+and still decides nothing. The physical JSON names stay for journal
+compatibility. A later journal-format revision may remove the fields, but
+historical events are never rewritten merely to rename them.
+
 Runtime data is stored in the operator state directory, not the target repo.
 Artifacts are references only and distinguish raw/local-only data from
 sanitized/publishable data.  The #30 extension and #31 checkpoint shapes are
