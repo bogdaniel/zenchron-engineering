@@ -358,6 +358,10 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 	if err != nil {
 		return nil, err
 	}
+	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store: c.store,
 		// A SUCCESSOR STARTS SHUT. It admits work when the durable record says
@@ -372,9 +376,12 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		StateDir:              c.config.StateDir,
 		Repositories:          repositories,
 		MaxConcurrentRuns:     ceiling,
-		PollInterval:          settings.PollInterval,
-		Discovery:             discovery,
-		Agents:                c.agents,
+		// The supervisor's turn envelope is the sum of both class ceilings;
+		// the engines' schedulers enforce each one durably (#85).
+		MaxConcurrentObservations: observations,
+		PollInterval:              settings.PollInterval,
+		Discovery:                 discovery,
+		Agents:                    c.agents,
 		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
 			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
 		},
@@ -432,7 +439,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		if err != nil {
 			return controlError(err)
 		}
-		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, time.Now().UTC())
+		observations, err := c.maxConcurrentObservations()
+		if err != nil {
+			return controlError(err)
+		}
+		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, observations, time.Now().UTC())
 		if err != nil {
 			return controlError(err)
 		}
@@ -696,6 +707,16 @@ func (c *composition) maxConcurrentRuns() (int, error) {
 	return settings.MaxConcurrentRuns, nil
 }
 
+// maxConcurrentObservations is the observation-class ceiling (#85), resolved
+// from the same settings for the same reason.
+func (c *composition) maxConcurrentObservations() (int, error) {
+	settings, err := c.config.WatchSettings()
+	if err != nil {
+		return 0, err
+	}
+	return settings.MaxConcurrentObservations, nil
+}
+
 // ---------------------------------------------------------------------------
 // agents
 // ---------------------------------------------------------------------------
@@ -778,7 +799,11 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, time.Now().UTC())
+	observations, err := built.maxConcurrentObservations()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, observations, time.Now().UTC())
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -796,7 +821,8 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	// The ceiling bounds workers, not runs, so the two counts are printed as
 	// the two facts they are rather than as one ratio that is true of neither.
 	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
-	fmt.Fprintf(stdout, "Runs:       %d nonterminal\n\n", fleet.Active)
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d unavailable\n\n",
+		fleet.Active, fleet.Working, fleet.Capacity, fleet.Observing, fleet.ObservationCapacity, fleet.Runnable, fleet.Waiting, fleet.Unavailable)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",

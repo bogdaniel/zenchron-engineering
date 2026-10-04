@@ -44,6 +44,10 @@ type CommandOutput struct {
 	// process, committed by the executor when it was decided (#213). An
 	// executor that does not decide it leaves OwnerUndecided.
 	Owner TerminationOwner
+	// EscapedWriter reports that, after the process returned and its group
+	// was stopped, something still held the candidate writer lock: a
+	// descendant that left the process group and is still running (#168).
+	EscapedWriter bool
 }
 type CommandExecutor interface {
 	LookPath(string) error
@@ -180,6 +184,10 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 		cmd.Stdout = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, out)
 		cmd.Stderr = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, errOut)
 	}
+	lock := candidateWriterFrom(ctx)
+	if lock != nil {
+		cmd.ExtraFiles = []*os.File{lock}
+	}
 	stopWatch := watch.watchUntilComplete()
 	owner, err := runBoundedProcess(ctx, cmd, grace)
 	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the
@@ -202,8 +210,12 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	if exit, ok := err.(*exec.ExitError); ok {
 		result.ExitCode = exit.ExitCode()
 	}
+	if lock != nil && cmd.Process != nil {
+		result.EscapedWriter = releaseCandidateWriter(lock, cmd.Process.Pid, grace)
+	}
 	return result, err
 }
+
 func (OSCommandExecutor) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	return OSCommandExecutor{}.Run(ctx, name, args, dir, env, grace)
 }

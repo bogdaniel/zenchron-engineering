@@ -95,8 +95,8 @@ and adds nothing to what may be authorized:
   infrastructure `docs/construction-principles.md`'s YAGNI section already
   warns against; it is deferred until a concrete UI requirement cannot be met
   without one.
-- **Per-run SSE using `EventsAfter`.** Live event streaming for one run reuses
-  `SQLiteOperationStore.EventsAfter` (`runtime/journal.go`) — the same cursor
+- **Per-run SSE using `EventsPage`.** Live event streaming for one run reuses
+  the LIMIT-bounded `SQLiteOperationStore.EventsPage` (`runtime/journal.go`) over the same run-local `sequence` cursor
   contract `autonomy events` already relies on — pushed over Server-Sent
   Events rather than polled, instead of a new subscription mechanism.
 - **Loopback-only by default, with a bearer token in the state directory at

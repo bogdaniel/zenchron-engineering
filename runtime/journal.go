@@ -565,13 +565,22 @@ func decodeRun(document string) (EngineeringRun, error) {
 	return run, nil
 }
 
+const (
+	eventsPageWhere     = `stream_kind = ? AND run_id = ? AND plan_id = '' AND sequence > ?`
+	latestSequenceQuery = `SELECT COALESCE(MAX(sequence), 0) FROM events WHERE stream_kind = ? AND run_id = ? AND plan_id = ''`
+)
+
 // EventsPage uses the run-local sequence, never the fleet global_sequence.
 // The extra row establishes hasMore without reading the unbounded tail.
+// Binding plan_id to the empty string (true of every run event) binds every column of the
+// UNIQUE(stream_kind, run_id, plan_id, sequence) index before sequence, so
+// the page is a range seek; without it SQLite walks the run's whole index
+// range on every page and every steady-state poll (#396 measurement).
 func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) (events []EngineeringEvent, hasMore bool, err error) {
 	if after < 0 || limit < 1 || limit > 500 {
 		return nil, false, fmt.Errorf("invalid event page bounds")
 	}
-	events, err = queryStreamEventsLimited(s.db, `stream_kind = ? AND run_id = ? AND sequence > ?`, ` LIMIT ?`, streamRun, runID, after, limit+1)
+	events, err = queryStreamEventsLimited(s.db, eventsPageWhere, ` LIMIT ?`, streamRun, runID, after, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -579,4 +588,15 @@ func (s *SQLiteOperationStore) EventsPage(runID string, after int64, limit int) 
 		events, hasMore = events[:limit], true
 	}
 	return events, hasMore, nil
+}
+
+// LatestSequence returns the run's highest run-stream sequence, or 0 if it has
+// none yet. It is a single indexed seek - the same (stream_kind, run_id,
+// plan_id, sequence) prefix EventsPage filters by - never a scan, so a per-run
+// SSE snapshot can bound its live tail to events after this cursor without
+// reading the run's history to find it.
+func (s *SQLiteOperationStore) LatestSequence(runID string) (int64, error) {
+	var sequence int64
+	err := s.db.QueryRow(latestSequenceQuery, streamRun, runID).Scan(&sequence)
+	return sequence, err
 }

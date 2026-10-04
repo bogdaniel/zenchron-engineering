@@ -232,8 +232,8 @@ func transientForgeFailure(err error) bool {
 		return true
 	}
 	// A cancelled or timed-out poll says nothing about the actor, and the next
-	// tick asks again.
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	// tick asks again; nor does transport loss.
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || transportCause(err).Lost()
 }
 
 func findFeedbackItem(items []FeedbackItem, key string) (FeedbackItem, bool) {
