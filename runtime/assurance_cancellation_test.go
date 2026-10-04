@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,12 @@ type scriptedDocker struct {
 	onBlock  func()
 	seen     map[string]int
 	blocked  bool
+	// startExits scripts the nth `start` (preparation and verification
+	// alternate, so verification is every even one). A positive code is the
+	// workload's own exit, which Docker records and `wait` reports; a negative
+	// one is a start that failed before any workload ran.
+	startExits map[int]int
+	exited     int
 }
 
 func (d *scriptedDocker) LookPath(string) error { return nil }
@@ -36,6 +44,10 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 	}
 	verb := strings.Fields(joined)[0]
 	d.seen[verb]++
+	code := 0
+	if verb == "start" {
+		code = d.startExits[d.seen[verb]]
+	}
 	block := d.blockOn != "" && strings.HasPrefix(joined, d.blockOn) && d.seen[verb] == d.blockNth
 	if block {
 		d.blocked = true
@@ -49,6 +61,23 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 		return CommandOutput{}, ctx.Err()
 	}
 	switch {
+	case code != 0:
+		if code < 0 {
+			return CommandOutput{ExitCode: 1, Stderr: []byte("Error response from daemon: cannot start container\n")}, errors.New("exit status 1")
+		}
+		d.mu.Lock()
+		d.exited = code
+		d.mu.Unlock()
+		return CommandOutput{ExitCode: code, Stdout: []byte("--- FAIL: TestCandidate\nFAIL\n")}, fmt.Errorf("exit status %d", code)
+	case strings.HasPrefix(joined, "inspect") && d.exitedCode() != 0:
+		return CommandOutput{Stdout: []byte("false\n")}, nil
+	case verb == "wait" && d.exitedCode() != 0:
+		return CommandOutput{Stdout: []byte(strconv.Itoa(d.exitedCode()) + "\n")}, nil
+	case verb == "rm":
+		d.mu.Lock()
+		d.exited = 0
+		d.mu.Unlock()
+		return CommandOutput{}, nil
 	case strings.HasPrefix(joined, "info --format {{.ServerVersion}}"):
 		return CommandOutput{Stdout: []byte("27.1.1\n")}, nil
 	case strings.HasPrefix(joined, "info --format {{.ID}}"):
@@ -59,6 +88,12 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 		return CommandOutput{ExitCode: 1, Stderr: []byte("Error: No such object\n")}, errors.New("no such object")
 	}
 	return CommandOutput{}, nil // create, start, kill, wait, rm
+}
+
+func (d *scriptedDocker) exitedCode() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.exited
 }
 
 func (d *scriptedDocker) count(verb string) int {
