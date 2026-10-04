@@ -19,6 +19,18 @@ journal cursor, and its hash-chain fields excluded. Event hashes are SHA-256 of
 the canonical event with only `event_hash` excluded, retaining its
 state-before/state-after and chain bindings. The reducer never reads wall time.
 
+Every persisted event carries its `event_hash`, in its document and in its
+indexed column. A persisted event whose `event_hash` is empty is corruption, on
+the run stream and the plan stream alike, wherever it sits in the chain and
+whether or not anything else about it changed: the shared read that every
+replay and event read passes through refuses it, and the reducers have no
+empty-hash tolerance of their own (#462). The only event that is ever hashed
+without a stored hash is the one being appended: inside its append
+transaction, before `state_after` is known, it carries a provisional hash
+(its digest with `state_after` still empty) so the reducer can fold it, and
+the final hash replaces that before the row is written. The state digest
+excludes the cursor, so the provisional value never reaches it.
+
 An event's `state_before` and `state_after` are recorded transition digests:
 diagnostic compatibility metadata, not replay-verification inputs and not an
 integrity or authority anchor (#453). Replay authority is the event's type,
@@ -29,7 +41,7 @@ recompute or compare the recorded digests, and no cache, checkpoint, recovery
 path, admission, authority or other runtime decision may trust either field
 in place of replay. Because `event_hash` covers them, changing either field
 without recomputing that hash is corruption and is refused like any other
-tampered event; a value that is arbitrary but chain-consistent is accepted
+tampered event, including when the hash is blanked rather than left stale; a value that is arbitrary but chain-consistent is accepted
 and still decides nothing. The physical JSON names stay for journal
 compatibility. A later journal-format revision may remove the fields, but
 historical events are never rewritten merely to rename them.

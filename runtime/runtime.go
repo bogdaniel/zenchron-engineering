@@ -568,10 +568,11 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			return s, fmt.Errorf("broken event chain")
 		}
 		h, err := EventDigest(e)
-		if err != nil || (e.EventHash != "" && e.EventHash != h) {
+		// No empty-hash tolerance: every event a reducer sees carries its hash,
+		// including the journal's not-yet-persisted one (#462).
+		if err != nil || e.EventHash != h {
 			return s, fmt.Errorf("invalid event hash")
 		}
-		e.EventHash = h
 		for _, a := range e.Artifacts {
 			if err := ValidateArtifact(a); err != nil {
 				return s, err

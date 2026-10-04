@@ -594,6 +594,10 @@ func TestMigrationPreservesAPreExistingRunJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	event.StateBefore = before.StateSHA256
+	// The provisional hash appendToStream folds in before state_after (#462).
+	if event.EventHash, err = EventDigest(event); err != nil {
+		t.Fatal(err)
+	}
 	after, err := Reduce(run, []EngineeringEvent{event})
 	if err != nil {
 		t.Fatal(err)
