@@ -754,6 +754,7 @@ func doctorGitIsolation() DoctorCheck {
 		"GIT_ATTR_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_LITERAL_PATHSPECS=1",
+		"GIT_NO_REPLACE_OBJECTS=1",
 		"PATH=" + trustedPATH,
 	} {
 		if !containsExact(env, required) {
