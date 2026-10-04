@@ -251,7 +251,10 @@ func TestALeftoverHandoffCannotBeInherited(t *testing.T) {
 // Admitted handoffs and completed items survive a further restart unchanged,
 // and nothing completed is executed again.
 func TestARestartRecreatesNothingAndRecoversWhatDidNotLand(t *testing.T) {
-	fixture := newFleetFixture(t, 10)
+	// Restart, not concurrency, is under test; three slots keep SQLite write
+	// contention below the level at which a busy store orphans a live lease
+	// (see #485).
+	fixture := newFleetFixture(t, 3)
 	first := fixture.supervisor()
 	engine, err := first.engine("acme/repo", "claude")
 	if err != nil {

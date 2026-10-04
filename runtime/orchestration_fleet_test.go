@@ -269,6 +269,11 @@ func (f *fleetFixture) drive(supervisor *Supervisor, batchID string) Orchestrati
 		for _, problem := range report.Orchestration {
 			f.t.Log("orchestration: " + problem)
 		}
+		for _, driven := range report.Driven {
+			if driven.Error != "" {
+				f.t.Logf("driven %s: %s", driven.RunID, driven.Error)
+			}
+		}
 		f.clock.advance(61 * time.Second)
 		view := f.status(batchID)
 		settled := 0
