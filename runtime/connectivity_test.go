@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -558,18 +559,32 @@ func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 		t.Fatal("a bare RetryNotBefore was read as a connectivity wait")
 	}
 	op.RetryDisposition = DispositionAccountWait
+	op.Result = mustMarshal(t, mutationResult{FailureClass: FailureProviderAccountUnavailable})
 	if waitReasonOf(op) != "execution_provider_account_unavailable" || !fold(op) || binding(op) == "kept" {
-		t.Fatal("a reserved disposition lost its own reason or wait")
+		t.Fatal("a provider disposition lost its class's reason or its wait")
 	}
+	op.Result = nil
 	op.RetryDisposition, op.RetryNotBefore = DispositionTransportBackoff, time.Time{}
 	op.Attempt = op.MaxAttempts
 	if binding(op) != "kept" || fold(op) {
 		t.Fatal("the last transport attempt minted a binding or opened a wait")
 	}
 	for d, s := range retryDispositions {
-		if s.Reason == "" || s.ResumeCondition == "" || externalWaitReasons[s.Reason] == s.SpendsActiveWork {
+		if s.ResumeCondition == "" || (s.Reason != "" && externalWaitReasons[s.Reason] == s.SpendsActiveWork) {
 			t.Fatalf("%s: incomplete accounting row %+v", d, s)
 		}
+	}
+	// A row with no reason of its own waits under its classes' stated reasons,
+	// and those must be external exactly as the row says.
+	for class := range waitReasons {
+		if s, ok := retryDispositions[retryDispositionFor(class)]; ok && s.Reason == "" && externalWaitReasons[waitReason(class)] == s.SpendsActiveWork {
+			t.Fatalf("%s: class reason %q does not match its row's accounting", class, waitReason(class))
+		}
+	}
+	// A reason-less row must not register "": a reason-less run.waiting
+	// would then pause the active-work budget.
+	if externalWaitReasons[""] {
+		t.Fatal("the empty reason is registered as external wait")
 	}
 }
 
@@ -586,8 +601,8 @@ func TestConnectivityRetryNotBeforeOmittedWhenZero(t *testing.T) {
 	}
 }
 
-// Endpoint capacity has one owner and one rule: provider_unavailable routes to
-// the refunded wait and carries no retry disposition.
+// Endpoint capacity (#87): provider_unavailable keeps its reason and its
+// refunded wait, now probed through provider_availability_wait.
 func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
@@ -597,8 +612,8 @@ func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 		t.Fatalf("capacity: %+v", out)
 	}
 	for _, op := range f.state(runID).snapshot.Operations {
-		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != "" || !op.RetryNotBefore.IsZero()) {
-			t.Fatalf("capacity acquired a disposition: %+v", op)
+		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != DispositionProviderAvailabilityWait || !op.RetryNotBefore.Equal(f.clock.Now().Add(5*time.Minute))) {
+			t.Fatalf("capacity probe: %s", retryRow(op))
 		}
 	}
 	ops, err := f.store.Operations(runID)
@@ -682,11 +697,15 @@ func TestConnectivityStoreLagUsesTheJournalledEnd(t *testing.T) {
 	}
 }
 
-// G6: the #87 rows are declared, not produced. No failure class maps to them,
-// and nothing outside this table names them or their reasons.
-func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
-	reserved := map[string]bool{
-		"DispositionProviderPrerequisiteWait": true, "DispositionRateLimitWait": true, "DispositionAccountWait": true,
+// #87 slice 2: the provider dispositions are produced by exactly the four
+// provider wait classes, and every other class keeps its route alone.
+func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing.T) {
+	want := map[FailureClass]RetryDisposition{
+		FailureConnectivity:               DispositionTransportBackoff,
+		FailureProviderAccountUnavailable: DispositionAccountWait,
+		FailureProviderQuota:              DispositionRateLimitWait,
+		FailureProviderRateLimited:        DispositionRateLimitWait,
+		FailureProviderUnavailable:        DispositionProviderAvailabilityWait,
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -703,25 +722,20 @@ func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
 			t.Fatal(err)
 		}
 		ast.Inspect(parsed, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.Ident:
-				if reserved[n.Name] && file != "connectivity.go" {
-					t.Errorf("%s names reserved disposition %s", fset.Position(n.Pos()), n.Name)
-				}
-			case *ast.ValueSpec:
-				if typ, ok := n.Type.(*ast.Ident); ok && typ.Name == "FailureClass" {
-					for _, value := range n.Values {
-						if lit, ok := value.(*ast.BasicLit); ok {
-							classes++
-							if d := retryDispositionFor(FailureClass(strings.Trim(lit.Value, `"`))); d != "" && d != DispositionTransportBackoff {
-								t.Errorf("class %s produces reserved disposition %s", lit.Value, d)
-							}
-						}
+			spec, ok := n.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			if typ, ok := spec.Type.(*ast.Ident); !ok || typ.Name != "FailureClass" {
+				return true
+			}
+			for _, value := range spec.Values {
+				if lit, ok := value.(*ast.BasicLit); ok {
+					classes++
+					class := FailureClass(strings.Trim(lit.Value, `"`))
+					if got := retryDispositionFor(class); got != want[class] {
+						t.Errorf("class %s produces %q, want %q", class, got, want[class])
 					}
-				}
-			case *ast.BasicLit:
-				if n.Value == `"execution_provider_prerequisite_unavailable"` && file != "connectivity.go" {
-					t.Errorf("%s uses the reserved prerequisite reason", fset.Position(n.Pos()))
 				}
 			}
 			return true
@@ -730,10 +744,396 @@ func TestConnectivityReservedDispositionsAreNotProduced(t *testing.T) {
 	if classes < 20 {
 		t.Fatalf("found only %d failure classes; the scan is not reading the declarations", classes)
 	}
-	// The reserved reason is registered as external wait only through the
-	// table, ready for #87, and is otherwise unreachable today.
-	if !externalWaitReasons["execution_provider_prerequisite_unavailable"] {
-		t.Fatal("the reserved prerequisite reason is not registered from the table")
+	// Every row has a producer: an unproduced row has no real semantics and
+	// one stray producer away from an unbounded, immediately eligible wait.
+	produced := map[RetryDisposition]bool{}
+	for _, d := range want {
+		produced[d] = true
+	}
+	for d := range retryDispositions {
+		if !produced[d] {
+			t.Errorf("disposition %s is produced by no failure class", d)
+		}
+	}
+	for class, d := range want {
+		s := retryDispositions[d]
+		if d == DispositionTransportBackoff {
+			continue
+		}
+		// The accounting the frozen table states: refunded, external, no
+		// finite attempt authority, a fixed 5 minute probe whatever the attempt.
+		if RouteFailure(class) != RouteWait || s.SpendsAttempt || s.SpendsActiveWork || s.FiniteAttemptAuthority || s.Delay == nil || s.Delay(1) != 5*time.Minute || s.Delay(9) != 5*time.Minute ||
+			!strings.HasSuffix(s.ResumeCondition, fmt.Sprintf("; probed every %d minutes", providerWaitProbe(1)/time.Minute)) {
+			t.Errorf("%s/%s: accounting %+v", class, d, s)
+		}
+	}
+}
+
+// #87: status reports only the retry the run is actually waiting on.
+func TestConnectivityRetryStatusIsTheRunsOwnWait(t *testing.T) {
+	at := time.Date(2027, 1, 15, 8, 0, 0, 0, time.UTC)
+	quota := mustMarshal(t, mutationResult{FailureClass: FailureProviderQuota})
+	waitOp := func(id, kind string, created time.Time) RunOperation {
+		return RunOperation{ID: id, Kind: kind, State: OperationFailed, MaxAttempts: 2, CreatedAt: created, Result: quota,
+			RetryDisposition: DispositionRateLimitWait, RetryNotBefore: created.Add(5 * time.Minute)}
+	}
+	state := func(disposition Disposition, reason string, ops ...RunOperation) *runState {
+		s := &runState{snapshot: RunSnapshot{Operations: map[string]RunOperation{}}}
+		s.snapshot.Disposition, s.snapshot.Reason = disposition, reason
+		for _, op := range ops {
+			s.snapshot.Operations[op.ID] = op
+		}
+		return s
+	}
+	stale := waitOp("a", OpExecutionInvoke, at)
+	later := RunOperation{ID: "b", Kind: OpExecutionInvoke, State: Succeeded, CreatedAt: at.Add(time.Hour)}
+	if got := retryStatus(state(Waiting, "awaiting_authority", stale, later)); got != nil {
+		t.Fatalf("a superseded provider wait masked the authority wait: %+v", got)
+	}
+	// Same reason, but the binding moved on: still history.
+	if got := retryStatus(state(Waiting, "execution_provider_quota", stale, later)); got != nil {
+		t.Fatalf("a superseded provider wait was reported: %+v", got)
+	}
+	// Still the latest of its kind, but the run waits on something else.
+	if got := retryStatus(state(Waiting, "awaiting_authority", stale)); got != nil {
+		t.Fatalf("a provider wait masked the run's own reason: %+v", got)
+	}
+	if got := retryStatus(state(Failed, "execution_provider_quota", stale)); got != nil {
+		t.Fatalf("a run that is not waiting reported a probe: %+v", got)
+	}
+	newer := waitOp("c", OpSourceObserve, at.Add(time.Minute))
+	got := retryStatus(state(Waiting, "execution_provider_quota", stale, newer))
+	if got == nil || got.Operation != "c" || !got.NotBefore.Equal(newer.RetryNotBefore) || got.ResumeCondition != "the provider allowance returns; probed every 5 minutes" {
+		t.Fatalf("two awaiting operations did not report the latest: %+v", got)
+	}
+}
+
+// #87 (frozen): restoring the account does not bypass RetryNotBefore.
+// `autonomy resume` is exactly Reconcile, so it is no hidden --now.
+func TestConnectivityResumeDoesNotBringTheProbeForward(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderAccountUnavailable}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
+		t.Fatalf("account: %+v", out)
+	}
+	waiting := executionOperation(t, f.store, runID)
+	calls := len(f.provider.requests)
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded} // the operator restored it
+	f.clock.at = waiting.RetryNotBefore.Add(-time.Second)
+	out, err := f.runtime.Reconcile(context.Background(), runID) // what `autonomy resume` runs
+	if err != nil || out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" || len(f.provider.requests) != calls {
+		t.Fatalf("resume brought the probe forward: %+v calls=%d %v", out, len(f.provider.requests)-calls, err)
+	}
+	if after := executionOperation(t, f.store, runID); !after.RetryNotBefore.Equal(waiting.RetryNotBefore) {
+		t.Fatalf("resume moved the probe: %s -> %s", waiting.RetryNotBefore, after.RetryNotBefore)
+	}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	if after := executionOperation(t, f.store, runID); after.ID != waiting.ID || after.State != Succeeded || len(f.provider.requests) != calls+1 {
+		t.Fatalf("the probe did not resume the same operation: %s", retryRow(after))
+	}
+}
+
+// #87 (frozen): a recognized provider wait refunds the attempt always, and the
+// execution time only when the provider did not run (ProviderExecuted=false).
+func TestConnectivityProviderWaitRefundsExecutionOnlyWhenNothingRan(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		ran  time.Duration
+		step time.Duration
+		want time.Duration
+	}{
+		"provider ran": {nil, 10 * time.Minute, 0, 10 * time.Minute},
+		// Refused at once: only the runtime's own clock reads elapse, and
+		// that attempt time is refunded.
+		"refused before it ran": {errors.New("refused before dispatch"), 0, time.Second, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPhase8Fixture(t)
+			runID := f.start()
+			f.clock.step = tc.step
+			f.provider.mutate = func(string) error { f.clock.at = f.clock.at.Add(tc.ran); return nil }
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+			f.provider.Err = tc.err
+			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+				t.Fatalf("quota: %+v", out)
+			}
+			op := executionOperation(t, f.store, runID)
+			if op.Attempt != 0 || op.ConsumedExecution != tc.want || op.RetryDisposition != DispositionRateLimitWait {
+				t.Fatalf("attempt %d consumed %s (want 0, %s): %s", op.Attempt, op.ConsumedExecution, tc.want, retryRow(op))
+			}
+		})
+	}
+}
+
+// #87 (frozen), the production openai_responses shape: a 429 on the first
+// exchange ran nothing and is refunded; a 429 after a completed exchange
+// keeps that elapsed work charged. Both refund the attempt.
+func TestConnectivityOpenAIWaitChargesWorkThatRan(t *testing.T) {
+	for name, tc := range map[string]struct {
+		exchanges int
+		step      time.Duration
+		want      time.Duration
+	}{
+		"429 before any exchange":   {0, time.Second, 0},
+		"429 after a real exchange": {1, 0, 10 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPhase8Fixture(t)
+			runID := f.start()
+			f.clock.step = tc.step
+			calls := 0
+			api := doerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				status, body := http.StatusTooManyRequests, creditExhausted429
+				if calls <= tc.exchanges {
+					f.clock.at = f.clock.at.Add(10 * time.Minute) // the model reasoned
+					status, body = http.StatusOK, scriptedToolCalls(t, "work", 10, [2]string{"no_such_tool", "{}"})
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+			})
+			useRealProvider(t, f, runID, api, func(p *OpenAIProvider) { p.MaxIterations = 4 })
+			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
+				t.Fatalf("account: %+v", out)
+			}
+			op := executionOperation(t, f.store, runID)
+			if calls != tc.exchanges+1 || op.Attempt != 0 || op.ConsumedExecution != tc.want || op.RetryDisposition != DispositionAccountWait {
+				t.Fatalf("calls %d attempt %d consumed %s (want %s): %s", calls, op.Attempt, op.ConsumedExecution, tc.want, retryRow(op))
+			}
+		})
+	}
+}
+
+// #87: feedback admitted while a feedback operation sits in a durable provider
+// wait is delivered WITH what that operation was already given, never instead
+// of it. CLI shape: the worker ran, hit a quota, and resumes after the probe.
+func TestConnectivityFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing.T) {
+	f, runID := feedbackFixture(t)
+	f.clock.step = 0
+	comment := func(id int64, body string) {
+		number := f.state(runID).projection.PullRequest.Number
+		f.forge.ConversationComments[number] = append(f.forge.ConversationComments[number],
+			GitHubComment{ID: id, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText(body), CreatedAt: f.clock.Now()})
+		if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != 1 {
+			t.Fatalf("admission of %d: %+v %v", id, observation, err)
+		}
+	}
+	comment(501, "add A")
+	keyA := f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+		t.Fatalf("quota: %+v", out)
+	}
+	comment(502, "add B")
+	keyB := f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
+	var waiting RunOperation
+	for _, op := range f.state(runID).snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && op.RetryDisposition == DispositionRateLimitWait {
+			waiting = op
+		}
+	}
+	calls := len(f.provider.requests)
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.provider.mutate = func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, "recovered.go"), []byte("package candidate\n"), 0600)
+	}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	if len(f.provider.requests) <= calls {
+		t.Fatal("the retry never reached the worker")
+	}
+	got := map[string]int{}
+	for _, item := range f.provider.requests[calls].Feedback {
+		got[item.Key]++
+	}
+	if len(got) != 2 || got[keyA] != 1 || got[keyB] != 1 {
+		t.Fatalf("retry of %s delivered %v, want A=%s and B=%s once each", waiting.ID, got, keyA, keyB)
+	}
+}
+
+// #87 S1: the delivery union is capped. The retry keeps everything it was
+// already given and fills only the room left from what arrived during the
+// wait; the rest waits, unconsumed, for the next binding.
+func TestConnectivityFeedbackDeliveryAcrossAWaitIsBounded(t *testing.T) {
+	for name, tc := range map[string]struct{ before, during int }{
+		"full: 10 then 10":       {10, 10},
+		"partial room: 6 then 7": {6, 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, runID := feedbackFixture(t)
+			f.clock.step = 0
+			next := int64(600)
+			admit := func(n int) []string {
+				number := f.state(runID).projection.PullRequest.Number
+				for i := 0; i < n; i++ {
+					next++
+					f.forge.ConversationComments[number] = append(f.forge.ConversationComments[number],
+						GitHubComment{ID: next, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText(fmt.Sprintf("item %d", next)), CreatedAt: f.clock.Now()})
+				}
+				if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != n {
+					t.Fatalf("admission of %d: %+v %v", n, observation, err)
+				}
+				admitted := f.state(runID).feedbackState().Admitted
+				var keys []string
+				for _, d := range admitted[len(admitted)-n:] {
+					keys = append(keys, d.Key)
+				}
+				return keys
+			}
+			keysOf := func(r ExecutionRequest) []string {
+				var keys []string
+				for _, item := range r.Feedback {
+					keys = append(keys, item.Key)
+				}
+				return keys
+			}
+			a := admit(tc.before)
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+				t.Fatalf("quota: %+v", out)
+			}
+			var x RunOperation
+			for _, op := range f.state(runID).snapshot.Operations {
+				if op.Kind == OpExecutionInvoke && op.RetryDisposition == DispositionRateLimitWait {
+					x = op
+				}
+			}
+			b := admit(tc.during)
+			// The worker now answers with a no-change resolution naming exactly
+			// what it was given, and mutates nothing.
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+			f.provider.mutate, f.provider.resolveFeedback = nil, true
+			calls := len(f.provider.requests)
+			f.clock.at = x.RetryNotBefore
+			f.reconcile(runID)
+			room := maxDeliveredFeedbackItems - len(a)
+			if len(f.provider.requests) <= calls {
+				t.Fatal("the retry never reached the worker")
+			}
+			if got, want := keysOf(f.provider.requests[calls]), append(append([]string{}, a...), b[:room]...); !reflect.DeepEqual(got, want) {
+				t.Fatalf("retry delivered %d items %v, want A then the %d oldest of B: %v", len(got), got, room, want)
+			}
+			if after := f.state(runID).snapshot.Operations[x.ID]; after.State != Succeeded {
+				t.Fatalf("the no-change resolution was not admitted: %s %s", after.State, after.Result)
+			}
+			// The rest of B is delivered by the next binding, exactly once.
+			for i := 0; i < 3 && len(f.provider.requests) == calls+1; i++ {
+				f.reconcile(runID)
+			}
+			if len(f.provider.requests) != calls+2 || !reflect.DeepEqual(keysOf(f.provider.requests[calls+1]), b[room:]) {
+				t.Fatalf("the remaining %d of B were not delivered next: %d requests", len(b)-room, len(f.provider.requests)-calls)
+			}
+		})
+	}
+}
+
+// The same law in the openai_responses shape: an exchange happened, so A is
+// consumed; B arrives during the account wait; the next probe shows both.
+func TestConnectivityOpenAIFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing.T) {
+	f, runID := feedbackFixture(t)
+	f.clock.step = 0
+	comment := func(id int64, body string) string {
+		number := f.state(runID).projection.PullRequest.Number
+		f.forge.ConversationComments[number] = append(f.forge.ConversationComments[number],
+			GitHubComment{ID: id, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText(body), CreatedAt: f.clock.Now()})
+		if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != 1 {
+			t.Fatalf("admission of %d: %+v %v", id, observation, err)
+		}
+		return f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
+	}
+	var bodies []string
+	api := doerFunc(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		status, body := http.StatusTooManyRequests, creditExhausted429
+		if len(bodies) == 1 {
+			status, body = http.StatusOK, scriptedToolCalls(t, "work", 10, [2]string{"no_such_tool", "{}"})
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})
+	keyA := comment(501, "add A")
+	useRealProvider(t, f, runID, api, func(p *OpenAIProvider) { p.MaxIterations = 4 })
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
+		t.Fatalf("account: %+v", out)
+	}
+	keyB := comment(502, "add B")
+	for _, op := range f.state(runID).snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && op.RetryDisposition == DispositionAccountWait {
+			f.clock.at = op.RetryNotBefore
+		}
+	}
+	seen := len(bodies)
+	f.reconcile(runID)
+	if len(bodies) != seen+1 || !strings.Contains(bodies[seen], keyA) || !strings.Contains(bodies[seen], keyB) {
+		t.Fatalf("the next probe did not carry both A (%s) and B (%s): %d new requests", keyA, keyB, len(bodies)-seen)
+	}
+}
+
+// #87 slice 2: a quota wait is durable. Its probe time survives a store
+// reopen and a new runtime, nothing invokes the provider before it, no attempt
+// or active work is spent, and the SAME operation resumes once it passes.
+func TestConnectivityProviderQuotaWaitIsDurable(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+		t.Fatalf("quota: %+v", out)
+	}
+	var waiting RunOperation
+	ops, err := f.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Kind == OpExecutionInvoke {
+			waiting = op
+		}
+	}
+	if waiting.State != OperationFailed || waiting.Attempt != 0 || waiting.RetryDisposition != DispositionRateLimitWait ||
+		!waiting.RetryNotBefore.Equal(f.clock.Now().Add(5*time.Minute)) {
+		t.Fatalf("quota wait not durable or not refunded: %s", retryRow(waiting))
+	}
+	report, err := f.runtime.Status(runID)
+	if err != nil || report.Retry == nil || report.Retry.Operation != waiting.ID || !report.Retry.NotBefore.Equal(waiting.RetryNotBefore) ||
+		report.Retry.Disposition != DispositionRateLimitWait || report.Retry.ResumeCondition != "the provider allowance returns; probed every 5 minutes" {
+		t.Fatalf("status: %+v %v", report.Retry, err)
+	}
+	calls := len(f.provider.requests)
+	active := f.state(runID).activeElapsed(f.clock.Now())
+
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteOperationStore(f.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	f.store, f.deps.Store = reopened, reopened
+	f.runtime = f.newRuntime(f.deps)
+	f.clock.at = waiting.RetryNotBefore.Add(-time.Nanosecond)
+	for i := 0; i < 3; i++ {
+		if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+			t.Fatalf("early probe: %+v", out)
+		}
+	}
+	stored, _, _, err := f.store.Operation(waiting.ID)
+	if err != nil || !reflect.DeepEqual(stored, waiting) || len(f.provider.requests) != calls {
+		t.Fatalf("restart re-probed early: calls %d->%d %s / %s %v", calls, len(f.provider.requests), retryRow(waiting), retryRow(stored), err)
+	}
+	if got := f.state(runID).activeElapsed(f.clock.Now()); got != active {
+		t.Fatalf("the wait was charged as active work: %s -> %s", active, got)
+	}
+
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	recovered, _, _, err := f.store.Operation(waiting.ID)
+	if err != nil || recovered.State != Succeeded || recovered.Attempt != 1 || !recovered.RetryNotBefore.IsZero() || recovered.RetryDisposition != "" || len(f.provider.requests) != calls+1 {
+		t.Fatalf("same operation did not resume: %s calls=%d %v", retryRow(recovered), len(f.provider.requests)-calls, err)
 	}
 }
 

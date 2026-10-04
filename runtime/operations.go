@@ -719,9 +719,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// actually given a second chance to address. This re-derives exactly the
 	// keys THIS operation's own prior attempt(s) consumed - never a different
 	// or wider set - so a retry is shown exactly what it was shown before.
-	if len(pending) == 0 {
-		pending = state.feedbackRedeliveryFor(operation.ID)
-	}
+	//
+	// It is a UNION with whatever is pending now (#87): feedback admitted while
+	// this operation sat in a durable provider wait must not displace what
+	// its earlier attempt was already given.
+	pending = state.feedbackDeliveryFor(operation.ID, pending)
 	feedback := r.feedbackContext(state.run.ID, pending)
 	if len(feedback) > 0 && purpose != InvocationContinuation {
 		purpose = InvocationRemediation
@@ -1010,10 +1012,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// what an operator needs to recognise which command it was.
 		DiscardRefusals: len(providerGitRefusals(result)),
 		DiscardRefused:  lastProviderGitRefusal(result),
-		// Invocation provenance is written only after the process returns, so
-		// it is the honest signal for "this attempt reached a worker" - the
-		// same signal the feedback-delivery record below relies on.
-		ProviderExecuted: execErr == nil || result.Invocation != nil,
+		// The same signal the feedback-delivery record below relies on.
+		ProviderExecuted: reachedWorker(result, execErr),
 	}
 	// THE EXPLICIT COMPLETION CLAIM, admitted only against what this attempt
 	// actually was invoked against - never from the provider's own claim that
@@ -1245,10 +1245,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	//
 	// An invocation that ran and then failed still counts, which is the case
 	// the comment above defends: re-delivering a human's review because the
-	// work failed afterwards would duplicate it. Invocation provenance is
-	// written only after the process returns, so it is the honest signal for
-	// "this attempt reached a worker".
-	invoked := execErr == nil || result.Invocation != nil
+	// work failed afterwards would duplicate it.
+	invoked := reachedWorker(result, execErr)
 	if len(pending) > 0 && invoked {
 		delivered := make(map[string]bool, len(feedback))
 		keys := make([]string, 0, len(feedback))
@@ -3644,4 +3642,12 @@ func (r *EngineeringRuntime) executionAuthorityRevoked(operation RunOperation) (
 		return FailureRunCancelled, nil
 	}
 	return "", nil
+}
+
+// reachedWorker is THE signal that an attempt reached a worker, owned by the
+// provider: process provenance (written only after a CLI returns) or the
+// provider's own Executed report (a model exchange completed). Never the
+// failure class.
+func reachedWorker(result ExecutionResult, execErr error) bool {
+	return execErr == nil || result.Invocation != nil || result.Executed
 }

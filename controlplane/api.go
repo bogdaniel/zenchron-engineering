@@ -210,7 +210,10 @@ type Controller struct {
 	DurableGeneration  *Build                `json:"durable_generation,omitempty"`
 	LiveReachable      bool                  `json:"live_reachable"`
 	LiveBuild          *Build                `json:"live_build,omitempty"`
-	Findings           []string              `json:"findings,omitempty"`
+	// ControllerBinding is the live controller's build binding, which a
+	// governed action must echo (#398); empty when unattested or unobserved.
+	ControllerBinding string   `json:"controller_binding,omitempty"`
+	Findings          []string `json:"findings,omitempty"`
 }
 type Error struct {
 	Code string `json:"error"`
@@ -235,6 +238,7 @@ type FleetClasses struct {
 	Observing   int `json:"observing"`
 	Runnable    int `json:"runnable"`
 	Waiting     int `json:"waiting"`
+	Paused      int `json:"paused"`
 	Unavailable int `json:"unavailable"`
 }
 
@@ -252,13 +256,17 @@ type Fleet struct {
 	Plans             []Plan       `json:"plans,omitempty"`
 }
 
-// API owns only a read capability. Observe must issue controller.snapshot only.
+// API owns a read capability. Observe must issue controller.snapshot only;
+// Send carries the governed actions in actions.go, and Listen is the address
+// a mutation's Host and Origin must name.
 type API struct {
 	Store          *rt.ReadStore
 	Token          string
 	ControllerRoot string
 	Observe        func() (rt.LiveControllerSnapshot, error)
 	Now            func() time.Time
+	Send           func(rt.ControlRequest) (rt.ControlResponse, error)
+	Listen         string
 	// StreamPollInterval and StreamHeartbeatInterval govern the per-run SSE
 	// stream's tail-poll and liveness cadence. Zero means the production
 	// default; tests shorten them so a stream test finishes in milliseconds
@@ -285,6 +293,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
 	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
+	mux.HandleFunc("POST /v1/runs/{id}/stop", a.stop)
+	mux.HandleFunc("POST /v1/plans/{id}/reject", a.reject)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -292,8 +302,11 @@ func (a *API) Handler() http.Handler {
 			fail(w, 401, "unauthorized")
 			return
 		}
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			fail(w, 405, "method_not_allowed")
+			return
+		}
+		if r.Method == http.MethodPost && !a.mutationAllowed(w, r) {
 			return
 		}
 		if path.Clean(r.URL.Path) != r.URL.Path {
@@ -549,6 +562,7 @@ func controllerProjection(s rt.ControllerStatus) Controller {
 		out.WorkAdmission = s.Live.Snapshot.WorkAdmission
 		build := s.Live.Snapshot.Identity.Build
 		out.LiveBuild = &Build{Kind: build.Kind, Version: build.Version, SourceRevision: build.SourceRevision}
+		out.ControllerBinding = rt.ControllerBuildBinding(build)
 		if s.Durable.Generation != nil && s.DurableConsistency != rt.DurableUnstable {
 			out.GenerationMatch = "mismatch"
 			if *s.Durable.Generation == build {
@@ -596,7 +610,7 @@ func fleetCounts(runs []Run) FleetCounts {
 // mechanism description (#397 review 5397796709).
 func fleetProjection(f rt.Fleet) Fleet {
 	out := Fleet{Capacity: f.Capacity, Executing: f.Executing, Active: f.Active, SupervisorRunning: f.SupervisorRunning,
-		Classes: FleetClasses{Working: f.Working, Observing: f.Observing, Runnable: f.Runnable, Waiting: f.Waiting, Unavailable: f.Unavailable}}
+		Classes: FleetClasses{Working: f.Working, Observing: f.Observing, Runnable: f.Runnable, Waiting: f.Waiting, Paused: f.Paused, Unavailable: f.Unavailable}}
 	out.Runs = make([]Run, 0, len(f.Runs))
 	for _, run := range f.Runs {
 		out.Runs = append(out.Runs, runProjection(run))

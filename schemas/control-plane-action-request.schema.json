@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Body of a governed Control Plane action (#398). POST /v1/runs/{id}/stop takes only controller_binding; POST /v1/plans/{id}/reject also binds the exact revision and digest. Unknown members are refused.",
+  "oneOf": [
+    {
+      "title": "stop",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    {
+      "title": "reject",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding",
+        "revision",
+        "digest"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

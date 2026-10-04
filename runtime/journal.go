@@ -212,6 +212,13 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 			return ev, nil
 		}
 	}
+	if e.Type == EventRunPaused || e.Type == EventRunUnpaused {
+		// Decided under the write lock, so two racing pauses append one event
+		// and a pause never lands on a run that just went terminal (#86).
+		allocate = func(existing []EngineeringEvent, ev EngineeringEvent) (EngineeringEvent, error) {
+			return ev, pauseTransition(run, existing, ev.Type)
+		}
+	}
 	return s.appendToStream(e, journalStream{
 		kind: streamRun, id: e.RunID, allocate: allocate,
 		// The run row is read INSIDE the transaction. That read is what the

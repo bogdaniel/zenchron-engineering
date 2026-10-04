@@ -174,6 +174,12 @@ func resumeRefusal(run runtime.EngineeringRun, runID string, events []runtime.En
 		return runtime.ExitCancelled, fmt.Sprintf(
 			"run %s was cancelled (%s); explicit operator intent is not withdrawn by asking again. Start new work with `autonomy run issue <number>`", runID, reason), true
 	}
+	// A pause is cleared only by `unpause` (#86); resume never walks over it.
+	if pause := runtime.JournalPause(events); pause != nil {
+		return runtime.ExitWaiting, fmt.Sprintf(
+			"run %s is paused by %s since %s (%s); `autonomy unpause %s` clears it",
+			runID, terminalSafe(pause.Operator), pause.Since.Format(time.RFC3339), terminalSafe(pause.Reason), runID), true
+	}
 	if reason == runtime.WatchWaitingOptInRemoved {
 		return runtime.ExitWaiting, fmt.Sprintf(
 			"run %s is waiting on opt_in_removed: the opt-in label was removed from its source issue, which withdraws consent to work on it. Restore the label; the run then resumes through the ordinary schedule. Resuming does not restore consent", runID), true
@@ -591,6 +597,12 @@ func githubWaitOf(built *composition, repository string) *githubWaitView {
 // value here because the CLI renders durable state; it does not re-derive it.
 const providerAccountWaitReason = "execution_provider_account_unavailable"
 
+// providerWait reports a durable provider wait (#87): any retry other than
+// transport backoff, whose status this does not change.
+func providerWait(retry *runtime.RetryStatus) bool {
+	return retry != nil && retry.Disposition != runtime.DispositionTransportBackoff
+}
+
 // nextOperatorAction is the one interpretive field in the view, and it is a
 // total function of the rest of it: the same durable state always yields the
 // same sentence. It grants nothing and decides nothing.
@@ -605,6 +617,9 @@ func nextOperatorAction(view statusView) string {
 	// It is an EXTERNAL account prerequisite, not a human-authority condition,
 	// and telling an operator that the authority boundary is refusing would
 	// send them to resolve a condition that does not exist.
+	case providerWait(view.Retry):
+		return view.Retry.ResumeCondition + "; the run resumes on its own at the next probe (" +
+			view.Retry.NotBefore.UTC().Format(time.RFC3339) + "), and `autonomy resume " + run + "` does not probe earlier"
 	case view.Reason == providerAccountWaitReason:
 		return "restore execution-provider account availability, then `autonomy resume " + run + "`"
 	case view.AuthorityRefusal != "":
@@ -739,6 +754,9 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("workspace", view.Worker.Workspace)
 	}
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
+	if providerWait(view.Retry) {
+		line("next probe", "at "+view.Retry.NotBefore.UTC().Format(time.RFC3339)+" (no earlier, across restarts)")
+	}
 	line("phase", view.Phase)
 	line("active consumed", view.ActiveElapsed)
 	line("external wait", view.ExternalWaitElapsed)
@@ -900,6 +918,24 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("execution invocation", fmt.Sprintf("%s version=%s permission=%s sandbox=%s auth=%s (%s) elapsed=%s overran_deadline=%t",
 			inv.Executable, orUnknown(inv.Version), orUnknown(inv.PermissionMode), orUnknown(inv.SandboxMode),
 			orUnknown(inv.AuthMode), orUnknown(inv.AuthModeSource), inv.Elapsed, inv.OverranDeadline))
+		// The allowlisted provider-control environment (#391): absent and
+		// empty are printed differently, never collapsed.
+		if len(inv.ProviderEnvironment) > 0 {
+			vars := make([]string, 0, len(inv.ProviderEnvironment))
+			for _, e := range inv.ProviderEnvironment {
+				switch {
+				case e.SHA256 != "":
+					vars = append(vars, e.Name+"=sha256:"+short(e.SHA256))
+				case e.Value == nil:
+					vars = append(vars, e.Name+" (absent)")
+				case e.Bounded:
+					vars = append(vars, fmt.Sprintf("%s=%q (bounded)", e.Name, *e.Value))
+				default:
+					vars = append(vars, fmt.Sprintf("%s=%q", e.Name, *e.Value))
+				}
+			}
+			line("execution environment", strings.Join(vars, " "))
+		}
 	} else if view.Attempts[runtime.OpExecutionInvoke] > 0 {
 		line("execution attempt", "no invocation provenance recorded: the latest attempt did not reach a provider, or has not ended")
 	}

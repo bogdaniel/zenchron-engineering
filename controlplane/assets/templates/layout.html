@@ -19,6 +19,17 @@
 <main>
 {{template "content" .Data}}
 </main>
+<dialog id="action-dialog" aria-labelledby="action-title">
+  <h2 id="action-title">confirm operator action</h2>
+  <table class="kv">
+    <tr><th>target</th><td class="mono" id="action-target"></td></tr>
+    <tr><th>controller</th><td class="mono" id="action-generation"></td></tr>
+  </table>
+  <p id="action-consequence"></p>
+  <p id="action-note-field" hidden><label for="action-note">note (optional)</label><br><textarea id="action-note" rows="2" maxlength="500"></textarea></p>
+  <p id="action-result" role="status" aria-live="polite"></p>
+  <p><button type="button" id="action-confirm" class="action">confirm</button> <button type="button" id="action-close">close</button></p>
+</dialog>
 <script src="/static/console.js"></script>
 </body>
 </html>

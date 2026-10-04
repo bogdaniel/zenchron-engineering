@@ -41,7 +41,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -250,6 +252,10 @@ type cliAgentSpec struct {
 	// Probes never receive them, and withInvocationEnv refuses any credential-
 	// shaped name or any name the allowlisted environment already sets.
 	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
+	// ControlEnv names this provider's own non-secret control variables, so
+	// invocation provenance records them - present or absent - beside the
+	// runtime's common allowlist (#391). HomeEnv is recorded too.
+	ControlEnv []string
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
@@ -533,6 +539,120 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 		env = append(env, spec.HomeEnv+"="+home)
 	}
 	return env
+}
+
+// providerControlNames is the runtime's NON-SECRET allowlist of the
+// provider-control variables env() and toolchainEnv() can set (#391). Only
+// these, plus the spec's HomeEnv and ControlEnv, are ever recorded; a name
+// that is not here is not recorded whatever the process received.
+var providerControlNames = []string{
+	"PATH", "HOME", "GOENV", brokeredGitDirEnv,
+	"GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS",
+	"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH",
+}
+
+// providerEnvNotRecorded is what env() passes and provenance deliberately
+// omits. USER is host/operator identity, not a governance input.
+var providerEnvNotRecorded = []string{"USER"}
+
+// recordedEnvNames is the closed set of names provider_environment may carry:
+// the common allowlist plus every spec's HomeEnv and ControlEnv, nothing else
+// (no case variant, no unlisted name).
+func recordedEnvNames(spec cliAgentSpec) []string {
+	names := slices.Clone(providerControlNames)
+	if spec.HomeEnv != "" {
+		names = append(names, spec.HomeEnv)
+	}
+	return append(names, spec.ControlEnv...)
+}
+
+// recordedEnvName reports whether any adapter records name.
+func recordedEnvName(name string) bool {
+	for _, spec := range cliAgentSpecs {
+		if slices.Contains(recordedEnvNames(spec), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hashedProviderEnvNames are the common host-path names hashedEnvName covers.
+var hashedProviderEnvNames = []string{"PATH", "HOME", brokeredGitDirEnv, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE"}
+
+// hashedEnvName reports the names whose value is recorded only as an
+// identity: every variable whose value is a host path - PATH, HOME, the Git
+// guard sentinel, the scratch and Go cache locations, and every provider
+// state-home variable. The durable record keeps same/different identity,
+// never the literal path.
+func hashedEnvName(name string) bool {
+	if slices.Contains(hashedProviderEnvNames, name) {
+		return true
+	}
+	for _, spec := range cliAgentSpecs {
+		if spec.HomeEnv != "" && spec.HomeEnv == name {
+			return true
+		}
+	}
+	return false
+}
+
+// domainSeparatedSHA256 is the identity construction #84's home_identity
+// specifies: lowercase hex SHA-256 of tag + NUL + value. A distinct tag per
+// use keeps one value's identity in one place from matching it in another.
+func domainSeparatedSHA256(tag, value string) string {
+	sum := sha256.Sum256([]byte(tag + "\x00" + value))
+	return hex.EncodeToString(sum[:])
+}
+
+// providerEnvIdentityTag is the domain tag of one recorded variable.
+func providerEnvIdentityTag(name string) string { return "zenchron/provider-env/" + name + "/v1" }
+
+// credentialShapedName is the one test for an environment NAME that may carry
+// a credential; such a name is never added and never recorded.
+func credentialShapedName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
+		if strings.Contains(upper, secret) {
+			return true
+		}
+	}
+	return false
+}
+
+// urlUserinfo matches the userinfo of a URL (scheme://user:token@host), the
+// shape a credential takes inside an otherwise non-secret value such as a
+// GOPROXY list. The match is greedy up to the LAST @ before the first /, so a
+// raw @ inside a password does not leave the password's tail behind.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]+@`)
+
+// providerEnvironment records the allowlisted names from the environment the
+// process was actually given. A name not passed is recorded with neither a
+// value nor an identity; a hashed name records only its identity (of "" when
+// passed empty); other values are redacted and bounded exactly as other
+// provenance detail is.
+func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEntry {
+	passed := map[string]string{}
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			passed[name] = value // os/exec keeps the last duplicate too
+		}
+	}
+	names := recordedEnvNames(spec)
+	recorded := make([]domain.EnvironmentEntry, 0, len(names))
+	for _, name := range names {
+		if credentialShapedName(name) {
+			continue
+		}
+		entry := domain.EnvironmentEntry{Name: name}
+		if value, ok := passed[name]; ok && hashedEnvName(name) {
+			entry.SHA256 = domainSeparatedSHA256(providerEnvIdentityTag(name), value)
+		} else if ok {
+			bounded := sanitizedDetail(urlUserinfo.ReplaceAllString(value, "${1}[REDACTED]@"))
+			entry.Value, entry.Bounded = &bounded, bounded != value
+		}
+		recorded = append(recorded, entry)
+	}
+	return recorded
 }
 
 // probe requires the installed CLI to advertise every capability the runtime
@@ -1101,7 +1221,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			PermissionBypass: p.PermissionBypass, AuthMode: boundedDetail(authMode), AuthModeSource: authSource,
 			WorkspaceBound:                  spec.WorkingDirectoryFlag,
 			WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
-			Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
+			Argv:                            recordedArgv(buildArgs, invocation, p.StateDir, spec.PromptArgFromEnd),
 			PromptSHA256:                    promptDigest(invocation.Prompt),
 			ProgressMode:                    progressMode,
 		},
@@ -1180,6 +1300,8 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer claimed.Close()
 		writer = claimed
 	}
+	// Read from the exact slice handed to the process, after every addition.
+	provenance.ProviderEnvironment = providerEnvironment(env, spec)
 	startedAt := time.Now()
 	output, runErr := p.executor().Run(withCandidateWriter(ctx, writer), p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()

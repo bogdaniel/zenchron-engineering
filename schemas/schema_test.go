@@ -94,9 +94,9 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Document fixtures and the shared vocabulary are joined by eight Control
+	// Document fixtures and the shared vocabulary are joined by ten Control
 	// Plane contracts, validated against actual HTTP/SSE bytes in controlplane.
-	if want := len(fixtureSchemas) + 1 + 8; len(files) != want {
+	if want := len(fixtureSchemas) + 1 + 10; len(files) != want {
 		t.Fatalf("found %d schemas, want %d (documents, vocabulary and Control Plane wire contracts)", len(files), want)
 	}
 
@@ -277,5 +277,41 @@ func TestTheSchemaVocabularyMatchesTheDomainCatalogue(t *testing.T) {
 	}
 	if !slices.Equal(vocabulary.Defs.Capability.Enum, capabilities) {
 		t.Fatalf("the schema capability catalogue is %v and the domain catalogue is %v", vocabulary.Defs.Capability.Enum, capabilities)
+	}
+}
+
+// #391: a host path carries only an identity, every other name only a value.
+func TestProviderEnvironmentSchemaSeparatesHashedFromLiteral(t *testing.T) {
+	body, err := os.ReadFile("planning-vocabulary.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("planning-vocabulary.schema.json", document); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("planning-vocabulary.schema.json#/$defs/invocation_observation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("ab", 32)
+	for entry, valid := range map[string]bool{
+		`{"name":"GOCACHE","sha256":"` + digest + `"}`: true,
+		`{"name":"GOFLAGS","value":""}`:                true,
+		`{"name":"HOME"}`:                              true,
+		`{"name":"GOCACHE","value":"/x"}`:              false,
+		`{"name":"GOFLAGS","sha256":"` + digest + `"}`: false,
+		`{"name":"GOCACHE","value_bounded":true}`:      false,
+		`{"name":"home"}`:                              false,
+		`{"name":"XDG_CONFIG_HOME","value":"x"}`:       false,
+	} {
+		observation, _ := jsonschema.UnmarshalJSON(strings.NewReader(`{"executable":"x","workspace_bound":false,"workspace_instructions_suppressed":false,"provider_environment":[` + entry + `]}`))
+		if err := schema.Validate(observation); (err == nil) != valid {
+			t.Errorf("%s: valid=%t, want %t (%v)", entry, err == nil, valid, err)
+		}
 	}
 }
