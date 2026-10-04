@@ -134,8 +134,13 @@ func validateInvocationObservation(o domain.InvocationObservation) error {
 		return fmt.Errorf("invocation names %d denied tools, above the bound of %d", len(o.PermissionDeniedTools), domain.MaxPermissionDeniedTools)
 	}
 	var errs []error
-	for _, arg := range o.Argv {
+	for n, arg := range o.Argv {
 		errs = append(errs, bounded("invocation.argv[]", arg))
+		// Recorded argv names runtime-owned paths by role (#464); a raw host
+		// path reaching the journal is a projection defect, refused here.
+		if isHostPath(arg) {
+			errs = append(errs, fmt.Errorf("invocation argv[%d] is a raw host path; record its logical reference", n))
+		}
 	}
 	for _, tool := range o.PermissionDeniedTools {
 		if !domain.IsInvocationIdentifier(tool) {
