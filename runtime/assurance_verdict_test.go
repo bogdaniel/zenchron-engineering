@@ -17,6 +17,9 @@ func TestBaselineVerifierReturnsAJudgedFailureWithoutAnError(t *testing.T) {
 		wantErr bool
 	}{
 		"workload exited non-zero":   {1, FailureVerification, false},
+		"highest verdict exit":       {125, FailureVerification, false},
+		"workload not executable":    {126, FailureTransientInfrastructure, true},
+		"workload killed by signal":  {137, FailureTransientInfrastructure, true},
 		"start failed, no workload":  {-1, FailureTransientInfrastructure, true},
 		"workload could not execute": {127, FailureTransientInfrastructure, true},
 	} {
@@ -44,9 +47,21 @@ func TestBaselineVerifierFailuresReachTheConfirmationRerun(t *testing.T) {
 		docker := &scriptedDocker{startExits: map[int]int{2: 1, 4: 1}}
 		f := goModFixture(t, docker)
 		f.distinctMutations()
+		// Docker starts seen when remediation begins: preparation and
+		// verification for the first run and for exactly one confirmation.
+		mutate, executions, startsAtRemediation := f.provider.mutate, 0, -1
+		f.provider.mutate = func(dir string) error {
+			if executions++; executions == 2 {
+				startsAtRemediation = docker.count("start")
+			}
+			return mutate(dir)
+		}
 		runID := f.start()
 		for pass := 0; pass < 30 && len(f.provider.requests) < 2; pass++ {
 			f.reconcile(runID)
+		}
+		if startsAtRemediation != 4 {
+			t.Fatalf("remediation began after %d docker starts, want 4 (one run and exactly one confirmation)", startsAtRemediation)
 		}
 		observed := automatedAssurancePayloads(t, f.state(runID).events)
 		// The journalled verdict is the confirmation's own transcript.
@@ -91,6 +106,11 @@ func TestAnInfrastructureResultIsNeverHalfOfAFlake(t *testing.T) {
 				t.Fatalf("routed as %q (passed=%v, %v), want its own %q", class, result.Passed, err, FailureTransientInfrastructure)
 			}
 		})
+	}
+	// An unpassed verdict naming no class IS verification: the pair agrees.
+	unclassified := AssuranceResult{ProviderID: "v", VerifierDefinition: "v1"}
+	if _, class, err := AssuranceRerun(context.Background(), &FakeAssuranceProvider{Results: []AssuranceResult{unclassified, verdict}}, AssuranceRequest{}); err != nil || class != FailureVerification {
+		t.Fatalf("an unclassified failure confirmed by verification_failure routed as %q (%v), want %q", class, err, FailureVerification)
 	}
 	if !CandidateVerdict(AssuranceResult{Passed: true}) || !CandidateVerdict(verdict) || CandidateVerdict(infra) {
 		t.Fatal("CandidateVerdict misreads a verdict")
