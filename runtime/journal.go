@@ -270,10 +270,9 @@ type journalStream struct {
 
 // appendToStream is the ONE append implementation. Allocating a sequence,
 // linking the hash chain, recording the diagnostic state-before/state-after
-// digests and
-// inserting the row happen in one transaction, whichever stream the event
-// belongs to - so a plan's history is as tamper-evident as a run's, by being
-// the same mechanism rather than a similar one.
+// digests and inserting the row happen in one transaction, whichever stream
+// the event belongs to - so a plan's history is as tamper-evident as a run's,
+// by being the same mechanism rather than a similar one.
 func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journalStream) (EngineeringEvent, error) {
 	if e.Sequence != 0 || e.PreviousEventID != "" || e.PreviousEventHash != "" || e.StateBefore != "" || e.StateAfter != "" || e.EventHash != "" {
 		return EngineeringEvent{}, fmt.Errorf("sequence, chain, and state hashes are allocated by the journal, not the caller")
@@ -329,8 +328,8 @@ func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journal
 	// and a reader that needs the state must replay rather than trust these.
 	e.StateBefore = before
 	// StateDigest excludes the journal cursor and state_sha256, so an event's
-	// state_after never feeds back into the digest it records: the last event's
-	// state_after equals the replayed snapshot's state_sha256.
+	// state_after never feeds back into the digest it records: at append time,
+	// the last event's state_after equals the replayed snapshot's state_sha256.
 	after, err := stream.digest(append(existing, e))
 	if err != nil {
 		return EngineeringEvent{}, err
