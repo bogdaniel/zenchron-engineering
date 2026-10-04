@@ -555,16 +555,20 @@ var providerControlNames = []string{
 // omits. USER is host/operator identity, not a governance input.
 var providerEnvNotRecorded = []string{"USER"}
 
+// hashedProviderEnvNames are the common host-path names hashedEnvName covers.
+var hashedProviderEnvNames = []string{"PATH", "HOME", brokeredGitDirEnv, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE"}
+
 // hashedEnvName reports the names whose value is recorded only as an
-// identity: PATH, HOME and every provider state-home variable. They are host
-// account paths (and PATH is long enough to be truncated), so the durable
-// record keeps same/different identity, never the literal path.
+// identity: every variable whose value is a host path - PATH, HOME, the Git
+// guard sentinel, the scratch and Go cache locations, and every provider
+// state-home variable. The durable record keeps same/different identity,
+// never the literal path.
 func hashedEnvName(name string) bool {
-	if name == "PATH" || name == "HOME" {
+	if slices.Contains(hashedProviderEnvNames, name) {
 		return true
 	}
 	for _, spec := range cliAgentSpecs {
-		if spec.HomeEnv == name {
+		if spec.HomeEnv != "" && spec.HomeEnv == name {
 			return true
 		}
 	}

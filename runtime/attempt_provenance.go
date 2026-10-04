@@ -151,6 +151,8 @@ func validateInvocationObservation(o domain.InvocationObservation) error {
 			errs = append(errs, fmt.Errorf("invocation environment %s carries both a value and an identity", entry.Name))
 		case entry.Value != nil && hashedEnvName(entry.Name):
 			errs = append(errs, fmt.Errorf("invocation environment %s is a host path recorded only by identity, never literally", entry.Name))
+		case entry.SHA256 != "" && !hashedEnvName(entry.Name):
+			errs = append(errs, fmt.Errorf("invocation environment %s is recorded literally, never by identity", entry.Name))
 		}
 	}
 	for _, arg := range o.Argv {

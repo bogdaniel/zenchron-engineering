@@ -266,16 +266,26 @@ did not pass the variable; otherwise exactly one is present, including for an
 empty value. Absent and empty are never collapsed, and `status` prints them as
 `NAME (absent)` and `NAME=""` (or `NAME=sha256:<12 hex>`).
 
-**Host paths are recorded by identity only.** PATH, HOME and the provider's
-state variable never appear literally. Each records `sha256`, the lowercase hex
-SHA-256 of `"zenchron/provider-env/<NAME>/v1" + NUL + value` over the exact,
-untruncated passed value; an empty value records the identity of `""`, an
-absent one records nothing. This is the construction #84 specifies for
-`home_identity` (a tag, NUL, the value), with its own tag, so the same path in
-two roles is two different identities. It answers "was this the same PATH/HOME
-as before" without copying host-account paths into the permanent journal. The
+**Host paths are recorded by identity only.** Every variable whose value is a
+host path never appears literally: PATH, HOME, GIT_DIR (the Git guard
+sentinel), TMPDIR, GOTMPDIR, GOCACHE, GOPATH, GOMODCACHE and the provider's
+state variable. Each records `sha256`, the lowercase hex SHA-256 of
+`"zenchron/provider-env/<NAME>/v1" + NUL + value` over the exact, untruncated
+passed value; an empty value records the identity of `""`, an absent one
+records nothing. Every other name records only `value`. Validation and the
+schema refuse a literal value on a hash-only name and a `sha256` on a literal
+one. The recorded environment therefore holds no host path except the null
+device GOENV names. It answers "was this the same PATH/HOME/cache as before"
+without copying host-account or scratch paths into the permanent journal. The
 raw PATH is not kept even truncated: a 200-byte prefix is no reproducibility
-evidence and the full value stays in the operator's own shell.
+evidence and the full value stays in the operator's own shell. (The argv is a
+separate #327 member and still carries the scratch path a provider flag names.)
+
+The construction is the one #84 specifies for `home_identity` (a tag, NUL, the
+value), but the TAGS ARE SEPARATE AND STAY SEPARATE: `zenchron/provider-env/...`
+here, #84's own tag for agent posture. Environment provenance (what one attempt
+was given) and posture binding (what an agent is bound to) are different facts,
+so the same HOME is deliberately a different identity in each.
 
 A name shaped like a
 credential (containing KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH) is

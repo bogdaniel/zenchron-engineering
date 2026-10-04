@@ -24,7 +24,7 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 		AgentKindCodexCLI:   append(slices.Clone(common), "CODEX_HOME"),
 		AgentKindClaudeCode: append(slices.Clone(common), "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"),
 	}
-	hashed := []string{"PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+	hashed := []string{"PATH", "HOME", "GIT_DIR", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
 	// Assembled at run time so this source file is not itself credential
 	// material to candidate admission.
 	secret := "gh" + "p_" + strings.Repeat("0a", 20)
@@ -108,8 +108,8 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				if v := byName["GOENV"].Value; v == nil || *v != os.DevNull {
 					t.Errorf("GOENV not recorded as %s: %v", os.DevNull, v)
 				}
-				if scratch == (byName["GOCACHE"].Value == nil) {
-					t.Errorf("GOCACHE presence %v does not follow the scratch grant %v", byName["GOCACHE"].Value != nil, scratch)
+				if scratch == (byName["GOCACHE"].SHA256 == "") {
+					t.Errorf("GOCACHE presence %v does not follow the scratch grant %v", byName["GOCACHE"].SHA256 != "", scratch)
 				}
 				if v := byName["GOFLAGS"].Value; scratch != (v != nil) || v != nil && *v != "-mod=readonly" {
 					t.Errorf("GOFLAGS recorded %v; the ambient -v must never appear", v)
@@ -122,6 +122,19 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				}
 				if byName["HOME"].SHA256 == "" || byName["PATH"].SHA256 == "" {
 					t.Error("HOME and PATH were passed but carry no identity")
+				}
+				// NO RAW HOST PATH in the recorded environment: the only literal
+				// path allowed is the null device GOENV names.
+				environment, _ := json.Marshal(recorded)
+				for _, path := range []string{provider.OperatorHome, request.ScratchDir, os.TempDir()} {
+					if path != "" && strings.Contains(string(environment), path) {
+						t.Errorf("raw path %s reached the recorded environment: %s", path, environment)
+					}
+				}
+				for _, e := range recorded {
+					if e.Value != nil && strings.Contains(*e.Value, "/") && *e.Value != os.DevNull {
+						t.Errorf("%s recorded a literal path %q", e.Name, *e.Value)
+					}
 				}
 				raw, _ := json.Marshal(newExecutionAttemptProvenance(request.OperationID, 1, *result.Invocation))
 				if strings.Contains(string(raw), provider.OperatorHome) || strings.Contains(string(raw), `"USER"`) {
@@ -162,6 +175,49 @@ func TestProviderEnvironmentHostPathIdentity(t *testing.T) {
 	plain := sha256.Sum256([]byte("/h"))
 	if c := got["CODEX_HOME"].SHA256; c != testEnvIdentity("CODEX_HOME", "/h") || c == testEnvIdentity("HOME", "/h") || c == hex.EncodeToString(plain[:]) {
 		t.Errorf("CODEX_HOME identity %s is not domain-separated", c)
+	}
+}
+
+// The schema's hash-only name set is the runtime's, so neither can gain a
+// host path the other records literally.
+func TestSchemaHashedNamesMatchTheRuntime(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "schemas", "planning-vocabulary.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Defs struct {
+			Observation struct {
+				Properties struct {
+					Environment struct {
+						Items struct {
+							If struct {
+								Properties struct {
+									Name struct{ Enum []string }
+								}
+							}
+						}
+					} `json:"provider_environment"`
+				}
+			} `json:"invocation_observation"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(body, &schema); err != nil {
+		t.Fatal(err)
+	}
+	inSchema := schema.Defs.Observation.Properties.Environment.Items.If.Properties.Name.Enum
+	var want []string
+	for _, spec := range cliAgentSpecs {
+		for _, name := range append(append(slices.Clone(providerControlNames), spec.HomeEnv), spec.ControlEnv...) {
+			if hashedEnvName(name) && !slices.Contains(want, name) {
+				want = append(want, name)
+			}
+		}
+	}
+	slices.Sort(want)
+	slices.Sort(inSchema)
+	if !slices.Equal(inSchema, want) {
+		t.Fatalf("schema hash-only names %v, runtime %v", inSchema, want)
 	}
 }
 
@@ -247,6 +303,8 @@ func TestValidateRefusesMalformedProviderEnvironment(t *testing.T) {
 		"literal HOME":     {{Name: "HOME", Value: &ok}},
 		"value and hash":   {{Name: "GOFLAGS", Value: &ok, SHA256: testEnvIdentity("GOFLAGS", "v")}},
 		"malformed hash":   {{Name: "PATH", SHA256: "not-a-digest"}},
+		"literal GOCACHE":  {{Name: "GOCACHE", Value: &ok}},
+		"hash on literal":  {{Name: "GOFLAGS", SHA256: testEnvIdentity("GOFLAGS", "v")}},
 	} {
 		if validateInvocationObservation(domain.InvocationObservation{Executable: "x", ProviderEnvironment: env}) == nil {
 			t.Errorf("%s: accepted", name)
