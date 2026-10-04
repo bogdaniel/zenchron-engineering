@@ -138,8 +138,8 @@ func validateInvocationObservation(o domain.InvocationObservation) error {
 	}
 	var errs []error
 	for _, entry := range o.ProviderEnvironment {
-		if !domain.IsInvocationIdentifier(entry.Name) || credentialShapedName(entry.Name) {
-			errs = append(errs, fmt.Errorf("invocation environment name %q is not a non-secret control name", entry.Name))
+		if !recordedEnvName(entry.Name) || credentialShapedName(entry.Name) {
+			errs = append(errs, fmt.Errorf("invocation environment name %q is not on the recorded allowlist", entry.Name))
 		}
 		if entry.Value != nil {
 			errs = append(errs, bounded("invocation.provider_environment[].value", *entry.Value))

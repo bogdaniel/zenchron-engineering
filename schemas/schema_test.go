@@ -305,6 +305,9 @@ func TestProviderEnvironmentSchemaSeparatesHashedFromLiteral(t *testing.T) {
 		`{"name":"HOME"}`:                              true,
 		`{"name":"GOCACHE","value":"/x"}`:              false,
 		`{"name":"GOFLAGS","sha256":"` + digest + `"}`: false,
+		`{"name":"GOCACHE","value_bounded":true}`:      false,
+		`{"name":"home"}`:                              false,
+		`{"name":"XDG_CONFIG_HOME","value":"x"}`:       false,
 	} {
 		observation, _ := jsonschema.UnmarshalJSON(strings.NewReader(`{"executable":"x","workspace_bound":false,"workspace_instructions_suppressed":false,"provider_environment":[` + entry + `]}`))
 		if err := schema.Validate(observation); (err == nil) != valid {

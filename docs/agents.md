@@ -257,6 +257,9 @@ plus Claude Code's controls: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
                   BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
 ```
 
+That set is CLOSED: validation and the schema accept exactly these names, so a
+case variant (`home`) or an unlisted name (`XDG_CONFIG_HOME`) is refused.
+
 USER is passed to the provider (keychain lookup) but is deliberately NOT
 recorded: it is host/operator identity, not a governance input.
 

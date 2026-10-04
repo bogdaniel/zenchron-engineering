@@ -99,8 +99,27 @@
             ],
             "properties": {
               "name": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9_.:-]{1,64}$"
+                "enum": [
+                  "PATH",
+                  "HOME",
+                  "GOENV",
+                  "GIT_DIR",
+                  "GOMODCACHE",
+                  "GOTOOLCHAIN",
+                  "GOPROXY",
+                  "GOSUMDB",
+                  "GOFLAGS",
+                  "TMPDIR",
+                  "GOTMPDIR",
+                  "GOCACHE",
+                  "GOPATH",
+                  "CODEX_HOME",
+                  "CLAUDE_CONFIG_DIR",
+                  "QWEN_HOME",
+                  "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS",
+                  "BASH_DEFAULT_TIMEOUT_MS",
+                  "BASH_MAX_TIMEOUT_MS"
+                ]
               },
               "value": {
                 "type": "string",

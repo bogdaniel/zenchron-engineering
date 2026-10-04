@@ -555,6 +555,27 @@ var providerControlNames = []string{
 // omits. USER is host/operator identity, not a governance input.
 var providerEnvNotRecorded = []string{"USER"}
 
+// recordedEnvNames is the closed set of names provider_environment may carry:
+// the common allowlist plus every spec's HomeEnv and ControlEnv, nothing else
+// (no case variant, no unlisted name).
+func recordedEnvNames(spec cliAgentSpec) []string {
+	names := slices.Clone(providerControlNames)
+	if spec.HomeEnv != "" {
+		names = append(names, spec.HomeEnv)
+	}
+	return append(names, spec.ControlEnv...)
+}
+
+// recordedEnvName reports whether any adapter records name.
+func recordedEnvName(name string) bool {
+	for _, spec := range cliAgentSpecs {
+		if slices.Contains(recordedEnvNames(spec), name) {
+			return true
+		}
+	}
+	return false
+}
+
 // hashedProviderEnvNames are the common host-path names hashedEnvName covers.
 var hashedProviderEnvNames = []string{"PATH", "HOME", brokeredGitDirEnv, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE"}
 
@@ -616,10 +637,10 @@ func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEn
 			passed[name] = value // os/exec keeps the last duplicate too
 		}
 	}
-	names := append(append(slices.Clone(providerControlNames), spec.HomeEnv), spec.ControlEnv...)
+	names := recordedEnvNames(spec)
 	recorded := make([]domain.EnvironmentEntry, 0, len(names))
 	for _, name := range names {
-		if name == "" || credentialShapedName(name) {
+		if credentialShapedName(name) {
 			continue
 		}
 		entry := domain.EnvironmentEntry{Name: name}

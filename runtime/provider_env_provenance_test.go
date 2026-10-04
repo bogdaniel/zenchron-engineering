@@ -180,7 +180,7 @@ func TestProviderEnvironmentHostPathIdentity(t *testing.T) {
 
 // The schema's hash-only name set is the runtime's, so neither can gain a
 // host path the other records literally.
-func TestSchemaHashedNamesMatchTheRuntime(t *testing.T) {
+func TestSchemaEnvironmentNamesMatchTheRuntime(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "schemas", "planning-vocabulary.schema.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +191,9 @@ func TestSchemaHashedNamesMatchTheRuntime(t *testing.T) {
 				Properties struct {
 					Environment struct {
 						Items struct {
+							Properties struct {
+								Name struct{ Enum []string }
+							}
 							If struct {
 								Properties struct {
 									Name struct{ Enum []string }
@@ -205,19 +208,26 @@ func TestSchemaHashedNamesMatchTheRuntime(t *testing.T) {
 	if err := json.Unmarshal(body, &schema); err != nil {
 		t.Fatal(err)
 	}
-	inSchema := schema.Defs.Observation.Properties.Environment.Items.If.Properties.Name.Enum
-	var want []string
+	items := schema.Defs.Observation.Properties.Environment.Items
+	var all, hashed []string
 	for _, spec := range cliAgentSpecs {
-		for _, name := range append(append(slices.Clone(providerControlNames), spec.HomeEnv), spec.ControlEnv...) {
-			if hashedEnvName(name) && !slices.Contains(want, name) {
-				want = append(want, name)
+		for _, name := range recordedEnvNames(spec) {
+			if !slices.Contains(all, name) {
+				all = append(all, name)
+				if hashedEnvName(name) {
+					hashed = append(hashed, name)
+				}
 			}
 		}
 	}
-	slices.Sort(want)
-	slices.Sort(inSchema)
-	if !slices.Equal(inSchema, want) {
-		t.Fatalf("schema hash-only names %v, runtime %v", inSchema, want)
+	for label, pair := range map[string][2][]string{
+		"recorded names":  {items.Properties.Name.Enum, all},
+		"hash-only names": {items.If.Properties.Name.Enum, hashed},
+	} {
+		inSchema, runtime := slices.Sorted(slices.Values(pair[0])), slices.Sorted(slices.Values(pair[1]))
+		if !slices.Equal(inSchema, runtime) {
+			t.Errorf("schema %s %v, runtime %v", label, inSchema, runtime)
+		}
 	}
 }
 
@@ -285,6 +295,16 @@ func TestEverySpecProviderEnvironmentFitsTheBound(t *testing.T) {
 		if n := len(providerEnvironment(nil, spec)); n > domain.MaxProviderEnvironment {
 			t.Errorf("%s records %d environment names, above %d", kind, n, domain.MaxProviderEnvironment)
 		}
+		// Every name the spec can record, passed and absent, validates.
+		var env []string
+		for _, name := range recordedEnvNames(spec) {
+			env = append(env, name+"=/x")
+		}
+		for _, passed := range [][]string{env, nil} {
+			if err := validateInvocationObservation(domain.InvocationObservation{Executable: "x", ProviderEnvironment: providerEnvironment(passed, spec)}); err != nil {
+				t.Errorf("%s: its own recorded environment is refused: %v", kind, err)
+			}
+		}
 	}
 }
 
@@ -293,10 +313,12 @@ func TestValidateRefusesMalformedProviderEnvironment(t *testing.T) {
 	long, ok := strings.Repeat("x", 201), "v"
 	many := make([]domain.EnvironmentEntry, domain.MaxProviderEnvironment+1)
 	for i := range many {
-		many[i] = domain.EnvironmentEntry{Name: "V" + strings.Repeat("A", i)}
+		many[i] = domain.EnvironmentEntry{Name: "GOFLAGS"} // an allowlisted name, so only the cap refuses it
 	}
 	for name, env := range map[string][]domain.EnvironmentEntry{
 		"bad identifier":   {{Name: "NOT A NAME"}},
+		"case variant":     {{Name: "home"}},
+		"unlisted name":    {{Name: "XDG_CONFIG_HOME"}},
 		"credential name":  {{Name: "GITHUB_TOKEN"}},
 		"too many entries": many,
 		"oversized value":  {{Name: "GOFLAGS", Value: &long}},
