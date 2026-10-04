@@ -88,7 +88,7 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "provider_environment": {
-          "description": "The effective provider-control environment passed to the process, restricted to the adapter's explicit non-secret allowlist (#391). An entry without value means the variable was not passed; a value of \"\" means it was passed empty.",
+          "description": "The effective provider-control environment passed to the process, restricted to the adapter's explicit non-secret allowlist (#391). An entry with neither value nor sha256 means the variable was not passed; otherwise exactly one is present, even for an empty value. Host paths (PATH, HOME, provider state homes) carry only sha256, the domain-separated identity SHA-256(\"zenchron/provider-env/<NAME>/v1\" NUL value).",
           "type": "array",
           "maxItems": 24,
           "items": {
@@ -108,7 +108,17 @@
               },
               "value_bounded": {
                 "type": "boolean"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
               }
+            },
+            "not": {
+              "required": [
+                "value",
+                "sha256"
+              ]
             }
           }
         },

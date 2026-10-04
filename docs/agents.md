@@ -250,22 +250,39 @@ timeouts), never from the supervisor's own environment. It is restricted to an
 explicit non-secret allowlist and is never the whole environment:
 
 ```text
-every native CLI: PATH HOME USER GOENV GIT_DIR GOMODCACHE GOTOOLCHAIN GOPROXY
+every native CLI: PATH HOME GOENV GIT_DIR GOMODCACHE GOTOOLCHAIN GOPROXY
                   GOSUMDB GOFLAGS TMPDIR GOTMPDIR GOCACHE GOPATH
 plus the provider's state variable: CODEX_HOME, CLAUDE_CONFIG_DIR, QWEN_HOME
 plus Claude Code's controls: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
                   BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
 ```
 
-It is an ordered list of `{name, value, value_bounded}`, one entry per
-allowlisted name. An entry WITHOUT `value` means the runtime did not pass the
-variable; `"value": ""` means it passed it empty. The two are never collapsed,
-and `status` prints them as `NAME (absent)` and `NAME=""`. A name shaped like a
+USER is passed to the provider (keychain lookup) but is deliberately NOT
+recorded: it is host/operator identity, not a governance input.
+
+It is an ordered list of `{name, value, sha256, value_bounded}`, one entry per
+allowlisted name. An entry with neither `value` nor `sha256` means the runtime
+did not pass the variable; otherwise exactly one is present, including for an
+empty value. Absent and empty are never collapsed, and `status` prints them as
+`NAME (absent)` and `NAME=""` (or `NAME=sha256:<12 hex>`).
+
+**Host paths are recorded by identity only.** PATH, HOME and the provider's
+state variable never appear literally. Each records `sha256`, the lowercase hex
+SHA-256 of `"zenchron/provider-env/<NAME>/v1" + NUL + value` over the exact,
+untruncated passed value; an empty value records the identity of `""`, an
+absent one records nothing. This is the construction #84 specifies for
+`home_identity` (a tag, NUL, the value), with its own tag, so the same path in
+two roles is two different identities. It answers "was this the same PATH/HOME
+as before" without copying host-account paths into the permanent journal. The
+raw PATH is not kept even truncated: a 200-byte prefix is no reproducibility
+evidence and the full value stays in the operator's own shell.
+
+A name shaped like a
 credential (containing KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH) is
 never recorded, URL userinfo in a value (`scheme://user:token@host`) is
 redacted, values pass through the same token redaction and 200-byte field
 bound as every other detail, and `value_bounded` marks a value that was redacted
-or cut (a long PATH typically is). The record stays inside the journal and
+or cut. The record stays inside the journal and
 `autonomy status`/`events`; the control-plane HTTP API projects no invocation
 provenance, so these local paths do not cross it.
 

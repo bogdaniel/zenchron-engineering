@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,11 +19,12 @@ import (
 // process ACTUALLY received, restricted to a non-secret allowlist, with an
 // unpassed variable recorded as absent rather than empty.
 func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T) {
-	common := []string{"PATH", "HOME", "USER", "GOENV", "GIT_DIR", "GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"}
+	common := []string{"PATH", "HOME", "GOENV", "GIT_DIR", "GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"}
 	want := map[string][]string{
 		AgentKindCodexCLI:   append(slices.Clone(common), "CODEX_HOME"),
 		AgentKindClaudeCode: append(slices.Clone(common), "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"),
 	}
+	hashed := []string{"PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
 	// Assembled at run time so this source file is not itself credential
 	// material to candidate admission.
 	secret := "gh" + "p_" + strings.Repeat("0a", 20)
@@ -61,24 +64,40 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 					names = append(names, e.Name)
 				}
 				// The allowlist and env() are maintained apart: a variable
-				// env() starts passing must be added here, or this goes red.
+				// env() starts passing must be recorded or deliberately
+				// omitted, or this goes red.
 				for name := range passed {
-					if !slices.Contains(names, name) {
+					if !slices.Contains(names, name) && !slices.Contains(providerEnvNotRecorded, name) {
 						t.Errorf("%s is passed to the provider but not recorded", name)
 					}
+				}
+				if _, ok := passed["USER"]; !ok {
+					t.Fatal("the fixture no longer passes USER, so its omission is untested")
 				}
 				if !slices.Equal(names, want[kind]) {
 					t.Fatalf("recorded names %v, want exactly %v", names, want[kind])
 				}
 				for _, e := range recorded {
 					value, ok := passed[e.Name]
+					if slices.Contains(hashed, e.Name) {
+						switch {
+						case e.Value != nil:
+							t.Errorf("host path %s recorded literally", e.Name)
+						case ok != (e.SHA256 != ""):
+							t.Errorf("%s passed=%t but identity %q", e.Name, ok, e.SHA256)
+						case ok && e.SHA256 != testEnvIdentity(e.Name, value):
+							t.Errorf("%s identity %s is not the domain-separated SHA-256 of the passed value", e.Name, e.SHA256)
+						}
+						continue
+					}
 					switch {
+					case e.SHA256 != "":
+						t.Errorf("%s is not a host path but carries an identity", e.Name)
 					case !ok && e.Value != nil:
 						t.Errorf("%s was not passed but is recorded as %q", e.Name, *e.Value)
 					case ok && e.Value == nil:
 						t.Errorf("%s was passed as %q but is recorded as absent", e.Name, value)
 					case ok && (*e.Value != sanitizedDetail(value) || e.Bounded != (*e.Value != value)):
-						// A long PATH is cut to the field bound, visibly.
 						t.Errorf("%s recorded %q (bounded=%t), passed %q", e.Name, *e.Value, e.Bounded, value)
 					}
 				}
@@ -101,10 +120,13 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				if kind == AgentKindClaudeCode && byName["BASH_MAX_TIMEOUT_MS"].Value == nil {
 					t.Error("the deadline-derived Claude Bash timeout is not recorded")
 				}
-				if u := byName["USER"]; u.Value == nil || !u.Bounded {
-					t.Errorf("a forwarded USER carrying a token was not recorded redacted: %+v", u)
+				if byName["HOME"].SHA256 == "" || byName["PATH"].SHA256 == "" {
+					t.Error("HOME and PATH were passed but carry no identity")
 				}
 				raw, _ := json.Marshal(newExecutionAttemptProvenance(request.OperationID, 1, *result.Invocation))
+				if strings.Contains(string(raw), provider.OperatorHome) || strings.Contains(string(raw), `"USER"`) {
+					t.Fatalf("a host path or USER reached provenance: %s", raw)
+				}
 				if strings.Contains(string(raw), secret) || strings.Contains(string(raw), "GITHUB_TOKEN") || strings.Contains(string(raw), "API_KEY") {
 					t.Fatalf("a secret reached provenance: %s", raw)
 				}
@@ -113,6 +135,33 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+// testEnvIdentity restates the construction independently of the producer:
+// lowercase hex SHA-256 of "zenchron/provider-env/<NAME>/v1" NUL value.
+func testEnvIdentity(name, value string) string {
+	sum := sha256.Sum256([]byte("zenchron/provider-env/" + name + "/v1\x00" + value))
+	return hex.EncodeToString(sum[:])
+}
+
+// Absent records nothing, empty records the identity of "", and the tag
+// separates domains: the same path under HOME and CODEX_HOME, or bare, is
+// three different identities.
+func TestProviderEnvironmentHostPathIdentity(t *testing.T) {
+	got := map[string]domain.EnvironmentEntry{}
+	for _, e := range providerEnvironment([]string{"HOME=", "CODEX_HOME=/h"}, cliAgentSpecs[AgentKindCodexCLI]) {
+		got[e.Name] = e
+	}
+	if p := got["PATH"]; p.SHA256 != "" || p.Value != nil {
+		t.Errorf("an absent PATH recorded %+v", p)
+	}
+	if h := got["HOME"]; h.Value != nil || h.SHA256 != testEnvIdentity("HOME", "") {
+		t.Errorf("an empty HOME recorded %+v, want the identity of \"\"", h)
+	}
+	plain := sha256.Sum256([]byte("/h"))
+	if c := got["CODEX_HOME"].SHA256; c != testEnvIdentity("CODEX_HOME", "/h") || c == testEnvIdentity("HOME", "/h") || c == hex.EncodeToString(plain[:]) {
+		t.Errorf("CODEX_HOME identity %s is not domain-separated", c)
 	}
 }
 
@@ -185,7 +234,7 @@ func TestEverySpecProviderEnvironmentFitsTheBound(t *testing.T) {
 
 // The append-time check refuses what the producer never writes.
 func TestValidateRefusesMalformedProviderEnvironment(t *testing.T) {
-	long := strings.Repeat("x", 201)
+	long, ok := strings.Repeat("x", 201), "v"
 	many := make([]domain.EnvironmentEntry, domain.MaxProviderEnvironment+1)
 	for i := range many {
 		many[i] = domain.EnvironmentEntry{Name: "V" + strings.Repeat("A", i)}
@@ -194,13 +243,15 @@ func TestValidateRefusesMalformedProviderEnvironment(t *testing.T) {
 		"bad identifier":   {{Name: "NOT A NAME"}},
 		"credential name":  {{Name: "GITHUB_TOKEN"}},
 		"too many entries": many,
-		"oversized value":  {{Name: "PATH", Value: &long}},
+		"oversized value":  {{Name: "GOFLAGS", Value: &long}},
+		"literal HOME":     {{Name: "HOME", Value: &ok}},
+		"value and hash":   {{Name: "GOFLAGS", Value: &ok, SHA256: testEnvIdentity("GOFLAGS", "v")}},
+		"malformed hash":   {{Name: "PATH", SHA256: "not-a-digest"}},
 	} {
 		if validateInvocationObservation(domain.InvocationObservation{Executable: "x", ProviderEnvironment: env}) == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	ok := "v"
 	if err := validateInvocationObservation(domain.InvocationObservation{Executable: "x", ProviderEnvironment: []domain.EnvironmentEntry{{Name: "GOFLAGS", Value: &ok}, {Name: "GOCACHE"}}}); err != nil {
 		t.Errorf("a well-formed environment was refused: %v", err)
 	}

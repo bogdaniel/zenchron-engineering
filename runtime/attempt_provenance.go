@@ -144,6 +144,14 @@ func validateInvocationObservation(o domain.InvocationObservation) error {
 		if entry.Value != nil {
 			errs = append(errs, bounded("invocation.provider_environment[].value", *entry.Value))
 		}
+		switch {
+		case entry.SHA256 != "" && !isSHA256Hex(entry.SHA256):
+			errs = append(errs, fmt.Errorf("invocation environment %s identity is not a SHA-256", entry.Name))
+		case entry.SHA256 != "" && entry.Value != nil:
+			errs = append(errs, fmt.Errorf("invocation environment %s carries both a value and an identity", entry.Name))
+		case entry.Value != nil && hashedEnvName(entry.Name):
+			errs = append(errs, fmt.Errorf("invocation environment %s is a host path recorded only by identity, never literally", entry.Name))
+		}
 	}
 	for _, arg := range o.Argv {
 		errs = append(errs, bounded("invocation.argv[]", arg))

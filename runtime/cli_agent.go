@@ -546,10 +546,41 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 // these, plus the spec's HomeEnv and ControlEnv, are ever recorded; a name
 // that is not here is not recorded whatever the process received.
 var providerControlNames = []string{
-	"PATH", "HOME", "USER", "GOENV", brokeredGitDirEnv,
+	"PATH", "HOME", "GOENV", brokeredGitDirEnv,
 	"GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS",
 	"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH",
 }
+
+// providerEnvNotRecorded is what env() passes and provenance deliberately
+// omits. USER is host/operator identity, not a governance input.
+var providerEnvNotRecorded = []string{"USER"}
+
+// hashedEnvName reports the names whose value is recorded only as an
+// identity: PATH, HOME and every provider state-home variable. They are host
+// account paths (and PATH is long enough to be truncated), so the durable
+// record keeps same/different identity, never the literal path.
+func hashedEnvName(name string) bool {
+	if name == "PATH" || name == "HOME" {
+		return true
+	}
+	for _, spec := range cliAgentSpecs {
+		if spec.HomeEnv == name {
+			return true
+		}
+	}
+	return false
+}
+
+// domainSeparatedSHA256 is the identity construction #84's home_identity
+// specifies: lowercase hex SHA-256 of tag + NUL + value. A distinct tag per
+// use keeps one value's identity in one place from matching it in another.
+func domainSeparatedSHA256(tag, value string) string {
+	sum := sha256.Sum256([]byte(tag + "\x00" + value))
+	return hex.EncodeToString(sum[:])
+}
+
+// providerEnvIdentityTag is the domain tag of one recorded variable.
+func providerEnvIdentityTag(name string) string { return "zenchron/provider-env/" + name + "/v1" }
 
 // credentialShapedName is the one test for an environment NAME that may carry
 // a credential; such a name is never added and never recorded.
@@ -570,8 +601,10 @@ func credentialShapedName(name string) bool {
 var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]+@`)
 
 // providerEnvironment records the allowlisted names from the environment the
-// process was actually given. A name not passed is recorded without a value;
-// values are redacted and bounded exactly as other provenance detail is.
+// process was actually given. A name not passed is recorded with neither a
+// value nor an identity; a hashed name records only its identity (of "" when
+// passed empty); other values are redacted and bounded exactly as other
+// provenance detail is.
 func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEntry {
 	passed := map[string]string{}
 	for _, entry := range env {
@@ -586,7 +619,9 @@ func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEn
 			continue
 		}
 		entry := domain.EnvironmentEntry{Name: name}
-		if value, ok := passed[name]; ok {
+		if value, ok := passed[name]; ok && hashedEnvName(name) {
+			entry.SHA256 = domainSeparatedSHA256(providerEnvIdentityTag(name), value)
+		} else if ok {
 			bounded := sanitizedDetail(urlUserinfo.ReplaceAllString(value, "${1}[REDACTED]@"))
 			entry.Value, entry.Bounded = &bounded, bounded != value
 		}

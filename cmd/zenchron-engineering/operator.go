@@ -906,6 +906,8 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			vars := make([]string, 0, len(inv.ProviderEnvironment))
 			for _, e := range inv.ProviderEnvironment {
 				switch {
+				case e.SHA256 != "":
+					vars = append(vars, e.Name+"=sha256:"+short(e.SHA256))
 				case e.Value == nil:
 					vars = append(vars, e.Name+" (absent)")
 				case e.Bounded:

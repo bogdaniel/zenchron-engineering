@@ -99,12 +99,16 @@ type InvocationObservation struct {
 	Truncated bool `json:"provenance_truncated,omitempty"`
 }
 
-// EnvironmentEntry is one allowlisted provider-control variable. Value is
-// ABSENT when the runtime did not pass the variable at all, and present - even
-// as "" - when it did: unset and set-to-empty are different facts.
+// EnvironmentEntry is one allowlisted provider-control variable. Value and
+// SHA256 are BOTH absent when the runtime did not pass the variable at all;
+// otherwise exactly one is present - even for "" - because unset and
+// set-to-empty are different facts.
 type EnvironmentEntry struct {
 	Name  string  `json:"name"`
 	Value *string `json:"value,omitempty"`
+	// SHA256 replaces Value for a host path (PATH, HOME, a provider state
+	// home): the domain-separated identity of the exact passed value.
+	SHA256 string `json:"sha256,omitempty"`
 	// Bounded marks a recorded value that is not the passed value verbatim:
 	// a credential-shaped substring was redacted, or it was cut to the field
 	// bound.

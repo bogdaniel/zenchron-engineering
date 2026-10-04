@@ -30,6 +30,7 @@ func TestStatusSurfacesTheLatestAttemptProvenance(t *testing.T) {
 					FinalResultObserved: true, PermissionDenials: 6, PermissionDeniedTools: []string{"Bash", "WebFetch"},
 					ProviderEnvironment: []domain.EnvironmentEntry{
 						{Name: "GOENV", Value: &devNull}, {Name: "GOFLAGS", Value: new(string)}, {Name: "GOCACHE"},
+						{Name: "HOME", SHA256: strings.Repeat("ab", 32)},
 					},
 				}},
 			},
@@ -43,7 +44,7 @@ func TestStatusSurfacesTheLatestAttemptProvenance(t *testing.T) {
 		"termination=deadline_reached", "progress_mode=structured_claude_events", "inactivity_limit=10m0s",
 		"structured_events=202", "open_tools_at_exit=1", "permission_denials=6", "Bash,WebFetch", "permission=acceptEdits",
 		// #391: set, set-to-empty and absent stay three distinct facts.
-		`GOENV="/dev/null"`, `GOFLAGS=""`, "GOCACHE (absent)",
+		`GOENV="/dev/null"`, `GOFLAGS=""`, "GOCACHE (absent)", "HOME=sha256:abababababab",
 	} {
 		if !strings.Contains(text.String(), want) {
 			t.Fatalf("the text status does not surface %q:\n%s", want, text.String())
