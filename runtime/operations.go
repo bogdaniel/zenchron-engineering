@@ -391,7 +391,7 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		// it here costs nothing when it has already happened.
 		base := state.pinnedBase()
 		if ref := state.upstreamCandidate(); ref != nil {
-			if err := MaterializeCandidate(dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
+			if err := r.materializeUpstream(dir, *ref); err != nil {
 				return failed(err)
 			}
 			base = ref.Revision
@@ -438,7 +438,7 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 	// would be the exact substitution this closes - and it would be invisible,
 	// because a base-shaped workspace looks perfectly healthy.
 	if ref := state.upstreamCandidate(); ref != nil {
-		if err := MaterializeCandidate(workspace.Dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
+		if err := r.materializeUpstream(workspace.Dir, *ref); err != nil {
 			return failed(err)
 		}
 		if err := refuseSubmodules(workspace.Dir); err != nil {
@@ -458,6 +458,16 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		return failed(err)
 	}
 	return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, workspace.BaseRevision, workspace.TrustedMetadata}}
+}
+
+// materializeUpstream takes an upstream run's candidate from that run's
+// verified subject store, never from its candidate object database (#437).
+func (r *EngineeringRuntime) materializeUpstream(dir string, ref CandidateRef) error {
+	source, err := subjectStore(candidateDir(r.deps.StateDir, ref.RunID), ref.Revision)
+	if err != nil {
+		return fmt.Errorf("upstream candidate %s could not be taken from run %s: %w", short12(ref.Revision), ref.RunID, err)
+	}
+	return MaterializeCandidate(dir, ref, source)
 }
 
 func candidateDir(stateDir, runID string) string {
@@ -2201,8 +2211,20 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	if err != nil {
 		return refuse(err.Error())
 	}
-	// No rename detection: the path set Commit records lists both sides.
-	paths, err := diffPaths(dir, expected, head.Commit, "--no-renames")
+	if prior == nil {
+		return refuse("no attempt recorded a runtime commit, so the head is unproven")
+	}
+	if head.Commit != prior.Commit || head.Tree != prior.Tree {
+		return refuse("it is not the recorded commit " + prior.Commit)
+	}
+	// The paths come from the verified subject store, never from the
+	// candidate's object directory (#437). No rename detection: the path set
+	// Commit records lists both sides.
+	store, err := subjectStore(dir, head.Commit)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	paths, err := diffPaths(store, expected, head.Commit, "--no-renames")
 	if err != nil {
 		return refuse(err.Error())
 	}
@@ -2210,12 +2232,7 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	if err != nil {
 		return refuse(err.Error())
 	}
-	if prior == nil {
-		return refuse("no attempt recorded a runtime commit, so the head is unproven")
-	}
 	switch {
-	case head.Commit != prior.Commit || head.Tree != prior.Tree:
-		return refuse("it is not the recorded commit " + prior.Commit)
 	case pathsDigest(paths) != prior.PathsDigest:
 		return refuse("its paths differ from the recorded commit")
 	case metadata != prior.MetadataDigest:
@@ -2287,6 +2304,16 @@ func deviationKinds(state KernelState) []string {
 // assurance.go
 // ---------------------------------------------------------------------------
 
+// assuranceCheckout makes a verifier's checkout of commit from the verified
+// subject store, never from the candidate's object directory (#437).
+func assuranceCheckout(candidateDir, checkout, commit, tree string) error {
+	source, err := subjectStore(candidateDir, commit)
+	if err != nil {
+		return err
+	}
+	return CreateAssuranceCheckout(source, checkout, commit, tree)
+}
+
 // assureCandidate verifies the EXACT recorded commit and tree from a fresh
 // detached checkout. The producer's writable workspace is never verified, and
 // the first failing result gets exactly one identical rerun through
@@ -2304,7 +2331,7 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err := os.MkdirAll(filepath.Dir(checkout), 0700); err != nil {
 		return failed(err)
 	}
-	if err := CreateAssuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
+	if err := assuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
 		return failed(err)
 	}
 	kernel, err := r.buildKernel(state)
@@ -2446,7 +2473,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if err := os.MkdirAll(filepath.Dir(checkout), 0700); err != nil {
 		return failed(err)
 	}
-	if err := CreateAssuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
+	if err := assuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
 		return failed(err)
 	}
 	defer os.RemoveAll(checkout)
@@ -2459,7 +2486,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if len(claims) == 0 {
 		return failed(fmt.Errorf("no semantic claim is required by this contract"))
 	}
-	paths, err := candidatePaths(checkout, state.pinnedBase(), commit)
+	paths, err := candidatePaths(workspace.Dir, state.pinnedBase(), commit)
 	if err != nil {
 		return failed(err)
 	}
@@ -2573,8 +2600,14 @@ func (r *EngineeringRuntime) integrateBase(_ context.Context, state *runState, _
 	if base == state.baseRevision() {
 		return effect{state: Succeeded, result: baseIntegrateResult{BaseRevision: base, MetadataDigest: workspace.TrustedMetadata}}
 	}
-	// Already contained: the base moved but the candidate is built on it.
-	if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", base, state.projection.CandidateRevision); err == nil {
+	// Already contained: the base moved but the candidate is built on it. The
+	// candidate's history is read from the verified subject store (#437): a
+	// base absent from it is not contained, and is integrated.
+	store, err := subjectStore(workspace.Dir, state.projection.CandidateRevision)
+	if err != nil {
+		return failed(err)
+	}
+	if _, err := runGit(store, "merge-base", "--is-ancestor", base, state.projection.CandidateRevision); err == nil {
 		return effect{state: Succeeded, result: baseIntegrateResult{BaseRevision: base, MetadataDigest: workspace.TrustedMetadata}}
 	}
 	published := state.published()
@@ -2676,11 +2709,19 @@ func (r *EngineeringRuntime) pushCandidate(ctx context.Context, state *runState,
 		return failed(err)
 	}
 	remote := strings.TrimSpace(observation.SHA)
+	// PUBLICATION READS THE VERIFIED SUBJECT STORE (#437), for the ancestry
+	// diagnosis below as much as for the objects it pushes: a foreign remote
+	// head is absent there and is recorded, never related to the candidate
+	// through the candidate's own object directory.
+	store, err := subjectStore(workspace.Dir, revision)
+	if err != nil {
+		return failed(err)
+	}
 	switch {
 	case observation.Exists && remote == revision:
 		return effect{state: Succeeded, result: pushResult{branch, revision, true}}
 	case observation.Exists && remote != "":
-		if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", remote, revision); err != nil {
+		if _, err := runGit(store, "merge-base", "--is-ancestor", remote, revision); err != nil {
 			return effect{
 				state:  OperationFailed,
 				result: pushResult{Ref: branch, Revision: remote},
@@ -2699,7 +2740,7 @@ func (r *EngineeringRuntime) pushCandidate(ctx context.Context, state *runState,
 		return failed(err)
 	}
 	runner := RepositoryGitRunner{
-		Dir:    workspace.Dir,
+		Dir:    store,
 		Local:  controlPolicy(),
 		Remote: &RemotePolicy{Identity: r.deps.Remote, Credentials: r.deps.Credentials},
 	}
@@ -2939,14 +2980,20 @@ func (r *EngineeringRuntime) observeGitHub(ctx context.Context, state *runState,
 }
 
 // ancestorOfCandidate reports whether an externally observed head is one of the
-// runtime's own commits. It is answered from the runtime-owned clone, not from
-// anything GitHub said about itself.
+// runtime's own commits. It is answered from the verified subject store (#437),
+// not from the candidate's object directory and not from anything GitHub said
+// about itself. A foreign head is absent there, so the answer is "no" and the
+// change is recorded - the conservative outcome.
 func (r *EngineeringRuntime) ancestorOfCandidate(state *runState, head string) (bool, error) {
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return false, err
 	}
-	if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", head, state.projection.CandidateRevision); err != nil {
+	store, err := subjectStore(workspace.Dir, state.projection.CandidateRevision)
+	if err != nil {
+		return false, err
+	}
+	if _, err := runGit(store, "merge-base", "--is-ancestor", head, state.projection.CandidateRevision); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -3234,9 +3281,14 @@ func (s *runState) assuranceRecordedAt(sequence int64) string {
 }
 
 // candidatePaths is the observed change: every path that differs between the
-// pinned base and the exact recorded candidate commit.
+// pinned base and the exact recorded candidate commit, read from the verified
+// subject store and never from the candidate workspace dir (#437).
 func candidatePaths(dir, base, commit string) ([]string, error) {
-	return diffPaths(dir, base, commit)
+	store, err := subjectStore(dir, commit)
+	if err != nil {
+		return nil, err
+	}
+	return diffPaths(store, base, commit)
 }
 
 // diffPaths lists, sorted, every path that differs between two revisions.
@@ -3405,7 +3457,13 @@ func readCandidateDiff(dir, base, candidate string) (string, bool) {
 	if strings.TrimSpace(base) == "" || strings.TrimSpace(candidate) == "" {
 		return "", false
 	}
-	out, err := gitOutput(dir, "diff", base+".."+candidate)
+	// Reviewer context is committed content: it is read from the upstream
+	// run's verified subject store, never its candidate object database.
+	store, err := subjectStore(dir, candidate)
+	if err != nil {
+		return "", false
+	}
+	out, err := gitOutput(store, "diff", base+".."+candidate)
 	if err != nil {
 		return "", false
 	}

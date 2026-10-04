@@ -1729,12 +1729,14 @@ func directoryIsEmpty(dir string) (bool, error) {
 
 // CreateAssuranceCheckout proves the checked out input before the verifier is
 // invoked. The verifier only receives this detached disposable clone, never a
-// producer's writable workspace.
+// producer's writable workspace. The runtime clones from the verified subject
+// store (#437); --no-hardlinks keeps a verifier that writes its checkout's
+// object files from reaching that store.
 func CreateAssuranceCheckout(source, destination, commit, tree string) error {
 	if source == "" || destination == "" || commit == "" || tree == "" {
 		return fmt.Errorf("source, destination, commit, and tree are required")
 	}
-	if _, err := runGit("", "clone", "--no-checkout", source, destination); err != nil {
+	if _, err := runGit("", "clone", "--no-checkout", "--no-hardlinks", source, destination); err != nil {
 		return err
 	}
 	if _, err := runGit(destination, "checkout", "--detach", commit); err != nil {

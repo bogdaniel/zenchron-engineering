@@ -297,8 +297,8 @@ func headOf(t *testing.T, w *CandidateWorkspace) string {
 	return head
 }
 
-// TestCommitRefusesAMissingStagedBlob: a blob the gates cannot read is refused
-// by the gates, not left for `git commit` to trip over.
+// TestCommitRefusesAMissingStagedBlob: a blob that cannot be read is refused
+// before anything is committed, not left for a later reader to trip over.
 func TestCommitRefusesAMissingStagedBlob(t *testing.T) {
 	w := commitGateWorkspace(t)
 	before := headOf(t, w)
@@ -323,8 +323,9 @@ func TestCommitRefusesAMissingStagedBlob(t *testing.T) {
 	if err := os.WriteFile(object, nil, 0o400); err != nil {
 		t.Fatal(err)
 	}
+	// The verified subject store (#437) refuses it before the gates read it.
 	_, err = w.Commit("missing blob", 1<<20)
-	if err == nil || !strings.Contains(err.Error(), `staged candidate path "gone.go" has no readable blob`) {
+	if err == nil || !strings.Contains(err.Error(), errSubjectUnverified) {
 		t.Fatalf("a missing staged blob was not refused by the gate: %v", err)
 	}
 	if after := headOf(t, w); after != before {

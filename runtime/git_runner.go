@@ -69,6 +69,7 @@ func trustedGitEnv(home, ceiling string) []string {
 		"GIT_CEILING_DIRECTORIES=" + ceiling,
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_GRAFT_FILE=" + os.DevNull,
 	}
 	// Deliberately absent, and absent by construction rather than by
 	// overriding: GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,
@@ -105,7 +106,9 @@ func (r GitRunner) run(args ...string) ([]byte, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(home)
-	cmd := exec.Command(binary, append([]string{"-C", r.Dir}, args...)...)
+	// GIT_GRAFT_FILE is the null device (trustedGitEnv), and Git advises that
+	// grafts are deprecated whenever it opens a graft file.
+	cmd := exec.Command(binary, append([]string{"-C", r.Dir, "-c", "advice.graftFileDeprecated=false"}, args...)...)
 	cmd.Dir = r.Dir
 	cmd.Env = trustedGitEnv(home, filepath.Dir(r.Dir))
 	// nil Stdin is /dev/null, so anything that tried to prompt gets EOF.

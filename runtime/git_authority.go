@@ -1039,6 +1039,7 @@ var brokerGitPins = []string{
 	"PAGER=cat",
 	"GIT_OPTIONAL_LOCKS=0",
 	"GIT_NO_REPLACE_OBJECTS=1",
+	"GIT_GRAFT_FILE=" + os.DevNull,
 }
 
 // brokerGitOutput asks Git a question in the same environment the command will
@@ -1142,6 +1143,9 @@ func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, erro
 		"--attr-source=" + emptyTreeObject,
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
+		// GIT_GRAFT_FILE is the null device (brokerGitPins), and Git advises
+		// that grafts are deprecated whenever it opens a graft file.
+		"-c", "advice.graftFileDeprecated=false",
 	}, args...)...)
 	if dir != "" {
 		cmd.Dir = dir

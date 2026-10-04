@@ -647,6 +647,10 @@ func repositoryGitEnv(home, template, askpass string) []string {
 		// a commit or push carries for real, so the gates would judge the
 		// wrong content (#437).
 		"GIT_NO_REPLACE_OBJECTS=1",
+		// .git/info/grafts rewrites parents for every reader, so an ancestry
+		// query could call a foreign head the candidate's own (#437). Grafts
+		// are read from the empty null device instead.
+		"GIT_GRAFT_FILE=" + os.DevNull,
 		// An empty runtime-owned template, so neither a user template nor a
 		// system template can seed hooks into a clone or init.
 		"GIT_TEMPLATE_DIR=" + template,
@@ -669,6 +673,10 @@ func (r RepositoryGitRunner) runtimeConfigOverrides(hooks string, transport gitT
 		"-c", "commit.gpgSign=false",
 		"-c", "tag.gpgSign=false",
 		"-c", "fetch.recurseSubmodules=false",
+		// GIT_GRAFT_FILE names an existing (empty) file, and Git advises that
+		// grafts are deprecated whenever it opens one; that hint is noise in
+		// every error this runner reports.
+		"-c", "advice.graftFileDeprecated=false",
 		"-c", "credential.helper=",
 		"-c", "protocol.allow=never",
 		"-c", "protocol.ext.allow=never",
