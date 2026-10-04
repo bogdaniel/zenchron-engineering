@@ -585,17 +585,17 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 		return out, err
 	}
 	// Docker's own record of the workload's exit is the proof that the
-	// container ran its command and that command decided to fail. 126 and
-	// above are a command that could not execute or a signal death, and an
-	// error with no recorded exit never reached the workload at all.
-	if runErr != nil && exitCode >= 1 && exitCode <= 125 {
+	// container ran its command. What a given code MEANS belongs to the caller
+	// that chose the command; an error with no recorded exit never reached the
+	// workload at all.
+	if runErr != nil && exitCode >= 1 {
 		return out, &containerExitError{Code: exitCode, err: runErr}
 	}
 	return out, runErr
 }
 
-// containerExitError is a workload that ran and exited non-zero on its own.
-// It reads exactly as the error it wraps, so no caller sees a new message.
+// containerExitError is a workload Docker recorded as exiting non-zero. It
+// reads exactly as the error it wraps, so no caller sees a new message.
 type containerExitError struct {
 	Code int
 	err  error
@@ -1619,8 +1619,13 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		return AssuranceResult{}, signatureErr
 	}
 	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: &EvidenceBinding{Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy, Producer: Ref{ID: "baseline-go", Revision: v.Definition()}, Environment: Ref{ID: "docker-network-none", Revision: v.Sandbox.Image}}}
+	// The workload is `gofmt; go vet; go test` under sh -e, which exits 1 or 2
+	// when the candidate fails. Every other code - Docker's own 125, an
+	// unexecutable 126/127, a signal death such as 137 - is not a verdict.
+	// Candidate code that kills itself can only force bounded retries this way,
+	// never a pass (#454).
 	var exited *containerExitError
-	verdict := runErr != nil && ctx.Err() == nil && errors.As(runErr, &exited)
+	verdict := runErr != nil && ctx.Err() == nil && errors.As(runErr, &exited) && (exited.Code == 1 || exited.Code == 2)
 	if runErr != nil || ctx.Err() != nil {
 		// Only a verifier that actually ran judged the candidate. A cancelled
 		// context is routed by who cancelled it (FailureUnknown here settled the

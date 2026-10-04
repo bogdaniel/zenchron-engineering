@@ -17,7 +17,9 @@ func TestBaselineVerifierReturnsAJudgedFailureWithoutAnError(t *testing.T) {
 		wantErr bool
 	}{
 		"workload exited non-zero":   {1, FailureVerification, false},
-		"highest verdict exit":       {125, FailureVerification, false},
+		"workload exited 2":          {2, FailureVerification, false},
+		"first non-verdict exit":     {3, FailureTransientInfrastructure, true},
+		"docker's own failure":       {125, FailureTransientInfrastructure, true},
 		"workload not executable":    {126, FailureTransientInfrastructure, true},
 		"workload killed by signal":  {137, FailureTransientInfrastructure, true},
 		"start failed, no workload":  {-1, FailureTransientInfrastructure, true},

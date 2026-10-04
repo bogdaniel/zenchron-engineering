@@ -384,12 +384,33 @@ satisfied by it, and it cannot reach authority or publication.
 provider error is never passed either.
 
 A provider therefore returns a judged failure as a result with a nil error. The
-built-in Go verifier does so when Docker records that the verification workload
-ran and exited on its own with status 1-125, which is `gofmt`, `go vet` or
-`go test` failing on the candidate. A start that never ran the workload, a
-workload that could not execute or died to a signal (126 and above), or a
-container that could not be reaped is `transient_infrastructure` and keeps its
-error. Cancellation keeps its error and its owner's class.
+built-in Go verifier runs `gofmt`, `go vet` and `go test` under `sh -e`. Docker
+records that workload's own exit status, and the verifier reads it as follows:
+
+| Workload exit | Meaning | Class | Error |
+|---|---|---|---|
+| 0 | pass | none | nil |
+| 1 or 2 | the candidate failed | `verification_failure` | nil |
+| any other code (3 and above, Docker's 125, an unexecutable 126/127, a signal death such as 137) | not a verdict | `transient_infrastructure` | kept |
+| none recorded (a start that never ran the workload, a container that could not be reaped) | not a verdict | `transient_infrastructure` | kept |
+
+Cancellation keeps its error and its owner's class.
+
+Known ceilings, accepted deliberately:
+
+- **Signal deaths are infrastructure.** Docker's OOM record is not inspected.
+  Candidate code can kill its own workload and force retries this way, but a
+  non-verdict is never passed. It cannot create passing evidence or reach
+  authority, and `max_assurance_attempts` bounds the retries.
+- **In-container resource blips that exit 1 or 2 are read as verdicts.** A full
+  tmpfs, the pids limit or a module missing under `GOPROXY=off` is
+  indistinguishable from a candidate failure by exit status.
+- **A blip followed by a pass stays `flaky_verification`**, terminal and not
+  retryable. Contradictory evidence about the same exact tree is not weakened
+  because the classifier has known ceilings.
+
+Retry backoff for assurance `transient_infrastructure` is not part of this rule
+(#465).
 
 Before this rule the built-in verifier returned every judged failure as an
 error, so it never reached the confirmation rerun and could not record a flaky
