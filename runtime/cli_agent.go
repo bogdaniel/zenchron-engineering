@@ -1101,7 +1101,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			PermissionBypass: p.PermissionBypass, AuthMode: boundedDetail(authMode), AuthModeSource: authSource,
 			WorkspaceBound:                  spec.WorkingDirectoryFlag,
 			WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
-			Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
+			Argv:                            recordedArgv(buildArgs, invocation, p.StateDir, spec.PromptArgFromEnd),
 			PromptSHA256:                    promptDigest(invocation.Prompt),
 			ProgressMode:                    progressMode,
 		},
