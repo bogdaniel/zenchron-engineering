@@ -371,9 +371,12 @@ mutation. A differing result is `flaky_verification`, never passing
 evidence: the rerun's verdict is not passed even when the confirmation run
 passed, so no evidence bundle is bound, no claim is satisfied by it, and it
 cannot reach authority or publication. `flaky_verification` routes `stop`, and
-the run settles `assurance.go_failure_not_retryable`. No-progress uses a deterministic fingerprint over candidate tree,
-contract revision, failure signature, verifier, provider, and remediation
-identity rather than transcript text.
+the run settles `assurance.go_failure_not_retryable`. A result returned together with a
+provider error is never passed either.
+
+No-progress uses a deterministic fingerprint over candidate tree, contract
+revision, failure signature, verifier, provider, and remediation identity
+rather than transcript text.
 
 ## Operator surface
 

@@ -88,9 +88,14 @@ func (t *NoProgressTracker) Allow(f FailureFingerprint) bool {
 // flaky even if the retry passes; no producer mutation happens between calls.
 // It is the one owner of the verdict: a flaky result is never Passed, so no
 // caller can bind a pass that the first run contradicted as evidence (#454).
+// Nor is a result that came with an error, whatever the provider claims.
 func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request AssuranceRequest) (AssuranceResult, FailureClass, error) {
 	first, err := provider.Assure(ctx, request)
-	if err != nil || first.Passed {
+	if err != nil {
+		first.Passed = false
+		return first, first.FailureClass, err
+	}
+	if first.Passed {
 		return first, first.FailureClass, err
 	}
 	// The confirmation pass is a DIFFERENT verification and writes its own
@@ -106,6 +111,7 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 		} else if second.FailureClass != "" {
 			class = second.FailureClass // the verifier said what went wrong
 		}
+		second.Passed = false
 		return second, class, secondErr
 	}
 	if second.Passed != first.Passed || second.FailureClass != first.FailureClass {

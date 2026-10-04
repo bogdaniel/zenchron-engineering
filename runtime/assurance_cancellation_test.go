@@ -408,10 +408,15 @@ func TestAFlakyAssurancePassIsNeverEvidence(t *testing.T) {
 	if len(state.projection.EvidenceBundles) != 0 {
 		t.Fatalf("a flaky pass bound evidence: %+v", state.projection.EvidenceBundles)
 	}
+	flaky := false
 	for _, p := range automatedAssurancePayloads(t, state.events) {
 		if p.Passed || p.Bundle != (Ref{}) {
 			t.Fatalf("a flaky result was observed as passing evidence: %+v", p)
 		}
+		flaky = flaky || p.FailureClass == FailureFlaky
+	}
+	if !flaky {
+		t.Fatalf("no %s observation was journalled", FailureFlaky)
 	}
 	for _, e := range state.events {
 		if e.Type == EventAuthorityEvaluated {
@@ -420,5 +425,48 @@ func TestAFlakyAssurancePassIsNeverEvidence(t *testing.T) {
 	}
 	if outcome.Disposition != Failed || outcome.Reason != OpAssuranceGo+"_failure_not_retryable" {
 		t.Fatalf("a flaky assurance settled %+v, want %s_failure_not_retryable", outcome, OpAssuranceGo)
+	}
+}
+
+// passWithError answers the first call with failing, then claims a pass on
+// the confirmation together with an error.
+type passWithError struct{ FakeAssuranceProvider }
+
+func (p *passWithError) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {
+	if !r.Confirmation {
+		return AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", FailureClass: FailureVerification}, nil
+	}
+	return AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", Passed: true}, ErrSandboxUnavailable
+}
+
+// A provider that claims a pass together with an error has not passed, on
+// either call, and binds no evidence.
+func TestAPassReturnedWithAnErrorIsNeverEvidence(t *testing.T) {
+	first := passingAssurance()
+	first.Err = ErrSandboxUnavailable
+	for name, provider := range map[string]AssuranceProvider{"first": first, "confirmation": &passWithError{}} {
+		if result, _, err := AssuranceRerun(context.Background(), provider, AssuranceRequest{}); err == nil || result.Passed {
+			t.Fatalf("%s: a result with an error was passed (%v)", name, err)
+		}
+	}
+	f := newPhase8Fixture(t)
+	verifier := passingAssurance()
+	verifier.Err = ErrSandboxUnavailable
+	f.useAssurance(verifier)
+	runID := f.start()
+	for pass := 0; pass < 30; pass++ {
+		f.reconcile(runID)
+	}
+	if len(verifier.Requests) == 0 {
+		t.Fatal("assurance never ran")
+	}
+	state := f.state(runID)
+	if len(state.projection.EvidenceBundles) != 0 {
+		t.Fatalf("a pass returned with an error bound evidence: %+v", state.projection.EvidenceBundles)
+	}
+	for _, e := range state.events {
+		if e.Type == EventAuthorityEvaluated {
+			t.Fatal("a pass returned with an error reached authority")
+		}
 	}
 }
