@@ -468,7 +468,12 @@ engineering attempts: no reasoning happened, no candidate moved, no evidence or
 authority changed, and no remediation budget was consumed. Quota returns on the
 provider's own schedule. Repeated rate limiting means
 `supervisor.max_concurrent_runs` is above what that account tolerates. An
-unavailable account is repaired by you, then `resume`.
+unavailable account is repaired by you. The run probes the provider again
+every 5 minutes on its own; `status` shows the next probe time, which survives
+a restart, and `resume` does not probe earlier, even after you restore the
+account. That time is a floor: a parked
+run gets a supervisor turn at most every 4 poll intervals, so the probe can
+land up to that much later.
 
 **A run fails with `..._attempts_exhausted` or `..._failure_not_retryable`.**
 The named operation ran out of its budget, or produced a class that does not

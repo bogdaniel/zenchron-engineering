@@ -42,6 +42,10 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// no evidence class is satisfied by it, and a worker that reported a
 		// perfect posture still cannot authorize its own change.
 		"Invocation",
+		// Executed is an observation ABOUT THE INVOCATION too: that it reached
+		// the model (#87). Its only effect is that the attempt's execution
+		// time stays charged; it can cost the run budget, never grant anything.
+		"Executed",
 		// Review is the structured verdict a reviewer stage emitted, and it is
 		// admitted here for a reason worth stating precisely: at THIS boundary
 		// it is a CLAIM, not authority.

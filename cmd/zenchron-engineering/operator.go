@@ -597,6 +597,12 @@ func githubWaitOf(built *composition, repository string) *githubWaitView {
 // value here because the CLI renders durable state; it does not re-derive it.
 const providerAccountWaitReason = "execution_provider_account_unavailable"
 
+// providerWait reports a durable provider wait (#87): any retry other than
+// transport backoff, whose status this does not change.
+func providerWait(retry *runtime.RetryStatus) bool {
+	return retry != nil && retry.Disposition != runtime.DispositionTransportBackoff
+}
+
 // nextOperatorAction is the one interpretive field in the view, and it is a
 // total function of the rest of it: the same durable state always yields the
 // same sentence. It grants nothing and decides nothing.
@@ -611,6 +617,9 @@ func nextOperatorAction(view statusView) string {
 	// It is an EXTERNAL account prerequisite, not a human-authority condition,
 	// and telling an operator that the authority boundary is refusing would
 	// send them to resolve a condition that does not exist.
+	case providerWait(view.Retry):
+		return view.Retry.ResumeCondition + "; the run resumes on its own at the next probe (" +
+			view.Retry.NotBefore.UTC().Format(time.RFC3339) + "), and `autonomy resume " + run + "` does not probe earlier"
 	case view.Reason == providerAccountWaitReason:
 		return "restore execution-provider account availability, then `autonomy resume " + run + "`"
 	case view.AuthorityRefusal != "":
@@ -745,6 +754,9 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("workspace", view.Worker.Workspace)
 	}
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
+	if providerWait(view.Retry) {
+		line("next probe", "at "+view.Retry.NotBefore.UTC().Format(time.RFC3339)+" (no earlier, across restarts)")
+	}
 	line("phase", view.Phase)
 	line("active consumed", view.ActiveElapsed)
 	line("external wait", view.ExternalWaitElapsed)

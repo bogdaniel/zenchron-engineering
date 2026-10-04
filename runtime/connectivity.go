@@ -118,9 +118,9 @@ type RetryDisposition string
 
 const (
 	DispositionTransportBackoff RetryDisposition = "transport_backoff"
-	// Reserved for #87. Declared so the vocabulary is closed and its accounting
-	// is frozen here; nothing produces them yet.
-	DispositionProviderPrerequisiteWait RetryDisposition = "provider_prerequisite_wait"
+	// The provider waits (#87): external, refunded, probed at a fixed durable
+	// cadence until the condition clears and the same run resumes.
+	DispositionProviderAvailabilityWait RetryDisposition = "provider_availability_wait"
 	DispositionRateLimitWait            RetryDisposition = "rate_limit_wait"
 	DispositionAccountWait              RetryDisposition = "account_wait"
 )
@@ -136,7 +136,7 @@ type dispositionSemantics struct {
 	FiniteAttemptAuthority bool
 	// ResumeCondition is what makes the operation eligible again.
 	ResumeCondition string
-	// Reason is the run's waiting reason.
+	// Reason is the run's waiting reason; empty means the class's stated one.
 	Reason string
 	// Delay is the RetryNotBefore schedule; nil sets none.
 	Delay func(attempt int) time.Duration
@@ -153,17 +153,27 @@ var retryDispositions = map[RetryDisposition]dispositionSemantics{
 		ResumeCondition: "retry_not_before has passed", Reason: ReasonConnectivityBackoff,
 		Delay: connectivityBackoff,
 	},
-	DispositionProviderPrerequisiteWait: {ResumeCondition: "an operator restores the provider prerequisite", Reason: "execution_provider_prerequisite_unavailable"},
-	DispositionRateLimitWait:            {ResumeCondition: "the provider's stated retry time has passed", Reason: "execution_provider_rate_limited"},
-	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account", Reason: "execution_provider_account_unavailable"},
+	DispositionProviderAvailabilityWait: {ResumeCondition: "the provider endpoint recovers on its own; probed every 5 minutes", Delay: providerWaitProbe},
+	DispositionRateLimitWait:            {ResumeCondition: "the provider allowance returns; probed every 5 minutes", Delay: providerWaitProbe},
+	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account; probed every 5 minutes", Delay: providerWaitProbe},
 }
 
+// providerWaitProbe is the fixed cadence of a provider wait. The attempt is
+// refunded, so an attempt-keyed backoff would never grow.
+func providerWaitProbe(int) time.Duration { return 5 * time.Minute }
+
 // retryDispositionFor is the ONE owner of which failure class carries a
-// disposition. Only transport loss does today; every other class keeps the
-// route RouteFailure gives it.
+// disposition. Every other class keeps the route RouteFailure gives it.
 func retryDispositionFor(class FailureClass) RetryDisposition {
-	if class == FailureConnectivity {
+	switch class {
+	case FailureConnectivity:
 		return DispositionTransportBackoff
+	case FailureProviderAccountUnavailable:
+		return DispositionAccountWait
+	case FailureProviderQuota, FailureProviderRateLimited:
+		return DispositionRateLimitWait
+	case FailureProviderUnavailable:
+		return DispositionProviderAvailabilityWait
 	}
 	return ""
 }
@@ -171,20 +181,22 @@ func retryDispositionFor(class FailureClass) RetryDisposition {
 // A disposition's wait is external wait by its table row, not by a second list.
 func init() {
 	for _, s := range retryDispositions {
-		if !s.SpendsActiveWork {
+		if !s.SpendsActiveWork && s.Reason != "" {
 			externalWaitReasons[s.Reason] = true
 		}
 	}
 }
 
 // waitReasonOf names the wait a not-yet-eligible operation is in: its
-// disposition's reason, else its wait-routed class's. Never its timestamp.
+// wait-routed class's stated reason (the provider rows state none: quota and
+// rate limit share a disposition but not an operator action), else its
+// disposition's. Never its timestamp.
 func waitReasonOf(op RunOperation) string {
-	if s, ok := retryDispositions[op.RetryDisposition]; ok {
-		return s.Reason
-	}
 	if class, waiting := waitRoutedFailure(op.Result); waiting {
 		return waitReason(class)
+	}
+	if s, ok := retryDispositions[op.RetryDisposition]; ok && s.Reason != "" {
+		return s.Reason
 	}
 	return "operation_unavailable"
 }

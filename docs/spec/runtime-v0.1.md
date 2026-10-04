@@ -462,12 +462,15 @@ carries no meaning of its own: the waiting reason, any attempt refund, whether
 the wait counts as external, and whether an observation keeps its binding are
 all read from the disposition, and never from whether a timestamp is set.
 
-| Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
+| Disposition | Produced by | Spends attempt | Spends active work¹ | Finite attempt authority | Resume condition | Waiting reason |
 |---|---|---|---|---|---|---|
 | `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
-| `provider_prerequisite_wait` | declared; produced by #87 | no | no | no | an operator restores the provider prerequisite | `execution_provider_prerequisite_unavailable` |
-| `rate_limit_wait` | declared; produced by #87 | no | no | no | the provider's stated retry time has passed | `execution_provider_rate_limited` |
-| `account_wait` | declared; produced by #87 | no | no | no | an operator restores the provider account | `execution_provider_account_unavailable` |
+| `provider_availability_wait` | `provider_unavailable` | no | no | no | the provider endpoint recovers on its own; probed every 5 min | the class's: `execution_provider_unavailable` |
+| `rate_limit_wait` | `provider_quota`, `provider_rate_limited` | no | no | no | the provider allowance returns; probed every 5 min | the class's: `execution_provider_quota` / `execution_provider_rate_limited` |
+| `account_wait` | `provider_account_unavailable` | no | no | no | an operator restores the provider account; probed every 5 min | the class's: `execution_provider_account_unavailable` |
+
+¹ Waiting only. A probe's own execution time is refunded only when
+`provider_executed` is false (see Provider waits).
 
 Further rules:
 
@@ -495,9 +498,46 @@ Further rules:
     envelope. For a CLI that text is how it reports losing the network, so a
     typed DNS not-found failing closed does not extend to it. Text is compared
     in lower case, with U+2019 read as an ASCII apostrophe.
-- **Endpoint capacity.** An overloaded endpoint or a 502, 503 or 504 is
-  `provider_unavailable`, routed `wait` with no disposition. That is the
-  existing refunded wait, unchanged until #87 assigns it a disposition.
+- **Endpoint availability.** An overloaded endpoint or a 502, 503 or 504 is
+  `provider_unavailable`, routed `wait` under `provider_availability_wait`.
+  The failure class stays the exact cause; the disposition names only how
+  the retry is accounted.
+- **Class to disposition (frozen, #87).** `provider_unavailable` →
+  `provider_availability_wait`; `provider_quota` and `provider_rate_limited`
+  → `rate_limit_wait`; `provider_account_unavailable` → `account_wait`;
+  `connectivity_unavailable` → `transport_backoff`. No other class carries a
+  disposition, and every disposition has a producer: these four are the
+  whole vocabulary. A concrete executable or prerequisite disposition, with
+  its own rules, is #87 slice 3's to introduce after #84.
+- **Provider waits (#87).** The four provider classes keep `RouteWait`. Their
+  disposition is external wait and sets `retry_not_before` to a fixed 5
+  minutes after each probe: an attempt-keyed backoff would never grow,
+  because the attempt is given back. The probe time is on the operation row
+  and in its journalled `operation.after`, so a restart before it invokes
+  nothing. Once it passes, the same operation of the same run is invoked
+  again.
+- **Provider wait accounting (frozen, #87).** A recognized provider wait
+  always refunds the logical engineering attempt. The attempt's active
+  execution time is refunded only when `provider_executed` is false, that is
+  when the provider was refused before it ran. The provider owns that fact,
+  never the failure class: a CLI reports it with its process provenance, and
+  `openai_responses` once one model exchange has completed, so a tool loop
+  that ends in a 429 keeps its elapsed work charged. When the provider really ran,
+  that elapsed work stays charged to the active-work budget. There is no
+  "made no progress" heuristic: a long wait therefore spends active work one
+  probe per 5 min and is bounded by the active-work budget as well as
+  `lifecycle_deadline`.
+- **No early probe (frozen, #87).** Restoring the provider account, or any
+  other external fix, does not bypass `retry_not_before` in this slice.
+  `autonomy resume` is an ordinary reconcile and honours it; it is not a
+  hidden `--now`, and no override verb exists. The provider rows state no
+  reason of their own: the run waits under the class's stated reason (quota
+  and rate limit share a disposition but not an operator action). Status
+  reports the next probe time and the disposition's resume condition only
+  for the latest operation of its kind whose reason is the run's.
+  `retry_not_before` is a floor: the supervisor gives a parked run a turn at
+  most every 4 poll intervals, so the effective cadence is 5 min plus up to
+  that quiet-tier re-poll delay.
 
 Effective patience with the defaults: an execution (`max_execution_attempts`
 2) waits once, for 30 s, before stopping. An observation (3 attempts) waits
