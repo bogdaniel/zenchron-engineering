@@ -1748,6 +1748,7 @@ func TestTheBrokerEnvironmentDropsProviderGitAuthority(t *testing.T) {
 		"PAGER":                  "cat",
 		"GIT_OPTIONAL_LOCKS":     "0",
 		"GIT_NO_REPLACE_OBJECTS": "1",
+		"GIT_GRAFT_FILE":         os.DevNull,
 	} {
 		if got := present[name]; got != want {
 			t.Fatalf("pin %s = %q, want %q", name, got, want)

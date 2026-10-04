@@ -163,9 +163,10 @@ so an index rewritten after gating cannot change what is committed. A HEAD that
 moved from the gated parent is refused as a `workspace_integrity_violation` and
 no commit is reported. Every runtime Git call ignores replace objects
 (`GIT_NO_REPLACE_OBJECTS=1`), so a `refs/replace/*` ref cannot make the gates
-read stand-in bytes for a blob the commit carries. Every runtime Git call
-also reads grafts from a path that never exists (`GIT_GRAFT_FILE`), so
-`.git/info/grafts` cannot rewrite a commit's parents. The commit's recorded paths
+read stand-in bytes for a blob the commit carries. Every runtime Git call,
+and every Git command the broker runs for a provider, also reads grafts from
+the null device (`GIT_GRAFT_FILE=/dev/null`), so `.git/info/grafts` cannot
+rewrite a commit's parents. The commit's recorded paths
 are that tree diff, the same set #431 recovery recomputes.
 
 After the runtime writes the commit object, the provider-writable candidate
@@ -174,12 +175,27 @@ exact commit into a runtime-owned subject store beside the candidate workspace
 (`runs/<id>/subject.git`), never inside it. Every object the fetch receives is
 re-hashed by `index-pack`, so content that does not match its name is refused
 rather than stored. This covers a loose object swapped behind its name and a
-name answered from `objects/info/alternates`. The commit gates, observation,
-contract reassessment, the assurance and semantic checkouts, #431 recovery,
-the `candidate.push`, and the ancestry check that decides whether an observed
-pull-request head is the runtime's own all read that store. A foreign head is
-absent from the store, so it is recorded as `candidate.external_changed`. None of them reads the
-candidate's worktree, index or object directory. A commit whose content
+name answered from `objects/info/alternates`.
+
+Once a runtime commit is made, no production decision, reviewer context, recovery check, assurance checkout or publication path may obtain committed content/ancestry from the provider-writable candidate object database.
+
+These readers all read the subject store, and none of them reads the
+candidate's worktree, index or object directory:
+
+- the commit gates;
+- observation and contract reassessment;
+- the assurance and semantic checkouts;
+- #431 recovery;
+- `candidate.push`, and its diagnosis of whether the remote branch head is an
+  ancestor of the candidate;
+- the check of whether an observed pull-request head is the runtime's own;
+- the plan reconciler's proof that one upstream candidate contains another;
+- the upstream diff a reviewer is given;
+- the transfer of an upstream candidate into a downstream run.
+
+A head or a sibling candidate that is not in the store's history is never
+related to the candidate. A foreign pull-request or remote-branch head is
+therefore recorded as `candidate.external_changed`. A commit whose content
 cannot be fetched under its own names fails closed and never falls back to the
 candidate: before HEAD moves, nothing is committed; after it, the failure is a
 #402 post-commit failure. Assurance checkouts are cloned from the store

@@ -391,7 +391,7 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		// it here costs nothing when it has already happened.
 		base := state.pinnedBase()
 		if ref := state.upstreamCandidate(); ref != nil {
-			if err := MaterializeCandidate(dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
+			if err := r.materializeUpstream(dir, *ref); err != nil {
 				return failed(err)
 			}
 			base = ref.Revision
@@ -438,7 +438,7 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 	// would be the exact substitution this closes - and it would be invisible,
 	// because a base-shaped workspace looks perfectly healthy.
 	if ref := state.upstreamCandidate(); ref != nil {
-		if err := MaterializeCandidate(workspace.Dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
+		if err := r.materializeUpstream(workspace.Dir, *ref); err != nil {
 			return failed(err)
 		}
 		if err := refuseSubmodules(workspace.Dir); err != nil {
@@ -458,6 +458,16 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		return failed(err)
 	}
 	return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, workspace.BaseRevision, workspace.TrustedMetadata}}
+}
+
+// materializeUpstream takes an upstream run's candidate from that run's
+// verified subject store, never from its candidate object database (#437).
+func (r *EngineeringRuntime) materializeUpstream(dir string, ref CandidateRef) error {
+	source, err := subjectStore(candidateDir(r.deps.StateDir, ref.RunID), ref.Revision)
+	if err != nil {
+		return fmt.Errorf("upstream candidate %s could not be taken from run %s: %w", short12(ref.Revision), ref.RunID, err)
+	}
+	return MaterializeCandidate(dir, ref, source)
 }
 
 func candidateDir(stateDir, runID string) string {
@@ -2478,7 +2488,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if len(claims) == 0 {
 		return failed(fmt.Errorf("no semantic claim is required by this contract"))
 	}
-	paths, err := candidatePaths(checkout, state.pinnedBase(), commit)
+	paths, err := candidatePaths(workspace.Dir, state.pinnedBase(), commit)
 	if err != nil {
 		return failed(err)
 	}
@@ -2592,8 +2602,14 @@ func (r *EngineeringRuntime) integrateBase(_ context.Context, state *runState, _
 	if base == state.baseRevision() {
 		return effect{state: Succeeded, result: baseIntegrateResult{BaseRevision: base, MetadataDigest: workspace.TrustedMetadata}}
 	}
-	// Already contained: the base moved but the candidate is built on it.
-	if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", base, state.projection.CandidateRevision); err == nil {
+	// Already contained: the base moved but the candidate is built on it. The
+	// candidate's history is read from the verified subject store (#437): a
+	// base absent from it is not contained, and is integrated.
+	store, err := subjectStore(workspace.Dir, state.projection.CandidateRevision)
+	if err != nil {
+		return failed(err)
+	}
+	if _, err := runGit(store, "merge-base", "--is-ancestor", base, state.projection.CandidateRevision); err == nil {
 		return effect{state: Succeeded, result: baseIntegrateResult{BaseRevision: base, MetadataDigest: workspace.TrustedMetadata}}
 	}
 	published := state.published()
@@ -2695,11 +2711,19 @@ func (r *EngineeringRuntime) pushCandidate(ctx context.Context, state *runState,
 		return failed(err)
 	}
 	remote := strings.TrimSpace(observation.SHA)
+	// PUBLICATION READS THE VERIFIED SUBJECT STORE (#437), for the ancestry
+	// diagnosis below as much as for the objects it pushes: a foreign remote
+	// head is absent there and is recorded, never related to the candidate
+	// through the candidate's own object directory.
+	store, err := subjectStore(workspace.Dir, revision)
+	if err != nil {
+		return failed(err)
+	}
 	switch {
 	case observation.Exists && remote == revision:
 		return effect{state: Succeeded, result: pushResult{branch, revision, true}}
 	case observation.Exists && remote != "":
-		if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", remote, revision); err != nil {
+		if _, err := runGit(store, "merge-base", "--is-ancestor", remote, revision); err != nil {
 			return effect{
 				state:  OperationFailed,
 				result: pushResult{Ref: branch, Revision: remote},
@@ -2715,13 +2739,6 @@ func (r *EngineeringRuntime) pushCandidate(ctx context.Context, state *runState,
 	// A cancelled run must not START a publication. This is the last point
 	// before the effect becomes externally visible.
 	if err := ctx.Err(); err != nil {
-		return failed(err)
-	}
-	// PUBLICATION READS THE VERIFIED SUBJECT STORE (#437): the pushed objects
-	// are the content the commit's names denote, never what the candidate's
-	// object directory holds behind them now.
-	store, err := subjectStore(workspace.Dir, revision)
-	if err != nil {
 		return failed(err)
 	}
 	runner := RepositoryGitRunner{
@@ -3442,7 +3459,13 @@ func readCandidateDiff(dir, base, candidate string) (string, bool) {
 	if strings.TrimSpace(base) == "" || strings.TrimSpace(candidate) == "" {
 		return "", false
 	}
-	out, err := gitOutput(dir, "diff", base+".."+candidate)
+	// Reviewer context is committed content: it is read from the upstream
+	// run's verified subject store, never its candidate object database.
+	store, err := subjectStore(dir, candidate)
+	if err != nil {
+		return "", false
+	}
+	out, err := gitOutput(store, "diff", base+".."+candidate)
 	if err != nil {
 		return "", false
 	}

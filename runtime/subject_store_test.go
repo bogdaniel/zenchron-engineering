@@ -19,6 +19,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // swapLooseObject rewrites the loose object id in dir's object directory with
@@ -390,14 +392,8 @@ func TestAForeignHeadIsNeverTheCandidatesAncestor(t *testing.T) {
 		{"a graft", func(t *testing.T, dir, candidate, foreign string) {
 			mustWrite(t, filepath.Join(dir, ".git", "info", "grafts"), candidate+" "+foreign+"\n")
 		}},
-		// Git verifies a commit named on the command line, not the parents it
-		// walks to, so the candidate's parent is swapped for one that names
-		// the foreign commit as a parent of its own.
 		{"a swapped parent commit object", func(t *testing.T, dir, candidate, foreign string) {
-			parent := mustGit(t, dir, "rev-parse", candidate+"^")
-			raw := mustGit(t, dir, "cat-file", "commit", parent)
-			tree, rest, _ := strings.Cut(raw, "\n")
-			swapLooseObject(t, dir, parent, "commit", []byte(tree+"\nparent "+foreign+"\n"+rest+"\n"))
+			swapParentToName(t, dir, candidate, foreign)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -451,5 +447,178 @@ func mustBytes(t *testing.T) func([]byte, error) []byte {
 			t.Fatal(err)
 		}
 		return b
+	}
+}
+
+// swapParentToName replaces commit's parent commit object in dir with one that
+// also names extra as a parent: Git verifies a commit named on the command
+// line, not the parents it walks to. extra must exist in dir.
+func swapParentToName(t *testing.T, dir, commit, extra string) {
+	t.Helper()
+	parent := mustGit(t, dir, "rev-parse", commit+"^")
+	raw := mustGit(t, dir, "cat-file", "commit", parent)
+	tree, rest, _ := strings.Cut(raw, "\n")
+	swapLooseObject(t, dir, parent, "commit", []byte(tree+"\nparent "+extra+"\n"+rest+"\n"))
+	if out, err := exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", extra, commit).CombinedOutput(); err != nil {
+		t.Fatalf("the tamper did not take: plain git does not relate %s to %s: %v %s", extra, commit, err, out)
+	}
+}
+
+// stateRunCommit clones origin as runID's candidate under stateDir and makes a
+// runtime commit of files there, filling that run's subject store.
+func stateRunCommit(t *testing.T, stateDir, origin, runID string, files map[string]string) CommitResult {
+	t.Helper()
+	dir := candidateDir(stateDir, runID)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit("", "clone", "-q", origin, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"config", "user.name", "fixture"}, {"config", "user.email", "fixture@example.invalid"}} {
+		if _, err := runGit(dir, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, content := range files {
+		mustWrite(t, filepath.Join(dir, name), content)
+	}
+	metadata, err := gitMetadataDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&CandidateWorkspace{Dir: dir, TrustedMetadata: metadata}).Commit(runID, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+// TestPrePushDiagnosisReadsTheSubjectStore: a remote branch head the
+// candidate's object database has been tampered to relate to the candidate is
+// still foreign - recorded as candidate.external_changed, and never pushed over.
+func TestPrePushDiagnosisReadsTheSubjectStore(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	fixture.crash(runID, func(call GitHubCall) bool {
+		return call.Method == "RefSHA" && strings.HasPrefix(call.Ref, "zenchron/")
+	})
+	candidate := fixture.state(runID).projection.CandidateRevision
+	if candidate == "" {
+		t.Fatal("no candidate commit")
+	}
+	dir := candidateDir(fixture.stateDir, runID)
+	foreign := strings.TrimSpace(string(mustBytes(t)(runGitInput(dir, []byte("foreign\n"), "commit-tree", fixture.base+"^{tree}"))))
+	swapParentToName(t, dir, candidate, foreign)
+	branch := candidateBranch(runID)
+	fixture.inject(func(call GitHubCall) error {
+		if call.Method == "RefSHA" && call.Ref == branch {
+			fixture.forge.Refs[branch] = foreign
+		}
+		return nil
+	})
+	fixture.reconcile(runID)
+	if got := fixture.state(runID).projection.ObservedExternalHead; got != foreign {
+		t.Fatalf("a foreign remote head passed as the candidate's ancestor: observed external head %q", got)
+	}
+	if out, err := gitOutput(fixture.origin, "rev-parse", "--verify", "-q", "refs/heads/"+branch); err == nil {
+		t.Fatalf("the runtime pushed over a foreign remote head: %s", out)
+	}
+}
+
+// TestContainmentReadsTheSubjectStore: two sibling candidates are never
+// related through a candidate object database tampered to make one the
+// other's ancestor.
+func TestContainmentReadsTheSubjectStore(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	initFixtureRepo(t, origin, "README.md", "base\n")
+	stateDir := filepath.Join(root, "state")
+	x := stateRunCommit(t, stateDir, origin, "run-x", map[string]string{"x.go": "package x\n"})
+	y := stateRunCommit(t, stateDir, origin, "run-y", map[string]string{"y.go": "package y\n"})
+	dirX := candidateDir(stateDir, "run-x")
+	fixtureGit(t, dirX, "fetch", "-q", candidateDir(stateDir, "run-y"), y.Commit)
+	swapParentToName(t, dirX, x.Commit, y.Commit)
+	all := []domain.UpstreamOutput{{RunID: "run-x", Candidate: x.Commit}, {RunID: "run-y", Candidate: y.Commit}}
+	contains, err := PlanReconciler{StateDir: stateDir}.containsAll(all[0], all)
+	if err != nil || contains {
+		t.Fatalf("siblings were related through a tampered candidate object database: %v %v", contains, err)
+	}
+}
+
+// TestReviewerDiffReadsTheSubjectStore: the upstream diff a reviewer is handed
+// is the committed change, not a tree swapped behind the commit's name.
+func TestReviewerDiffReadsTheSubjectStore(t *testing.T) {
+	w, result, parent := committedSubject(t)
+	standIn := strings.TrimSpace(string(mustBytes(t)(runGitInput(w.Dir, []byte(standInSource), "hash-object", "-w", "--stdin"))))
+	var listing []string
+	for _, line := range strings.Split(mustGit(t, w.Dir, "ls-tree", result.Commit), "\n") {
+		if strings.HasSuffix(line, "\ta.go") {
+			line = "100644 blob " + standIn + "\ta.go"
+		}
+		listing = append(listing, line)
+	}
+	tree := strings.TrimSpace(string(mustBytes(t)(runGitInput(w.Dir, []byte(strings.Join(listing, "\n")+"\n"), "mktree"))))
+	swapLooseObject(t, w.Dir, result.Tree, "tree", mustBytes(t)(runGit(w.Dir, "cat-file", "tree", tree)))
+	if out := mustGit(t, w.Dir, "diff", parent+".."+result.Commit); !strings.Contains(out, "STANDIN") {
+		t.Fatalf("the tree swap did not take: %q", out)
+	}
+	diff, _ := readCandidateDiff(w.Dir, parent, result.Commit)
+	if strings.Contains(diff, "STANDIN") || !strings.Contains(diff, "// real") {
+		t.Fatalf("the reviewer was handed a diff that is not the commit's: %q", diff)
+	}
+}
+
+// TestUpstreamMaterializationReadsTheSubjectStore: a downstream run takes an
+// upstream candidate from that run's subject store, so a blob swapped in the
+// upstream candidate object database neither reaches it nor blocks it.
+func TestUpstreamMaterializationReadsTheSubjectStore(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	initFixtureRepo(t, origin, "README.md", "base\n")
+	stateDir := filepath.Join(root, "state")
+	up := stateRunCommit(t, stateDir, origin, "run-up", map[string]string{"a.go": realSource})
+	upDir := candidateDir(stateDir, "run-up")
+	swapLooseObject(t, upDir, mustGit(t, upDir, "rev-parse", up.Commit+":a.go"), "blob", []byte(standInSource))
+	consumer := filepath.Join(root, "consumer")
+	if _, err := runGit("", "clone", "-q", origin, consumer); err != nil {
+		t.Fatal(err)
+	}
+	r := &EngineeringRuntime{deps: Dependencies{StateDir: stateDir}}
+	if err := r.materializeUpstream(consumer, CandidateRef{RunID: "run-up", Revision: up.Commit, Tree: up.Tree}); err != nil {
+		t.Fatalf("the upstream candidate was not taken from its subject store: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(consumer, "a.go")); string(got) != realSource {
+		t.Fatalf("the downstream workspace holds %q, not the committed bytes", got)
+	}
+}
+
+// TestBaseContainmentReadsTheSubjectStore: a moved base is integrated even
+// when the candidate object database has been tampered to make the candidate
+// look built on it.
+func TestBaseContainmentReadsTheSubjectStore(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	fixture.crash(runID, func(call GitHubCall) bool {
+		return call.Method == "RefSHA" && strings.HasPrefix(call.Ref, "zenchron/")
+	})
+	before := fixture.state(runID)
+	candidate := before.projection.CandidateRevision
+	if candidate == "" {
+		t.Fatal("no candidate commit")
+	}
+	moved := fixture.moveBase("moved.txt", "base moved\n")
+	dir := candidateDir(fixture.stateDir, runID)
+	fixtureGit(t, dir, "fetch", "-q", fixture.origin, moved)
+	swapParentToName(t, dir, candidate, moved)
+	driftKey, _ := bindBaseIntegrate(before)
+	if !forgetOperation(t, fixture, runID, OpBaseIntegrate, driftKey) {
+		t.Fatal("no base drift check to interrupt")
+	}
+	fixture.reconcile(runID)
+	state := fixture.state(runID)
+	if state.projection.CandidateRevision == candidate && countType(state.events, EventCandidateBaseIntegrated) == 0 {
+		t.Logf("journal: %v", journalTypes(state.events))
+		t.Fatal("a moved base was taken as contained through a tampered candidate object database")
 	}
 }

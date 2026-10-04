@@ -126,8 +126,8 @@ func MaterializeCandidate(dir string, ref CandidateRef, sourceDir string) error 
 	if !ref.Materializable() {
 		return fmt.Errorf("upstream candidate reference is incomplete: run=%q revision=%q tree=%q", ref.RunID, ref.Revision, ref.Tree)
 	}
-	if _, err := os.Stat(filepath.Join(sourceDir, ".git")); err != nil {
-		return fmt.Errorf("upstream run %s has no workspace to take candidate %s from: %w", ref.RunID, short12(ref.Revision), err)
+	if !isDir(sourceDir) {
+		return fmt.Errorf("upstream run %s has no workspace to take candidate %s from", ref.RunID, short12(ref.Revision))
 	}
 	// --no-tags and an explicit revision: this takes exactly the object asked
 	// for and nothing else the producer's workspace happens to carry.
@@ -348,6 +348,10 @@ func subjectStore(candidateDir, commit string) (string, error) {
 	}
 	store := subjectStoreDir(candidateDir)
 	if !isDir(store) {
+		// Nothing to take a commit from: a reclaimed run is not given a store.
+		if !isDir(candidateDir) {
+			return "", fmt.Errorf("candidate commit %s has no workspace to be taken from", short12(commit))
+		}
 		if _, err := runGit("", "init", "-q", "--bare", store); err != nil {
 			return "", err
 		}

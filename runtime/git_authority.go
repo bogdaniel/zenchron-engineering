@@ -1039,6 +1039,7 @@ var brokerGitPins = []string{
 	"PAGER=cat",
 	"GIT_OPTIONAL_LOCKS=0",
 	"GIT_NO_REPLACE_OBJECTS=1",
+	"GIT_GRAFT_FILE=" + os.DevNull,
 }
 
 // brokerGitOutput asks Git a question in the same environment the command will

@@ -653,7 +653,7 @@ func TestRepositoryGitEnvironmentIsBuiltFromScratch(t *testing.T) {
 		"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
 		"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat",
 		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-		"GIT_GRAFT_FILE": "/home/no-grafts", "GIT_TEMPLATE_DIR": "/template",
+		"GIT_GRAFT_FILE": os.DevNull, "GIT_TEMPLATE_DIR": "/template",
 	} {
 		if names[key] != want {
 			t.Fatalf("%s = %q, want %q", key, names[key], want)

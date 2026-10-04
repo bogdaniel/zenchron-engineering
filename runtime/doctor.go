@@ -755,7 +755,7 @@ func doctorGitIsolation() DoctorCheck {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_LITERAL_PATHSPECS=1",
 		"GIT_NO_REPLACE_OBJECTS=1",
-		"GIT_GRAFT_FILE=" + noGraftFile(home),
+		"GIT_GRAFT_FILE=" + os.DevNull,
 		"PATH=" + trustedPATH,
 	} {
 		if !containsExact(env, required) {

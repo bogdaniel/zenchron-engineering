@@ -27,8 +27,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1491,21 +1489,23 @@ func (r PlanReconciler) upstreamSubject(assignment domain.AgentAssignment) (*dom
 
 // containsAll reports whether one candidate has every other as an ancestor.
 //
-// The proof runs in the CANDIDATE'S OWN runtime-owned workspace, which is the
-// only place both objects are guaranteed to exist: a sibling producer's commit
-// was never fetched anywhere else. A workspace that has been reclaimed, or an
-// object that is genuinely absent, proves nothing and therefore answers false -
-// the caller refuses rather than assuming a relationship it could not check.
+// The proof runs in the candidate's run's verified subject store (#437), which
+// holds the candidate's whole history re-hashed - never in its provider-
+// writable object database, where a graft or a swapped commit could relate
+// two siblings. A sibling's commit is an ancestor only if it is in that
+// history. A store that cannot be had, or an object that is genuinely absent,
+// proves nothing and therefore answers false - the caller refuses rather than
+// assuming a relationship it could not check.
 func (r PlanReconciler) containsAll(candidate domain.UpstreamOutput, all []domain.UpstreamOutput) (bool, error) {
-	dir := candidateDir(r.StateDir, candidate.RunID)
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+	store, err := subjectStore(candidateDir(r.StateDir, candidate.RunID), candidate.Candidate)
+	if err != nil {
 		return false, nil
 	}
 	for _, other := range all {
 		if other.Candidate == candidate.Candidate {
 			continue
 		}
-		if _, err := runGit(dir, "merge-base", "--is-ancestor", other.Candidate, candidate.Candidate); err != nil {
+		if _, err := runGit(store, "merge-base", "--is-ancestor", other.Candidate, candidate.Candidate); err != nil {
 			return false, nil
 		}
 	}
