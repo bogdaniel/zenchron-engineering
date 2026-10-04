@@ -384,6 +384,25 @@ CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequenc
 -- latest run.paused/run.unpaused event. This partial index makes the common
 -- never-paused case an empty probe rather than a scan of the run's journal.
 CREATE INDEX events_run_pause ON events(run_id, sequence) WHERE type IN ('run.paused', 'run.unpaused');
+`, `
+-- Basic explicit orchestration (#470), in the SAME database as runs and the
+-- journal. Both tables are insert-only: a batch is written once with every
+-- item's child run already decided, and an admitted handoff is immutable. Item
+-- state is never stored; it is projected from the child runs on every read.
+CREATE TABLE orchestration_batches (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE TABLE orchestration_handoffs (
+	id                 TEXT PRIMARY KEY,
+	batch_id           TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoffs_by_run ON orchestration_handoffs(run_id, admitted_unix_nano, id);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

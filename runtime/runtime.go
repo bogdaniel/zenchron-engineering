@@ -102,6 +102,12 @@ const (
 	EventOperationBefore             = "operation.before"
 	EventOperationAfter              = "operation.after"
 	EventCandidateChanged            = "candidate.changed"
+	// EventHandoffReported and EventHandoffRefused record what a FINISHED
+	// worker invocation of an orchestrated run transferred through its typed
+	// handoff slot (#470): a valid report, or why there was none. Neither is
+	// evidence or authority; see handoff_slot.go.
+	EventHandoffReported = "handoff.reported"
+	EventHandoffRefused  = "handoff.refused"
 	// EventControllerSuccessionAdmitted records that one adopted controller
 	// may continue this run under another. It is an ADDITION to the journal
 	// and never an edit: the run row keeps naming its creator, and every
@@ -241,7 +247,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventRunPaused: true, EventRunUnpaused: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventCandidateQuarantined: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
+var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventRunPaused: true, EventRunUnpaused: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventCandidateQuarantined: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true, EventHandoffReported: true, EventHandoffRefused: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -317,10 +323,23 @@ type EngineeringRun struct {
 	// pack and the frozen profile configuration live in the durable
 	// AgentAssignment this points at, so the run row cannot drift from the
 	// assignment an operator approved.
-	Plan      *RunPlanBinding `json:"plan,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Cursor    Cursor          `json:"journal_cursor"`
+	Plan *RunPlanBinding `json:"plan,omitempty"`
+	// Orchestration binds this run to the orchestration batch item that
+	// created it (#470), when one did. Like Plan it is part of the run AS
+	// CREATED, a pointer with omitempty so every other run canonicalizes as it
+	// always did, and it carries an identity and nothing else. It changes no
+	// execution semantics: it is what makes the runtime give the worker a
+	// typed handoff slot and journal what the worker transferred through it.
+	Orchestration *RunOrchestrationBinding `json:"orchestration,omitempty"`
+	CreatedAt     time.Time                `json:"created_at"`
+	UpdatedAt     time.Time                `json:"updated_at"`
+	Cursor        Cursor                   `json:"journal_cursor"`
+}
+
+// RunOrchestrationBinding is the durable link from an ordinary EngineeringRun
+// back to the orchestration batch that created it.
+type RunOrchestrationBinding struct {
+	BatchID string `json:"batch_id"`
 }
 
 // RunPlanBinding is the durable link from an ordinary EngineeringRun back to

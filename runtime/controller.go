@@ -705,7 +705,7 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal, nil, domain.StageBudget{})
+			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{})
 			return StartOutcome{RunID: created}, err
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
@@ -831,7 +831,7 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, stageBudget domain.StageBudget) (string, error) {
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, orchestration *RunOrchestrationBinding, stageBudget domain.StageBudget) (string, error) {
 	now := r.deps.Clock.Now()
 	budgets := r.deps.Budgets.defaults().tightenedBy(stageBudget)
 	run := EngineeringRun{
@@ -854,9 +854,10 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 		// afterwards: the genesis event is hashed against this row, and a row
 		// that gained its binding later would leave the two disagreeing about
 		// what the run is.
-		Plan:      plan,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Plan:          plan,
+		Orchestration: orchestration,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	// ClaimRun is the cross-process source claim: one conditional INSERT on the
 	// derived identity, so the database decides which process created this run.
@@ -1507,6 +1508,6 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
-	created, err := r.createRun(ctx, runID, goal, &binding, binding.StageBudget)
+	created, err := r.createRun(ctx, runID, goal, &binding, nil, binding.StageBudget)
 	return StartOutcome{RunID: created}, err
 }

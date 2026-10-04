@@ -167,8 +167,18 @@ var codexSpec = cliAgentSpec{
 		args := []string{"--ask-for-approval", "never", "exec", "--sandbox", sandbox, "--ignore-user-config"}
 		if !i.Bypass {
 			args = append(args, "-c", "sandbox_workspace_write.network_access=false")
-			if i.ScratchDir != "" {
-				roots, _ := json.Marshal([]string{i.ScratchDir})
+			// The typed-result directory is a writable root for the same
+			// reason it is an --add-dir for Claude: the slot is deliberately
+			// outside the workspace, and a worker that cannot write it can
+			// never complete a protocol the runtime requires of it.
+			var writable []string
+			for _, dir := range []string{i.ScratchDir, i.ResultDir} {
+				if dir != "" {
+					writable = append(writable, dir)
+				}
+			}
+			if len(writable) > 0 {
+				roots, _ := json.Marshal(writable)
 				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(roots))
 			}
 		}

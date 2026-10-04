@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // maxCanonicalPayloadBytes is the M0 ceiling on one event payload after RFC 8785
@@ -145,6 +146,24 @@ var eventPayloads = map[string]payloadValidator{
 			nonNegative("path_count", p.PathCount),
 			required("paths_digest", p.PathsDigest),
 			required("location", p.Location))
+	}),
+	EventHandoffReported: payloadSchema(func(p HandoffReportedPayload) error {
+		if p.Outcome != orchestration.OutcomeCompleted && p.Outcome != orchestration.OutcomePartial {
+			return fmt.Errorf("handoff outcome %q is not a recognized outcome", p.Outcome)
+		}
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			positive("attempt", p.Attempt),
+			required("report_sha256", p.ReportSHA256))
+	}),
+	EventHandoffRefused: payloadSchema(func(p HandoffRefusedPayload) error {
+		if p.Kind != HandoffMissing && p.Kind != HandoffInvalid {
+			return fmt.Errorf("handoff refusal kind %q is not a recognized kind", p.Kind)
+		}
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			positive("attempt", p.Attempt),
+			required("detail", p.Detail))
 	}),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
@@ -729,6 +748,13 @@ func boundedList(name string, values []string) error {
 		if len(value) > maxPayloadListItemBytes {
 			return fmt.Errorf("payload list %q has a %d byte element, above the %d byte element bound", name, len(value), maxPayloadListItemBytes)
 		}
+	}
+	return nil
+}
+
+func positive(name string, n int) error {
+	if n <= 0 {
+		return fmt.Errorf("payload field %q must be positive", name)
 	}
 	return nil
 }

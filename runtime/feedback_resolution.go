@@ -112,6 +112,15 @@ type FeedbackResolution struct {
 // state directory, and never inside the candidate workspace - the same
 // unspoofable placement reviewer_result.go uses and for the same reason.
 func FeedbackResolutionPath(stateDir string, attempt ExecutionAttemptRef) (string, error) {
+	return producerResultPath(stateDir, attempt, feedbackResolutionFile)
+}
+
+// producerResultPath is where a PRODUCER invocation's typed results live: one
+// runtime-owned directory per attempt, outside the candidate workspace. Every
+// producer slot (feedback resolution, orchestration handoff) is named here so
+// they share that one directory, which is the only one a sandboxed CLI is
+// granted (cli_agent.go ResultDir).
+func producerResultPath(stateDir string, attempt ExecutionAttemptRef, file string) (string, error) {
 	if err := attempt.Validate(); err != nil {
 		return "", err
 	}
@@ -119,7 +128,7 @@ func FeedbackResolutionPath(stateDir string, attempt ExecutionAttemptRef) (strin
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(stateDir, "artifacts", prefix+"."+feedbackResolutionFile), nil
+	return filepath.Join(stateDir, "artifacts", prefix+"."+file), nil
 }
 
 // PrepareFeedbackResolution clears any leftover resolution and returns the
@@ -131,13 +140,7 @@ func PrepareFeedbackResolution(stateDir string, attempt ExecutionAttemptRef) (st
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	return path, nil
+	return path, clearResultSlot(path)
 }
 
 // ReadFeedbackResolution reads and decodes the resolution a provider wrote.

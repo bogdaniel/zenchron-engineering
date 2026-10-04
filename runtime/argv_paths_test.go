@@ -17,7 +17,7 @@ import (
 // names them only by role.
 func TestRecordedArgvNamesRuntimePathsByRole(t *testing.T) {
 	for kind, want := range map[string][]string{
-		AgentKindCodexCLI:   {`sandbox_workspace_write.writable_roots=["$SCRATCH"]`, "--cd", "$CANDIDATE"},
+		AgentKindCodexCLI:   {`sandbox_workspace_write.writable_roots=["$SCRATCH","$RESULT"]`, "--cd", "$CANDIDATE"},
 		AgentKindClaudeCode: {"--add-dir", "$SCRATCH", "$RESULT"},
 	} {
 		t.Run(kind, func(t *testing.T) {
@@ -34,7 +34,7 @@ func TestRecordedArgvNamesRuntimePathsByRole(t *testing.T) {
 			// Exact elements, not a substring search: the prompt also names the
 			// scratch path, and would satisfy a looser check.
 			real := fake.execution(t).args
-			roots, _ := json.Marshal([]string{request.ScratchDir})
+			roots, _ := json.Marshal([]string{request.ScratchDir, filepath.Dir(request.ReviewerResultPath)})
 			wantReal := map[string][]string{
 				AgentKindCodexCLI:   {"sandbox_workspace_write.writable_roots=" + string(roots), request.CandidateDir},
 				AgentKindClaudeCode: {request.ScratchDir, filepath.Dir(request.ReviewerResultPath)},

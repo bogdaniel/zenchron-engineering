@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -246,7 +247,7 @@ func TestStopSendsOnceAndADuplicateIsAlreadyApplied(t *testing.T) {
 	if outcome(first) != OutcomeApplied || first["state"].(map[string]any)["disposition"] != "cancelled" {
 		t.Fatalf("first stop: %v", first)
 	}
-	if want := (rt.ControlRequest{Command: rt.ControlStop, RunID: "s", ExpectedController: testBinding}); f.sent[0] != want {
+	if want := (rt.ControlRequest{Command: rt.ControlStop, RunID: "s", ExpectedController: testBinding}); !reflect.DeepEqual(f.sent[0], want) {
 		t.Fatalf("sent %+v, want the CLI's stop plus the observed binding %+v", f.sent[0], want)
 	}
 	state, _ := json.Marshal(first["state"])
@@ -300,7 +301,7 @@ func TestRejectBindsTheExactRevisionAndDigest(t *testing.T) {
 		t.Fatalf("reject: %v", applied)
 	}
 	want := rt.ControlRequest{Command: rt.ControlPlanReject, PlanID: "p", Revision: 1, Digest: f.digest, Note: "no", ExpectedController: testBinding}
-	if f.sent[0] != want {
+	if !reflect.DeepEqual(f.sent[0], want) {
 		t.Fatalf("sent %+v, want %+v", f.sent[0], want)
 	}
 	again := post(t, f.api, validRequest("/v1/plans/p/reject", rejectBody(1, f.digest)), 200)

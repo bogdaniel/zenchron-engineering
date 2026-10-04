@@ -1156,7 +1156,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// directory its typed result goes in, and the executables its contract
 		// obliges it to run. Both are runtime-owned facts; neither widens the
 		// sandbox beyond them.
-		ResultDir:     resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath)),
+		ResultDir:     resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath, request.HandoffPath)),
 		RequiredTools: request.RequiredTools,
 		ScratchDir:    request.ScratchDir,
 	}
