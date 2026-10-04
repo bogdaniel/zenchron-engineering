@@ -308,6 +308,12 @@ func (s PlanSnapshot) ApprovedRevision() (int, bool) {
 	return s.Approved.Revision, true
 }
 
+// AwaitingDecision reports whether revision is the latest one and no decision
+// has been recorded on it yet.
+func (s PlanSnapshot) AwaitingDecision(revision int) bool {
+	return revision > 0 && s.Revision == revision && s.Approval.Status == domain.ApprovalPending
+}
+
 // ChildRuns lists the EngineeringRuns this plan created, in stage order.
 func (s PlanSnapshot) ChildRuns() []string {
 	stages := make([]string, 0, len(s.Stages))
@@ -348,10 +354,9 @@ func ReducePlan(planID string, events []EngineeringEvent) (PlanSnapshot, error) 
 			return snapshot, fmt.Errorf("broken plan event chain")
 		}
 		hash, err := EventDigest(e)
-		if err != nil || (e.EventHash != "" && e.EventHash != hash) {
+		if err != nil || e.EventHash != hash {
 			return snapshot, fmt.Errorf("invalid plan event hash")
 		}
-		e.EventHash = hash
 		for _, artifact := range e.Artifacts {
 			if err := ValidateArtifact(artifact); err != nil {
 				return snapshot, err

@@ -379,6 +379,11 @@ CREATE UNIQUE INDEX events_global_sequence ON events(global_sequence);
 -- answers the filter AND the ordering from one range scan, so LIMIT bounds
 -- the rows actually touched.
 CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequence);
+`, `
+-- The operator pause (#86) is read inside every lease acquisition: the run's
+-- latest run.paused/run.unpaused event. This partial index makes the common
+-- never-paused case an empty probe rather than a scan of the run's journal.
+CREATE INDEX events_run_pause ON events(run_id, sequence) WHERE type IN ('run.paused', 'run.unpaused');
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -655,6 +660,7 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 		         AND json_extract(other.document, '$.lease') IS NOT NULL)
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
 		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
+		  AND NOT (`+runPausedSQL("run_operations.run_id")+`)
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL

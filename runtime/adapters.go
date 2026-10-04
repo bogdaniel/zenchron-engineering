@@ -283,6 +283,11 @@ type ExecutionResult struct {
 	// value that would read as "no sandbox, no bypass, unknown auth" - three
 	// claims it did not make.
 	Invocation *InvocationProvenance
+	// Executed is a provider's own report that this attempt reached its model
+	// (at least one completed exchange), for a provider with no process
+	// provenance to say so. A provider that failed after real work sets it,
+	// so that work stays charged even when the failure routes to a wait.
+	Executed bool
 	// Review is the structured verdict a reviewer stage emitted, read by the
 	// adapter from the runtime-owned result path. It is nil when none was
 	// written, which is an ordinary outcome rather than a failure: a reviewer
@@ -599,6 +604,21 @@ func GuardCandidatePathShape(root string, paths []string) error {
 // candidate, and its bytes are not candidate bytes, because neither reaches the
 // tree. The gates are unchanged for everything that does reach it.
 func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
+	return guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
+	})
+}
+
+// guardCommitNamesAndSizes is the one implementation of the sensitive-name and
+// size-ceiling rules. sizeOf answers for a normalized path, and false means the
+// path carries no bytes (a deletion), so it adds nothing to the total. The
+// worktree form above and the staged-blob form in CandidateWorkspace.Commit
+// differ only in where the size comes from.
+func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normalized string) (int64, bool)) error {
 	var total int64
 	for _, p := range paths {
 		normalized, err := normalizedCandidatePath(p)
@@ -613,11 +633,11 @@ func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) er
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
 			return fmt.Errorf("sensitive candidate path %q", normalized)
 		}
-		info, err := os.Lstat(filepath.Join(root, normalized))
-		if err != nil {
+		size, ok := sizeOf(normalized)
+		if !ok {
 			continue
 		}
-		total += info.Size()
+		total += size
 		if maxBytes > 0 && total > maxBytes {
 			return fmt.Errorf("candidate exceeds size ceiling")
 		}
@@ -1034,6 +1054,23 @@ func RouteFailure(c FailureClass) FailureRoute {
 	default:
 		return RouteStop
 	}
+}
+
+// CandidateVerdict reports whether an assurance result is a valid verdict
+// about the CANDIDATE: a pass, or a failure the verifier judged (format,
+// compile/test, verification, or an unpassed result naming no class, which is
+// read as verification). This is the one definition. Everything else - an
+// infrastructure fault, a cancellation, a missing prerequisite - says nothing
+// about the candidate, and only two verdicts can disagree as a flake.
+func CandidateVerdict(r AssuranceResult) bool {
+	if r.Passed {
+		return true
+	}
+	switch r.FailureClass {
+	case "", FailureFormat, FailureCompileTest, FailureVerification:
+		return true
+	}
+	return false
 }
 
 // PriorAttemptContextEligible reports whether a retry of the same execution

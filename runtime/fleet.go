@@ -98,6 +98,9 @@ type RunSummary struct {
 	// material or may not, and an operator triaging a fleet needs to find the
 	// ones that do without opening each one's detail.
 	Held bool `json:"held,omitempty"`
+	// Paused is the operator's pause in force (#86), read from the journal.
+	// It is independent of Disposition, which a pause never changes.
+	Paused *RunPause `json:"paused,omitempty"`
 	// Error is set when this run's state could not be replayed. One unreadable
 	// run must not hide the rest of the fleet.
 	Error string `json:"error,omitempty"`
@@ -119,15 +122,17 @@ type Fleet struct {
 	Active    int `json:"active"`
 	// The capacity-class view (#85). ObservationCapacity is the observation
 	// ceiling, as Capacity is the work ceiling; zero means a reader that does
-	// not know the configuration (the control plane), and is omitted. The five counts partition the
+	// not know the configuration (the control plane), and is omitted. The six counts partition the
 	// nonterminal runs exactly: Working + Observing + Runnable + Waiting +
-	// Unavailable == Active. They are read from durable operation rows, never
+	// Paused + Unavailable == Active. Paused (#86) is a paused run holding no
+	// active operation; one still settling counts as Working or Observing. They are read from durable operation rows, never
 	// from a supervisor's memory; see capacityState.
 	ObservationCapacity int          `json:"observation_capacity,omitempty"`
 	Working             int          `json:"working"`
 	Observing           int          `json:"observing"`
 	Runnable            int          `json:"runnable"`
 	Waiting             int          `json:"waiting"`
+	Paused              int          `json:"paused"`
 	Unavailable         int          `json:"unavailable"`
 	Runs                []RunSummary `json:"runs"`
 	// Plans is the plan-level view beside the runs. An operator with a plan
@@ -334,12 +339,14 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 			case summary.Error != "":
 				fleet.Unavailable++
 			default:
-				switch capacityState(byRun[run.ID], now) {
-				case CapacityWork:
+				switch state := capacityState(byRun[run.ID], now); {
+				case state == CapacityWork:
 					fleet.Working++
-				case CapacityObservation:
+				case state == CapacityObservation:
 					fleet.Observing++
-				case capacityRunnable:
+				case summary.Paused != nil:
+					fleet.Paused++
+				case state == capacityRunnable:
 					fleet.Runnable++
 				default:
 					fleet.Waiting++
@@ -490,6 +497,7 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	summary.CandidateRevision, summary.CandidateTree = projection.CandidateRevision, projection.CandidateTree
 	summary.Attempts = projection.Attempts
 	summary.Held = snapshot.HeldMaterial != nil
+	summary.Paused = snapshot.Paused
 	if operation, ok := state.currentOperation(); ok {
 		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
 	}

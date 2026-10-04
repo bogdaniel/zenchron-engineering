@@ -61,6 +61,9 @@ func (s *ReadStore) Status(id string, now time.Time) (StatusReport, error) {
 func (s *ReadStore) PlanView(id string, revision int) (PlanView, error) {
 	return PlanService{Store: s.store}.DurableView(id, revision)
 }
+func (s *ReadStore) PlanEvents(id string) ([]EngineeringEvent, error) {
+	return s.store.PlanEvents(id)
+}
 func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(id); return ok, err }
 func (s *ReadStore) EventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {
 	return s.store.EventsPage(id, after, limit)

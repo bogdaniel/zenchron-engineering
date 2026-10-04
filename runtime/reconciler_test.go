@@ -1685,7 +1685,10 @@ func resequenceEvents(t *testing.T, fixture *phase8Fixture, runID string) {
 			t.Fatal(err)
 		}
 		e.StateBefore = before.StateSHA256
-		e.EventHash = ""
+		// The provisional hash appendToStream folds in before state_after (#462).
+		if e.EventHash, err = EventDigest(e); err != nil {
+			t.Fatal(err)
+		}
 		after, err := Reduce(run, append(append([]EngineeringEvent(nil), replayed...), e))
 		if err != nil {
 			t.Fatal(err)

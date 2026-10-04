@@ -35,6 +35,11 @@ jobs:
       - name: Cross-compile the non-unix build
         run: GOOS=windows GOARCH=amd64 go build ./...
 
+      # The build above never compiles _test.go files; vet does, so a test
+      # leaning on a Unix-only helper cannot slip in untagged.
+      - name: Vet the non-unix build
+        run: GOOS=windows GOARCH=amd64 go vet ./...
+
       - name: Test
         # The runtime package runs about six minutes and grows with every
         # slice, against Go's IMPLICIT ten-minute per-package default. That

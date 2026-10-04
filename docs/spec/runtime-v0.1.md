@@ -19,6 +19,33 @@ journal cursor, and its hash-chain fields excluded. Event hashes are SHA-256 of
 the canonical event with only `event_hash` excluded, retaining its
 state-before/state-after and chain bindings. The reducer never reads wall time.
 
+Every persisted event carries its `event_hash`, in its document and in its
+indexed column. A persisted event whose `event_hash` is empty is corruption, on
+the run stream and the plan stream alike, wherever it sits in the chain and
+whether or not anything else about it changed: the shared read that every
+replay and event read passes through refuses it, and the reducers have no
+empty-hash tolerance of their own (#462). The only event that is ever hashed
+without a stored hash is the one being appended: inside its append
+transaction, before `state_after` is known, it carries a provisional hash
+(its digest with `state_after` still empty) so the reducer can fold it, and
+the final hash replaces that before the row is written. The state digest
+excludes the cursor, so the provisional value never reaches it.
+
+An event's `state_before` and `state_after` are recorded transition digests:
+diagnostic compatibility metadata, not replay-verification inputs and not an
+integrity or authority anchor (#453). Replay authority is the event's type,
+stream and sequence, agreement between its indexed columns and its document,
+its link to the previous event, its `event_hash`, the validity of its
+artifacts, and the deterministic fold over its events. Replay does not
+recompute or compare the recorded digests, and no cache, checkpoint, recovery
+path, admission, authority or other runtime decision may trust either field
+in place of replay. Because `event_hash` covers them, changing either field
+without recomputing that hash is corruption and is refused like any other
+tampered event, including when the hash is blanked rather than left stale; a value that is arbitrary but chain-consistent is accepted
+and still decides nothing. The physical JSON names stay for journal
+compatibility. A later journal-format revision may remove the fields, but
+historical events are never rewritten merely to rename them.
+
 Runtime data is stored in the operator state directory, not the target repo.
 Artifacts are references only and distinguish raw/local-only data from
 sanitized/publishable data.  The #30 extension and #31 checkpoint shapes are
@@ -85,6 +112,103 @@ one-sided by construction - an owner is alive unless it can be positively
 proven gone - so an unparseable owner identity, another host, or an
 unreadable process all refuse takeover rather than allow it.
 
+## Operator pause
+
+Status: **frozen** (#86, maintainer decision of 2026-10-03, including both
+narrowings below). This section is that design as committed spec.
+
+```text
+autonomy pause RUN --reason T   ->  journal: run.paused   {reason, operator}
+autonomy unpause RUN            ->  journal: run.unpaused {operator}
+paused(run) := the latest of {run.paused, run.unpaused} in the run's journal is run.paused
+```
+
+The names are `pause` and `unpause` because `hold` (#203 held material) and
+`resume` (`autonomy resume`) are taken. A pause is **a fact in the journal and
+nothing else**: no column, no mirror on the run row, no in-memory flag. It is an
+**orthogonal** fact: it is never a `Disposition` and never a reusable `Reason`,
+and it changes neither.
+
+It is enforced in exactly two places, both reading that fact:
+
+1. **`AcquireOperation` is the gate.** One more conjunct in the same atomic
+   `UPDATE` that grants a lease, beside the terminal-run check, reads the run's
+   latest pause event (backed by the partial index `events_run_pause`). A
+   paused run is granted no lease of either capacity class: no work and no
+   observation. A driver that read the run before the pause is refused there.
+2. **`Reconcile` exits early** right after loading a paused run, beside the
+   `driven_elsewhere` exit, returning the run's own disposition and reason. It
+   plans, settles and journals nothing. It is an optimization and the
+   no-journal guarantee, never the gate. A pass whose acquisition the store
+   refused because a pause landed mid-pass likewise leaves the run unsettled.
+
+**In-flight work is not interrupted.** An operation leased before the pause
+finishes under its own existing bounds and its result is journalled; the next
+acquisition is refused. Interrupting a provider on pause is out of scope
+(`stop RUN` is terminal, `shutdown` is fleet-wide and resumable).
+
+Invariants:
+
+1. Durable and restart-safe: replay, the acquire predicate and status all read
+   the journal events, so a restarted `serve`, another process, or a reopened
+   store sees the same answer.
+2. Never cancels or terminalizes: the pause causes no
+   `run.waiting/failed/cancelled/completed`, finishes no operation and
+   requests no cancellation. A pass that already decided before a pause
+   committed mid-pass may still journal those decisions (`operation.planned`,
+   a `run.waiting` or `run.failed` it derived earlier); they are ordered
+   before the pause took effect and are not caused by it.
+3. Never discards material: only the pause event is written; GC already keeps
+   a nonterminal run's material.
+4. The store decides atomically (above).
+5. Idempotent: `pause` on a paused run appends nothing and reports the
+   original `since`, `reason` and `operator`; `unpause` on an unpaused run
+   appends nothing; the decision is made inside the append transaction, so two
+   racing commands append one event. Both refuse a terminal run and append
+   nothing. Nothing but `unpause` clears a pause: not a forge event, a config
+   change, a plan tick, a restart or `autonomy resume`, which refuses a paused
+   run with the `unpause` hint. `stop` on a paused run cancels it; cancel
+   dominates.
+6. Authority is the operator's owner-only access to the state directory. With
+   a supervisor running the command is delegated through the control endpoint
+   and applied under the controller role (`WithAuthority`), so a superseded
+   generation cannot accept it; an endpoint that exists but cannot be reached
+   is a refusal, never a local write beside it. With no supervisor it is
+   written locally. This is plan approve's routing; `stop RUN` writes locally
+   even beside a running supervisor. The recorded `operator` is the
+   requester's resolved identity: provenance, never authority.
+7. No authority or evidence, and no change to trust, budgets or ceilings. The
+   reason is bounded payload text and never part of an event id
+   (`<run>-paused-<unixnano>`).
+8. No budget movement: paused time is non-active because nothing runs;
+   `lifecycle_deadline_seconds` keeps running because it is calendar time.
+9. Unknown is never "not paused": if the predicate cannot be evaluated the
+   acquisition errors; a run whose journal cannot be replayed is
+   `unavailable` in status; a command that cannot read the journal refuses.
+
+`RunSnapshot` gains `paused`, omitted when empty, so every existing run replays
+to the same state digest. Status shows `paused {since, reason, operator}` per
+run and a fleet **paused** count (a paused run holding no active operation),
+taken out of runnable/waiting, so
+`working + observing + runnable + waiting + paused + unavailable == active`. A
+paused run still settling counts as working or observing.
+
+Upgrade and rollback. The binary that introduces pause adds one migration,
+the partial index `events_run_pause`, applied with the schema version bump in
+one transaction (seconds on a large store). Mixed versions fail closed: an
+older binary refuses to open the newer schema version, exactly as for every
+earlier migration. A downgrade therefore needs `DROP INDEX events_run_pause`
+and decrementing `PRAGMA user_version` by one, done by hand with every
+controller stopped. Even then, a run that was EVER paused cannot be replayed
+by an older binary, which does not know `run.paused`/`run.unpaused` and
+refuses the unknown event type; such runs stay unreadable to it until the
+newer binary is restored.
+
+Out of scope: provider interruption on pause, observation while paused (forge
+movement is observed on the first pass after `unpause`), scheduled or automatic
+pause, fleet-wide pause (`drain`), and any change to `stop`, `drain`,
+`shutdown`, held material or opt-out semantics.
+
 ## Configuration layers
 
 Configuration is two layers with strictly different authority. The operator
@@ -125,6 +249,20 @@ remotes, config, or other protected Git metadata is a
 `workspace_integrity_violation`; it is refused/restored rather than adopted.
 Base drift rebases before publication; after publication it is integrated by a
 merge-from-base and never a runtime force-push. Conflicts are typed outcomes.
+
+The runtime commit carries exactly the tree its gates judged. It writes the
+staged index to a tree once (`write-tree`), takes the blob list from
+`diff-tree -r --raw --no-renames <parent> <tree>`, runs the commit gates and
+the raw-worktree backstop over those blobs, then builds the commit with
+`commit-tree <tree> -p <parent>` and moves HEAD with
+`update-ref --no-deref HEAD <commit> <parent>`. It never reads the index again,
+so an index rewritten after gating cannot change what is committed. A HEAD that
+moved from the gated parent is refused as a `workspace_integrity_violation` and
+no commit is reported. Every runtime Git call ignores replace objects
+(`GIT_NO_REPLACE_OBJECTS=1`), so a `refs/replace/*` ref cannot make the gates
+read stand-in bytes for a blob the commit carries. The commit's recorded paths
+are that tree diff, the same set #431 recovery recomputes. Whether the worktree still matches the commit after it is made is
+not covered by this rule (#437).
 
 The trusted Git metadata baseline is persisted rather than re-derived. Every
 runtime-owned Git operation that succeeds journals the digest of the
@@ -324,12 +462,15 @@ carries no meaning of its own: the waiting reason, any attempt refund, whether
 the wait counts as external, and whether an observation keeps its binding are
 all read from the disposition, and never from whether a timestamp is set.
 
-| Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
+| Disposition | Produced by | Spends attempt | Spends active work¹ | Finite attempt authority | Resume condition | Waiting reason |
 |---|---|---|---|---|---|---|
 | `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
-| `provider_prerequisite_wait` | declared; produced by #87 | no | no | no | an operator restores the provider prerequisite | `execution_provider_prerequisite_unavailable` |
-| `rate_limit_wait` | declared; produced by #87 | no | no | no | the provider's stated retry time has passed | `execution_provider_rate_limited` |
-| `account_wait` | declared; produced by #87 | no | no | no | an operator restores the provider account | `execution_provider_account_unavailable` |
+| `provider_availability_wait` | `provider_unavailable` | no | no | no | the provider endpoint recovers on its own; probed every 5 min | the class's: `execution_provider_unavailable` |
+| `rate_limit_wait` | `provider_quota`, `provider_rate_limited` | no | no | no | the provider allowance returns; probed every 5 min | the class's: `execution_provider_quota` / `execution_provider_rate_limited` |
+| `account_wait` | `provider_account_unavailable` | no | no | no | an operator restores the provider account; probed every 5 min | the class's: `execution_provider_account_unavailable` |
+
+¹ Waiting only. A probe's own execution time is refunded only when
+`provider_executed` is false (see Provider waits).
 
 Further rules:
 
@@ -357,26 +498,113 @@ Further rules:
     envelope. For a CLI that text is how it reports losing the network, so a
     typed DNS not-found failing closed does not extend to it. Text is compared
     in lower case, with U+2019 read as an ASCII apostrophe.
-- **Endpoint capacity.** An overloaded endpoint or a 502, 503 or 504 is
-  `provider_unavailable`, routed `wait` with no disposition. That is the
-  existing refunded wait, unchanged until #87 assigns it a disposition.
+- **Endpoint availability.** An overloaded endpoint or a 502, 503 or 504 is
+  `provider_unavailable`, routed `wait` under `provider_availability_wait`.
+  The failure class stays the exact cause; the disposition names only how
+  the retry is accounted.
+- **Class to disposition (frozen, #87).** `provider_unavailable` →
+  `provider_availability_wait`; `provider_quota` and `provider_rate_limited`
+  → `rate_limit_wait`; `provider_account_unavailable` → `account_wait`;
+  `connectivity_unavailable` → `transport_backoff`. No other class carries a
+  disposition, and every disposition has a producer: these four are the
+  whole vocabulary. A concrete executable or prerequisite disposition, with
+  its own rules, is #87 slice 3's to introduce after #84.
+- **Provider waits (#87).** The four provider classes keep `RouteWait`. Their
+  disposition is external wait and sets `retry_not_before` to a fixed 5
+  minutes after each probe: an attempt-keyed backoff would never grow,
+  because the attempt is given back. The probe time is on the operation row
+  and in its journalled `operation.after`, so a restart before it invokes
+  nothing. Once it passes, the same operation of the same run is invoked
+  again.
+- **Provider wait accounting (frozen, #87).** A recognized provider wait
+  always refunds the logical engineering attempt. The attempt's active
+  execution time is refunded only when `provider_executed` is false, that is
+  when the provider was refused before it ran. The provider owns that fact,
+  never the failure class: a CLI reports it with its process provenance, and
+  `openai_responses` once one model exchange has completed, so a tool loop
+  that ends in a 429 keeps its elapsed work charged. When the provider really ran,
+  that elapsed work stays charged to the active-work budget. There is no
+  "made no progress" heuristic: a long wait therefore spends active work one
+  probe per 5 min and is bounded by the active-work budget as well as
+  `lifecycle_deadline`.
+- **No early probe (frozen, #87).** Restoring the provider account, or any
+  other external fix, does not bypass `retry_not_before` in this slice.
+  `autonomy resume` is an ordinary reconcile and honours it; it is not a
+  hidden `--now`, and no override verb exists. The provider rows state no
+  reason of their own: the run waits under the class's stated reason (quota
+  and rate limit share a disposition but not an operator action). Status
+  reports the next probe time and the disposition's resume condition only
+  for the latest operation of its kind whose reason is the run's.
+  `retry_not_before` is a floor: the supervisor gives a parked run a turn at
+  most every 4 poll intervals, so the effective cadence is 5 min plus up to
+  that quiet-tier re-poll delay.
 
 Effective patience with the defaults: an execution (`max_execution_attempts`
 2) waits once, for 30 s, before stopping. An observation (3 attempts) waits
 30 s and then 60 s. The 5 min cap is reached only by the fifth backoff, so an
 operation needs at least six attempts to wait that long.
 
-The first failing assurance result gets exactly one identical rerun before any
-mutation. A differing result is `flaky_verification`, not pristine passing
-evidence. No-progress uses a deterministic fingerprint over candidate tree,
-contract revision, failure signature, verifier, provider, and remediation
-identity rather than transcript text.
+The first failing assurance result that is a **candidate verdict** gets
+exactly one identical rerun before any mutation. A candidate verdict is a pass,
+or a failure the verifier judged: `format`, `compile_or_test`,
+`verification_failure`, or an unpassed result naming no class (read as
+verification). `CandidateVerdict` is the one definition. An infrastructure,
+cancellation or prerequisite result is not a verdict: it is never rerun as a
+confirmation and never half of a flake, and on either run it routes by its own
+class.
+
+Only two candidate verdicts that disagree are `flaky_verification`, and a flaky
+result is never passing evidence. The rerun's verdict is not passed even when
+the confirmation run passed, so no evidence bundle is bound, no claim is
+satisfied by it, and it cannot reach authority or publication.
+`flaky_verification` routes `stop`, and the run settles
+`assurance.go_failure_not_retryable`. A result returned together with a
+provider error is never passed either.
+
+A provider therefore returns a judged failure as a result with a nil error. The
+built-in Go verifier runs `gofmt`, `go vet` and `go test` under `sh -e`. Docker
+records that workload's own exit status, and the verifier reads it as follows:
+
+| Workload exit | Meaning | Class | Error |
+|---|---|---|---|
+| 0 | pass | none | nil |
+| 1 or 2 | the candidate failed | `verification_failure` | nil |
+| any other code (3 and above, Docker's 125, an unexecutable 126/127, a signal death such as 137) | not a verdict | `transient_infrastructure` | kept |
+| none recorded (a start that never ran the workload, a container that could not be reaped) | not a verdict | `transient_infrastructure` | kept |
+
+Cancellation keeps its error and its owner's class.
+
+Known ceilings, accepted deliberately:
+
+- **Signal deaths are infrastructure.** Docker's OOM record is not inspected.
+  Candidate code can kill its own workload and force retries this way, but a
+  non-verdict is never passed. It cannot create passing evidence or reach
+  authority, and `max_assurance_attempts` bounds the retries.
+- **In-container resource blips that exit 1 or 2 are read as verdicts.** A full
+  tmpfs, the pids limit or a module missing under `GOPROXY=off` is
+  indistinguishable from a candidate failure by exit status.
+- **A blip followed by a pass stays `flaky_verification`**, terminal and not
+  retryable. Contradictory evidence about the same exact tree is not weakened
+  because the classifier has known ceilings.
+
+Retry backoff for assurance `transient_infrastructure` is not part of this rule
+(#465).
+
+Before this rule the built-in verifier returned every judged failure as an
+error, so it never reached the confirmation rerun and could not record a flaky
+pass. A provider that reported failure with a nil error could, and a flaky pass
+it recorded as a plain pass cannot be reconstructed: the journal kept only
+the confirmation's verdict. No migration exists or is needed.
+
+No-progress uses a deterministic fingerprint over candidate tree, contract
+revision, failure signature, verifier, provider, and remediation identity
+rather than transcript text.
 
 ## Operator surface
 
 The operator surface is the `autonomy` command set: `run`, `status`,
-`events`, `resume`, `refresh`, `authorize`, `stop`, `watch`, `doctor`, and
-`gc`. Each one builds dependencies from the two configuration layers, calls
+`events`, `resume`, `refresh`, `authorize`, `stop`, `pause`, `unpause`,
+`watch`, `doctor`, and `gc`. Each one builds dependencies from the two configuration layers, calls
 the runtime, renders the result, and maps it to an exit status. None of them
 orchestrates: when something happens is the runtime's decision, and what is
 rendered is the operator surface's. Output is JSON by default; a text

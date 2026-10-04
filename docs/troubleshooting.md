@@ -253,6 +253,23 @@ is missing, the daemon is unreachable, or the pinned assurance image is not
 present locally`.** Without it no candidate can be verified, so no run can
 complete. Start the daemon and pull the image by its pinned digest.
 
+**`assurance.verifier_sandbox` FAIL — `the verifier sandbox is unavailable:
+... Docker daemon did not respond within 10s`.** The daemon is installed but
+hung; restart it. Every Docker readiness and identity probe (`docker info`,
+`docker image inspect` of the pinned image, and the daemon-identity lookup
+before a container is created) runs under the caller's context AND a fixed
+10-second probe ceiling, whichever ends first: a shorter caller deadline is
+never replaced. The two endings are kept apart. The ceiling firing means
+Docker readiness is unavailable (`ErrSandboxUnavailable`). In either assurance
+phase, dependency preparation or the verification run, that is
+`transient_infrastructure`: the scheduler retries the same assurance, and it is
+never a verdict on the candidate, so it spends no remediation. The caller's own
+cancellation propagates as that cancellation, is never reported as an
+unavailable sandbox, and is classified by who cancelled: a controller shutdown
+leaves assurance unsatisfied and the run waiting on `controller_shutdown`, to
+re-run after restart; an operator stop is `run_cancelled`. Doctor uses the same
+probe, so it reports this diagnostic instead of hanging.
+
 **`assurance.toolchain` FAIL — `the pinned assurance image did not resolve the
 Go toolchain on the runtime sandbox path`.** A reachable daemon holding the
 image proves a container can start, not that it can build. The probe runs with
@@ -451,7 +468,12 @@ engineering attempts: no reasoning happened, no candidate moved, no evidence or
 authority changed, and no remediation budget was consumed. Quota returns on the
 provider's own schedule. Repeated rate limiting means
 `supervisor.max_concurrent_runs` is above what that account tolerates. An
-unavailable account is repaired by you, then `resume`.
+unavailable account is repaired by you. The run probes the provider again
+every 5 minutes on its own; `status` shows the next probe time, which survives
+a restart, and `resume` does not probe earlier, even after you restore the
+account. That time is a floor: a parked
+run gets a supervisor turn at most every 4 poll intervals, so the probe can
+land up to that much later.
 
 **A run fails with `..._attempts_exhausted` or `..._failure_not_retryable`.**
 The named operation ran out of its budget, or produced a class that does not

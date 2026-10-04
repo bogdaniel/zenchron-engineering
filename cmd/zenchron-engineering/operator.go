@@ -174,6 +174,12 @@ func resumeRefusal(run runtime.EngineeringRun, runID string, events []runtime.En
 		return runtime.ExitCancelled, fmt.Sprintf(
 			"run %s was cancelled (%s); explicit operator intent is not withdrawn by asking again. Start new work with `autonomy run issue <number>`", runID, reason), true
 	}
+	// A pause is cleared only by `unpause` (#86); resume never walks over it.
+	if pause := runtime.JournalPause(events); pause != nil {
+		return runtime.ExitWaiting, fmt.Sprintf(
+			"run %s is paused by %s since %s (%s); `autonomy unpause %s` clears it",
+			runID, terminalSafe(pause.Operator), pause.Since.Format(time.RFC3339), terminalSafe(pause.Reason), runID), true
+	}
 	if reason == runtime.WatchWaitingOptInRemoved {
 		return runtime.ExitWaiting, fmt.Sprintf(
 			"run %s is waiting on opt_in_removed: the opt-in label was removed from its source issue, which withdraws consent to work on it. Restore the label; the run then resumes through the ordinary schedule. Resuming does not restore consent", runID), true
@@ -591,6 +597,12 @@ func githubWaitOf(built *composition, repository string) *githubWaitView {
 // value here because the CLI renders durable state; it does not re-derive it.
 const providerAccountWaitReason = "execution_provider_account_unavailable"
 
+// providerWait reports a durable provider wait (#87): any retry other than
+// transport backoff, whose status this does not change.
+func providerWait(retry *runtime.RetryStatus) bool {
+	return retry != nil && retry.Disposition != runtime.DispositionTransportBackoff
+}
+
 // nextOperatorAction is the one interpretive field in the view, and it is a
 // total function of the rest of it: the same durable state always yields the
 // same sentence. It grants nothing and decides nothing.
@@ -605,6 +617,9 @@ func nextOperatorAction(view statusView) string {
 	// It is an EXTERNAL account prerequisite, not a human-authority condition,
 	// and telling an operator that the authority boundary is refusing would
 	// send them to resolve a condition that does not exist.
+	case providerWait(view.Retry):
+		return view.Retry.ResumeCondition + "; the run resumes on its own at the next probe (" +
+			view.Retry.NotBefore.UTC().Format(time.RFC3339) + "), and `autonomy resume " + run + "` does not probe earlier"
 	case view.Reason == providerAccountWaitReason:
 		return "restore execution-provider account availability, then `autonomy resume " + run + "`"
 	case view.AuthorityRefusal != "":
@@ -739,6 +754,9 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("workspace", view.Worker.Workspace)
 	}
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
+	if providerWait(view.Retry) {
+		line("next probe", "at "+view.Retry.NotBefore.UTC().Format(time.RFC3339)+" (no earlier, across restarts)")
+	}
 	line("phase", view.Phase)
 	line("active consumed", view.ActiveElapsed)
 	line("external wait", view.ExternalWaitElapsed)
@@ -1013,15 +1031,17 @@ const followInterval = time.Second
 // a digest, and its local-only and sanitized flags - so listing events can
 // never emit raw local-only material.
 type eventView struct {
-	SchemaVersion     string             `json:"schema_version"`
-	View              string             `json:"view"`
-	Sequence          int64              `json:"sequence"`
-	ID                string             `json:"id"`
-	RunID             string             `json:"run_id"`
-	Type              string             `json:"type"`
-	OccurredAt        time.Time          `json:"occurred_at"`
-	Actor             string             `json:"actor"`
-	OperationID       string             `json:"operation_id,omitempty"`
+	SchemaVersion string    `json:"schema_version"`
+	View          string    `json:"view"`
+	Sequence      int64     `json:"sequence"`
+	ID            string    `json:"id"`
+	RunID         string    `json:"run_id"`
+	Type          string    `json:"type"`
+	OccurredAt    time.Time `json:"occurred_at"`
+	Actor         string    `json:"actor"`
+	OperationID   string    `json:"operation_id,omitempty"`
+	// Rendered as recorded, for diagnostics: the journal's state digests are
+	// not authoritative (#453) and this view never interprets them.
 	StateBefore       string             `json:"state_before,omitempty"`
 	StateAfter        string             `json:"state_after,omitempty"`
 	Subject           *eventSubject      `json:"subject,omitempty"`

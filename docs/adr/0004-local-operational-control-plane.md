@@ -78,9 +78,16 @@ and adds nothing to what may be authorized:
   documents, limited to that endpoint's closed command vocabulary as it exists
   in the runtime today (`submit`, `status`, `agents`, `drain`, `shutdown`,
   `stop`, `stop-all`, `ping`, `controller.snapshot`, `plan-approve`,
-  `plan-reject`, `plan-revise` — `runtime/control_endpoint.go`), through the
-  same `ControlSession`/`ProveControllerIdentity` mechanism the runtime uses
-  for controller succession today (`runtime/control_session.go`). No new
+  `plan-reject`, `plan-revise` — `runtime/control_endpoint.go`), with the
+  controller's identity proven on the same one-shot request that carries the
+  action: the request names the controller binding the operator observed
+  (`expected_controller`), and `serve` refuses unless its own measured,
+  attested identity has that binding, then executes the verb inside its
+  controller-role authority section (amended by #398; see
+  `docs/control-plane.md` "Governed actions"). The earlier wording named the
+  `ControlSession`/`ProveControllerIdentity` mechanism of
+  `runtime/control_session.go`, but `serve` never serves sessions — it mounts
+  only the one-shot endpoint — so that was not a path the console could use. No new
   mutation path, no new authority boundary, and no privilege the CLI does not
   already have. This ADR names no verb the socket does not already accept:
   a later action becomes console-visible only once its owning runtime
@@ -119,8 +126,8 @@ and adds nothing to what may be authorized:
   decision that mutating requests enforce same-origin protections and
   server-side authority: a browser's claimed origin, or the token's presence
   alone, is never treated as sufficient, and authority/eligibility for a
-  mutation is revalidated server-side — through the same control-session
-  identity proof above — never inferred from what the browser sent.
+  mutation is revalidated server-side — through the same-request identity
+  proof above — never inferred from what the browser sent.
 - **JSON Schema for public API contracts.** The console's HTTP responses are
   described by schemas validated with the `santhosh-tekuri/jsonschema`
   dependency already in `go.mod`, consistent with every other canonical

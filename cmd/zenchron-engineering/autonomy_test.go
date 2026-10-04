@@ -2320,6 +2320,35 @@ func TestStatusNamesTheProviderAccountWaitInsteadOfBlamingAuthority(t *testing.T
 	}
 }
 
+// #87: a provider wait shows its durable next probe and the disposition's
+// resume condition; transport backoff's status is unchanged.
+func TestStatusShowsTheProviderWaitNextProbe(t *testing.T) {
+	at := time.Date(2026, 10, 4, 21, 32, 0, 0, time.UTC)
+	render := func(d runtime.RetryDisposition) (string, string) {
+		view := statusView{StatusReport: runtime.StatusReport{RunID: "run-1", Disposition: runtime.Waiting, Reason: "execution_provider_quota",
+			Retry: &runtime.RetryStatus{Operation: "op", NotBefore: at, Disposition: d, ResumeCondition: "the provider allowance returns; probed every 5 minutes"}}}
+		var out bytes.Buffer
+		if err := renderStatusText(&out, view); err != nil {
+			t.Fatal(err)
+		}
+		return out.String(), nextOperatorAction(view)
+	}
+	text, next := render(runtime.DispositionRateLimitWait)
+	if !strings.Contains(text, "next probe:            at 2026-10-04T21:32:00Z (no earlier, across restarts)") ||
+		!strings.HasPrefix(next, "the provider allowance returns; probed every 5 minutes; the run resumes on its own at the next probe (2026-10-04T21:32:00Z)") {
+		t.Fatalf("provider wait:\n%s\n%s", text, next)
+	}
+	if text, next := render(runtime.DispositionTransportBackoff); strings.Contains(text, "next probe") || strings.Contains(next, "next probe") {
+		t.Fatalf("transport backoff status changed:\n%s\n%s", text, next)
+	}
+	// With no provider retry reported, a pending human decision is the action.
+	view := statusView{StatusReport: runtime.StatusReport{RunID: "run-1", Disposition: runtime.Waiting, Reason: "awaiting_authority"},
+		AuthorityRequest: &runtime.AuthorityRequest{ID: "req-1"}}
+	if next := nextOperatorAction(view); !strings.HasPrefix(next, "record a human decision") {
+		t.Fatalf("authority action masked: %s", next)
+	}
+}
+
 // TestRunAcceptsAnExplicitNewGeneration proves the flag is parsed and reaches
 // the runtime as the mode it names. Defect P was two intentions sharing one
 // command; the mode is what separates them.

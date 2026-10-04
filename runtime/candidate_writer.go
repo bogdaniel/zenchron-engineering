@@ -54,6 +54,11 @@ func candidateWriterLockPath(candidateDir string) string {
 // just before the provider would start. A var only so tests can shorten it.
 var candidateWriterSettle = 15 * time.Second
 
+// candidateWriterSettling, when set, is called each time a claim finds the
+// lock held, before it consults ctx: a test seam that observes the settle from
+// inside it rather than guessing when it started. Nil in production.
+var candidateWriterSettling func()
+
 // claimCandidateWriter takes the candidate's writer lock before anything
 // touches the candidate for a provider attempt. It answers exactly one of:
 //
@@ -79,6 +84,9 @@ func claimCandidateWriter(ctx context.Context, candidateDir string, settle time.
 		_ = lock.Close()
 		if err != nil {
 			return nil, &CandidateWriterAliveError{Lock: path, Cause: err}
+		}
+		if candidateWriterSettling != nil {
+			candidateWriterSettling()
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("claiming the candidate writer lock %s: %w", path, err)

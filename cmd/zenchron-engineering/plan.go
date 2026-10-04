@@ -166,7 +166,7 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 	if err != nil {
 		return runtime.ExitFailed, cause
 	}
-	decided, applied := decisionEventFor(events, verb, revision, digest)
+	decided, applied := runtime.DecisionEventFor(events, verb, revision, digest)
 	if !applied {
 		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: no %s of revision %d at digest %s is recorded)",
 			cause, verb, revision, digest)
@@ -174,38 +174,6 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", terminalSafe(planID), decided.Revision, terminalSafe(string(decided.Status)), terminalSafe(decided.Operator))
 	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%s); the durable record above is what happened\n", terminalSafe(cause.Error()))
 	return runtime.ExitCompleted, nil
-}
-
-// decisionEventFor finds the durable decision this invocation asked for, by
-// revision, digest and verb. It reads the journal rather than a projection
-// because a projection answers about the present and this question is about the
-// past: a later proposal, a later decision, or a supersession all move the
-// present without unmaking what already happened.
-func decisionEventFor(events []runtime.EngineeringEvent, verb string, revision int, digest string) (runtime.PlanApproval, bool) {
-	want := runtime.EventPlanApproved
-	status := domain.ApprovalApproved
-	if verb == "reject" {
-		want, status = runtime.EventPlanRejected, domain.ApprovalRejected
-	}
-	for _, event := range events {
-		if event.Type != want {
-			continue
-		}
-		var payload runtime.PlanDecisionPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			// An unreadable decision record is not this decision. It is also
-			// not a reason to claim one landed.
-			continue
-		}
-		if payload.Revision != revision || payload.Digest != digest {
-			continue
-		}
-		return runtime.PlanApproval{
-			Revision: payload.Revision, Digest: payload.Digest,
-			Status: status, Operator: payload.Operator, Note: payload.Note,
-		}, true
-	}
-	return runtime.PlanApproval{}, false
 }
 
 // renderDelegatedPlan prints a supervisor's answer exactly as a locally applied

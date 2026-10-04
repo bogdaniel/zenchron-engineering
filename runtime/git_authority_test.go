@@ -1739,14 +1739,15 @@ func TestTheBrokerEnvironmentDropsProviderGitAuthority(t *testing.T) {
 	}
 
 	for name, want := range map[string]string{
-		"GIT_CONFIG_NOSYSTEM": "1",
-		"GIT_CONFIG_SYSTEM":   "/dev/null",
-		"GIT_CONFIG_GLOBAL":   "/dev/null",
-		"GIT_ATTR_NOSYSTEM":   "1",
-		"GIT_TERMINAL_PROMPT": "0",
-		"GIT_PAGER":           "cat",
-		"PAGER":               "cat",
-		"GIT_OPTIONAL_LOCKS":  "0",
+		"GIT_CONFIG_NOSYSTEM":    "1",
+		"GIT_CONFIG_SYSTEM":      "/dev/null",
+		"GIT_CONFIG_GLOBAL":      "/dev/null",
+		"GIT_ATTR_NOSYSTEM":      "1",
+		"GIT_TERMINAL_PROMPT":    "0",
+		"GIT_PAGER":              "cat",
+		"PAGER":                  "cat",
+		"GIT_OPTIONAL_LOCKS":     "0",
+		"GIT_NO_REPLACE_OBJECTS": "1",
 	} {
 		if got := present[name]; got != want {
 			t.Fatalf("pin %s = %q, want %q", name, got, want)
