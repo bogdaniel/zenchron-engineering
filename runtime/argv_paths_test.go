@@ -194,3 +194,58 @@ func TestTheJournalRefusesARawHostPathInRecordedArgv(t *testing.T) {
 		t.Fatalf("a logical argv was refused: %v", err)
 	}
 }
+
+// TestAModelPathUnderTheStateDirIsRecordedByRole pins the per-field mappings
+// in recorded(): the bare post-pass alone would only yield <host-path> here.
+func TestAModelPathUnderTheStateDirIsRecordedByRole(t *testing.T) {
+	const state = "/Users/sentinel-464/state"
+	for name, tc := range map[string]struct {
+		invocation cliInvocation
+		want       string
+	}{
+		"profile preference": {cliInvocation{ModelPreference: state + "/models/pref.gguf", Agent: ResolvedAgent{Model: "default"}}, "$STATE/models/pref.gguf"},
+		"agent default":      {cliInvocation{Agent: ResolvedAgent{Model: state + "/models/agent.gguf"}}, "$STATE/models/agent.gguf"},
+		"leading space":      {cliInvocation{Agent: ResolvedAgent{Model: " " + state + "/models/agent.gguf"}}, "$STATE/models/agent.gguf"},
+	} {
+		tc.invocation.Prompt = "p"
+		recorded := recordedArgv(claudeSpec.Args, tc.invocation, state, claudeSpec.PromptArgFromEnd)
+		if !strings.Contains(strings.Join(recorded, " "), "--model "+tc.want) {
+			t.Errorf("%s: recorded argv lacks --model %s: %q", name, tc.want, recorded)
+		}
+	}
+}
+
+func TestALeadingSpaceDoesNotHideAHostPath(t *testing.T) {
+	invocation := cliInvocation{Agent: ResolvedAgent{Model: " /opt/models/x.gguf"}, Prompt: "p"}
+	recorded := recordedArgv(claudeSpec.Args, invocation, "", claudeSpec.PromptArgFromEnd)
+	if joined := strings.Join(recorded, " "); strings.Contains(joined, "/opt/") {
+		t.Fatalf("a space-prefixed host path was recorded raw: %q", recorded)
+	}
+	literal := recordedArgv(func(cliInvocation) []string { return []string{"\t/etc/x", "p"} }, invocation, "", 0)
+	if literal[0] != hostPathMarker {
+		t.Fatalf("the post-pass missed a space-prefixed host path: %q", literal)
+	}
+	if validateInvocationObservation(domain.InvocationObservation{Argv: []string{" /Users/alice"}}) == nil {
+		t.Fatal("the journal accepted a space-prefixed host path")
+	}
+}
+
+// TestAFilesystemRootIsNeverARoleRoot: a StateDir misconfigured as `/` or a
+// drive root must not turn every host path into `$STATE/<host path>`.
+func TestAFilesystemRootIsNeverARoleRoot(t *testing.T) {
+	for root, path := range map[string]string{
+		"/":                   "/Users/alice/x",
+		`C:\`:                 `C:\Users\alice\x`,
+		"c:/":                 "c:/Users/alice/x",
+		`\\fileserver\share`:  `\\fileserver\share\alice\x`,
+		"//fileserver/share/": "//fileserver/share/alice/x",
+	} {
+		if got := logicalPath(path, []pathRoot{{root, "$STATE"}}); got != hostPathMarker {
+			t.Errorf("root %q claimed %q as %q", root, path, got)
+		}
+	}
+	// A real directory on a share is still a role root.
+	if got := logicalPath(`\\fileserver\share\state\runs`, []pathRoot{{`\\fileserver\share\state`, "$STATE"}}); got != "$STATE/runs" {
+		t.Errorf("a share-hosted state dir lost its role: %q", got)
+	}
+}

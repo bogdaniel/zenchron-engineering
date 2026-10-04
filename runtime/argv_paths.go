@@ -72,12 +72,13 @@ func recordedArgv(build func(cliInvocation) []string, i cliInvocation, stateDir 
 }
 
 // logicalArg maps a free-form operator value only when it is itself a host
-// path; a model name or a tool name passes through unchanged.
+// path, surrounding space ignored; a model name or a tool name passes through
+// unchanged.
 func logicalArg(value string, roots []pathRoot) string {
 	if !isHostPath(value) {
 		return value
 	}
-	return logicalPath(value, roots)
+	return logicalPath(strings.TrimSpace(value), roots)
 }
 
 // logicalPath names p by the most specific runtime-owned root containing it,
@@ -91,10 +92,13 @@ func logicalPath(p string, roots []pathRoot) string {
 	best, bestRest := hostPathMarker, -1
 	for _, spelling := range pathSpellings(p) {
 		for _, root := range roots {
-			if root.path == "" {
+			if root.path == "" || isFilesystemRoot(root.path) {
 				continue
 			}
 			for _, rootSpelling := range pathSpellings(root.path) {
+				if isFilesystemRoot(rootSpelling) {
+					continue
+				}
 				rest, ok := withinRoot(spelling, rootSpelling)
 				if !ok || (bestRest >= 0 && len(rest) >= bestRest) {
 					continue
@@ -143,9 +147,23 @@ func normalizedPath(p string) string {
 	return path.Clean(p)
 }
 
+// isFilesystemRoot reports a root no role may claim: `/`, a drive root, or a
+// bare UNC share. A StateDir misconfigured as one would otherwise record every
+// host path as `$STATE/Users/...`.
+func isFilesystemRoot(p string) bool {
+	n := normalizedPath(p)
+	if n == "/" || (len(n) == 2 && n[1] == ':') {
+		return true
+	}
+	unc := strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//")
+	return unc && strings.Count(strings.Trim(n, "/"), "/") <= 1
+}
+
 // isHostPath reports an absolute path in either host family: a POSIX root, a
-// Windows drive root, or a UNC/rooted backslash path.
+// Windows drive root, or a UNC/rooted backslash path. Surrounding space is
+// ignored, so " /Users/x" is still a host path.
 func isHostPath(s string) bool {
+	s = strings.TrimSpace(s)
 	return strings.HasPrefix(s, "/") || strings.HasPrefix(s, `\`) || hasDriveRoot(s)
 }
 
