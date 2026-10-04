@@ -158,6 +158,13 @@ type ControlRequest struct {
 	Template        string `json:"template,omitempty"`
 	Deterministic   bool   `json:"deterministic,omitempty"`
 	SubstituteHuman string `json:"substitute_human,omitempty"`
+	// ExpectedController is the controller binding (ControllerBuildBinding)
+	// the requester observed. When present, `serve` refuses unless its OWN
+	// measured identity has that binding, and executes the verb inside its
+	// controller-role authority section - all on this one connection, so the
+	// proof and the act cannot be split across two (#398). The CLI never sets
+	// it; a request without it behaves exactly as before.
+	ExpectedController string `json:"expected_controller,omitempty"`
 }
 
 // Control commands. Each maps to one supervisor action.
@@ -194,7 +201,44 @@ type ControlResponse struct {
 	OK      bool            `json:"ok"`
 	Error   string          `json:"error,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// Code is a typed refusal a client branches on instead of matching Error's
+	// prose. Empty when the refusal has no type.
+	Code string `json:"code,omitempty"`
 }
+
+// Typed refusal codes. A governed request (one carrying ExpectedController) is
+// refused with one of the first four before anything is executed.
+const (
+	ControlCodeControllerUnattested = "controller_unattested"
+	ControlCodeControllerMismatch   = "controller_mismatch"
+	ControlCodeRoleNotHeld          = "role_not_held"
+	ControlCodeUnsupported          = "unsupported_command"
+	ControlCodeRunTerminal          = "run_terminal"
+	ControlCodePlanRefused          = "plan_refused"
+	ControlCodeNotAwaitingDecision  = "not_awaiting_decision"
+)
+
+// ControlCode is the typed code for an error a control verb returned, or "".
+func ControlCode(err error) string {
+	var unheld *ControllerRoleUnheldError
+	var plan *PlanRefusedError
+	switch {
+	case IsRunTerminal(err):
+		return ControlCodeRunTerminal
+	case errors.Is(err, ErrPlanNotAwaitingDecision):
+		return ControlCodeNotAwaitingDecision
+	case errors.As(err, &unheld):
+		return ControlCodeRoleNotHeld
+	case errors.As(err, &plan):
+		return ControlCodePlanRefused
+	}
+	return ""
+}
+
+// ErrControlReplyLost is a request that WAS written to the endpoint and got no
+// readable answer. The supervisor may have applied it; only durable state can
+// say, and re-sending could apply it twice.
+var ErrControlReplyLost = errors.New("the control request was sent and its reply was lost")
 
 // ControlListener owns the endpoint for one supervisor's lifetime.
 type ControlListener struct {
@@ -396,17 +440,19 @@ func SendControl(stateDir string, request ControlRequest) (ControlResponse, erro
 	if err != nil {
 		return ControlResponse{}, err
 	}
+	// From the first write on, a failure is ambiguous: part or all of the
+	// request may already have reached the supervisor.
 	if _, err := connection.Write(append(encoded, '\n')); err != nil {
-		return ControlResponse{}, err
+		return ControlResponse{}, fmt.Errorf("%w: %w", ErrControlReplyLost, err)
 	}
 	reader := bufio.NewReaderSize(connection, 1<<20)
 	line, err := reader.ReadBytes('\n')
 	if err != nil && len(line) == 0 {
-		return ControlResponse{}, err
+		return ControlResponse{}, fmt.Errorf("%w: %w", ErrControlReplyLost, err)
 	}
 	var response ControlResponse
 	if err := json.Unmarshal(line, &response); err != nil {
-		return ControlResponse{}, fmt.Errorf("control response is not a JSON object")
+		return ControlResponse{}, fmt.Errorf("%w: control response is not a JSON object", ErrControlReplyLost)
 	}
 	return response, nil
 }

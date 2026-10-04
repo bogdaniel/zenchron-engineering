@@ -63,6 +63,14 @@
   </table>
 </section>
 
+<section class="panel" id="run-actions">
+  <h2>operator action</h2>
+  {{if .StopDisabled}}<p class="muted">stop unavailable: {{.StopDisabled}}</p>
+  {{else}}{{with .Controller}}<button type="button" class="action" data-action="/v1/runs/{{$s.ID}}/stop" data-binding="{{.ControllerBinding}}"
+    data-target="run {{$s.ID}}" data-generation="{{with .LiveBuild}}{{.Kind}} {{.Version}} @ {{.SourceRevision}}{{end}} · binding {{.ControllerBinding}}"
+    data-consequence="Stopping cancels this run. Cancellation is terminal and is not undone by resume.">stop run…</button>{{end}}{{end}}
+</section>
+
 <section class="panel" id="operation-panel" data-run-id="{{$s.ID}}">
   <h2>current operation</h2>
   {{with $s.Operation}}

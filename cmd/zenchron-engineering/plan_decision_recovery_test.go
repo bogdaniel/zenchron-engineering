@@ -36,7 +36,7 @@ func TestLostReplyRecoveryReadsTheDecisionHistory(t *testing.T) {
 		})},
 	}
 
-	decided, applied := decisionEventFor(events, "approve", 2, "digest-2")
+	decided, applied := runtime.DecisionEventFor(events, "approve", 2, "digest-2")
 	if !applied {
 		t.Fatal("an approval that landed was reported as not applied because a later proposal arrived")
 	}
@@ -47,18 +47,18 @@ func TestLostReplyRecoveryReadsTheDecisionHistory(t *testing.T) {
 	// A decision that did NOT land is still reported as not landed: the same
 	// digest at a different revision, and the same revision at a different
 	// digest, are different decisions.
-	if _, applied := decisionEventFor(events, "approve", 3, "digest-3"); applied {
+	if _, applied := runtime.DecisionEventFor(events, "approve", 3, "digest-3"); applied {
 		t.Fatal("a proposal was read as an approval")
 	}
-	if _, applied := decisionEventFor(events, "approve", 2, "digest-other"); applied {
+	if _, applied := runtime.DecisionEventFor(events, "approve", 2, "digest-other"); applied {
 		t.Fatal("a different digest was accepted as this decision")
 	}
-	if _, applied := decisionEventFor(events, "reject", 2, "digest-2"); applied {
+	if _, applied := runtime.DecisionEventFor(events, "reject", 2, "digest-2"); applied {
 		t.Fatal("an approval answered a question about a rejection")
 	}
 	// An unreadable record is not this decision, and not a reason to claim one.
 	broken := []runtime.EngineeringEvent{{Type: runtime.EventPlanApproved, Payload: json.RawMessage("[]")}}
-	if _, applied := decisionEventFor(broken, "approve", 2, "digest-2"); applied {
+	if _, applied := runtime.DecisionEventFor(broken, "approve", 2, "digest-2"); applied {
 		t.Fatal("an unreadable decision record was reported as this decision")
 	}
 }

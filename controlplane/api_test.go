@@ -122,7 +122,7 @@ func TestHTTPWireSchemasAndSecretBoundary(t *testing.T) {
 	wire(t, a, "/v1/plans/missing/detail", "GET", a.Token, "error", 404)
 	wire(t, a, "/v1/plans/p/detail?revision=9", "GET", a.Token, "error", 404)
 	wire(t, a, "/v1/plans/p/detail?revision=-1", "GET", a.Token, "error", 400)
-	wire(t, a, "/v1/runs", "POST", a.Token, "error", 405)
+	wire(t, a, "/v1/runs", "PUT", a.Token, "error", 405)
 	wire(t, a, "/v1/runs/r/events?after=999", "GET", a.Token, "run-events", 200)
 	a.Store.Close()
 	wire(t, a, "/v1/runs", "GET", a.Token, "error", 500)
