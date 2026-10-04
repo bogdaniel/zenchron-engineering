@@ -383,3 +383,42 @@ func TestAStopRoutedAssuranceClassDoesNotSatisfyTheOperation(t *testing.T) {
 		t.Fatalf("a run_cancelled assurance with no stop satisfied the operation: %+v", outcome)
 	}
 }
+
+// #454: a first run that fails and a confirmation that passes is flaky, and a
+// flaky result is never passing evidence. No bundle is bound, the operation is
+// not satisfied, nothing reaches authority, and the run stops non-retryably.
+func TestAFlakyAssurancePassIsNeverEvidence(t *testing.T) {
+	f := newPhase8Fixture(t)
+	results := append([]AssuranceResult{{ProviderID: "test-verifier", VerifierDefinition: "verifier-v1", FailureClass: FailureVerification}}, passingAssurance().Results...)
+	verifier := &FakeAssuranceProvider{Results: results}
+	f.useAssurance(verifier)
+	runID := f.start()
+	var outcome Outcome
+	for pass := 0; pass < 30 && outcome.Disposition != Failed; pass++ {
+		outcome = f.reconcile(runID)
+	}
+	if len(verifier.Requests) < 2 || !verifier.Requests[1].Confirmation {
+		t.Fatalf("the failing first run was not confirmed: %+v", verifier.Requests)
+	}
+	state := f.state(runID)
+	key, _ := bindAssuranceGo(state)
+	if state.satisfied(OpAssuranceGo, key) {
+		t.Fatal("a flaky assurance satisfied the operation")
+	}
+	if len(state.projection.EvidenceBundles) != 0 {
+		t.Fatalf("a flaky pass bound evidence: %+v", state.projection.EvidenceBundles)
+	}
+	for _, p := range automatedAssurancePayloads(t, state.events) {
+		if p.Passed || p.Bundle != (Ref{}) {
+			t.Fatalf("a flaky result was observed as passing evidence: %+v", p)
+		}
+	}
+	for _, e := range state.events {
+		if e.Type == EventAuthorityEvaluated {
+			t.Fatal("a flaky result reached authority")
+		}
+	}
+	if outcome.Disposition != Failed || outcome.Reason != OpAssuranceGo+"_failure_not_retryable" {
+		t.Fatalf("a flaky assurance settled %+v, want %s_failure_not_retryable", outcome, OpAssuranceGo)
+	}
+}

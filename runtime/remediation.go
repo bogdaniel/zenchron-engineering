@@ -86,6 +86,8 @@ func (t *NoProgressTracker) Allow(f FailureFingerprint) bool {
 
 // AssuranceRerun enforces the single identical rerun law. A disagreement is
 // flaky even if the retry passes; no producer mutation happens between calls.
+// It is the one owner of the verdict: a flaky result is never Passed, so no
+// caller can bind a pass that the first run contradicted as evidence (#454).
 func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request AssuranceRequest) (AssuranceResult, FailureClass, error) {
 	first, err := provider.Assure(ctx, request)
 	if err != nil || first.Passed {
@@ -107,6 +109,7 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 		return second, class, secondErr
 	}
 	if second.Passed != first.Passed || second.FailureClass != first.FailureClass {
+		second.Passed, second.FailureClass = false, FailureFlaky
 		return second, FailureFlaky, nil
 	}
 	return second, second.FailureClass, nil

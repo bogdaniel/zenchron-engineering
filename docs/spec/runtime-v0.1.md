@@ -367,8 +367,11 @@ Effective patience with the defaults: an execution (`max_execution_attempts`
 operation needs at least six attempts to wait that long.
 
 The first failing assurance result gets exactly one identical rerun before any
-mutation. A differing result is `flaky_verification`, not pristine passing
-evidence. No-progress uses a deterministic fingerprint over candidate tree,
+mutation. A differing result is `flaky_verification`, never passing
+evidence: the rerun's verdict is not passed even when the confirmation run
+passed, so no evidence bundle is bound, no claim is satisfied by it, and it
+cannot reach authority or publication. `flaky_verification` routes `stop`, and
+the run settles `assurance.go_failure_not_retryable`. No-progress uses a deterministic fingerprint over candidate tree,
 contract revision, failure signature, verifier, provider, and remediation
 identity rather than transcript text.
 
