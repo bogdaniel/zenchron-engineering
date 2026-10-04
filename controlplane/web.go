@@ -263,6 +263,9 @@ type runDetailData struct {
 	After      int64
 	NextAfter  int64
 	HasMore    bool
+	// Controller and StopDisabled drive the governed stop action (#398).
+	Controller   Controller
+	StopDisabled string
 }
 
 func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
@@ -299,6 +302,11 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 	if len(data.Events) > 0 {
 		data.NextAfter = data.Events[len(data.Events)-1].Sequence
 	}
+	data.Controller = w.liveController(now)
+	data.StopDisabled = data.Controller.ActionsDisabled()
+	if d := data.Status.Disposition; data.StopDisabled == "" && (d == rt.Completed || d == rt.Failed || d == rt.Cancelled) {
+		data.StopDisabled = "the run is already " + string(d)
+	}
 	w.render(rw, runDetailTemplate, data)
 }
 
@@ -309,13 +317,21 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 type planDetailData struct {
 	ObservedAt time.Time
 	Plan       PlanDetail
+	// Controller and RejectDisabled drive the governed reject action (#398).
+	Controller     Controller
+	RejectDisabled string
 }
 
 func (w *Web) handlePlanDetail(rw http.ResponseWriter, r *http.Request) {
 	detail, status, _ := readPlanDetail(w.Store, r)
 	switch status {
 	case 200:
-		w.render(rw, planDetailTemplate, planDetailData{ObservedAt: w.now(), Plan: detail})
+		data := planDetailData{ObservedAt: w.now(), Plan: detail, Controller: w.liveController(w.now())}
+		data.RejectDisabled = data.Controller.ActionsDisabled()
+		if data.RejectDisabled == "" && detail.Shown != "proposed" && detail.Shown != "unapproved" {
+			data.RejectDisabled = "this revision is " + detail.Shown + ", not awaiting a decision"
+		}
+		w.render(rw, planDetailTemplate, data)
 	case 404, 400:
 		w.renderNotFound(rw)
 	default:

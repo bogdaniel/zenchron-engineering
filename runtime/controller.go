@@ -90,6 +90,20 @@ func (b ControllerBuild) Attested() bool {
 		b.Version != "" || b.SourceRevision != "" || b.SourceTree != "" || b.BinarySHA256 != ""
 }
 
+// ControllerBuildBinding is the one comparable identity of a build: the digest
+// of every provenance field, the measured binary included. An unattested build
+// has none, because it claims nothing that could be bound to (#398).
+func ControllerBuildBinding(b ControllerBuild) string {
+	if !b.Attested() {
+		return ""
+	}
+	digest, err := Digest(b)
+	if err != nil {
+		return ""
+	}
+	return digest
+}
+
 // validate is the construction-time check: nothing injected is legal, but a
 // partially injected build is not. A binary that claims a source revision
 // without a binary digest is exactly the provenance gap this type exists to

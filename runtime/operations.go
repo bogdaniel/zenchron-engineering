@@ -562,6 +562,45 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			result: mutationResult{FailureClass: FailureToolchainUnavailable},
 		}
 	}
+	// NO EARLIER WRITER MAY STILL BE ALIVE (#168). Claimed before anything
+	// below reads, restores or scans the candidate, and held through dispatch:
+	// a process a dead supervisor left behind can still be writing it, and
+	// judging that workspace - an inconclusive scan of its half-written cache
+	// is a STOP - would charge this run for a writer that is not this
+	// attempt's. A held lock is a wait an operator clears.
+	if dir := candidateDir(r.deps.StateDir, state.run.ID); isDir(dir) {
+		// The settle is paid once, on first encounter. A run already
+		// waiting on a held lock re-probes with no sleep.
+		settle := candidateWriterSettle
+		if last, ok := state.lastFailure(operation.ID); ok && last == FailureCandidateWriterAlive {
+			settle = 0
+		}
+		writer, err := claimCandidateWriter(ctx, dir, settle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			// The PARENT context ended during the claim: the provider is not
+			// started because its context had ended, and that takes exactly
+			// the class the executor's own not-started refusal takes
+			// (controller_shutdown for a shutdown). It is never a live
+			// writer, and never an operator stop - that is a durable act the
+			// execution watcher observes, not a context.
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			result := notStartedResult("", "", "", operation.AttemptIdentity, notStarted)
+			class := result.Failure.Classification
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, class, result, notStarted),
+			}}
+		}
+		if err != nil {
+			class, _ := candidateGuardFailureClass(err)
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, ExecutionResult{}, err),
+			}}
+		}
+		defer writer.Close()
+		ctx = withCandidateWriter(ctx, writer)
+	}
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return failed(err)
@@ -2287,6 +2326,12 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}
+	// An unpassed result that names no class is a verification failure, as
+	// currentHeadFailure reads it, so the stop-route guard below cannot turn it
+	// into a non-retryable stop.
+	if !result.Passed && class == "" {
+		class = FailureVerification
+	}
 	payload := AssuranceObservedPayload{
 		ProviderID:         firstNonEmpty(result.ProviderID, "assurance-provider"),
 		VerifierDefinition: firstNonEmpty(result.VerifierDefinition, "unknown-verifier"),
@@ -2332,7 +2377,13 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// unsatisfied. Retry is a fault that may clear by itself; wait is one an
 	// operator has to clear. Recording either as a succeeded observation is
 	// defect G, and a wait-routed one would recreate it exactly.
-	if !result.Passed && (RouteFailure(class) == RouteRetry || RouteFailure(class) == RouteWait) {
+	//
+	// A STOP-routed class (run_cancelled, unknown, flaky) is not a verdict
+	// either, and nothing plans an operation for it. Recording it as succeeded
+	// satisfied assurance for this head and stranded the run at
+	// goal_state_reached; failing it lets the reconciler settle the run on the
+	// non-retryable failure instead (#447).
+	if route := RouteFailure(class); !result.Passed && (reattemptable(route) || route == RouteStop) {
 		return effect{
 			state:  OperationFailed,
 			result: assuranceRecord{FailureClass: class, Passed: false},

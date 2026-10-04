@@ -198,3 +198,17 @@ table.runs td { overflow-wrap: normal; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+
+/* Governed operator actions (#398): a confirm dialog, never a one-click act. */
+button.action, dialog button {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  padding: 0.3rem 0.7rem; border-radius: 3px; font: inherit; cursor: pointer;
+}
+button.action { border-color: var(--bad); color: var(--bad); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); max-width: min(40rem, calc(100vw - 2rem)); }
+dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); font: inherit; }
+#action-result[data-outcome="applied"], #action-result[data-outcome="already_applied"] { color: var(--ok); }
+#action-result[data-outcome="refused"], #action-result[data-outcome="unknown"], #action-result[data-outcome="unreachable"] { color: var(--warn); }

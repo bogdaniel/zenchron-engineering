@@ -14,6 +14,10 @@
         "not_found",
         "invalid_page",
         "read_failed",
+        "forbidden_host",
+        "forbidden_origin",
+        "unsupported_media_type",
+        "invalid_request",
         "stream_unsupported"
       ]
     }

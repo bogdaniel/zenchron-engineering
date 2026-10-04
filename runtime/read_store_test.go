@@ -135,6 +135,11 @@ func TestBoundedEventReadCostAtAJournalScale(t *testing.T) {
 	at := time.Unix(1_700_000_000, 0).UTC()
 	for n := int64(1); n <= total; n++ {
 		e := EngineeringEvent{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("e%d", n), RunID: "r", Sequence: n, Type: "synthetic.marker", OccurredAt: at.Add(time.Duration(n) * time.Second)}
+		// A persisted row always carries its event_hash (#462); this read
+		// path does not verify the chain, only that one is present.
+		if e.EventHash, err = EventDigest(e); err != nil {
+			t.Fatal(err)
+		}
 		document, err := json.Marshal(e)
 		if err != nil {
 			t.Fatal(err)

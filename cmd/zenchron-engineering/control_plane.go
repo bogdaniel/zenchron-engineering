@@ -41,7 +41,12 @@ func controlPlane(args []string, stdout io.Writer) (int, error) {
 	}
 	defer listener.Close()
 	observe := observeLiveController(*state)
-	api := &controlplane.API{Store: store, Token: token, ControllerRoot: *root, Observe: observe}
+	// Send is the ONLY mutation path: one governed request to the controller's
+	// own socket. The store handle above stays read-only.
+	send := func(request runtime.ControlRequest) (runtime.ControlResponse, error) {
+		return runtime.SendControl(*state, request)
+	}
+	api := &controlplane.API{Store: store, Token: token, ControllerRoot: *root, Observe: observe, Send: send, Listen: listener.Addr().String()}
 	web := &controlplane.Web{Store: store, Token: token, ControllerRoot: *root, Observe: observe}
 	// One listener, one process, one token: the console is a second
 	// presentation of exactly the boundary API owns, mounted beside it on

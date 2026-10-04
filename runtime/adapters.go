@@ -604,6 +604,21 @@ func GuardCandidatePathShape(root string, paths []string) error {
 // candidate, and its bytes are not candidate bytes, because neither reaches the
 // tree. The gates are unchanged for everything that does reach it.
 func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
+	return guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
+	})
+}
+
+// guardCommitNamesAndSizes is the one implementation of the sensitive-name and
+// size-ceiling rules. sizeOf answers for a normalized path, and false means the
+// path carries no bytes (a deletion), so it adds nothing to the total. The
+// worktree form above and the staged-blob form in CandidateWorkspace.Commit
+// differ only in where the size comes from.
+func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normalized string) (int64, bool)) error {
 	var total int64
 	for _, p := range paths {
 		normalized, err := normalizedCandidatePath(p)
@@ -618,11 +633,11 @@ func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) er
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
 			return fmt.Errorf("sensitive candidate path %q", normalized)
 		}
-		info, err := os.Lstat(filepath.Join(root, normalized))
-		if err != nil {
+		size, ok := sizeOf(normalized)
+		if !ok {
 			continue
 		}
-		total += info.Size()
+		total += size
 		if maxBytes > 0 && total > maxBytes {
 			return fmt.Errorf("candidate exceeds size ceiling")
 		}
@@ -903,10 +918,15 @@ const (
 	// executable would destroy work over a condition that is entirely local
 	// and entirely fixable.
 	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
-	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
-	FailureFlaky                     FailureClass = "flaky_verification"
+	// FailureCandidateWriterAlive is a candidate whose writer lock is still
+	// held by a process from an earlier invocation - one that outlived its
+	// supervisor (#168). Refused before dispatch, it waits: an operator stops
+	// the stale writer and the same run continues.
+	FailureCandidateWriterAlive    FailureClass = "candidate_writer_alive"
+	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
+	FailureFlaky                   FailureClass = "flaky_verification"
 	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
 	// that returned without discharging it: the workspace it left behind is
 	// unchanged, and it did not state (or failed to bind) an explicit
@@ -1029,11 +1049,28 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureCandidateWriterAlive:
 		return RouteWait
 	default:
 		return RouteStop
 	}
+}
+
+// CandidateVerdict reports whether an assurance result is a valid verdict
+// about the CANDIDATE: a pass, or a failure the verifier judged (format,
+// compile/test, verification, or an unpassed result naming no class, which is
+// read as verification). This is the one definition. Everything else - an
+// infrastructure fault, a cancellation, a missing prerequisite - says nothing
+// about the candidate, and only two verdicts can disagree as a flake.
+func CandidateVerdict(r AssuranceResult) bool {
+	if r.Passed {
+		return true
+	}
+	switch r.FailureClass {
+	case "", FailureFormat, FailureCompileTest, FailureVerification:
+		return true
+	}
+	return false
 }
 
 // PriorAttemptContextEligible reports whether a retry of the same execution

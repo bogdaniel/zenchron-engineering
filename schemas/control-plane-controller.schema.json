@@ -94,6 +94,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "controller_binding": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   }
 }

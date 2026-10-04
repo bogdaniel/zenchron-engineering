@@ -58,6 +58,8 @@ func mustCompile() map[string]*jsonschema.Schema {
 		"control-plane-plan",
 		"control-plane-plan-detail",
 		"control-plane-error",
+		"control-plane-action-request",
+		"control-plane-action-result",
 
 		AuthorityDecision,
 		EngineeringFact,

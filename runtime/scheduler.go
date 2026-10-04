@@ -50,6 +50,11 @@ type OperationStore interface {
 	// execution.invoke, through the execution watcher (#213); every other
 	// started operation runs to completion (#215).
 	//
+	// The same statement refuses a PAUSED run (#86): the run's latest
+	// run.paused/run.unpaused event is read inside it, so a pause that commits
+	// after a driver read the run still refuses that driver's lease. Like the
+	// terminal-run condition, it is stated against SQLite only.
+	//
 	// The ceiling is PER CAPACITY CLASS (#85): only other runs holding an
 	// active operation of the acquired operation's class are counted, against
 	// maxRuns for work and maxObservations for observation.

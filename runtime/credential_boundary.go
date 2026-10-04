@@ -230,52 +230,24 @@ func ScanCandidateForCredentialValues(root string) error {
 		if sensitiveCredentialFilename(entry.Name()) {
 			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialFile}
 		}
-		if info.Size() > credentialScanFileLimit {
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "file exceeds the deterministic scan ceiling"}
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "workspace entry is unreadable"}
-		}
-		if ContainsCredentialValue(data) {
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialValue}
-		}
-		return nil
+		return credentialContentVerdict(rel, info.Size(), func() ([]byte, error) { return os.ReadFile(path) }, "workspace entry is unreadable")
 	})
 }
 
-// scanPathsForCredentialValues is the commit-gate half: the same question asked
-// of exactly the paths a commit is about to capture.
-//
-// Admission proves what went IN. This proves what came OUT, and the two are
-// different facts: a producer can write a credential into a workspace that was
-// clean when it was handed over. Neither one implies the other, so neither one
-// is skipped.
-func scanPathsForCredentialValues(root string, paths []string) error {
-	for _, rel := range paths {
-		full := filepath.Join(root, filepath.FromSlash(rel))
-		info, err := os.Lstat(full)
-		if err != nil {
-			// A deleted path has no content to inspect. Deletion is not how a
-			// credential enters a tree. Other stat failures are inconclusive.
-			if os.IsNotExist(err) {
-				continue
-			}
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "changed path is unreadable"}
-		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		if info.Size() > credentialScanFileLimit {
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "file exceeds the deterministic scan ceiling"}
-		}
-		data, err := os.ReadFile(full)
-		if err != nil {
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "changed path is unreadable"}
-		}
-		if ContainsCredentialValue(data) {
-			return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialValue}
-		}
+// credentialContentVerdict is the one content rule every credential scan
+// applies, whether the bytes come from the workspace or from a staged blob:
+// content above the deterministic scan ceiling is INCONCLUSIVE and is never
+// read, unreadable content is INCONCLUSIVE, and a value is refused.
+func credentialContentVerdict(rel string, size int64, read func() ([]byte, error), unreadable string) error {
+	if size > credentialScanFileLimit {
+		return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: "file exceeds the deterministic scan ceiling"}
+	}
+	data, err := read()
+	if err != nil {
+		return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialInconclusive, Detail: unreadable}
+	}
+	if ContainsCredentialValue(data) {
+		return &CredentialMaterialError{Path: rel, Kind: CredentialMaterialValue}
 	}
 	return nil
 }
