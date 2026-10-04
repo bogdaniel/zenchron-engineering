@@ -324,12 +324,14 @@ carries no meaning of its own: the waiting reason, any attempt refund, whether
 the wait counts as external, and whether an observation keeps its binding are
 all read from the disposition, and never from whether a timestamp is set.
 
-| Disposition | Produced by | Spends attempt | Spends active work | Finite attempt authority | Resume condition | Waiting reason |
+| Disposition | Produced by | Spends attempt | Spends active work¹ | Finite attempt authority | Resume condition | Waiting reason |
 |---|---|---|---|---|---|---|
 | `transport_backoff` | `connectivity_unavailable` | yes | no | yes | `retry_not_before` has passed (30 s, doubling, capped at 5 min) | `connectivity_backoff` |
 | `provider_prerequisite_wait` | `provider_unavailable` | no | no | no | the provider endpoint recovers on its own; probed every 5 min | the class's: `execution_provider_unavailable` |
 | `rate_limit_wait` | `provider_quota`, `provider_rate_limited` | no | no | no | the provider allowance returns; probed every 5 min | the class's: `execution_provider_quota` / `execution_provider_rate_limited` |
 | `account_wait` | `provider_account_unavailable` | no | no | no | an operator restores the provider account; probed every 5 min | the class's: `execution_provider_account_unavailable` |
+
+¹ Waiting only; a probe's own execution is charged.
 
 Further rules:
 

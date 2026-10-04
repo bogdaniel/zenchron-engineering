@@ -588,6 +588,11 @@ func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 			t.Fatalf("%s: class reason %q does not match its row's accounting", class, waitReason(class))
 		}
 	}
+	// A reason-less row must not register "": a reason-less run.waiting
+	// would then pause the active-work budget.
+	if externalWaitReasons[""] {
+		t.Fatal("the empty reason is registered as external wait")
+	}
 	if externalWaitReasons["execution_provider_prerequisite_unavailable"] {
 		t.Fatal("a reason nothing produces is registered as external wait")
 	}
@@ -756,7 +761,8 @@ func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing
 		}
 		// The accounting the frozen table states: refunded, external, no
 		// finite attempt authority, a fixed 5 minute probe whatever the attempt.
-		if RouteFailure(class) != RouteWait || s.SpendsAttempt || s.SpendsActiveWork || s.FiniteAttemptAuthority || s.Delay == nil || s.Delay(1) != 5*time.Minute || s.Delay(9) != 5*time.Minute {
+		if RouteFailure(class) != RouteWait || s.SpendsAttempt || s.SpendsActiveWork || s.FiniteAttemptAuthority || s.Delay == nil || s.Delay(1) != 5*time.Minute || s.Delay(9) != 5*time.Minute ||
+			!strings.HasSuffix(s.ResumeCondition, fmt.Sprintf("; probed every %d minutes", providerWaitProbe(1)/time.Minute)) {
 			t.Errorf("%s/%s: accounting %+v", class, d, s)
 		}
 	}
