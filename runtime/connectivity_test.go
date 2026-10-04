@@ -594,9 +594,6 @@ func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 	if externalWaitReasons[""] {
 		t.Fatal("the empty reason is registered as external wait")
 	}
-	if externalWaitReasons["execution_provider_prerequisite_unavailable"] {
-		t.Fatal("a reason nothing produces is registered as external wait")
-	}
 }
 
 // omitzero: an operation with no deadline serializes none, and a legacy
@@ -755,9 +752,16 @@ func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing
 	if classes < 20 {
 		t.Fatalf("found only %d failure classes; the scan is not reading the declarations", classes)
 	}
-	// Declared for a genuine prerequisite (slice 3), produced by nothing here.
-	if s := retryDispositions[DispositionProviderPrerequisiteWait]; s.Delay != nil || s.Reason != "" {
-		t.Fatalf("provider_prerequisite_wait was given slice 3's cadence or reason: %+v", s)
+	// Every row has a producer: an unproduced row has no real semantics and
+	// one stray producer away from an unbounded, immediately eligible wait.
+	produced := map[RetryDisposition]bool{}
+	for _, d := range want {
+		produced[d] = true
+	}
+	for d := range retryDispositions {
+		if !produced[d] {
+			t.Errorf("disposition %s is produced by no failure class", d)
+		}
 	}
 	for class, d := range want {
 		s := retryDispositions[d]
@@ -954,6 +958,82 @@ func TestConnectivityFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing
 	}
 	if len(got) != 2 || got[keyA] != 1 || got[keyB] != 1 {
 		t.Fatalf("retry of %s delivered %v, want A=%s and B=%s once each", waiting.ID, got, keyA, keyB)
+	}
+}
+
+// #87 S1: the delivery union is capped. The retry keeps everything it was
+// already given and fills only the room left from what arrived during the
+// wait; the rest waits, unconsumed, for the next binding.
+func TestConnectivityFeedbackDeliveryAcrossAWaitIsBounded(t *testing.T) {
+	for name, tc := range map[string]struct{ before, during int }{
+		"full: 10 then 10":       {10, 10},
+		"partial room: 6 then 7": {6, 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, runID := feedbackFixture(t)
+			f.clock.step = 0
+			next := int64(600)
+			admit := func(n int) []string {
+				number := f.state(runID).projection.PullRequest.Number
+				for i := 0; i < n; i++ {
+					next++
+					f.forge.ConversationComments[number] = append(f.forge.ConversationComments[number],
+						GitHubComment{ID: next, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText(fmt.Sprintf("item %d", next)), CreatedAt: f.clock.Now()})
+				}
+				if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != n {
+					t.Fatalf("admission of %d: %+v %v", n, observation, err)
+				}
+				admitted := f.state(runID).feedbackState().Admitted
+				var keys []string
+				for _, d := range admitted[len(admitted)-n:] {
+					keys = append(keys, d.Key)
+				}
+				return keys
+			}
+			keysOf := func(r ExecutionRequest) []string {
+				var keys []string
+				for _, item := range r.Feedback {
+					keys = append(keys, item.Key)
+				}
+				return keys
+			}
+			a := admit(tc.before)
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+				t.Fatalf("quota: %+v", out)
+			}
+			var x RunOperation
+			for _, op := range f.state(runID).snapshot.Operations {
+				if op.Kind == OpExecutionInvoke && op.RetryDisposition == DispositionRateLimitWait {
+					x = op
+				}
+			}
+			b := admit(tc.during)
+			// The worker now answers with a no-change resolution naming exactly
+			// what it was given, and mutates nothing.
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+			f.provider.mutate, f.provider.resolveFeedback = nil, true
+			calls := len(f.provider.requests)
+			f.clock.at = x.RetryNotBefore
+			f.reconcile(runID)
+			room := maxDeliveredFeedbackItems - len(a)
+			if len(f.provider.requests) <= calls {
+				t.Fatal("the retry never reached the worker")
+			}
+			if got, want := keysOf(f.provider.requests[calls]), append(append([]string{}, a...), b[:room]...); !reflect.DeepEqual(got, want) {
+				t.Fatalf("retry delivered %d items %v, want A then the %d oldest of B: %v", len(got), got, room, want)
+			}
+			if after := f.state(runID).snapshot.Operations[x.ID]; after.State != Succeeded {
+				t.Fatalf("the no-change resolution was not admitted: %s %s", after.State, after.Result)
+			}
+			// The rest of B is delivered by the next binding, exactly once.
+			for i := 0; i < 3 && len(f.provider.requests) == calls+1; i++ {
+				f.reconcile(runID)
+			}
+			if len(f.provider.requests) != calls+2 || !reflect.DeepEqual(keysOf(f.provider.requests[calls+1]), b[room:]) {
+				t.Fatalf("the remaining %d of B were not delivered next: %d requests", len(b)-room, len(f.provider.requests)-calls)
+			}
+		})
 	}
 }
 

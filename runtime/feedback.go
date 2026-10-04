@@ -515,18 +515,23 @@ func (s *runState) feedbackRedeliveryFor(operationID string) []FeedbackObservedP
 }
 
 // feedbackDeliveryFor is what an attempt of operationID is given: its own
-// prior attempts' consumed items (feedbackRedeliveryFor) united with pending,
-// deduplicated by key, in admission order. The two sets are disjoint in
+// prior attempts' consumed items (feedbackRedeliveryFor) first, then pending
+// in its order, deduplicated by key, at most maxDeliveredFeedbackItems, in
+// admission order. The redelivered items are never displaced by newer ones
+// (#87 F1); pending only fills the room left, and what does not fit stays
+// unconsumed for the next binding. The first attempt delivers at most the cap
+// and a retry's redelivery set is what earlier attempts delivered, so by
+// induction no attempt exceeds it, which keeps a no-change resolution and the
+// consumption record within their own bounds. The two sets are disjoint in
 // practice (Pending excludes consumed keys), so a plain #376 redelivery is
-// unchanged and nothing is delivered twice in one invocation. The operation's
-// binding still names the set that opened it; what each attempt delivered is
-// recorded by its own EventFeedbackConsumed, so a newer item delivered here is
-// consumed by this operation and never opens a second one. Each part is
-// bounded by maxDeliveredFeedbackItems, so the union stays under
-// maxFeedbackKeysPerEvent.
+// unchanged. The operation's binding still names the set that opened it; what
+// each attempt delivered is recorded by its own EventFeedbackConsumed.
 func (s *runState) feedbackDeliveryFor(operationID string, pending []FeedbackObservedPayload) []FeedbackObservedPayload {
 	want := map[string]bool{}
 	for _, decision := range append(s.feedbackRedeliveryFor(operationID), pending...) {
+		if len(want) == maxDeliveredFeedbackItems {
+			break
+		}
 		want[decision.Key] = true
 	}
 	var out []FeedbackObservedPayload

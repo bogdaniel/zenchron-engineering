@@ -123,9 +123,6 @@ const (
 	DispositionProviderAvailabilityWait RetryDisposition = "provider_availability_wait"
 	DispositionRateLimitWait            RetryDisposition = "rate_limit_wait"
 	DispositionAccountWait              RetryDisposition = "account_wait"
-	// Declared, produced by nothing yet: a genuine provider prerequisite (the
-	// executable, #87 slice 3 after #84) sets its own cadence and reason.
-	DispositionProviderPrerequisiteWait RetryDisposition = "provider_prerequisite_wait"
 )
 
 type dispositionSemantics struct {
@@ -159,7 +156,6 @@ var retryDispositions = map[RetryDisposition]dispositionSemantics{
 	DispositionProviderAvailabilityWait: {ResumeCondition: "the provider endpoint recovers on its own; probed every 5 minutes", Delay: providerWaitProbe},
 	DispositionRateLimitWait:            {ResumeCondition: "the provider allowance returns; probed every 5 minutes", Delay: providerWaitProbe},
 	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account; probed every 5 minutes", Delay: providerWaitProbe},
-	DispositionProviderPrerequisiteWait: {ResumeCondition: "an operator restores the provider prerequisite"},
 }
 
 // providerWaitProbe is the fixed cadence of a provider wait. The attempt is
