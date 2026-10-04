@@ -74,6 +74,21 @@ func ownerOfCancellation(ctx context.Context) TerminationOwner {
 	return ownerOfCause(context.Cause(ctx))
 }
 
+// cancellationClass is the failure class a cancellation cause stands for. It is
+// the one mapping every result built from a cancelled context uses, so a
+// shutdown always waits and resumes, and an operator stop always stops.
+func cancellationClass(cause error) FailureClass {
+	switch ownerOfCause(cause) {
+	case OwnerOperatorStop:
+		return FailureRunCancelled
+	case OwnerDeadline:
+		return FailureExecutionIncomplete
+	case OwnerInactivity:
+		return FailureProviderNoProgress
+	}
+	return FailureControllerShutdown
+}
+
 // ownerOfCause names the owner a cancellation cause stands for.
 func ownerOfCause(cause error) TerminationOwner {
 	switch {
