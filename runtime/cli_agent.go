@@ -1101,7 +1101,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			PermissionBypass: p.PermissionBypass, AuthMode: boundedDetail(authMode), AuthModeSource: authSource,
 			WorkspaceBound:                  spec.WorkingDirectoryFlag,
 			WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
-			Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
+			Argv:                            recordedArgv(buildArgs, invocation, p.StateDir, spec.PromptArgFromEnd),
 			PromptSHA256:                    promptDigest(invocation.Prompt),
 			ProgressMode:                    progressMode,
 		},
@@ -1775,14 +1775,9 @@ func (p CLIAgentProvider) refuseUnsupportedObligations(request ExecutionRequest)
 // from the cause the executor recorded at the refusal.
 func notStartedResult(providerID, model, authMode string, attempt int, notStarted *ProviderNotStartedError) ExecutionResult {
 	result := ExecutionResult{ProviderID: providerID, Model: model, AuthMode: authMode, Attempt: attempt, Outcome: OperationCancelled}
-	class := FailureControllerShutdown
-	switch ownerOfCause(notStarted.Cause) {
-	case OwnerOperatorStop:
-		class = FailureRunCancelled
-	case OwnerDeadline:
-		result.Outcome, class = OperationFailed, FailureExecutionIncomplete
-	case OwnerInactivity:
-		result.Outcome, class = OperationFailed, FailureProviderNoProgress
+	class := cancellationClass(notStarted.Cause)
+	if class != FailureControllerShutdown && class != FailureRunCancelled {
+		result.Outcome = OperationFailed // a runtime bound ended it, not a cancellation
 	}
 	result.Failure = &ProviderFailure{Classification: class}
 	return result

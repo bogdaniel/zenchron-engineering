@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -417,24 +418,24 @@ func TestAShutdownDuringTheSettleIsAControllerShutdown(t *testing.T) {
 	}
 	defer held.Close()
 
-	var outcome Outcome
-	for pass := 0; pass < 10; pass++ {
-		ctx, shutdown := context.WithCancel(context.Background())
-		timer := time.AfterFunc(500*time.Millisecond, shutdown)
-		started := time.Now()
-		outcome, err = f.runtime.Reconcile(ctx, runID)
-		elapsed := time.Since(started)
-		timer.Stop()
-		shutdown()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, found := executionFailureClass(t, f.state(runID)); found {
-			if elapsed > 5*time.Second {
-				t.Fatalf("the shutdown waited out the settle: %s", elapsed)
-			}
-			break
-		}
+	// THE SHUTDOWN LANDS INSIDE THE SETTLE, NOT AFTER A GUESSED DELAY: the
+	// claim's first held-lock probe is what ends the controller's context, so
+	// nothing before the settle can be the thing that saw the cancellation.
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	var settling atomic.Int32
+	candidateWriterSettling = func() { settling.Add(1); shutdown() }
+	t.Cleanup(func() { candidateWriterSettling = nil })
+	started := time.Now()
+	outcome, err := f.runtime.Reconcile(ctx, runID)
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the shutdown waited out the settle: %s", elapsed)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := settling.Load(); n != 1 {
+		t.Fatalf("the claim probed a held lock %d time(s), want exactly 1 before the shutdown ended it", n)
 	}
 	class, found := executionFailureClass(t, f.state(runID))
 	if !found || class != FailureControllerShutdown {

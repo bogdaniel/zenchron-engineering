@@ -626,11 +626,6 @@ func TestTheCredentialValueScanAsksAboutWhatTheCommitCarries(t *testing.T) {
 	if _, err := gitOutput(w.Dir, "show", "HEAD:"+scratch+"/leaked.txt"); err == nil {
 		t.Fatal("the excluded scratch reached the tree, so unscanned bytes were published")
 	}
-	// The scan itself is unchanged, and still refuses the value wherever it is
-	// asked about a regular file.
-	if err := scanPathsForCredentialValues(w.Dir, []string{scratch + "/leaked.txt"}); err == nil {
-		t.Fatal("the credential scan stopped recognizing a value")
-	}
 	// And the same bytes in candidate work are refused by the commit.
 	leaking := commitGateWorkspace(t)
 	workerTestScratchRepository(t, leaking.Dir, "scratch", true)

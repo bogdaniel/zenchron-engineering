@@ -242,6 +242,38 @@ placeholder `[prompt]` and its SHA-256 is recorded as `prompt_sha256`. It
 carries untrusted third-party text and is unbounded, while every
 security-relevant flag is short and is kept verbatim.
 
+**Paths in recorded argv are logical references (#464).** The provider runs
+with the real host paths; the durable argv names each runtime-owned directory
+by the role the runtime gave it, never by its host spelling:
+
+```text
+invocation scratch root          $SCRATCH
+typed-result directory           $RESULT
+candidate workspace              $CANDIDATE/<relative>
+anything else under StateDir     $STATE/<relative>
+any other absolute path          <host-path>
+```
+
+So Codex records `-c sandbox_workspace_write.writable_roots=["$SCRATCH"]` and
+`--cd $CANDIDATE`, and Claude Code records `--add-dir $SCRATCH --add-dir
+$RESULT`. The record is built from the invocation's structured path roles - the
+provider spec's own argument builder applied to the invocation with each
+path-bearing field replaced by its reference - not by scrubbing strings, so the
+spec that knows a value is the scratch directory is the only thing that decides
+where `$SCRATCH` appears. Roots match on whole path components (`/tmp/ab` is not
+under `/tmp/a`), under both the given and the symlink-resolved spelling (macOS
+`/tmp` is `/private/tmp`), with Windows drive roots and separators normalized;
+the most specific role wins. A recorded argv is therefore the same when the
+state directory moves to another machine or home.
+
+An absolute path under no runtime-owned root - an operator-configured model
+path or tool path, say - is recorded as `<host-path>`. The loss is explicit
+rather than silent, and the invocation is never refused for it: a diagnostic
+projection does not get to block real work. The journal refuses, at append, an
+argv element that is itself a raw POSIX, drive-rooted or UNC path, as a
+backstop for a projection defect. Artifact references are unaffected; they are
+already runtime-relative identities.
+
 **Where it is recorded.** For a run attempt - initial execution, remediation or
 continuation, whether it succeeded, failed, hit its deadline, was ended for
 inactivity or was cancelled - the record is one immutable

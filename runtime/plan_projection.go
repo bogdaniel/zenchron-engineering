@@ -354,10 +354,9 @@ func ReducePlan(planID string, events []EngineeringEvent) (PlanSnapshot, error) 
 			return snapshot, fmt.Errorf("broken plan event chain")
 		}
 		hash, err := EventDigest(e)
-		if err != nil || (e.EventHash != "" && e.EventHash != hash) {
+		if err != nil || e.EventHash != hash {
 			return snapshot, fmt.Errorf("invalid plan event hash")
 		}
-		e.EventHash = hash
 		for _, artifact := range e.Artifacts {
 			if err := ValidateArtifact(artifact); err != nil {
 				return snapshot, err

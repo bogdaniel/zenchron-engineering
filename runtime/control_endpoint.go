@@ -176,7 +176,10 @@ const (
 	ControlShutdown = "shutdown"
 	ControlStop     = "stop"
 	ControlStopAll  = "stop-all"
-	ControlPing     = "ping"
+	// ControlPause and ControlUnpause carry RunID, Reason and Operator (#86).
+	ControlPause   = "pause"
+	ControlUnpause = "unpause"
+	ControlPing    = "ping"
 	// ControlCommandControllerSnapshot asks the running controller for ONE
 	// coherent observation of itself: which generation it is, whether it holds
 	// the controller role, and whether it is admitting work. It is read-only

@@ -1038,6 +1038,7 @@ var brokerGitPins = []string{
 	"GIT_PAGER=cat",
 	"PAGER=cat",
 	"GIT_OPTIONAL_LOCKS=0",
+	"GIT_NO_REPLACE_OBJECTS=1",
 }
 
 // brokerGitOutput asks Git a question in the same environment the command will
