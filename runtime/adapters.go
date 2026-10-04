@@ -1051,6 +1051,23 @@ func RouteFailure(c FailureClass) FailureRoute {
 	}
 }
 
+// CandidateVerdict reports whether an assurance result is a valid verdict
+// about the CANDIDATE: a pass, or a failure the verifier judged (format,
+// compile/test, verification, or an unpassed result naming no class, which is
+// read as verification). This is the one definition. Everything else - an
+// infrastructure fault, a cancellation, a missing prerequisite - says nothing
+// about the candidate, and only two verdicts can disagree as a flake.
+func CandidateVerdict(r AssuranceResult) bool {
+	if r.Passed {
+		return true
+	}
+	switch r.FailureClass {
+	case "", FailureFormat, FailureCompileTest, FailureVerification:
+		return true
+	}
+	return false
+}
+
 // PriorAttemptContextEligible reports whether a retry of the same execution
 // binding may inherit the previous attempt's observations.
 //

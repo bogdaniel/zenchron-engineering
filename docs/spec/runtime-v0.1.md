@@ -431,11 +431,61 @@ Effective patience with the defaults: an execution (`max_execution_attempts`
 30 s and then 60 s. The 5 min cap is reached only by the fifth backoff, so an
 operation needs at least six attempts to wait that long.
 
-The first failing assurance result gets exactly one identical rerun before any
-mutation. A differing result is `flaky_verification`, not pristine passing
-evidence. No-progress uses a deterministic fingerprint over candidate tree,
-contract revision, failure signature, verifier, provider, and remediation
-identity rather than transcript text.
+The first failing assurance result that is a **candidate verdict** gets
+exactly one identical rerun before any mutation. A candidate verdict is a pass,
+or a failure the verifier judged: `format`, `compile_or_test`,
+`verification_failure`, or an unpassed result naming no class (read as
+verification). `CandidateVerdict` is the one definition. An infrastructure,
+cancellation or prerequisite result is not a verdict: it is never rerun as a
+confirmation and never half of a flake, and on either run it routes by its own
+class.
+
+Only two candidate verdicts that disagree are `flaky_verification`, and a flaky
+result is never passing evidence. The rerun's verdict is not passed even when
+the confirmation run passed, so no evidence bundle is bound, no claim is
+satisfied by it, and it cannot reach authority or publication.
+`flaky_verification` routes `stop`, and the run settles
+`assurance.go_failure_not_retryable`. A result returned together with a
+provider error is never passed either.
+
+A provider therefore returns a judged failure as a result with a nil error. The
+built-in Go verifier runs `gofmt`, `go vet` and `go test` under `sh -e`. Docker
+records that workload's own exit status, and the verifier reads it as follows:
+
+| Workload exit | Meaning | Class | Error |
+|---|---|---|---|
+| 0 | pass | none | nil |
+| 1 or 2 | the candidate failed | `verification_failure` | nil |
+| any other code (3 and above, Docker's 125, an unexecutable 126/127, a signal death such as 137) | not a verdict | `transient_infrastructure` | kept |
+| none recorded (a start that never ran the workload, a container that could not be reaped) | not a verdict | `transient_infrastructure` | kept |
+
+Cancellation keeps its error and its owner's class.
+
+Known ceilings, accepted deliberately:
+
+- **Signal deaths are infrastructure.** Docker's OOM record is not inspected.
+  Candidate code can kill its own workload and force retries this way, but a
+  non-verdict is never passed. It cannot create passing evidence or reach
+  authority, and `max_assurance_attempts` bounds the retries.
+- **In-container resource blips that exit 1 or 2 are read as verdicts.** A full
+  tmpfs, the pids limit or a module missing under `GOPROXY=off` is
+  indistinguishable from a candidate failure by exit status.
+- **A blip followed by a pass stays `flaky_verification`**, terminal and not
+  retryable. Contradictory evidence about the same exact tree is not weakened
+  because the classifier has known ceilings.
+
+Retry backoff for assurance `transient_infrastructure` is not part of this rule
+(#465).
+
+Before this rule the built-in verifier returned every judged failure as an
+error, so it never reached the confirmation rerun and could not record a flaky
+pass. A provider that reported failure with a nil error could, and a flaky pass
+it recorded as a plain pass cannot be reconstructed: the journal kept only
+the confirmation's verdict. No migration exists or is needed.
+
+No-progress uses a deterministic fingerprint over candidate tree, contract
+revision, failure signature, verifier, provider, and remediation identity
+rather than transcript text.
 
 ## Operator surface
 

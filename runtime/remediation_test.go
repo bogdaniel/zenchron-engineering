@@ -69,9 +69,12 @@ func TestFailureRoutingFlakyAndNoProgressAreBounded(t *testing.T) {
 		t.Fatal("unsafe failure routing")
 	}
 	provider := &FakeAssuranceProvider{Results: []AssuranceResult{{Passed: false, FailureClass: FailureCompileTest}, {Passed: true}}}
-	_, class, err := AssuranceRerun(context.Background(), provider, AssuranceRequest{Commit: "c", Tree: "t"})
+	result, class, err := AssuranceRerun(context.Background(), provider, AssuranceRequest{Commit: "c", Tree: "t"})
 	if err != nil || class != FailureFlaky || len(provider.Requests) != 2 {
 		t.Fatalf("identical flaky rerun law failed: %v %s %#v", err, class, provider.Requests)
+	}
+	if result.Passed || result.FailureClass != FailureFlaky {
+		t.Fatalf("a flaky rerun is never a pass (#454): %#v", result)
 	}
 	tracker := NoProgressTracker{Limit: 1}
 	fp := FailureFingerprint{CandidateTree: "tree", ContractRevision: "2", FailureSignature: "compile", VerifierIdentity: "v", ProviderIdentity: "p", RemediationIdentity: "r"}
