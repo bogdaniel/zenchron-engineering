@@ -128,7 +128,9 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 		return fail(err)
 	}
 	out.State = state
-	if finding.detail != "" && (state == orchestration.ItemHandoffPending || finding.observation == orchestration.HandoffReported) {
+	// The handoff explains the item only where the handoff is what the item
+	// is waiting on; a failed or stopped child keeps its own run's reason.
+	if finding.detail != "" && (state == orchestration.ItemHandoffPending || state == orchestration.ItemRunning) {
 		out.Reason = boundedDetail(finding.detail)
 	}
 	return out

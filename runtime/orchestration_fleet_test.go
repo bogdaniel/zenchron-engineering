@@ -179,6 +179,10 @@ func newFleetFixture(t *testing.T, capacity int) *fleetFixture {
 	// wide so that the WORK ceiling under test is the only thing that bounds
 	// how many workers run at once.
 	fixture.deps.MaxConcurrentObservations = 10
+	// The fixture clock steps on every read, so wall time here is a count of
+	// clock reads, which concurrency and -race inflate. Budgets are not what
+	// these tests are about; a wide one keeps them from deciding outcomes.
+	fixture.deps.Budgets.WallLimit = 1000 * time.Hour
 	// ONE live process owns every lease here, as one `serve` does. The base
 	// fixture reports every owner dead, which - under a clock that steps on
 	// every read - lets a sibling reclaim a slot whose worker is still
@@ -359,6 +363,11 @@ func TestTheSchedulerAloneBoundsBatchConcurrency(t *testing.T) {
 			fixture.worker.mu.Unlock()
 			if peak != capacity {
 				t.Fatalf("peak concurrent workers = %d under a ceiling of %d", peak, capacity)
+			}
+			for _, item := range settled.Items {
+				if item.State != orchestration.ItemCompleted {
+					t.Logf("issue %d: %s %s/%s reason=%s", item.Issue, item.State, item.Phase, item.Disposition, item.Reason)
+				}
 			}
 			if executed != 10 || settled.Counts.Completed != 10 {
 				t.Fatalf("%d of 10 items were executed and %d completed: %+v", executed, settled.Counts.Completed, settled.Counts)

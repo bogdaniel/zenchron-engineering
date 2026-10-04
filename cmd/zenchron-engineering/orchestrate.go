@@ -140,7 +140,7 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 		c.Total, c.Queued, c.Running, c.Waiting, c.HandoffPending, c.Completed, c.Failed, c.Stopped, c.NotCreated, c.Unknown)
 	fmt.Fprintf(stdout, "%-7s %-16s %-38s %-9s %-24s %s\n", "ISSUE", "STATE", "RUN", "HANDOFF", "CANDIDATE / PR", "REASON")
 	for _, item := range view.Items {
-		location := orDash(shortRevision(item.CandidateRevision))
+		location := orDash(item.CandidateRevision[:min(12, len(item.CandidateRevision))])
 		if item.PullRequest > 0 {
 			location = fmt.Sprintf("PR #%d %s", item.PullRequest, item.PRState)
 		}
@@ -151,11 +151,4 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 		fmt.Fprintf(stdout, "#%-6d %-16s %-38s %-9s %-24s %s\n", item.Issue, state, item.RunID, item.Handoff, location, item.Reason)
 	}
 	return runtime.ExitCompleted, nil
-}
-
-func shortRevision(revision string) string {
-	if len(revision) > 12 {
-		return revision[:12]
-	}
-	return revision
 }
