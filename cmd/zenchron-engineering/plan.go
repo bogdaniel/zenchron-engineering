@@ -1218,13 +1218,19 @@ func writePlanBudget(stdout io.Writer, view runtime.PlanView) {
 		view.Envelope.MaxConcurrency)
 	// RE-PERFORMANCE HEADROOM, said out loud. A stage whose upstream candidate
 	// is replaced is performed again as a new execution generation, and that
-	// needs a child run - so an envelope with exactly one child run per agent
-	// stage is legal, approvable, and blocks on budget the first time anything
-	// upstream moves. An operator reading the envelope cannot see that from the
-	// numbers alone.
+	// needs a child run - so an envelope with exactly one child run per
+	// run-creating agent stage is legal, approvable, and blocks on budget the
+	// first time anything upstream moves. An operator reading the envelope
+	// cannot see that from the numbers alone.
+	//
+	// A planner-role stage never counts here: it performs its work through a
+	// verified non-mutating planning invocation and never becomes an
+	// EngineeringRun (see PlanReconciler's own check on InvocationMode), so it
+	// spends no child_run from the envelope. Counting it as demand warned an
+	// operator to raise a ceiling that was already adequate.
 	agentStages := 0
 	for _, stage := range view.Plan.Stages {
-		if stage.Kind == domain.StageAgent {
+		if stage.Kind == domain.StageAgent && stage.InvocationMode != domain.InvocationModeNonMutatingPlanning {
 			agentStages++
 		}
 	}

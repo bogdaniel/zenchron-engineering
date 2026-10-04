@@ -238,12 +238,33 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	// below it is refused at compile time rather than approved and then blocked
 	// at the first stage that tries to run under it.
 	var consumed domain.PlanConsumption
+	// The privilege ratchet's floor: the latest revision an OPERATOR approved,
+	// never merely the latest stored one. `previous` above is the latest
+	// stored revision whatever its status, and a rejected or still-pending
+	// proposal grants no privilege floor - see planning.ValidationInput's
+	// RatchetBaseline. Nil here means nothing has ever been approved, which is
+	// itself the correct answer: there is no proposal-history floor to hold a
+	// first or still-unapproved proposal to.
+	var ratchetBaseline *domain.EngineeringPlan
 	if found {
 		snapshot, err := s.Store.ReplayPlan(input.PlanID)
 		if err != nil {
 			return domain.EngineeringPlan{}, err
 		}
 		consumed = snapshot.Consumed
+		if approvedRevision, ok := snapshot.ApprovedRevision(); ok {
+			baseline, baselineFound, err := s.Store.PlanRevision(input.PlanID, approvedRevision)
+			if err != nil {
+				return domain.EngineeringPlan{}, err
+			}
+			if !baselineFound {
+				return domain.EngineeringPlan{}, &PlanRefusedError{
+					PlanID: input.PlanID,
+					Detail: fmt.Sprintf("revision %d is approved and not stored, so a new proposal cannot be checked against it", approvedRevision),
+				}
+			}
+			ratchetBaseline = &baseline
+		}
 	}
 	// WHETHER A BASE REBINDING IS AUTHORIZED, before anything is compiled.
 	//
@@ -265,7 +286,7 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
 			Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
-			Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
+			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
 		})
 	}
 	if compileErr != nil {
@@ -779,24 +800,56 @@ func (s PlanService) View(planID string) (PlanView, error) { return s.ViewRevisi
 // an operator reads the proposal they are being asked about while a different
 // revision is executing.
 func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error) {
-	plan, found, err := s.Store.Plan(planID)
+	plan, snapshot, preview, err := s.durable(planID, revision)
 	if err != nil {
 		return PlanView{}, err
 	}
+	view, err := s.viewOf(plan, snapshot)
+	if err != nil {
+		return PlanView{}, err
+	}
+	view.Preview = preview
+	return view, nil
+}
+
+// DurableView is ViewRevision without assignment resolution: only what the
+// store records - the revision, its replayed state, the preview against the
+// governing revision and the base change. Resolution needs the governing
+// controller's agents and profiles; a reader without that configuration
+// would invent Unbound and Blocked verdicts, so it does not resolve at all
+// (#425).
+func (s PlanService) DurableView(planID string, revision int) (PlanView, error) {
+	plan, snapshot, preview, err := s.durable(planID, revision)
+	if err != nil {
+		return PlanView{}, err
+	}
+	view, err := s.durableViewOf(plan, snapshot)
+	view.Preview = preview
+	return view, err
+}
+
+// durable selects the revision a view describes and the snapshot it is read
+// against: the governing revision by default, or one exact revision previewed
+// against the governing one.
+func (s PlanService) durable(planID string, revision int) (domain.EngineeringPlan, PlanSnapshot, *PlanPreview, error) {
+	plan, found, err := s.Store.Plan(planID)
+	if err != nil {
+		return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
+	}
 	if !found {
-		return PlanView{}, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
+		return domain.EngineeringPlan{}, PlanSnapshot{}, nil, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
 	}
 	snapshot, err := s.Store.ReplayPlan(planID)
 	if err != nil {
-		return PlanView{}, err
+		return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 	}
 	if revision > 0 {
 		exact, exactFound, err := s.Store.PlanRevision(planID, revision)
 		if err != nil {
-			return PlanView{}, err
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 		}
 		if !exactFound {
-			return PlanView{}, &PlanRefusedError{
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, &PlanRefusedError{
 				PlanID: planID, Detail: fmt.Sprintf("revision %d does not exist", revision),
 			}
 		}
@@ -808,14 +861,9 @@ func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error)
 		// preview; it is one document decorated with another's execution.
 		preview, prospective, err := s.previewSnapshot(exact, snapshot)
 		if err != nil {
-			return PlanView{}, err
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 		}
-		view, err := s.viewOf(exact, prospective)
-		if err != nil {
-			return PlanView{}, err
-		}
-		view.Preview = preview
-		return view, nil
+		return exact, prospective, preview, nil
 	}
 	// The revision shown is the one that GOVERNS: the approved revision when
 	// there is one, and the latest proposal otherwise. Showing the newest
@@ -823,13 +871,13 @@ func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error)
 	if approved, ok := snapshot.ApprovedRevision(); ok && approved != plan.Revision {
 		governing, governingFound, err := s.Store.PlanRevision(planID, approved)
 		if err != nil {
-			return PlanView{}, err
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 		}
 		if governingFound {
 			plan = governing
 		}
 	}
-	return s.viewOf(plan, snapshot)
+	return plan, snapshot, nil, nil
 }
 
 // viewOf renders one exact plan document beside the plan's replayed state.
@@ -884,13 +932,21 @@ func (s PlanService) previewSnapshot(plan domain.EngineeringPlan, snapshot PlanS
 	return preview, prospective, nil
 }
 
-func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
+func (s PlanService) durableViewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
 	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
 	baseChange, err := s.baseChange(plan)
 	if err != nil {
 		return PlanView{}, err
 	}
 	view.BaseChange = baseChange
+	return view, nil
+}
+
+func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
+	view, err := s.durableViewOf(plan, snapshot)
+	if err != nil {
+		return PlanView{}, err
+	}
 	resolution, err := s.Resolve(plan, snapshot)
 	if err != nil {
 		return PlanView{}, err

@@ -196,6 +196,26 @@ automatically to make room: trading one active run's evidence for another's
 progress is not a decision a scheduler gets to make. `autonomy gc --dry-run`
 shows what is eligible under `gc.retention_hours`.
 
+**Doctor `state.go_env` WARN.** Your global Go env file (`go env GOENV`) sets
+`GOCACHE`, `GOTMPDIR`, `GOMODCACHE` or `GOPATH` under the state directory, so
+every Go command on the host writes into runtime state that retention may
+delete. Doctor never edits it; run the `go env -u ...` it names (and remove
+`GOFLAGS` if you did not set it). Doctor checks the default file
+(`os.UserConfigDir()/go/env`) even when its own `GOENV` is `off`, because other
+processes still read it. Workers run with `GOENV` at the null device, so a
+plain `go env -w` from a worker is discarded (#430). That is not a boundary: a
+worker that overrides `GOENV` or writes the file itself still can, because
+workers share your `HOME`, and isolating `HOME` is out of scope here.
+
+**`candidate_writer_alive`, or gc retaining a candidate with `a process still
+holds the candidate writer lock`.** A process from an earlier provider
+invocation, typically one that outlived a killed supervisor, still holds
+`<state>/runs/<run>/candidate.writer.lock` and may still be writing the
+candidate. `lsof <that path>` names it. Stop it: the waiting run re-checks the
+lock on each pass, once and without waiting, and proceeds when it is free; gc
+collects the candidate on its next pass. On a platform without advisory locks
+(Windows) a candidate with a lock file is never collected.
+
 ## Supervisor and submission
 
 **`starting several issues at once needs a supervisor to own them; run
@@ -232,6 +252,23 @@ targets and takes explicit submissions only.
 is missing, the daemon is unreachable, or the pinned assurance image is not
 present locally`.** Without it no candidate can be verified, so no run can
 complete. Start the daemon and pull the image by its pinned digest.
+
+**`assurance.verifier_sandbox` FAIL — `the verifier sandbox is unavailable:
+... Docker daemon did not respond within 10s`.** The daemon is installed but
+hung; restart it. Every Docker readiness and identity probe (`docker info`,
+`docker image inspect` of the pinned image, and the daemon-identity lookup
+before a container is created) runs under the caller's context AND a fixed
+10-second probe ceiling, whichever ends first: a shorter caller deadline is
+never replaced. The two endings are kept apart. The ceiling firing means
+Docker readiness is unavailable (`ErrSandboxUnavailable`). In either assurance
+phase, dependency preparation or the verification run, that is
+`transient_infrastructure`: the scheduler retries the same assurance, and it is
+never a verdict on the candidate, so it spends no remediation. The caller's own
+cancellation propagates as that cancellation, is never reported as an
+unavailable sandbox, and is classified by who cancelled: a controller shutdown
+leaves assurance unsatisfied and the run waiting on `controller_shutdown`, to
+re-run after restart; an operator stop is `run_cancelled`. Doctor uses the same
+probe, so it reports this diagnostic instead of hanging.
 
 **`assurance.toolchain` FAIL — `the pinned assurance image did not resolve the
 Go toolchain on the runtime sandbox path`.** A reachable daemon holding the

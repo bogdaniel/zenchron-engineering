@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "runs",
+    "offset",
+    "has_more"
+  ],
+  "properties": {
+    "runs": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "phase",
+          "disposition",
+          "executing"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "issue": {
+            "type": "integer"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "provider_kind": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "trust_mode": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "disposition": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "executing": {
+            "type": "boolean"
+          },
+          "elapsed": {
+            "type": "integer"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "candidate_revision": {
+            "type": "string"
+          },
+          "attempts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "held": {
+            "type": "boolean"
+          },
+          "pull_request": {
+            "type": "integer"
+          },
+          "pull_request_state": {
+            "type": "string"
+          },
+          "ci": {
+            "type": "string"
+          },
+          "review": {
+            "type": "string"
+          },
+          "unavailable": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "offset": {
+      "type": "integer"
+    },
+    "has_more": {
+      "type": "boolean"
+    }
+  }
+}

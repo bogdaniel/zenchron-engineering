@@ -4,11 +4,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 func newJournalRun(id string) EngineeringRun {
@@ -191,6 +198,28 @@ func TestJournalRefusesBrokenChain(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(`UPDATE events SET document = ?, previous_event_hash = ? WHERE run_id = 'r' AND sequence = 3`, string(tampered), e.PreviousEventHash); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// state_after is diagnostic, never authoritative (#453), but it is
+		// inside the event document its event_hash covers: rewriting it
+		// without recomputing that hash is still corruption. The tip is tampered so
+		// only its own event_hash, not a successor's link, can catch it.
+		{"state_after without its event hash", func(t *testing.T, db *sql.DB) {
+			var document string
+			if err := db.QueryRow(`SELECT document FROM events WHERE run_id = 'r' AND sequence = 4`).Scan(&document); err != nil {
+				t.Fatal(err)
+			}
+			var e EngineeringEvent
+			if err := json.Unmarshal([]byte(document), &e); err != nil {
+				t.Fatal(err)
+			}
+			e.StateAfter = strings.Repeat("0", 64)
+			tampered, err := CanonicalJSON(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE events SET document = ?, state_after = ? WHERE run_id = 'r' AND sequence = 4`, string(tampered), e.StateAfter); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -384,5 +413,376 @@ func TestJournalRefusesEventsForAnUnknownRun(t *testing.T) {
 	}
 	if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "e-1", RunID: "r", Type: "run.invented", OccurredAt: time.Unix(100, 0).UTC()}); err == nil {
 		t.Fatal("an event outside the catalogue was appended")
+	}
+}
+
+// rewriteStateDigests sets every selected event's state_before/state_after to
+// an arbitrary value and recomputes the hash chain over the result, as a writer
+// able to rewrite a whole suffix could. It returns the rewritten events.
+func rewriteStateDigests(t *testing.T, db *sql.DB, where string, args ...any) []EngineeringEvent {
+	t.Helper()
+	rows, err := db.Query(`SELECT document FROM events WHERE `+where+` ORDER BY sequence ASC`, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []EngineeringEvent
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			t.Fatal(err)
+		}
+		var e EngineeringEvent
+		if err := json.Unmarshal([]byte(document), &e); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, e)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("fixture selected %d events; a chain needs at least two", len(events))
+	}
+	for i, e := range events {
+		e.StateBefore = fmt.Sprintf("arbitrary-before-%d", i)
+		e.StateAfter = strings.Repeat(fmt.Sprint(i%10), 64)
+		if i > 0 {
+			e.PreviousEventHash = events[i-1].EventHash
+		}
+		if e.EventHash, err = EventDigest(e); err != nil {
+			t.Fatal(err)
+		}
+		events[i] = e
+		canonical, err := CanonicalJSON(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE events SET document = ?, state_before = ?, state_after = ?, previous_event_hash = ?, event_hash = ? WHERE id = ?`,
+			string(canonical), e.StateBefore, e.StateAfter, e.PreviousEventHash, e.EventHash, e.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return events
+}
+
+// TestJournalStateDigestsAreNotAuthoritative pins #453's frozen decision:
+// state_before/state_after are recorded transition digests kept as diagnostic
+// compatibility metadata. A journal whose state fields are arbitrary, but whose
+// event documents and hash chain are internally consistent, replays to exactly
+// the state its events fold to - nothing in replay consults those fields.
+func TestJournalStateDigestsAreNotAuthoritative(t *testing.T) {
+	dir, store := openJournal(t)
+	for _, e := range journalFixture(t, "r") {
+		if _, err := store.AppendEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	honest, err := store.Replay("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := rewriteStateDigests(t, rawJournalDB(t, dir), `run_id = ?`, "r")
+	tip := events[len(events)-1]
+
+	reopened, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	rewritten, err := reopened.Replay("r")
+	if err != nil {
+		t.Fatalf("a chain-consistent journal with arbitrary state fields was refused: %v", err)
+	}
+	if rewritten.StateSHA256 != honest.StateSHA256 {
+		t.Fatalf("replayed state depends on state_before/state_after: %s vs %s", rewritten.StateSHA256, honest.StateSHA256)
+	}
+	if rewritten.StateSHA256 == tip.StateAfter {
+		t.Fatal("fixture did not make the recorded state_after disagree with replay")
+	}
+	// The cursor names the rewritten tip, because the event hash covers the
+	// fields; everything else about the run is unchanged.
+	if rewritten.Cursor != (Cursor{LastSequence: int64(len(events)), LastEventID: tip.ID, LastEventHash: tip.EventHash}) {
+		t.Fatalf("cursor does not name the rewritten tip: %+v", rewritten.Cursor)
+	}
+}
+
+// TestPlanJournalStateDigestsAreNotAuthoritative is the same contract for the
+// plan stream: ReplayPlan folds the events, never the recorded state digests.
+func TestPlanJournalStateDigestsAreNotAuthoritative(t *testing.T) {
+	dir, store := openPlanStore(t)
+	plan := planFixture(t, "plan-453", 1)
+	if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	appendPlan(t, store, planEvent(t, plan.ID, "p453-1", EventPlanProposed, proposedPayload(plan)))
+	appendPlan(t, store, planEvent(t, plan.ID, "p453-2", EventPlanValidated, PlanValidatedPayload{
+		Revision: 1, Digest: plan.Digest, Status: string(domain.ProposalValid),
+	}))
+	appendPlan(t, store, planEvent(t, plan.ID, "p453-3", EventPlanApproved, PlanDecisionPayload{
+		Revision: 1, Digest: plan.Digest, Operator: "operator-1", Note: "reviewed",
+	}))
+	honest, err := store.ReplayPlan(plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := rewriteStateDigests(t, rawJournalDB(t, dir), `plan_id = ?`, plan.ID)
+	tip := events[len(events)-1]
+
+	rewritten, err := reopenStore(t, dir).ReplayPlan(plan.ID)
+	if err != nil {
+		t.Fatalf("a chain-consistent plan journal with arbitrary state fields was refused: %v", err)
+	}
+	if rewritten.StateSHA256 != honest.StateSHA256 {
+		t.Fatalf("replayed plan state depends on state_before/state_after: %s vs %s", rewritten.StateSHA256, honest.StateSHA256)
+	}
+	if rewritten.StateSHA256 == tip.StateAfter {
+		t.Fatal("fixture did not make the recorded state_after disagree with replay")
+	}
+	if rewritten.Cursor != (Cursor{LastSequence: int64(len(events)), LastEventID: tip.ID, LastEventHash: tip.EventHash}) {
+		t.Fatalf("cursor does not name the rewritten tip: %+v", rewritten.Cursor)
+	}
+}
+
+// blankEventHash models #462's tamper: an event's document is optionally
+// edited and its event_hash is emptied in both the document and the column, so
+// the two still agree. Nothing else about the row changes.
+func blankEventHash(t *testing.T, db *sql.DB, id string, edit func(*EngineeringEvent)) {
+	t.Helper()
+	var document string
+	if err := db.QueryRow(`SELECT document FROM events WHERE id = ?`, id).Scan(&document); err != nil {
+		t.Fatal(err)
+	}
+	var e EngineeringEvent
+	if err := json.Unmarshal([]byte(document), &e); err != nil {
+		t.Fatal(err)
+	}
+	if edit != nil {
+		edit(&e)
+	}
+	e.EventHash = ""
+	canonical, err := CanonicalJSON(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE events SET document = ?, event_hash = '' WHERE id = ?`, string(canonical), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// emptyHashTampers are #462's cases, for any stream whose events are ids[0..n].
+// An edited payload on the tip is the attack; the unedited tip and the unedited
+// non-tip show the refusal is about the missing hash, not about the edit.
+func emptyHashTampers(ids []string) []struct {
+	name, id string
+	edit     func(*EngineeringEvent)
+} {
+	tip := ids[len(ids)-1]
+	return []struct {
+		name, id string
+		edit     func(*EngineeringEvent)
+	}{
+		{"tip with edited payload", tip, func(e *EngineeringEvent) { e.Payload = json.RawMessage(`{"reason":"forged"}`) }},
+		{"tip unedited", tip, nil},
+		{"non-tip unedited", ids[1], nil},
+	}
+}
+
+// A persisted event with an empty event_hash is corruption (#462). It is
+// refused at the shared read boundary, so Events and Replay both refuse it.
+func TestJournalRefusesAPersistedEmptyEventHash(t *testing.T) {
+	for _, tamper := range emptyHashTampers([]string{"e-1", "e-2", "e-3", "e-4"}) {
+		t.Run(tamper.name, func(t *testing.T) {
+			dir, store := openJournal(t)
+			for _, e := range journalFixture(t, "r") {
+				if _, err := store.AppendEvent(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			blankEventHash(t, rawJournalDB(t, dir), tamper.id, tamper.edit)
+			reopened := reopenStore(t, dir)
+			if _, err := reopened.Events("r"); err == nil || !strings.Contains(err.Error(), "no event_hash") {
+				t.Errorf("read boundary returned an event with an empty event_hash: %v", err)
+			}
+			if _, err := reopened.Replay("r"); err == nil {
+				t.Fatal("a journal with an empty event_hash replayed as valid")
+			}
+		})
+	}
+}
+
+// The plan stream reads through the same boundary and is refused the same way.
+func TestPlanJournalRefusesAPersistedEmptyEventHash(t *testing.T) {
+	for _, tamper := range emptyHashTampers([]string{"p462-1", "p462-2", "p462-3"}) {
+		t.Run(tamper.name, func(t *testing.T) {
+			dir, store := openPlanStore(t)
+			plan := planFixture(t, "plan-462", 1)
+			if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			appendPlan(t, store, planEvent(t, plan.ID, "p462-1", EventPlanProposed, proposedPayload(plan)))
+			appendPlan(t, store, planEvent(t, plan.ID, "p462-2", EventPlanValidated, PlanValidatedPayload{
+				Revision: 1, Digest: plan.Digest, Status: string(domain.ProposalValid),
+			}))
+			appendPlan(t, store, planEvent(t, plan.ID, "p462-3", EventPlanApproved, PlanDecisionPayload{
+				Revision: 1, Digest: plan.Digest, Operator: "operator-1", Note: "reviewed",
+			}))
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			blankEventHash(t, rawJournalDB(t, dir), tamper.id, tamper.edit)
+			reopened := reopenStore(t, dir)
+			if _, err := reopened.PlanEvents(plan.ID); err == nil || !strings.Contains(err.Error(), "no event_hash") {
+				t.Errorf("read boundary returned a plan event with an empty event_hash: %v", err)
+			}
+			if _, err := reopened.ReplayPlan(plan.ID); err == nil {
+				t.Fatal("a plan journal with an empty event_hash replayed as valid")
+			}
+		})
+	}
+}
+
+// The reducers carry no empty-hash tolerance of their own (#462): an event
+// without its hash is refused even when handed to them directly, so nothing
+// that bypasses the read boundary inherits the old gap.
+func TestReducersRefuseAnEventWithoutItsHash(t *testing.T) {
+	_, store := openJournal(t)
+	for _, e := range journalFixture(t, "r") {
+		if _, err := store.AppendEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := store.Events("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events[len(events)-1].EventHash = ""
+	if _, err := Reduce(newJournalRun("r"), events); err == nil {
+		t.Error("Reduce accepted an event without its hash")
+	}
+
+	_, plans := openPlanStore(t)
+	plan := planFixture(t, "plan-462r", 1)
+	if _, err := plans.ClaimPlan(plan, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	appendPlan(t, plans, planEvent(t, plan.ID, "p462r-1", EventPlanProposed, proposedPayload(plan)))
+	planEvents, err := plans.PlanEvents(plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planEvents[0].EventHash = ""
+	if _, err := ReducePlan(plan.ID, planEvents); err == nil {
+		t.Fatal("ReducePlan accepted an event without its hash")
+	}
+}
+
+// stateDigestReaders are the only production declarations that may touch an
+// event's state_before/state_after, keyed "path:declaration". Each one writes
+// the fields, checks that the indexed columns agree with the document, renders
+// them, or declares their columns. Replay, ReplayPlan and the reducers are
+// deliberately absent: they must decide from the events alone (#453).
+var stateDigestReaders = map[string]bool{
+	"runtime/journal.go:appendToStream":                true, // allocates both
+	"runtime/journal.go:AppendEvent":                   true, // run row insert
+	"runtime/journal.go:queryStreamEventsLimited":      true, // column/document agreement
+	"runtime/journal.go:sqliteEventColumns":            true,
+	"runtime/journal.go:sqlitePlanEventColumns":        true,
+	"runtime/plan_store.go:AppendPlanEvent":            true, // plan row insert
+	"runtime/sqlite_store.go:sqliteMigrations":         true, // DDL
+	"cmd/zenchron-engineering/operator.go:renderEvent": true, // display
+}
+
+// TestNoProductionCodeReadsStateDigestsAsAuthority is #453's search guard, at
+// declaration granularity: any selector .StateBefore/.StateAfter, or any string
+// literal naming state_before/state_after (raw SQL), outside the declarations
+// above fails. A new reader must decide from replay instead. Struct tags and
+// comments are not code and are not scanned.
+func TestNoProductionCodeReadsStateDigestsAsAuthority(t *testing.T) {
+	column := regexp.MustCompile(`state_(before|after)`)
+	root := ".."
+	fset := token.NewFileSet()
+	seen := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".claude" || d.Name() == "testdata") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		parsed, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		for _, decl := range parsed.Decls {
+			var names []string
+			var nodes []ast.Node
+			switch decl := decl.(type) {
+			case *ast.FuncDecl:
+				names, nodes = []string{decl.Name.Name}, []ast.Node{decl}
+			case *ast.GenDecl:
+				for _, spec := range decl.Specs {
+					switch spec := spec.(type) {
+					case *ast.ValueSpec:
+						names = append(names, spec.Names[0].Name)
+					case *ast.TypeSpec:
+						names = append(names, spec.Name.Name)
+					default:
+						names = append(names, "import")
+					}
+					nodes = append(nodes, spec)
+				}
+			}
+			for i, node := range nodes {
+				key := rel + ":" + names[i]
+				ast.Inspect(node, func(n ast.Node) bool {
+					hit := false
+					switch n := n.(type) {
+					case *ast.Field:
+						// A declaration and its json tag name the field; they
+						// do not read it.
+						return false
+					case *ast.SelectorExpr:
+						hit = n.Sel.Name == "StateBefore" || n.Sel.Name == "StateAfter"
+					case *ast.BasicLit:
+						hit = n.Kind == token.STRING && column.MatchString(n.Value)
+					}
+					if hit {
+						seen[key] = true
+						if !stateDigestReaders[key] {
+							t.Errorf("%s (%s) touches an event's state_before/state_after; those are diagnostic metadata (#453), decide from replay instead", fset.Position(n.Pos()), key)
+						}
+					}
+					return true
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stale allowlist entry means the scan is no longer seeing what it
+	// guards, or a writer moved: either way the list must be corrected.
+	for key := range stateDigestReaders {
+		if !seen[key] {
+			t.Errorf("allowlisted %s no longer touches the state digests; remove or correct it", key)
+		}
 	}
 }

@@ -40,7 +40,7 @@ const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
-	"stop <run>|stop-all [--reason <text>]|drain|shutdown|watch|doctor [--text]|gc [--dry-run]} " +
+	"stop <run>|pause <run> [--reason <text>]|unpause <run>|stop-all [--reason <text>]|drain|shutdown|watch|doctor [--text]|gc [--dry-run]} " +
 	"[--repo owner/name] [--config <path>]"
 
 // Exit statuses this CLI adds to the run-mode exits in runtime.go. They are
@@ -85,7 +85,7 @@ func exitFor(err error, fallback int) int {
 		return runtime.ExitInvalid
 	}
 	var config *runtime.ConfigError
-	if errors.As(err, &config) {
+	if errors.As(err, &config) || runtime.IsRunTerminal(err) {
 		return runtime.ExitInvalid
 	}
 	return fallback
@@ -357,7 +357,7 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 			return autonomyFleet(flags, overrides, stdout)
 		}
 		runID, rest = rest[0], rest[1:]
-	case "events", "resume", "refresh", "stop":
+	case "events", "resume", "refresh", "stop", "pause", "unpause":
 		if len(rest) < 1 || strings.TrimSpace(rest[0]) == "" {
 			return runtime.ExitInvalid, errors.New(autonomyUsage)
 		}
@@ -380,6 +380,9 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 	}
 	if command == "stop" {
 		return autonomyStop(flags, overrides, runID, stdout)
+	}
+	if command == "pause" || command == "unpause" {
+		return autonomyPause(flags, overrides, command, runID, stdout)
 	}
 
 	engine, built, release := overrides.Runtime, (*composition)(nil), func() {}
@@ -768,6 +771,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 	if err != nil {
 		return nil, err
 	}
+	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
 		Agent:             agent,
@@ -794,12 +801,13 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
-		// The scheduler is the one place the ceiling is ENFORCED: its
-		// acquisition counts every run holding an operation across the whole
-		// durable store, which is what makes the bound hold between processes
-		// as well as inside one. Everything else that knows the number - the
-		// supervisor's goroutine bound, the watch capacity probe, the fleet
-		// view - is a cheap early exit in front of it.
+		// The scheduler is the one place the ceilings are ENFORCED: its
+		// acquisition counts, per capacity class (#85), every other run holding
+		// an operation of that class across the whole durable store, which is
+		// what makes the bounds hold between processes as well as inside one.
+		// Everything else that knows the numbers - the supervisor's turn
+		// envelope, the fleet view - reports or bounds goroutines; nothing in
+		// front of the scheduler decides capacity.
 		//
 		// Which is why leaving this unset was not a missing second enforcer but
 		// a missing number: the supervisor admitted two runs against the
@@ -810,6 +818,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		// the operator's configuration, so advertised and enforced cannot be
 		// different numbers.
 		OperatorMaxConcurrentRuns: ceiling,
+		MaxConcurrentObservations: observations,
 	})
 }
 
@@ -1393,6 +1402,71 @@ func autonomyStop(flags autonomyFlags, overrides autonomyOverrides, runID string
 	return runtime.ExitCancelled, nil
 }
 
+// autonomyPause records an operator's durable pause or unpause of one run
+// (#86). It cancels nothing and changes no disposition; see runtime/pause.go.
+//
+// Routing is plan approve's, not stop's: a running supervisor applies it under
+// its controller role, an endpoint that exists but cannot be reached is a
+// refusal rather than a local write beside a live supervisor, and with no
+// supervisor it is written here. The recorded operator is this terminal's
+// resolved identity - provenance, never authority.
+func autonomyPause(flags autonomyFlags, overrides autonomyOverrides, verb, runID string, stdout io.Writer) (int, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	config, err := runtime.LoadConfig(flags.Config, cwd)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	operator, err := config.ResolveOperator()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	store, err := runtime.OpenSQLiteOperationStore(config.StateDir)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer store.Close()
+	run, found, err := store.Run(runID)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	if !found {
+		return exitRunNotFound, &runNotFoundError{RunID: runID}
+	}
+	// Advisory, so both routes refuse a terminal run with the same exit. The
+	// binding refusal is made by the append itself.
+	if run.Disposition == runtime.Completed || run.Disposition == runtime.Failed || run.Disposition == runtime.Cancelled {
+		return runtime.ExitInvalid, &runtime.RunTerminalError{RunID: runID, Disposition: run.Disposition, Reason: run.Reason, Verb: verb}
+	}
+	request := runtime.ControlRequest{Command: runtime.ControlPause, RunID: runID, Reason: flags.Reason, Operator: operator.ID}
+	if verb == "unpause" {
+		request = runtime.ControlRequest{Command: runtime.ControlUnpause, RunID: runID, Operator: operator.ID}
+	}
+	if delegated, code, err := delegate(config.StateDir, request, stdout); delegated {
+		return code, err
+	}
+	view, err := applyPause(store, request)
+	if err != nil {
+		return exitFor(err, runtime.ExitFailed), err
+	}
+	if err := writeJSON(stdout, view); err != nil {
+		return runtime.ExitFailed, err
+	}
+	return runtime.ExitCompleted, nil
+}
+
+// applyPause is the one place a pause request becomes a journal write, for the
+// local path and for the supervisor's endpoint alike.
+func applyPause(store *runtime.SQLiteOperationStore, request runtime.ControlRequest) (runtime.PauseView, error) {
+	now := time.Now().UTC()
+	if request.Command == runtime.ControlUnpause {
+		return runtime.UnpauseRun(store, now, request.RunID, request.Operator)
+	}
+	return runtime.PauseRun(store, now, request.RunID, request.Reason, request.Operator)
+}
+
 // cancelRun records durable operator cancellation intent for one run. The
 // mechanism lives in the runtime, because `stop RUN` and the supervisor's
 // explicit stop-all action must be one cancellation path rather than two
@@ -1401,6 +1475,6 @@ func cancelRun(built *composition, runID, reason string) (runtime.Outcome, error
 	if _, err := requireRun(built, runID); err != nil {
 		return runtime.Outcome{}, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	return runtime.CancelRun(built.store, scheduler, time.Now().UTC(), runID, reason)
 }

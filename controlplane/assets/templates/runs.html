@@ -1,0 +1,78 @@
+{{define "title"}}runs{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>runs</h1>
+  <p class="meta" id="runs-meta" data-live>observed {{fmtTime .ObservedAt}} · {{.Fleet.Executing}}{{if .Fleet.Capacity}} / {{.Fleet.Capacity}}{{end}} executing · {{.Fleet.Active}} active</p>
+
+  <nav class="filters" aria-label="status filter">
+    <a href="{{runsLink "" .Filter.Source}}" {{if eq .Filter.Status ""}}class="active" aria-current="true"{{end}}>all</a>
+    <a href="{{runsLink "active" .Filter.Source}}" {{if eq .Filter.Status "active"}}class="active" aria-current="true"{{end}} data-state="active">active</a>
+    <a href="{{runsLink "waiting" .Filter.Source}}" {{if eq .Filter.Status "waiting"}}class="active" aria-current="true"{{end}} data-state="waiting">waiting</a>
+    <a href="{{runsLink "failed" .Filter.Source}}" {{if eq .Filter.Status "failed"}}class="active" aria-current="true"{{end}} data-state="failed">failed</a>
+    <a href="{{runsLink "completed" .Filter.Source}}" {{if eq .Filter.Status "completed"}}class="active" aria-current="true"{{end}} data-state="completed">completed</a>
+    <a href="{{runsLink "cancelled" .Filter.Source}}" {{if eq .Filter.Status "cancelled"}}class="active" aria-current="true"{{end}} data-state="cancelled">cancelled</a>
+    <a href="{{runsLink "held" .Filter.Source}}" {{if eq .Filter.Status "held"}}class="active" aria-current="true"{{end}} data-state="held_material">held material</a>
+  </nav>
+
+  <form class="source-filter" method="get" action="/runs">
+    <input type="hidden" name="status" value="{{.Filter.Status}}">
+    <label for="source">source issue</label>
+    <input id="source" name="source" type="text" placeholder="owner/repo#123 or 123" value="{{.Filter.Source}}">
+    <button type="submit">filter</button>
+    {{if .Filter.Source}}<a href="{{runsLink .Filter.Status ""}}">clear</a>{{end}}
+  </form>
+
+  <table class="runs" id="runs-table" data-live>
+    <thead>
+      <tr>
+        <th>run</th>
+        <th>lifecycle</th>
+        <th>operation</th>
+        <th>agent</th>
+        <th>candidate</th>
+        <th>elapsed</th>
+        <th>attempts</th>
+        <th>held</th>
+        <th>pull request</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Runs}}
+      <tr>
+        <td>
+          <a class="mono" href="/runs/{{.ID}}">{{.ID}}</a>
+          <div class="muted">{{.Repository}}{{if .Issue}} #{{.Issue}}{{end}}</div>
+        </td>
+        <td>
+          <span data-state="{{.Phase}}">{{.Phase}}</span> / <span data-state="{{.Disposition}}">{{.Disposition}}</span>
+        </td>
+        <td>
+          {{if .Operation}}{{.Operation}} #{{.Attempt}}{{if .Executing}} <span class="badge live">live</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+        </td>
+        <td>
+          {{if .Agent}}{{.Agent}}{{else}}<span class="muted">—</span>{{end}}
+          {{if .ProviderKind}}<div class="muted">{{.ProviderKind}}{{if .Model}} · {{.Model}}{{end}}</div>{{end}}
+        </td>
+        <td>
+          {{if .Branch}}<span class="mono">{{.Branch}}</span>{{else}}<span class="muted">—</span>{{end}}
+          {{if .CandidateRevision}}<div class="muted mono">{{.CandidateRevision}}</div>{{end}}
+        </td>
+        <td>{{fmtDuration .Elapsed}}</td>
+        <td>
+          {{if .Attempts}}{{range $kind, $n := .Attempts}}<div>{{$kind}}: {{$n}}</div>{{end}}{{else}}<span class="muted">—</span>{{end}}
+        </td>
+        <td>
+          {{if .Held}}<span class="badge held" data-state="held_material">held</span>{{else}}<span class="muted">—</span>{{end}}
+        </td>
+        <td>
+          {{if .PullRequest}}<span>#{{.PullRequest}}</span>{{if .PRState}} <span class="muted">{{.PRState}}</span>{{end}}{{if .CI}} · CI <span data-state="{{.CI}}">{{.CI}}</span>{{end}}{{if .Review}} · review <span data-state="{{.Review}}">{{.Review}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+        </td>
+      </tr>
+      {{if .Unavailable}}<tr><td colspan="9" class="banner error">{{.ID}}: could not be replayed</td></tr>{{end}}
+      {{else}}
+      <tr><td colspan="9" class="empty">no runs match this filter</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

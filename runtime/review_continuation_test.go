@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,6 +75,12 @@ func TestInterruptedReviewContinuesWithPersistedBudget(t *testing.T) {
 		}
 		return os.WriteFile(filepath.Join(dir, "review.go"), []byte("package candidate\n// completed review fix\n"), 0600)
 	}
+	// The delivered continuation states an explicit checkpoint-completion
+	// claim (#379), bound to the exact checkpoint it inherited - mutating the
+	// workspace further is real work, but it does not by itself prove the
+	// inherited checkpoint is finished, so a clean return alone must not
+	// promote it.
+	f.provider.resolveFeedback = true
 	outcome = f.reconcile(id)
 	final := f.state(id)
 	if outcome.Disposition != Waiting || outcome.Reason != ReasonGoalStateReached {
@@ -124,6 +131,170 @@ func TestDischargedReviewDoesNotExemptUnrelatedWork(t *testing.T) {
 	s.run.Budgets = &RunBudgets{WallLimit: 30 * time.Minute}
 	if d, r := s.conditions(); d != Failed || r != "run_wall_budget_exhausted" {
 		t.Fatalf("historical review exempted unrelated work: %s/%s", d, r)
+	}
+}
+
+// TestProviderReturnAloneDoesNotDischargeFeedback is the restored #376
+// defect, stated directly against outstandingReviewKeys(): an invocation
+// that reached a provider, left the workspace unmodified, and simply
+// returned success is NOT evidence the admitted feedback was addressed. The
+// production no-change-success rule used to discharge exactly this shape
+// (ProviderExecuted && !Mutated), which is indistinguishable from a provider
+// that deferred unfinished background work and exited. It must stay
+// outstanding until an explicit, bound resolution admits it.
+func TestProviderReturnAloneDoesNotDischargeFeedback(t *testing.T) {
+	payload := func(p any) json.RawMessage {
+		b, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	const head = "head-1"
+	baseEvents := []EngineeringEvent{
+		{Type: EventFeedbackObserved, Payload: payload(FeedbackObservedPayload{FeedbackDecision: FeedbackDecision{Key: "review:1", Admitted: true}})},
+		{Type: EventGitHubPRObserved, Payload: payload(GitHubPRObservedPayload{HeadRevision: head})},
+		{Type: EventFeedbackConsumed, Payload: payload(FeedbackConsumedPayload{Keys: []string{"review:1"}, OperationID: "op-1"})},
+		{OperationID: "op-1", Type: EventExecutionCompleted, Payload: payload(ExecutionCompletedPayload{SubjectCommit: head})},
+	}
+	t.Run("return alone leaves feedback outstanding", func(t *testing.T) {
+		events := append(append([]EngineeringEvent(nil), baseEvents...), EngineeringEvent{
+			Type: EventOperationAfter, Payload: payload(RunOperation{
+				ID: "op-1", Kind: OpExecutionInvoke, State: Succeeded,
+				Result: payload(mutationResult{ProviderExecuted: true, Mutated: false}),
+			}),
+		})
+		s := &runState{events: events}
+		if keys := s.outstandingReviewKeys(); len(keys) != 1 || keys[0] != "review:1" {
+			t.Fatalf("a provider that merely returned discharged feedback without stating a resolution: %v", keys)
+		}
+	})
+	t.Run("an explicit bound resolution discharges it", func(t *testing.T) {
+		events := append(append([]EngineeringEvent(nil), baseEvents...), EngineeringEvent{
+			Type: EventOperationAfter, Payload: payload(RunOperation{
+				ID: "op-1", Kind: OpExecutionInvoke, State: Succeeded,
+				Result: payload(mutationResult{ProviderExecuted: true, Mutated: false, ResolvedFeedback: []string{"review:1"}}),
+			}),
+		})
+		s := &runState{events: events}
+		if keys := s.outstandingReviewKeys(); len(keys) != 0 {
+			t.Fatalf("an admitted, bound no-change resolution did not discharge feedback: %v", keys)
+		}
+	})
+}
+
+// TestUnresolvedFeedbackReturnFailsTheOperationAndStaysActionable is the full
+// runtime-lifecycle restoration of the #376 defect, driven through the real
+// EngineeringRuntime rather than only against outstandingReviewKeys() in
+// isolation. REQUEST_CHANGES is delivered; the provider returns on every
+// attempt having changed nothing and stated no resolution - the
+// isolatedProvider default, since its "mutate" rewrites candidate.go with the
+// exact bytes already committed, producing a clean workspace, and
+// resolveFeedback is left unset.
+//
+// bindExecutionInvoke's feedback branch is built from pendingFeedbackKeys():
+// admitted, undelivered feedback. The first attempt's EventFeedbackConsumed
+// empties that set immediately, before the attempt even settles - which used
+// to mean the operation, once marked Succeeded by the old no-change-success
+// rule, satisfied its binding forever while discharging nothing. This proves
+// the operation itself is never a successful completion for that shape, that
+// the feedback stays actionable rather than stranded behind a settled
+// operation, and that the run reaches a bounded successor retry and then a
+// truthful attempt-budget failure - never goal_state_reached.
+func TestUnresolvedFeedbackReturnFailsTheOperationAndStaysActionable(t *testing.T) {
+	f, id := feedbackFixtureWithWallLimit(t, time.Hour)
+	number := f.state(id).projection.PullRequest.Number
+	f.forge.ConversationComments[number] = []GitHubComment{{ID: 9550, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText("tighten this"), CreatedAt: f.clock.Now()}}
+	if _, err := f.runtime.ObserveFeedback(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	key := "pull_request_comment:9550"
+	calls := len(f.provider.requests)
+
+	outcome := f.reconcile(id)
+
+	// Both attempts of the SAME binding ran: the feedback_unresolved failure
+	// did not strand the obligation behind a settled operation that nothing
+	// proposes again, and it did not mint a second, different binding either.
+	if got := len(f.provider.requests) - calls; got != 2 {
+		t.Fatalf("expected exactly the 2 configured attempts of the feedback binding to run, got %d", got)
+	}
+	state := f.state(id)
+	var invoke RunOperation
+	found := 0
+	for _, op := range state.snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && strings.HasPrefix(bindingOf(op), "feedback|") {
+			invoke, found = op, found+1
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly one feedback execution.invoke operation, found %d", found)
+	}
+	if invoke.State != OperationFailed {
+		t.Fatalf("an invocation that neither changed the candidate nor stated an admitted resolution was recorded as %s, not a failed operation", invoke.State)
+	}
+	var result mutationResult
+	if err := decodeJSON(invoke.Result, &result); err != nil || result.FailureClass != FailureFeedbackUnresolved {
+		t.Fatalf("unresolved feedback did not record failure_class=feedback_unresolved: %+v (decode err %v)", result, err)
+	}
+	if keys := state.outstandingReviewKeys(); len(keys) != 1 || keys[0] != key {
+		t.Fatalf("feedback that was neither addressed nor explicitly resolved is not outstanding: %v", keys)
+	}
+	if outcome.Disposition == Waiting && outcome.Reason == ReasonGoalStateReached {
+		t.Fatalf("an unaddressed REQUEST_CHANGES reached goal_state_reached: %+v", outcome)
+	}
+	if outcome.Disposition != Failed || !BudgetBoundary(outcome.Disposition, outcome.Reason) {
+		t.Fatalf("exhausted attempts did not stop the run truthfully under its existing finite authority: %+v", outcome)
+	}
+}
+
+// TestMalformedFeedbackResolutionFailsAndRoutesCorrectively proves the other
+// half of the reviewer's #376 follow-up: a resolution that does not BIND
+// (here, the wrong subject - exactly the AdmitFeedbackResolution refusal
+// tested in isolation in feedback_resolution_test.go) must not be silently
+// dropped as an otherwise-successful execution. It has to fail the operation
+// with an OBSERVABLE EXACT REASON, the same as a resolution that was never
+// written at all, and route to the same bounded corrective retry.
+func TestMalformedFeedbackResolutionFailsAndRoutesCorrectively(t *testing.T) {
+	f, id := feedbackFixtureWithWallLimit(t, time.Hour)
+	number := f.state(id).projection.PullRequest.Number
+	f.forge.ConversationComments[number] = []GitHubComment{{ID: 9560, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText("tighten this too"), CreatedAt: f.clock.Now()}}
+	if _, err := f.runtime.ObserveFeedback(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	key := "pull_request_comment:9560"
+	// Every attempt claims a subject the invocation was never shown - a bound
+	// refusal, through the real write/read/admit path, on every retry.
+	f.provider.malformedResolutionSubject = strings.Repeat("f", 40)
+
+	outcome := f.reconcile(id)
+
+	state := f.state(id)
+	var invoke RunOperation
+	found := 0
+	for _, op := range state.snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && strings.HasPrefix(bindingOf(op), "feedback|") {
+			invoke, found = op, found+1
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly one feedback execution.invoke operation, found %d", found)
+	}
+	if invoke.State != OperationFailed {
+		t.Fatalf("a resolution that did not bind was recorded as %s, not a failed operation", invoke.State)
+	}
+	var result executionRecord
+	if err := decodeJSON(invoke.Result, &result); err != nil || result.FailureClass != FailureFeedbackUnresolved {
+		t.Fatalf("an unbound resolution did not record failure_class=feedback_unresolved: %+v (decode err %v)", result, err)
+	}
+	if result.Diagnostic == nil || !strings.Contains(result.Diagnostic.Message, "claims subject") {
+		t.Fatalf("the exact refusal reason was not observable on the diagnostic: %+v", result.Diagnostic)
+	}
+	if keys := state.outstandingReviewKeys(); len(keys) != 1 || keys[0] != key {
+		t.Fatalf("feedback behind an unbound resolution is not outstanding: %v", keys)
+	}
+	if outcome.Disposition != Failed || !BudgetBoundary(outcome.Disposition, outcome.Reason) {
+		t.Fatalf("a resolution that never binds did not stop the run truthfully under its existing finite authority: %+v", outcome)
 	}
 }
 
@@ -197,8 +368,19 @@ func TestReviewContinuationRejectsLateProviderSuccess(t *testing.T) {
 	if !state.feedbackState().Consumed["pull_request_comment:9530"] || len(state.outstandingReviewKeys()) != 1 {
 		t.Fatal("late invocation lost accepted obligation")
 	}
-	if _, err := os.Stat(filepath.Join(candidateDir, "late.go")); err != nil {
-		t.Fatal("late partial work was orphaned", err)
+	// Late partial work is REFUSED, so it must not stay in the candidate
+	// workspace for the next attempt to inherit (#390) - and it must not be
+	// orphaned either: it is preserved, byte for byte, in the journalled
+	// quarantine.
+	if _, err := os.Stat(filepath.Join(candidateDir, "late.go")); !os.IsNotExist(err) {
+		t.Fatalf("refused late work was left in the workspace for the next attempt (err=%v)", err)
+	}
+	q, ok := state.latestQuarantine()
+	if !ok {
+		t.Fatal("late partial work was orphaned: no quarantine record")
+	}
+	if kept, err := os.ReadFile(filepath.Join(f.stateDir, q.Location, "files", "late.go")); err != nil || string(kept) != "package candidate\n" {
+		t.Fatalf("late partial work was orphaned: quarantine %s holds %q, %v", q.Location, kept, err)
 	}
 	request := f.provider.requests[len(f.provider.requests)-1]
 	if request.Deadline == nil || request.Budgets.WallLimit <= 0 || request.Budgets.WallLimit > 30*time.Minute {
@@ -213,6 +395,10 @@ func TestCompletedUnchangedReviewDoesNotGrantContinuation(t *testing.T) {
 	if _, err := f.runtime.ObserveFeedback(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
+	// The provider's return alone must never discharge the review (#376): it
+	// has to STATE that no change is required, through the typed resolution
+	// channel, bound to this attempt's exact delivered key and subject.
+	f.provider.resolveFeedback = true
 	outcome := f.reconcile(id)
 	if outcome.Disposition != Waiting || outcome.Reason != ReasonGoalStateReached {
 		t.Fatalf("review did not complete: %+v", outcome)

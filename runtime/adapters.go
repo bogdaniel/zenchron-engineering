@@ -112,6 +112,13 @@ type ExecutionRequest struct {
 	// the invocation so no earlier attempt's answer can be inherited. Empty for
 	// every other stage, and a provider that is given none emits no verdict.
 	ReviewerResultPath string
+	// FeedbackResolutionPath is the runtime-owned file a producer invocation
+	// may write an explicit no-change resolution to, set only when this
+	// invocation was given admitted feedback to address. It is the same kind
+	// of unspoofable, runtime-cleared channel ReviewerResultPath is, and it
+	// exists so a producer that decides no change is required can STATE that
+	// rather than have it inferred from an unmodified workspace (#376).
+	FeedbackResolutionPath string
 	// RequiredTools are the executables THIS invocation's contract obliges the
 	// worker to run, derived from the contract's own frozen acceptance
 	// obligations.
@@ -283,6 +290,31 @@ type ExecutionResult struct {
 	// unsettled. It is a CLAIM at this point and authorizes nothing until
 	// AdmitReviewerResult has checked it.
 	Review *ReviewerResult
+	// ReviewRefusal is set by an adapter that tried to read Review and could
+	// not: the reviewer-result file existed but failed to decode as one. It
+	// carries the runtime's own exact reason, through the same typed refusal
+	// AdmitReviewerResult produces for a result that decoded but failed its
+	// authority checks, so a decode failure and an authority refusal retain
+	// their reason the same way instead of the decode failure's being
+	// discarded down to a bare classification (#374).
+	ReviewRefusal *ReviewerResultRefusedError
+	// Resolution is the structured no-change resolution a producer invocation
+	// emitted, read by the adapter from the runtime-owned result path. It is
+	// nil when none was written - the ordinary case for an invocation that
+	// mutated the workspace, and also the case for one that merely returned
+	// without stating anything. A nil Resolution authorizes no discharge;
+	// see AdmitFeedbackResolution.
+	Resolution *FeedbackResolution
+	// Answer is the invocation's SEMANTIC final answer text, exposed by an
+	// adapter that can state one directly rather than leaving a consumer to
+	// locate it inside the forensic transcript. It is empty whenever the
+	// adapter has no such shape to offer - every provider but Claude's
+	// structured stream, and even that one on a failed or malformed
+	// invocation - and emptiness is exactly the signal that a consumer must
+	// fall back to reading the transcript itself. Provider-specific transport
+	// framing (stream-json event shapes, escaping, and the like) is decoded by
+	// the adapter that owns it and never described here.
+	Answer string
 }
 
 // ExecutionAttemptRef is the runtime-owned identity of one provider
@@ -567,6 +599,21 @@ func GuardCandidatePathShape(root string, paths []string) error {
 // candidate, and its bytes are not candidate bytes, because neither reaches the
 // tree. The gates are unchanged for everything that does reach it.
 func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
+	return guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
+	})
+}
+
+// guardCommitNamesAndSizes is the one implementation of the sensitive-name and
+// size-ceiling rules. sizeOf answers for a normalized path, and false means the
+// path carries no bytes (a deletion), so it adds nothing to the total. The
+// worktree form above and the staged-blob form in CandidateWorkspace.Commit
+// differ only in where the size comes from.
+func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normalized string) (int64, bool)) error {
 	var total int64
 	for _, p := range paths {
 		normalized, err := normalizedCandidatePath(p)
@@ -581,11 +628,11 @@ func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) er
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
 			return fmt.Errorf("sensitive candidate path %q", normalized)
 		}
-		info, err := os.Lstat(filepath.Join(root, normalized))
-		if err != nil {
+		size, ok := sizeOf(normalized)
+		if !ok {
 			continue
 		}
-		total += info.Size()
+		total += size
 		if maxBytes > 0 && total > maxBytes {
 			return fmt.Errorf("candidate exceeds size ceiling")
 		}
@@ -688,9 +735,35 @@ const (
 	// continuation-eligible: silence is not interrupted work waiting to be
 	// resumed, and a retry inherits no observations from it.
 	FailureProviderNoProgress FailureClass = "provider_no_progress"
-	// FailureProviderUnavailable is the provider's TRANSPORT being gone, named
-	// by the provider's own diagnostic: DNS did not resolve, the connection was
-	// refused or reset, or the endpoint answered that it is unavailable.
+	// FailureProviderBackgroundWorkUnresolved means a main-thread Bash call
+	// detached explicitly or automatically (#384, #388). This stays unresolved
+	// throughout the invocation, regardless of later polls or kill requests.
+	//
+
+	// Provider return is not proof of semantic completion, the same finding
+	// #376 and #379 made about a provider's own self-report: a process that
+	// backgrounded its verification and then wrote a final answer without
+	// ever checking back is indistinguishable, from the model's own prose
+	// alone, from one that genuinely finished - and the typed stream gives
+	// no field that could tell the two apart. The invocation's process tree
+	// ends with it, so whatever that shell was running - a test suite, most
+	// often - is lost with it: a valid final result here is proof only that
+	// this invocation stopped talking, not that the work it describes
+	// actually happened.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// shape FailureFeedbackUnresolved and FailureCheckpointContinuationUnresolved
+	// already use: no budget is minted or reset, and an invocation that keeps
+	// abandoning its own background work exhausts its attempts and stops
+	// truthfully instead of looping forever on a checkpoint it can never
+	// admit as resolved. It is deliberately NOT continuation-eligible: the
+	// provider was not cut short by a runtime bound, it walked away from work
+	// it started on its own, so the retry gets a fresh invocation rather than
+	// observations from one that said nothing worth keeping.
+	FailureProviderBackgroundWorkUnresolved FailureClass = "provider_background_work_unresolved"
+	// FailureProviderUnavailable is the provider's ENDPOINT saying it cannot
+	// serve: overloaded, or a gateway status (502/503/504). The host reached
+	// it; losing the transport itself is FailureConnectivity.
 	//
 	// It is a recognized statement, never an inference from silence. Silence
 	// is FailureProviderNoProgress; only an explicit diagnostic reaches here,
@@ -706,6 +779,13 @@ const (
 	// interval must not be charged to the active-work budget, and the same run
 	// continues once connectivity returns.
 	FailureProviderUnavailable FailureClass = "provider_unavailable"
+	// FailureConnectivity is the host's TRANSPORT being gone (#380), named by a
+	// typed transport error or the provider's own diagnostic: DNS did not
+	// resolve, or the connection was refused, reset or unreachable. It routes
+	// to an attempt-CONSUMING retry that runs only after a durable bounded
+	// backoff (RetryNotBefore), so persistent loss exhausts finite authority
+	// rather than waiting forever on a refunded attempt.
+	FailureConnectivity FailureClass = "connectivity_unavailable"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -833,11 +913,85 @@ const (
 	// executable would destroy work over a condition that is entirely local
 	// and entirely fixable.
 	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
-	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
-	FailureFlaky                     FailureClass = "flaky_verification"
-	FailureUnknown                   FailureClass = "unknown"
+	// FailureCandidateWriterAlive is a candidate whose writer lock is still
+	// held by a process from an earlier invocation - one that outlived its
+	// supervisor (#168). Refused before dispatch, it waits: an operator stops
+	// the stale writer and the same run continues.
+	FailureCandidateWriterAlive    FailureClass = "candidate_writer_alive"
+	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
+	FailureFlaky                   FailureClass = "flaky_verification"
+	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
+	// that returned without discharging it: the workspace it left behind is
+	// unchanged, and it did not state (or failed to bind) an explicit
+	// no_change_required resolution. See FeedbackResolution.
+	//
+	// Provider return is not proof of semantic completion (#376): a producer
+	// that defers to background work it never finishes, or that simply
+	// misreads admitted feedback, returns exactly this way - indistinguishable
+	// from one that legitimately needed to do nothing, right up until it is
+	// asked to STATE that rather than have it inferred. So neither shape is
+	// read as success; both are this class, and only a bound, admitted
+	// resolution (or a mutation) escapes it.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation,
+	// under that operation's existing attempt ceiling - no budget is minted
+	// or reset, and a provider that keeps returning unresolved exhausts its
+	// attempts and stops truthfully, exactly like any other producer failure
+	// that never lands. It is deliberately excluded from
+	// PriorAttemptContextEligible: the provider was not cut short by a
+	// runtime bound mid-task, so the retry gets a fresh invocation rather
+	// than observations from an attempt that said nothing.
+	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
+	// FailureCheckpointContinuationUnresolved is a continuation invocation -
+	// one that inherited a runtime-owned checkpoint, interrupted rather than
+	// finished work - that returned without settling it: it did not state (or
+	// failed to bind) an explicit FeedbackResolutionCheckpointComplete claim
+	// bound to the exact checkpoint revision and tree it was shown. See
+	// FeedbackResolution.
+	//
+	// Provider return is not proof of semantic completion (#379, generalizing
+	// #376 from feedback discharge to checkpoint continuation): a continuation
+	// that defers to background work it never finishes, or that simply
+	// misreads the checkpoint, returns exactly this way - indistinguishable
+	// from one that legitimately needed to do nothing further, right up until
+	// it is asked to STATE that rather than have it inferred. Mutation does
+	// NOT escape this class by itself: it proves work happened, not that the
+	// inherited checkpoint is finished, so only a bound, admitted completion
+	// claim escapes it, mutated or not.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation,
+	// under that operation's existing attempt ceiling - no budget is minted
+	// or reset, and a continuation that keeps returning unresolved exhausts
+	// its attempts and stops truthfully, exactly like any other producer
+	// failure that never lands. It is deliberately excluded from
+	// PriorAttemptContextEligible: the provider was not cut short by a
+	// runtime bound mid-task, so the retry gets a fresh invocation rather
+	// than observations from an attempt that said nothing.
+	FailureCheckpointContinuationUnresolved FailureClass = "checkpoint_continuation_unresolved"
+	// FailureReviewerProtocolIncomplete is a reviewer-role invocation that
+	// completed - the process exited cleanly, within its bounds - without
+	// crossing the reviewer-result protocol (reviewer_result.go): the result
+	// file it wrote failed to decode as one, or it wrote none at all.
+	//
+	// It is deliberately NOT FailureVerification. That class means a verdict
+	// WAS reached and the candidate was judged and found wanting; this class
+	// means no verdict was reached at all. A reviewer that produced malformed
+	// JSON, or stdout but no result file, has refused to answer the question
+	// it was asked - that is a defect of THIS invocation's protocol
+	// compliance, not an observation about the candidate under review, and
+	// folding it into FailureVerification is what let a reviewer's own broken
+	// output read as the candidate having failed review (#374).
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// same shape FailureFeedbackUnresolved uses: no budget is minted or reset,
+	// and a reviewer that keeps failing the protocol exhausts its attempts and
+	// stops truthfully. The exact reason is kept (ReviewerResultRefusedError)
+	// and returned to the reviewer on the retry as a finding, so correction is
+	// possible instead of the reviewer guessing what was wrong the first time.
+	FailureReviewerProtocolIncomplete FailureClass = "reviewer_protocol_incomplete"
+	FailureUnknown                    FailureClass = "unknown"
 )
 
 type FailureRoute string
@@ -875,7 +1029,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress:
+		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
+		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved, FailureConnectivity:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
@@ -889,11 +1044,28 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureCandidateWriterAlive:
 		return RouteWait
 	default:
 		return RouteStop
 	}
+}
+
+// CandidateVerdict reports whether an assurance result is a valid verdict
+// about the CANDIDATE: a pass, or a failure the verifier judged (format,
+// compile/test, verification, or an unpassed result naming no class, which is
+// read as verification). This is the one definition. Everything else - an
+// infrastructure fault, a cancellation, a missing prerequisite - says nothing
+// about the candidate, and only two verdicts can disagree as a flake.
+func CandidateVerdict(r AssuranceResult) bool {
+	if r.Passed {
+		return true
+	}
+	switch r.FailureClass {
+	case "", FailureFormat, FailureCompileTest, FailureVerification:
+		return true
+	}
+	return false
 }
 
 // PriorAttemptContextEligible reports whether a retry of the same execution

@@ -41,6 +41,23 @@ const (
 	// that the runtime never committed because the budget ended the run
 	// first. It exists only in the candidate workspace.
 	HeldUncommitted = "uncommitted"
+	// HeldCommittedUnobserved is a runtime-owned commit candidate.commit made
+	// whose observation or reassessment then failed (#402). It is neither
+	// execution- nor assurance-complete; Revision and Tree are that commit.
+	HeldCommittedUnobserved = "committed_unobserved"
+	// HeldUnprovenHead is a candidate head that moved to a commit NO
+	// candidate.commit attempt recorded as its own (#402). Revision and Tree
+	// are that head as observed. It is not a runtime commit, it is never
+	// adopted, observed or assured, and only operator release (#344) can
+	// resolve it.
+	HeldUnprovenHead = "unproven_head"
+	// HeldNextOperatorRelease is the next step of material no lifecycle
+	// operation can advance: only an operator's governed release (#344).
+	HeldNextOperatorRelease = "operator_release"
+	// HeldQuarantined is material a REFUSED invocation left behind (#390):
+	// moved out of the candidate workspace into a runtime-owned quarantine,
+	// never committed and never inherited by a retry. Location names it.
+	HeldQuarantined = "quarantined"
 )
 
 // HeldDisposition is the one disposition #203 records: preserved in place,
@@ -67,6 +84,9 @@ type HeldMaterial struct {
 	Operation     string `json:"operation,omitempty"`
 	PathCount     int    `json:"path_count,omitempty"`
 	ContentDigest string `json:"content_digest,omitempty"`
+	// Location is where quarantined material is kept, relative to the state
+	// directory. It is set only for HeldQuarantined.
+	Location string `json:"location,omitempty"`
 	// NextStep is the lifecycle operation the planner selects next, and
 	// BlockedBy is the terminal reason that step is not admissible.
 	NextStep  string `json:"next_step,omitempty"`
@@ -79,7 +99,7 @@ type HeldMaterial struct {
 	Disposition          string `json:"disposition"`
 }
 
-var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true}
+var heldKinds = map[string]bool{HeldVerifiedUnpublished: true, HeldCommittedUnverified: true, HeldCheckpoint: true, HeldUncommitted: true, HeldCommittedUnobserved: true, HeldUnprovenHead: true, HeldQuarantined: true}
 
 func (h HeldMaterial) validate() error {
 	var closed error
@@ -143,9 +163,34 @@ func (s *runState) heldMaterial(reason string) *HeldMaterial {
 		if head == "" {
 			held.Revision, held.Tree = s.baseRevision(), ""
 		}
+		// The runtime already made the commit and only what follows it failed
+		// (#402): the material is that commit, not uncommitted work at its parent.
+		// A moved head no attempt recorded is named as exactly that: unproven,
+		// with none of the producer's identity claimed for its content.
+		if op, ok := s.operationByKey(OpCandidateCommit, producing); ok {
+			// It takes precedence over a recorded runtime commit: the head IS
+			// what the workspace holds, and that commit's identity stays in the
+			// journal. No lifecycle step applies, so the next step is release.
+			if unproven := s.unprovenHead(op.ID); unproven != nil {
+				held.Kind, held.Revision, held.Tree = HeldUnprovenHead, unproven.Commit, unproven.Tree
+				held.Operation, held.PathCount, held.ContentDigest = "", 0, ""
+				held.NextStep = HeldNextOperatorRelease
+			} else if made := s.runtimeCommit(op.ID); made != nil {
+				held.Kind, held.Revision, held.Tree, held.PathCount = HeldCommittedUnobserved, made.Commit, made.Tree, made.PathCount
+			}
+		}
 		return held.bounded()
 	}
 	if head == "" {
+		// Nothing was committed. What a refused attempt produced is still
+		// preserved, so the terminal record names the latest quarantine
+		// rather than reporting that nothing is held.
+		if q, ok := s.latestQuarantine(); ok {
+			held.Kind, held.Operation, held.Location = HeldQuarantined, q.OperationID, q.Location
+			held.PathCount, held.ContentDigest = q.PathCount, q.ContentDigest
+			held.Revision = q.Subject
+			return held.bounded()
+		}
 		return nil
 	}
 	if pr := s.projection.PullRequest; pr != nil && pr.HeadRevision == head {
@@ -171,7 +216,7 @@ func (h HeldMaterial) bounded() *HeldMaterial {
 	for _, field := range []*string{&h.NextStep, &h.BlockedBy, &h.Successor, &h.SuccessorUnavailable} {
 		*field = boundedField(*field)
 	}
-	for _, field := range []*string{&h.Revision, &h.Tree, &h.Operation, &h.ContentDigest} {
+	for _, field := range []*string{&h.Revision, &h.Tree, &h.Operation, &h.ContentDigest, &h.Location} {
 		if boundedField(*field) != *field {
 			*field = ""
 		}
@@ -206,7 +251,7 @@ func (s *runState) verifiedAt(head string) bool {
 // is always re-wanted at a fresh epoch and says nothing about the material.
 func (s *runState) nextLifecycleStep() string {
 	for _, spec := range operationSpecs {
-		if observationKinds[spec.kind] {
+		if OperationCapacityClass(spec.kind) == CapacityObservation {
 			continue
 		}
 		if key, wanted := spec.bind(s); wanted && key != "" && !s.satisfied(spec.kind, key) {
@@ -261,4 +306,19 @@ func workspaceContentDigest(dir string, paths []string) string {
 		b.WriteString(path + "\x00" + identity + "\n")
 	}
 	return textDigest(b.String())
+}
+
+// latestQuarantine is the most recent candidate.quarantined record the run
+// journalled, read back rather than re-derived.
+func (s *runState) latestQuarantine() (CandidateQuarantinedPayload, bool) {
+	for i := len(s.events) - 1; i >= 0; i-- {
+		if s.events[i].Type != EventCandidateQuarantined {
+			continue
+		}
+		var p CandidateQuarantinedPayload
+		if json.Unmarshal(s.events[i].Payload, &p) == nil {
+			return p, true
+		}
+	}
+	return CandidateQuarantinedPayload{}, false
 }

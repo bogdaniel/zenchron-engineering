@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -27,6 +28,12 @@ import (
 // what is under test.
 type fakePlanningProvider struct {
 	answer string
+	// transcript overrides the raw bytes stored as this attempt's transcript.
+	// It defaults to answer, so most callers never think about it; a test sets
+	// it when the TRANSPORT-ENCODED bytes must differ from the semantic
+	// answer - #366's restored defect, where a stream-json final result
+	// JSON-escapes the very fence and quotes a raw-transcript scan looks for.
+	transcript string
 	// writes is what a MISBEHAVING provider leaves in the workspace. A real
 	// one cannot, because the provider mode forbids it - which is precisely why
 	// the runtime verifies instead of trusting.
@@ -42,6 +49,12 @@ type fakePlanningProvider struct {
 	echoPrompt bool
 	// invocation replaces the minimal provenance the fake reports.
 	invocation *InvocationProvenance
+	// claudeShaped mimics the one real adapter (claude_stream.go) that can
+	// state its semantic final answer directly rather than leaving a reader to
+	// locate it inside the transcript: it fills ExecutionResult.Answer with
+	// answer and marks a valid final result observed, exactly as that adapter
+	// does on a successful, non-error final result.
+	claudeShaped bool
 
 	artifacts ArtifactStore
 	requests  []ExecutionRequest
@@ -58,9 +71,12 @@ func (p *fakePlanningProvider) Execute(_ context.Context, request ExecutionReque
 			return ExecutionResult{}, err
 		}
 	}
-	transcript := p.answer
+	transcript := p.transcript
+	if transcript == "" {
+		transcript = p.answer
+	}
 	if p.echoPrompt {
-		transcript = request.Objective + "\n" + request.TrustedInstructions + "\n" + p.answer
+		transcript = request.Objective + "\n" + request.TrustedInstructions + "\n" + transcript
 	}
 	artifacts, err := p.artifacts.StoreExecutionAttemptTranscript("planner", request.AttemptRef(), []byte(transcript), nil)
 	if err != nil {
@@ -73,6 +89,10 @@ func (p *fakePlanningProvider) Execute(_ context.Context, request ExecutionReque
 	}
 	if p.invocation != nil {
 		result.Invocation = p.invocation
+	}
+	if p.claudeShaped {
+		result.Answer = p.answer
+		result.Invocation.FinalResultObserved = true
 	}
 	if p.failure != nil {
 		result.Outcome = OperationFailed
@@ -318,6 +338,53 @@ func TestTheLastStatedProposalIsTheOneRead(t *testing.T) {
 	}
 	if len(output.Stages) != 1 || output.Stages[0].ID != "second" {
 		t.Fatalf("stages = %#v", output.Stages)
+	}
+}
+
+// #366's restored defect: a real Claude stream-json final result JSON-escapes
+// the fenced plan inside its own "result" field, so neither the fence nor the
+// literal `"stages"` member the raw-transcript scanner looks for ever appears
+// unescaped in the transcript bytes - that transcript is the transport
+// encoding, not the model's answer. The adapter now decodes that field once
+// and hands the planner the semantic answer directly through
+// ExecutionResult.Answer; the planner must read THAT rather than re-deriving
+// it from the transport encoding, and the fallback path alone - exercised
+// below with the identical transcript and no adapter-exposed answer - must
+// still be refused, which is the failure #64's Claude dogfood on #343 hit.
+func TestClaudePlanningAnswerIsReadFromTheSemanticResultNotTheRawTranscript(t *testing.T) {
+	escaped, err := json.Marshal(goodAnswer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportLine := `{"type":"result","subtype":"success","is_error":false,"result":` + string(escaped) + `,"session_id":"s"}` + "\n"
+
+	// Proof the fixture actually reproduces the escaping #366 depends on: the
+	// exact quoted member the raw scanner requires must not appear unescaped.
+	if strings.Contains(transportLine, `"stages"`) {
+		t.Fatal("fixture does not reproduce the escaping #366 depends on")
+	}
+
+	input, provider := plannerFixture(t, goodAnswer)
+	provider.transcript = transportLine
+	provider.claudeShaped = true
+	output, err := InvokePlanner(context.Background(), input)
+	if err != nil {
+		t.Fatalf("planning invocation refused a valid escaped answer: %v", err)
+	}
+	if len(output.Stages) != 2 || output.Stages[0].ID != "implementation" {
+		t.Fatalf("stages = %#v", output.Stages)
+	}
+
+	// WITHOUT the adapter-exposed semantic answer, the identical transcript is
+	// refused: the fallback path alone cannot recover this answer, which is
+	// exactly the defect this issue closes rather than something this test
+	// coincidentally cannot reach.
+	fallbackInput, fallbackProvider := plannerFixture(t, goodAnswer)
+	fallbackProvider.transcript = transportLine
+	if _, err := InvokePlanner(context.Background(), fallbackInput); err == nil {
+		t.Fatal("the raw-transcript fallback unexpectedly parsed the escaped transport line")
+	} else if !strings.Contains(err.Error(), "no JSON object with a stages member was found") {
+		t.Fatalf("expected the known #366 refusal, got %v", err)
 	}
 }
 

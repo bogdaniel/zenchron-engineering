@@ -112,6 +112,10 @@ func (a GitHubRESTAdapter) token(repo GitHubRepo) (string, error) {
 		if errors.As(err, &transient) {
 			return "", transient
 		}
+		var transport *TransportError
+		if errors.As(err, &transport) {
+			return "", transport
+		}
 		return "", &GitHubAuthError{Detail: "credential resolution failed"}
 	}
 	if strings.TrimSpace(secret) == "" {
@@ -184,7 +188,7 @@ func (a GitHubRESTAdapter) doRaw(ctx context.Context, repo GitHubRepo, method, p
 	}
 	response, err := a.HTTP.Do(request)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("github request failed: %w", err)
+		return 0, nil, nil, transportFailure(err, true)
 	}
 	defer response.Body.Close()
 	raw, err := readBoundedBody(response)
@@ -833,6 +837,11 @@ func (a GitHubRESTAdapter) Reviews(ctx context.Context, repo GitHubRepo, number 
 	return observation, nil
 }
 
+// normalizeReview maps GitHub's wire review state to the closed vocabulary.
+// An unrecognized state - a future GitHub review disposition this runtime
+// does not yet know - is returned as the zero value rather than relabelled
+// GitHubReviewCommented, so the durable record reflects "unknown" instead of
+// falsely claiming a neutral comment was observed.
 func normalizeReview(state string) GitHubReviewState {
 	switch strings.ToUpper(state) {
 	case "APPROVED":
@@ -841,8 +850,10 @@ func normalizeReview(state string) GitHubReviewState {
 		return GitHubReviewChangesRequested
 	case "DISMISSED":
 		return GitHubReviewDismissed
-	default:
+	case "COMMENTED":
 		return GitHubReviewCommented
+	default:
+		return ""
 	}
 }
 

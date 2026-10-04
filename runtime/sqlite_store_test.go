@@ -507,18 +507,18 @@ func TestSQLiteGlobalRunCeilingIsAtomicAcrossHandles(t *testing.T) {
 	if err != nil || !okB {
 		t.Fatal(err, okB)
 	}
-	_, gotA, err := storeA.AcquireOperation(leasedAt(opA, "one", now), revA, 1)
+	_, gotA, err := storeA.AcquireOperation(leasedAt(opA, "one", now), revA, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, gotB, err := storeB.AcquireOperation(leasedAt(opB, "two", now), revB, 1)
+	_, gotB, err := storeB.AcquireOperation(leasedAt(opB, "two", now), revB, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotA == gotB {
 		t.Fatalf("max=1 was not durable: run-a acquired=%v, run-b acquired=%v", gotA, gotB)
 	}
-	if _, _, err := storeA.AcquireOperation(opA, 0, 1); err == nil {
+	if _, _, err := storeA.AcquireOperation(opA, 0, 1, 1); err == nil {
 		t.Fatal("an acquisition without an observed revision was accepted")
 	}
 

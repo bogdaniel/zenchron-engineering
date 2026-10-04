@@ -496,6 +496,16 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	env := []string{"PATH=" + p.gitGuard.SearchPath(searchPath)}
 	env = append(env, p.gitGuard.Env()...)
 	env = append(env, p.toolchainEnv()...)
+	// GOENV IS THE NULL DEVICE FOR EVERY WORKER, toolchain or not, scratch or
+	// not (#430). Unset, Go reads and `go env -w` WRITES the operator's own
+	// os.UserConfigDir()/go/env under the HOME below. GOENV=off did not stop
+	// that either (go1.27.1 on darwin still wrote the default file). With the
+	// null device a plain `go env -w` from a worker is discarded.
+	//
+	// This is hygiene, not a boundary: a worker that sets its own GOENV, or
+	// writes the file directly, still reaches the operator's HOME. Isolating
+	// HOME is out of scope here.
+	env = append(env, "GOENV="+os.DevNull)
 	if home == "" {
 		return env
 	}
@@ -944,6 +954,9 @@ func agentPrompt(request ExecutionRequest) string {
 // acceptance claim, and whether the candidate actually changed is established
 // from the workspace by the caller, never from what the worker said.
 func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	// Taken off the context so no probe below is ever handed the lock.
+	writer := candidateWriterFrom(ctx)
+	ctx = withCandidateWriter(ctx, nil)
 	spec, err := p.spec()
 	if err != nil {
 		return ExecutionResult{}, err
@@ -1023,7 +1036,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// directory its typed result goes in, and the executables its contract
 		// obliges it to run. Both are runtime-owned facts; neither widens the
 		// sandbox beyond them.
-		ResultDir:     resultDirFor(request.ReviewerResultPath),
+		ResultDir:     resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath)),
 		RequiredTools: request.RequiredTools,
 		ScratchDir:    request.ScratchDir,
 	}
@@ -1088,7 +1101,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			PermissionBypass: p.PermissionBypass, AuthMode: boundedDetail(authMode), AuthModeSource: authSource,
 			WorkspaceBound:                  spec.WorkingDirectoryFlag,
 			WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
-			Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
+			Argv:                            recordedArgv(buildArgs, invocation, p.StateDir, spec.PromptArgFromEnd),
 			PromptSHA256:                    promptDigest(invocation.Prompt),
 			ProgressMode:                    progressMode,
 		},
@@ -1132,6 +1145,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	if p.Agent.Kind == AgentKindClaudeCode {
+		if deadline, bounded := ctx.Deadline(); bounded {
+			extra, err := claudeBashTimeoutEnv(time.Until(deadline))
+			if err == nil {
+				env, err = withInvocationEnv(env, extra)
+			}
+			if err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+	}
 	if progressMode == progressByteOutputExcludingTransportChatter {
 		ctx = withTransportChatter(ctx, transportChatterPatterns(spec))
 	}
@@ -1140,8 +1164,24 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		stream = newClaudeStream(request.Attempt)
 		ctx = withClaudeStream(ctx, stream)
 	}
+	// THE CANDIDATE WRITER LOCK (#168) reaches the provider's own process
+	// only. A runtime attempt claimed it before touching the candidate and
+	// hands it over; any other caller (the planner, an embedder) is claimed
+	// for here.
+	if writer == nil {
+		claimed, err := claimCandidateWriter(ctx, request.CandidateDir, candidateWriterSettle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			return notStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), notStarted
+		}
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		defer claimed.Close()
+		writer = claimed
+	}
 	startedAt := time.Now()
-	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, env, p.grace())
+	output, runErr := p.executor().Run(withCandidateWriter(ctx, writer), p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()
 	// WHAT ENDED THE PROCESS is fixed at the instant it exited, and it has
 	// exactly one owner. The contexts stay live while the transcript is stored
@@ -1232,6 +1272,28 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		ProviderID: p.Agent.ID, Model: invocation.Model(), AuthMode: authMode,
 		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
+	}
+	// THE SEMANTIC ANSWER, exposed only when the structured stream itself
+	// decoded one off a valid, non-error final result (claude_stream.go). It
+	// is redacted exactly as the stored transcript is - the same secret
+	// patterns, the same replacement - so a consumer reading this field sees
+	// what every other reader of this invocation's output is allowed to see,
+	// never a step earlier.
+	if streamed.AnswerObserved {
+		result.Answer = string(redactTranscript([]byte(streamed.Answer)))
+	}
+	// No exit status or final result can resolve explicit or tool-owned automatic
+	// Bash detachment (#384, #388). Refuse before trusting a structured verdict
+	// for any invocation purpose; polling and kill requests never clear it.
+	// A descendant that left the provider's process group and still holds
+	// the candidate writer lock after the group was stopped is background
+	// work this invocation walked away from, writing the candidate (#168).
+	if streamed.UnresolvedBackgroundWork || (output.EscapedWriter && !killed) {
+		result.Outcome = OperationFailed
+		result.Failure = &ProviderFailure{
+			Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: artifacts[0].Path,
+		}
+		return result, runErr
 	}
 	if runErr != nil || killed {
 		result.Outcome = OperationFailed
@@ -1348,16 +1410,38 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// that tried to answer and produced something unreadable has not silently
 	// declined to answer, and treating the two the same would hide a broken
 	// protocol behind a stage that merely never settles.
+	//
+	// It fails as a REVIEWER PROTOCOL failure, never as FailureVerification
+	// (#374): nothing was judged, so nothing about the candidate failed
+	// verification, and the exact decode reason is kept on ReviewRefusal
+	// rather than discarded down to a bare classification.
 	if request.ReviewerResultPath != "" {
 		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
 		if reviewErr != nil {
+			result.Outcome = OperationFailed
+			result.Failure = &ProviderFailure{
+				Classification: FailureReviewerProtocolIncomplete, RawDiagnosticRef: artifacts[0].Path,
+			}
+			result.ReviewRefusal = &ReviewerResultRefusedError{Detail: boundedDetail(reviewErr.Error())}
+			return result, nil
+		}
+		result.Review = review
+	}
+	// THE FEEDBACK RESOLUTION, read the same way and for the same reason: a
+	// malformed document on a successful invocation fails it rather than
+	// being silently dropped, and an absent one simply leaves Resolution nil
+	// - which AdmitFeedbackResolution and outstandingReviewKeys already treat
+	// as "nothing was stated" (#376).
+	if request.FeedbackResolutionPath != "" {
+		resolution, resolutionErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
+		if resolutionErr != nil {
 			result.Outcome = OperationFailed
 			result.Failure = &ProviderFailure{
 				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
 			}
 			return result, nil
 		}
-		result.Review = review
+		result.Resolution = resolution
 	}
 	return result, runErr
 }
@@ -1449,7 +1533,17 @@ func terminalDiagnostic(stderr []byte) string {
 	if len(stderr) > maxTerminalDiagnosticBytes {
 		stderr = stderr[len(stderr)-maxTerminalDiagnosticBytes:]
 	}
-	return strings.ToLower(string(stderr))
+	// A CLI may print its statement with a typographic apostrophe (U+2019);
+	// the signals are written in ASCII. Observed live (#87): Codex's quota
+	// statement used U+2019, so the configured quota signal never matched and
+	// the run stopped as unknown instead of waiting.
+	return normalizeDiagnostic(string(stderr))
+}
+
+// normalizeDiagnostic is the one comparison form for a CLI's own statements:
+// lower case, with a typographic apostrophe (U+2019) read as ASCII.
+func normalizeDiagnostic(text string) string {
+	return strings.ReplaceAll(strings.ToLower(text), "\u2019", "'")
 }
 
 // classifyAgentFailure classifies a failed native-CLI invocation from the
@@ -1536,7 +1630,7 @@ func (p CLIAgentProvider) toolchainEnv() []string {
 	// alone do not make a directory writable. TMPDIR keeps test fixtures here
 	// too, including temporary repositories that must never become gitlinks.
 	if scratch := strings.TrimSpace(p.ExecScratchDir); scratch != "" {
-		env = append(env, "TMPDIR="+scratch, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"), "GOPATH="+filepath.Join(scratch, "gopath"), "GOENV=off")
+		env = append(env, "TMPDIR="+scratch, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"), "GOPATH="+filepath.Join(scratch, "gopath"))
 	}
 	return env
 }
@@ -1681,14 +1775,9 @@ func (p CLIAgentProvider) refuseUnsupportedObligations(request ExecutionRequest)
 // from the cause the executor recorded at the refusal.
 func notStartedResult(providerID, model, authMode string, attempt int, notStarted *ProviderNotStartedError) ExecutionResult {
 	result := ExecutionResult{ProviderID: providerID, Model: model, AuthMode: authMode, Attempt: attempt, Outcome: OperationCancelled}
-	class := FailureControllerShutdown
-	switch ownerOfCause(notStarted.Cause) {
-	case OwnerOperatorStop:
-		class = FailureRunCancelled
-	case OwnerDeadline:
-		result.Outcome, class = OperationFailed, FailureExecutionIncomplete
-	case OwnerInactivity:
-		result.Outcome, class = OperationFailed, FailureProviderNoProgress
+	class := cancellationClass(notStarted.Cause)
+	if class != FailureControllerShutdown && class != FailureRunCancelled {
+		result.Outcome = OperationFailed // a runtime bound ended it, not a cancellation
 	}
 	result.Failure = &ProviderFailure{Classification: class}
 	return result

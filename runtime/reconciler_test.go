@@ -57,6 +57,22 @@ type isolatedProvider struct {
 	*FakeExecutionProvider
 	mutate   func(dir string) error
 	requests []ExecutionRequest
+	// resolveFeedback, when set, writes a real FeedbackResolution document to
+	// whatever FeedbackResolutionPath the invocation was given, claiming every
+	// delivered key resolved - no_change_required outside a continuation,
+	// checkpoint_complete (bound to the exact tree too) for one (#379) - and
+	// then reads it back through the production decoder - exactly as an
+	// installed CLI writing the real channel and CLIAgentProvider reading it
+	// would. A test wanting a provider that merely returns without stating a
+	// resolution (the #376 case that must NOT discharge feedback) leaves this
+	// unset.
+	resolveFeedback bool
+	// malformedResolutionSubject, when non-empty, writes a resolution through
+	// the same real write/read path as resolveFeedback, but claiming THIS
+	// subject instead of the exact one the invocation was shown - a bound
+	// refusal AdmitFeedbackResolution must produce, through the real decoder,
+	// never a synthetic result.Resolution a test assembled by hand.
+	malformedResolutionSubject string
 }
 
 func newIsolatedProvider(mutate func(dir string) error) *isolatedProvider {
@@ -80,7 +96,47 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 			return ExecutionResult{}, err
 		}
 	}
-	return p.FakeExecutionProvider.Execute(ctx, request)
+	result, err := p.FakeExecutionProvider.Execute(ctx, request)
+	writeResolution := p.resolveFeedback || p.malformedResolutionSubject != ""
+	if err != nil || !writeResolution || request.FeedbackResolutionPath == "" {
+		return result, err
+	}
+	// Zero delivered feedback is only a valid claim for a CONTINUATION (#379):
+	// it is the checkpoint-only shape, naming no feedback key because none was
+	// delivered. Outside a continuation, zero feedback means the path was
+	// never even granted (operations.go only prepares it when feedback exists
+	// or the invocation is a continuation), so this is unreachable there.
+	if len(request.Feedback) == 0 && request.Purpose != InvocationContinuation {
+		return result, err
+	}
+	keys := make([]string, 0, len(request.Feedback))
+	for _, item := range request.Feedback {
+		keys = append(keys, item.Key)
+	}
+	subject := request.Candidate.Revision
+	if p.malformedResolutionSubject != "" {
+		subject = p.malformedResolutionSubject
+	}
+	claim := FeedbackResolution{SchemaVersion: FeedbackResolutionSchemaVersion, Subject: subject, Keys: keys}
+	if request.Purpose == InvocationContinuation {
+		claim.Resolution = FeedbackResolutionCheckpointComplete
+		claim.Tree = request.Candidate.Tree
+	} else {
+		claim.Resolution = FeedbackResolutionNoChangeRequired
+	}
+	document, marshalErr := json.Marshal(claim)
+	if marshalErr != nil {
+		return result, marshalErr
+	}
+	if writeErr := os.WriteFile(request.FeedbackResolutionPath, document, 0o600); writeErr != nil {
+		return result, writeErr
+	}
+	resolution, readErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
+	if readErr != nil {
+		return result, readErr
+	}
+	result.Resolution = resolution
+	return result, nil
 }
 
 // passingAssurance keeps FakeAssuranceProvider topped up so a run can verify
@@ -1605,6 +1661,14 @@ func resequenceEvents(t *testing.T, fixture *phase8Fixture, runID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The deleted rows freed their global_sequence values, but global_sequence
+	// is a table-wide counter (#399), not a per-run one: reinserted rows still
+	// need values that don't collide with any other run's events, so the next
+	// one is read fresh rather than reused from the deleted rows.
+	var nextGlobalSequence int64
+	if err := db.QueryRow(`SELECT COALESCE(MAX(global_sequence), 0) + 1 FROM events`).Scan(&nextGlobalSequence); err != nil {
+		t.Fatal(err)
+	}
 	var replayed []EngineeringEvent
 	for _, document := range documents {
 		var e EngineeringEvent
@@ -1621,7 +1685,10 @@ func resequenceEvents(t *testing.T, fixture *phase8Fixture, runID string) {
 			t.Fatal(err)
 		}
 		e.StateBefore = before.StateSHA256
-		e.EventHash = ""
+		// The provisional hash appendToStream folds in before state_after (#462).
+		if e.EventHash, err = EventDigest(e); err != nil {
+			t.Fatal(err)
+		}
 		after, err := Reduce(run, append(append([]EngineeringEvent(nil), replayed...), e))
 		if err != nil {
 			t.Fatal(err)
@@ -1634,11 +1701,12 @@ func resequenceEvents(t *testing.T, fixture *phase8Fixture, runID string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`INSERT INTO events (`+sqliteEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		if _, err := db.Exec(`INSERT INTO events (`+sqliteEventInsertColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.RunID, e.Sequence, e.Type, e.OperationID, e.PreviousEventID, e.PreviousEventHash,
-			e.StateBefore, e.StateAfter, e.EventHash, string(canonical)); err != nil {
+			e.StateBefore, e.StateAfter, e.EventHash, string(canonical), nextGlobalSequence); err != nil {
 			t.Fatal(err)
 		}
+		nextGlobalSequence++
 		replayed = append(replayed, e)
 	}
 }

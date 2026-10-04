@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,10 @@ type CommandOutput struct {
 	// process, committed by the executor when it was decided (#213). An
 	// executor that does not decide it leaves OwnerUndecided.
 	Owner TerminationOwner
+	// EscapedWriter reports that, after the process returned and its group
+	// was stopped, something still held the candidate writer lock: a
+	// descendant that left the process group and is still running (#168).
+	EscapedWriter bool
 }
 type CommandExecutor interface {
 	LookPath(string) error
@@ -180,6 +185,10 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 		cmd.Stdout = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, out)
 		cmd.Stderr = io.MultiWriter(&chatterFilter{progress: watch.progress, patterns: patterns}, errOut)
 	}
+	lock := candidateWriterFrom(ctx)
+	if lock != nil {
+		cmd.ExtraFiles = []*os.File{lock}
+	}
 	stopWatch := watch.watchUntilComplete()
 	owner, err := runBoundedProcess(ctx, cmd, grace)
 	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the
@@ -202,8 +211,12 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	if exit, ok := err.(*exec.ExitError); ok {
 		result.ExitCode = exit.ExitCode()
 	}
+	if lock != nil && cmd.Process != nil {
+		result.EscapedWriter = releaseCandidateWriter(lock, cmd.Process.Pid, grace)
+	}
 	return result, err
 }
+
 func (OSCommandExecutor) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	return OSCommandExecutor{}.Run(ctx, name, args, dir, env, grace)
 }
@@ -264,7 +277,7 @@ func (s DockerSandbox) executor() CommandExecutor {
 	}
 	return s.Executor
 }
-func (s DockerSandbox) ready() error {
+func (s DockerSandbox) ready(ctx context.Context) error {
 	if s.Image == "" || !strings.HasPrefix(s.Image, "sha256:") {
 		return ErrSandboxUnavailable
 	}
@@ -274,15 +287,41 @@ func (s DockerSandbox) ready() error {
 	if _, err := s.Endpoint.identity(); err != nil {
 		return ErrSandboxUnavailable
 	}
-	_, err := s.dockerRun(context.Background(), []string{"info", "--format", "{{.ServerVersion}}"})
-	if err != nil {
-		return ErrSandboxUnavailable
+	if _, err := s.dockerProbe(ctx, s.dockerRun, []string{"info", "--format", "{{.ServerVersion}}"}); err != nil {
+		return err
 	}
-	image, err := s.dockerOutput(context.Background(), []string{"image", "inspect", "--format", "{{.Id}}", s.Image})
-	if err != nil || strings.TrimSpace(string(image.Stdout)) != s.Image {
+	image, err := s.dockerProbe(ctx, s.dockerOutput, []string{"image", "inspect", "--format", "{{.Id}}", s.Image})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(image.Stdout)) != s.Image {
 		return ErrSandboxUnavailable
 	}
 	return nil
+}
+
+// dockerProbeCeiling bounds every Docker readiness/identity probe (#447). It is
+// a var only so a test can shorten it; nothing configures it.
+var dockerProbeCeiling = 10 * time.Second
+
+// dockerProbe runs one readiness/identity probe under the CALLER's context and
+// dockerProbeCeiling, whichever ends first, so a shorter caller deadline is
+// never replaced. The two endings stay distinct: the caller's own cancellation
+// or deadline is returned as the caller's cause, never as unavailability; only
+// the ceiling firing, or the probe failing outright, is ErrSandboxUnavailable.
+func (s DockerSandbox) dockerProbe(ctx context.Context, call func(context.Context, []string) (CommandOutput, error), args []string) (CommandOutput, error) {
+	probe, cancel := context.WithTimeout(ctx, dockerProbeCeiling)
+	defer cancel()
+	out, err := call(probe, args)
+	switch {
+	case err == nil:
+		return out, nil
+	case ctx.Err() != nil:
+		return out, context.Cause(ctx)
+	case probe.Err() != nil:
+		return out, fmt.Errorf("%w: Docker daemon did not respond within %s", ErrSandboxUnavailable, dockerProbeCeiling)
+	}
+	return out, ErrSandboxUnavailable
 }
 func (s DockerSandbox) dockerRun(ctx context.Context, args []string) (CommandOutput, error) {
 	bound, err := s.Endpoint.args(args)
@@ -298,15 +337,21 @@ func (s DockerSandbox) dockerOutput(ctx context.Context, args []string) (Command
 	}
 	return s.executor().Output(ctx, "docker", bound, "", []string{}, s.Grace)
 }
-func (s DockerSandbox) daemonIdentity() (string, error) {
-	out, err := s.dockerOutput(context.Background(), []string{"info", "--format", "{{.ID}}"})
-	if err != nil || strings.TrimSpace(string(out.Stdout)) == "" {
-		return "", fmt.Errorf("trusted Docker daemon identity unavailable")
+func (s DockerSandbox) daemonIdentity(ctx context.Context) (string, error) {
+	out, err := s.dockerProbe(ctx, s.dockerOutput, []string{"info", "--format", "{{.ID}}"})
+	if err != nil && !errors.Is(err, ErrSandboxUnavailable) {
+		return "", err // the caller's cancellation, not an identity verdict
+	}
+	if err == nil && strings.TrimSpace(string(out.Stdout)) == "" {
+		err = ErrSandboxUnavailable
+	}
+	if err != nil {
+		return "", fmt.Errorf("trusted Docker daemon identity unavailable: %w", err)
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil
 }
 func (s DockerSandbox) run(ctx context.Context, args []string) (CommandOutput, error) {
-	if err := s.ready(); err != nil {
+	if err := s.ready(ctx); err != nil {
 		return CommandOutput{}, err
 	}
 	if s.Grace <= 0 {
@@ -335,7 +380,7 @@ func (s DockerSandbox) operationRecordPath() (string, error) {
 	return filepath.Join(s.StateDir, "docker-operation-"+hex.EncodeToString(name[:])+".json"), nil
 }
 
-func (s DockerSandbox) operationRecord() (dockerOperationRecord, string, error) {
+func (s DockerSandbox) operationRecord(ctx context.Context) (dockerOperationRecord, string, error) {
 	path, err := s.operationRecordPath()
 	if err != nil {
 		return dockerOperationRecord{}, "", err
@@ -344,7 +389,7 @@ func (s DockerSandbox) operationRecord() (dockerOperationRecord, string, error) 
 	if err != nil {
 		return dockerOperationRecord{}, "", err
 	}
-	daemonID, err := s.daemonIdentity()
+	daemonID, err := s.daemonIdentity(ctx)
 	if err != nil {
 		return dockerOperationRecord{}, "", err
 	}
@@ -467,7 +512,7 @@ func (s DockerSandbox) terminateExact(record dockerOperationRecord, path string)
 }
 
 func (s DockerSandbox) runContainer(ctx context.Context, args []string) (CommandOutput, error) {
-	record, path, err := s.operationRecord()
+	record, path, err := s.operationRecord(ctx)
 	if err != nil {
 		return CommandOutput{}, err
 	}
@@ -522,9 +567,14 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	if exists && running {
 		return out, fmt.Errorf("Docker start returned while runtime-owned container remains running")
 	}
+	exitCode := -1
 	if exists {
-		if _, err := s.dockerRun(context.Background(), []string{"wait", record.ContainerName}); err != nil {
+		waited, err := s.dockerRun(context.Background(), []string{"wait", record.ContainerName})
+		if err != nil {
 			return out, err
+		}
+		if code, err := strconv.Atoi(strings.TrimSpace(string(waited.Stdout))); err == nil {
+			exitCode = code
 		}
 		if err := s.removeExact(record.ContainerName); err != nil {
 			return out, err
@@ -534,8 +584,25 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	if err := writeDockerOperation(path, record); err != nil {
 		return out, err
 	}
+	// Docker's own record of the workload's exit is the proof that the
+	// container ran its command. What a given code MEANS belongs to the caller
+	// that chose the command; an error with no recorded exit never reached the
+	// workload at all.
+	if runErr != nil && exitCode >= 1 {
+		return out, &containerExitError{Code: exitCode, err: runErr}
+	}
 	return out, runErr
 }
+
+// containerExitError is a workload Docker recorded as exiting non-zero. It
+// reads exactly as the error it wraps, so no caller sees a new message.
+type containerExitError struct {
+	Code int
+	err  error
+}
+
+func (e *containerExitError) Error() string { return e.err.Error() }
+func (e *containerExitError) Unwrap() error { return e.err }
 
 // DockerReconciliation is intentionally conservative. A record is the sole
 // authority to target a container; missing state never authorizes discovery by
@@ -549,7 +616,7 @@ const (
 	DockerAmbiguous   DockerReconciliation = "ambiguous"
 )
 
-func (s DockerSandbox) ReconcileDockerOperation() (DockerReconciliation, error) {
+func (s DockerSandbox) ReconcileDockerOperation(ctx context.Context) (DockerReconciliation, error) {
 	path, err := s.operationRecordPath()
 	if err != nil {
 		return DockerNoContainer, err
@@ -563,7 +630,7 @@ func (s DockerSandbox) ReconcileDockerOperation() (DockerReconciliation, error) 
 	}
 	var record dockerOperationRecord
 	endpoint, endpointErr := s.Endpoint.identity()
-	daemonID, daemonErr := s.daemonIdentity()
+	daemonID, daemonErr := s.daemonIdentity(ctx)
 	if err := json.Unmarshal(data, &record); err != nil || endpointErr != nil || daemonErr != nil || record.ContainerName == "" || record.OperationID != s.OperationID || record.Endpoint != endpoint || record.DaemonID != daemonID {
 		return DockerAmbiguous, fmt.Errorf("invalid runtime-owned Docker operation record")
 	}
@@ -598,15 +665,23 @@ func (s DockerSandbox) ReconcileDockerOperation() (DockerReconciliation, error) 
 // string. ProviderSandbox reports the native Codex CLI's proven sandbox
 // capability; the remaining fields report Docker, which isolates assurance.
 // They are separate values because they are separate boundaries.
-type SandboxDoctor struct{ ProviderSandbox, VerifierSandbox, OfflineVerification, DependencyPreparation string }
+type SandboxDoctor struct {
+	ProviderSandbox, VerifierSandbox, OfflineVerification, DependencyPreparation string
+	// VerifierSandboxReason says more than "unavailable" when readiness knows
+	// more: the bounded "Docker daemon did not respond within 10s", or the
+	// caller's own cancellation. Empty otherwise.
+	VerifierSandboxReason string
+}
 
-func DiagnoseSandbox(p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
-	provider, assurance := "unavailable", "unavailable"
+func DiagnoseSandbox(ctx context.Context, p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
+	provider, assurance, reason := "unavailable", "unavailable", ""
 	if p.probe(context.Background()) == nil {
 		provider = "enforceable"
 	}
-	if s.ready() == nil {
+	if err := s.ready(ctx); err == nil {
 		assurance = "enforceable"
+	} else if err != ErrSandboxUnavailable {
+		reason = err.Error()
 	}
 	// DependencyPreparation is NOT an alias of Docker readiness. A reachable
 	// daemon holding the pinned image proves a container can start; it proves
@@ -615,11 +690,11 @@ func DiagnoseSandbox(p NativeCodexProvider, s DockerSandbox) SandboxDoctor {
 	// with FAIL=0 while every Go command inside that exact image exited 127.
 	preparation := "unavailable"
 	if assurance == "enforceable" {
-		if _, err := s.ProbeToolchain(context.Background()); err == nil {
+		if _, err := s.ProbeToolchain(ctx); err == nil {
 			preparation = "enforceable"
 		}
 	}
-	return SandboxDoctor{ProviderSandbox: provider, VerifierSandbox: assurance, OfflineVerification: assurance, DependencyPreparation: preparation}
+	return SandboxDoctor{ProviderSandbox: provider, VerifierSandbox: assurance, OfflineVerification: assurance, DependencyPreparation: preparation, VerifierSandboxReason: reason}
 }
 
 // ProbeToolchain answers one question about the CONFIGURED image: does the
@@ -1070,7 +1145,50 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback)
+	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r)
+}
+
+// feedbackResolutionEnvelope states the REQUIRED OUTPUT when a producer
+// invocation decides none of the admitted feedback above needs a change, or
+// (#379) when a continuation decides the checkpoint it inherited is complete.
+//
+// Provider return is not proof of completion (#376, generalized by #379 from
+// feedback discharge to checkpoint continuation): an invocation that simply
+// leaves the workspace unmodified and exits is indistinguishable from one
+// that ran out of time or deferred unfinished work, and - for a continuation
+// - so is one that mutates further and exits: mutation proves work happened,
+// not that the inherited checkpoint is finished. So a legitimate completion
+// conclusion has to be WRITTEN, the same way a reviewer's verdict has to be -
+// never left for the runtime to infer from a diff, empty or not.
+func feedbackResolutionEnvelope(r ExecutionRequest) string {
+	if r.FeedbackResolutionPath == "" {
+		return ""
+	}
+	if r.Purpose == InvocationContinuation {
+		return fmt.Sprintf(
+			"\n\nThis candidate is a CHECKPOINT: an earlier invocation left this exact work interrupted, not finished. Returning - whether or not "+
+				"you change the candidate further - is not, by itself, evidence that the checkpoint's obligations (including any admitted feedback "+
+				"above) are complete: both are indistinguishable from an invocation that deferred unfinished work and exited. If, having investigated, "+
+				"you conclude the checkpoint is now fully complete, that conclusion must be WRITTEN rather than left to be inferred from the diff: "+
+				"write a JSON document to %s. "+
+				"The document is a JSON object with exactly these members: schema_version (%q), resolution (%q), subject (the exact candidate revision %s), "+
+				"tree (the exact candidate tree %s), keys (an array naming every admitted feedback key above, exactly - not a subset - or an empty array "+
+				"if none was delivered), and an optional reason. Write this document ONLY when the checkpoint is actually complete. If further work is "+
+				"still needed, make the change and do not write this document. An invocation that neither finishes the work nor writes this document "+
+				"leaves the checkpoint exactly as interrupted as it was, however the invocation otherwise ends.",
+			r.FeedbackResolutionPath, FeedbackResolutionSchemaVersion, FeedbackResolutionCheckpointComplete, r.Candidate.Revision, r.Candidate.Tree)
+	}
+	if len(r.Feedback) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\n\nIf, having investigated, NONE of the admitted feedback above requires a change to this candidate, "+
+			"that conclusion must be WRITTEN rather than left to be inferred from an unmodified workspace: write a JSON document to %s and make no edit. "+
+			"The document is a JSON object with exactly these members: schema_version (%q), resolution (%q), subject (the exact candidate revision %s), "+
+			"keys (an array naming every admitted feedback key above, exactly - not a subset), and an optional reason. "+
+			"Write this document ONLY when every admitted item needs no change. If any item needs a change, make the change instead and do not write this document. "+
+			"An invocation that neither changes the candidate nor writes this document leaves every item above outstanding, however the invocation otherwise ends.",
+		r.FeedbackResolutionPath, FeedbackResolutionSchemaVersion, FeedbackResolutionNoChangeRequired, r.Candidate.Revision)
 }
 
 // planningEnvelope is the envelope for a NON-MUTATING invocation. It is a
@@ -1101,21 +1219,52 @@ func planningEnvelope(r ExecutionRequest) string {
 // comes from the stage objective the planner wrote and the operator approved,
 // and how to judge it comes from the contract's acceptance obligations. This
 // text only says how to ANSWER.
+//
+// The member names it quotes come from reviewerResultStatedMembers and
+// ReviewerFindingMembers (reviewer_result.go), never typed here directly
+// (#374): this function and ReadReviewerResult's strict decoder both close
+// over the same ReviewerResult/ReviewerFinding structs, so a member this
+// prose tells a reviewer to write is, by construction, a member the decoder
+// also accepts - see TestReviewerEnvelopeMembersMatchTheProtocolStructFields
+// for what pins that order down.
+//
+// It also states the VERIFICATION BOUNDARY explicitly (#374 dogfood
+// evidence): a reviewer's permission grant is independent of this runtime's
+// own assurance pipeline, and may not include running the build or test
+// commands an acceptance obligation names. That is a scope boundary, not a
+// capability gap for the reviewer to route around by attempting those
+// commands anyway - the #343 dogfood recorded ten denied Bash calls from one
+// reviewer invocation for exactly this reason. The model is: this runtime
+// independently observes build and test evidence through its own pipeline and
+// quotes it below, under its own untrusted-evidence marker, when it exists;
+// the reviewer judges FROM that evidence and from what its own grant actually
+// lets it inspect, and a denied command is reported through the obligation it
+// left unverified - the existing "not verified is not satisfied" rule, which
+// already covers this case - never as a separate malfunction.
 func reviewerEnvelope(r ExecutionRequest) string {
 	if r.ReviewerResultPath == "" {
 		return ""
 	}
+	members, findingMembers := reviewerResultStatedMembers(), ReviewerFindingMembers()
 	return fmt.Sprintf(
 		"\n\nREQUIRED RESULT. This is a review stage, and its work product is a verdict rather than a change. "+
 			"Prose alone does not complete it: write a JSON document to %s and nothing else decides this stage. "+
-			"The document is a JSON object with exactly these members: schema_version (%q), verdict (%q or %q), "+
-			"findings (an array of objects with a signature and an optional detail), and an optional reason. "+
+			"The document is a JSON object with exactly these members: %s (%q), %s (%q or %q), "+
+			"%s (an array of objects with a %s and an optional %s), and an optional %s. "+
 			"Use %q only when every acceptance obligation above is satisfied by evidence you actually observed, and name no findings with it. "+
-			"Use %q when any obligation is unmet, naming at least one finding; each finding's signature is a short stable identifier for one defect. "+
+			"Use %q when any obligation is unmet, naming at least one finding; each finding's %s is a short stable identifier for one defect. "+
 			"An obligation you could not verify is NOT satisfied - report it as a finding rather than treating it as passed. "+
+			"VERIFICATION BOUNDARY: this runtime's own assurance pipeline independently observes build and test evidence and, when it exists, quotes it to you separately as evidence to reason about; "+
+			"your permission grant for this invocation may not include running the commands an acceptance obligation names, and that is a scope boundary rather than a defect in this invocation. "+
+			"Judge such an obligation from the evidence presented and from what your own grant actually lets you inspect - do not repeatedly attempt a command you have already been denied, and do not treat a denial itself as a finding; "+
+			"an obligation you still cannot verify after that is, as above, not satisfied, and is reported through the ordinary finding for that obligation. "+
 			"Do not restate the candidate revision or tree: the runtime binds this result to the exact candidate it gave you.",
-		r.ReviewerResultPath, ReviewerResultSchemaVersion,
-		StageReviewAccepted, StageReviewBlocked, StageReviewAccepted, StageReviewBlocked)
+		r.ReviewerResultPath,
+		members[0], ReviewerResultSchemaVersion,
+		members[1], StageReviewAccepted, StageReviewBlocked,
+		members[2], findingMembers[0], findingMembers[1],
+		members[3],
+		StageReviewAccepted, StageReviewBlocked, findingMembers[0])
 }
 
 func providerEnvelope(r ExecutionRequest) string {
@@ -1431,6 +1580,11 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		if errors.As(err, &unavailable) && unavailable.Transient() {
 			class = FailureTransientInfrastructure
 		}
+		// The caller's cancellation is classified exactly as it is for the
+		// verification run below: not a prerequisite verdict (#447).
+		if ctx.Err() != nil {
+			class = cancellationClass(context.Cause(ctx))
+		}
 		return AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), FailureClass: class}, err
 	}
 	args := dockerBase(request.CheckoutDir, true)
@@ -1465,14 +1619,37 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		return AssuranceResult{}, signatureErr
 	}
 	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: &EvidenceBinding{Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy, Producer: Ref{ID: "baseline-go", Revision: v.Definition()}, Environment: Ref{ID: "docker-network-none", Revision: v.Sandbox.Image}}}
+	// The workload is `gofmt; go vet; go test` under sh -e, which exits 1 or 2
+	// when the candidate fails. Every other code - Docker's own 125, an
+	// unexecutable 126/127, a signal death such as 137 - is not a verdict.
+	// Candidate code that kills itself can only force bounded retries this way,
+	// never a pass (#454).
+	var exited *containerExitError
+	verdict := runErr != nil && ctx.Err() == nil && errors.As(runErr, &exited) && (exited.Code == 1 || exited.Code == 2)
 	if runErr != nil || ctx.Err() != nil {
-		result.FailureClass = FailureVerification
-		if ctx.Err() != nil {
-			result.FailureClass = FailureUnknown
+		// Only a verifier that actually ran judged the candidate. A cancelled
+		// context is routed by who cancelled it (FailureUnknown here settled the
+		// operation as satisfied and stranded the run). Anything else that did
+		// not end in the workload's own non-zero exit - an unavailable sandbox,
+		// a container that could not start or be reaped - is infrastructure,
+		// never a verdict that spends remediation.
+		switch {
+		case ctx.Err() != nil:
+			result.FailureClass = cancellationClass(context.Cause(ctx))
+		case verdict:
+			result.FailureClass = FailureVerification
+		default:
+			result.FailureClass = FailureTransientInfrastructure
 		}
 	}
 	if tree, err := gitOutput(request.CheckoutDir, "rev-parse", "HEAD^{tree}"); err != nil || strings.TrimSpace(tree) != request.Tree {
 		return AssuranceResult{}, fmt.Errorf("verifier input changed during assurance")
+	}
+	if verdict {
+		// A judged failure is a RESULT, not an error: gofmt, vet or a test said
+		// no. Returning it as an error skipped the single confirmation rerun
+		// for every production failure (#454).
+		return result, nil
 	}
 	return result, runErr
 }
@@ -1512,6 +1689,9 @@ func (v BaselineGoVerifier) prepare(ctx context.Context, checkout string) error 
 	out, err := sandbox.run(ctx, args)
 	if err == nil {
 		return nil
+	}
+	if ctx.Err() != nil {
+		return context.Cause(ctx) // cancellation, never a classified prerequisite (#447)
 	}
 	// A daemon or image that is not there is the one genuinely transient case:
 	// no container ran, so there is no output to classify.

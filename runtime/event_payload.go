@@ -74,6 +74,17 @@ var eventPayloads = map[string]payloadValidator{
 	EventRunCompleted: dispositionPayload(false),
 	EventRunFailed:    dispositionPayload(true),
 	EventRunCancelled: dispositionPayload(false),
+	// A pause records who asked and why; an unpause records who asked. Neither
+	// carries a disposition, a reason code or any authority (#86).
+	EventRunPaused: payloadSchema(func(p RunPausePayload) error {
+		return errors.Join(required("operator", p.Operator), bounded("reason", p.Reason))
+	}),
+	EventRunUnpaused: payloadSchema(func(p RunPausePayload) error {
+		if p.Reason != "" {
+			return errors.New("an unpause carries no reason")
+		}
+		return required("operator", p.Operator)
+	}),
 
 	EventFeedbackPublicationIdentity: payloadSchema(FeedbackPublicationIdentityPayload.validate),
 
@@ -125,6 +136,15 @@ var eventPayloads = map[string]payloadValidator{
 			nonNegative("path_count", p.PathCount),
 			required("paths_digest", p.PathsDigest),
 			boundedList("excluded_paths", p.ExcludedPaths))
+	}),
+	EventCandidateQuarantined: payloadSchema(func(p CandidateQuarantinedPayload) error {
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			nonNegative("attempt", p.Attempt),
+			required("subject", p.Subject),
+			nonNegative("path_count", p.PathCount),
+			required("paths_digest", p.PathsDigest),
+			required("location", p.Location))
 	}),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
@@ -230,7 +250,8 @@ var eventPayloads = map[string]payloadValidator{
 			required("class", string(p.Class)),
 			required("reason", p.Reason),
 			required("text_digest", p.TextDigest),
-			bounded("actor", p.Actor))
+			bounded("actor", p.Actor),
+			validFeedbackReviewState(p.Class, p.ReviewState))
 	}),
 	EventExecutionAttemptProvenance: payloadSchema(ExecutionAttemptProvenance.validate),
 	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
@@ -407,6 +428,30 @@ type CandidateChangedPayload struct {
 // CandidateCommittedPayload records the commit/tree identity the runtime
 // created. The changed path set is a count plus a digest over it, so a wide
 // change cannot grow the payload.
+// CandidateQuarantinedPayload identifies the refused material one physical
+// attempt left behind (#390): which operation and attempt produced it, the
+// subject it was produced against, the refusal that settled it, and where the
+// bytes are kept. It carries identity only; the bytes stay on disk.
+type CandidateQuarantinedPayload struct {
+	OperationID   string       `json:"operation_id"`
+	Attempt       int          `json:"attempt"`
+	Subject       string       `json:"subject"`
+	FailureClass  FailureClass `json:"failure_class,omitempty"`
+	PathCount     int          `json:"path_count"`
+	PathsDigest   string       `json:"paths_digest"`
+	ContentDigest string       `json:"content_digest,omitempty"`
+	Location      string       `json:"location"`
+	// Restored says whether the refused paths were returned to Subject. A
+	// complete copy is journalled even when restoration failed, so the
+	// quarantine always has a durable identity; false means the attempt was
+	// stopped because the workspace may still hold part of the material.
+	Restored bool `json:"restored"`
+	// Adopted marks a record journalled by restart adoption: the copy was
+	// completed by an earlier attempt whose controller died before its own
+	// record became durable (#390).
+	Adopted bool `json:"adopted,omitempty"`
+}
+
 type CandidateCommittedPayload struct {
 	Commit      string `json:"commit"`
 	Tree        string `json:"tree"`
@@ -691,6 +736,24 @@ func boundedList(name string, values []string) error {
 func nonNegative(name string, n int) error {
 	if n < 0 {
 		return fmt.Errorf("payload field %q must not be negative", name)
+	}
+	return nil
+}
+
+// validFeedbackReviewState rejects a durable review_state that is neither
+// empty - the only value a non-review class or a legacy event may carry - nor
+// a member of the closed GitHub review-disposition vocabulary. Without this,
+// an adapter bug or a future review state could be written to the journal as
+// a value that looks recognized but was never validated as one.
+func validFeedbackReviewState(class FeedbackClass, state GitHubReviewState) error {
+	if state == "" {
+		return nil
+	}
+	if class != FeedbackReview {
+		return fmt.Errorf("payload field %q is set on a %q item, which carries no review disposition", "review_state", class)
+	}
+	if !validGitHubReviewStates[state] {
+		return fmt.Errorf("payload field %q is %q, outside the closed review-disposition vocabulary", "review_state", state)
 	}
 	return nil
 }

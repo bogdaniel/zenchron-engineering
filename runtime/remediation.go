@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,12 +84,21 @@ func (t *NoProgressTracker) Allow(f FailureFingerprint) bool {
 	return t.Seen[k] <= t.Limit
 }
 
-// AssuranceRerun enforces the single identical rerun law. A disagreement is
-// flaky even if the retry passes; no producer mutation happens between calls.
+// AssuranceRerun enforces the single identical rerun law. A disagreement
+// between two CANDIDATE VERDICTS is flaky even if the retry passes; no producer
+// mutation happens between calls. It is the one owner of the verdict: a flaky
+// result is never Passed, so no caller can bind a pass that the first run
+// contradicted as evidence (#454). Nor is a result that came with an error,
+// whatever the provider claims. A result that is not a verdict on either run
+// (CandidateVerdict) is not a flake: it routes by its own class.
 func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request AssuranceRequest) (AssuranceResult, FailureClass, error) {
 	first, err := provider.Assure(ctx, request)
-	if err != nil || first.Passed {
+	if err != nil {
+		first.Passed = false
 		return first, first.FailureClass, err
+	}
+	if first.Passed || !CandidateVerdict(first) {
+		return first, first.FailureClass, nil
 	}
 	// The confirmation pass is a DIFFERENT verification and writes its own
 	// immutable transcript. Reusing the first pass's identity would make the
@@ -97,12 +107,32 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 	confirmation.Confirmation = true
 	second, secondErr := provider.Assure(ctx, confirmation)
 	if secondErr != nil {
-		return second, FailureUnknown, secondErr
+		class := FailureUnknown
+		if ctx.Err() != nil {
+			class = cancellationClass(context.Cause(ctx)) // a cancelled confirmation is not unjudged-and-done
+		} else if second.FailureClass != "" {
+			class = second.FailureClass // the verifier said what went wrong
+		}
+		second.Passed = false
+		return second, class, secondErr
 	}
-	if second.Passed != first.Passed || second.FailureClass != first.FailureClass {
+	if !CandidateVerdict(second) {
+		return second, second.FailureClass, nil
+	}
+	if second.Passed != first.Passed || verdictClass(second) != verdictClass(first) {
+		second.Passed, second.FailureClass = false, FailureFlaky
 		return second, FailureFlaky, nil
 	}
 	return second, second.FailureClass, nil
+}
+
+// verdictClass reads an unpassed verdict naming no class as verification, as
+// assureCandidate does, so "" and verification_failure never disagree.
+func verdictClass(r AssuranceResult) FailureClass {
+	if !r.Passed && r.FailureClass == "" {
+		return FailureVerification
+	}
+	return r.FailureClass
 }
 
 // MutationCoordinator is the only remediation bridge: it guards then creates a
@@ -122,8 +152,23 @@ func (c MutationCoordinator) CommitAndObserve(state KernelState, model domain.Pr
 	if err != nil {
 		return state, result, err
 	}
-	next, err := c.Flow.ObserveCommit(state, model, policy, c.Repository, result)
+	next, err := c.Observe(state, model, policy, result)
 	return next, result, err
+}
+
+// errCommitObservation marks a failure of the observation half: the commit
+// exists, and #8 did not observe it (#402).
+var errCommitObservation = errors.New("post-commit observation failed")
+
+// Observe is the observation half of CommitAndObserve, on its own so a commit
+// an earlier attempt already made is observed through the same bridge rather
+// than being made again.
+func (c MutationCoordinator) Observe(state KernelState, model domain.ProjectModel, policy domain.EngineeringPolicy, result CommitResult) (KernelState, error) {
+	next, err := c.Flow.ObserveCommit(state, model, policy, c.Repository, result)
+	if err != nil {
+		return next, fmt.Errorf("%w: %w", errCommitObservation, err)
+	}
+	return next, nil
 }
 
 // DeterministicGofmt is intentionally narrow. The caller supplies the actual
@@ -359,7 +404,8 @@ func (f *FakeReviewerProvider) read(request ExecutionRequest, result ExecutionRe
 	review, err := ReadReviewerResult(request.ReviewerResultPath)
 	if err != nil {
 		result.Outcome = OperationFailed
-		result.Failure = &ProviderFailure{Classification: FailureVerification}
+		result.Failure = &ProviderFailure{Classification: FailureReviewerProtocolIncomplete}
+		result.ReviewRefusal = &ReviewerResultRefusedError{Detail: boundedDetail(err.Error())}
 		return result, nil
 	}
 	result.Review = review

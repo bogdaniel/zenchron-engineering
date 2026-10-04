@@ -343,6 +343,47 @@ WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed',
 -- The controller-effective configuration a plan was first claimed under (#307).
 -- Empty for plans that predate it; see planConfigurationHold.
 ALTER TABLE plans ADD COLUMN config_digest TEXT NOT NULL DEFAULT '';
+`, `
+-- A durable, monotonically increasing CROSS-STREAM cursor (#399).
+--
+-- Every stream's own sequence column already orders that one run's (or
+-- plan's) history, but nothing orders events ACROSS runs: a fleet-wide
+-- observer asking "which runs changed since X" had no answer but polling
+-- every run or replaying the whole table (#96). global_sequence is that total
+-- order - one counter shared by every stream, allocated inside the same
+-- write-locked append transaction that allocates the stream-local sequence
+-- (appendToStream), so the two can never disagree about which event came
+-- first.
+--
+-- It is never part of the hash-chained document: a run's chain and digests
+-- are defined entirely by that run's own stream, and a fleet-wide numbering
+-- scheme is not something a run's history should need to know about, or be
+-- able to invalidate, to stay verifiable.
+--
+-- Existing rows are backfilled in ROWID order. That order already agrees with
+-- every stream's sequence order - appendToStream commits each row strictly
+-- after the rows before it in that stream, so ROWID order and per-stream
+-- sequence order are the same order seen through two different columns - so
+-- backfilling by it gives historical rows a global order consistent with the
+-- history they already have, not a renumbering of it.
+ALTER TABLE events ADD COLUMN global_sequence INTEGER NOT NULL DEFAULT 0;
+UPDATE events SET global_sequence = ranked.ord
+FROM (SELECT rowid AS rid, ROW_NUMBER() OVER (ORDER BY rowid) AS ord FROM events) AS ranked
+WHERE events.rowid = ranked.rid;
+CREATE UNIQUE INDEX events_global_sequence ON events(global_sequence);
+-- ChangesSince filters by stream_kind and orders by global_sequence. Without
+-- this index SQLite's planner prefers the existing (stream_kind, run_id,
+-- plan_id, sequence) index for the equality filter and then sorts the result
+-- in a temp B-tree before LIMIT applies - a scan of every matching row, which
+-- is exactly the unbounded cost #399 exists to avoid. This composite index
+-- answers the filter AND the ordering from one range scan, so LIMIT bounds
+-- the rows actually touched.
+CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequence);
+`, `
+-- The operator pause (#86) is read inside every lease acquisition: the run's
+-- latest run.paused/run.unpaused event. This partial index makes the common
+-- never-paused case an empty probe rather than a scan of the run's journal.
+CREATE INDEX events_run_pause ON events(run_id, sequence) WHERE type IN ('run.paused', 'run.unpaused');
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -573,7 +614,21 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // database. Scheduler.reclaimAbandoned retires an abandoned operation before
 // this count is taken, so what is counted here is always durable state - and
 // never a durable row plus a live opinion about it.
-func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
+//
+// The count is PER CAPACITY CLASS (#85): only other runs holding an active
+// operation of the class being acquired are counted, against that class's
+// ceiling. The class is read from the canonical document's kind - the one the
+// runtime decodes - and never from the denormalized kind column, which nothing
+// verifies; the observation kinds are bound parameters generated from
+// OperationCapacityClass, so there is no second list. A row whose document
+// carries no kind is counted as work, which is the closed direction.
+//
+// The same statement also refuses an operation while ANOTHER operation of the
+// same run holds a lease. That is what makes "a run holds at most one active
+// operation" a durable fact rather than a property of whoever drives it: a
+// second process can never observe a run beside the work another process is
+// doing on it.
+func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -581,19 +636,35 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
-	args := []any{string(document), op.ID, expected, op.RunID}
+	args := []any{string(document), op.ID, expected, op.RunID, op.ID, op.RunID}
 	for _, disposition := range terminalDispositions {
 		args = append(args, string(disposition))
 	}
-	args = append(args, op.RunID, maxRuns)
+	observation := observationKindList()
+	ceiling, acquiringObservation := maxRuns, 0
+	if OperationCapacityClass(op.Kind) == CapacityObservation {
+		ceiling, acquiringObservation = maxObservations, 1
+	}
+	args = append(args, op.RunID)
+	for _, kind := range observation {
+		args = append(args, kind)
+	}
+	args = append(args, acquiringObservation, ceiling)
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
+	kinds := strings.TrimSuffix(strings.Repeat("?,", len(observation)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM run_operations AS other
+		       WHERE other.run_id = ? AND other.id <> ?
+		         AND json_extract(other.document, '$.state') IN ('leased', 'running')
+		         AND json_extract(other.document, '$.lease') IS NOT NULL)
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
 		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
+		  AND NOT (`+runPausedSQL("run_operations.run_id")+`)
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
-		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
+		         AND json_extract(document, '$.lease') IS NOT NULL
+		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?`,
 		args...)
 	if err != nil {
 		return 0, false, err

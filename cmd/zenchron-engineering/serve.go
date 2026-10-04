@@ -358,6 +358,10 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 	if err != nil {
 		return nil, err
 	}
+	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store: c.store,
 		// A SUCCESSOR STARTS SHUT. It admits work when the durable record says
@@ -372,9 +376,12 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		StateDir:              c.config.StateDir,
 		Repositories:          repositories,
 		MaxConcurrentRuns:     ceiling,
-		PollInterval:          settings.PollInterval,
-		Discovery:             discovery,
-		Agents:                c.agents,
+		// The supervisor's turn envelope is the sum of both class ceilings;
+		// the engines' schedulers enforce each one durably (#85).
+		MaxConcurrentObservations: observations,
+		PollInterval:              settings.PollInterval,
+		Discovery:                 discovery,
+		Agents:                    c.agents,
 		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
 			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
 		},
@@ -432,7 +439,11 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		if err != nil {
 			return controlError(err)
 		}
-		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, time.Now().UTC())
+		observations, err := c.maxConcurrentObservations()
+		if err != nil {
+			return controlError(err)
+		}
+		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, observations, time.Now().UTC())
 		if err != nil {
 			return controlError(err)
 		}
@@ -448,12 +459,21 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		shutdown()
 		return controlOK(map[string]bool{"shutting_down": true})
 	case runtime.ControlStop:
-		scheduler := runtime.Scheduler{Store: c.store, Clock: runtime.RealClock{}, Owner: c.owner}
+		scheduler := runtime.Scheduler{Store: c.store, Clock: runtime.RealClock{}, Owner: c.owner, Liveness: runtime.NewLockOwnerLiveness(c.config.StateDir)}
 		outcome, err := runtime.CancelRun(c.store, scheduler, time.Now().UTC(), request.RunID, stopReason)
 		if err != nil {
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlPause, runtime.ControlUnpause:
+		// Applied under the controller role (#86): a generation that has been
+		// superseded - or a process holding no role at all (WithAuthority is
+		// nil-safe and refuses) - cannot accept a pause or an unpause.
+		var view runtime.PauseView
+		if err := c.role.WithAuthority(func() (err error) { view, err = applyPause(c.store, request); return err }); err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
 		// Under the reconciler's own lock: a decision and a plan tick both read
 		// a snapshot and then append against it, and interleaving them lets one
@@ -696,6 +716,16 @@ func (c *composition) maxConcurrentRuns() (int, error) {
 	return settings.MaxConcurrentRuns, nil
 }
 
+// maxConcurrentObservations is the observation-class ceiling (#85), resolved
+// from the same settings for the same reason.
+func (c *composition) maxConcurrentObservations() (int, error) {
+	settings, err := c.config.WatchSettings()
+	if err != nil {
+		return 0, err
+	}
+	return settings.MaxConcurrentObservations, nil
+}
+
 // ---------------------------------------------------------------------------
 // agents
 // ---------------------------------------------------------------------------
@@ -778,7 +808,11 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, time.Now().UTC())
+	observations, err := built.maxConcurrentObservations()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, observations, time.Now().UTC())
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -796,12 +830,13 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	// The ceiling bounds workers, not runs, so the two counts are printed as
 	// the two facts they are rather than as one ratio that is true of neither.
 	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
-	fmt.Fprintf(stdout, "Runs:       %d nonterminal\n\n", fleet.Active)
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d paused, %d unavailable\n\n",
+		fleet.Active, fleet.Working, fleet.Capacity, fleet.Observing, fleet.ObservationCapacity, fleet.Runnable, fleet.Waiting, fleet.Paused, fleet.Unavailable)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",
 			issueLabel(run), orDash(run.Agent), stateLabel(run), locationLabel(run),
-			elapsedLabel(run.Elapsed), run.Reason)
+			elapsedLabel(run.Elapsed), reasonLabel(run))
 	}
 	// PLANS, beside the runs. A plan awaiting approval is the runtime waiting on
 	// a PERSON, and that has to be visible where an operator looks to see
@@ -862,6 +897,19 @@ func stateLabel(run runtime.RunSummary) string {
 		return string(run.Disposition) + ":" + run.Operation
 	}
 	return string(run.Disposition)
+}
+
+// reasonLabel puts an operator pause (#86) beside the run's own reason, which
+// a pause never replaces.
+func reasonLabel(run runtime.RunSummary) string {
+	if run.Paused == nil {
+		return run.Reason
+	}
+	paused := fmt.Sprintf("paused (%s) since %s", terminalSafe(run.Paused.Reason), run.Paused.Since.Format(time.RFC3339))
+	if run.Reason == "" {
+		return paused
+	}
+	return paused + "; " + run.Reason
 }
 
 func locationLabel(run runtime.RunSummary) string {
@@ -1043,13 +1091,16 @@ func autonomyStopAll(flags autonomyFlags, overrides autonomyOverrides, stdout io
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	var outcomes []runtime.Outcome
 	for _, run := range runs {
 		if run.Disposition == runtime.Completed || run.Disposition == runtime.Failed || run.Disposition == runtime.Cancelled {
 			continue
 		}
 		outcome, err := runtime.CancelRun(built.store, scheduler, time.Now().UTC(), run.ID, reason)
+		if runtime.IsRunTerminal(err) {
+			continue // finished after the listing; its outcome stands
+		}
 		if err != nil {
 			return runtime.ExitFailed, err
 		}

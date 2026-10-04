@@ -61,12 +61,6 @@ const (
 	OpGitHubObserve     = "github.observe"
 )
 
-// observationKinds are the operations that only READ external state. They are
-// the only operations a waiting run may perform: a waiting run must still be
-// able to notice that its pull request was merged, but it must not execute,
-// mutate, verify, authorize, or publish anything while it waits.
-var observationKinds = map[string]bool{OpSourceObserve: true, OpGitHubObserve: true}
-
 // publicationKinds are the operations that change protected remote state.
 // Every one of them is gated on a current, authorized #7 decision.
 var publicationKinds = map[string]bool{OpCandidatePush: true, OpPullRequestCreate: true, OpPullRequestUpdate: true}
@@ -161,6 +155,29 @@ type mutationResult struct {
 	// what binds held material to exact content when a budget ends the run
 	// before the change is committed (#203). Empty means unknown.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// ResolvedFeedback is the set of admitted feedback keys this attempt
+	// explicitly and typedly resolved as requiring no change, admitted by
+	// AdmitFeedbackResolution against exactly what this attempt was
+	// delivered and exactly the subject it was invoked against (#376).
+	//
+	// It is populated ONLY through that admission. It is never set from
+	// "the provider returned success and the workspace is unchanged" alone -
+	// that observation is indistinguishable from a provider that deferred
+	// unfinished work and simply exited, which is the exact defect #376
+	// exists to close. Discharge reads this field and nothing else.
+	ResolvedFeedback []string `json:"resolved_feedback,omitempty"`
+	// CheckpointResolved records that AdmitCheckpointCompletion admitted a
+	// FeedbackResolutionCheckpointComplete claim for this attempt, independent
+	// of how many feedback keys (if any) it named and independent of Mutated.
+	// ResolvedFeedback alone cannot say this: an admitted resolution naming
+	// zero keys - the shape a continuation that inherits a checkpoint with no
+	// feedback obligation writes to state "this checkpoint is complete" -
+	// leaves ResolvedFeedback empty exactly like no resolution was ever
+	// admitted at all. This is #379's generalization of #376 from feedback
+	// discharge to checkpoint continuation: a continuation that returns
+	// without setting this is not evidence the checkpoint it inherited is
+	// complete, whether or not it mutated the candidate further.
+	CheckpointResolved bool `json:"checkpoint_resolved,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -309,6 +326,63 @@ func (s *runState) lastFailure(id string) (FailureClass, bool) {
 	return result.FailureClass, true
 }
 
+// lastReviewRefusal reads the exact reviewer-protocol refusal THIS operation's
+// most recent failed attempt recorded, so a bounded retry of the same
+// reviewer invocation (#374) can be told why rather than being re-dispatched
+// blind. It is scoped to FailureReviewerProtocolIncomplete deliberately: that
+// is the one class a retry of this exact operation, not a different one,
+// answers - unlike FailureVerification's admission refusals, which only ever
+// surface once a candidate exists for the run to remediate (see findings()).
+func (s *runState) lastReviewRefusal(id string) (*ReviewerResultRefusedError, bool) {
+	op, ok := s.snapshot.Operations[id]
+	if !ok || op.State != OperationFailed {
+		return nil, false
+	}
+	var record executionRecord
+	if decodeJSON(op.Result, &record) != nil ||
+		record.FailureClass != FailureReviewerProtocolIncomplete || record.ReviewRefusal == nil {
+		return nil, false
+	}
+	return record.ReviewRefusal, true
+}
+
+// reviewerProtocolCorrectionExhausted reports whether this operation's two
+// most recent CONSECUTIVE attempts both failed to cross the reviewer-result
+// protocol (#374). The runtime grants exactly one corrective reviewer
+// invocation after a malformed or missing result; it is independent of
+// max_execution_attempts, which bounds a different question (how many tries
+// this operation gets, for any reason) and must not be read as also answering
+// this one. A second FailureReviewerProtocolIncomplete in a row means the
+// correction offered through lastReviewRefusal was not taken up.
+//
+// It reads the full event history, not the folded operation, because the
+// folded operation (lastFailure, lastReviewRefusal) only ever holds the most
+// recent attempt - exactly one attempt short of what "two in a row" needs. A
+// non-reviewer-protocol attempt anywhere in the streak - success, a different
+// failure class, an external wait - resets the count: only a run of
+// uninterrupted protocol failures, starting from the most recent attempt,
+// counts against the one-correction grant.
+func (s *runState) reviewerProtocolCorrectionExhausted(id string) bool {
+	streak := 0
+	for _, e := range s.events {
+		if e.Type != EventOperationAfter || e.OperationID != id {
+			continue
+		}
+		var op RunOperation
+		if decodeJSON(e.Payload, &op) != nil || op.State != OperationFailed {
+			streak = 0
+			continue
+		}
+		var record executionRecord
+		if decodeJSON(op.Result, &record) == nil && record.FailureClass == FailureReviewerProtocolIncomplete {
+			streak++
+		} else {
+			streak = 0
+		}
+	}
+	return streak >= 2
+}
+
 // currentOperation is the most recently started operation, for the status
 // report only. It is never consulted to decide what to do next.
 func (s *runState) currentOperation() (RunOperation, bool) {
@@ -403,6 +477,9 @@ var externalWaitReasons = map[string]bool{
 	// it performed no execution at all. Nothing is running and an operator has
 	// to repair the installation.
 	"candidate_guard_unavailable": true,
+	// A dead owner's process still holds the candidate (#168); nothing was
+	// dispatched and an operator has to stop it.
+	"candidate_writer_alive": true,
 	// The controller stopped. The run is not working, and it is waiting for a
 	// supervisor to exist again rather than for anything it can do itself.
 	"controller_shutdown":  true,
@@ -505,6 +582,16 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
+			// The after record is durable before run.waiting. A crash in that
+			// gap must preserve external-wait accounting as well as the deadline.
+			if waitingSince.IsZero() {
+				var op RunOperation
+				if decodeJSON(event.Payload, &op) == nil {
+					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
+						waitingSince = event.OccurredAt
+					}
+				}
+			}
 			if waitingSince.IsZero() || event.OperationID == "" {
 				continue
 			}
@@ -592,12 +679,29 @@ func (s *runState) upstreamCandidate() *CandidateRef {
 	return s.run.Plan.UpstreamCandidate
 }
 
-// baseRevision is the base the candidate currently sits on.
+// pristineCandidateHead is the commit a freshly cloned workspace must be at
+// before this run has made any commit of its own: ordinarily the trusted
+// base it was cloned at, but the exact upstream candidate when this stage
+// consumes one that was never published and had to be transferred into the
+// workspace after the clone - see createCandidate.
+func (s *runState) pristineCandidateHead() string {
+	if ref := s.upstreamCandidate(); ref != nil {
+		return ref.Revision
+	}
+	return s.pinnedBase()
+}
+
+// baseRevision is the base the candidate currently sits on: the recorded base
+// once a base.integrate has moved it, otherwise the pristine head the
+// workspace started from - which, for a stage consuming an unpublished
+// upstream candidate, is the transferred candidate rather than the trusted
+// base the clone itself resolved. Falling back to pinnedBase here would claim
+// the workspace sits on a commit createCandidate never checked it out to.
 func (s *runState) baseRevision() string {
 	if s.projection.BaseRevision != "" {
 		return s.projection.BaseRevision
 	}
-	return s.pinnedBase()
+	return s.pristineCandidateHead()
 }
 
 func (s *runState) contractRevision() string { return s.projection.Contract.Revision }
@@ -960,13 +1064,32 @@ func (s *runState) attemptsFor(kind string) int {
 	}
 }
 
-func bindSourceObserve(s *runState) (string, bool) { return s.epochKey(), true }
+// A retry disposition with finite attempt authority changes status, not the
+// observation being retried. Keep its binding so status events cannot mint a
+// fresh attempt budget, through to the last attempt.
+func observationBinding(s *runState, kind string) string {
+	var latest *RunOperation
+	for _, op := range s.snapshot.Operations {
+		if op.Kind == kind && (latest == nil || op.CreatedAt.After(latest.CreatedAt) || (op.CreatedAt.Equal(latest.CreatedAt) && op.ID > latest.ID)) {
+			copy := op
+			latest = &copy
+		}
+	}
+	if latest != nil && latest.State == OperationFailed && retryDispositions[latest.RetryDisposition].FiniteAttemptAuthority {
+		return bindingOf(*latest)
+	}
+	return s.epochKey()
+}
+
+func bindSourceObserve(s *runState) (string, bool) {
+	return observationBinding(s, OpSourceObserve), true
+}
 
 func bindGitHubObserve(s *runState) (string, bool) {
 	if !s.published() {
 		return "", false
 	}
-	return s.epochKey(), true
+	return observationBinding(s, OpGitHubObserve), true
 }
 
 func bindContractCompile(s *runState) (string, bool) {
@@ -1019,8 +1142,39 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	// rather than a retry of this one. That is what makes "the same comment is
 	// never sent to the worker twice" a property of the planner rather than of
 	// a cursor someone has to remember to advance.
+	//
+	// An EXISTING unresolved delivery for this head is checked FIRST and takes
+	// priority over deriving a fresh binding from newly pending items (#376).
+	// pendingFeedbackKeys() empties the instant delivery is journalled - before
+	// the attempt that delivered it even succeeds or fails - so re-deriving a
+	// binding purely from what is still pending would stop proposing THIS
+	// operation again the moment it failed with feedback_unresolved: plan()
+	// would find nothing wanted, the run would settle, and the operation would
+	// sit failed-but-retryable forever with its feedback still outstanding.
+	// Re-finding the EXACT key that existing non-succeeded operation already
+	// used keeps it eligible for the scheduler's own bounded retry instead.
+	if binding, ok := s.unresolvedFeedbackBinding(s.projection.CandidateRevision); ok {
+		return binding, true
+	}
 	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
 		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	return "", false
+}
+
+// unresolvedFeedbackBinding re-proposes the exact feedback execution binding
+// an earlier attempt for this head already started, when that operation has
+// not succeeded. See the call site in bindExecutionInvoke for why this is
+// necessary rather than merely convenient.
+func (s *runState) unresolvedFeedbackBinding(head string) (string, bool) {
+	prefix := "feedback|" + head + "|"
+	for _, op := range s.snapshot.Operations {
+		if op.Kind != OpExecutionInvoke || op.State == Succeeded {
+			continue
+		}
+		if binding := bindingOf(op); strings.HasPrefix(binding, prefix) {
+			return binding, true
+		}
 	}
 	return "", false
 }
@@ -1412,13 +1566,17 @@ func (s *runState) validate(desired desiredOperation, live Disposition) error {
 	if terminalDisposition(live) {
 		return &OperationRefusedError{desired.kind, "run reached a terminal condition"}
 	}
-	if live == Waiting && !observationKinds[desired.kind] {
+	// Observation-class operations only READ external state, so they are the
+	// only ones a waiting run may perform: it must still notice that its pull
+	// request was merged, but it must not execute, mutate, verify, authorize
+	// or publish anything while it waits.
+	if live == Waiting && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "a waiting run performs observation only"}
 	}
 	if s.projection.SourceIntentChanged && desired.kind == OpContractCompile {
 		return &OperationRefusedError{desired.kind, "the pinned source moved; new intent is never silently compiled"}
 	}
-	if s.projection.ObservedExternalHead != "" && !observationKinds[desired.kind] {
+	if s.projection.ObservedExternalHead != "" && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "an unexpected external head is never overwritten"}
 	}
 	if publicationKinds[desired.kind] && !s.authorizedForPublication() {
@@ -1479,6 +1637,22 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := r.reconcileStoreLag(state); err != nil {
 			return Outcome{}, err
 		}
+		// A PAUSED run is returned unchanged (#86): nothing is planned,
+		// settled or journalled, and the Outcome carries the run's own
+		// disposition and reason - a pause is never one. This exit is only the
+		// no-journal guarantee; the gate is AcquireOperation, which refuses a
+		// paused run's lease whatever this pass read.
+		if state.snapshot.Paused != nil {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
+		}
+		// Another live driver is operating this run. The store would refuse
+		// every acquisition anyway (a run holds at most one active operation),
+		// so this pass journals NOTHING - no planned operation, no run.waiting
+		// over a run someone else is driving. The reason is not journalled; it
+		// tells the caller why this pass did nothing.
+		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: ReasonDrivenElsewhere}, err
+		}
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
@@ -1496,7 +1670,7 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		// is recorded BY an observation, which then makes the next two passes
 		// re-observe at the new epoch, so counting them would exhaust the
 		// budget before the producer could ever be planned.
-		if !wanted || !observationKinds[desired.kind] {
+		if !wanted || OperationCapacityClass(desired.kind) != CapacityObservation {
 			if fingerprint, failing := state.failureFingerprint(); failing && !progress.Allow(fingerprint) {
 				return r.settle(state, Failed, "no_progress")
 			}
@@ -1529,6 +1703,32 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 	return r.settle(state, Waiting, "reconcile_pass_limit")
 }
 
+// ReasonDrivenElsewhere is the Outcome reason of a Reconcile pass that found
+// another live driver operating the run. It is never journalled.
+const ReasonDrivenElsewhere = "driven_elsewhere"
+
+// drivenElsewhere reports whether a DIFFERENT owner holds a lease on one of the
+// run's operations that this driver may not take over: the owner is alive, or
+// its lease has not expired. The driver's own leftover lease is not
+// "elsewhere"; it is recovered by the ordinary takeover in Scheduler.Next.
+func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
+	s := r.scheduler.defaults()
+	operations, err := s.Store.Operations(runID)
+	if err != nil {
+		return false, err
+	}
+	now := s.Clock.Now()
+	for _, op := range operations {
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.Lease.Owner == s.Owner {
+			continue
+		}
+		if !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func waitingOr(live, fallback Disposition) Disposition {
 	if live == Waiting {
 		return Waiting
@@ -1557,7 +1757,18 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 		if !ok || (journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled) {
 			continue
 		}
-		if _, err := r.scheduler.Finish(journalled.ID, journalled.State); err != nil {
+		// The attempt ended when its after record was journalled; the
+		// controller's downtime since then is not execution. Only an after
+		// record of the SAME attempt the store holds says when that ended.
+		var ended time.Time
+		if journalled.Attempt == stored.Attempt {
+			for _, event := range state.events {
+				if event.Type == EventOperationAfter && event.OperationID == stored.ID {
+					ended = event.OccurredAt
+				}
+			}
+		}
+		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore, journalled.RetryDisposition, ended); err != nil {
 			return err
 		}
 	}
@@ -1600,11 +1811,22 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Failed, desired.kind+attemptsExhaustedSuffix)
 		return false, outcome, err
 	}
+	if r.deps.Clock.Now().Before(planned.RetryNotBefore) {
+		// The timestamp only says "not yet"; the journalled record says why.
+		outcome, err := r.settle(state, Waiting, waitReasonOf(state.snapshot.Operations[planned.ID]))
+		return false, outcome, err
+	}
 	leased, err := r.scheduler.Next(state.run.ID)
 	if err != nil {
 		return false, Outcome{}, err
 	}
 	if leased == nil {
+		// A pause that committed after this pass's check is why the store
+		// refused (#86). The run is left as it is rather than settled on the
+		// stale view, so nothing is journalled after run.paused.
+		if paused, err := r.deps.Store.RunPaused(state.run.ID); err != nil || paused {
+			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
+		}
 		outcome, err := r.settle(state, waitingOr(live, Waiting), "operation_unavailable")
 		return false, outcome, err
 	}
@@ -1650,6 +1872,26 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// account state, so asking it again is the only honest re-derivation; the
 	// attempt that only re-observes the wait is given back by RestoreAttempt,
 	// which is what keeps repeated passes from spending the run's budget.
+	// A REVIEWER PROTOCOL FAILURE gets exactly ONE corrective re-invocation
+	// (#374), never a budget's worth. RouteFailure(FailureReviewerProtocolIncomplete)
+	// is RouteRetry - a malformed or missing result is a correctable mistake,
+	// not a verdict on the candidate - so without this check the ordinary rule
+	// below would keep re-dispatching the SAME reviewer for as many attempts as
+	// the operator's execution-attempt budget happens to allow, which answers a
+	// question #374 does not ask: how many tries does this invocation get, not
+	// how many corrections does a reviewer that keeps failing the protocol
+	// deserve. One correction is the whole grant. A reviewer handed its own
+	// exact refusal reason (lastReviewRefusal, consulted in invokeExecution)
+	// and still failing to cross the protocol a second time in a row has shown
+	// the correction was not taken up, and no further authority accrues to
+	// this operation from retrying it again - whatever budget remains.
+	if state.reviewerProtocolCorrectionExhausted(leased.ID) {
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Failed, leased.Kind+"_reviewer_protocol_correction_exhausted")
+		return false, outcome, err
+	}
 	if class, recorded := state.lastFailure(leased.ID); recorded && !reattemptable(RouteFailure(class)) {
 		// The journal already records this operation as failed; releasing the
 		// lease keeps the scheduler row saying the same thing.
@@ -1679,6 +1921,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// itself writes to the scheduler row - so journal and store agree, and the
 	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
+	finished.RetryNotBefore, finished.RetryDisposition = time.Time{}, ""
 	finished.State = produced.state
 	if interrupted {
 		finished.State = OperationCancelled
@@ -1691,11 +1934,20 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	// The disposition is recorded from the class; the wait and its timing only
+	// while a successor attempt exists, so the last attempt stops truthfully.
+	if finished.State == OperationFailed {
+		finished.RetryDisposition = retryDispositionFor(failureClassOf(finished.Result))
+	}
+	disposition, awaiting := awaitsRetry(finished)
+	if awaiting && disposition.Delay != nil {
+		finished.RetryNotBefore = r.deps.Clock.Now().Add(disposition.Delay(started.Attempt))
+	}
 	// The journal is written first and is the authority for reconciliation.
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.Finish(started.ID, finished.State); err != nil {
+	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore, finished.RetryDisposition, time.Time{}); err != nil {
 		// The stop may already have finished the row. That is accepted only for
 		// an interrupted execution and only when the row durably reads
 		// OperationCancelled - the one state CancelRun writes. Every other
@@ -1729,6 +1981,35 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, "execution_checkpointed")
 		return false, outcome, err
 	}
+	// AN UNRESOLVED CONTINUATION ALSO ENDS THE PASS (#379), for the same
+	// reason a checkpoint does: the checkpoint it inherited is unresolved work,
+	// not a flake worth hammering same-call like an ordinary retryable
+	// failure. feedback_unresolved and reviewer-protocol failures are
+	// deliberately NOT given this treatment - they retry within the same pass,
+	// spending their whole attempt budget at once, because that failure is
+	// about a candidate already known to exist and already being iterated on.
+	// A checkpoint continuation is different: it is the one invocation that
+	// may have just spent real wall-clock time deferring to work it never
+	// finished, and retrying it immediately, in the same call, is exactly how
+	// the fourth dogfood's checkpoint got hammered through its whole budget
+	// and promoted on the attempt that happened to return clean. Ending the
+	// pass here means each continuation attempt is observed at a durable
+	// point - the checkpoint stays exactly where it was, the attempt it spent
+	// is not given back, and a later reconciliation (not this same call)
+	// decides whether to spend the next one.
+	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
+		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
+	if awaiting {
+		if !disposition.SpendsAttempt {
+			if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
+				return false, Outcome{}, err
+			}
+		}
+		outcome, err := r.settle(state, Waiting, disposition.Reason)
+		return false, outcome, err
+	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
 		// The ATTEMPT is always given back - observing an external refusal is
 		// not work. The execution TIME is given back only when no execution
@@ -1742,6 +2023,18 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	return true, Outcome{}, nil
+}
+
+// failureClassOf reads the same one shared mutationResult field lastFailure
+// does, without requiring the caller to care whether the class routes
+// anywhere in particular - unlike waitRoutedFailure, which only answers for
+// RouteWait.
+func failureClassOf(raw json.RawMessage) FailureClass {
+	var result mutationResult
+	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
+		return ""
+	}
+	return result.FailureClass
 }
 
 // journalled reports whether an effect appended one particular event type.
@@ -1811,6 +2104,7 @@ var waitReasons = map[FailureClass]string{
 	// The controller cannot install its own candidate-Git boundary. An
 	// operator repairs the installation; nothing about the work is wrong.
 	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
+	FailureCandidateWriterAlive:      "candidate_writer_alive",
 	FailureControllerShutdown:        "controller_shutdown",
 }
 

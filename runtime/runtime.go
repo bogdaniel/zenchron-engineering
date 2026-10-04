@@ -115,6 +115,10 @@ const (
 	// execution-complete, assurance-eligible candidate, and a checkpoint is
 	// neither. See RunProjection.CandidateComplete.
 	EventCandidateCheckpointed = "candidate.checkpointed"
+	// EventCandidateQuarantined records material a REFUSED invocation left in
+	// the workspace being moved out of it (#390): preserved in a runtime-owned
+	// quarantine, never committed, never inherited by the next attempt.
+	EventCandidateQuarantined = "candidate.quarantined"
 	// EventExecutionCompleted records that a producer invocation ended by
 	// finishing, rather than by running out of a bound. It is a producer
 	// COMPLETION OBSERVATION and nothing more: it asserts no acceptance, no
@@ -237,7 +241,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
+var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventRunPaused: true, EventRunUnpaused: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventCandidateQuarantined: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -376,13 +380,18 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
-	SchemaVersion  string         `json:"schema_version"`
-	ID             string         `json:"id"`
-	RunID          string         `json:"run_id"`
-	Kind           string         `json:"kind"`
-	IdempotencyKey string         `json:"idempotency_key"`
-	State          OperationState `json:"state"`
-	Attempt        int            `json:"attempt"`
+	// RetryNotBefore is purely "not eligible before"; it survives restart and
+	// carries no meaning of its own. RetryDisposition says why and how the
+	// wait is accounted (retryDispositions).
+	RetryNotBefore   time.Time        `json:"retry_not_before,omitzero"`
+	RetryDisposition RetryDisposition `json:"retry_disposition,omitempty"`
+	SchemaVersion    string           `json:"schema_version"`
+	ID               string           `json:"id"`
+	RunID            string           `json:"run_id"`
+	Kind             string           `json:"kind"`
+	IdempotencyKey   string           `json:"idempotency_key"`
+	State            OperationState   `json:"state"`
+	Attempt          int              `json:"attempt"`
 	// AttemptIdentity is the highest PHYSICAL attempt identity allocated for
 	// this operation. It is an identity, not a count of anything, and it only
 	// ever moves forward.
@@ -497,9 +506,16 @@ type EngineeringEvent struct {
 	PreviousEventHash string          `json:"previous_event_hash,omitempty"`
 	Payload           json.RawMessage `json:"payload,omitempty"`
 	Artifacts         []Artifact      `json:"artifacts,omitempty"`
-	StateBefore       string          `json:"state_before,omitempty"`
-	StateAfter        string          `json:"state_after,omitempty"`
-	EventHash         string          `json:"event_hash,omitempty"`
+	// StateBefore and StateAfter are recorded transition digests: diagnostic
+	// compatibility metadata, NOT authoritative (#453). Replay never verifies
+	// them, and no cache, checkpoint, recovery path or decision may trust them
+	// in place of replaying the events. EventHash covers them, so editing one
+	// without recomputing the hash is still refused as corruption; an arbitrary
+	// but chain-consistent value is accepted and decides nothing. The JSON
+	// names stay for journal compatibility.
+	StateBefore string `json:"state_before,omitempty"`
+	StateAfter  string `json:"state_after,omitempty"`
+	EventHash   string `json:"event_hash,omitempty"`
 }
 type RunSnapshot struct {
 	EngineeringRun
@@ -508,7 +524,11 @@ type RunSnapshot struct {
 	// HeldMaterial is what a budget-ended run is holding (#203), read back
 	// from its run.failed event exactly as recorded.
 	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
-	StateSHA256  string        `json:"state_sha256"`
+	// Paused is the operator's pause in force (#86), nil when there is none.
+	// omitempty is load-bearing: every run that was never paused keeps the
+	// state digest it always had.
+	Paused      *RunPause `json:"paused,omitempty"`
+	StateSHA256 string    `json:"state_sha256"`
 }
 
 // CanonicalJSON serializes a typed runtime value to JSON, then applies RFC 8785
@@ -552,10 +572,11 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			return s, fmt.Errorf("broken event chain")
 		}
 		h, err := EventDigest(e)
-		if err != nil || (e.EventHash != "" && e.EventHash != h) {
+		// No empty-hash tolerance: every event a reducer sees carries its hash,
+		// including the journal's not-yet-persisted one (#462).
+		if err != nil || e.EventHash != h {
 			return s, fmt.Errorf("invalid event hash")
 		}
-		e.EventHash = h
 		for _, a := range e.Artifacts {
 			if err := ValidateArtifact(a); err != nil {
 				return s, err
@@ -615,6 +636,7 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			s.Disposition = Cancelled
 			s.Reason = payloadReason(e.Payload)
 		}
+		s.Paused = foldPause(s.Paused, e)
 		s.Cursor = Cursor{e.Sequence, e.ID, e.EventHash}
 		prev = e
 	}
@@ -634,6 +656,9 @@ func StableOperationKey(runID, kind string, bindings ...string) string {
 	return strings.Join(append([]string{runID, kind}, bindings...), ":")
 }
 func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
+	if now.Before(op.RetryNotBefore) {
+		return false
+	}
 	if op.State == Succeeded || op.State == OperationCancelled {
 		return false
 	}

@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // THE CEILING BOUNDS WORKERS, NOT RUNS, so the fleet reports the two counts
@@ -81,5 +83,42 @@ func TestExecutingIsTakenFromTheOperationRows(t *testing.T) {
 	}
 	if executingNow(fixture.store, runID) {
 		t.Fatal("a run whose attempt has ended was reported as executing")
+	}
+}
+
+// A BUDGET-ENDED RUN HOLDING MATERIAL IS DISCOVERABLE FROM THE LIST, not only
+// from its own detail. An operator triaging a fleet of terminal runs needs to
+// find the ones holding a verified commit without opening each one.
+func TestFleetSummaryReportsHeldMaterial(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	base := time.Unix(1000, 0).UTC()
+	if err := store.PutRun(EngineeringRun{SchemaVersion: SchemaVersion, ID: "held-run", Repository: "o/r",
+		Goal: "github-issue:o/r#1", Phase: Contract, Disposition: Active, CreatedAt: base, UpdatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "held-run-created", RunID: "held-run",
+		Type: EventRunCreated, OccurredAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := marshalPayloadJSON(dispositionRecord{Reason: "run_wall_budget_exhausted", HeldMaterial: &HeldMaterial{
+		Kind: HeldVerifiedUnpublished, Revision: "b6f2c09", BlockedBy: "run_wall_budget_exhausted", Disposition: HeldDisposition}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "held-run-failed", RunID: "held-run",
+		Type: EventRunFailed, OccurredAt: base, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	fleet, err := FleetStatus(store, dir, 0, 0, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fleet.Runs) != 1 || !fleet.Runs[0].Held {
+		t.Fatalf("fleet runs = %+v, want one run reporting held material", fleet.Runs)
 	}
 }

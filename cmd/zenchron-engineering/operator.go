@@ -174,6 +174,12 @@ func resumeRefusal(run runtime.EngineeringRun, runID string, events []runtime.En
 		return runtime.ExitCancelled, fmt.Sprintf(
 			"run %s was cancelled (%s); explicit operator intent is not withdrawn by asking again. Start new work with `autonomy run issue <number>`", runID, reason), true
 	}
+	// A pause is cleared only by `unpause` (#86); resume never walks over it.
+	if pause := runtime.JournalPause(events); pause != nil {
+		return runtime.ExitWaiting, fmt.Sprintf(
+			"run %s is paused by %s since %s (%s); `autonomy unpause %s` clears it",
+			runID, terminalSafe(pause.Operator), pause.Since.Format(time.RFC3339), terminalSafe(pause.Reason), runID), true
+	}
 	if reason == runtime.WatchWaitingOptInRemoved {
 		return runtime.ExitWaiting, fmt.Sprintf(
 			"run %s is waiting on opt_in_removed: the opt-in label was removed from its source issue, which withdraws consent to work on it. Restore the label; the run then resumes through the ordinary schedule. Resuming does not restore consent", runID), true
@@ -751,7 +757,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// stated rather than one being left as a missing line.
 	if h := view.HeldMaterial; h != nil {
 		line("held material", fmt.Sprintf("%s %s rev=%s tree=%s", h.Disposition, h.Kind, orUnknown(short(h.Revision)), orUnknown(short(h.Tree))))
-		if h.Kind == runtime.HeldUncommitted {
+		if h.Kind == runtime.HeldUncommitted || h.Kind == runtime.HeldCommittedUnobserved {
 			line("held content", fmt.Sprintf("operation=%s paths=%d digest=%s", h.Operation, h.PathCount, orUnknown(short(h.ContentDigest))))
 		}
 		blocked := h.NextStep
@@ -909,14 +915,17 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		switch d.FailureClass {
 		case runtime.FailureProviderAccountUnavailable:
 			failure = "provider account unavailable (" + failure + ")"
-		// The three provider conditions an operator most needs kept apart, and
-		// the ones #238 collapsed into hours of apparent active work. A stall
-		// is a live process that stopped moving; unavailable is a host that
-		// cannot reach the provider; quota is an allowance that will come back.
+		// The provider conditions an operator most needs kept apart, and the
+		// ones #238 collapsed into hours of apparent active work. A stall is a
+		// live process that stopped moving; unavailable is an endpoint that
+		// answered it cannot serve; connectivity is a host that cannot reach
+		// it (#380); quota is an allowance that will come back.
 		case runtime.FailureProviderNoProgress:
 			failure = "provider stalled: terminated by the inactivity policy (" + failure + ")"
 		case runtime.FailureProviderUnavailable:
-			failure = "provider unavailable: the host could not reach the provider (" + failure + ")"
+			failure = "provider unavailable: the endpoint reported it cannot serve (" + failure + ")"
+		case runtime.FailureConnectivity:
+			failure = "connectivity unavailable: the host could not reach the endpoint; retrying after a bounded backoff (" + failure + ")"
 		case runtime.FailureProviderQuota:
 			failure = "provider quota exhausted (" + failure + ")"
 		}
@@ -992,15 +1001,17 @@ const followInterval = time.Second
 // a digest, and its local-only and sanitized flags - so listing events can
 // never emit raw local-only material.
 type eventView struct {
-	SchemaVersion     string             `json:"schema_version"`
-	View              string             `json:"view"`
-	Sequence          int64              `json:"sequence"`
-	ID                string             `json:"id"`
-	RunID             string             `json:"run_id"`
-	Type              string             `json:"type"`
-	OccurredAt        time.Time          `json:"occurred_at"`
-	Actor             string             `json:"actor"`
-	OperationID       string             `json:"operation_id,omitempty"`
+	SchemaVersion string    `json:"schema_version"`
+	View          string    `json:"view"`
+	Sequence      int64     `json:"sequence"`
+	ID            string    `json:"id"`
+	RunID         string    `json:"run_id"`
+	Type          string    `json:"type"`
+	OccurredAt    time.Time `json:"occurred_at"`
+	Actor         string    `json:"actor"`
+	OperationID   string    `json:"operation_id,omitempty"`
+	// Rendered as recorded, for diagnostics: the journal's state digests are
+	// not authoritative (#453) and this view never interprets them.
 	StateBefore       string             `json:"state_before,omitempty"`
 	StateAfter        string             `json:"state_after,omitempty"`
 	Subject           *eventSubject      `json:"subject,omitempty"`
@@ -1240,6 +1251,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		// uses, and the SAME PATH a real shell would resolve.
 		ControllerRoot:    controllerRoot(),
 		EntrypointPathEnv: os.Getenv("PATH"),
+		GoEnvFile:         runtime.OperatorGoEnvFile(os.Getenv("GOENV")),
 	}
 	// The running binary's own provenance. A resolution failure is carried
 	// through as itself rather than discarded: doctor must be able to say "I

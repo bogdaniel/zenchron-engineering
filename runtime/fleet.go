@@ -14,12 +14,19 @@ package runtime
 // supervisor owns them.
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"hash"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -86,6 +93,14 @@ type RunSummary struct {
 	FeedbackPending  int `json:"feedback_pending,omitempty"`
 	// Attempts is the per-operation-kind attempt tally.
 	Attempts map[string]int `json:"attempts,omitempty"`
+	// Held reports that a budget-ended run is holding valuable material
+	// (#203). It is independent of Disposition: a terminal run may hold
+	// material or may not, and an operator triaging a fleet needs to find the
+	// ones that do without opening each one's detail.
+	Held bool `json:"held,omitempty"`
+	// Paused is the operator's pause in force (#86), read from the journal.
+	// It is independent of Disposition, which a pause never changes.
+	Paused *RunPause `json:"paused,omitempty"`
 	// Error is set when this run's state could not be replayed. One unreadable
 	// run must not hide the rest of the fleet.
 	Error string `json:"error,omitempty"`
@@ -102,10 +117,24 @@ type Fleet struct {
 	// produced "Workers: 3 / 2 active" on a fleet with one run parked for
 	// review - true of neither quantity, and reading as though the ceiling had
 	// been breached when it had been enforced exactly.
-	Capacity  int          `json:"capacity"`
-	Executing int          `json:"executing"`
-	Active    int          `json:"active"`
-	Runs      []RunSummary `json:"runs"`
+	Capacity  int `json:"capacity"`
+	Executing int `json:"executing"`
+	Active    int `json:"active"`
+	// The capacity-class view (#85). ObservationCapacity is the observation
+	// ceiling, as Capacity is the work ceiling; zero means a reader that does
+	// not know the configuration (the control plane), and is omitted. The six counts partition the
+	// nonterminal runs exactly: Working + Observing + Runnable + Waiting +
+	// Paused + Unavailable == Active. Paused (#86) is a paused run holding no
+	// active operation; one still settling counts as Working or Observing. They are read from durable operation rows, never
+	// from a supervisor's memory; see capacityState.
+	ObservationCapacity int          `json:"observation_capacity,omitempty"`
+	Working             int          `json:"working"`
+	Observing           int          `json:"observing"`
+	Runnable            int          `json:"runnable"`
+	Waiting             int          `json:"waiting"`
+	Paused              int          `json:"paused"`
+	Unavailable         int          `json:"unavailable"`
+	Runs                []RunSummary `json:"runs"`
 	// Plans is the plan-level view beside the runs. An operator with a plan
 	// awaiting their approval is being waited ON, and that has to be visible in
 	// the same place they look to see whether anything is happening.
@@ -275,8 +304,20 @@ func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 // is unreadable: that run reports its own error and the rest are still
 // answered, because a fleet view whose whole value is "show me everything" must
 // not be lost to one bad row.
-func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time) (Fleet, error) {
+func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity, observationCapacity int, now time.Time) (Fleet, error) {
+	fleet, err := fleetStatus(store, stateDir, capacity, now, nil)
+	fleet.ObservationCapacity = observationCapacity
+	return fleet, err
+}
+
+// fleetStatus is FleetStatus with an optional summary cache, which a
+// long-lived reader passes and a one-shot CLI does not.
+func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time, cache *summaryCache) (Fleet, error) {
 	runs, err := store.Runs()
+	if err != nil {
+		return Fleet{}, err
+	}
+	journals, err := runJournalDigests(store, cache)
 	if err != nil {
 		return Fleet{}, err
 	}
@@ -286,10 +327,31 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
 	fleet.Plans = summarizePlans(store)
+	byRun, err := capacityOperations(store)
+	if err != nil {
+		return Fleet{}, err
+	}
 	for _, run := range runs {
-		summary := summarizeRun(store, stateDir, run, now)
+		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
+			switch {
+			case summary.Error != "":
+				fleet.Unavailable++
+			default:
+				switch state := capacityState(byRun[run.ID], now); {
+				case state == CapacityWork:
+					fleet.Working++
+				case state == CapacityObservation:
+					fleet.Observing++
+				case summary.Paused != nil:
+					fleet.Paused++
+				case state == capacityRunnable:
+					fleet.Runnable++
+				default:
+					fleet.Waiting++
+				}
+			}
 		}
 		if summary.Executing {
 			fleet.Executing++
@@ -308,6 +370,88 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		return left.Elapsed < right.Elapsed
 	})
 	return fleet, nil
+}
+
+// capacityOperations reads, per nonterminal run, only the operations that can
+// still decide its count: those not succeeded or cancelled. Decoding every
+// operation of every run on each control-plane read would undo #428. A
+// dependency outside that set (succeeded, in practice) is read by id, so
+// leasable sees exactly what Next sees.
+func capacityOperations(store *SQLiteOperationStore) (map[string]map[string]RunOperation, error) {
+	args := []any{}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
+	}
+	rows, err := store.db.Query(`SELECT document FROM run_operations
+		WHERE json_extract(document, '$.state') NOT IN ('succeeded', 'cancelled')
+		  AND run_id IN (SELECT id FROM runs WHERE json_extract(document, '$.disposition') NOT IN (`+
+		strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`))`, args...)
+	if err != nil {
+		return nil, err
+	}
+	operations, err := scanOperations(rows)
+	if err != nil {
+		return nil, err
+	}
+	byRun := map[string]map[string]RunOperation{}
+	for _, op := range operations {
+		if byRun[op.RunID] == nil {
+			byRun[op.RunID] = map[string]RunOperation{}
+		}
+		byRun[op.RunID][op.ID] = op
+	}
+	for _, all := range byRun {
+		for _, op := range all {
+			for _, id := range op.DependsOn {
+				if _, ok := all[id]; ok {
+					continue
+				}
+				if dependency, _, found, err := store.Operation(id); err != nil {
+					return nil, err
+				} else if found {
+					all[id] = dependency
+				}
+			}
+		}
+	}
+	return byRun, nil
+}
+
+// capacityRunnable and capacityWaiting are the two states of a run holding no
+// active operation. They are not capacity classes; they only share the type
+// so capacityState answers in one value.
+const (
+	capacityRunnable CapacityClass = "runnable"
+	capacityWaiting  CapacityClass = "waiting"
+)
+
+// capacityState places one nonterminal run's durable operations in exactly one
+// operator count (#85). Active means what AcquireOperation counts: leased or
+// running WITH a lease. A run holds at most one, so work-or-observation is a
+// partition; should it ever hold both, work wins, which is the closed side.
+// Runnable is a WORK operation Next would lease now: leasable, the scheduler's
+// own predicate, and not expired. The one approximation is liveness, which a
+// read never probes: an abandoned lease counts as active (Working or
+// Observing) until a scheduler reclaims it.
+func capacityState(all map[string]RunOperation, now time.Time) CapacityClass {
+	active := CapacityClass("")
+	for _, op := range all {
+		if op.Lease != nil && (op.State == Leased || op.State == Running) {
+			if class := OperationCapacityClass(op.Kind); active == "" || class == CapacityWork {
+				active = class
+			}
+		}
+	}
+	if active != "" {
+		return active
+	}
+	for _, op := range all {
+		if op.State != Leased && op.State != Running && OperationCapacityClass(op.Kind) == CapacityWork &&
+			leasable(op, all, now, false) && !OperationExpired(op, now) {
+			return capacityRunnable
+		}
+	}
+	return capacityWaiting
 }
 
 func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {
@@ -352,6 +496,8 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 	summary.Disposition, summary.Reason = snapshot.Disposition, snapshot.Reason
 	summary.CandidateRevision, summary.CandidateTree = projection.CandidateRevision, projection.CandidateTree
 	summary.Attempts = projection.Attempts
+	summary.Held = snapshot.HeldMaterial != nil
+	summary.Paused = snapshot.Paused
 	if operation, ok := state.currentOperation(); ok {
 		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
 	}
@@ -372,6 +518,118 @@ func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringR
 		}
 	}
 	summary.FeedbackPending = len(feedback.Pending(projection.Head()))
+	return summary
+}
+
+// summaryCache memoizes the replayed part of each RunSummary for a long-lived
+// reader such as the control plane, which re-reads the whole fleet every few
+// seconds. Decoding, canonicalizing and hash-verifying every journal on every
+// read cost ~8ms a run - about a second at 93 runs.
+//
+// The key is the run row plus a SHA-256 over exactly the event bytes replay
+// reads: the same columns, the same WHERE, the same order as Events. Replay is
+// a pure function of those inputs, so a hit returns what replaying would
+// return - including for a journal edited in place, which changes the bytes,
+// misses, replays, and is refused by the chain check exactly as an uncached
+// read would refuse it (#428 review). What depends on the clock or on the
+// process - elapsed, executing right now, workspace - is recomputed on every
+// read, and failed summaries are never cached.
+type summaryCache struct {
+	mu      sync.Mutex
+	entries map[string]cachedSummary
+}
+
+type cachedSummary struct {
+	run     EngineeringRun
+	journal [sha256.Size]byte
+	summary RunSummary
+}
+
+// runJournalDigests hashes, per run, every column of every event row replay
+// would read, or nothing when there is no cache to key. Reading the raw bytes
+// is a fraction of replaying them: no JSON decoding, no canonical encoding.
+func runJournalDigests(store *SQLiteOperationStore, cache *summaryCache) (map[string][sha256.Size]byte, error) {
+	if cache == nil {
+		return nil, nil
+	}
+	rows, err := store.db.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE stream_kind = ? ORDER BY run_id ASC, sequence ASC`, streamRun)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	raw := make([]sql.RawBytes, len(columns))
+	dest := make([]any, len(columns))
+	for i := range raw {
+		dest[i] = &raw[i]
+	}
+	digests := map[string][sha256.Size]byte{}
+	var current string
+	var h hash.Hash
+	flush := func() {
+		if h != nil {
+			var sum [sha256.Size]byte
+			copy(sum[:], h.Sum(nil))
+			digests[current] = sum
+		}
+	}
+	var length [8]byte
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if runID := string(raw[1]); h == nil || runID != current {
+			flush()
+			current, h = runID, sha256.New()
+		}
+		for _, column := range raw {
+			// Length-prefixed, so no two different rows hash alike by shifting
+			// bytes between adjacent columns.
+			binary.BigEndian.PutUint64(length[:], uint64(len(column)))
+			h.Write(length[:])
+			h.Write(column)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return digests, nil
+}
+
+func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, run EngineeringRun, journal [sha256.Size]byte, now time.Time) RunSummary {
+	if c == nil {
+		return summarizeRun(store, stateDir, run, now)
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[run.ID]
+	c.mu.Unlock()
+	if ok && entry.journal == journal && reflect.DeepEqual(entry.run, run) {
+		summary := entry.summary
+		summary.Attempts = maps.Clone(summary.Attempts)
+		summary.Elapsed = now.Sub(run.CreatedAt)
+		summary.Executing = executingNow(store, run.ID)
+		summary.Workspace = ""
+		if dir := candidateDir(stateDir, run.ID); dirExists(dir) {
+			summary.Workspace = dir
+		}
+		return summary
+	}
+	// journal was digested before this replay, so a journal that changes in
+	// between is cached under the older digest and simply replayed again next
+	// time: the cache can be conservative, never stale.
+	summary := summarizeRun(store, stateDir, run, now)
+	if summary.Error == "" {
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]cachedSummary{}
+		}
+		c.entries[run.ID] = cachedSummary{run: run, journal: journal, summary: summary}
+		c.mu.Unlock()
+	}
 	return summary
 }
 

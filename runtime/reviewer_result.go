@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -97,6 +98,62 @@ type ReviewerFinding struct {
 	Signature string `json:"signature"`
 	// Detail is optional bounded context for an operator.
 	Detail string `json:"detail,omitempty"`
+}
+
+// ReviewerResultMembers names, in declaration order, every JSON member
+// ReadReviewerResult's strict decoder accepts on a ReviewerResult document.
+// ReviewerFindingMembers is the same derivation for one finding.
+//
+// Both are read off the struct's own `json` tags by reflection rather than
+// typed out a second time (#374). reviewerEnvelope (sandbox.go), which tells a
+// reviewer what to write, built its member list as independent prose before
+// this existed - a contract described in English and a contract enforced in
+// Go, agreeing only because nobody had yet changed one without the other. A
+// reviewer whose honest answer used fields this build does not define, and
+// then was told the file's required shape only in prose that happened to
+// still match, is exactly the #343 dogfood. Deriving the prose from these two
+// functions instead closes that gap structurally: nothing outside this file
+// can quote a member name ReadReviewerResult does not also accept, because
+// there is no longer a second place to type one.
+func ReviewerResultMembers() []string  { return jsonMemberNames(reflect.TypeOf(ReviewerResult{})) }
+func ReviewerFindingMembers() []string { return jsonMemberNames(reflect.TypeOf(ReviewerFinding{})) }
+
+// reviewerResultStatedMembers is ReviewerResultMembers minus the two a
+// reviewer is deliberately told NOT to write (candidate, tree - see
+// reviewerEnvelope's closing sentence). The decoder still accepts them; a
+// reviewer is simply never instructed to restate what the runtime already
+// knows, for the reason AdmitReviewerResult's own doc comment gives: two
+// answers to "what did you review" is the ambiguity a verdict must not carry.
+func reviewerResultStatedMembers() []string {
+	omit := map[string]bool{"candidate": true, "tree": true}
+	var out []string
+	for _, name := range ReviewerResultMembers() {
+		if !omit[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// jsonMemberNames reads the `json:"name[,options]"` tag off every field of a
+// struct type, in declaration order, skipping an explicitly suppressed field
+// (`json:"-"`) or one with no tag at all. It is the one place in this package
+// a JSON member name is read out of a Go struct tag for use in prose; every
+// other place that needs one calls this, directly or through
+// ReviewerResultMembers/ReviewerFindingMembers, rather than typing the name
+// again.
+func jsonMemberNames(t reflect.Type) []string {
+	names := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		tag, ok := t.Field(i).Tag.Lookup("json")
+		if !ok {
+			continue
+		}
+		if name := strings.Split(tag, ",")[0]; name != "" && name != "-" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // ReviewerResultPath is the runtime-owned location for ONE invocation's result.
@@ -185,6 +242,24 @@ func ReadReviewerResult(path string) (*ReviewerResult, error) {
 type ReviewerResultRefusedError struct {
 	StageID string
 	Detail  string
+	// Protocol marks a refusal about the SHAPE of the claim itself - an
+	// unrecognized or absent schema version, an unrecognized or absent
+	// verdict, a verdict/findings combination the protocol disallows, or a
+	// finding the durable payload bound cannot hold - rather than about
+	// AUTHORITY over the candidate (wrong stage, wrong worker, wrong
+	// candidate, broken independence).
+	//
+	// The distinction exists because the two refusal kinds answer different
+	// questions (#374). A protocol refusal is a mistake the SAME reviewer can
+	// correct by writing a better-formed document about the SAME review it
+	// already did - exactly the malformed-decode case this file's own comment
+	// at the top describes - so it is recorded as FailureReviewerProtocolIncomplete
+	// and earns the one bounded corrective retry. An authority refusal means
+	// something claimed power it did not have; no amount of rewriting the
+	// document fixes who produced it or what it was bound to, so it stays
+	// classified as a verification failure of the invocation rather than a
+	// correctable protocol mistake.
+	Protocol bool
 }
 
 func (e *ReviewerResultRefusedError) Error() string {
@@ -197,16 +272,25 @@ func (e *ReviewerResultRefusedError) Error() string {
 // AdmitReviewerResult decides whether one structured result may become a
 // durable verdict, and returns the verdict it admits.
 //
-// Every check here is about AUTHORITY rather than about the review's opinion.
-// The runtime is not judging whether the reviewer was right; it is establishing
-// that this result came from the worker the operator approved, for the stage
-// that was assigned, about the candidate that was actually materialized, and
-// that it says one thing rather than two.
+// Most checks here are about AUTHORITY rather than about the review's
+// opinion. The runtime is not judging whether the reviewer was right; it is
+// establishing that this result came from the worker the operator approved,
+// for the stage that was assigned, about the candidate that was actually
+// materialized, and that it says one thing rather than two.
 //
 // The candidate binding is taken from the frozen assignment, never from the
 // result. A reviewer that restates a different candidate is refused - not
 // corrected - because two answers to "what did you review" is exactly the
 // ambiguity a verdict must not carry.
+//
+// A few checks near the end are different in kind (#374): they are about the
+// SHAPE of the claim rather than its authority - a schema version or verdict
+// this build does not recognize, or a verdict/findings combination the
+// protocol disallows. refuseProtocol marks exactly those, so the caller can
+// tell "this candidate was judged and failed" apart from "this reviewer
+// invocation never produced a judgment to admit" - the distinction a
+// malformed decode already gets, extended to every other way a result can
+// fail to be a usable verdict.
 func AdmitReviewerResult(
 	stage domain.PlanStage,
 	assignment domain.AgentAssignment,
@@ -218,6 +302,9 @@ func AdmitReviewerResult(
 ) (PlanStageReviewedPayload, error) {
 	refuse := func(format string, args ...any) (PlanStageReviewedPayload, error) {
 		return PlanStageReviewedPayload{}, &ReviewerResultRefusedError{StageID: stage.ID, Detail: fmt.Sprintf(format, args...)}
+	}
+	refuseProtocol := func(format string, args ...any) (PlanStageReviewedPayload, error) {
+		return PlanStageReviewedPayload{}, &ReviewerResultRefusedError{StageID: stage.ID, Detail: fmt.Sprintf(format, args...), Protocol: true}
 	}
 	if result == nil {
 		return PlanStageReviewedPayload{}, nil
@@ -265,14 +352,19 @@ func AdmitReviewerResult(
 		return refuse("the result claims tree %s and the invocation materialized %s",
 			short12(result.Tree), short12(subject.Tree))
 	}
-	// 12. A recognized protocol version.
+	// 12. A recognized protocol version. An absent or unrecognized version is
+	// exactly as uncorrectable-without-a-retry as an unknown JSON member would
+	// have been had the decoder let it through - this is the same "a result
+	// this build does not understand is not a verdict it may act on" the
+	// schema constant's own comment makes, reached through a value the
+	// decoder accepts rather than one it refuses.
 	if result.SchemaVersion != ReviewerResultSchemaVersion {
-		return refuse("result schema version %q is not %q", result.SchemaVersion, ReviewerResultSchemaVersion)
+		return refuseProtocol("result schema version %q is not %q", result.SchemaVersion, ReviewerResultSchemaVersion)
 	}
 	// 10-11. One answer, and an answer that can be acted on.
 	findings, err := boundedReviewerFindings(result.Findings)
 	if err != nil {
-		return refuse("%s", err.Error())
+		return refuseProtocol("%s", err.Error())
 	}
 	switch result.Verdict {
 	case StageReviewAccepted:
@@ -280,16 +372,16 @@ func AdmitReviewerResult(
 		// the verdict, so accepting while naming defects would let the more
 		// permissive half decide.
 		if len(findings) > 0 {
-			return refuse("an accepting verdict names %d finding(s): acceptance and outstanding findings are different answers", len(findings))
+			return refuseProtocol("an accepting verdict names %d finding(s): acceptance and outstanding findings are different answers", len(findings))
 		}
 	case StageReviewBlocked:
 		// A BLOCK MUST BE ACTIONABLE. Remediation is bound to the finding set,
 		// so a block naming nothing would plan the same invocation forever.
 		if len(findings) == 0 {
-			return refuse("a blocking verdict names no finding, so remediation would have nothing to be bound to")
+			return refuseProtocol("a blocking verdict names no finding, so remediation would have nothing to be bound to")
 		}
 	default:
-		return refuse("verdict %q must be %q or %q", result.Verdict, StageReviewAccepted, StageReviewBlocked)
+		return refuseProtocol("verdict %q must be %q or %q", result.Verdict, StageReviewAccepted, StageReviewBlocked)
 	}
 	return PlanStageReviewedPayload{
 		StageID: stage.ID, RunID: reviewerRunID,

@@ -258,6 +258,11 @@ type SupervisorConfig struct {
 	// once. Zero means "not stated here", which falls back to the watch bound
 	// and then to the M0 default of one.
 	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// MaxConcurrentObservations is the operator-authorized ceiling on runs
+	// OBSERVING at once (#85). Observation does not consume a run slot, so it
+	// has its own bound. Zero means "not stated here", which falls back to the
+	// watch bound and then to DefaultMaxConcurrentObservations.
+	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
 	// PollIntervalSeconds is how often a quiet supervisor looks again. Zero
 	// means "not stated here".
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
@@ -508,6 +513,9 @@ type WatchConfig struct {
 	// feeds resolveMaxConcurrentRuns as the AUTHORIZED value; the ceiling rule
 	// itself lives there and is not restated here.
 	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// MaxConcurrentObservations is the watch-scope observation ceiling, combined
+	// with the supervisor's exactly as MaxConcurrentRuns is.
+	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
 }
 
 // GCConfig is the operator's retention window for `autonomy gc`. It is
@@ -638,8 +646,9 @@ type RepositoryBudgets struct {
 // and no Label member - enrolment and the opt-in label are operator authority,
 // and repositoryWatchScope refuses either name before decoding.
 type RepositoryWatch struct {
-	PollIntervalSeconds *int `json:"poll_interval_seconds,omitempty"`
-	MaxConcurrentRuns   *int `json:"max_concurrent_runs,omitempty"`
+	PollIntervalSeconds       *int `json:"poll_interval_seconds,omitempty"`
+	MaxConcurrentRuns         *int `json:"max_concurrent_runs,omitempty"`
+	MaxConcurrentObservations *int `json:"max_concurrent_observations,omitempty"`
 }
 
 // RepositoryConfig is the tighten-only layer.
@@ -660,7 +669,7 @@ var repositoryScope = map[string]bool{"budgets": true, "watch": true}
 // and "label" are absent on purpose: a repository that could name either would
 // be enrolling itself into watch, which is exactly the authority this layer
 // does not have.
-var repositoryWatchScope = map[string]bool{"poll_interval_seconds": true, "max_concurrent_runs": true}
+var repositoryWatchScope = map[string]bool{"poll_interval_seconds": true, "max_concurrent_runs": true, "max_concurrent_observations": true}
 
 // Config is the governing configuration for one process invocation, together
 // with the digest of exactly the two layers that produced it.
@@ -903,6 +912,15 @@ func (c *OperatorConfig) tightenWatch(watch *RepositoryWatch) error {
 		}
 		c.Watch.MaxConcurrentRuns = *proposed
 	}
+	if proposed := watch.MaxConcurrentObservations; proposed != nil {
+		if *proposed < 1 {
+			return &ConfigError{Detail: "watch.max_concurrent_observations must be at least 1"}
+		}
+		if *proposed > settings.MaxConcurrentObservations {
+			return &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten watch.max_concurrent_observations: %d exceeds the operator bound %d", *proposed, settings.MaxConcurrentObservations)}
+		}
+		c.Watch.MaxConcurrentObservations = *proposed
+	}
 	if proposed := watch.PollIntervalSeconds; proposed != nil {
 		operatorSeconds := int(settings.PollInterval / time.Second)
 		if *proposed < operatorSeconds {
@@ -929,6 +947,8 @@ type WatchSettings struct {
 	PollInterval time.Duration
 	// MaxConcurrentRuns is the resolved ceiling; see resolveMaxConcurrentRuns.
 	MaxConcurrentRuns int
+	// MaxConcurrentObservations is the resolved observation ceiling (#85).
+	MaxConcurrentObservations int
 }
 
 // validRepositoryPart bounds one side of owner/name to the characters GitHub
@@ -959,6 +979,10 @@ func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 	if stated := c.Supervisor.MaxConcurrentRuns; stated > 0 && (ceiling <= 0 || stated < ceiling) {
 		ceiling = stated
 	}
+	observations := c.Watch.MaxConcurrentObservations
+	if stated := c.Supervisor.MaxConcurrentObservations; stated > 0 && (observations <= 0 || stated < observations) {
+		observations = stated
+	}
 	interval := time.Duration(c.Watch.PollIntervalSeconds) * time.Second
 	// Only a STATED supervisor interval participates. Treating an unset zero
 	// as a candidate would let the absence of one member erase a malformed
@@ -968,9 +992,10 @@ func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 		interval = stated
 	}
 	settings := WatchSettings{
-		Label:             strings.TrimSpace(c.Watch.Label),
-		PollInterval:      interval,
-		MaxConcurrentRuns: resolveMaxConcurrentRuns(0, ceiling),
+		Label:                     strings.TrimSpace(c.Watch.Label),
+		PollInterval:              interval,
+		MaxConcurrentRuns:         resolveMaxConcurrentRuns(0, ceiling),
+		MaxConcurrentObservations: resolveMaxConcurrentObservations(observations),
 	}
 	if settings.Label == "" {
 		settings.Label = DefaultWatchLabel
@@ -1212,6 +1237,9 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if c.Supervisor.MaxConcurrentRuns < 0 {
 		return refuse("supervisor.max_concurrent_runs must not be negative")
+	}
+	if c.Supervisor.MaxConcurrentObservations < 0 {
+		return refuse("supervisor.max_concurrent_observations must not be negative")
 	}
 	if seconds := c.Supervisor.PollIntervalSeconds; seconds != 0 && seconds < MinWatchPollSeconds {
 		return refuse(fmt.Sprintf("supervisor.poll_interval_seconds must be at least %d", MinWatchPollSeconds))

@@ -54,10 +54,22 @@ type effect struct {
 	interrupted bool
 }
 
+// failed records the typed transport cause, and transport loss as
+// FailureConnectivity, so the durable result says why a retry waits (#380).
 func failed(err error) effect {
+	var class FailureClass
+	cause := transportCause(err)
+	if cause.Lost() {
+		class = FailureConnectivity
+	}
+	if cause == TransportUnrecognized {
+		cause = ""
+	}
 	return effect{state: OperationFailed, result: struct {
-		Error string `json:"error"`
-	}{boundedDetail(err.Error())}}
+		Error          string         `json:"error"`
+		FailureClass   FailureClass   `json:"failure_class,omitempty"`
+		TransportCause TransportCause `json:"transport_cause,omitempty"`
+	}{boundedDetail(err.Error()), class, cause}}
 }
 
 func boundedDetail(detail string) string { return boundedField(detail) }
@@ -384,6 +396,9 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 			}
 			base = ref.Revision
 		}
+		if err := refuseSubmodules(dir); err != nil {
+			return failed(err)
+		}
 		adopted, err := gitMetadataDigest(dir)
 		if err != nil {
 			return failed(err)
@@ -426,6 +441,9 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 		if err := MaterializeCandidate(workspace.Dir, *ref, candidateDir(r.deps.StateDir, ref.RunID)); err != nil {
 			return failed(err)
 		}
+		if err := refuseSubmodules(workspace.Dir); err != nil {
+			return failed(err)
+		}
 		// The metadata baseline is taken AFTER the transfer, so the durable
 		// baseline describes the workspace the run will actually use.
 		digest, err := gitMetadataDigest(workspace.Dir)
@@ -433,6 +451,11 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 			return failed(err)
 		}
 		return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, ref.Revision, digest}}
+	}
+	// Admission ends here: a repository that records submodules is refused
+	// before any producer work is paid for.
+	if err := refuseSubmodules(workspace.Dir); err != nil {
+		return failed(err)
 	}
 	return effect{state: Succeeded, result: candidateCreateResult{workspace.Dir, workspace.BaseRevision, workspace.TrustedMetadata}}
 }
@@ -462,7 +485,7 @@ func (r *EngineeringRuntime) workspace(state *runState) (*CandidateWorkspace, er
 	}
 	expected := state.projection.CandidateRevision
 	if expected == "" {
-		expected = state.pinnedBase()
+		expected = state.baseRevision()
 	}
 	if got := strings.TrimSpace(head); got != expected {
 		return nil, &WorkspaceIntegrityError{Detail: "candidate head " + got + " is not the recorded revision " + expected}
@@ -510,7 +533,17 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// only around Provider.Execute; a stop landing before or after that
 	// window rewrites nothing here.
 	var watch executionWatch
-	defer func() { watch.settle(&out) }()
+	// settleMaterial is the #390 attempt boundary. It runs AFTER watch.settle,
+	// because only then is it known whether an operator stop ended this
+	// attempt - and a stopped attempt's material is #203's to hold in place,
+	// never quarantine's to move.
+	var settleMaterial func(*effect)
+	defer func() {
+		watch.settle(&out)
+		if settleMaterial != nil {
+			settleMaterial(&out)
+		}
+	}()
 	// CAN THIS WORKER ATTEMPT WHAT IT IS ABOUT TO BE OBLIGATED TO DO?
 	//
 	// Asked before the workspace is touched and before any invocation is spent.
@@ -529,12 +562,68 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			result: mutationResult{FailureClass: FailureToolchainUnavailable},
 		}
 	}
+	// NO EARLIER WRITER MAY STILL BE ALIVE (#168). Claimed before anything
+	// below reads, restores or scans the candidate, and held through dispatch:
+	// a process a dead supervisor left behind can still be writing it, and
+	// judging that workspace - an inconclusive scan of its half-written cache
+	// is a STOP - would charge this run for a writer that is not this
+	// attempt's. A held lock is a wait an operator clears.
+	if dir := candidateDir(r.deps.StateDir, state.run.ID); isDir(dir) {
+		// The settle is paid once, on first encounter. A run already
+		// waiting on a held lock re-probes with no sleep.
+		settle := candidateWriterSettle
+		if last, ok := state.lastFailure(operation.ID); ok && last == FailureCandidateWriterAlive {
+			settle = 0
+		}
+		writer, err := claimCandidateWriter(ctx, dir, settle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			// The PARENT context ended during the claim: the provider is not
+			// started because its context had ended, and that takes exactly
+			// the class the executor's own not-started refusal takes
+			// (controller_shutdown for a shutdown). It is never a live
+			// writer, and never an operator stop - that is a durable act the
+			// execution watcher observes, not a context.
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			result := notStartedResult("", "", "", operation.AttemptIdentity, notStarted)
+			class := result.Failure.Classification
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, class, result, notStarted),
+			}}
+		}
+		if err != nil {
+			class, _ := candidateGuardFailureClass(err)
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: class},
+				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, ExecutionResult{}, err),
+			}}
+		}
+		defer writer.Close()
+		ctx = withCandidateWriter(ctx, writer)
+	}
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return failed(err)
 	}
 	if err := workspace.AssertIntegrity(); err != nil {
 		return r.restoreCandidate(workspace, err)
+	}
+	// ORPHANED QUARANTINES ARE ADOPTED BEFORE ANY PROVIDER RUNS (#390). A
+	// controller that died after a quarantine copy completed but before its
+	// candidate.quarantined event was journalled left a complete copy with no
+	// durable identity and a workspace that may still be partly restored.
+	// Adoption re-applies the idempotent restore and journals the record with
+	// THIS invocation's outcome; a restore that fails stops the attempt before
+	// a provider can run on top of refused material.
+	adopted, adoptErr := r.adoptOrphanQuarantines(state, operation, operation.AttemptIdentity, workspace.Dir)
+	if adoptErr != nil {
+		out := failed(adoptErr)
+		stopRefusedAttempt(&out, adoptErr)
+		out.events = adopted
+		return out
+	}
+	if len(adopted) > 0 {
+		defer func() { out.events = append(append([]journalEntry(nil), adopted...), out.events...) }()
 	}
 	// THE SUBJECT, re-proven immediately before the provider runs.
 	//
@@ -611,6 +700,18 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// worker is being asked to change something in response to a finding, and
 	// the invocation contract requires a remediation to carry findings.
 	pending := state.feedbackState().Pending(state.projection.Head())
+	// A RETRY of this exact operation (#376): Pending() excludes anything an
+	// earlier attempt already recorded as consumed, which happens the instant
+	// that attempt reaches a worker - before it even settles. Without this, a
+	// retry of an attempt that returned having neither mutated the candidate
+	// nor stated an admitted resolution would see nothing pending, carry no
+	// feedback at all, and trivially "succeed" an obligation it was never
+	// actually given a second chance to address. This re-derives exactly the
+	// keys THIS operation's own prior attempt(s) consumed - never a different
+	// or wider set - so a retry is shown exactly what it was shown before.
+	if len(pending) == 0 {
+		pending = state.feedbackRedeliveryFor(operation.ID)
+	}
 	feedback := r.feedbackContext(state.run.ID, pending)
 	if len(feedback) > 0 && purpose != InvocationContinuation {
 		purpose = InvocationRemediation
@@ -620,6 +721,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
 	priorFailure, _ := state.lastFailure(operation.ID)
+	// A REVIEWER PROTOCOL REFUSAL from THIS exact operation's own last attempt
+	// is delivered as a finding regardless of purpose (#374): a reviewer-role
+	// run that never mutates its workspace never acquires a CandidateRevision,
+	// so it never reaches the InvocationRemediation branch above and would
+	// otherwise be re-dispatched with no account of why its last attempt was
+	// refused. Findings carry independently of Purpose (see the request built
+	// below), so this does not force Purpose to Remediation - doing so here
+	// would fail assertExecutionSubject, which requires a non-initial purpose
+	// to already have a recorded CandidateRevision this run has none of.
+	if refusal, ok := state.lastReviewRefusal(operation.ID); ok {
+		findings = append(findings, Finding{
+			Classification: FailureReviewerProtocolIncomplete,
+			Signature:      boundedDetail("reviewer-protocol: " + refusal.Error()),
+		})
+	}
 	// A PLAN STAGE run executes under its frozen assignment: the stage
 	// objective the operator approved, the context that stage's role receives,
 	// and the instruction packs its profile named - by digest. An ordinary run
@@ -680,6 +796,25 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	reviewerResultPath := ""
 	if stage.producesVerdict() {
 		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
+			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
+		})
+		if err != nil {
+			return effect{state: OperationFailed, result: executionRecord{
+				mutationResult: mutationResult{FailureClass: FailureUnknown},
+				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+			}}
+		}
+	}
+	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation when this
+	// invocation is being given admitted feedback to address, OR when it is a
+	// CONTINUATION of a runtime-owned checkpoint (#379). A producer that
+	// concludes no change is required has somewhere to STATE that in either
+	// case; a producer given neither feedback nor a checkpoint to continue has
+	// nothing to resolve and is given no path, so it cannot write a claim that
+	// binds to nothing (#376).
+	feedbackResolutionPath := ""
+	if len(feedback) > 0 || purpose == InvocationContinuation {
+		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, ExecutionAttemptRef{
 			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
 		})
 		if err != nil {
@@ -769,8 +904,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}}
 	}
 	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
-		ReviewerResultPath: reviewerResultPath,
-		ScratchDir:         scratchDir,
+		ReviewerResultPath:     reviewerResultPath,
+		FeedbackResolutionPath: feedbackResolutionPath,
+		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
 		// are strictly sequential and each container is created, waited on and
@@ -847,6 +983,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if pathErr != nil {
 		return recorded(failed(pathErr))
 	}
+	// THE ATTEMPT BOUNDARY (#390). Whatever path below settles this attempt,
+	// a FAILED settlement with material in the workspace quarantines that
+	// material before the operation is recorded, so the same binding's next
+	// physical attempt starts from the exact subject this one was given.
+	settleMaterial = func(out *effect) {
+		r.settleRefusedMaterial(out, state, operation, physicalAttempt, workspace.Dir, subject.Commit, paths)
+	}
 	record := mutationResult{
 		Mutated: len(paths) > 0, PathCount: len(paths), ProviderID: result.ProviderID,
 		ContentDigest: workspaceContentDigest(workspace.Dir, paths),
@@ -862,6 +1005,102 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// same signal the feedback-delivery record below relies on.
 		ProviderExecuted: execErr == nil || result.Invocation != nil,
 	}
+	// THE EXPLICIT COMPLETION CLAIM, admitted only against what this attempt
+	// actually was invoked against - never from the provider's own claim that
+	// nothing changed or that it is done.
+	//
+	// A CONTINUATION admits FeedbackResolutionCheckpointComplete, bound to the
+	// exact checkpoint revision AND tree it inherited, independently of
+	// record.Mutated (#379): mutation proves work happened, not that the
+	// inherited checkpoint is finished, so a continuation that goes on to
+	// change the candidate further is not thereby exempted from stating
+	// completion. Every other invocation (feedback delivered, no checkpoint
+	// involved) admits FeedbackResolutionNoChangeRequired exactly as #376
+	// introduced it, and only when the inspected workspace agrees nothing
+	// changed - a provider that also mutated the workspace is not stating "no
+	// change required", it is doing a change.
+	//
+	// A resolution that fails to bind (wrong subject, wrong tree, wrong or
+	// partial keys, wrong schema or wrong value for what this invocation may
+	// state) is simply not admitted; it does not fail the operation BY ITSELF
+	// - see feedbackUnresolved and continuationUnresolved below, which are
+	// what actually fail it - but the exact refusal reason is kept rather than
+	// discarded, so an operator sees why it did not bind instead of a bare
+	// "nothing happened".
+	var resolutionErr error
+	if result.Resolution != nil && execErr == nil && result.Failure == nil {
+		deliveredKeys := make([]string, 0, len(feedback))
+		for _, item := range feedback {
+			deliveredKeys = append(deliveredKeys, item.Key)
+		}
+		switch {
+		case purpose == InvocationContinuation:
+			if resolved, admitErr := AdmitCheckpointCompletion(deliveredKeys, subject.Commit, subject.Tree, result.Resolution); admitErr == nil {
+				record.ResolvedFeedback = resolved
+				record.CheckpointResolved = true
+			} else {
+				resolutionErr = admitErr
+			}
+		case !record.Mutated:
+			if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
+				record.ResolvedFeedback = resolved
+			} else {
+				resolutionErr = admitErr
+			}
+		default:
+			resolutionErr = fmt.Errorf("a no-change resolution was stated by an invocation that mutated the candidate")
+		}
+	}
+	// THE SEMANTIC COMPLETION GATE (#376). An invocation delivered admitted
+	// feedback settles it in exactly one of two ways: it mutates the
+	// candidate, or it states a resolution that binds. Provider return is not
+	// a third way - a clean exit that did neither is exactly the shape of an
+	// invocation that deferred unfinished background work and simply
+	// returned, which is the defect #376 exists to close. It fails the
+	// OPERATION (see below) rather than only leaving the feedback outstanding,
+	// so the run keeps wanting a successor instead of silently stranding the
+	// obligation behind an operation the scheduler already considers settled.
+	feedbackUnresolved := len(feedback) > 0 && !record.Mutated && execErr == nil &&
+		result.Failure == nil && len(record.ResolvedFeedback) == 0
+	// THE REVIEWER PROTOCOL COMPLETION GATE (#374), the same shape as #376's
+	// feedback gate just above. A stage whose role produces a verdict crosses
+	// the reviewer-result protocol in exactly one of two ways: it writes a
+	// result that fails to decode (result.Failure is already set for that, by
+	// the adapter), or it writes a result that decodes (result.Review is
+	// non-nil). Provider return with NEITHER is a third way - a clean exit
+	// that wrote nothing to the runtime-owned path - and left unchecked it is
+	// the #374 second dogfood shape exactly: the invocation is recorded
+	// Succeeded, candidate.changed is journalled, and the stage is left
+	// "running" forever because nothing ever calls admitReview to settle it
+	// one way or the other. This fails the OPERATION instead, under the same
+	// bounded-retry class a malformed result gets, so the run keeps asking
+	// for a verdict rather than silently waiting on one that will never come.
+	reviewUnresolved := stage.producesVerdict() && execErr == nil &&
+		result.Failure == nil && result.Review == nil
+	// THE CHECKPOINT CONTINUATION COMPLETION GATE (#379), generalizing #376's
+	// feedback gate from feedback discharge to checkpoint continuation itself.
+	// A continuation inherits a checkpoint - work a prior attempt left
+	// interrupted, not finished - and settles it in exactly ONE way: it states
+	// a FeedbackResolutionCheckpointComplete resolution that binds to the exact
+	// checkpoint revision AND tree it was shown (CheckpointResolved), naming
+	// whatever feedback keys (possibly none) it was delivered.
+	//
+	// Mutation is deliberately NOT a second way, however the gate used to read.
+	// A continuation that mutates further has done real work, but that proves
+	// only that something happened, not that the checkpoint it inherited is
+	// finished - it may have addressed only part of what was owed and deferred
+	// the rest, which is indistinguishable from a continuation that mutated
+	// nothing and simply exited. Provider return, mutated or not, is the
+	// dogfood shape #379 records: a continuation that ran out of its own
+	// bound, deferred to background work, or simply misread the checkpoint and
+	// exited is indistinguishable from one that is a clean, successful return,
+	// and the EXACT SAME invocation that returned cleanly is the one event
+	// this gate is checked against. It fails the OPERATION, the same as
+	// feedbackUnresolved, so the checkpoint stays exactly where it was and the
+	// run keeps wanting a successor rather than promoting interrupted work
+	// because nothing went wrong on the way out.
+	continuationUnresolved := purpose == InvocationContinuation &&
+		execErr == nil && result.Failure == nil && !record.CheckpointResolved
 	producerID := firstNonEmpty(result.ProviderID, "execution-provider")
 	events := append(attemptProvenance, journalEntry{
 		Type: EventCandidateChanged,
@@ -872,13 +1111,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		},
 		Artifacts: result.Artifacts,
 	})
-	// A producer that FINISHED is the only thing that completes an execution.
-	// It is an observation about the producer, not about the work: it makes the
-	// exact subject eligible to be treated as a finished candidate, and it
-	// still proves nothing about whether the change is acceptable. Recording it
-	// on every normal completion is what lets a continuation that finds nothing
-	// left to do promote the checkpoint it inherited, without inventing a
-	// commit no mutation produced.
+	// A producer that FINISHED is the only thing that completes an execution,
+	// and for a CONTINUATION, finishing is exactly what continuationUnresolved
+	// above decides: mutating further, or stating a resolution that binds, not
+	// merely returning (#379). It is an observation about the producer, not
+	// about the work: it makes the exact subject eligible to be treated as a
+	// finished candidate, and it still proves nothing about whether the change
+	// is acceptable.
 	//
 	// A REVIEWER'S VERDICT IS ADMITTED IN THE SAME BREATH, and structurally so:
 	// it is inside this condition rather than beside it, because the two ask the
@@ -922,31 +1161,63 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if revokeErr != nil {
 		return recorded(failed(revokeErr))
 	}
-	if execErr == nil && result.Failure == nil && revoked == "" {
+	if execErr == nil && result.Failure == nil && revoked == "" && providerOutcome(result, execErr) == Succeeded {
 		// Admission happens in the RUNTIME, against the frozen assignment -
 		// never in the adapter, which only read a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
 		// treating that as "no verdict" would let a malformed or mis-scoped
 		// claim look identical to an honest silence.
+		//
+		// The Outcome check is defensive: today every in-tree provider pairs a
+		// failed or cancelled outcome with a non-nil Failure, so result.Failure
+		// == nil already implies success in practice. A future or third-party
+		// adapter is not bound to that pairing, and admitting a verdict from a
+		// result that reports OperationFailed or OperationCancelled with a nil
+		// Failure would be exactly the unfinished-invocation-contributing-a-
+		// finished-answer defect this gate exists to close.
 		if result.Review != nil {
 			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
 				var refusal *ReviewerResultRefusedError
 				if errors.As(admitErr, &refusal) {
-					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail)}
+					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail), Protocol: refusal.Protocol}
+				}
+				// A PROTOCOL refusal (#374) - an unrecognized schema version or
+				// verdict, or a verdict/findings combination the protocol
+				// disallows - is the exact same kind of failure a malformed
+				// decode already is: the reviewer answered, but not in a shape
+				// this build may act on. It gets the same classification, the
+				// same retained exact reason, and the same one bounded
+				// correction - never FailureVerification, which would say the
+				// CANDIDATE failed review when nothing was actually judged. An
+				// AUTHORITY refusal (wrong stage, wrong worker, wrong candidate,
+				// broken independence) is not something rewriting the document
+				// fixes, so it keeps the verification classification it always
+				// had.
+				class := FailureVerification
+				if refusal != nil && refusal.Protocol {
+					class = FailureReviewerProtocolIncomplete
 				}
 				return recorded(effect{state: OperationFailed, result: executionRecord{
 					ReviewRefusal:  refusal,
-					mutationResult: mutationResult{FailureClass: FailureVerification, ProviderID: result.ProviderID},
-					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureVerification, result, admitErr),
+					mutationResult: mutationResult{FailureClass: class, ProviderID: result.ProviderID},
+					Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, result, admitErr),
 				}})
 			}
 		}
-		events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
-			ProducerID:    producerID,
-			Purpose:       purpose,
-			SubjectCommit: subject.Commit,
-			SubjectTree:   subject.Tree,
-		}})
+		// feedbackUnresolved, reviewUnresolved and continuationUnresolved are
+		// excluded here deliberately: none of the three is a finished
+		// execution (#376, #374, #379) even though the provider itself
+		// reported success, so the exact subject it left behind must not
+		// become eligible to be treated as a finished candidate. The failure
+		// path below is what actually settles this attempt.
+		if !feedbackUnresolved && !reviewUnresolved && !continuationUnresolved {
+			events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
+				ProducerID:    producerID,
+				Purpose:       purpose,
+				SubjectCommit: subject.Commit,
+				SubjectTree:   subject.Tree,
+			}})
+		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.
 	// Delivery is journalled whether or not the invocation went on to succeed:
@@ -1013,6 +1284,97 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			},
 		}
 	}
+	// THE OPERATION FAILS HERE, not just the feedback staying outstanding
+	// (#376). bindExecutionInvoke's feedback branch binds this operation from
+	// pendingFeedbackKeys(), and the EventFeedbackConsumed above already moved
+	// every delivered key out of "pending" - so an operation left Succeeded
+	// here would satisfy that binding forever while discharging nothing: the
+	// obligation would be stranded, outstanding but with no operation left
+	// that wants to run for it. Failing it keeps the SAME operation (the SAME
+	// idempotency key) eligible for a bounded retry under its own existing
+	// attempt ceiling - no new counter, no reset budget - and when that
+	// ceiling is reached the run stops truthfully with the feedback still
+	// visibly outstanding, exactly like any other producer failure that never
+	// lands.
+	if feedbackUnresolved {
+		record.FailureClass = FailureFeedbackUnresolved
+		cause := errors.New("the invocation neither changed the candidate nor stated an admitted no-change resolution for the feedback it was delivered")
+		if resolutionErr != nil {
+			cause = fmt.Errorf("the feedback resolution did not bind: %w", resolutionErr)
+		}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureFeedbackUnresolved, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
+	// THE OPERATION FAILS HERE for the same reason #376's feedback gate just
+	// above does (#374): a reviewer-role invocation that returned clean but
+	// crossed no reviewer-result protocol has not completed. Left Succeeded,
+	// this operation would satisfy bindExecutionInvoke's wanted binding
+	// forever while admitting no verdict, which is exactly the #374 second
+	// dogfood shape - candidate.changed succeeded, the stage left "running"
+	// with nothing left to want. Failing it with a class that routes to
+	// RouteRetry (never FailureVerification - no verdict was reached, so
+	// nothing about the candidate failed review) keeps the SAME operation
+	// eligible for a bounded retry under its own existing attempt ceiling; the
+	// exact reason is attached so the next attempt's findings (see
+	// lastReviewRefusal above) can tell the reviewer what was missing.
+	if reviewUnresolved {
+		record.FailureClass = FailureReviewerProtocolIncomplete
+		cause := errors.New("the invocation completed without writing a reviewer result")
+		refusal := &ReviewerResultRefusedError{Detail: boundedDetail(cause.Error())}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureReviewerProtocolIncomplete, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				ReviewRefusal:  refusal,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
+	// THE OPERATION FAILS HERE for the same reason #376's feedback gate above
+	// does, generalized to the checkpoint itself (#379): a continuation that
+	// returned clean but neither mutated the candidate nor stated an admitted
+	// resolution bound to the exact checkpoint commit has not settled the
+	// work it inherited. Left Succeeded, this operation would promote the
+	// checkpoint on provider return alone - the exact dogfood shape #379
+	// records: a continuation that deferred to background work it never
+	// finished returned cleanly, and that return alone carried the checkpoint
+	// all the way to assurance and publication. Failing it keeps the SAME
+	// operation (the SAME idempotency key, continuation|<checkpoint>)
+	// eligible for a bounded retry under its own existing attempt ceiling -
+	// no new counter, no reset budget - and when that ceiling is reached the
+	// run stops truthfully with the checkpoint still visibly preserved,
+	// exactly like any other producer failure that never lands.
+	if continuationUnresolved {
+		record.FailureClass = FailureCheckpointContinuationUnresolved
+		cause := errors.New("the continuation neither changed the candidate nor stated an admitted no-change resolution for the checkpoint it inherited")
+		if resolutionErr != nil {
+			cause = fmt.Errorf("the checkpoint resolution did not bind: %w", resolutionErr)
+		}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureCheckpointContinuationUnresolved, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
 	if execErr != nil || result.Failure != nil {
 		class := FailureUnknown
 		if result.Failure != nil {
@@ -1066,7 +1428,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		execution := executionRecord{
 			mutationResult: record,
 			PriorContext:   result.PriorContext,
-			Diagnostic:     r.executionDiagnostic(stage, class, result, execErr),
+			// Carried whether this refusal came from a decode failure (set by
+			// the adapter on ExecutionResult) or survives from nowhere else:
+			// the admission-refusal path below sets its own ReviewRefusal on
+			// its own executionRecord literal, and this is the OTHER place a
+			// reviewer-role invocation's exact reason must reach the journal
+			// rather than being discarded down to a bare classification
+			// (#374).
+			ReviewRefusal: result.ReviewRefusal,
+			Diagnostic:    r.executionDiagnostic(stage, class, result, execErr),
 			// Real work exists but the producer did not finish, so what it left
 			// is a CHECKPOINT: preserved, exactly identified, reassessed, and
 			// deliberately not eligible for assurance or anything past it.
@@ -1099,7 +1469,30 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// and the checkpoint ceiling still bounds how much unfinished work one
 		// run may accumulate, because a zero-delta invocation creates no
 		// checkpoint.
-		if !record.Mutated {
+		//
+		// A REVIEWER PROTOCOL FAILURE ALWAYS FAILS THE OPERATION, mutation or
+		// not (#374). "Left real work behind" means something for a producer,
+		// whose deliverable IS candidate content; a reviewer's deliverable is
+		// the verdict, and incidental workspace touches (review notes, a
+		// toolchain's own output) are not that verdict. Letting Mutated excuse
+		// this class would let the runtime's own candidate.commit operation
+		// treat a reviewer's scratch output as a successful execution and
+		// commit it - admitting candidate content from an invocation that
+		// never crossed the protocol it was there to run.
+		//
+		// A FAILURE CLASSIFICATION IS AUTHORITATIVE FOR THE INVOCATION (#390).
+		// The one way a provider failure leaves the operation Succeeded is the
+		// governed checkpoint above: a runtime bound ended a producer that left
+		// real work, and that work is preserved as an INCOMPLETE head (#54,
+		// #328, #379). Any other failure with mutation - a refusal such as
+		// provider_background_work_unresolved, a quota or provider error, an
+		// unknown failure - used to fall through as Succeeded+mutated, and
+		// candidate.commit then committed bytes the runtime had just refused
+		// as a completed candidate. Mutation proves material exists; it is
+		// not evidence the execution succeeded. Such an operation fails, and
+		// its material is quarantined at this attempt boundary (see
+		// settleRefusedMaterial) rather than left for the next attempt.
+		if !execution.Checkpoint {
 			produced.state = OperationFailed
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
@@ -1356,13 +1749,18 @@ func providerOutcome(result ExecutionResult, err error) OperationState {
 // restoreCandidate is the workspace_integrity_violation route: refuse and
 // restore, never adopt. RouteFailure names it; this performs it.
 func (r *EngineeringRuntime) restoreCandidate(workspace *CandidateWorkspace, cause error) effect {
+	return failed(r.restore(workspace, cause))
+}
+
+// restore performs the restore route and returns the error the operation fails with.
+func (r *EngineeringRuntime) restore(workspace *CandidateWorkspace, cause error) error {
 	if RouteFailure(FailureWorkspaceIntegrity) != RouteRestore {
-		return failed(cause)
+		return cause
 	}
 	if err := workspace.RestoreTrusted(); err != nil {
-		return failed(fmt.Errorf("%s; restore failed: %w", cause, err))
+		return fmt.Errorf("%s; restore failed: %w", cause, err)
 	}
-	return failed(cause)
+	return cause
 }
 
 // findings normalizes CURRENT-head external observations into typed findings.
@@ -1377,8 +1775,9 @@ func (s *runState) findings() []Finding {
 			continue
 		}
 		var record executionRecord
-		if decodeJSON(ops[i].Result, &record) == nil && record.FailureClass == FailureVerification && record.ReviewRefusal != nil {
-			findings = append(findings, Finding{Classification: FailureVerification, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
+		if decodeJSON(ops[i].Result, &record) == nil && record.ReviewRefusal != nil &&
+			(record.FailureClass == FailureVerification || record.FailureClass == FailureReviewerProtocolIncomplete) {
+			findings = append(findings, Finding{Classification: record.FailureClass, Signature: boundedDetail("review-refused:" + record.ReviewRefusal.Error())})
 		}
 		break
 	}
@@ -1567,13 +1966,21 @@ type commitRecord struct {
 // goes straight through MutationCoordinator, which guards the change, creates
 // the runtime-owned commit, and immediately returns through the #8 bridge, so
 // commit -> normalized observation -> reassessment is one indivisible step.
-func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState, _ RunOperation) effect {
+//
+// Indivisible in MEANING, not in the filesystem (#402): the commit lands
+// before anything is journalled, so every failure after it returns the commit
+// itself in the attempt's durable result, and a later attempt observes that
+// same commit instead of committing again or calling the work uncommitted.
+// Process loss BEFORE that result is written leaves a head nothing durable
+// proves is the runtime's: it is refused and held as unproven, never adopted.
+func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState, op RunOperation) effect {
 	// Which mutation is being committed is the planner's binding, so the
 	// producing operation is re-derived the same way rather than re-encoded
 	// into this handler's own key. Its record says whether the producer
 	// finished; that is what decides the meaning of the commit about to be made.
 	checkpoint := false
-	if producing, wanted := bindCandidateCommit(state); wanted {
+	producing, wanted := bindCandidateCommit(state)
+	if wanted {
 		if op, ok := state.snapshot.Operations[producing]; ok {
 			var record executionRecord
 			if len(op.Result) > 0 && json.Unmarshal(op.Result, &record) == nil {
@@ -1581,16 +1988,22 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 			}
 		}
 	}
+	prior := state.runtimeCommit(op.ID)
 	workspace, err := r.workspace(state)
+	var recovered *CommitResult
 	if err != nil {
-		return failed(err)
-	}
-	if err := workspace.AssertIntegrity(); err != nil {
-		return r.restoreCandidate(workspace, err)
+		if workspace, recovered, err = r.recoverRuntimeCommit(state, prior, err); err != nil {
+			return effect{state: OperationFailed, result: commitFailure{
+				Error: boundedDetail(err.Error()), Stage: commitStageWorkspace,
+				RuntimeCommit: prior, UnprovenHead: r.refusedHead(state, prior),
+			}}
+		}
+	} else if err := workspace.AssertIntegrity(); err != nil {
+		return commitFailed(commitStageWorkspace, r.restore(workspace, err), prior)
 	}
 	kernel, err := r.buildKernel(state)
 	if err != nil {
-		return failed(err)
+		return commitFailed(commitStageWorkspace, err, prior)
 	}
 	coordinator := MutationCoordinator{
 		Flow:       r.flow,
@@ -1598,9 +2011,34 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 		Repository: r.deps.Repository.Identity,
 		MaxBytes:   maxCandidateBytes,
 	}
-	_, result, err := coordinator.CommitAndObserve(kernel, r.projectModel(state), r.deps.Policy, "zenchron: candidate change for "+state.run.Goal)
+	var result CommitResult
+	if recovered != nil {
+		result = *recovered
+		_, err = coordinator.Observe(kernel, r.projectModel(state), r.deps.Policy, result)
+	} else {
+		_, result, err = coordinator.CommitAndObserve(kernel, r.projectModel(state), r.deps.Policy, candidateCommitMessage(state))
+	}
+	made := func() *runtimeCommit {
+		return &runtimeCommit{
+			commitRecord: commitRecord{result.Commit, result.Tree, len(result.Paths), workspace.TrustedMetadata, result.Excluded},
+			PathsDigest:  pathsDigest(result.Paths), Producing: producing, Checkpoint: checkpoint,
+		}
+	}
 	if err != nil {
-		return failed(err)
+		if result.Commit == "" {
+			// Commit's own integrity check refuses before any commit exists.
+			stage := commitStageCommit
+			var integrity *WorkspaceIntegrityError
+			if errors.As(err, &integrity) {
+				stage = commitStageWorkspace
+			}
+			return commitFailed(stage, err, prior)
+		}
+		stage := commitStageCommit
+		if errors.Is(err, errCommitObservation) {
+			stage = commitStageObservation
+		}
+		return commitFailed(stage, err, made())
 	}
 	// The JOURNALLED reassessment is the canonical rebuild for the new head,
 	// not the coordinator's incremental one. The incremental observation sees
@@ -1610,7 +2048,7 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	// record identical to the state evidence and authority are evaluated under.
 	next, err := r.buildKernelAt(state, workspace.Dir, result.Commit)
 	if err != nil {
-		return failed(err)
+		return commitFailed(commitStageReassessment, err, made())
 	}
 	// Both events carry the same identity, because a checkpoint IS a real
 	// runtime-owned commit. Only the meaning differs, and it differs in the
@@ -1640,6 +2078,177 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 			}},
 		},
 	}
+}
+
+// The stages a candidate.commit attempt records its failure at (#402), so a
+// deterministic failure repeated across attempts names where it happens.
+const (
+	commitStageWorkspace    = "workspace"    // before any commit: workspace, guard or kernel
+	commitStageCommit       = "commit"       // Git commit, or its own cleanliness probe
+	commitStageObservation  = "observation"  // the commit exists; #8 did not observe it
+	commitStageReassessment = "reassessment" // the commit exists; the canonical rebuild failed
+)
+
+// commitFailure is a failed candidate.commit attempt's result. RuntimeCommit
+// is set whenever a runtime-owned commit exists for this operation - made by
+// this attempt or recorded by an earlier one - so the journal never says
+// "uncommitted" about a head the runtime already moved. UnprovenHead is a
+// moved head that NO attempt recorded as its own: it is observed, never
+// adopted, and never described as a runtime commit.
+type commitFailure struct {
+	Error         string         `json:"error"`
+	Stage         string         `json:"failure_stage"`
+	RuntimeCommit *runtimeCommit `json:"runtime_commit,omitempty"`
+	UnprovenHead  *observedHead  `json:"unproven_head,omitempty"`
+}
+
+// runtimeCommit is the durable identity of a commit whose candidate.committed
+// never landed: what it is, what produced it, and what it would have meant.
+type runtimeCommit struct {
+	commitRecord
+	PathsDigest string `json:"paths_digest"`
+	Producing   string `json:"producing_operation"`
+	Checkpoint  bool   `json:"checkpoint,omitempty"`
+}
+
+// observedHead is a candidate head as read from the workspace, and nothing more.
+type observedHead struct {
+	Commit string `json:"commit"`
+	Tree   string `json:"tree"`
+}
+
+func commitFailed(stage string, err error, made *runtimeCommit) effect {
+	return effect{state: OperationFailed, result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
+}
+
+func candidateCommitMessage(state *runState) string {
+	return "zenchron: candidate change for " + state.run.Goal
+}
+
+// commitFailures visits this candidate.commit operation's attempt results,
+// newest first, until visit returns true.
+func (s *runState) commitFailures(opID string, visit func(commitFailure) bool) {
+	for i := len(s.events) - 1; i >= 0; i-- {
+		e := s.events[i]
+		if e.Type != EventOperationAfter || e.OperationID != opID {
+			continue
+		}
+		op, err := decodePayload[RunOperation](e.Payload)
+		if err != nil {
+			continue
+		}
+		var failure commitFailure
+		if decodeJSON(op.Result, &failure) == nil && visit(failure) {
+			return
+		}
+	}
+}
+
+// runtimeCommit is the latest runtime-owned commit an attempt of this
+// candidate.commit operation recorded without completing, read back from the
+// journal so neither a restart nor a later attempt that failed earlier can
+// lose it.
+func (s *runState) runtimeCommit(opID string) (made *runtimeCommit) {
+	s.commitFailures(opID, func(f commitFailure) bool { made = f.RuntimeCommit; return made != nil })
+	return made
+}
+
+// unprovenHead is the head the LATEST attempt of this operation refused as
+// unproven, or nil.
+func (s *runState) unprovenHead(opID string) (head *observedHead) {
+	s.commitFailures(opID, func(f commitFailure) bool { head = f.UnprovenHead; return true })
+	return head
+}
+
+// readHead reads the candidate head and its tree.
+func readHead(dir string) (observedHead, error) {
+	out, err := gitOutput(dir, "rev-parse", "HEAD", "HEAD^{tree}")
+	if err != nil {
+		return observedHead{}, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return observedHead{}, fmt.Errorf("unreadable candidate head")
+	}
+	return observedHead{fields[0], fields[1]}, nil
+}
+
+// recoverRuntimeCommit answers a candidate head that is not the recorded
+// revision. It adopts exactly one thing: the commit an earlier attempt of this
+// operation RECORDED as its own runtime commit and then failed to complete
+// (#402). The recorded hash binds parent, history and tree, and the tree binds
+// content, so what is checked here is only what that binding cannot prove: the
+// path set and Git metadata as recorded, and a worktree holding nothing more.
+//
+// It FAILS CLOSED. A head no attempt recorded - including the runtime's own
+// commit after process loss before any journal record - is never adopted:
+// author, message, parent and a clean status are all forgeable by whoever can
+// write the workspace, and are not evidence. The original integrity error
+// stands, nothing here writes to the workspace, and the head is left to the
+// operator release path (#344).
+func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtimeCommit, cause error) (*CandidateWorkspace, *CommitResult, error) {
+	var integrity *WorkspaceIntegrityError
+	if !errors.As(cause, &integrity) {
+		return nil, nil, cause
+	}
+	refuse := func(why string) (*CandidateWorkspace, *CommitResult, error) {
+		return nil, nil, fmt.Errorf("%w; not a recoverable runtime commit: %s", cause, why)
+	}
+	dir := candidateDir(r.deps.StateDir, state.run.ID)
+	expected := state.projection.CandidateRevision
+	if expected == "" {
+		expected = state.baseRevision()
+	}
+	head, err := readHead(dir)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	// No rename detection: the path set Commit records lists both sides.
+	paths, err := diffPaths(dir, expected, head.Commit, "--no-renames")
+	if err != nil {
+		return refuse(err.Error())
+	}
+	metadata, err := gitMetadataDigest(dir)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	if prior == nil {
+		return refuse("no attempt recorded a runtime commit, so the head is unproven")
+	}
+	switch {
+	case head.Commit != prior.Commit || head.Tree != prior.Tree:
+		return refuse("it is not the recorded commit " + prior.Commit)
+	case pathsDigest(paths) != prior.PathsDigest:
+		return refuse("its paths differ from the recorded commit")
+	case metadata != prior.MetadataDigest:
+		return refuse("Git metadata differs from the recorded commit")
+	}
+	residue, err := dirtyPathsOutside(dir, prior.ExcludedPaths)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	if len(residue) > 0 {
+		return refuse("work is still uncommitted: " + quotedPaths(residue))
+	}
+	return &CandidateWorkspace{
+			Dir: dir, BaseRevision: state.baseRevision(), TrustedMetadata: metadata,
+			Remote: r.deps.Remote.URL, Credentials: r.deps.Credentials,
+		}, &CommitResult{Commit: head.Commit, Tree: head.Tree, Paths: paths, Excluded: prior.ExcludedPaths},
+		nil
+}
+
+// refusedHead is the head a refused recovery leaves in place, when it moved
+// and is not the runtime commit the operation recorded.
+func (r *EngineeringRuntime) refusedHead(state *runState, prior *runtimeCommit) *observedHead {
+	head, err := readHead(candidateDir(r.deps.StateDir, state.run.ID))
+	expected := state.projection.CandidateRevision
+	if expected == "" {
+		expected = state.baseRevision()
+	}
+	if err != nil || head.Commit == expected || (prior != nil && head.Commit == prior.Commit) {
+		return nil
+	}
+	return &head
 }
 
 // maxCandidateBytes bounds one runtime-owned commit. It is the candidate size
@@ -1719,6 +2328,12 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}
+	// An unpassed result that names no class is a verification failure, as
+	// currentHeadFailure reads it, so the stop-route guard below cannot turn it
+	// into a non-retryable stop.
+	if !result.Passed && class == "" {
+		class = FailureVerification
+	}
 	payload := AssuranceObservedPayload{
 		ProviderID:         firstNonEmpty(result.ProviderID, "assurance-provider"),
 		VerifierDefinition: firstNonEmpty(result.VerifierDefinition, "unknown-verifier"),
@@ -1764,7 +2379,13 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// unsatisfied. Retry is a fault that may clear by itself; wait is one an
 	// operator has to clear. Recording either as a succeeded observation is
 	// defect G, and a wait-routed one would recreate it exactly.
-	if !result.Passed && (RouteFailure(class) == RouteRetry || RouteFailure(class) == RouteWait) {
+	//
+	// A STOP-routed class (run_cancelled, unknown, flaky) is not a verdict
+	// either, and nothing plans an operation for it. Recording it as succeeded
+	// satisfied assurance for this head and stranded the run at
+	// goal_state_reached; failing it lets the reconciler settle the run on the
+	// non-retryable failure instead (#447).
+	if route := RouteFailure(class); !result.Passed && (reattemptable(route) || route == RouteStop) {
 		return effect{
 			state:  OperationFailed,
 			result: assuranceRecord{FailureClass: class, Passed: false},
@@ -2617,7 +3238,13 @@ func (s *runState) assuranceRecordedAt(sequence int64) string {
 // candidatePaths is the observed change: every path that differs between the
 // pinned base and the exact recorded candidate commit.
 func candidatePaths(dir, base, commit string) ([]string, error) {
-	out, err := gitOutput(dir, "diff", "--name-only", "-z", base, commit)
+	return diffPaths(dir, base, commit)
+}
+
+// diffPaths lists, sorted, every path that differs between two revisions.
+func diffPaths(dir, base, commit string, flags ...string) ([]string, error) {
+	args := append(append([]string{"diff", "--name-only", "-z"}, flags...), base, commit)
+	out, err := gitOutput(dir, args...)
 	if err != nil {
 		return nil, err
 	}

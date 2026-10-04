@@ -449,8 +449,10 @@ func (r PlanReconciler) stopRetiredRun(runID, reason string) (bool, error) {
 	if run.Plan == nil || run.Disposition == Cancelled || terminalDisposition(run.Disposition) {
 		return false, nil
 	}
-	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256}
-	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); err != nil {
+	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256, Liveness: NewLockOwnerLiveness(r.StateDir)}
+	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); IsRunTerminal(err) {
+		return false, nil // finished after the read above: already settled (#439)
+	} else if err != nil {
 		return false, err
 	}
 	return true, nil
@@ -727,7 +729,9 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		// A terminal failure leaves a last head, not a replacement input
+		// that dependent work can consume.
+		if outcome, settled := runSettled(run); !settled || outcome != "completed" {
 			continue
 		}
 		head := run.Candidate.Revision
@@ -1388,9 +1392,17 @@ func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) (string,
 	if err != nil {
 		return "", nil, fmt.Errorf("upstream stage %q run %s could not be projected: %w", subject.StageID, subject.RunID, err)
 	}
-	if projection.PullRequest != nil {
-		// Published: the governed remote already has this commit, so the
-		// ordinary clone reaches it and nothing needs transferring.
+	if projection.PullRequest != nil && !projection.PullRequest.Stale && projection.PullRequest.HeadRevision == subject.Candidate {
+		// Published: the governed remote has a live pull request whose head IS
+		// the exact candidate this stage froze, so the ordinary clone reaches it
+		// and nothing needs transferring.
+		//
+		// A stale observation, or one whose head has moved past this frozen
+		// candidate, is not proof of anything about THIS commit - a producer
+		// that published candidate A and later produced unpublished candidate B
+		// leaves a pull request the remote can resolve, but not at B. Treating
+		// that PR as proof for B would select a base the remote cannot actually
+		// serve, so the unpublished-candidate transport below is used instead.
 		return subject.Candidate, nil, nil
 	}
 	// NOT PUBLISHED, which is not the same as not available. The commit exists
@@ -1715,7 +1727,10 @@ func (r PlanReconciler) reviewAcceptance(plan domain.EngineeringPlan, stage doma
 	if !found {
 		return "", false, nil
 	}
-	subject, ok := r.reviewSubject(assignment)
+	subject, ok, err := r.reviewSubject(assignment)
+	if err != nil {
+		return "", false, err
+	}
 	if !ok {
 		// A reviewer with no frozen upstream has nothing it was asked to judge.
 		// Settling it either way would be inventing a subject for a verdict.
@@ -1856,12 +1871,21 @@ func unreachableUpstream(stage domain.PlanStage, assignment domain.AgentAssignme
 // the LAST frozen upstream is the head that combination settles on - the same
 // one upstreamBase materializes the workspace from, so the verdict and the
 // workspace are answers about one tree by construction.
-func (r PlanReconciler) reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool) {
+//
+// A subject-selection failure - divergent upstream siblings with no single one
+// containing the others - is returned rather than folded into "no subject".
+// upstreamBase propagates that same error; collapsing it here would leave a
+// reviewer stage pending with no operator-visible reason once containment
+// becomes unprovable, the one case this is meant to surface rather than hide.
+func (r PlanReconciler) reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool, error) {
 	subject, err := r.upstreamSubject(assignment)
-	if err != nil || subject == nil {
-		return domain.UpstreamOutput{}, false
+	if err != nil {
+		return domain.UpstreamOutput{}, false, err
 	}
-	return *subject, true
+	if subject == nil {
+		return domain.UpstreamOutput{}, false, nil
+	}
+	return *subject, true, nil
 }
 
 // stageSettlementReason is what an operator reads beside a settled stage.

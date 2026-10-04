@@ -156,15 +156,16 @@ func watchStateOf(t *testing.T, fixture *phase8Fixture, repo GitHubRepo) (WatchS
 	return state, ok
 }
 
-// occupyGlobalSlot makes another live owner hold the single run-driving slot.
-// It is how a test isolates discovery from driving, and it is also the durable
-// shape the run ceiling is defined against.
+// occupyGlobalSlot makes another live owner hold the single WORK slot. Since
+// #85 that no longer stops a run observing; occupyEverySlot does.
+//
+// It is the durable shape the run ceiling is defined against.
 func occupyGlobalSlot(t *testing.T, fixture *phase8Fixture) {
 	t.Helper()
 	at := fixture.clock.at
 	_, ok, err := fixture.store.PutOperation(RunOperation{
 		SchemaVersion: SchemaVersion, ID: "op-foreign", RunID: "run-foreign",
-		Kind: "external.work", IdempotencyKey: "foreign", State: Leased,
+		Kind: OpExecutionInvoke, IdempotencyKey: "foreign", State: Running,
 		Attempt: 1, MaxAttempts: 1, CreatedAt: at,
 		Lease: &Lease{Owner: "other-owner", HeartbeatAt: at, ExpiresAt: at.Add(time.Minute)},
 	}, 0)
@@ -182,6 +183,41 @@ func releaseGlobalSlot(t *testing.T, fixture *phase8Fixture) {
 	op.State, op.Lease = Succeeded, nil
 	if _, written, err := fixture.store.PutOperation(op, revision); err != nil || !written {
 		t.Fatalf("releasing the foreign lease: written=%v err=%v", written, err)
+	}
+}
+
+// occupyEverySlot fills BOTH capacity classes - the work slot and the default
+// observation ceiling - with other live owners' leases, which is how a test
+// isolates discovery from driving now that observation has its own ceiling.
+func occupyEverySlot(t *testing.T, fixture *phase8Fixture) {
+	t.Helper()
+	occupyGlobalSlot(t, fixture)
+	at := fixture.clock.at
+	for i := 0; i < DefaultMaxConcurrentObservations; i++ {
+		id := fmt.Sprintf("op-foreign-observe-%d", i)
+		if _, ok, err := fixture.store.PutOperation(RunOperation{
+			SchemaVersion: SchemaVersion, ID: id, RunID: fmt.Sprintf("run-foreign-observe-%d", i),
+			Kind: OpGitHubObserve, IdempotencyKey: id, State: Running,
+			Attempt: 1, MaxAttempts: 1, CreatedAt: at,
+			Lease: &Lease{Owner: "other-owner", HeartbeatAt: at, ExpiresAt: at.Add(time.Minute)},
+		}, 0); err != nil || !ok {
+			t.Fatalf("seeding a foreign observation lease: ok=%v err=%v", ok, err)
+		}
+	}
+}
+
+func releaseEverySlot(t *testing.T, fixture *phase8Fixture) {
+	t.Helper()
+	releaseGlobalSlot(t, fixture)
+	for i := 0; i < DefaultMaxConcurrentObservations; i++ {
+		op, revision, ok, err := fixture.store.Operation(fmt.Sprintf("op-foreign-observe-%d", i))
+		if err != nil || !ok {
+			t.Fatalf("reading a foreign observation lease: ok=%v err=%v", ok, err)
+		}
+		op.State, op.Lease = Succeeded, nil
+		if _, written, err := fixture.store.PutOperation(op, revision); err != nil || !written {
+			t.Fatalf("releasing a foreign observation lease: written=%v err=%v", written, err)
+		}
 	}
 }
 
@@ -714,25 +750,54 @@ func TestWatchNeverSilentlyAbsorbsEditedIntent(t *testing.T) {
 // Capacity and fairness
 // ---------------------------------------------------------------------------
 
-func TestWatchHoldsTheGlobalRunCeiling(t *testing.T) {
+// TestWatchHoldsTheWorkCeilingButStillObserves is #85's decisive case for
+// standalone watch. The work ceiling is one and another owner's
+// execution.invoke holds it. Watch still reconciles run B: B's observation
+// runs, and its next WORK operation is planned but not acquired. Once the slot
+// is released, B's work acquires. Capacity is the scheduler's transactional
+// acquisition alone; a class-blind gate in watch fails this test.
+func TestWatchHoldsTheWorkCeilingButStillObserves(t *testing.T) {
 	fixture := newWatchFixture(t)
 	optIn(fixture.forge, fixture.issue, time.Unix(1_700_000_000, 0).UTC())
 	occupyGlobalSlot(t, fixture)
+	controller := watchOne(t, fixture)
 
-	report := tick(t, watchOne(t, fixture))
+	report := tick(t, controller)
 	observed := only(t, report)
 	if report.ActiveRuns != 1 {
 		t.Fatalf("active runs reported as %d, want the one another owner drives", report.ActiveRuns)
 	}
-	if len(observed.Driven) != 0 {
-		t.Fatalf("the M0 ceiling of one was exceeded: %v", observed.Driven)
+	runID := runIDFor(t, fixture.runtime, fixture.issue)
+	if !containsRun(observed.Driven, runID) {
+		t.Fatalf("watch did not reconcile run B while only the work slot was full: %v (%q)", observed.Driven, observed.Detail)
 	}
-	// Claiming is discovery, not driving: the run exists, it just has no slot.
-	if _, ok := storedRun(t, fixture, runIDFor(t, fixture.runtime, fixture.issue)); !ok {
-		t.Fatal("a full ceiling also stopped the source being claimed")
+	operations, err := fixture.store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedSource, pendingWork := false, false
+	for _, op := range operations {
+		switch {
+		case op.Kind == OpSourceObserve && op.State == Succeeded:
+			observedSource = true
+		case OperationCapacityClass(op.Kind) == CapacityWork && op.State == Pending:
+			pendingWork = true
+		case OperationCapacityClass(op.Kind) == CapacityWork:
+			t.Fatalf("B's work operation %s reached %s while another run held the only work slot", op.Kind, op.State)
+		}
+	}
+	if !observedSource || !pendingWork {
+		t.Fatalf("B observed=%v pending work=%v, want its observation done and its work waiting: %+v", observedSource, pendingWork, operations)
 	}
 	if len(fixture.provider.requests) != 0 {
-		t.Fatal("a run was driven without a slot")
+		t.Fatal("a run was driven into a provider without a work slot")
+	}
+
+	releaseGlobalSlot(t, fixture)
+	fixture.clock.advance(2 * watchPollInterval)
+	tick(t, controller)
+	if compiled := countType(journalOf(t, fixture.runtime, runID), EventContractCompiled); compiled == 0 {
+		t.Fatal("B's work did not acquire once the work slot was released")
 	}
 }
 
