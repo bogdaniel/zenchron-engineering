@@ -184,13 +184,21 @@ func PrepareReviewerResult(stateDir string, attempt ExecutionAttemptRef) (string
 	if err != nil {
 		return "", err
 	}
+	return path, clearResultSlot(path)
+}
+
+// clearResultSlot makes sure a runtime-owned typed result slot exists as an
+// owner-only directory holding NO document. It is the one implementation of
+// "the runtime empties the slot before the invocation" every typed channel
+// relies on, so no channel can inherit an earlier attempt's answer.
+func clearResultSlot(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", err
+		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", err
+		return err
 	}
-	return path, nil
+	return nil
 }
 
 // ReadReviewerResult reads and decodes the result a reviewer wrote.

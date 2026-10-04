@@ -384,6 +384,36 @@ CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequenc
 -- latest run.paused/run.unpaused event. This partial index makes the common
 -- never-paused case an empty probe rather than a scan of the run's journal.
 CREATE INDEX events_run_pause ON events(run_id, sequence) WHERE type IN ('run.paused', 'run.unpaused');
+`, `
+-- Basic explicit orchestration (#470), in the SAME database as runs and the
+-- journal. Both tables are insert-only: a batch is written once with every
+-- item's child run already decided, and an admitted handoff is immutable. Item
+-- state is never stored; it is projected from the child runs on every read.
+CREATE TABLE orchestration_batches (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE TABLE orchestration_handoffs (
+	id                 TEXT PRIMARY KEY,
+	batch_id           TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoffs_by_run ON orchestration_handoffs(run_id, admitted_unix_nano, id);
+-- A reported handoff the runtime decided it can never admit (its report is
+-- gone or no longer the journalled document). Insert-only, keyed by the same
+-- identity an admission would have had, so one invocation is settled once.
+CREATE TABLE orchestration_handoff_refusals (
+	id                TEXT PRIMARY KEY,
+	batch_id          TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoff_refusals_by_run ON orchestration_handoff_refusals(run_id);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

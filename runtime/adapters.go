@@ -119,6 +119,12 @@ type ExecutionRequest struct {
 	// exists so a producer that decides no change is required can STATE that
 	// rather than have it inferred from an unmodified workspace (#376).
 	FeedbackResolutionPath string
+	// HandoffPath is the runtime-owned file an ORCHESTRATED invocation must
+	// write its typed handoff to (#470), set only for a run an orchestration
+	// batch created. It is the same kind of unspoofable, runtime-cleared
+	// channel the two paths above are, and the runtime - not the provider -
+	// reads it after a completed invocation; see handoff_slot.go.
+	HandoffPath string
 	// RequiredTools are the executables THIS invocation's contract obliges the
 	// worker to run, derived from the contract's own frozen acceptance
 	// obligations.

@@ -293,6 +293,7 @@ the supervisor, for an operator who wants intake and nothing else.
 
 ## See also
 
+- [orchestration.md](orchestration.md) — `autonomy orchestrate`: one explicit issue batch, mandatory handoffs, one status
 - [running-work.md](running-work.md) — one run in detail
 - [github-feedback.md](github-feedback.md) — reviews reaching a live worker
 - [configuration.md](configuration.md) — `supervisor`, `watch`, `storage`

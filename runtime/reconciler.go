@@ -236,17 +236,23 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 		// journal; everything without that evidence parks exactly as before.
 		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller, r.wasTransitionActivated()),
 	}
-	for _, op := range state.succeeded(OpSourceObserve) {
+	state.collectSources()
+	return state, nil
+}
+
+// collectSources folds the run's succeeded source observations into the state,
+// which is where its pinned base comes from.
+func (s *runState) collectSources() {
+	for _, op := range s.succeeded(OpSourceObserve) {
 		var record sourceRecord
 		if len(op.Result) == 0 || json.Unmarshal(op.Result, &record) != nil {
 			continue
 		}
-		state.sources = append(state.sources, record)
+		s.sources = append(s.sources, record)
 	}
-	if n := len(state.sources); n > 0 {
-		state.source = &state.sources[n-1]
+	if n := len(s.sources); n > 0 {
+		s.source = &s.sources[n-1]
 	}
-	return state, nil
 }
 
 // succeeded returns the run's succeeded operations of one kind in durable
