@@ -554,9 +554,14 @@ type RunTerminalError struct {
 	RunID       string
 	Disposition Disposition
 	Reason      string
+	// Verb is the refused pause or unpause (#86); empty for a stop.
+	Verb string
 }
 
 func (e *RunTerminalError) Error() string {
+	if e.Verb != "" {
+		return fmt.Sprintf("run %s is %s; there is nothing to %s", e.RunID, e.Disposition, e.Verb)
+	}
 	return fmt.Sprintf("run %q is already %s (%s); stop never rewrites a terminal outcome", e.RunID, e.Disposition, e.Reason)
 }
 

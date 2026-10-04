@@ -112,6 +112,103 @@ one-sided by construction - an owner is alive unless it can be positively
 proven gone - so an unparseable owner identity, another host, or an
 unreadable process all refuse takeover rather than allow it.
 
+## Operator pause
+
+Status: **frozen** (#86, maintainer decision of 2026-10-03, including both
+narrowings below). This section is that design as committed spec.
+
+```text
+autonomy pause RUN --reason T   ->  journal: run.paused   {reason, operator}
+autonomy unpause RUN            ->  journal: run.unpaused {operator}
+paused(run) := the latest of {run.paused, run.unpaused} in the run's journal is run.paused
+```
+
+The names are `pause` and `unpause` because `hold` (#203 held material) and
+`resume` (`autonomy resume`) are taken. A pause is **a fact in the journal and
+nothing else**: no column, no mirror on the run row, no in-memory flag. It is an
+**orthogonal** fact: it is never a `Disposition` and never a reusable `Reason`,
+and it changes neither.
+
+It is enforced in exactly two places, both reading that fact:
+
+1. **`AcquireOperation` is the gate.** One more conjunct in the same atomic
+   `UPDATE` that grants a lease, beside the terminal-run check, reads the run's
+   latest pause event (backed by the partial index `events_run_pause`). A
+   paused run is granted no lease of either capacity class: no work and no
+   observation. A driver that read the run before the pause is refused there.
+2. **`Reconcile` exits early** right after loading a paused run, beside the
+   `driven_elsewhere` exit, returning the run's own disposition and reason. It
+   plans, settles and journals nothing. It is an optimization and the
+   no-journal guarantee, never the gate. A pass whose acquisition the store
+   refused because a pause landed mid-pass likewise leaves the run unsettled.
+
+**In-flight work is not interrupted.** An operation leased before the pause
+finishes under its own existing bounds and its result is journalled; the next
+acquisition is refused. Interrupting a provider on pause is out of scope
+(`stop RUN` is terminal, `shutdown` is fleet-wide and resumable).
+
+Invariants:
+
+1. Durable and restart-safe: replay, the acquire predicate and status all read
+   the journal events, so a restarted `serve`, another process, or a reopened
+   store sees the same answer.
+2. Never cancels or terminalizes: the pause causes no
+   `run.waiting/failed/cancelled/completed`, finishes no operation and
+   requests no cancellation. A pass that already decided before a pause
+   committed mid-pass may still journal those decisions (`operation.planned`,
+   a `run.waiting` or `run.failed` it derived earlier); they are ordered
+   before the pause took effect and are not caused by it.
+3. Never discards material: only the pause event is written; GC already keeps
+   a nonterminal run's material.
+4. The store decides atomically (above).
+5. Idempotent: `pause` on a paused run appends nothing and reports the
+   original `since`, `reason` and `operator`; `unpause` on an unpaused run
+   appends nothing; the decision is made inside the append transaction, so two
+   racing commands append one event. Both refuse a terminal run and append
+   nothing. Nothing but `unpause` clears a pause: not a forge event, a config
+   change, a plan tick, a restart or `autonomy resume`, which refuses a paused
+   run with the `unpause` hint. `stop` on a paused run cancels it; cancel
+   dominates.
+6. Authority is the operator's owner-only access to the state directory. With
+   a supervisor running the command is delegated through the control endpoint
+   and applied under the controller role (`WithAuthority`), so a superseded
+   generation cannot accept it; an endpoint that exists but cannot be reached
+   is a refusal, never a local write beside it. With no supervisor it is
+   written locally. This is plan approve's routing; `stop RUN` writes locally
+   even beside a running supervisor. The recorded `operator` is the
+   requester's resolved identity: provenance, never authority.
+7. No authority or evidence, and no change to trust, budgets or ceilings. The
+   reason is bounded payload text and never part of an event id
+   (`<run>-paused-<unixnano>`).
+8. No budget movement: paused time is non-active because nothing runs;
+   `lifecycle_deadline_seconds` keeps running because it is calendar time.
+9. Unknown is never "not paused": if the predicate cannot be evaluated the
+   acquisition errors; a run whose journal cannot be replayed is
+   `unavailable` in status; a command that cannot read the journal refuses.
+
+`RunSnapshot` gains `paused`, omitted when empty, so every existing run replays
+to the same state digest. Status shows `paused {since, reason, operator}` per
+run and a fleet **paused** count (a paused run holding no active operation),
+taken out of runnable/waiting, so
+`working + observing + runnable + waiting + paused + unavailable == active`. A
+paused run still settling counts as working or observing.
+
+Upgrade and rollback. The binary that introduces pause adds one migration,
+the partial index `events_run_pause`, applied with the schema version bump in
+one transaction (seconds on a large store). Mixed versions fail closed: an
+older binary refuses to open the newer schema version, exactly as for every
+earlier migration. A downgrade therefore needs `DROP INDEX events_run_pause`
+and decrementing `PRAGMA user_version` by one, done by hand with every
+controller stopped. Even then, a run that was EVER paused cannot be replayed
+by an older binary, which does not know `run.paused`/`run.unpaused` and
+refuses the unknown event type; such runs stay unreadable to it until the
+newer binary is restored.
+
+Out of scope: provider interruption on pause, observation while paused (forge
+movement is observed on the first pass after `unpause`), scheduled or automatic
+pause, fleet-wide pause (`drain`), and any change to `stop`, `drain`,
+`shutdown`, held material or opt-out semantics.
+
 ## Configuration layers
 
 Configuration is two layers with strictly different authority. The operator
@@ -466,8 +563,8 @@ rather than transcript text.
 ## Operator surface
 
 The operator surface is the `autonomy` command set: `run`, `status`,
-`events`, `resume`, `refresh`, `authorize`, `stop`, `watch`, `doctor`, and
-`gc`. Each one builds dependencies from the two configuration layers, calls
+`events`, `resume`, `refresh`, `authorize`, `stop`, `pause`, `unpause`,
+`watch`, `doctor`, and `gc`. Each one builds dependencies from the two configuration layers, calls
 the runtime, renders the result, and maps it to an exit status. None of them
 orchestrates: when something happens is the runtime's decision, and what is
 rendered is the operator surface's. Output is JSON by default; a text

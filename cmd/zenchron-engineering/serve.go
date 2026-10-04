@@ -465,6 +465,15 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlPause, runtime.ControlUnpause:
+		// Applied under the controller role (#86): a generation that has been
+		// superseded - or a process holding no role at all (WithAuthority is
+		// nil-safe and refuses) - cannot accept a pause or an unpause.
+		var view runtime.PauseView
+		if err := c.role.WithAuthority(func() (err error) { view, err = applyPause(c.store, request); return err }); err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
 		// Under the reconciler's own lock: a decision and a plan tick both read
 		// a snapshot and then append against it, and interleaving them lets one
@@ -821,13 +830,13 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	// The ceiling bounds workers, not runs, so the two counts are printed as
 	// the two facts they are rather than as one ratio that is true of neither.
 	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
-	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d unavailable\n\n",
-		fleet.Active, fleet.Working, fleet.Capacity, fleet.Observing, fleet.ObservationCapacity, fleet.Runnable, fleet.Waiting, fleet.Unavailable)
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d paused, %d unavailable\n\n",
+		fleet.Active, fleet.Working, fleet.Capacity, fleet.Observing, fleet.ObservationCapacity, fleet.Runnable, fleet.Waiting, fleet.Paused, fleet.Unavailable)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",
 			issueLabel(run), orDash(run.Agent), stateLabel(run), locationLabel(run),
-			elapsedLabel(run.Elapsed), run.Reason)
+			elapsedLabel(run.Elapsed), reasonLabel(run))
 	}
 	// PLANS, beside the runs. A plan awaiting approval is the runtime waiting on
 	// a PERSON, and that has to be visible where an operator looks to see
@@ -888,6 +897,19 @@ func stateLabel(run runtime.RunSummary) string {
 		return string(run.Disposition) + ":" + run.Operation
 	}
 	return string(run.Disposition)
+}
+
+// reasonLabel puts an operator pause (#86) beside the run's own reason, which
+// a pause never replaces.
+func reasonLabel(run runtime.RunSummary) string {
+	if run.Paused == nil {
+		return run.Reason
+	}
+	paused := fmt.Sprintf("paused (%s) since %s", terminalSafe(run.Paused.Reason), run.Paused.Since.Format(time.RFC3339))
+	if run.Reason == "" {
+		return paused
+	}
+	return paused + "; " + run.Reason
 }
 
 func locationLabel(run runtime.RunSummary) string {
