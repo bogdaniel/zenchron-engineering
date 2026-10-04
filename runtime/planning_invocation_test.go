@@ -65,6 +65,14 @@ func TestPlanningInvocationUsesTheProvidersOwnReadOnlyMode(t *testing.T) {
 			if result.Invocation.SandboxMode != tc.sandbox {
 				t.Fatalf("provenance recorded sandbox %q, want %q: the planning invocation ran under %q", result.Invocation.SandboxMode, tc.sandbox, strings.Join(tc.expected, " "))
 			}
+			// The observation the planner persists (#391's closed name set
+			// included) passes the durable bound the plan journal holds it to.
+			if len(result.Invocation.ProviderEnvironment) == 0 {
+				t.Fatal("the planning invocation recorded no provider environment")
+			}
+			if err := validateInvocationObservation(result.Invocation.InvocationObservation); err != nil {
+				t.Fatalf("the planning observation is refused: %v", err)
+			}
 		})
 	}
 }

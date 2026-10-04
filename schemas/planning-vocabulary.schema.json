@@ -87,6 +87,96 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "provider_environment": {
+          "description": "The effective provider-control environment passed to the process, restricted to the adapter's explicit non-secret allowlist (#391). An entry with neither value nor sha256 means the variable was not passed; otherwise exactly one is present, even for an empty value. Host paths (PATH, HOME, GIT_DIR, TMPDIR, GOTMPDIR, GOCACHE, GOPATH, GOMODCACHE and provider state homes) carry only sha256; every other name carries only value, the domain-separated identity SHA-256(\"zenchron/provider-env/<NAME>/v1\" NUL value).",
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "PATH",
+                  "HOME",
+                  "GOENV",
+                  "GIT_DIR",
+                  "GOMODCACHE",
+                  "GOTOOLCHAIN",
+                  "GOPROXY",
+                  "GOSUMDB",
+                  "GOFLAGS",
+                  "TMPDIR",
+                  "GOTMPDIR",
+                  "GOCACHE",
+                  "GOPATH",
+                  "CODEX_HOME",
+                  "CLAUDE_CONFIG_DIR",
+                  "QWEN_HOME",
+                  "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS",
+                  "BASH_DEFAULT_TIMEOUT_MS",
+                  "BASH_MAX_TIMEOUT_MS"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "value_bounded": {
+                "type": "boolean"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "if": {
+              "properties": {
+                "name": {
+                  "enum": [
+                    "PATH",
+                    "HOME",
+                    "GIT_DIR",
+                    "TMPDIR",
+                    "GOTMPDIR",
+                    "GOCACHE",
+                    "GOPATH",
+                    "GOMODCACHE",
+                    "CODEX_HOME",
+                    "CLAUDE_CONFIG_DIR",
+                    "QWEN_HOME"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "value"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "value_bounded"
+                    ]
+                  }
+                ]
+              }
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "sha256"
+                ]
+              }
+            }
+          }
+        },
         "execution_deadline": {
           "type": "string",
           "format": "date-time"

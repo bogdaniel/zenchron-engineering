@@ -42,6 +42,11 @@ type InvocationObservation struct {
 	// replaced by a placeholder. A vector cut short ends in "[argv truncated]".
 	Argv         []string `json:"argv,omitempty"`
 	PromptSHA256 string   `json:"prompt_sha256,omitempty"`
+	// ProviderEnvironment is the EFFECTIVE provider-control environment the
+	// runtime passed to the process (#391): one entry per name on the adapter's
+	// explicit non-secret allowlist, in allowlist order, read from the very
+	// slice the process received. Nothing outside the allowlist is recorded.
+	ProviderEnvironment []EnvironmentEntry `json:"provider_environment,omitempty"`
 
 	// THE AUTHORITY THIS INVOCATION ACTUALLY RAN UNDER, and what it did with
 	// it, so an invocation that outlives its bound explains itself from durable
@@ -93,6 +98,25 @@ type InvocationObservation struct {
 	// ordinary invocation.
 	Truncated bool `json:"provenance_truncated,omitempty"`
 }
+
+// EnvironmentEntry is one allowlisted provider-control variable. Value and
+// SHA256 are BOTH absent when the runtime did not pass the variable at all;
+// otherwise exactly one is present - even for "" - because unset and
+// set-to-empty are different facts.
+type EnvironmentEntry struct {
+	Name  string  `json:"name"`
+	Value *string `json:"value,omitempty"`
+	// SHA256 replaces Value for a host path (PATH, HOME, a provider state
+	// home): the domain-separated identity of the exact passed value.
+	SHA256 string `json:"sha256,omitempty"`
+	// Bounded marks a recorded value that is not the passed value verbatim:
+	// a credential-shaped substring was redacted, or it was cut to the field
+	// bound.
+	Bounded bool `json:"value_bounded,omitempty"`
+}
+
+// MaxProviderEnvironment bounds InvocationObservation.ProviderEnvironment.
+const MaxProviderEnvironment = 24
 
 // MinimalInvocationObservation is the fixed-size fallback of an observation
 // that cannot be recorded whole. It keeps only members whose encoded size does

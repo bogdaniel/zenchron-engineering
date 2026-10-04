@@ -584,11 +584,8 @@ func withInvocationEnv(env, extra []string) ([]string, error) {
 	}
 	for _, entry := range extra {
 		key, _, _ := strings.Cut(entry, "=")
-		upper := strings.ToUpper(key)
-		for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
-			if strings.Contains(upper, secret) {
-				return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
-			}
+		if credentialShapedName(key) {
+			return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
 		}
 		if key == "" || present[key] {
 			return nil, fmt.Errorf("refused invocation environment variable %q: it would replace the runtime's own environment", key)
