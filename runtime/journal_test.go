@@ -549,6 +549,142 @@ func TestPlanJournalStateDigestsAreNotAuthoritative(t *testing.T) {
 	}
 }
 
+// blankEventHash models #462's tamper: an event's document is optionally
+// edited and its event_hash is emptied in both the document and the column, so
+// the two still agree. Nothing else about the row changes.
+func blankEventHash(t *testing.T, db *sql.DB, id string, edit func(*EngineeringEvent)) {
+	t.Helper()
+	var document string
+	if err := db.QueryRow(`SELECT document FROM events WHERE id = ?`, id).Scan(&document); err != nil {
+		t.Fatal(err)
+	}
+	var e EngineeringEvent
+	if err := json.Unmarshal([]byte(document), &e); err != nil {
+		t.Fatal(err)
+	}
+	if edit != nil {
+		edit(&e)
+	}
+	e.EventHash = ""
+	canonical, err := CanonicalJSON(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE events SET document = ?, event_hash = '' WHERE id = ?`, string(canonical), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// emptyHashTampers are #462's cases, for any stream whose events are ids[0..n].
+// An edited payload on the tip is the attack; the unedited tip and the unedited
+// non-tip show the refusal is about the missing hash, not about the edit.
+func emptyHashTampers(ids []string) []struct {
+	name, id string
+	edit     func(*EngineeringEvent)
+} {
+	tip := ids[len(ids)-1]
+	return []struct {
+		name, id string
+		edit     func(*EngineeringEvent)
+	}{
+		{"tip with edited payload", tip, func(e *EngineeringEvent) { e.Payload = json.RawMessage(`{"reason":"forged"}`) }},
+		{"tip unedited", tip, nil},
+		{"non-tip unedited", ids[1], nil},
+	}
+}
+
+// A persisted event with an empty event_hash is corruption (#462). It is
+// refused at the shared read boundary, so Events and Replay both refuse it.
+func TestJournalRefusesAPersistedEmptyEventHash(t *testing.T) {
+	for _, tamper := range emptyHashTampers([]string{"e-1", "e-2", "e-3", "e-4"}) {
+		t.Run(tamper.name, func(t *testing.T) {
+			dir, store := openJournal(t)
+			for _, e := range journalFixture(t, "r") {
+				if _, err := store.AppendEvent(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			blankEventHash(t, rawJournalDB(t, dir), tamper.id, tamper.edit)
+			reopened := reopenStore(t, dir)
+			if _, err := reopened.Events("r"); err == nil || !strings.Contains(err.Error(), "no event_hash") {
+				t.Errorf("read boundary returned an event with an empty event_hash: %v", err)
+			}
+			if _, err := reopened.Replay("r"); err == nil {
+				t.Fatal("a journal with an empty event_hash replayed as valid")
+			}
+		})
+	}
+}
+
+// The plan stream reads through the same boundary and is refused the same way.
+func TestPlanJournalRefusesAPersistedEmptyEventHash(t *testing.T) {
+	for _, tamper := range emptyHashTampers([]string{"p462-1", "p462-2", "p462-3"}) {
+		t.Run(tamper.name, func(t *testing.T) {
+			dir, store := openPlanStore(t)
+			plan := planFixture(t, "plan-462", 1)
+			if _, err := store.ClaimPlan(plan, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			appendPlan(t, store, planEvent(t, plan.ID, "p462-1", EventPlanProposed, proposedPayload(plan)))
+			appendPlan(t, store, planEvent(t, plan.ID, "p462-2", EventPlanValidated, PlanValidatedPayload{
+				Revision: 1, Digest: plan.Digest, Status: string(domain.ProposalValid),
+			}))
+			appendPlan(t, store, planEvent(t, plan.ID, "p462-3", EventPlanApproved, PlanDecisionPayload{
+				Revision: 1, Digest: plan.Digest, Operator: "operator-1", Note: "reviewed",
+			}))
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			blankEventHash(t, rawJournalDB(t, dir), tamper.id, tamper.edit)
+			reopened := reopenStore(t, dir)
+			if _, err := reopened.PlanEvents(plan.ID); err == nil || !strings.Contains(err.Error(), "no event_hash") {
+				t.Errorf("read boundary returned a plan event with an empty event_hash: %v", err)
+			}
+			if _, err := reopened.ReplayPlan(plan.ID); err == nil {
+				t.Fatal("a plan journal with an empty event_hash replayed as valid")
+			}
+		})
+	}
+}
+
+// The reducers carry no empty-hash tolerance of their own (#462): an event
+// without its hash is refused even when handed to them directly, so nothing
+// that bypasses the read boundary inherits the old gap.
+func TestReducersRefuseAnEventWithoutItsHash(t *testing.T) {
+	_, store := openJournal(t)
+	for _, e := range journalFixture(t, "r") {
+		if _, err := store.AppendEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := store.Events("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events[len(events)-1].EventHash = ""
+	if _, err := Reduce(newJournalRun("r"), events); err == nil {
+		t.Error("Reduce accepted an event without its hash")
+	}
+
+	_, plans := openPlanStore(t)
+	plan := planFixture(t, "plan-462r", 1)
+	if _, err := plans.ClaimPlan(plan, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	appendPlan(t, plans, planEvent(t, plan.ID, "p462r-1", EventPlanProposed, proposedPayload(plan)))
+	planEvents, err := plans.PlanEvents(plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planEvents[0].EventHash = ""
+	if _, err := ReducePlan(plan.ID, planEvents); err == nil {
+		t.Fatal("ReducePlan accepted an event without its hash")
+	}
+}
+
 // stateDigestReaders are the only production declarations that may touch an
 // event's state_before/state_after, keyed "path:declaration". Each one writes
 // the fields, checks that the indexed columns agree with the document, renders
