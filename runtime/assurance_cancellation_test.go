@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,12 @@ type scriptedDocker struct {
 	onBlock  func()
 	seen     map[string]int
 	blocked  bool
+	// startExits scripts the nth `start` (preparation and verification
+	// alternate, so verification is every even one). A positive code is the
+	// workload's own exit, which Docker records and `wait` reports; a negative
+	// one is a start that failed before any workload ran.
+	startExits map[int]int
+	exited     int
 }
 
 func (d *scriptedDocker) LookPath(string) error { return nil }
@@ -36,6 +44,10 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 	}
 	verb := strings.Fields(joined)[0]
 	d.seen[verb]++
+	code := 0
+	if verb == "start" {
+		code = d.startExits[d.seen[verb]]
+	}
 	block := d.blockOn != "" && strings.HasPrefix(joined, d.blockOn) && d.seen[verb] == d.blockNth
 	if block {
 		d.blocked = true
@@ -49,6 +61,23 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 		return CommandOutput{}, ctx.Err()
 	}
 	switch {
+	case code != 0:
+		if code < 0 {
+			return CommandOutput{ExitCode: 1, Stderr: []byte("Error response from daemon: cannot start container\n")}, errors.New("exit status 1")
+		}
+		d.mu.Lock()
+		d.exited = code
+		d.mu.Unlock()
+		return CommandOutput{ExitCode: code, Stdout: []byte("--- FAIL: TestCandidate\nFAIL\n")}, fmt.Errorf("exit status %d", code)
+	case strings.HasPrefix(joined, "inspect") && d.exitedCode() != 0:
+		return CommandOutput{Stdout: []byte("false\n")}, nil
+	case verb == "wait" && d.exitedCode() != 0:
+		return CommandOutput{Stdout: []byte(strconv.Itoa(d.exitedCode()) + "\n")}, nil
+	case verb == "rm":
+		d.mu.Lock()
+		d.exited = 0
+		d.mu.Unlock()
+		return CommandOutput{}, nil
 	case strings.HasPrefix(joined, "info --format {{.ServerVersion}}"):
 		return CommandOutput{Stdout: []byte("27.1.1\n")}, nil
 	case strings.HasPrefix(joined, "info --format {{.ID}}"):
@@ -59,6 +88,12 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 		return CommandOutput{ExitCode: 1, Stderr: []byte("Error: No such object\n")}, errors.New("no such object")
 	}
 	return CommandOutput{}, nil // create, start, kill, wait, rm
+}
+
+func (d *scriptedDocker) exitedCode() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.exited
 }
 
 func (d *scriptedDocker) count(verb string) int {
@@ -381,5 +416,92 @@ func TestAStopRoutedAssuranceClassDoesNotSatisfyTheOperation(t *testing.T) {
 	key, _ := bindAssuranceGo(state)
 	if state.satisfied(OpAssuranceGo, key) || outcome.Reason == "goal_state_reached" {
 		t.Fatalf("a run_cancelled assurance with no stop satisfied the operation: %+v", outcome)
+	}
+}
+
+// #454: a first run that fails and a confirmation that passes is flaky, and a
+// flaky result is never passing evidence. No bundle is bound, the operation is
+// not satisfied, nothing reaches authority, and the run stops non-retryably.
+func TestAFlakyAssurancePassIsNeverEvidence(t *testing.T) {
+	f := newPhase8Fixture(t)
+	results := append([]AssuranceResult{{ProviderID: "test-verifier", VerifierDefinition: "verifier-v1", FailureClass: FailureVerification}}, passingAssurance().Results...)
+	verifier := &FakeAssuranceProvider{Results: results}
+	f.useAssurance(verifier)
+	runID := f.start()
+	var outcome Outcome
+	for pass := 0; pass < 30 && outcome.Disposition != Failed; pass++ {
+		outcome = f.reconcile(runID)
+	}
+	if len(verifier.Requests) < 2 || !verifier.Requests[1].Confirmation {
+		t.Fatalf("the failing first run was not confirmed: %+v", verifier.Requests)
+	}
+	state := f.state(runID)
+	key, _ := bindAssuranceGo(state)
+	if state.satisfied(OpAssuranceGo, key) {
+		t.Fatal("a flaky assurance satisfied the operation")
+	}
+	if len(state.projection.EvidenceBundles) != 0 {
+		t.Fatalf("a flaky pass bound evidence: %+v", state.projection.EvidenceBundles)
+	}
+	flaky := false
+	for _, p := range automatedAssurancePayloads(t, state.events) {
+		if p.Passed || p.Bundle != (Ref{}) {
+			t.Fatalf("a flaky result was observed as passing evidence: %+v", p)
+		}
+		flaky = flaky || p.FailureClass == FailureFlaky
+	}
+	if !flaky {
+		t.Fatalf("no %s observation was journalled", FailureFlaky)
+	}
+	for _, e := range state.events {
+		if e.Type == EventAuthorityEvaluated {
+			t.Fatal("a flaky result reached authority")
+		}
+	}
+	if outcome.Disposition != Failed || outcome.Reason != OpAssuranceGo+"_failure_not_retryable" {
+		t.Fatalf("a flaky assurance settled %+v, want %s_failure_not_retryable", outcome, OpAssuranceGo)
+	}
+}
+
+// passWithError answers the first call with failing, then claims a pass on
+// the confirmation together with an error.
+type passWithError struct{ FakeAssuranceProvider }
+
+func (p *passWithError) Assure(_ context.Context, r AssuranceRequest) (AssuranceResult, error) {
+	if !r.Confirmation {
+		return AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", FailureClass: FailureVerification}, nil
+	}
+	return AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", Passed: true}, ErrSandboxUnavailable
+}
+
+// A provider that claims a pass together with an error has not passed, on
+// either call, and binds no evidence.
+func TestAPassReturnedWithAnErrorIsNeverEvidence(t *testing.T) {
+	first := passingAssurance()
+	first.Err = ErrSandboxUnavailable
+	for name, provider := range map[string]AssuranceProvider{"first": first, "confirmation": &passWithError{}} {
+		if result, _, err := AssuranceRerun(context.Background(), provider, AssuranceRequest{}); err == nil || result.Passed {
+			t.Fatalf("%s: a result with an error was passed (%v)", name, err)
+		}
+	}
+	f := newPhase8Fixture(t)
+	verifier := passingAssurance()
+	verifier.Err = ErrSandboxUnavailable
+	f.useAssurance(verifier)
+	runID := f.start()
+	for pass := 0; pass < 30; pass++ {
+		f.reconcile(runID)
+	}
+	if len(verifier.Requests) == 0 {
+		t.Fatal("assurance never ran")
+	}
+	state := f.state(runID)
+	if len(state.projection.EvidenceBundles) != 0 {
+		t.Fatalf("a pass returned with an error bound evidence: %+v", state.projection.EvidenceBundles)
+	}
+	for _, e := range state.events {
+		if e.Type == EventAuthorityEvaluated {
+			t.Fatal("a pass returned with an error reached authority")
+		}
 	}
 }
