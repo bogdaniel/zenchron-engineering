@@ -383,7 +383,10 @@ Further rules:
 - **Provider wait accounting (frozen, #87).** A recognized provider wait
   always refunds the logical engineering attempt. The attempt's active
   execution time is refunded only when `provider_executed` is false, that is
-  when the provider was refused before it ran. When the provider really ran,
+  when the provider was refused before it ran. The provider owns that fact,
+  never the failure class: a CLI reports it with its process provenance, and
+  `openai_responses` once one model exchange has completed, so a tool loop
+  that ends in a 429 keeps its elapsed work charged. When the provider really ran,
   that elapsed work stays charged to the active-work budget. There is no
   "made no progress" heuristic: a long wait therefore spends active work one
   probe per 5 min and is bounded by the active-work budget as well as

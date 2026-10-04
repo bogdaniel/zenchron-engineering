@@ -437,6 +437,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	stop, detail := StopCompleted, ""
 	classification := FailureUnknown
 	httpStatus, providerCode, providerParam := 0, "", ""
+	exchanged := false
 
 	for iteration := 1; ; iteration++ {
 		if iteration > maxIterations {
@@ -468,6 +469,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			}
 			break
 		}
+		exchanged = true
 		if response.Model != "" {
 			model = response.Model
 		}
@@ -543,7 +545,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		return ExecutionResult{}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext}
+	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext, Executed: exchanged}
 	if stop == StopCompleted {
 		return result, nil
 	}

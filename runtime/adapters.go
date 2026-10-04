@@ -283,6 +283,11 @@ type ExecutionResult struct {
 	// value that would read as "no sandbox, no bypass, unknown auth" - three
 	// claims it did not make.
 	Invocation *InvocationProvenance
+	// Executed is a provider's own report that this attempt reached its model
+	// (at least one completed exchange), for a provider with no process
+	// provenance to say so. A provider that failed after real work sets it,
+	// so that work stays charged even when the failure routes to a wait.
+	Executed bool
 	// Review is the structured verdict a reviewer stage emitted, read by the
 	// adapter from the runtime-owned result path. It is nil when none was
 	// written, which is an ordinary outcome rather than a failure: a reviewer

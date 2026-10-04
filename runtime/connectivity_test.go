@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -844,16 +845,20 @@ func TestConnectivityResumeDoesNotBringTheProbeForward(t *testing.T) {
 func TestConnectivityProviderWaitRefundsExecutionOnlyWhenNothingRan(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err  error
+		ran  time.Duration
+		step time.Duration
 		want time.Duration
 	}{
-		"provider ran":          {nil, 10 * time.Minute},
-		"refused before it ran": {errors.New("refused before dispatch"), 0},
+		"provider ran": {nil, 10 * time.Minute, 0, 10 * time.Minute},
+		// Refused at once: only the runtime's own clock reads elapse, and
+		// that attempt time is refunded.
+		"refused before it ran": {errors.New("refused before dispatch"), 0, time.Second, 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPhase8Fixture(t)
 			runID := f.start()
-			f.clock.step = 0
-			f.provider.mutate = func(string) error { f.clock.at = f.clock.at.Add(10 * time.Minute); return nil }
+			f.clock.step = tc.step
+			f.provider.mutate = func(string) error { f.clock.at = f.clock.at.Add(tc.ran); return nil }
 			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
 			f.provider.Err = tc.err
 			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
@@ -862,6 +867,44 @@ func TestConnectivityProviderWaitRefundsExecutionOnlyWhenNothingRan(t *testing.T
 			op := executionOperation(t, f.store, runID)
 			if op.Attempt != 0 || op.ConsumedExecution != tc.want || op.RetryDisposition != DispositionRateLimitWait {
 				t.Fatalf("attempt %d consumed %s (want 0, %s): %s", op.Attempt, op.ConsumedExecution, tc.want, retryRow(op))
+			}
+		})
+	}
+}
+
+// #87 (frozen), the production openai_responses shape: a 429 on the first
+// exchange ran nothing and is refunded; a 429 after a completed exchange
+// keeps that elapsed work charged. Both refund the attempt.
+func TestConnectivityOpenAIWaitChargesWorkThatRan(t *testing.T) {
+	for name, tc := range map[string]struct {
+		exchanges int
+		step      time.Duration
+		want      time.Duration
+	}{
+		"429 before any exchange":   {0, time.Second, 0},
+		"429 after a real exchange": {1, 0, 10 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPhase8Fixture(t)
+			runID := f.start()
+			f.clock.step = tc.step
+			calls := 0
+			api := doerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				status, body := http.StatusTooManyRequests, creditExhausted429
+				if calls <= tc.exchanges {
+					f.clock.at = f.clock.at.Add(10 * time.Minute) // the model reasoned
+					status, body = http.StatusOK, scriptedToolCalls(t, "work", 10, [2]string{"no_such_tool", "{}"})
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+			})
+			useRealProvider(t, f, runID, api, func(p *OpenAIProvider) { p.MaxIterations = 4 })
+			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
+				t.Fatalf("account: %+v", out)
+			}
+			op := executionOperation(t, f.store, runID)
+			if calls != tc.exchanges+1 || op.Attempt != 0 || op.ConsumedExecution != tc.want || op.RetryDisposition != DispositionAccountWait {
+				t.Fatalf("calls %d attempt %d consumed %s (want %s): %s", calls, op.Attempt, op.ConsumedExecution, tc.want, retryRow(op))
 			}
 		})
 	}
