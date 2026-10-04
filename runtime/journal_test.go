@@ -610,7 +610,7 @@ func TestJournalRefusesAPersistedEmptyEventHash(t *testing.T) {
 			blankEventHash(t, rawJournalDB(t, dir), tamper.id, tamper.edit)
 			reopened := reopenStore(t, dir)
 			if _, err := reopened.Events("r"); err == nil || !strings.Contains(err.Error(), "no event_hash") {
-				t.Fatalf("read boundary returned an event with an empty event_hash: %v", err)
+				t.Errorf("read boundary returned an event with an empty event_hash: %v", err)
 			}
 			if _, err := reopened.Replay("r"); err == nil {
 				t.Fatal("a journal with an empty event_hash replayed as valid")
@@ -641,7 +641,7 @@ func TestPlanJournalRefusesAPersistedEmptyEventHash(t *testing.T) {
 			blankEventHash(t, rawJournalDB(t, dir), tamper.id, tamper.edit)
 			reopened := reopenStore(t, dir)
 			if _, err := reopened.PlanEvents(plan.ID); err == nil || !strings.Contains(err.Error(), "no event_hash") {
-				t.Fatalf("read boundary returned a plan event with an empty event_hash: %v", err)
+				t.Errorf("read boundary returned a plan event with an empty event_hash: %v", err)
 			}
 			if _, err := reopened.ReplayPlan(plan.ID); err == nil {
 				t.Fatal("a plan journal with an empty event_hash replayed as valid")
@@ -666,7 +666,7 @@ func TestReducersRefuseAnEventWithoutItsHash(t *testing.T) {
 	}
 	events[len(events)-1].EventHash = ""
 	if _, err := Reduce(newJournalRun("r"), events); err == nil {
-		t.Fatal("Reduce accepted an event without its hash")
+		t.Error("Reduce accepted an event without its hash")
 	}
 
 	_, plans := openPlanStore(t)
