@@ -382,46 +382,44 @@ func TestAssuranceCheckoutSharesNoObjectFileWithTheStore(t *testing.T) {
 
 // TestAForeignHeadIsNeverTheCandidatesAncestor: an external pull request head
 // is recognised as the runtime's own only from the subject store. A graft or a
-// commit object swapped in the candidate that would make a foreign commit look
-// like the candidate's parent must not suppress candidate.external_changed.
+// parent commit swapped in the candidate that makes a foreign commit look like
+// the candidate's ancestor must not make ancestorOfCandidate say so - which is
+// what keeps observeGitHub recording candidate.external_changed. One run is
+// committed once and each tamper is asked of it in turn; observeGitHub's
+// recording of the refusal is TestUnexpectedExternalHeadIsRecordedAndNeverOverwritten's.
 func TestAForeignHeadIsNeverTheCandidatesAncestor(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	runID := fixture.start()
+	fixture.crash(runID, func(call GitHubCall) bool {
+		return call.Method == "RefSHA" && strings.HasPrefix(call.Ref, "zenchron/")
+	})
+	state := fixture.state(runID)
+	candidate := state.projection.CandidateRevision
+	if candidate == "" {
+		t.Fatal("no candidate commit")
+	}
+	dir := candidateDir(fixture.stateDir, runID)
+	foreign := strings.TrimSpace(string(mustBytes(t)(runGitInput(dir, []byte("foreign\n"), "commit-tree", fixture.base+"^{tree}"))))
+	grafts := filepath.Join(dir, ".git", "info", "grafts")
 	for _, tc := range []struct {
 		name   string
-		tamper func(t *testing.T, dir, candidate, foreign string)
+		tamper func(t *testing.T)
 	}{
-		{"a graft", func(t *testing.T, dir, candidate, foreign string) {
-			mustWrite(t, filepath.Join(dir, ".git", "info", "grafts"), candidate+" "+foreign+"\n")
-		}},
-		{"a swapped parent commit object", func(t *testing.T, dir, candidate, foreign string) {
+		{"a graft", func(t *testing.T) { mustWrite(t, grafts, candidate+" "+foreign+"\n") }},
+		{"a swapped parent commit object", func(t *testing.T) {
+			if err := os.Remove(grafts); err != nil {
+				t.Fatal(err)
+			}
 			swapParentToName(t, dir, candidate, foreign)
 		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fixture := newPhase8Fixture(t)
-			runID := fixture.start()
-			fixture.reconcile(runID)
-			state := fixture.state(runID)
-			candidate, number := state.projection.CandidateRevision, state.projection.PullRequest.Number
-			if candidate == "" || number == 0 {
-				t.Fatalf("the run did not publish: candidate %q, pull request %d", candidate, number)
-			}
-			dir := candidateDir(fixture.stateDir, runID)
-			foreign := strings.TrimSpace(string(mustBytes(t)(runGitInput(dir, []byte("foreign\n"), "commit-tree", fixture.base+"^{tree}"))))
-			tc.tamper(t, dir, candidate, foreign)
-			if out, err := exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", foreign, candidate).CombinedOutput(); err != nil {
-				t.Fatalf("the tamper did not take: plain git does not see the foreign head as an ancestor: %v %s", err, out)
-			}
-			fixture.inject(func(GitHubCall) error {
-				pr := fixture.forge.PullRequests[number]
-				pr.HeadSHA = foreign
-				fixture.forge.PullRequests[number] = pr
-				return nil
-			})
-			fixture.reconcile(runID)
-			if got := fixture.state(runID).projection.ObservedExternalHead; got != foreign {
-				t.Fatalf("a foreign head passed as the candidate's own: observed external head %q", got)
-			}
-		})
+		tc.tamper(t)
+		if out, err := exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", foreign, candidate).CombinedOutput(); err != nil {
+			t.Fatalf("%s: the tamper did not take: plain git does not see the foreign head as an ancestor: %v %s", tc.name, err, out)
+		}
+		if ours, err := fixture.runtime.ancestorOfCandidate(state, foreign); err == nil || ours {
+			t.Fatalf("%s: a foreign head passed as the candidate's own", tc.name)
+		}
 	}
 }
 
@@ -620,5 +618,37 @@ func TestBaseContainmentReadsTheSubjectStore(t *testing.T) {
 	if state.projection.CandidateRevision == candidate && countType(state.events, EventCandidateBaseIntegrated) == 0 {
 		t.Logf("journal: %v", journalTypes(state.events))
 		t.Fatal("a moved base was taken as contained through a tampered candidate object database")
+	}
+}
+
+// TestNoRuntimeGitPrintsTheGraftDeprecationHint: GIT_GRAFT_FILE names the
+// null device, and Git's "grafts are deprecated" advice would otherwise reach
+// every commit-walking call's stderr - provider output through the broker, and
+// error text through each runtime runner.
+func TestNoRuntimeGitPrintsTheGraftDeprecationHint(t *testing.T) {
+	deprecated := func(t *testing.T, where, stderr string) {
+		t.Helper()
+		if strings.Contains(stderr, "graftFileDeprecated") || strings.Contains(stderr, "grafts is deprecated") {
+			t.Fatalf("%s printed the graft deprecation hint: %q", where, stderr)
+		}
+	}
+	dir, refusalLog := gitAuthorityFixture(t)
+	if code, stderr := brokerGit(t, dir, refusalLog, "log", "--oneline", "-1"); code != 0 {
+		t.Fatalf("brokered log exited %d: %q", code, stderr)
+	} else {
+		deprecated(t, "the broker", stderr)
+	}
+	// The runners report stderr only in an error, so the call fails after
+	// parsing commits: an ancestor further back than the history goes.
+	beyond := "HEAD~1000"
+	if _, err := (GitRunner{Dir: dir}).run("rev-parse", beyond); err == nil {
+		t.Fatal("trusted runner: the history is deeper than the fixture made it")
+	} else {
+		deprecated(t, "the trusted runner", err.Error())
+	}
+	if _, err := runGit(dir, "rev-parse", beyond); err == nil {
+		t.Fatal("repository runner: the history is deeper than the fixture made it")
+	} else {
+		deprecated(t, "the repository runner", err.Error())
 	}
 }

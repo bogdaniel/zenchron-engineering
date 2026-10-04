@@ -1143,6 +1143,9 @@ func execRealGit(dir string, args []string, stdout, stderr io.Writer) (int, erro
 		"--attr-source=" + emptyTreeObject,
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
+		// GIT_GRAFT_FILE is the null device (brokerGitPins), and Git advises
+		// that grafts are deprecated whenever it opens a graft file.
+		"-c", "advice.graftFileDeprecated=false",
 	}, args...)...)
 	if dir != "" {
 		cmd.Dir = dir
