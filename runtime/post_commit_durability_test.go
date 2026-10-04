@@ -353,9 +353,14 @@ type recoveryCase struct {
 	valid   *runtimeCommit // what the crashed attempt would have recorded
 }
 
-func newRecoveryCase(t *testing.T) recoveryCase {
+func newRecoveryCase(t *testing.T, produce ...func(dir string) error) recoveryCase {
 	t.Helper()
 	fixture := newPhase8Fixture(t)
+	for _, write := range produce {
+		fixture.provider = newIsolatedProvider(write)
+		fixture.deps.Provider = fixture.provider
+		fixture.runtime = fixture.newRuntime(fixture.deps)
+	}
 	withFault(fixture, &observationFault{fail: func(n int) bool { return n == 1 }, crash: true})
 	runID := fixture.start()
 	func() {

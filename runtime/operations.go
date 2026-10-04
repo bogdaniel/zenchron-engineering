@@ -2203,8 +2203,20 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	if err != nil {
 		return refuse(err.Error())
 	}
-	// No rename detection: the path set Commit records lists both sides.
-	paths, err := diffPaths(dir, expected, head.Commit, "--no-renames")
+	if prior == nil {
+		return refuse("no attempt recorded a runtime commit, so the head is unproven")
+	}
+	if head.Commit != prior.Commit || head.Tree != prior.Tree {
+		return refuse("it is not the recorded commit " + prior.Commit)
+	}
+	// The paths come from the verified subject store, never from the
+	// candidate's object directory (#437). No rename detection: the path set
+	// Commit records lists both sides.
+	store, err := subjectStore(dir, head.Commit)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	paths, err := diffPaths(store, expected, head.Commit, "--no-renames")
 	if err != nil {
 		return refuse(err.Error())
 	}
@@ -2212,12 +2224,7 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	if err != nil {
 		return refuse(err.Error())
 	}
-	if prior == nil {
-		return refuse("no attempt recorded a runtime commit, so the head is unproven")
-	}
 	switch {
-	case head.Commit != prior.Commit || head.Tree != prior.Tree:
-		return refuse("it is not the recorded commit " + prior.Commit)
 	case pathsDigest(paths) != prior.PathsDigest:
 		return refuse("its paths differ from the recorded commit")
 	case metadata != prior.MetadataDigest:
@@ -2289,6 +2296,16 @@ func deviationKinds(state KernelState) []string {
 // assurance.go
 // ---------------------------------------------------------------------------
 
+// assuranceCheckout makes a verifier's checkout of commit from the verified
+// subject store, never from the candidate's object directory (#437).
+func assuranceCheckout(candidateDir, checkout, commit, tree string) error {
+	source, err := subjectStore(candidateDir, commit)
+	if err != nil {
+		return err
+	}
+	return CreateAssuranceCheckout(source, checkout, commit, tree)
+}
+
 // assureCandidate verifies the EXACT recorded commit and tree from a fresh
 // detached checkout. The producer's writable workspace is never verified, and
 // the first failing result gets exactly one identical rerun through
@@ -2306,7 +2323,7 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err := os.MkdirAll(filepath.Dir(checkout), 0700); err != nil {
 		return failed(err)
 	}
-	if err := CreateAssuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
+	if err := assuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
 		return failed(err)
 	}
 	kernel, err := r.buildKernel(state)
@@ -2448,7 +2465,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if err := os.MkdirAll(filepath.Dir(checkout), 0700); err != nil {
 		return failed(err)
 	}
-	if err := CreateAssuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
+	if err := assuranceCheckout(workspace.Dir, checkout, commit, tree); err != nil {
 		return failed(err)
 	}
 	defer os.RemoveAll(checkout)
@@ -2700,8 +2717,15 @@ func (r *EngineeringRuntime) pushCandidate(ctx context.Context, state *runState,
 	if err := ctx.Err(); err != nil {
 		return failed(err)
 	}
+	// PUBLICATION READS THE VERIFIED SUBJECT STORE (#437): the pushed objects
+	// are the content the commit's names denote, never what the candidate's
+	// object directory holds behind them now.
+	store, err := subjectStore(workspace.Dir, revision)
+	if err != nil {
+		return failed(err)
+	}
 	runner := RepositoryGitRunner{
-		Dir:    workspace.Dir,
+		Dir:    store,
 		Local:  controlPolicy(),
 		Remote: &RemotePolicy{Identity: r.deps.Remote, Credentials: r.deps.Credentials},
 	}
@@ -3236,9 +3260,14 @@ func (s *runState) assuranceRecordedAt(sequence int64) string {
 }
 
 // candidatePaths is the observed change: every path that differs between the
-// pinned base and the exact recorded candidate commit.
+// pinned base and the exact recorded candidate commit, read from the verified
+// subject store and never from the candidate workspace dir (#437).
 func candidatePaths(dir, base, commit string) ([]string, error) {
-	return diffPaths(dir, base, commit)
+	store, err := subjectStore(dir, commit)
+	if err != nil {
+		return nil, err
+	}
+	return diffPaths(store, base, commit)
 }
 
 // diffPaths lists, sorted, every path that differs between two revisions.

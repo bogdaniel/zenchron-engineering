@@ -285,24 +285,101 @@ func (w *CandidateWorkspace) FetchBase(remote string) error {
 	return err
 }
 func gitMetadataDigest(dir string) (string, error) {
+	m, err := readGitMetadata(dir)
+	if err != nil {
+		return "", err
+	}
+	return m.digest(m.head), nil
+}
+
+// gitMetadata is what the integrity digest covers, kept in parts so a runtime
+// commit can derive its post-commit baseline from the state it checked rather
+// than re-reading a repository a provider process can still write (#437).
+type gitMetadata struct{ config, refs, head string }
+
+func readGitMetadata(dir string) (gitMetadata, error) {
 	// --local keeps the baseline on the runtime-owned repository file. System
 	// and global config are switched off for every runtime Git call, and the
 	// runtime's own -c overrides would otherwise appear as "command line:"
 	// entries and make the digest depend on per-call temporary paths.
 	config, err := gitOutput(dir, "config", "--list", "--show-origin", "--local")
 	if err != nil {
-		return "", err
+		return gitMetadata{}, err
 	}
 	refs, err := gitOutput(dir, "for-each-ref", "--format=%(refname):%(objectname)")
 	if err != nil {
-		return "", err
+		return gitMetadata{}, err
 	}
 	head, err := gitOutput(dir, "rev-parse", "HEAD")
 	if err != nil {
-		return "", err
+		return gitMetadata{}, err
 	}
-	h := sha256.Sum256([]byte(config + "\n" + refs + "\n" + head))
-	return hex.EncodeToString(h[:]), nil
+	return gitMetadata{config, refs, strings.TrimSpace(head)}, nil
+}
+
+// digest is the metadata digest with HEAD at head.
+func (m gitMetadata) digest(head string) string {
+	h := sha256.Sum256([]byte(m.config + "\n" + m.refs + "\n" + head + "\n"))
+	return hex.EncodeToString(h[:])
+}
+
+// subjectStoreDir is the runtime-owned, content-verified object store beside a
+// candidate workspace - never inside it, so nothing a provider can write is
+// part of it.
+func subjectStoreDir(candidateDir string) string {
+	return filepath.Join(filepath.Dir(candidateDir), "subject.git")
+}
+
+// subjectStore returns the subject store holding commit, taking the commit
+// from the candidate workspace first if the store does not hold it yet.
+//
+// AFTER A RUNTIME COMMIT THE CANDIDATE IS NOT A CONTENT AUTHORITY (#437). Git
+// does not re-hash a loose object it reads, so a process that outlived its
+// invocation can swap the bytes behind a recorded name, or answer a name from
+// an alternate. The store is filled only by a fetch, whose index-pack re-hashes
+// every object it receives: content that does not match its name is refused,
+// never stored. An object in the store is therefore the content its name
+// denotes, and every judgement and publication about a commit reads it here.
+// A commit that cannot be taken is an error; nothing falls back to the
+// candidate.
+func subjectStore(candidateDir, commit string) (string, error) {
+	if !isObjectName(commit) {
+		return "", fmt.Errorf("subject store: %q is not an object name", commit)
+	}
+	store := subjectStoreDir(candidateDir)
+	if !isDir(store) {
+		if _, err := runGit("", "init", "-q", "--bare", store); err != nil {
+			return "", err
+		}
+	}
+	// A fetch checks connectivity, so a commit present here has its whole
+	// history and trees present, all of them re-hashed on the way in.
+	if _, err := runGit(store, "cat-file", "-e", commit+"^{commit}"); err == nil {
+		return store, nil
+	}
+	// The ref keeps the commit reachable for the store's own maintenance.
+	// git's stderr is not echoed: it carries candidate-controlled text.
+	if _, err := runGit(store, "fetch", "-q", "--no-tags", candidateDir, commit+":refs/subject/"+commit); err != nil {
+		return "", fmt.Errorf("candidate commit %s %s", short12(commit), errSubjectUnverified)
+	}
+	return store, nil
+}
+
+// errSubjectUnverified is the refusal of a commit the subject store could not
+// take: an object missing, unreadable, or not the content its name denotes.
+const errSubjectUnverified = "could not be taken into the verified subject store: an object is missing or does not match its name"
+
+// isObjectName reports a full, lowercase SHA-1 or SHA-256 object name.
+func isObjectName(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type CommitResult struct {
@@ -316,20 +393,26 @@ type CommitResult struct {
 }
 
 // afterCommitGates is a test seam: it runs after the gates have judged the
-// written tree and before that tree is committed (#437).
+// written tree and before HEAD names its commit (#437).
 var afterCommitGates func(dir string)
 
+// afterCommitUpdateRef is a test seam: it runs after HEAD names the runtime
+// commit and before the post-commit metadata is compared (#437).
+var afterCommitUpdateRef func(dir string)
+
 func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResult, error) {
-	// The parent is read BEFORE the integrity check, so the HEAD the check
-	// approved is the one the new commit names and update-ref expects.
-	parentOut, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	// ONE READ is both the integrity check and the parent: the HEAD the check
+	// approved is the one the new commit names and update-ref expects, and the
+	// config and refs it approved are what the post-commit baseline is
+	// derived from (#437).
+	checked, err := readGitMetadata(w.Dir)
 	if err != nil {
 		return CommitResult{}, err
 	}
-	parent := strings.TrimSpace(parentOut)
-	if err := w.AssertIntegrity(); err != nil {
-		return CommitResult{}, err
+	if checked.digest(checked.head) != w.TrustedMetadata {
+		return CommitResult{}, &WorkspaceIntegrityError{Detail: "Git metadata changed outside runtime"}
 	}
+	parent := checked.head
 	paths, err := changedPaths(w.Dir)
 	if err != nil {
 		return CommitResult{}, err
@@ -436,25 +519,6 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return CommitResult{}, err
 	}
 	tree := strings.TrimSpace(treeOut)
-	staged, blobs, err := treeCommitPaths(w.Dir, parent, tree)
-	if err != nil {
-		return CommitResult{}, err
-	}
-	if len(staged) == 0 {
-		return CommitResult{}, fmt.Errorf("candidate changes stage nothing a runtime commit can carry")
-	}
-	if err := guardStagedContent(w.Dir, staged, blobs, maxBytes); err != nil {
-		return CommitResult{}, err
-	}
-	// The fail-closed backstop: everything after the commit (observation,
-	// assurance) reads the worktree, so the worktree must hold the committed
-	// bytes exactly.
-	if err := refuseWorktreeDivergence(w.Dir, blobs); err != nil {
-		return CommitResult{}, err
-	}
-	if afterCommitGates != nil {
-		afterCommitGates(w.Dir)
-	}
 	// The message gets the same whitespace cleanup `git commit -m` applies.
 	cleaned, err := runGitInput(w.Dir, []byte(message), "stripspace")
 	if err != nil {
@@ -465,6 +529,37 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return CommitResult{}, err
 	}
 	commit := strings.TrimSpace(string(commitOut))
+	// THE GATES READ THE VERIFIED SUBJECT STORE (#437). The commit object is
+	// written but named by nothing yet; it is taken into the subject store,
+	// whose fetch re-hashes every object, and the gates judge the tree diff
+	// and blobs from there. A stand-in planted behind a staged blob's name in
+	// the candidate's object directory is refused by that fetch instead of
+	// being what the gates read, and what the gates read is exactly what every
+	// later reader and the push read.
+	store, err := subjectStore(w.Dir, commit)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	staged, blobs, err := treeCommitPaths(store, parent, tree)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if len(staged) == 0 {
+		return CommitResult{}, fmt.Errorf("candidate changes stage nothing a runtime commit can carry")
+	}
+	if err := guardStagedContent(store, staged, blobs, maxBytes); err != nil {
+		return CommitResult{}, err
+	}
+	// The fail-closed backstop: the worktree must hold the committed bytes
+	// exactly, so the workspace the next producer invocation is handed is the
+	// commit. No runtime judgement after the commit reads the worktree, the
+	// index or the candidate's object directory: they read the subject store.
+	if err := refuseWorktreeDivergence(w.Dir, blobs); err != nil {
+		return CommitResult{}, err
+	}
+	if afterCommitGates != nil {
+		afterCommitGates(w.Dir)
+	}
 	// HEAD moves only from the parent the gates were run against. A HEAD moved
 	// concurrently is refused as the integrity violation a moved HEAD is
 	// everywhere else, and no commit is reported: HEAD never named this one.
@@ -477,13 +572,23 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// Paths is the committed tree diff (--no-renames), the same set #431
 	// recovery recomputes, not the status list.
 	result := CommitResult{Commit: commit, Tree: tree, Paths: staged, Excluded: debris.Excluded}
-	// The baseline is the runtime's own commit, taken before the probe below
-	// so a refused probe still leaves the caller the digest to record.
-	metadata, err := gitMetadataDigest(w.Dir)
+	// THE BASELINE IS DERIVED, NEVER RE-READ (#437). Nothing the runtime ran
+	// since the check above writes config or refs, and HEAD is detached, so
+	// the trusted state is the checked config and refs with HEAD at the new
+	// commit. Re-reading the live repository here would adopt whatever a
+	// process changed in this window; instead such a change is the integrity
+	// violation it is, reported with the commit.
+	w.TrustedMetadata = checked.digest(commit)
+	if afterCommitUpdateRef != nil {
+		afterCommitUpdateRef(w.Dir)
+	}
+	live, err := gitMetadataDigest(w.Dir)
 	if err != nil {
 		return result, err
 	}
-	w.TrustedMetadata = metadata
+	if live != w.TrustedMetadata {
+		return result, &WorkspaceIntegrityError{Detail: "Git metadata changed during the runtime commit"}
+	}
 	// THE CLEANLINESS PROBE ASKS ABOUT CANDIDATE STATE, NOT ABOUT DEBRIS.
 	//
 	// Reading the whole status is what refused commit f0f72ba: one excluded

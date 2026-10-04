@@ -69,6 +69,7 @@ type GCKind string
 
 const (
 	GCCandidateWorkspace GCKind = "candidate_workspace"
+	GCSubjectStore       GCKind = "subject_store"
 	GCAssuranceCheckout  GCKind = "assurance_checkout"
 	GCExecutionScratch   GCKind = "execution_scratch"
 	GCRawTranscript      GCKind = "raw_transcript"
@@ -203,7 +204,9 @@ func (c Collector) Plan() (GCPlan, error) {
 			plan.Retained = append(plan.Retained, target)
 			if strings.HasPrefix(reason, gcHeldReason) {
 				bytes, _ := StateStorage{Dir: target.Path}.Usage() // lower bound on error
-				plan.Held.Workspaces++
+				if target.Kind == GCCandidateWorkspace {
+					plan.Held.Workspaces++
+				}
 				plan.Held.Bytes += bytes
 			}
 			continue
@@ -228,6 +231,11 @@ func (c Collector) discover(root string) ([]GCTarget, error) {
 		candidate := filepath.Join(runDir, "candidate")
 		if isDir(candidate) {
 			targets = append(targets, GCTarget{Kind: GCCandidateWorkspace, RunID: id, Path: candidate})
+		}
+		// The verified copy of the candidate's commits (#437) is reclaimed on
+		// exactly the terms the candidate workspace is.
+		if subject := subjectStoreDir(candidate); isDir(subject) {
+			targets = append(targets, GCTarget{Kind: GCSubjectStore, RunID: id, Path: subject})
 		}
 		entries, err := os.ReadDir(filepath.Join(runDir, "assurance"))
 		if err != nil && !os.IsNotExist(err) {
@@ -391,7 +399,7 @@ func (c Collector) prove(root string, target GCTarget, now time.Time) string {
 	// is NO governed release yet: the only way such a workspace goes away
 	// today is an operator deleting it by hand outside the runtime. The
 	// plan's Held summary counts these so the cost stays visible.
-	if held := snapshot.HeldMaterial; held != nil && target.Kind == GCCandidateWorkspace {
+	if held := snapshot.HeldMaterial; held != nil && (target.Kind == GCCandidateWorkspace || target.Kind == GCSubjectStore) {
 		return gcHeldReason + held.Kind + " at " + held.Revision
 	}
 	// A terminal run's candidate can still have a writer a dead supervisor

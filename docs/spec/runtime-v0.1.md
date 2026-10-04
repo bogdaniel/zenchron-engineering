@@ -164,8 +164,28 @@ moved from the gated parent is refused as a `workspace_integrity_violation` and
 no commit is reported. Every runtime Git call ignores replace objects
 (`GIT_NO_REPLACE_OBJECTS=1`), so a `refs/replace/*` ref cannot make the gates
 read stand-in bytes for a blob the commit carries. The commit's recorded paths
-are that tree diff, the same set #431 recovery recomputes. Whether the worktree still matches the commit after it is made is
-not covered by this rule (#437).
+are that tree diff, the same set #431 recovery recomputes.
+
+After the runtime writes the commit object, the provider-writable candidate
+repository is no longer a content authority (#437). The runtime fetches the
+exact commit into a runtime-owned subject store beside the candidate workspace
+(`runs/<id>/subject.git`), never inside it. Every object the fetch receives is
+re-hashed by `index-pack`, so content that does not match its name is refused
+rather than stored. This covers a loose object swapped behind its name and a
+name answered from `objects/info/alternates`. The commit gates, observation,
+contract reassessment, the assurance and semantic checkouts, #431 recovery
+and the `candidate.push` all read that store. None of them reads the
+candidate's worktree, index or object directory. A commit whose content
+cannot be fetched under its own names fails closed and never falls back to the
+candidate: before HEAD moves, nothing is committed; after it, the failure is a
+#402 post-commit failure. Assurance checkouts are cloned from the store
+without hardlinks. Committed `.gitattributes` apply in them as repository
+semantics, and the candidate's `.git/info/attributes`, replace refs, alternates
+and index state do not. The post-commit metadata baseline is derived: it is
+the config and refs the commit's integrity check approved, with HEAD at the
+new commit. It is never re-read from the live repository. A live digest that
+differs from it is a `workspace_integrity_violation`, reported with the
+commit. The baseline re-reads after a rebase or a merge from base are #466.
 
 The trusted Git metadata baseline is persisted rather than re-derived. Every
 runtime-owned Git operation that succeeds journals the digest of the
