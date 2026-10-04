@@ -206,6 +206,9 @@ func newFleetFixture(t *testing.T, capacity int) *fleetFixture {
 	// running, and would measure that fixture artifact instead of the
 	// ceiling.
 	fixture.deps.Liveness = OwnerLivenessFunc(func(owner string) bool { return owner == "owner-1" })
+	// And, as in `serve`, one record of the leases this process's drivers
+	// hold, shared by every engine the supervisor builds (#485).
+	fixture.deps.DriverLeases = NewDriverLeases()
 	return &fleetFixture{phase8Fixture: fixture, worker: worker, capacity: capacity}
 }
 

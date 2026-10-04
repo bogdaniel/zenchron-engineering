@@ -251,9 +251,8 @@ func TestALeftoverHandoffCannotBeInherited(t *testing.T) {
 // Admitted handoffs and completed items survive a further restart unchanged,
 // and nothing completed is executed again.
 func TestARestartRecreatesNothingAndRecoversWhatDidNotLand(t *testing.T) {
-	// Restart, not concurrency, is under test; three slots keep SQLite write
-	// contention below the level at which a busy store orphans a live lease
-	// (see #485).
+	// Restart, not concurrency, is under test; the ten-driver contention case
+	// is TestTenContendedDriversNeverStrandALease (#485).
 	fixture := newFleetFixture(t, 3)
 	first := fixture.supervisor()
 	engine, err := first.engine("acme/repo", "claude")
@@ -309,7 +308,8 @@ func TestARestartRecreatesNothingAndRecoversWhatDidNotLand(t *testing.T) {
 	}
 	for i, item := range settled.Items {
 		if item.RunID != batch.Items[i].RunID || item.State != orchestration.ItemCompleted {
-			t.Fatalf("item %d: run %s state %s, want the batch's own run %s completed", item.Issue, item.RunID, item.State, batch.Items[i].RunID)
+			t.Fatalf("item %d: run %s state %s (%s/%s: %s), want the batch's own run %s completed", item.Issue, item.RunID, item.State,
+				item.Phase, item.Disposition, item.Reason, batch.Items[i].RunID)
 		}
 	}
 	fixture.worker.mu.Lock()
