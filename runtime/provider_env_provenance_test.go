@@ -38,6 +38,7 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				t.Setenv("GOENV", "/operator/go/env")
 				t.Setenv("GOCACHE", "/operator/cache")
 				t.Setenv("GOFLAGS", "-v")
+				t.Setenv("GOPROXY", "https://user:"+secret+"@proxy.example")
 				provider, request, fake := agentFixture(t, kind)
 				if scratch {
 					provider.Toolchain = ToolchainConfig{RequiredTools: []string{"go"}}
@@ -58,6 +59,13 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				var names []string
 				for _, e := range recorded {
 					names = append(names, e.Name)
+				}
+				// The allowlist and env() are maintained apart: a variable
+				// env() starts passing must be added here, or this goes red.
+				for name := range passed {
+					if !slices.Contains(names, name) {
+						t.Errorf("%s is passed to the provider but not recorded", name)
+					}
 				}
 				if !slices.Equal(names, want[kind]) {
 					t.Fatalf("recorded names %v, want exactly %v", names, want[kind])
@@ -86,6 +94,9 @@ func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T
 				}
 				if v := byName["GOFLAGS"].Value; scratch != (v != nil) || v != nil && *v != "-mod=readonly" {
 					t.Errorf("GOFLAGS recorded %v; the ambient -v must never appear", v)
+				}
+				if v := byName["GOPROXY"].Value; scratch != (v != nil) || v != nil && *v != "off" {
+					t.Errorf("GOPROXY recorded %v; the ambient proxy must never appear", v)
 				}
 				if kind == AgentKindClaudeCode && byName["BASH_MAX_TIMEOUT_MS"].Value == nil {
 					t.Error("the deadline-derived Claude Bash timeout is not recorded")
@@ -126,5 +137,56 @@ func TestProviderEnvironmentRecordsOnlyAllowlistedNames(t *testing.T) {
 				t.Errorf("an unpassed PATH recorded as %q", *e.Value)
 			}
 		}
+	}
+}
+
+// os/exec keeps the LAST duplicate, so provenance must too; a URL's userinfo
+// is a credential even inside a non-secret control value.
+func TestProviderEnvironmentLastWinsAndRedactsUserinfo(t *testing.T) {
+	token := "tok" + strings.Repeat("9", 20)
+	got := map[string]domain.EnvironmentEntry{}
+	for _, e := range providerEnvironment([]string{
+		"GOFLAGS=first", "GOFLAGS=last", "GOPROXY=https://user:" + token + "@proxy.example,direct",
+	}, cliAgentSpecs[AgentKindCodexCLI]) {
+		got[e.Name] = e
+	}
+	if v := got["GOFLAGS"].Value; v == nil || *v != "last" {
+		t.Errorf("duplicate GOFLAGS recorded as %v, want the last one", v)
+	}
+	proxy := got["GOPROXY"]
+	if proxy.Value == nil || strings.Contains(*proxy.Value, token) || strings.Contains(*proxy.Value, "user") || !proxy.Bounded {
+		t.Errorf("GOPROXY userinfo not redacted: %+v", proxy)
+	}
+}
+
+// Every spec's allowlist fits the bound validation enforces at append.
+func TestEverySpecProviderEnvironmentFitsTheBound(t *testing.T) {
+	for kind, spec := range cliAgentSpecs {
+		if n := len(providerEnvironment(nil, spec)); n > domain.MaxProviderEnvironment {
+			t.Errorf("%s records %d environment names, above %d", kind, n, domain.MaxProviderEnvironment)
+		}
+	}
+}
+
+// The append-time check refuses what the producer never writes.
+func TestValidateRefusesMalformedProviderEnvironment(t *testing.T) {
+	long := strings.Repeat("x", 201)
+	many := make([]domain.EnvironmentEntry, domain.MaxProviderEnvironment+1)
+	for i := range many {
+		many[i] = domain.EnvironmentEntry{Name: "V" + strings.Repeat("A", i)}
+	}
+	for name, env := range map[string][]domain.EnvironmentEntry{
+		"bad identifier":   {{Name: "NOT A NAME"}},
+		"credential name":  {{Name: "GITHUB_TOKEN"}},
+		"too many entries": many,
+		"oversized value":  {{Name: "PATH", Value: &long}},
+	} {
+		if validateInvocationObservation(domain.InvocationObservation{Executable: "x", ProviderEnvironment: env}) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	ok := "v"
+	if err := validateInvocationObservation(domain.InvocationObservation{Executable: "x", ProviderEnvironment: []domain.EnvironmentEntry{{Name: "GOFLAGS", Value: &ok}, {Name: "GOCACHE"}}}); err != nil {
+		t.Errorf("a well-formed environment was refused: %v", err)
 	}
 }

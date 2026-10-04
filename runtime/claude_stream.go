@@ -572,18 +572,6 @@ func claudeBackgroundWaitEnv(window time.Duration) ([]string, error) {
 	return []string{fmt.Sprintf("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=%d", ceiling)}, nil
 }
 
-// credentialShapedName is the one test for an environment NAME that may carry
-// a credential; such a name is never added and never recorded.
-func credentialShapedName(name string) bool {
-	upper := strings.ToUpper(name)
-	for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
-		if strings.Contains(upper, secret) {
-			return true
-		}
-	}
-	return false
-}
-
 // withInvocationEnv appends a spec's invocation-only variables to the
 // allowlisted environment. A variable that would replace one the allowlist
 // already set (PATH, HOME, the Git guard) or that is shaped like a credential

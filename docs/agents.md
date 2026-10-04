@@ -262,7 +262,8 @@ allowlisted name. An entry WITHOUT `value` means the runtime did not pass the
 variable; `"value": ""` means it passed it empty. The two are never collapsed,
 and `status` prints them as `NAME (absent)` and `NAME=""`. A name shaped like a
 credential (containing KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH) is
-never recorded, values pass through the same token redaction and 200-byte field
+never recorded, URL userinfo in a value (`scheme://user:token@host`) is
+redacted, values pass through the same token redaction and 200-byte field
 bound as every other detail, and `value_bounded` marks a value that was redacted
 or cut (a long PATH typically is). The record stays inside the journal and
 `autonomy status`/`events`; the control-plane HTTP API projects no invocation

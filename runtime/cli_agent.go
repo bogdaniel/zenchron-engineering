@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -550,6 +551,23 @@ var providerControlNames = []string{
 	"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH",
 }
 
+// credentialShapedName is the one test for an environment NAME that may carry
+// a credential; such a name is never added and never recorded.
+func credentialShapedName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
+		if strings.Contains(upper, secret) {
+			return true
+		}
+	}
+	return false
+}
+
+// urlUserinfo matches the userinfo of a URL (scheme://user:token@host), the
+// shape a credential takes inside an otherwise non-secret value such as a
+// GOPROXY list.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@`)
+
 // providerEnvironment records the allowlisted names from the environment the
 // process was actually given. A name not passed is recorded without a value;
 // values are redacted and bounded exactly as other provenance detail is.
@@ -568,7 +586,7 @@ func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEn
 		}
 		entry := domain.EnvironmentEntry{Name: name}
 		if value, ok := passed[name]; ok {
-			bounded := sanitizedDetail(value)
+			bounded := sanitizedDetail(urlUserinfo.ReplaceAllString(value, "${1}[REDACTED]@"))
 			entry.Value, entry.Bounded = &bounded, bounded != value
 		}
 		recorded = append(recorded, entry)
