@@ -465,7 +465,13 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
 	// reads state it is about to overwrite (journal sequence allocation) waits
 	// on busy_timeout instead of failing an unretryable upgrade in WAL mode.
-	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	//
+	// busy_timeout is SQLite's own bounded wait for the write lock. Ten
+	// drivers writing at once could wait past 5s, and a write that gives up
+	// fails its pass - which since #485 costs that pass and, truthfully, an
+	// attempt it had started, but should not happen for mere contention.
+	// 15s stays under the 30s control-request deadline.
+	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
