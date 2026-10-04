@@ -506,9 +506,16 @@ type EngineeringEvent struct {
 	PreviousEventHash string          `json:"previous_event_hash,omitempty"`
 	Payload           json.RawMessage `json:"payload,omitempty"`
 	Artifacts         []Artifact      `json:"artifacts,omitempty"`
-	StateBefore       string          `json:"state_before,omitempty"`
-	StateAfter        string          `json:"state_after,omitempty"`
-	EventHash         string          `json:"event_hash,omitempty"`
+	// StateBefore and StateAfter are recorded transition digests: diagnostic
+	// compatibility metadata, NOT authoritative (#453). Replay never verifies
+	// them, and no cache, checkpoint, recovery path or decision may trust them
+	// in place of replaying the events. EventHash covers them, so editing one
+	// without recomputing the hash is still refused as corruption; an arbitrary
+	// but chain-consistent value is accepted and decides nothing. The JSON
+	// names stay for journal compatibility.
+	StateBefore string `json:"state_before,omitempty"`
+	StateAfter  string `json:"state_after,omitempty"`
+	EventHash   string `json:"event_hash,omitempty"`
 }
 type RunSnapshot struct {
 	EngineeringRun

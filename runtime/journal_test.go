@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -191,6 +194,28 @@ func TestJournalRefusesBrokenChain(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(`UPDATE events SET document = ?, previous_event_hash = ? WHERE run_id = 'r' AND sequence = 3`, string(tampered), e.PreviousEventHash); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// state_after is diagnostic, never authoritative (#453), but it is
+		// inside the event document its event_hash covers: rewriting it
+		// without recomputing that hash is still corruption. The tip is tampered so
+		// only its own event_hash, not a successor's link, can catch it.
+		{"state_after without its event hash", func(t *testing.T, db *sql.DB) {
+			var document string
+			if err := db.QueryRow(`SELECT document FROM events WHERE run_id = 'r' AND sequence = 4`).Scan(&document); err != nil {
+				t.Fatal(err)
+			}
+			var e EngineeringEvent
+			if err := json.Unmarshal([]byte(document), &e); err != nil {
+				t.Fatal(err)
+			}
+			e.StateAfter = strings.Repeat("0", 64)
+			tampered, err := CanonicalJSON(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE events SET document = ?, state_after = ? WHERE run_id = 'r' AND sequence = 4`, string(tampered), e.StateAfter); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -384,5 +409,132 @@ func TestJournalRefusesEventsForAnUnknownRun(t *testing.T) {
 	}
 	if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "e-1", RunID: "r", Type: "run.invented", OccurredAt: time.Unix(100, 0).UTC()}); err == nil {
 		t.Fatal("an event outside the catalogue was appended")
+	}
+}
+
+// TestJournalStateDigestsAreNotAuthoritative pins #453's frozen decision:
+// state_before/state_after are recorded transition digests kept as diagnostic
+// compatibility metadata. A journal whose state fields are arbitrary, but whose
+// event documents and hash chain are internally consistent, replays to exactly
+// the state its events fold to - nothing in replay consults those fields.
+func TestJournalStateDigestsAreNotAuthoritative(t *testing.T) {
+	dir, store := openJournal(t)
+	for _, e := range journalFixture(t, "r") {
+		if _, err := store.AppendEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	honest, err := store.Replay("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rewrite every event's state fields to arbitrary values and recompute the
+	// chain, as a writer able to rewrite a whole suffix could.
+	db := rawJournalDB(t, dir)
+	rows, err := db.Query(`SELECT document FROM events WHERE run_id = 'r' ORDER BY sequence ASC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []EngineeringEvent
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			t.Fatal(err)
+		}
+		var e EngineeringEvent
+		if err := json.Unmarshal([]byte(document), &e); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, e)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previous := ""
+	for i, e := range events {
+		e.StateBefore = fmt.Sprintf("arbitrary-before-%d", i)
+		e.StateAfter = strings.Repeat(fmt.Sprint(i%10), 64)
+		if i > 0 {
+			e.PreviousEventHash = previous
+		}
+		if e.EventHash, err = EventDigest(e); err != nil {
+			t.Fatal(err)
+		}
+		previous = e.EventHash
+		events[i] = e
+		canonical, err := CanonicalJSON(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE events SET document = ?, state_before = ?, state_after = ?, previous_event_hash = ?, event_hash = ? WHERE id = ?`,
+			string(canonical), e.StateBefore, e.StateAfter, e.PreviousEventHash, e.EventHash, e.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reopened, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	rewritten, err := reopened.Replay("r")
+	if err != nil {
+		t.Fatalf("a chain-consistent journal with arbitrary state fields was refused: %v", err)
+	}
+	if rewritten.StateSHA256 != honest.StateSHA256 {
+		t.Fatalf("replayed state depends on state_before/state_after: %s vs %s", rewritten.StateSHA256, honest.StateSHA256)
+	}
+	if rewritten.StateSHA256 == events[len(events)-1].StateAfter {
+		t.Fatal("fixture did not make the recorded state_after disagree with replay")
+	}
+	// The cursor names the rewritten tip, because the event hash covers the
+	// fields; everything else about the run is unchanged.
+	if rewritten.Cursor != (Cursor{LastSequence: int64(len(events)), LastEventID: events[len(events)-1].ID, LastEventHash: previous}) {
+		t.Fatalf("cursor does not name the rewritten tip: %+v", rewritten.Cursor)
+	}
+}
+
+// TestNoProductionCodeReadsStateDigestsAsAuthority is #453's search guard. The
+// only production code allowed to touch an event's StateBefore/StateAfter is
+// the journal (which allocates them and checks the indexed columns agree with
+// the document) and the operator's event view (which renders them). A new
+// reader must not branch on them: decide from replay instead.
+func TestNoProductionCodeReadsStateDigestsAsAuthority(t *testing.T) {
+	allowed := map[string]bool{
+		filepath.Join("runtime", "journal.go"):                      true,
+		filepath.Join("runtime", "plan_store.go"):                   true,
+		filepath.Join("cmd", "zenchron-engineering", "operator.go"): true,
+	}
+	field := regexp.MustCompile(`\.State(Before|After)\b`)
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".claude" || d.Name() == "testdata") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if field.Match(source) && !allowed[rel] {
+			t.Errorf("%s reads an event's state_before/state_after; those are diagnostic metadata (#453), decide from replay instead", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
