@@ -612,7 +612,7 @@ func TestConnectivityRetryNotBeforeOmittedWhenZero(t *testing.T) {
 }
 
 // Endpoint capacity (#87): provider_unavailable keeps its reason and its
-// refunded wait, now probed through provider_prerequisite_wait.
+// refunded wait, now probed through provider_availability_wait.
 func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
@@ -622,7 +622,7 @@ func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 		t.Fatalf("capacity: %+v", out)
 	}
 	for _, op := range f.state(runID).snapshot.Operations {
-		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != DispositionProviderPrerequisiteWait || !op.RetryNotBefore.Equal(f.clock.Now().Add(5*time.Minute))) {
+		if op.Kind == OpExecutionInvoke && (op.RetryDisposition != DispositionProviderAvailabilityWait || !op.RetryNotBefore.Equal(f.clock.Now().Add(5*time.Minute))) {
 			t.Fatalf("capacity probe: %s", retryRow(op))
 		}
 	}
@@ -715,7 +715,7 @@ func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing
 		FailureProviderAccountUnavailable: DispositionAccountWait,
 		FailureProviderQuota:              DispositionRateLimitWait,
 		FailureProviderRateLimited:        DispositionRateLimitWait,
-		FailureProviderUnavailable:        DispositionProviderPrerequisiteWait,
+		FailureProviderUnavailable:        DispositionProviderAvailabilityWait,
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -753,6 +753,10 @@ func TestConnectivityProviderDispositionsAreProducedByProviderClasses(t *testing
 	}
 	if classes < 20 {
 		t.Fatalf("found only %d failure classes; the scan is not reading the declarations", classes)
+	}
+	// Declared for a genuine prerequisite (slice 3), produced by nothing here.
+	if s := retryDispositions[DispositionProviderPrerequisiteWait]; s.Delay != nil || s.Reason != "" {
+		t.Fatalf("provider_prerequisite_wait was given slice 3's cadence or reason: %+v", s)
 	}
 	for class, d := range want {
 		s := retryDispositions[d]
@@ -804,6 +808,62 @@ func TestConnectivityRetryStatusIsTheRunsOwnWait(t *testing.T) {
 	got := retryStatus(state(Waiting, "execution_provider_quota", stale, newer))
 	if got == nil || got.Operation != "c" || !got.NotBefore.Equal(newer.RetryNotBefore) || got.ResumeCondition != "the provider allowance returns; probed every 5 minutes" {
 		t.Fatalf("two awaiting operations did not report the latest: %+v", got)
+	}
+}
+
+// #87 (frozen): restoring the account does not bypass RetryNotBefore.
+// `autonomy resume` is exactly Reconcile, so it is no hidden --now.
+func TestConnectivityResumeDoesNotBringTheProbeForward(t *testing.T) {
+	f := newPhase8Fixture(t)
+	runID := f.start()
+	f.clock.step = 0
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderAccountUnavailable}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
+		t.Fatalf("account: %+v", out)
+	}
+	waiting := executionOperation(t, f.store, runID)
+	calls := len(f.provider.requests)
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded} // the operator restored it
+	f.clock.at = waiting.RetryNotBefore.Add(-time.Second)
+	out, err := f.runtime.Reconcile(context.Background(), runID) // what `autonomy resume` runs
+	if err != nil || out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" || len(f.provider.requests) != calls {
+		t.Fatalf("resume brought the probe forward: %+v calls=%d %v", out, len(f.provider.requests)-calls, err)
+	}
+	if after := executionOperation(t, f.store, runID); !after.RetryNotBefore.Equal(waiting.RetryNotBefore) {
+		t.Fatalf("resume moved the probe: %s -> %s", waiting.RetryNotBefore, after.RetryNotBefore)
+	}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	if after := executionOperation(t, f.store, runID); after.ID != waiting.ID || after.State != Succeeded || len(f.provider.requests) != calls+1 {
+		t.Fatalf("the probe did not resume the same operation: %s", retryRow(after))
+	}
+}
+
+// #87 (frozen): a recognized provider wait refunds the attempt always, and the
+// execution time only when the provider did not run (ProviderExecuted=false).
+func TestConnectivityProviderWaitRefundsExecutionOnlyWhenNothingRan(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want time.Duration
+	}{
+		"provider ran":          {nil, 10 * time.Minute},
+		"refused before it ran": {errors.New("refused before dispatch"), 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPhase8Fixture(t)
+			runID := f.start()
+			f.clock.step = 0
+			f.provider.mutate = func(string) error { f.clock.at = f.clock.at.Add(10 * time.Minute); return nil }
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+			f.provider.Err = tc.err
+			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+				t.Fatalf("quota: %+v", out)
+			}
+			op := executionOperation(t, f.store, runID)
+			if op.Attempt != 0 || op.ConsumedExecution != tc.want || op.RetryDisposition != DispositionRateLimitWait {
+				t.Fatalf("attempt %d consumed %s (want 0, %s): %s", op.Attempt, op.ConsumedExecution, tc.want, retryRow(op))
+			}
+		})
 	}
 }
 

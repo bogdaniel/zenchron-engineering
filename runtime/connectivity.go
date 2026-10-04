@@ -118,11 +118,14 @@ type RetryDisposition string
 
 const (
 	DispositionTransportBackoff RetryDisposition = "transport_backoff"
-	// The provider waits (#87): an external prerequisite, refunded, probed at
-	// a fixed durable cadence until it clears and the same run resumes.
-	DispositionProviderPrerequisiteWait RetryDisposition = "provider_prerequisite_wait"
+	// The provider waits (#87): external, refunded, probed at a fixed durable
+	// cadence until the condition clears and the same run resumes.
+	DispositionProviderAvailabilityWait RetryDisposition = "provider_availability_wait"
 	DispositionRateLimitWait            RetryDisposition = "rate_limit_wait"
 	DispositionAccountWait              RetryDisposition = "account_wait"
+	// Declared, produced by nothing yet: a genuine provider prerequisite (the
+	// executable, #87 slice 3 after #84) sets its own cadence and reason.
+	DispositionProviderPrerequisiteWait RetryDisposition = "provider_prerequisite_wait"
 )
 
 type dispositionSemantics struct {
@@ -153,9 +156,10 @@ var retryDispositions = map[RetryDisposition]dispositionSemantics{
 		ResumeCondition: "retry_not_before has passed", Reason: ReasonConnectivityBackoff,
 		Delay: connectivityBackoff,
 	},
-	DispositionProviderPrerequisiteWait: {ResumeCondition: "the provider endpoint recovers on its own; probed every 5 minutes", Delay: providerWaitProbe},
+	DispositionProviderAvailabilityWait: {ResumeCondition: "the provider endpoint recovers on its own; probed every 5 minutes", Delay: providerWaitProbe},
 	DispositionRateLimitWait:            {ResumeCondition: "the provider allowance returns; probed every 5 minutes", Delay: providerWaitProbe},
 	DispositionAccountWait:              {ResumeCondition: "an operator restores the provider account; probed every 5 minutes", Delay: providerWaitProbe},
+	DispositionProviderPrerequisiteWait: {ResumeCondition: "an operator restores the provider prerequisite"},
 }
 
 // providerWaitProbe is the fixed cadence of a provider wait. The attempt is
@@ -173,7 +177,7 @@ func retryDispositionFor(class FailureClass) RetryDisposition {
 	case FailureProviderQuota, FailureProviderRateLimited:
 		return DispositionRateLimitWait
 	case FailureProviderUnavailable:
-		return DispositionProviderPrerequisiteWait
+		return DispositionProviderAvailabilityWait
 	}
 	return ""
 }
