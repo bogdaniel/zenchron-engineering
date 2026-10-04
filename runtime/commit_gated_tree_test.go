@@ -162,3 +162,35 @@ func TestCommitRefusesAnEmptyTreeDiff(t *testing.T) {
 		t.Fatal("HEAD moved on an empty tree diff")
 	}
 }
+
+// TestCommitDoesNotMoveABranchThroughASymbolicHead: update-ref --no-deref
+// moves HEAD itself, so a symbolic HEAD (one a provider could have set) is
+// detached at the runtime commit and the branch it named is left alone.
+func TestCommitDoesNotMoveABranchThroughASymbolicHead(t *testing.T) {
+	w := commitGateWorkspace(t)
+	out, err := exec.Command("git", "-C", w.Dir, "symbolic-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("fixture HEAD is not symbolic: %v", err)
+	}
+	branch := strings.TrimSpace(string(out))
+	before, err := gitOutput(w.Dir, "rev-parse", branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Dir, "a.go"), []byte("package a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.Commit("detached", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Command("git", "-C", w.Dir, "symbolic-ref", "-q", "HEAD").Run() == nil {
+		t.Fatal("HEAD is still symbolic: the commit moved a branch")
+	}
+	if after, _ := gitOutput(w.Dir, "rev-parse", branch); after != before {
+		t.Fatalf("branch %s moved from %s to %s", branch, before, after)
+	}
+	if strings.TrimSpace(headOf(t, w)) != result.Commit {
+		t.Fatal("HEAD is not the runtime commit")
+	}
+}

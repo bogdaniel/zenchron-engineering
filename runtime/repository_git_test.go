@@ -652,7 +652,7 @@ func TestRepositoryGitEnvironmentIsBuiltFromScratch(t *testing.T) {
 		"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
 		"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
 		"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat",
-		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1",
+		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1", "GIT_NO_REPLACE_OBJECTS": "1",
 		"GIT_TEMPLATE_DIR": "/template",
 	} {
 		if names[key] != want {
