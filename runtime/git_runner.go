@@ -68,6 +68,7 @@ func trustedGitEnv(home, ceiling string) []string {
 		// operating on some ancestor checkout.
 		"GIT_CEILING_DIRECTORIES=" + ceiling,
 		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_NO_REPLACE_OBJECTS=1",
 	}
 	// Deliberately absent, and absent by construction rather than by
 	// overriding: GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,

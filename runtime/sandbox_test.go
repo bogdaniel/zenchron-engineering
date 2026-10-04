@@ -152,7 +152,7 @@ func TestDockerSandboxBindsTrustedEndpointToEveryControlPlaneCall(t *testing.T) 
 
 func TestDockerSandboxRejectsAmbiguousTrustedEndpoint(t *testing.T) {
 	s := DockerSandbox{Image: "sha256:image", Endpoint: DockerEndpoint{Host: "tcp://user:secret@dind:2375"}, Executor: &fakeCommandExecutor{found: true}}
-	if !errors.Is(s.ready(), ErrSandboxUnavailable) {
+	if !errors.Is(s.ready(context.Background()), ErrSandboxUnavailable) {
 		t.Fatal("credential-bearing endpoint was accepted")
 	}
 }
@@ -237,14 +237,14 @@ func TestDockerReconciliationTargetsOnlyRecordedExactContainer(t *testing.T) {
 	root := t.TempDir()
 	fake := &fakeCommandExecutor{found: true}
 	s := DockerSandbox{Image: "sha256:image", Executor: fake, OperationID: "operation", StateDir: root}
-	state, err := s.ReconcileDockerOperation()
+	state, err := s.ReconcileDockerOperation(context.Background())
 	if err != nil || state != DockerNoContainer {
 		t.Fatalf("unrecorded reconciliation = %q, %v", state, err)
 	}
 	if len(fake.calls) != 0 {
 		t.Fatal("unrecorded reconciliation must not enumerate or target containers")
 	}
-	record, path, err := s.operationRecord()
+	record, path, err := s.operationRecord(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestDockerReconciliationTargetsOnlyRecordedExactContainer(t *testing.T) {
 	if err := writeDockerOperation(path, record); err != nil {
 		t.Fatal(err)
 	}
-	state, err = s.ReconcileDockerOperation()
+	state, err = s.ReconcileDockerOperation(context.Background())
 	if err != nil || state != DockerRemoved {
 		t.Fatalf("recorded exited reconciliation = %q, %v", state, err)
 	}
@@ -274,7 +274,7 @@ func TestReconciliationDefaultsGraceAndTriesGracefulStopBeforeForceKill(t *testi
 	// terminateExact's first loop pass, so the deadline/poll race is real.
 	fake := &fakeCommandExecutor{found: true, runningInspects: 2}
 	s := DockerSandbox{Image: "sha256:image", Executor: fake, OperationID: "operation", StateDir: root}
-	record, path, err := s.operationRecord()
+	record, path, err := s.operationRecord(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestReconciliationDefaultsGraceAndTriesGracefulStopBeforeForceKill(t *testi
 	if err := writeDockerOperation(path, record); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReconcileDockerOperation(); err != nil {
+	if _, err := s.ReconcileDockerOperation(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !hasDockerInvocation(fake.calls, "kill", "--signal", "TERM", record.ContainerName) {
@@ -543,7 +543,7 @@ func TestDockerSandboxOwnsExactContainerLifecycleWhenConfigured(t *testing.T) {
 	}
 	op := "lifecycle-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	s := DockerSandbox{Image: image, Endpoint: endpoint, Grace: 250 * time.Millisecond, OperationID: op, StateDir: filepath.Join(root, "runtime")}
-	record, _, err := s.operationRecord()
+	record, _, err := s.operationRecord(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
