@@ -29,8 +29,11 @@ const (
 	// fleetRepositorySeeded writes a perfect report into the candidate
 	// REPOSITORY, where a pre-seeded file would be, and not into the slot.
 	fleetRepositorySeeded
+	fleetPartialHandoff
 	fleetFails
 )
+
+const fleetPartialReport = `{"schema_version":"0.1","outcome":"partial","summary":"Half of it.","unresolved":["the migration"]}`
 
 const fleetValidReport = `{"schema_version":"0.1","outcome":"completed","summary":"Implemented the change.","recommended_next":["add a benchmark"]}`
 
@@ -57,8 +60,11 @@ type fleetProvider struct {
 }
 
 func newFleetProvider() *fleetProvider {
-	return &fleetProvider{invocations: map[string]int{}, requests: map[string]ExecutionRequest{}, behaviour: map[string]fleetBehaviour{}}
+	return &fleetProvider{invocations: map[string]int{}, requests: make(map[string]ExecutionRequest), behaviour: map[string]fleetBehaviour{}}
 }
+
+// WritesTypedResults: the controlled worker writes straight to the slot path.
+func (p *fleetProvider) WritesTypedResults() bool { return true }
 
 func (p *fleetProvider) Isolation() ProviderIsolation {
 	return ProviderIsolation{
@@ -121,12 +127,23 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 				return ExecutionResult{}, err
 			}
 		}
+	case fleetPartialHandoff:
+		if request.HandoffPath != "" {
+			return result, os.WriteFile(request.HandoffPath, []byte(fleetPartialReport), 0o600)
+		}
 	case fleetMalformedHandoff:
 		if request.HandoffPath != "" {
 			return result, os.WriteFile(request.HandoffPath, []byte(`{"schema_version":"0.1","outcome":"completed","summary":"s","run_id":"run-forged"}`), 0o600)
 		}
 	}
 	return result, nil
+}
+
+// request returns the latest request one run's worker received.
+func (p *fleetProvider) request(runID string) ExecutionRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.requests[runID]
 }
 
 func (p *fleetProvider) set(runID string, behaviour fleetBehaviour) {
@@ -257,7 +274,7 @@ func (f *fleetFixture) drive(supervisor *Supervisor, batchID string) Orchestrati
 		settled := 0
 		for _, item := range view.Items {
 			switch item.State {
-			case orchestration.ItemCompleted, orchestration.ItemHandoffPending, orchestration.ItemFailed, orchestration.ItemStopped:
+			case orchestration.ItemCompleted, orchestration.ItemPartial, orchestration.ItemHandoffPending, orchestration.ItemFailed, orchestration.ItemStopped:
 				settled++
 			}
 		}

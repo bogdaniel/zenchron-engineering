@@ -171,54 +171,13 @@ func TestAValidHandoffIsBoundToWhatTheRuntimeObserved(t *testing.T) {
 	}
 	// The worker was told where to write, and that path is the runtime's,
 	// outside the workspace it was told to modify.
-	request := fixture.worker.requests[runID]
+	request := fixture.worker.request(runID)
 	if request.HandoffPath == "" || filepath.Dir(request.HandoffPath) == request.CandidateDir ||
 		!filepath.IsAbs(request.HandoffPath) || strings.HasPrefix(request.HandoffPath, request.CandidateDir) {
 		t.Fatalf("handoff slot %q is not a runtime-owned path outside %q", request.HandoffPath, request.CandidateDir)
 	}
 	if prompt := providerPrompt(request); !strings.Contains(prompt, request.HandoffPath) || !strings.Contains(prompt, "REQUIRED HANDOFF") {
 		t.Fatal("the worker was not told the handoff is required or where it goes")
-	}
-}
-
-// TestAHandoffChangedAfterItWasJournalledIsNotAdmitted: admission re-reads the
-// slot and refuses a document that is no longer byte-identical to the one whose
-// digest was journalled when the invocation completed.
-func TestAHandoffChangedAfterItWasJournalledIsNotAdmitted(t *testing.T) {
-	fixture := newFleetFixture(t, 10)
-	supervisor := fixture.supervisor()
-	view := fixture.orchestrate(supervisor, "claude", fleetIssues(1))
-	runID := view.Items[0].RunID
-	tampered := false
-	var problems []string
-	for range 12 {
-		report, err := supervisor.Tick(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		problems = append(problems, report.Orchestration...)
-		fixture.clock.advance(61 * time.Second)
-		item := fixture.status(view.BatchID).Items[0]
-		if item.Handoff == orchestration.HandoffReported && !tampered {
-			path := fixture.worker.requests[runID].HandoffPath
-			rewritten := `{"schema_version":"0.1","outcome":"completed","summary":"Something else entirely."}`
-			if err := os.WriteFile(path, []byte(rewritten), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			tampered = true
-		}
-		if item.State == orchestration.ItemCompleted {
-			t.Fatal("a handoff rewritten after it was journalled was admitted")
-		}
-	}
-	if !tampered {
-		t.Fatal("the report was never observed before admission, so nothing was tampered with")
-	}
-	if handoffs, err := fixture.store.RunHandoffs(runID); err != nil || len(handoffs) != 0 {
-		t.Fatalf("%d handoffs admitted (%v)", len(handoffs), err)
-	}
-	if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "handoff not admitted: the report is no longer the document journalled") {
-		t.Fatalf("the refusal was not reported: %q", problems)
 	}
 }
 

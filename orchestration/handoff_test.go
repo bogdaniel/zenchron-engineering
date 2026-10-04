@@ -87,19 +87,22 @@ func TestItemStateIsAProjectionThatFailsClosed(t *testing.T) {
 		want  ItemState
 	}{
 		{ChildFacts{}, ItemNotCreated},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffNone}, ItemQueued},
-		{ChildFacts{true, RunLive, ActivityWorking, HandoffNone}, ItemRunning},
-		{ChildFacts{true, RunLive, ActivityWaiting, HandoffNone}, ItemWaiting},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffReported}, ItemRunning},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffRefused}, ItemHandoffPending},
-		{ChildFacts{true, RunLive, ActivityWorking, HandoffAdmitted}, ItemCompleted},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffNone, ""}, ItemQueued},
+		{ChildFacts{true, RunLive, ActivityWorking, HandoffNone, ""}, ItemRunning},
+		{ChildFacts{true, RunLive, ActivityWaiting, HandoffNone, ""}, ItemWaiting},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffReported, ""}, ItemRunning},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffRefused, ""}, ItemHandoffPending},
+		{ChildFacts{true, RunLive, ActivityWorking, HandoffAdmitted, OutcomeCompleted}, ItemCompleted},
+		// A valid, admitted transfer of PARTIAL work is not completed work.
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffAdmitted, OutcomePartial}, ItemPartial},
+		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffAdmitted, OutcomePartial}, ItemPartial},
 		// A provider that succeeded and a run that ended are still not a
 		// completed item without an admitted handoff.
-		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffNone}, ItemHandoffPending},
-		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffReported}, ItemHandoffPending},
-		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffAdmitted}, ItemCompleted},
-		{ChildFacts{true, RunFailed, ActivityIdle, HandoffAdmitted}, ItemFailed},
-		{ChildFacts{true, RunCancelled, ActivityIdle, HandoffNone}, ItemStopped},
+		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffNone, ""}, ItemHandoffPending},
+		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffReported, ""}, ItemHandoffPending},
+		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffAdmitted, OutcomeCompleted}, ItemCompleted},
+		{ChildFacts{true, RunFailed, ActivityIdle, HandoffAdmitted, OutcomeCompleted}, ItemFailed},
+		{ChildFacts{true, RunCancelled, ActivityIdle, HandoffNone, ""}, ItemStopped},
 	} {
 		got, err := ProjectItem(tc.facts)
 		if err != nil || got != tc.want {
@@ -107,9 +110,10 @@ func TestItemStateIsAProjectionThatFailsClosed(t *testing.T) {
 		}
 	}
 	for _, facts := range []ChildFacts{
-		{true, "paused?", ActivityIdle, HandoffNone},
-		{true, RunLive, "busy", HandoffNone},
-		{true, RunLive, ActivityIdle, "maybe"},
+		{true, "paused?", ActivityIdle, HandoffNone, ""},
+		{true, RunLive, "busy", HandoffNone, ""},
+		{true, RunLive, ActivityIdle, "maybe", ""},
+		{true, RunLive, ActivityIdle, HandoffAdmitted, "done"},
 	} {
 		if state, err := ProjectItem(facts); err == nil {
 			t.Errorf("%+v projected %q from an unrecognized fact", facts, state)

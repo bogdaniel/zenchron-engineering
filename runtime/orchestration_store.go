@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
@@ -139,4 +141,34 @@ func (s *SQLiteOperationStore) RunHandoffs(runID string) ([]orchestration.Engine
 		handoffs = append(handoffs, handoff)
 	}
 	return handoffs, rows.Err()
+}
+
+// RefuseHandoff durably records that the handoff with this identity will never
+// be admitted, and why. It is insert-only: the first decision stands.
+func (s *SQLiteOperationStore) RefuseHandoff(id, batchID, runID, reason string, at time.Time) error {
+	if id == "" || batchID == "" || runID == "" || strings.TrimSpace(reason) == "" {
+		return errors.New("a handoff refusal needs its identity, batch, run and reason")
+	}
+	_, err := s.db.Exec(`INSERT INTO orchestration_handoff_refusals (id, batch_id, run_id, refused_unix_nano, reason)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`, id, batchID, runID, at.UnixNano(), boundedDetail(reason))
+	return err
+}
+
+// RunHandoffRefusals maps every refused handoff identity of one run to its
+// recorded reason.
+func (s *SQLiteOperationStore) RunHandoffRefusals(runID string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT id, reason FROM orchestration_handoff_refusals WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	refused := map[string]string{}
+	for rows.Next() {
+		var id, reason string
+		if err := rows.Scan(&id, &reason); err != nil {
+			return nil, err
+		}
+		refused[id] = reason
+	}
+	return refused, rows.Err()
 }

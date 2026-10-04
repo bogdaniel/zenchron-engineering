@@ -46,6 +46,12 @@ leased by the same scheduler as any other run.
 - Issues must be distinct and positive; a batch names at most 32.
 - The repository must be one this supervisor governs, and the agent must pass
   the same readiness probe a single submission does.
+- The agent's adapter must be able to write the runtime-owned typed result
+  directory, because the handoff is mandatory. This is asked of the provider
+  generically (`TypedResultWriter`); a CLI adapter answers from the argv it
+  would actually run. Today Claude Code (`--add-dir`) and Codex
+  (`writable_roots`) can; Gemini, Qwen and the brokered API agent cannot, and a
+  batch naming one is refused before anything is written.
 - An issue that already has a live run is refused, and the refused request
   writes nothing. Orchestration does not adopt or race work it did not create.
 - The batch identity is a pure function of repository, agent and issue set.
@@ -92,6 +98,12 @@ contract, changed-path count and digest, and producer all come from the
 runtime's own records. The worker's report stays a claim; it authorizes
 nothing, satisfies no evidence and changes no contract.
 
+If the slot no longer holds exactly the journalled document when admission
+runs (it was changed or removed), that handoff is durably refused once and the
+item settles to `handoff_pending` with the reason. Admission needs no execution
+authority: it reads only the batch, the run's journal and the state directory,
+so a report is still finalized after its agent is removed from configuration.
+
 A missing or invalid handoff does not fail the run: failing it would quarantine
 the work and make a retry redo it. The item reports `handoff_pending` with the
 reason, and the child keeps its own governed lifecycle.
@@ -109,7 +121,8 @@ Item state is projected from the child run on every read:
 | `running` | holding a slot, or its handoff awaits admission |
 | `waiting` | live child in a typed wait or an operator pause |
 | `handoff_pending` | the latest finished invocation transferred no admissible handoff, or the child ended without one |
-| `completed` | the latest finished invocation's handoff is admitted |
+| `completed` | the latest finished invocation's admitted handoff reports `completed` |
+| `partial` | the latest finished invocation's admitted handoff reports unresolved work, named in the reason |
 | `failed` / `stopped` | the child run failed or was cancelled |
 
 A failing or waiting child never stops its siblings. `autonomy status RUN` and

@@ -50,7 +50,9 @@ func TestOrchestrateGoesThroughTheRunningSupervisor(t *testing.T) {
 	}
 	dir, configPath := planWorkspaceIn(t, stateDir)
 	t.Chdir(dir)
-	serving, err := newComposition(autonomyFlags{Config: configPath}, planOverrides(t, 41))
+	overrides := planOverrides(t, 41)
+	overrides.Provider = handoffCapable{&refusingPlanner{}}
+	serving, err := newComposition(autonomyFlags{Config: configPath}, overrides)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,3 +113,9 @@ func TestOrchestrateGoesThroughTheRunningSupervisor(t *testing.T) {
 		}
 	}
 }
+
+// handoffCapable is a test worker that declares it can write the runtime-owned
+// typed result directory, which orchestration requires of every worker.
+type handoffCapable struct{ *refusingPlanner }
+
+func (handoffCapable) WritesTypedResults() bool { return true }

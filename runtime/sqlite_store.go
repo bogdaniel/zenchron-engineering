@@ -403,6 +403,17 @@ CREATE TABLE orchestration_handoffs (
 	document           TEXT NOT NULL
 );
 CREATE INDEX orchestration_handoffs_by_run ON orchestration_handoffs(run_id, admitted_unix_nano, id);
+-- A reported handoff the runtime decided it can never admit (its report is
+-- gone or no longer the journalled document). Insert-only, keyed by the same
+-- identity an admission would have had, so one invocation is settled once.
+CREATE TABLE orchestration_handoff_refusals (
+	id                TEXT PRIMARY KEY,
+	batch_id          TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoff_refusals_by_run ON orchestration_handoff_refusals(run_id);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

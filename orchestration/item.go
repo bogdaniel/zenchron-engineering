@@ -28,6 +28,10 @@ const (
 	// transferred a handoff the runtime admitted and bound to the exact
 	// candidate it committed. The child run keeps its own governed lifecycle.
 	ItemCompleted ItemState = "completed"
+	// ItemPartial is a child whose latest finished invocation transferred an
+	// ADMITTED handoff that reports unresolved work. Admission proves the
+	// transfer is valid and bound; it does not make partial work complete.
+	ItemPartial ItemState = "partial"
 	// ItemFailed and ItemStopped mirror a terminal child run honestly.
 	ItemFailed  ItemState = "failed"
 	ItemStopped ItemState = "stopped"
@@ -76,6 +80,9 @@ type ChildFacts struct {
 	Termination RunTermination
 	Activity    RunActivity
 	Handoff     HandoffObservation
+	// HandoffOutcome is the admitted report's outcome. It is read only when
+	// Handoff is HandoffAdmitted.
+	HandoffOutcome string
 }
 
 // ProjectItem is the ONE place an item's state is decided. An unrecognized
@@ -101,7 +108,13 @@ func ProjectItem(facts ChildFacts) (ItemState, error) {
 	}
 	switch facts.Handoff {
 	case HandoffAdmitted:
-		return ItemCompleted, nil
+		switch facts.HandoffOutcome {
+		case OutcomeCompleted:
+			return ItemCompleted, nil
+		case OutcomePartial:
+			return ItemPartial, nil
+		}
+		return "", fmt.Errorf("unrecognized admitted handoff outcome %q", facts.HandoffOutcome)
 	case HandoffRefused:
 		return ItemHandoffPending, nil
 	}
@@ -132,6 +145,7 @@ type Counts struct {
 	Waiting        int `json:"waiting"`
 	HandoffPending int `json:"handoff_pending"`
 	Completed      int `json:"completed"`
+	Partial        int `json:"partial"`
 	Failed         int `json:"failed"`
 	Stopped        int `json:"stopped"`
 	// Unknown counts items whose facts could not be read or projected. It is
@@ -155,6 +169,8 @@ func (c *Counts) Add(state ItemState) {
 		c.HandoffPending++
 	case ItemCompleted:
 		c.Completed++
+	case ItemPartial:
+		c.Partial++
 	case ItemFailed:
 		c.Failed++
 	case ItemStopped:

@@ -19,12 +19,37 @@ type handoffFinding struct {
 	reported *HandoffReportedPayload
 	// handoffID is the identity that report is (or will be) admitted under.
 	handoffID string
+	// admitted is the durable handoff, when the latest report was admitted.
+	admitted *orchestration.EngineeringHandoff
+}
+
+// handoffRecords are the orchestration layer's own durable decisions about one
+// run's reports: the admitted handoffs and the refused identities.
+type handoffRecords struct {
+	admitted map[string]orchestration.EngineeringHandoff
+	refused  map[string]string
+}
+
+func loadHandoffRecords(store *SQLiteOperationStore, runID string) (handoffRecords, error) {
+	handoffs, err := store.RunHandoffs(runID)
+	if err != nil {
+		return handoffRecords{}, err
+	}
+	refused, err := store.RunHandoffRefusals(runID)
+	if err != nil {
+		return handoffRecords{}, err
+	}
+	records := handoffRecords{admitted: make(map[string]orchestration.EngineeringHandoff, len(handoffs)), refused: refused}
+	for _, handoff := range handoffs {
+		records.admitted[handoff.ID] = handoff
+	}
+	return records, nil
 }
 
 // inspectHandoff reads the latest handoff observation out of a run's journal.
 // It is the one place both the admission pass and the status projection ask
 // "where is this run's handoff", so they cannot disagree.
-func inspectHandoff(runID string, events []EngineeringEvent, operations map[string]RunOperation, admitted map[string]bool) (handoffFinding, error) {
+func inspectHandoff(runID string, events []EngineeringEvent, operations map[string]RunOperation, records handoffRecords) (handoffFinding, error) {
 	var latest *EngineeringEvent
 	for i := range events {
 		if events[i].Type == EventHandoffReported || events[i].Type == EventHandoffRefused {
@@ -50,8 +75,12 @@ func inspectHandoff(runID string, events []EngineeringEvent, operations map[stri
 		return handoffFinding{}, err
 	}
 	finding := handoffFinding{observation: orchestration.HandoffReported, reported: &reported, handoffID: id}
-	if admitted[id] {
-		finding.observation = orchestration.HandoffAdmitted
+	if handoff, ok := records.admitted[id]; ok {
+		finding.observation, finding.admitted = orchestration.HandoffAdmitted, &handoff
+		return finding, nil
+	}
+	if reason, ok := records.refused[id]; ok {
+		finding.observation, finding.detail = orchestration.HandoffRefused, "unadmittable: "+reason
 		return finding, nil
 	}
 	// A report from an invocation that changed nothing will never be bound:
@@ -91,11 +120,11 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 	if err != nil {
 		return err
 	}
-	admitted, err := admittedHandoffs(store, run.ID)
+	records, err := loadHandoffRecords(store, run.ID)
 	if err != nil {
 		return err
 	}
-	finding, err := inspectHandoff(run.ID, events, snapshot.Operations, admitted)
+	finding, err := inspectHandoff(run.ID, events, snapshot.Operations, records)
 	if err != nil || finding.observation != orchestration.HandoffReported {
 		return err
 	}
@@ -119,8 +148,14 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 			upTo = max(upTo, i)
 		}
 	}
+	// From here on, a report that cannot be admitted is a DECISION, recorded
+	// once, not an error repeated every pass: the item settles to
+	// handoff_pending with the reason instead of reading as running forever.
+	refuse := func(reason string) error {
+		return store.RefuseHandoff(finding.handoffID, batch.ID, run.ID, reason, now)
+	}
 	if payload.Commit == "" {
-		return fmt.Errorf("handoff not admitted: the commit of the reporting invocation journalled no completed candidate (run %s attempt %d)", run.ID, reported.Attempt)
+		return refuse("the commit of the reporting invocation journalled no completed candidate")
 	}
 	// The run AS IT STOOD when that commit landed, so the base and contract
 	// bound are the ones the commit was made and reassessed against, read
@@ -142,8 +177,7 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 	}
 	report, digest, present, err := readHandoffReport(path)
 	if !present || err != nil || digest != reported.ReportSHA256 {
-		return fmt.Errorf("handoff not admitted: the report is no longer the document journalled when the invocation completed (run %s attempt %d, present=%t, error=%v)",
-			run.ID, reported.Attempt, present, err)
+		return refuse(fmt.Sprintf("the report is no longer the document journalled when the invocation completed (present=%t, error=%v)", present, err))
 	}
 	_, err = store.AdmitHandoff(orchestration.EngineeringHandoff{
 		SchemaVersion: orchestration.EngineeringHandoffSchemaVersion,
@@ -157,18 +191,6 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 		ReportSHA256: digest, ProducerReport: report, AdmittedAt: now,
 	})
 	return err
-}
-
-func admittedHandoffs(store *SQLiteOperationStore, runID string) (map[string]bool, error) {
-	handoffs, err := store.RunHandoffs(runID)
-	if err != nil {
-		return nil, err
-	}
-	admitted := make(map[string]bool, len(handoffs))
-	for _, handoff := range handoffs {
-		admitted[handoff.ID] = true
-	}
-	return admitted, nil
 }
 
 func succeededOperation(operations map[string]RunOperation, kind, key string) (RunOperation, bool) {

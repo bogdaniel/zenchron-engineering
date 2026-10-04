@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -104,11 +105,11 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 	if err != nil {
 		return fail(err)
 	}
-	admitted, err := admittedHandoffs(store, run.ID)
+	records, err := loadHandoffRecords(store, run.ID)
 	if err != nil {
 		return fail(err)
 	}
-	finding, err := inspectHandoff(run.ID, events, snapshot.Operations, admitted)
+	finding, err := inspectHandoff(run.ID, events, snapshot.Operations, records)
 	if err != nil {
 		return fail(err)
 	}
@@ -120,10 +121,14 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 	if err != nil {
 		return fail(err)
 	}
-	state, err := orchestration.ProjectItem(orchestration.ChildFacts{
+	facts := orchestration.ChildFacts{
 		Exists: true, Termination: termination, Handoff: finding.observation,
 		Activity: runActivity(summary, operations, now),
-	})
+	}
+	if finding.admitted != nil {
+		facts.HandoffOutcome = finding.admitted.ProducerReport.Outcome
+	}
+	state, err := orchestration.ProjectItem(facts)
 	if err != nil {
 		return fail(err)
 	}
@@ -132,6 +137,10 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 	// is waiting on; a failed or stopped child keeps its own run's reason.
 	if finding.detail != "" && (state == orchestration.ItemHandoffPending || state == orchestration.ItemRunning) {
 		out.Reason = boundedDetail(finding.detail)
+	}
+	if state == orchestration.ItemPartial {
+		unresolved := finding.admitted.ProducerReport.Unresolved
+		out.Reason = boundedDetail(fmt.Sprintf("the worker reports %d unresolved item(s): %s", len(unresolved), strings.Join(unresolved, "; ")))
 	}
 	return out
 }

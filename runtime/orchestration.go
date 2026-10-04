@@ -76,6 +76,11 @@ func (s *Supervisor) Orchestrate(ctx context.Context, request ControlRequest) (O
 	if err != nil {
 		return OrchestrationView{}, err
 	}
+	// The handoff is MANDATORY, so the ability to write it is a precondition
+	// of the work, not a hope expressed in a prompt.
+	if !writesTypedResults(engine.deps.Provider) {
+		return OrchestrationView{}, fmt.Errorf("agent %q cannot write the runtime-owned typed result directory, so it can never satisfy an orchestration batch's mandatory handoff", agent.ID)
+	}
 	id, err := orchestration.BatchID(repository.String(), agent.ID, issues)
 	if err != nil {
 		return OrchestrationView{}, err
@@ -140,13 +145,17 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 	var problems []string
 	now := s.deps.Clock.Now()
 	for _, batch := range batches {
-		engine, err := s.engine(batch.Repository, batch.AgentID)
-		if err != nil {
+		// CREATING a child needs the engine: it is new work under the named
+		// agent. FINALIZING a handoff does not - it reads only the batch, the
+		// run's journal and the state directory - so an agent retired or a
+		// repository unconfigured after its worker reported still has that
+		// report settled, and no execution authority is needed or granted.
+		if engine, err := s.engine(batch.Repository, batch.AgentID); err != nil {
 			problems = append(problems, boundedDetail(batch.ID+": "+err.Error()))
-			continue
-		}
-		for issue, itemErr := range engine.materializeBatch(ctx, batch) {
-			problems = append(problems, boundedDetail(fmt.Sprintf("%s issue %d: %v", batch.ID, issue, itemErr)))
+		} else {
+			for issue, itemErr := range engine.materializeBatch(ctx, batch) {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s issue %d: %v", batch.ID, issue, itemErr)))
+			}
 		}
 		for _, item := range batch.Items {
 			if err := admitOrchestratedHandoff(s.deps.Store, s.deps.StateDir, batch, item, now); err != nil {

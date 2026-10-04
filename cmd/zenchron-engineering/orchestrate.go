@@ -136,8 +136,8 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 	}
 	c := view.Counts
 	fmt.Fprintf(stdout, "ORCHESTRATION %s\nRepository: %s   Agent: %s\n", view.BatchID, view.Repository, view.AgentID)
-	fmt.Fprintf(stdout, "Items: %d total: %d queued, %d running, %d waiting, %d handoff_pending, %d completed, %d failed, %d stopped, %d not_created, %d unknown\n\n",
-		c.Total, c.Queued, c.Running, c.Waiting, c.HandoffPending, c.Completed, c.Failed, c.Stopped, c.NotCreated, c.Unknown)
+	fmt.Fprintf(stdout, "Items: %d total: %d queued, %d running, %d waiting, %d handoff_pending, %d partial, %d completed, %d failed, %d stopped, %d not_created, %d unknown\n\n",
+		c.Total, c.Queued, c.Running, c.Waiting, c.HandoffPending, c.Partial, c.Completed, c.Failed, c.Stopped, c.NotCreated, c.Unknown)
 	fmt.Fprintf(stdout, "%-7s %-16s %-38s %-9s %-24s %s\n", "ISSUE", "STATE", "RUN", "HANDOFF", "CANDIDATE / PR", "REASON")
 	for _, item := range view.Items {
 		location := orDash(item.CandidateRevision[:min(12, len(item.CandidateRevision))])
