@@ -670,9 +670,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// actually given a second chance to address. This re-derives exactly the
 	// keys THIS operation's own prior attempt(s) consumed - never a different
 	// or wider set - so a retry is shown exactly what it was shown before.
-	if len(pending) == 0 {
-		pending = state.feedbackRedeliveryFor(operation.ID)
-	}
+	//
+	// It is a UNION with whatever is pending now (#87): feedback admitted while
+	// this operation sat in a durable provider wait must not displace what
+	// its earlier attempt was already given.
+	pending = state.feedbackDeliveryFor(operation.ID, pending)
 	feedback := r.feedbackContext(state.run.ID, pending)
 	if len(feedback) > 0 && purpose != InvocationContinuation {
 		purpose = InvocationRemediation

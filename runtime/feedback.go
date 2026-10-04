@@ -514,6 +514,30 @@ func (s *runState) feedbackRedeliveryFor(operationID string) []FeedbackObservedP
 	return redelivered
 }
 
+// feedbackDeliveryFor is what an attempt of operationID is given: its own
+// prior attempts' consumed items (feedbackRedeliveryFor) united with pending,
+// deduplicated by key, in admission order. The two sets are disjoint in
+// practice (Pending excludes consumed keys), so a plain #376 redelivery is
+// unchanged and nothing is delivered twice in one invocation. The operation's
+// binding still names the set that opened it; what each attempt delivered is
+// recorded by its own EventFeedbackConsumed, so a newer item delivered here is
+// consumed by this operation and never opens a second one. Each part is
+// bounded by maxDeliveredFeedbackItems, so the union stays under
+// maxFeedbackKeysPerEvent.
+func (s *runState) feedbackDeliveryFor(operationID string, pending []FeedbackObservedPayload) []FeedbackObservedPayload {
+	want := map[string]bool{}
+	for _, decision := range append(s.feedbackRedeliveryFor(operationID), pending...) {
+		want[decision.Key] = true
+	}
+	var out []FeedbackObservedPayload
+	for _, decision := range s.feedbackState().Admitted {
+		if want[decision.Key] {
+			out = append(out, decision) // Seen keeps admitted keys unique
+		}
+	}
+	return out
+}
+
 // Seen reports whether an item has already been judged, so re-polling records
 // nothing new. Dedup is by durable forge identity, never by text.
 func (s FeedbackState) Seen(key string) bool {

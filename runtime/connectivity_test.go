@@ -910,6 +910,95 @@ func TestConnectivityOpenAIWaitChargesWorkThatRan(t *testing.T) {
 	}
 }
 
+// #87: feedback admitted while a feedback operation sits in a durable provider
+// wait is delivered WITH what that operation was already given, never instead
+// of it. CLI shape: the worker ran, hit a quota, and resumes after the probe.
+func TestConnectivityFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing.T) {
+	f, runID := feedbackFixture(t)
+	f.clock.step = 0
+	comment := func(id int64, body string) {
+		number := f.state(runID).projection.PullRequest.Number
+		f.forge.ConversationComments[number] = append(f.forge.ConversationComments[number],
+			GitHubComment{ID: id, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText(body), CreatedAt: f.clock.Now()})
+		if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != 1 {
+			t.Fatalf("admission of %d: %+v %v", id, observation, err)
+		}
+	}
+	comment(501, "add A")
+	keyA := f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
+		t.Fatalf("quota: %+v", out)
+	}
+	comment(502, "add B")
+	keyB := f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
+	var waiting RunOperation
+	for _, op := range f.state(runID).snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && op.RetryDisposition == DispositionRateLimitWait {
+			waiting = op
+		}
+	}
+	calls := len(f.provider.requests)
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.provider.mutate = func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, "recovered.go"), []byte("package candidate\n"), 0600)
+	}
+	f.clock.at = waiting.RetryNotBefore
+	f.reconcile(runID)
+	if len(f.provider.requests) <= calls {
+		t.Fatal("the retry never reached the worker")
+	}
+	got := map[string]int{}
+	for _, item := range f.provider.requests[calls].Feedback {
+		got[item.Key]++
+	}
+	if len(got) != 2 || got[keyA] != 1 || got[keyB] != 1 {
+		t.Fatalf("retry of %s delivered %v, want A=%s and B=%s once each", waiting.ID, got, keyA, keyB)
+	}
+}
+
+// The same law in the openai_responses shape: an exchange happened, so A is
+// consumed; B arrives during the account wait; the next probe shows both.
+func TestConnectivityOpenAIFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing.T) {
+	f, runID := feedbackFixture(t)
+	f.clock.step = 0
+	comment := func(id int64, body string) string {
+		number := f.state(runID).projection.PullRequest.Number
+		f.forge.ConversationComments[number] = append(f.forge.ConversationComments[number],
+			GitHubComment{ID: id, Author: GitHubActor{Login: "maintainer", ID: 7}, Body: UntrustedText(body), CreatedAt: f.clock.Now()})
+		if observation, err := f.runtime.ObserveFeedback(context.Background(), runID); err != nil || observation.Admitted != 1 {
+			t.Fatalf("admission of %d: %+v %v", id, observation, err)
+		}
+		return f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
+	}
+	var bodies []string
+	api := doerFunc(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		status, body := http.StatusTooManyRequests, creditExhausted429
+		if len(bodies) == 1 {
+			status, body = http.StatusOK, scriptedToolCalls(t, "work", 10, [2]string{"no_such_tool", "{}"})
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})
+	keyA := comment(501, "add A")
+	useRealProvider(t, f, runID, api, func(p *OpenAIProvider) { p.MaxIterations = 4 })
+	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
+		t.Fatalf("account: %+v", out)
+	}
+	keyB := comment(502, "add B")
+	for _, op := range f.state(runID).snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && op.RetryDisposition == DispositionAccountWait {
+			f.clock.at = op.RetryNotBefore
+		}
+	}
+	seen := len(bodies)
+	f.reconcile(runID)
+	if len(bodies) != seen+1 || !strings.Contains(bodies[seen], keyA) || !strings.Contains(bodies[seen], keyB) {
+		t.Fatalf("the next probe did not carry both A (%s) and B (%s): %d new requests", keyA, keyB, len(bodies)-seen)
+	}
+}
+
 // #87 slice 2: a quota wait is durable. Its probe time survives a store
 // reopen and a new runtime, nothing invokes the provider before it, no attempt
 // or active work is spent, and the SAME operation resumes once it passes.
