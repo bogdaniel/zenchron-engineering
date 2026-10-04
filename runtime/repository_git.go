@@ -225,6 +225,9 @@ type RepositoryGitRunner struct {
 	// governed remote, and nil means every transport is refused.
 	Local  LocalPolicy
 	Remote *RemotePolicy
+	// Input is the command's stdin, for the batch forms (--stdin-paths,
+	// cat-file --batch). nil is /dev/null.
+	Input []byte
 }
 
 // controlPolicy is the default repository-control local profile.
@@ -640,6 +643,10 @@ func repositoryGitEnv(home, template, askpass string) []string {
 		"PAGER=cat",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_LITERAL_PATHSPECS=1",
+		// refs/replace/* would let a reader see stand-in bytes for an object
+		// a commit or push carries for real, so the gates would judge the
+		// wrong content (#437).
+		"GIT_NO_REPLACE_OBJECTS=1",
 		// An empty runtime-owned template, so neither a user template nor a
 		// system template can seed hooks into a clone or init.
 		"GIT_TEMPLATE_DIR=" + template,
@@ -787,8 +794,12 @@ func (r RepositoryGitRunner) run(args ...string) ([]byte, error) {
 		cmd.Dir = r.Dir
 	}
 	cmd.Env = repositoryGitEnv(home, template, askpass)
-	// nil Stdin is /dev/null, so anything that tried to prompt gets EOF.
+	// nil Stdin is /dev/null, so anything that tried to prompt gets EOF. Input
+	// is finite, so a prompt still reaches EOF after it.
 	cmd.Stdin = nil
+	if r.Input != nil {
+		cmd.Stdin = bytes.NewReader(r.Input)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

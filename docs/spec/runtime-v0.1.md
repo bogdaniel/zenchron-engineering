@@ -19,6 +19,33 @@ journal cursor, and its hash-chain fields excluded. Event hashes are SHA-256 of
 the canonical event with only `event_hash` excluded, retaining its
 state-before/state-after and chain bindings. The reducer never reads wall time.
 
+Every persisted event carries its `event_hash`, in its document and in its
+indexed column. A persisted event whose `event_hash` is empty is corruption, on
+the run stream and the plan stream alike, wherever it sits in the chain and
+whether or not anything else about it changed: the shared read that every
+replay and event read passes through refuses it, and the reducers have no
+empty-hash tolerance of their own (#462). The only event that is ever hashed
+without a stored hash is the one being appended: inside its append
+transaction, before `state_after` is known, it carries a provisional hash
+(its digest with `state_after` still empty) so the reducer can fold it, and
+the final hash replaces that before the row is written. The state digest
+excludes the cursor, so the provisional value never reaches it.
+
+An event's `state_before` and `state_after` are recorded transition digests:
+diagnostic compatibility metadata, not replay-verification inputs and not an
+integrity or authority anchor (#453). Replay authority is the event's type,
+stream and sequence, agreement between its indexed columns and its document,
+its link to the previous event, its `event_hash`, the validity of its
+artifacts, and the deterministic fold over its events. Replay does not
+recompute or compare the recorded digests, and no cache, checkpoint, recovery
+path, admission, authority or other runtime decision may trust either field
+in place of replay. Because `event_hash` covers them, changing either field
+without recomputing that hash is corruption and is refused like any other
+tampered event, including when the hash is blanked rather than left stale; a value that is arbitrary but chain-consistent is accepted
+and still decides nothing. The physical JSON names stay for journal
+compatibility. A later journal-format revision may remove the fields, but
+historical events are never rewritten merely to rename them.
+
 Runtime data is stored in the operator state directory, not the target repo.
 Artifacts are references only and distinguish raw/local-only data from
 sanitized/publishable data.  The #30 extension and #31 checkpoint shapes are
@@ -222,6 +249,20 @@ remotes, config, or other protected Git metadata is a
 `workspace_integrity_violation`; it is refused/restored rather than adopted.
 Base drift rebases before publication; after publication it is integrated by a
 merge-from-base and never a runtime force-push. Conflicts are typed outcomes.
+
+The runtime commit carries exactly the tree its gates judged. It writes the
+staged index to a tree once (`write-tree`), takes the blob list from
+`diff-tree -r --raw --no-renames <parent> <tree>`, runs the commit gates and
+the raw-worktree backstop over those blobs, then builds the commit with
+`commit-tree <tree> -p <parent>` and moves HEAD with
+`update-ref --no-deref HEAD <commit> <parent>`. It never reads the index again,
+so an index rewritten after gating cannot change what is committed. A HEAD that
+moved from the gated parent is refused as a `workspace_integrity_violation` and
+no commit is reported. Every runtime Git call ignores replace objects
+(`GIT_NO_REPLACE_OBJECTS=1`), so a `refs/replace/*` ref cannot make the gates
+read stand-in bytes for a blob the commit carries. The commit's recorded paths
+are that tree diff, the same set #431 recovery recomputes. Whether the worktree still matches the commit after it is made is
+not covered by this rule (#437).
 
 The trusted Git metadata baseline is persisted rather than re-derived. Every
 runtime-owned Git operation that succeeds journals the digest of the
@@ -463,11 +504,61 @@ Effective patience with the defaults: an execution (`max_execution_attempts`
 30 s and then 60 s. The 5 min cap is reached only by the fifth backoff, so an
 operation needs at least six attempts to wait that long.
 
-The first failing assurance result gets exactly one identical rerun before any
-mutation. A differing result is `flaky_verification`, not pristine passing
-evidence. No-progress uses a deterministic fingerprint over candidate tree,
-contract revision, failure signature, verifier, provider, and remediation
-identity rather than transcript text.
+The first failing assurance result that is a **candidate verdict** gets
+exactly one identical rerun before any mutation. A candidate verdict is a pass,
+or a failure the verifier judged: `format`, `compile_or_test`,
+`verification_failure`, or an unpassed result naming no class (read as
+verification). `CandidateVerdict` is the one definition. An infrastructure,
+cancellation or prerequisite result is not a verdict: it is never rerun as a
+confirmation and never half of a flake, and on either run it routes by its own
+class.
+
+Only two candidate verdicts that disagree are `flaky_verification`, and a flaky
+result is never passing evidence. The rerun's verdict is not passed even when
+the confirmation run passed, so no evidence bundle is bound, no claim is
+satisfied by it, and it cannot reach authority or publication.
+`flaky_verification` routes `stop`, and the run settles
+`assurance.go_failure_not_retryable`. A result returned together with a
+provider error is never passed either.
+
+A provider therefore returns a judged failure as a result with a nil error. The
+built-in Go verifier runs `gofmt`, `go vet` and `go test` under `sh -e`. Docker
+records that workload's own exit status, and the verifier reads it as follows:
+
+| Workload exit | Meaning | Class | Error |
+|---|---|---|---|
+| 0 | pass | none | nil |
+| 1 or 2 | the candidate failed | `verification_failure` | nil |
+| any other code (3 and above, Docker's 125, an unexecutable 126/127, a signal death such as 137) | not a verdict | `transient_infrastructure` | kept |
+| none recorded (a start that never ran the workload, a container that could not be reaped) | not a verdict | `transient_infrastructure` | kept |
+
+Cancellation keeps its error and its owner's class.
+
+Known ceilings, accepted deliberately:
+
+- **Signal deaths are infrastructure.** Docker's OOM record is not inspected.
+  Candidate code can kill its own workload and force retries this way, but a
+  non-verdict is never passed. It cannot create passing evidence or reach
+  authority, and `max_assurance_attempts` bounds the retries.
+- **In-container resource blips that exit 1 or 2 are read as verdicts.** A full
+  tmpfs, the pids limit or a module missing under `GOPROXY=off` is
+  indistinguishable from a candidate failure by exit status.
+- **A blip followed by a pass stays `flaky_verification`**, terminal and not
+  retryable. Contradictory evidence about the same exact tree is not weakened
+  because the classifier has known ceilings.
+
+Retry backoff for assurance `transient_infrastructure` is not part of this rule
+(#465).
+
+Before this rule the built-in verifier returned every judged failure as an
+error, so it never reached the confirmation rerun and could not record a flaky
+pass. A provider that reported failure with a nil error could, and a flaky pass
+it recorded as a plain pass cannot be reconstructed: the journal kept only
+the confirmation's verdict. No migration exists or is needed.
+
+No-progress uses a deterministic fingerprint over candidate tree, contract
+revision, failure signature, verifier, provider, and remediation identity
+rather than transcript text.
 
 ## Operator surface
 

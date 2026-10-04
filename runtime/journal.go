@@ -276,10 +276,10 @@ type journalStream struct {
 }
 
 // appendToStream is the ONE append implementation. Allocating a sequence,
-// linking the hash chain, recording the state-before/state-after digests and
-// inserting the row happen in one transaction, whichever stream the event
-// belongs to - so a plan's history is as tamper-evident as a run's, by being
-// the same mechanism rather than a similar one.
+// linking the hash chain, recording the diagnostic state-before/state-after
+// digests and inserting the row happen in one transaction, whichever stream
+// the event belongs to - so a plan's history is as tamper-evident as a run's,
+// by being the same mechanism rather than a similar one.
 func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journalStream) (EngineeringEvent, error) {
 	if e.Sequence != 0 || e.PreviousEventID != "" || e.PreviousEventHash != "" || e.StateBefore != "" || e.StateAfter != "" || e.EventHash != "" {
 		return EngineeringEvent{}, fmt.Errorf("sequence, chain, and state hashes are allocated by the journal, not the caller")
@@ -330,10 +330,21 @@ func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journal
 		e.PreviousEventID = existing[n-1].ID
 		e.PreviousEventHash = existing[n-1].EventHash
 	}
+	// The state digests are recorded for diagnostics only (#453): nothing
+	// reads them back as authority, replay recomputes state from the events,
+	// and a reader that needs the state must replay rather than trust these.
 	e.StateBefore = before
+	// The reducers refuse an event without its hash (#462), so the event the
+	// state_after digest folds in carries a provisional one: its hash with
+	// state_after still empty. StateDigest excludes the cursor - the only place
+	// a reducer copies an event hash into state - so the provisional value
+	// cannot reach the digest, and the final hash below replaces it.
+	if e.EventHash, err = EventDigest(e); err != nil {
+		return EngineeringEvent{}, err
+	}
 	// StateDigest excludes the journal cursor and state_sha256, so an event's
-	// state_after never feeds back into the digest it records: the last event's
-	// state_after equals the replayed snapshot's state_sha256.
+	// state_after never feeds back into the digest it records: at append time,
+	// the last event's state_after equals the replayed snapshot's state_sha256.
 	after, err := stream.digest(append(existing, e))
 	if err != nil {
 		return EngineeringEvent{}, err
@@ -498,6 +509,12 @@ func queryStreamEventsLimited(q eventQuerier, where, suffix string, args ...any)
 			&row.PreviousEventID, &row.PreviousEventHash, &row.StateBefore, &row.StateAfter,
 			&row.EventHash, &document, &streamKind, &row.PlanID); err != nil {
 			return nil, err
+		}
+		// The journal writes every row with its event_hash, so an empty one is
+		// corruption whatever else the row says (#462). Refused HERE, the one
+		// read every run and plan stream passes through, not left to a reducer.
+		if row.EventHash == "" {
+			return nil, fmt.Errorf("durable event %q has no event_hash", row.ID)
 		}
 		var e EngineeringEvent
 		if err := json.Unmarshal([]byte(document), &e); err != nil {

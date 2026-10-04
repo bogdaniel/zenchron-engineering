@@ -242,6 +242,38 @@ placeholder `[prompt]` and its SHA-256 is recorded as `prompt_sha256`. It
 carries untrusted third-party text and is unbounded, while every
 security-relevant flag is short and is kept verbatim.
 
+**Paths in recorded argv are logical references (#464).** The provider runs
+with the real host paths; the durable argv names each runtime-owned directory
+by the role the runtime gave it, never by its host spelling:
+
+```text
+invocation scratch root          $SCRATCH
+typed-result directory           $RESULT
+candidate workspace              $CANDIDATE/<relative>
+anything else under StateDir     $STATE/<relative>
+any other absolute path          <host-path>
+```
+
+So Codex records `-c sandbox_workspace_write.writable_roots=["$SCRATCH"]` and
+`--cd $CANDIDATE`, and Claude Code records `--add-dir $SCRATCH --add-dir
+$RESULT`. The record is built from the invocation's structured path roles - the
+provider spec's own argument builder applied to the invocation with each
+path-bearing field replaced by its reference - not by scrubbing strings, so the
+spec that knows a value is the scratch directory is the only thing that decides
+where `$SCRATCH` appears. Roots match on whole path components (`/tmp/ab` is not
+under `/tmp/a`), under both the given and the symlink-resolved spelling (macOS
+`/tmp` is `/private/tmp`), with Windows drive roots and separators normalized;
+the most specific role wins. A recorded argv is therefore the same when the
+state directory moves to another machine or home.
+
+An absolute path under no runtime-owned root - an operator-configured model
+path or tool path, say - is recorded as `<host-path>`. The loss is explicit
+rather than silent, and the invocation is never refused for it: a diagnostic
+projection does not get to block real work. The journal refuses, at append, an
+argv element that is itself a raw POSIX, drive-rooted or UNC path, as a
+backstop for a projection defect. Artifact references are unaffected; they are
+already runtime-relative identities.
+
 **Where it is recorded.** For a run attempt - initial execution, remediation or
 continuation, whether it succeeded, failed, hit its deadline, was ended for
 inactivity or was cancelled - the record is one immutable
@@ -498,6 +530,45 @@ clears by repairing the installation, never a provider fault, because nothing
 about the worker, the work, the account or the network is wrong. A deliberately
 unguarded composition — a unit test, a probe, an embedder driving one
 invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
+
+An execution attempt claims the candidate's writer lock
+(`<candidate>.writer.lock`, beside the candidate, never in it) before it reads,
+restores or scans the candidate, and holds it through dispatch. The provider
+inherits the lock's descriptor, so every descendant that keeps it keeps the
+candidate locked — including a tool command that left the provider's process
+group and survived a supervisor killed with SIGKILL, which the owner-death
+guard cannot reach (#168).
+
+- A claim that finds the lock held waits a bounded settle period (three times
+  the default guard grace) and is then refused before anything touches the
+  candidate as `candidate_writer_alive`: a typed, non-spending wait an
+  operator clears by stopping the stale writer (`lsof <candidate>.writer.lock`
+  names it). The settle is paid once: a run already waiting on
+  `candidate_writer_alive` re-probes once per pass without sleeping. A
+  controller shutdown (the attempt's parent context ending) interrupts the
+  settle and is recorded as `controller_shutdown`, never as a live writer. A
+  durable `stop RUN` is not observed during the settle; it is observed just
+  before the provider would start, as for any attempt. A lock that cannot be
+  checked at all is `candidate_guard_unavailable`.
+- When a provider returns normally, a lock still held by its own process
+  group (a backgrounded command) is stopped with the usual TERM-then-KILL, so
+  an attempt's own leftovers never refuse the next attempt. A holder that
+  survives that left the group, and is attributed to that attempt as
+  `provider_background_work_unresolved`.
+- Garbage collection does not delete a candidate whose lock is held, and
+  removes the lock file with the candidate.
+
+**It is cooperative, not a security boundary.** It sees only processes that
+kept the inherited descriptor; a provider can release it (`flock -u 3`), close
+it, or, unsandboxed, unlink the lock file. Whether tool commands inherit it is
+a property of each provider:
+
+| Provider kind | Tool commands inherit the lock descriptor |
+|---|---|
+| `codex_cli` | verified in review against codex 0.157.0, including a backgrounded `nohup` command |
+| node-based CLIs | no: node does not pass inherited descriptors to its children |
+| `claude_code` | unverified (a Bun-compiled binary) |
+| others | unverified |
 
 The boundary grants the worker no new command surface. It adds no tool to any
 provider's allowlist, so a stage that was obliged nothing is still obliged
