@@ -443,6 +443,12 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlOrchestrate:
+		view, err := supervisor.Orchestrate(ctx, request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlStatus:
 		ceiling, err := c.maxConcurrentRuns()
 		if err != nil {

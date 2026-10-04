@@ -37,6 +37,7 @@ import (
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
+	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
@@ -276,6 +277,8 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		// `run issue N` starts one governed run, `plan issue N` proposes the
 		// decomposition that several of them would execute.
 		return autonomyPlan(context.Background(), rest, overrides, stdout)
+	case "orchestrate":
+		return autonomyOrchestrate(rest, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
