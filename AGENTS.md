@@ -156,10 +156,10 @@ For non-trivial changes:
 
 Always run focused tests locally: the packages and `-run` patterns that cover
 the change, plus `gofmt -l .` and `go vet ./...`. Add `-race` when the change
-touches concurrency. Do not run the full suite (`go test ./...`) by default.
-GitHub Actions runs it on every push and pull request, and that CI result is
-the full-suite evidence. Run the full suite locally only when asked, or when
-you need to reproduce a CI failure.
+touches concurrency. Do not run the full suite (`go test ./...`) locally by
+default. GitHub Actions runs it on pull requests and on pushes to `main`, and
+that CI result is the full-suite evidence. Run the full suite locally only when
+it is explicitly needed or requested, or to reproduce a CI failure.
 
 ## Milestones
 
