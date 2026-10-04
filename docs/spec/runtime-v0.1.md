@@ -19,6 +19,33 @@ journal cursor, and its hash-chain fields excluded. Event hashes are SHA-256 of
 the canonical event with only `event_hash` excluded, retaining its
 state-before/state-after and chain bindings. The reducer never reads wall time.
 
+Every persisted event carries its `event_hash`, in its document and in its
+indexed column. A persisted event whose `event_hash` is empty is corruption, on
+the run stream and the plan stream alike, wherever it sits in the chain and
+whether or not anything else about it changed: the shared read that every
+replay and event read passes through refuses it, and the reducers have no
+empty-hash tolerance of their own (#462). The only event that is ever hashed
+without a stored hash is the one being appended: inside its append
+transaction, before `state_after` is known, it carries a provisional hash
+(its digest with `state_after` still empty) so the reducer can fold it, and
+the final hash replaces that before the row is written. The state digest
+excludes the cursor, so the provisional value never reaches it.
+
+An event's `state_before` and `state_after` are recorded transition digests:
+diagnostic compatibility metadata, not replay-verification inputs and not an
+integrity or authority anchor (#453). Replay authority is the event's type,
+stream and sequence, agreement between its indexed columns and its document,
+its link to the previous event, its `event_hash`, the validity of its
+artifacts, and the deterministic fold over its events. Replay does not
+recompute or compare the recorded digests, and no cache, checkpoint, recovery
+path, admission, authority or other runtime decision may trust either field
+in place of replay. Because `event_hash` covers them, changing either field
+without recomputing that hash is corruption and is refused like any other
+tampered event, including when the hash is blanked rather than left stale; a value that is arbitrary but chain-consistent is accepted
+and still decides nothing. The physical JSON names stay for journal
+compatibility. A later journal-format revision may remove the fields, but
+historical events are never rewritten merely to rename them.
+
 Runtime data is stored in the operator state directory, not the target repo.
 Artifacts are references only and distinguish raw/local-only data from
 sanitized/publishable data.  The #30 extension and #31 checkpoint shapes are
@@ -125,6 +152,20 @@ remotes, config, or other protected Git metadata is a
 `workspace_integrity_violation`; it is refused/restored rather than adopted.
 Base drift rebases before publication; after publication it is integrated by a
 merge-from-base and never a runtime force-push. Conflicts are typed outcomes.
+
+The runtime commit carries exactly the tree its gates judged. It writes the
+staged index to a tree once (`write-tree`), takes the blob list from
+`diff-tree -r --raw --no-renames <parent> <tree>`, runs the commit gates and
+the raw-worktree backstop over those blobs, then builds the commit with
+`commit-tree <tree> -p <parent>` and moves HEAD with
+`update-ref --no-deref HEAD <commit> <parent>`. It never reads the index again,
+so an index rewritten after gating cannot change what is committed. A HEAD that
+moved from the gated parent is refused as a `workspace_integrity_violation` and
+no commit is reported. Every runtime Git call ignores replace objects
+(`GIT_NO_REPLACE_OBJECTS=1`), so a `refs/replace/*` ref cannot make the gates
+read stand-in bytes for a blob the commit carries. The commit's recorded paths
+are that tree diff, the same set #431 recovery recomputes. Whether the worktree still matches the commit after it is made is
+not covered by this rule (#437).
 
 The trusted Git metadata baseline is persisted rather than re-derived. Every
 runtime-owned Git operation that succeeds journals the digest of the

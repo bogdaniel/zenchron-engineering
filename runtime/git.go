@@ -315,7 +315,18 @@ type CommitResult struct {
 	Excluded []string
 }
 
+// afterCommitGates is a test seam: it runs after the gates have judged the
+// written tree and before that tree is committed (#437).
+var afterCommitGates func(dir string)
+
 func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResult, error) {
+	// The parent is read BEFORE the integrity check, so the HEAD the check
+	// approved is the one the new commit names and update-ref expects.
+	parentOut, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		return CommitResult{}, err
+	}
+	parent := strings.TrimSpace(parentOut)
 	if err := w.AssertIntegrity(); err != nil {
 		return CommitResult{}, err
 	}
@@ -415,9 +426,22 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// staged, so it cannot veto the commit. A refusal here commits nothing;
 	// the staged entries are the same leftover an interrupted attempt leaves,
 	// which the `rm --cached -f` above expects.
-	staged, blobs, err := stagedCommitPaths(w.Dir)
+	//
+	// THE GATED SET IS IMMUTABLE (#437). The index is written to a tree ONCE,
+	// the gates judge that tree's blobs, and exactly that tree is committed
+	// with commit-tree. `git commit` would read the index again, and a process
+	// that outlived its invocation could rewrite it in between.
+	treeOut, err := gitOutput(w.Dir, "write-tree")
 	if err != nil {
 		return CommitResult{}, err
+	}
+	tree := strings.TrimSpace(treeOut)
+	staged, blobs, err := treeCommitPaths(w.Dir, parent, tree)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if len(staged) == 0 {
+		return CommitResult{}, fmt.Errorf("candidate changes stage nothing a runtime commit can carry")
 	}
 	if err := guardStagedContent(w.Dir, staged, blobs, maxBytes); err != nil {
 		return CommitResult{}, err
@@ -428,22 +452,31 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	if err := refuseWorktreeDivergence(w.Dir, blobs); err != nil {
 		return CommitResult{}, err
 	}
-	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", message); err != nil {
+	if afterCommitGates != nil {
+		afterCommitGates(w.Dir)
+	}
+	// The message gets the same whitespace cleanup `git commit -m` applies.
+	cleaned, err := runGitInput(w.Dir, []byte(message), "stripspace")
+	if err != nil {
 		return CommitResult{}, err
+	}
+	commitOut, err := runGitInput(w.Dir, cleaned, "commit-tree", "--no-gpg-sign", tree, "-p", parent)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	commit := strings.TrimSpace(string(commitOut))
+	// HEAD moves only from the parent the gates were run against. A HEAD moved
+	// concurrently is refused as the integrity violation a moved HEAD is
+	// everywhere else, and no commit is reported: HEAD never named this one.
+	if _, err := runGit(w.Dir, "update-ref", "--no-deref", "HEAD", commit, parent); err != nil {
+		return CommitResult{}, &WorkspaceIntegrityError{Detail: "HEAD moved during the runtime commit"}
 	}
 	// FROM HERE THE COMMIT EXISTS AND HEAD HAS MOVED (#402). Every return
-	// below carries whatever identity is already known, so a failure after
-	// this point can never make the caller report the work as uncommitted.
-	head, err := gitOutput(w.Dir, "rev-parse", "HEAD")
-	if err != nil {
-		return CommitResult{}, err
-	}
-	result := CommitResult{Commit: strings.TrimSpace(head), Paths: eligible, Excluded: debris.Excluded}
-	tree, err := gitOutput(w.Dir, "rev-parse", "HEAD^{tree}")
-	if err != nil {
-		return result, err
-	}
-	result.Tree = strings.TrimSpace(tree)
+	// below carries the identity already known, so a failure after this point
+	// can never make the caller report the work as uncommitted.
+	// Paths is the committed tree diff (--no-renames), the same set #431
+	// recovery recomputes, not the status list.
+	result := CommitResult{Commit: commit, Tree: tree, Paths: staged, Excluded: debris.Excluded}
 	// The baseline is the runtime's own commit, taken before the probe below
 	// so a refused probe still leaves the caller the digest to record.
 	metadata, err := gitMetadataDigest(w.Dir)
@@ -711,12 +744,12 @@ type stagedBlob struct {
 	size     int64
 }
 
-// stagedCommitPaths lists every path the commit would change (deletions too,
-// so the name gate still sees them) and the blob each addition or
-// modification would carry. Only regular-file blobs are carried: a symlink or
+// treeCommitPaths lists every path tree changes against parent (deletions
+// too, so the name gate still sees them) and the blob each addition or
+// modification carries. Only regular-file blobs are carried: a symlink or
 // gitlink entry is refused, because the gates judge bytes, not links.
-func stagedCommitPaths(dir string) ([]string, []stagedBlob, error) {
-	out, err := gitOutput(dir, "diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "HEAD")
+func treeCommitPaths(dir, parent, tree string) ([]string, []stagedBlob, error) {
+	out, err := gitOutput(dir, "diff-tree", "-r", "--raw", "-z", "--no-renames", "--no-abbrev", parent, tree)
 	if err != nil {
 		return nil, nil, err
 	}
