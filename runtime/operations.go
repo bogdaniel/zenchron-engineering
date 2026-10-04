@@ -2965,14 +2965,20 @@ func (r *EngineeringRuntime) observeGitHub(ctx context.Context, state *runState,
 }
 
 // ancestorOfCandidate reports whether an externally observed head is one of the
-// runtime's own commits. It is answered from the runtime-owned clone, not from
-// anything GitHub said about itself.
+// runtime's own commits. It is answered from the verified subject store (#437),
+// not from the candidate's object directory and not from anything GitHub said
+// about itself. A foreign head is absent there, so the answer is "no" and the
+// change is recorded - the conservative outcome.
 func (r *EngineeringRuntime) ancestorOfCandidate(state *runState, head string) (bool, error) {
 	workspace, err := r.workspace(state)
 	if err != nil {
 		return false, err
 	}
-	if _, err := runGit(workspace.Dir, "merge-base", "--is-ancestor", head, state.projection.CandidateRevision); err != nil {
+	store, err := subjectStore(workspace.Dir, state.projection.CandidateRevision)
+	if err != nil {
+		return false, err
+	}
+	if _, err := runGit(store, "merge-base", "--is-ancestor", head, state.projection.CandidateRevision); err != nil {
 		return false, err
 	}
 	return true, nil

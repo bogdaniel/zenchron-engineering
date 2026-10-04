@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -29,7 +30,11 @@ func swapLooseObject(t *testing.T, dir, id, kind string, content []byte) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.Chmod(path, 0o600)
+	// Replaced, not rewritten in place: a local clone hardlinks objects, and
+	// the swap must not reach the repository the candidate was cloned from.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, zlibObject(t, kind, content), 0o400); err != nil {
 		t.Fatal(err)
 	}
@@ -370,5 +375,81 @@ func TestAssuranceCheckoutSharesNoObjectFileWithTheStore(t *testing.T) {
 	})
 	if err != nil || compared == 0 {
 		t.Fatalf("compared %d object files: %v", compared, err)
+	}
+}
+
+// TestAForeignHeadIsNeverTheCandidatesAncestor: an external pull request head
+// is recognised as the runtime's own only from the subject store. A graft or a
+// commit object swapped in the candidate that would make a foreign commit look
+// like the candidate's parent must not suppress candidate.external_changed.
+func TestAForeignHeadIsNeverTheCandidatesAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(t *testing.T, dir, candidate, foreign string)
+	}{
+		{"a graft", func(t *testing.T, dir, candidate, foreign string) {
+			mustWrite(t, filepath.Join(dir, ".git", "info", "grafts"), candidate+" "+foreign+"\n")
+		}},
+		// Git verifies a commit named on the command line, not the parents it
+		// walks to, so the candidate's parent is swapped for one that names
+		// the foreign commit as a parent of its own.
+		{"a swapped parent commit object", func(t *testing.T, dir, candidate, foreign string) {
+			parent := mustGit(t, dir, "rev-parse", candidate+"^")
+			raw := mustGit(t, dir, "cat-file", "commit", parent)
+			tree, rest, _ := strings.Cut(raw, "\n")
+			swapLooseObject(t, dir, parent, "commit", []byte(tree+"\nparent "+foreign+"\n"+rest+"\n"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPhase8Fixture(t)
+			runID := fixture.start()
+			fixture.reconcile(runID)
+			state := fixture.state(runID)
+			candidate, number := state.projection.CandidateRevision, state.projection.PullRequest.Number
+			if candidate == "" || number == 0 {
+				t.Fatalf("the run did not publish: candidate %q, pull request %d", candidate, number)
+			}
+			dir := candidateDir(fixture.stateDir, runID)
+			foreign := strings.TrimSpace(string(mustBytes(t)(runGitInput(dir, []byte("foreign\n"), "commit-tree", fixture.base+"^{tree}"))))
+			tc.tamper(t, dir, candidate, foreign)
+			if out, err := exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", foreign, candidate).CombinedOutput(); err != nil {
+				t.Fatalf("the tamper did not take: plain git does not see the foreign head as an ancestor: %v %s", err, out)
+			}
+			fixture.inject(func(GitHubCall) error {
+				pr := fixture.forge.PullRequests[number]
+				pr.HeadSHA = foreign
+				fixture.forge.PullRequests[number] = pr
+				return nil
+			})
+			fixture.reconcile(runID)
+			if got := fixture.state(runID).projection.ObservedExternalHead; got != foreign {
+				t.Fatalf("a foreign head passed as the candidate's own: observed external head %q", got)
+			}
+		})
+	}
+}
+
+// TestRuntimeGitIgnoresGrafts: through the runtime runner a graft cannot make
+// an unrelated commit an ancestor.
+func TestRuntimeGitIgnoresGrafts(t *testing.T) {
+	w := commitGateWorkspace(t)
+	head := strings.TrimSpace(headOf(t, w))
+	foreign := strings.TrimSpace(string(mustBytes(t)(runGitInput(w.Dir, []byte("foreign\n"), "commit-tree", head+"^{tree}"))))
+	mustWrite(t, filepath.Join(w.Dir, ".git", "info", "grafts"), head+" "+foreign+"\n")
+	if out, err := exec.Command("git", "-C", w.Dir, "merge-base", "--is-ancestor", foreign, head).CombinedOutput(); err != nil {
+		t.Fatalf("the graft did not take for plain git: %v %s", err, out)
+	}
+	if _, err := runGit(w.Dir, "merge-base", "--is-ancestor", foreign, head); err == nil {
+		t.Fatal("a graft made an unrelated commit an ancestor through the runtime runner")
+	}
+}
+
+func mustBytes(t *testing.T) func([]byte, error) []byte {
+	return func(b []byte, err error) []byte {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
 	}
 }

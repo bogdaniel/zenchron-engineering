@@ -163,7 +163,9 @@ so an index rewritten after gating cannot change what is committed. A HEAD that
 moved from the gated parent is refused as a `workspace_integrity_violation` and
 no commit is reported. Every runtime Git call ignores replace objects
 (`GIT_NO_REPLACE_OBJECTS=1`), so a `refs/replace/*` ref cannot make the gates
-read stand-in bytes for a blob the commit carries. The commit's recorded paths
+read stand-in bytes for a blob the commit carries. Every runtime Git call
+also reads grafts from a path that never exists (`GIT_GRAFT_FILE`), so
+`.git/info/grafts` cannot rewrite a commit's parents. The commit's recorded paths
 are that tree diff, the same set #431 recovery recomputes.
 
 After the runtime writes the commit object, the provider-writable candidate
@@ -173,8 +175,10 @@ exact commit into a runtime-owned subject store beside the candidate workspace
 re-hashed by `index-pack`, so content that does not match its name is refused
 rather than stored. This covers a loose object swapped behind its name and a
 name answered from `objects/info/alternates`. The commit gates, observation,
-contract reassessment, the assurance and semantic checkouts, #431 recovery
-and the `candidate.push` all read that store. None of them reads the
+contract reassessment, the assurance and semantic checkouts, #431 recovery,
+the `candidate.push`, and the ancestry check that decides whether an observed
+pull-request head is the runtime's own all read that store. A foreign head is
+absent from the store, so it is recorded as `candidate.external_changed`. None of them reads the
 candidate's worktree, index or object directory. A commit whose content
 cannot be fetched under its own names fails closed and never falls back to the
 candidate: before HEAD moves, nothing is committed; after it, the failure is a

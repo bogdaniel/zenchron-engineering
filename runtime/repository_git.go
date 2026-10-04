@@ -647,6 +647,11 @@ func repositoryGitEnv(home, template, askpass string) []string {
 		// a commit or push carries for real, so the gates would judge the
 		// wrong content (#437).
 		"GIT_NO_REPLACE_OBJECTS=1",
+		// .git/info/grafts rewrites parents for every reader, so an ancestry
+		// query could call a foreign head the candidate's own (#437). The
+		// graft file is a path in the runtime-owned empty HOME that never
+		// exists, so no graft is read and Git prints no deprecation hint.
+		"GIT_GRAFT_FILE=" + noGraftFile(home),
 		// An empty runtime-owned template, so neither a user template nor a
 		// system template can seed hooks into a clone or init.
 		"GIT_TEMPLATE_DIR=" + template,
@@ -656,6 +661,10 @@ func repositoryGitEnv(home, template, askpass string) []string {
 	}
 	return env
 }
+
+// noGraftFile is the graft file every runtime Git call is pointed at: a path
+// inside the call's own runtime-owned HOME that nothing creates.
+func noGraftFile(home string) string { return filepath.Join(home, "no-grafts") }
 
 // runtimeConfigOverrides are applied to every repository-control operation, not
 // just the ones capable of triggering them, so the policy is uniform and one
