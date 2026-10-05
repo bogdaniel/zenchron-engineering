@@ -161,12 +161,12 @@ field declaration.
 | `agents.<id>.credential_path`, `agents.<id>.endpoint` (agents.go:145,147) | A Zenchron-held credential and its remote endpoint | C | controller start | as above | Yes | None. Stays C. | Credential authority. |
 | `agents.<id>.allow_permission_bypass` (agents.go:154) | Standing permission for unsafe bypass invocation | C | controller start | as above | Yes | None. Stays C. | Privilege. Moving it would allow silent escalation on a live run, which ADR-0001 prohibits. |
 | `agents.<id>.command`, `agents.<id>.home`, `agents.<id>.model` (agents.go:127,131,139) | The executable, provider profile and model of a worker | A | agent assignment (#84 posture) and attempt start | #84 posture fingerprint and attempt provenance (#327) | After migration, new runs only. A change for a live run → `waiting_configuration_drift` (#89). | As `toolchain`. | Execution posture (#84). **Stays C until #84, #327 and B5.** |
-| `agents.<id>.unattended` (agents.go:160) | Whether supervisor discovery may start work with this agent | S | supervisor start | SupervisorPolicyDigest | No. It gates creation only, and never an existing run. | Pre-migration supervisor starts carry no policy digest. Their policy is identified by the controller binding. | Scheduling eligibility, not trust. Explicit work is unaffected. Provisional: B4 must re-justify it, because it gates autonomous starts under the agent's account. |
+| `agents.<id>.unattended` (agents.go:160) | Whether supervisor discovery may start work with this agent | C (B4 re-justification failed; stays C) | controller start | Controller-effective digest | No. It gates creation only, and never an existing run. | Pre-migration supervisor starts carry no policy digest. Their policy is identified by the controller binding. | Scheduling eligibility, not trust. Explicit work is unaffected. B4 (#346) did NOT re-justify it: false → true widens what may start unattended under that agent's account, which is authority over that account rather than scheduling, so it stays C. |
 | `default_agent` (config.go:580) | Which agent a new run is assigned when none is named | R | run creation (frozen as `run.agent_assigned`) | Existing `run.agent_assigned` event. Also RunPolicyDigest. | No. The assignment is already durable per run. | Runs without `agent_assigned` keep the documented legacy meaning (runtime.go:298-302). | Already self-identifying at its freeze point. This is the first field eligible to move, in B3. |
 | `github.credential_mode`, `github.token_path`, `github.app_id`, `github.installation_id`, `github.private_key_path`, `github.endpoint`, `github.governance_credential_mode` (config.go:167-237) | Publication identity, forge endpoint, trust-root observation identity | C | controller start | controller-effective digest, run ID, PlanID | Yes | None. Stays C. | Who the runtime publishes as and what it treats as authoritative forge state. |
 | `feedback.min_permission`, `feedback.allowed_bots`, `feedback.self_logins` (config.go:360-367) | Who may direct a worker through model-visible feedback | C | controller start | as above | Yes. Widening admission on a live run widens who can steer it. | None. Stays C. | Authority over model input (config.go:345-349). |
-| `storage.max_state_bytes` (config.go:342) | Allocation ceiling on local state | S | supervisor start | SupervisorPolicyDigest | Only as an operational wait before a new allocation. It never widens authority. | As `agents.<id>.unattended`. | A local resource ceiling. It says nothing about what a run may do. |
-| `supervisor.max_concurrent_runs`, `supervisor.max_concurrent_observations`, `supervisor.poll_interval_seconds` (config.go:260-263) | Supervisor concurrency (work and observation classes, #85) and poll cadence | S | supervisor start | SupervisorPolicyDigest. The plan clamp is frozen into the plan revision (P). | No. Scheduling only. The scheduler still enforces the ceiling durably. | As above. | This is the runtime's own operating bound (config.go:247-258). |
+| `storage.max_state_bytes` (config.go:342) | Allocation ceiling on local state | S (target; not moved by B4) | process start | Controller-effective digest until moved | Only as an operational wait before a new allocation. It never widens authority. | As `agents.<id>.unattended`. | A local resource ceiling. It says nothing about what a run may do. Not moved by B4: every CLI process applies it too, not only a supervisor start, so a supervisor-start record does not name the policy that governed it. |
+| `supervisor.max_concurrent_runs`, `supervisor.max_concurrent_observations`, `supervisor.poll_interval_seconds` (config.go:260-263) | Supervisor concurrency (work and observation classes, #85) and poll cadence | S (moved by B4, #346) | supervisor start | SupervisorPolicyDigest in the `supervisor_starts` record. The plan clamp is frozen into the plan revision (P). | No. Scheduling only. The scheduler still enforces the ceiling durably. | As above. | This is the runtime's own operating bound (config.go:247-258). |
 | `plan.max_child_runs`, `plan.max_concurrency`, `plan.max_provider_invocations`, `plan.max_wall_seconds`, `plan.max_cost_micros` (config.go:275-288) | Aggregate plan ceiling | P | plan revision proposal (`plan.BudgetEnvelope`, `runtime/plan_service.go:245`) | Plan revision content digest (already exists) | No for approved revisions. A new revision re-resolves and needs re-approval. Consumed budget never resets. | Existing revisions already carry `budget_envelope`. | Already frozen and self-identifying. Moving it out of PlanID removes one #131 fork source. Moves in B3. |
 | `budgets.wall_limit_seconds` (config.go:390) | **Cumulative run active-work budget** (#83). Today it is also, implicitly, the physical-attempt deadline. | R | run creation | RunPolicyDigest | After migration, no. See §4. | See §4 and §5. | See §4. |
 | `budgets.lifecycle_deadline_seconds` (config.go:399) | Total calendar bound on a run | R | run creation | RunPolicyDigest | Today it is persisted but **read live** (reconciler.go:796). Target: no. | Runs with `run.Budgets` keep their persisted value. Runs with nil `run.Budgets` take the value their controller binding identifies. Under an identical digest, which is the only binding that reconciles them, that is the configured value. It is **not** "no deadline": absent would widen a run that was always judged by the configured deadline. See §5. | A per-run bound. Reading it live would let a config edit widen or shorten a live run. |
@@ -176,8 +176,8 @@ field declaration.
 | `budgets.provider_inactivity_seconds` (config.go:438) | The no-progress window of one invocation | A (value frozen at run creation, recorded per attempt) | run creation (ceiling) and attempt start (effective) | RunPolicyDigest and attempt provenance `inactivity_limit` (cli_agent.go:900, persisted by #327) | Today `min(live, persisted)` (reconciler.go:931). Planning invocations read it live (supervisor.go:913). Target: frozen exact. | Runs persisted before it existed (pre-#238) take the window their controller binding identifies. Under an identical digest that is the configured window, which is the one the reconciler has always given them. It is **not** "no window": absent would widen them to the unbounded stall this budget exists to remove. See §5. | Per-invocation bound, but its ceiling must not widen on restart (#322). |
 | `budgets.attempt_wall_limit_seconds` | Physical provider-attempt wall bound (#328), distinct from the run active-work budget | A | run creation (effective limit, frozen into `run.Budgets`); attempt start (effective deadline, the durable operation `deadline` and `deadline_bound`) | A stated value: controller-effective until B3, then RunPolicyDigest. Absent: in no digest | No. Absent is derived per run at creation; a stated value reaches new runs only. | Runs without a frozen limit keep the operation-remainder rule (§4). | See §4. Implemented by #328. |
 | `watch.repositories`, `watch.label` (config.go:492-493) | Which repositories automation may touch, and what counts as consent | C | controller start | controller-effective digest, run ID, PlanID | Yes | None. Stays C. | Enrolment and consent are authority (config.go:488-490). |
-| `watch.poll_interval_seconds`, `watch.max_concurrent_runs`, `watch.max_concurrent_observations` (config.go:494-498) | Watch cadence and concurrency | S | supervisor start | SupervisorPolicyDigest | No | As `storage`. | Same bounds as `supervisor.*`, combined stricter-wins (config.go:926-944). |
-| `gc.retention_hours` (config.go:515) | Reclamation window for `autonomy gc` | S | at each gc invocation, recorded with the gc report | SupervisorPolicyDigest | Only terminal, unleased material outside the window. A shorter window reclaims sooner and never touches a live run. | None needed. gc journals its own reclamation. | Operator retention policy, not run authority. |
+| `watch.poll_interval_seconds`, `watch.max_concurrent_runs`, `watch.max_concurrent_observations` (config.go:494-498) | Watch cadence and concurrency | S (moved by B4, #346) | supervisor start | SupervisorPolicyDigest in the `supervisor_starts` record | No | As `storage`. | Same bounds as `supervisor.*`, combined stricter-wins (config.go:926-944). |
+| `gc.retention_hours` (config.go:515) | Reclamation window for `autonomy gc` | S (target; not moved by B4) | at each gc invocation | Controller-effective digest until the gc report records it | Only terminal, unleased material outside the window. A shorter window reclaims sooner and never touches a live run. | None needed. gc journals its own reclamation. | Operator retention policy, not run authority. |
 | `operator.id`, `operator.require_configured_id` (operator.go:55,59) | Who a decision is recorded as authorized by | C | controller start. Recorded on every decision. | controller-effective digest, run ID, PlanID, and each decision record | Yes, for future decisions. Past decisions keep their recorded identity. | None. Stays C. | Approver identity is authority provenance (config.go:597-600). |
 
 #### Repository layer (`RepositoryConfig`, `runtime/config.go:604-633`)
@@ -192,7 +192,7 @@ an input to the RunPolicyDigest and the SupervisorPolicyDigest.
 | `.zenchron.json:budgets.wall_limit_seconds`, `.zenchron.json:budgets.max_execution_attempts`, `.zenchron.json:budgets.max_execution_continuations`, `.zenchron.json:budgets.max_remediation_attempts`, `.zenchron.json:budgets.max_assurance_attempts` (config.go:607-611) | R | run creation, as the already-tightened value | A repository may narrow its own runs. Re-resolution after freeze has no effect. |
 | `.zenchron.json:budgets.provider_inactivity_seconds` (config.go:616) | A | as the operator field | As the operator field. |
 | `.zenchron.json:budgets.attempt_wall_limit_seconds` | A | run creation, as the already-tightened value | Tighten-only against the operator limit, or the operator `wall_limit_seconds` when none is stated. |
-| `.zenchron.json:watch.poll_interval_seconds`, `.zenchron.json:watch.max_concurrent_runs`, `.zenchron.json:watch.max_concurrent_observations` (config.go:625-626) | S | supervisor start | Supervisor cadence and concurrency, loosen-for-self only. |
+| `.zenchron.json:watch.poll_interval_seconds`, `.zenchron.json:watch.max_concurrent_runs`, `.zenchron.json:watch.max_concurrent_observations` (config.go:625-626) | S (moved by B4, #346) | supervisor start | Supervisor cadence and concurrency, loosen-for-self only. |
 
 ### 4. Budget fields needed by #328 (decided before #328 adds them)
 
@@ -376,14 +376,39 @@ controller-effective digest before its destination satisfies all of §2.
   planning invocation, and its fallback wall and inactivity window are C until
   B3. They must be given a freeze point before those fields leave the digest.
   Tracked in #345.
-- **B4: SupervisorPolicy generation.** A durable supervisor-start record with a
-  SupervisorPolicyDigest over `storage.*`, `supervisor.*`,
-  `watch.poll_interval_seconds`, `watch.max_concurrent_runs`, `gc.*` and
-  `agents.<id>.unattended`. Then those fields leave C. No hot reload.
-  `agents.<id>.unattended` must be **re-justified** in B4 before it leaves C.
-  It gates autonomous starts under that agent's account, so a false → true
-  change widens what may run unattended as that account. If B4 cannot show
-  that this is scheduling policy rather than authority, it stays C.
+- **B4: SupervisorPolicy generation (#346, done for the fields below).** Every
+  process that drives runs - `serve`, a standalone `autonomy watch`, and a local
+  `run`/`resume`/`refresh` - writes a durable `supervisor_starts` record before
+  it drives anything: the configuration identity it runs under, that identity's
+  controller-effective (C-only) digest, and the SupervisorPolicyDigest over the
+  **effective** S values it enforces (defaults applied, supervisor/watch
+  stricter-wins combined, repository tightening applied - the one resolution
+  its supervisor and schedulers are built from), so a changed shipped default
+  is a different policy. It refuses under a configuration the governing
+  authority does not govern. Status names the latest policy digest and the
+  serve banner prints it. No hot reload.
+  Moved out of C: `supervisor.*`, `watch.poll_interval_seconds`,
+  `watch.max_concurrent_runs`, `watch.max_concurrent_observations` and the
+  repository-layer `watch.*`. Not moved: `agents.<id>.unattended` (it
+  widens what may start unattended under an account, so it is authority and
+  stays C), `storage.*` and `gc.*` (applied by every process or per gc
+  invocation, so a supervisor-start record does not name the policy that
+  governed them; they move when their own record exists).
+
+  **The configuration identity is a stable token, not a recomputed digest.**
+  The controller running when B4 lands hands off by naming its successor's
+  binding with its own whole-file digest and refusing a successor that
+  announces anything else, and that code cannot be changed after the fact. So
+  `ControllerBinding.Config` (and with it run ids, PlanIDs and
+  `ControllerSHA256`) keeps the token the governing authority names, and is
+  kept only on proof: the authority names this configuration's C-only digest;
+  or its legacy whole-file digest (identical values - the first B4 start); or a
+  supervisor-start record maps the token to a C-only digest equal to this
+  configuration's (an S-only edit since). Anything else is a genuine C change,
+  resolves to the C-only digest, does not match, and #307 refuses as before.
+  Without a governing authority the token is the legacy digest, as it always
+  was. Live runs therefore neither re-identify nor need an admission when an S
+  field changes.
 - **B5: attempt and provider posture.** After #327 (persisted invocation
   provenance) and #84 (resolved-agent fingerprint bound at assignment), move
   `agents.<id>.command`, `home` and `model`, `provider.model`, `toolchain.*`

@@ -1570,6 +1570,11 @@ func TestRefreshRecompilesFromTheCurrentSource(t *testing.T) {
 	if _, err := autonomy([]string{"refresh", runID, "--config", configPath}, overrides, &out); err != nil {
 		t.Fatalf("refresh failed: %v\n%s", err, out.String())
 	}
+	// Refresh drives its successor in this process, so it records the policy
+	// it enforced (ADR-0003 B4).
+	if _, found := latestPolicyGeneration(t, dir, configPath); !found {
+		t.Fatal("refresh drove its successor with no durable record of the policy it enforced")
+	}
 	var view struct {
 		View         string `json:"view"`
 		Run          string `json:"run"`

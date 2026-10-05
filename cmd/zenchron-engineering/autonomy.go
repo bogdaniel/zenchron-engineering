@@ -444,7 +444,7 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		} else {
 			fmt.Fprintf(stdout, "created generation %s\n", outcome.RunID)
 		}
-		return reconcile(ctx, engine, outcome.RunID, stdout)
+		return reconcile(ctx, engine, built, outcome.RunID, stdout)
 	case "resume":
 		return autonomyResume(ctx, engine, built, runID, stdout)
 	case "refresh":
@@ -540,7 +540,16 @@ func observeFeedback(ctx context.Context, engine engineeringRuntime, runID strin
 	_, _ = observer.ObserveFeedback(ctx, runID)
 }
 
-func reconcile(ctx context.Context, engine engineeringRuntime, runID string, stdout io.Writer) (int, error) {
+// reconcile drives one run in THIS process. A local drive enforces the
+// effective supervisor policy through its scheduler like any driver, so a
+// composed one records its policy generation first (ADR-0003 B4); an injected
+// test runtime has no composition and nothing to record.
+func reconcile(ctx context.Context, engine engineeringRuntime, built *composition, runID string, stdout io.Writer) (int, error) {
+	if built != nil {
+		if _, err := built.recordPolicyGeneration(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	observeFeedback(ctx, engine, runID)
 	outcome, err := engine.Reconcile(ctx, runID)
 	if err != nil {
@@ -646,6 +655,12 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		return nil, err
 	}
 	release := func() { _ = store.Close() }
+	// The configuration identity this process binds as is decided against
+	// the governing authority before anything uses it (ADR-0003 B4).
+	if config, err = runtime.ResolveConfigIdentity(store, config); err != nil {
+		release()
+		return nil, err
+	}
 
 	// The owner identity and the OS ownership lock must be the same string:
 	// the lock is the crash-safe evidence NewLockOwnerLiveness reads to decide
@@ -1261,6 +1276,11 @@ func autonomyWatch(parent context.Context, flags autonomyFlags, overrides autono
 
 	settings, err := built.watchSettings()
 	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	// A standalone watcher drives runs under the moved S policy exactly as
+	// `serve` does, so it records its policy generation before it polls.
+	if _, err := built.recordPolicyGeneration(); err != nil {
 		return runtime.ExitInvalid, err
 	}
 	controller := overrides.Watch

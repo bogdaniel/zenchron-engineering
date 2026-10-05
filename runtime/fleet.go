@@ -142,6 +142,9 @@ type Fleet struct {
 	// SupervisorRunning reports whether a persistent supervisor currently owns
 	// the control endpoint for this state directory.
 	SupervisorRunning bool `json:"supervisor_running"`
+	// SupervisorPolicy is the SupervisorPolicyDigest of the most recent
+	// supervisor start (ADR-0003 B4), or empty when no start has recorded one.
+	SupervisorPolicy string `json:"supervisor_policy,omitempty"`
 	// ControlEndpoint is the mechanism and path, so an operator can see the
 	// authority boundary they are relying on.
 	ControlEndpoint string `json:"control_endpoint,omitempty"`
@@ -327,6 +330,11 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
 	fleet.Plans = summarizePlans(store)
+	if start, found, err := store.LatestSupervisorStart(); err != nil {
+		return Fleet{}, err
+	} else if found {
+		fleet.SupervisorPolicy = start.PolicyDigest
+	}
 	byRun, err := capacityOperations(store)
 	if err != nil {
 		return Fleet{}, err
