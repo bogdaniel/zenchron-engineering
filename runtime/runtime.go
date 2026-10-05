@@ -504,6 +504,13 @@ type Lease struct {
 	Owner       string    `json:"owner"`
 	HeartbeatAt time.Time `json:"heartbeat_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
+	// Grant identifies ONE acquisition (#485). It is minted fresh every time
+	// an operation is leased and nothing that renews or uses the lease changes
+	// it, so it - not an owner or a pair of timestamps, which two acquisitions
+	// can share - is what says a lease is the one a driver was granted.
+	// omitempty: a lease written before it existed has none, and canonicalizes
+	// as it always did.
+	Grant string `json:"grant,omitempty"`
 }
 type EngineeringEvent struct {
 	SchemaVersion string `json:"schema_version"`

@@ -29,7 +29,7 @@ func strandedFixture(t *testing.T, drivers *DriverLeases) (Scheduler, *MemoryOpe
 	}
 	// The pass returns here. The in-process hold ends; the durable lease does
 	// not, because the write that would have ended it is the one that failed.
-	drivers.release(planned.ID)
+	drivers.release(started.Lease.Grant)
 	clock.now = clock.now.Add(10 * time.Minute)
 	return s, store, started
 }
@@ -67,11 +67,13 @@ func TestALeaseThisProcessStrandedIsRecoveredByItsNextPass(t *testing.T) {
 }
 
 // TestALeaseAConcurrentDriverHoldsIsNeverReclaimed: same owner, but a driver
-// in this process holds it. That is live work, not a stranded lease.
+// in this process holds its grant. That is live work, not a stranded lease.
 func TestALeaseAConcurrentDriverHoldsIsNeverReclaimed(t *testing.T) {
 	drivers := NewDriverLeases()
 	s, store, stranded := strandedFixture(t, drivers)
-	drivers.hold(stranded.ID)
+	drivers.mu.Lock()
+	drivers.held[stranded.Lease.Grant] = true
+	drivers.mu.Unlock()
 	if got, err := s.Next("r"); err != nil || got != nil {
 		t.Fatalf("a held lease was taken: %v %v", got, err)
 	}
@@ -93,7 +95,7 @@ func TestAnotherLiveOwnersExpiredLeaseIsNeverReclaimed(t *testing.T) {
 	if row, _, _, _ := store.Operation(stranded.ID); row.Lease == nil || row.Lease.Owner != "one" {
 		t.Fatalf("another process dropped a live owner's lease: %+v", row.Lease)
 	}
-	if err := other.Relinquish(stranded.ID, Lease{Owner: "two"}); err != nil {
+	if err := other.Relinquish(stranded.ID, Lease{Owner: "two", Grant: "not-the-grant"}); err != nil {
 		t.Fatal(err)
 	}
 	if row, _, _, _ := store.Operation(stranded.ID); row.Lease == nil {
@@ -160,9 +162,10 @@ func TestALeaseIsHeldBeforeItIsWritten(t *testing.T) {
 
 // TestADriverReturningLateDoesNotDropItsSuccessorsLease: two drivers of one run
 // in this process overlap on one operation - the first finished it retryably
-// and is still returning while the second has leased it again. The first
-// one's relinquish and release must leave the second one's lease and hold
-// exactly as they are.
+// and is still returning while the second has leased it again, IN THE SAME
+// CLOCK INSTANT, so the two leases share owner and both timestamps. Only the
+// grant tells them apart, and the first one's relinquish must leave the second
+// one's lease and hold exactly as they are.
 func TestADriverReturningLateDoesNotDropItsSuccessorsLease(t *testing.T) {
 	drivers := NewDriverLeases()
 	clock := &fakeClock{now: time.Unix(1_000, 0)}
@@ -183,20 +186,46 @@ func TestADriverReturningLateDoesNotDropItsSuccessorsLease(t *testing.T) {
 	if _, err := s.Finish(planned.ID, OperationFailed); err != nil {
 		t.Fatal(err)
 	}
-	clock.now = clock.now.Add(time.Second)
+	// The clock does NOT move.
 	second, err := s.Next("r")
 	if err != nil || second == nil {
 		t.Fatalf("the successor could not lease the retryable operation: %v %v", second, err)
+	}
+	if !second.Lease.HeartbeatAt.Equal(first.Lease.HeartbeatAt) || !second.Lease.ExpiresAt.Equal(first.Lease.ExpiresAt) {
+		t.Fatal("the two leases differ by time, so this does not test grant identity")
 	}
 	// The first driver returns now.
 	if err := s.Relinquish(first.ID, *first.Lease); err != nil {
 		t.Fatal(err)
 	}
 	row, _, _, _ := s.Store.Operation(planned.ID)
-	if row.Lease == nil || !sameLease(*row.Lease, *second.Lease) {
+	if row.Lease == nil || row.Lease.Grant != second.Lease.Grant {
 		t.Fatalf("the late driver dropped its successor's lease: %+v", row.Lease)
 	}
 	if s.stranded(row) {
 		t.Fatal("the late driver's release erased its successor's hold")
+	}
+}
+
+// TestAGrantAnotherRecordIssuedIsNeverStranded: two independently built
+// records under one owner identity - a construction production never makes -
+// cannot misread each other's live work as abandoned, because each vouches
+// only for grants it issued.
+func TestAGrantAnotherRecordIssuedIsNeverStranded(t *testing.T) {
+	_, store, live := strandedFixture(t, NewDriverLeases())
+	stranger := Scheduler{Store: store, Clock: &fakeClock{now: time.Unix(1_000, 0).Add(time.Hour)}, Owner: "one",
+		LeaseDuration: time.Minute, Liveness: OwnerLivenessFunc(func(string) bool { return true }),
+		Drivers: NewDriverLeases(), MaxConcurrentRuns: 1, MaxConcurrentObservations: 1}
+	if stranger.stranded(live) {
+		t.Fatal("a record treated a grant it never issued as stranded")
+	}
+	if got, err := stranger.Next("r"); err != nil || got != nil {
+		t.Fatalf("a second record under the same owner took the lease: %v %v", got, err)
+	}
+	// Nor is a lease from before grants existed.
+	legacy := live
+	legacy.Lease = &Lease{Owner: "one", HeartbeatAt: live.Lease.HeartbeatAt, ExpiresAt: live.Lease.ExpiresAt}
+	if stranger.stranded(legacy) {
+		t.Fatal("a lease with no grant was treated as stranded")
 	}
 }

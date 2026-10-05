@@ -412,20 +412,19 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 			continue
 		}
 		op.State = Leased
-		op.Lease = &Lease{Owner: s.Owner, HeartbeatAt: now, ExpiresAt: now.Add(s.LeaseDuration)}
+		// The grant is issued - and recorded as held - BEFORE the durable
+		// acquisition (#485), so no sibling driver in this process can read
+		// the new lease as one nobody here holds. The caller that receives the
+		// operation owns that grant from here and ends it with Relinquish.
+		grant := s.Drivers.issue()
+		op.Lease = &Lease{Owner: s.Owner, HeartbeatAt: now, ExpiresAt: now.Add(s.LeaseDuration), Grant: grant}
 		// Taking the lease IS taking the run-driving slot: the ceiling and the
 		// compare-and-set are one durable write. A refusal here is either a
 		// lost CAS or a full ceiling; both mean another driver owns the work,
 		// so the scan continues past it exactly as before.
-		//
-		// The hold is recorded FIRST (#485), so no sibling driver in this
-		// process can read the new lease as one nobody here holds. The caller
-		// that receives the operation owns it from here and ends it with
-		// Relinquish.
-		s.Drivers.hold(op.ID)
 		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns, s.MaxConcurrentObservations)
 		if err != nil || !acquired {
-			s.Drivers.release(op.ID)
+			s.Drivers.release(grant)
 		}
 		if err != nil {
 			return nil, err
@@ -472,8 +471,8 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 // A lease THIS process left behind is the other abandoned shape (#485): its
 // owner is alive, so the dead-owner rule never applies, yet no driver here
 // holds it - the pass that took it returned without finishing it. DriverLeases
-// is what proves that, and only for this process's own owner identity; any
-// other owner's lease is still reclaimable only when dead and expired.
+// is what proves that, and only for a grant it issued itself; any other
+// lease is still reclaimable only when its owner is dead and it has expired.
 func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool, error) {
 	abandoned := func(op RunOperation) bool {
 		return op.Lease != nil && (CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) || s.stranded(op))
