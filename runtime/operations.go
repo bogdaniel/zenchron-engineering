@@ -2264,7 +2264,7 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	if len(residue) > 0 {
-		return nil, nil, deterministicRefusal("candidate.residue", fmt.Errorf("%v; work is still uncommitted: %s", cause, quotedPaths(residue)))
+		return nil, nil, deterministicRefusal("candidate.residue", fmt.Errorf("%w; work is still uncommitted: %s", cause, quotedPaths(residue)))
 	}
 	return &CandidateWorkspace{
 			Dir: dir, BaseRevision: state.baseRevision(), TrustedMetadata: metadata,

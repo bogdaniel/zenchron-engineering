@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -20,7 +19,7 @@ func candidateFailureBinding(dir, code, checkPath string, result json.RawMessage
 		if checkPath == "" {
 			return "", errors.New("sensitive-path failure has no check subject")
 		}
-		paths, err := retryCommitPaths(dir)
+		paths, err := retryCommitPaths(dir, checkPath)
 		if err != nil {
 			return "", err
 		}
@@ -97,26 +96,81 @@ func candidateFailureBinding(dir, code, checkPath string, result json.RawMessage
 // A staged addition since deleted is absent; names of deletions from HEAD are
 // present, because the name gate also judges deletion paths. Nested repositories
 // are classified by the same structural owner as the commit's exclusion gate.
-func retryCommitPaths(dir string) ([]string, error) {
-	changed, err := gitOutput(dir, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--")
-	if err != nil {
-		return nil, err
-	}
-	others, err := gitOutput(dir, "ls-files", "--others", "-z")
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	if listed := changed + others; listed != "" {
-		paths = strings.Split(strings.TrimRight(listed, "\x00"), "\x00")
-		sort.Strings(paths)
-		paths = slices.Compact(paths)
+func retryCommitPaths(dir, checkPath string) ([]string, error) {
+	paths := []string{checkPath}
+	if checkPath == "" {
+		var err error
+		paths, err = candidateChangedPaths(dir)
+		if err != nil {
+			return nil, err
+		}
 	}
 	debris, err := classifyRuntimeDebris(dir, paths)
 	if err != nil {
 		return nil, err
 	}
-	return withoutPaths(paths, debris.Excluded), nil
+	paths = withoutPaths(paths, debris.Excluded)
+	head, err := readHead(dir)
+	if err != nil {
+		return nil, err
+	}
+	store, err := subjectStore(dir, head.Commit)
+	if err != nil {
+		return nil, err
+	}
+	fileMode, err := gitOutput(dir, "config", "--type=bool", "--default=true", "--get", "core.filemode")
+	if err != nil {
+		return nil, err
+	}
+	var carried []string
+	for _, path := range paths {
+		entry, err := gitOutput(store, "ls-tree", "-z", head.Commit, "--", path)
+		if err != nil {
+			return nil, err
+		}
+		info, err := retryCheckPathInfo(dir, path)
+		if errors.Is(err, os.ErrNotExist) {
+			if entry != "" {
+				carried = append(carried, path) // A deletion still carries its refused name.
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if entry == "" || !info.Mode().IsRegular() {
+			carried = append(carried, path)
+			continue
+		}
+		// A staged change reverted in the worktree disappears after add -A.
+		// Compare with verified baseline content, never candidate objects.
+		blob, err := gitOutput(dir, "hash-object", "--", path)
+		if err != nil {
+			return nil, err
+		}
+		fields := strings.Fields(strings.SplitN(entry, "\t", 2)[0])
+		if len(fields) != 3 {
+			return nil, errors.New("unreadable retry baseline entry")
+		}
+		mode := "100644"
+		if info.Mode().Perm()&0111 != 0 {
+			mode = "100755"
+		}
+		if strings.TrimSpace(fileMode) == "false" {
+			staged, err := gitOutput(dir, "ls-files", "--stage", "-z", "--", path)
+			if err != nil {
+				return nil, err
+			}
+			mode = fields[0]
+			if staged != "" {
+				mode, _, _ = strings.Cut(staged, " ")
+			}
+		}
+		if fields[2] != strings.TrimSpace(blob) || fields[0] != mode {
+			carried = append(carried, path)
+		}
+	}
+	return carried, nil
 }
 
 // The staged checks bind their own subject, not every readable workspace file.
@@ -126,7 +180,7 @@ func retryCandidateContentBinding(dir, code, checkPath string) (string, error) {
 	paths := []string{checkPath}
 	if checkPath == "" {
 		var err error
-		paths, err = retryCommitPaths(dir)
+		paths, err = retryCommitPaths(dir, "")
 		if err != nil {
 			return "", err
 		}
@@ -209,9 +263,17 @@ func retryCandidateContentBinding(dir, code, checkPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := head.Tree
+	store, err := subjectStore(dir, head.Commit)
+	if err != nil {
+		return "", err
+	}
+	base, err := gitOutput(store, "rev-parse", head.Commit+"^{tree}")
+	if err != nil {
+		return "", err
+	}
+	base = strings.TrimSpace(base)
 	if checkPath != "" {
-		if base, err = gitOutput(dir, "ls-tree", "-z", "HEAD", "--", checkPath); err != nil {
+		if base, err = gitOutput(store, "ls-tree", "-z", head.Commit, "--", checkPath); err != nil {
 			return "", err
 		}
 	}

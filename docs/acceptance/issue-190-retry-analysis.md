@@ -114,6 +114,9 @@ The #402 assertions still require exact commit/unproven-head preservation and
 refuse assurance/publication. Known deterministic refusals now wait after one
 failure instead of exhausting attempts; unclassified injected faults still
 exercise bounded recovery attempts.
+Recovery refusals retain their original typed integrity cause. Binding readers
+take baseline content from the verified subject store, preserving #437's
+content ownership rule and its search guard.
 
 Validation results and the deliberate guard-removal mutation are recorded in
 the PR. Full-suite evidence comes from GitHub CI for the current PR head.
