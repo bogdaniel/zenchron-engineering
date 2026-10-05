@@ -646,6 +646,12 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		return nil, err
 	}
 	release := func() { _ = store.Close() }
+	// The configuration identity this process binds as is decided against
+	// the governing authority before anything uses it (ADR-0003 B4).
+	if config, err = runtime.ResolveConfigIdentity(store, config); err != nil {
+		release()
+		return nil, err
+	}
 
 	// The owner identity and the OS ownership lock must be the same string:
 	// the lock is the crash-safe evidence NewLockOwnerLiveness reads to decide

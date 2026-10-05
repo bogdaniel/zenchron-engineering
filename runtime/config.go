@@ -675,7 +675,15 @@ var repositoryWatchScope = map[string]bool{"poll_interval_seconds": true, "max_c
 // with the digest of exactly the two layers that produced it.
 type Config struct {
 	OperatorConfig
-	Digest         ConfigDigest
+	// Digest is the configuration identity this process binds as. LoadConfig
+	// sets the legacy whole-file digest; ResolveConfigIdentity may keep the
+	// governing authority's token instead (ADR-0003 B4).
+	Digest ConfigDigest
+	// Effective is the digest of the controller-effective (category C)
+	// content alone: the configuration with its S members cleared.
+	Effective ConfigDigest
+	// Policy is the supervisor operating policy (category S) as stated.
+	Policy         SupervisorPolicy
 	OperatorPath   string
 	RepositoryPath string
 }
@@ -725,6 +733,10 @@ func LoadConfig(explicitPath, repositoryRoot string) (Config, error) {
 	}
 	config := Config{OperatorConfig: operator, OperatorPath: operatorPath}
 	config.Digest = ConfigDigest{Global: operatorDigest}
+	if config.Effective.Global, err = Digest(controllerEffectiveOperator(operator)); err != nil {
+		return Config{}, &ConfigError{Path: operatorPath, Detail: err.Error()}
+	}
+	config.Policy = supervisorPolicyOf(operator, nil)
 	if repositoryRoot == "" {
 		return config, nil
 	}
@@ -746,6 +758,10 @@ func LoadConfig(explicitPath, repositoryRoot string) (Config, error) {
 	config.OperatorConfig = tightened
 	config.RepositoryPath = repositoryPath
 	config.Digest.Repository = repositoryDigest
+	if config.Effective.Repository, err = Digest(controllerEffectiveRepository(repository)); err != nil {
+		return Config{}, &ConfigError{Path: repositoryPath, Detail: err.Error()}
+	}
+	config.Policy = supervisorPolicyOf(operator, &repository)
 	return config, nil
 }
 

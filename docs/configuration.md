@@ -311,6 +311,21 @@ run slot, so a run waiting on review still notices its review while another
 run's long work holds every run slot. Every other operation kind, including
 any kind added later, is work and counts against `max_concurrent_runs`.
 
+These concurrency and polling members (`supervisor.*` and the three `watch.*`
+members above, in either layer) are **supervisor operating policy** (ADR-0003
+category S). Changing one takes effect at the next `serve` start, with an
+ordinary restart: it is not a controller configuration change, it needs no
+`controller re-adopt`, and it never parks, re-identifies or rewrites a run.
+Each start records the policy it applied (`supervisor_starts`, and
+`supervisor policy` on the banner; `autonomy status` names the latest policy
+digest).
+
+One ordering rule: start the controller that understands this once with the
+configuration unchanged before editing these members. That first start is what
+records that its configuration identity names exactly this controller-effective
+content; an S edit made before it cannot be proven S-only and is refused like
+any other controller configuration change.
+
 ### Discovery
 
 `watch.repositories` is the complete set the runtime may observe. There is no

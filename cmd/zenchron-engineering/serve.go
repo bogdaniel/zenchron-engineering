@@ -166,6 +166,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 			return runtime.ExitFailed, err
 		}
 	}
+	// THE SUPERVISOR POLICY THIS GENERATION RUNS UNDER, recorded once per
+	// start (ADR-0003 B4) and only now that the configuration identity is
+	// the governing one. A start that cannot record its policy does not
+	// serve: an S value nothing durable names is one nobody can audit.
+	policy, err := runtime.RecordSupervisorStart(built.store, built.config, time.Now().UTC())
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -197,6 +205,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
 	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
+	fmt.Fprintf(stdout, "  supervisor policy %s (max_concurrent_runs %d)\n", policy.PolicyDigest[:12], ceilingOf(built))
 	fmt.Fprintf(stdout, "  transitions       %s\n", inflight)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
@@ -1330,4 +1339,13 @@ func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime
 		snapshot.WorkAdmission = runtime.AdmissionClosed
 	}
 	return snapshot
+}
+
+// ceilingOf is the resolved work ceiling this start applies, for the banner.
+func ceilingOf(c *composition) int {
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return 0
+	}
+	return ceiling
 }

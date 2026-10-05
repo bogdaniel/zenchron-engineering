@@ -414,6 +414,23 @@ CREATE TABLE orchestration_handoff_refusals (
 	reason            TEXT NOT NULL
 );
 CREATE INDEX orchestration_handoff_refusals_by_run ON orchestration_handoff_refusals(run_id);
+`, `
+-- One row per supervisor start (ADR-0003 B4): the configuration identity it
+-- served under, that identity's controller-effective (C-only) content, and the
+-- supervisor operating policy (S) it applied. Insert-only. A row is also the
+-- evidence that a configuration identity token names exactly that C content,
+-- which is what lets an S-only edit keep the identity.
+CREATE TABLE supervisor_starts (
+	id                   TEXT PRIMARY KEY,
+	started_unix_nano    INTEGER NOT NULL,
+	config_global        TEXT NOT NULL,
+	config_repository    TEXT NOT NULL,
+	effective_global     TEXT NOT NULL,
+	effective_repository TEXT NOT NULL,
+	policy_digest        TEXT NOT NULL,
+	document             TEXT NOT NULL
+);
+CREATE INDEX supervisor_starts_projection ON supervisor_starts(config_global, config_repository, effective_global, effective_repository);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
