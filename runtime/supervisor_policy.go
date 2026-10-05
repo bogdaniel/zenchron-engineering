@@ -58,36 +58,39 @@ func controllerEffectiveRepository(r RepositoryConfig) RepositoryConfig {
 	return r
 }
 
-// SupervisorPolicy is the S configuration one supervisor start runs under, as
-// stated in the operator and repository layers. Its digest is what says later
-// which policy governed that supervisor generation.
+// SupervisorPolicy is the S policy a process that drives runs EFFECTIVELY
+// applies: the values after defaults, the supervisor/watch stricter-wins
+// combination and repository tightening - exactly what its supervisor and
+// schedulers enforce, never merely what the files state. A digest over stated
+// values would let a binary that changed a shipped default enforce a
+// different policy under the same digest.
 type SupervisorPolicy struct {
-	Supervisor      SupervisorConfig `json:"supervisor"`
-	Watch           WatchPolicy      `json:"watch"`
-	RepositoryWatch *RepositoryWatch `json:"repository_watch,omitempty"`
+	MaxConcurrentRuns         int `json:"max_concurrent_runs"`
+	MaxConcurrentObservations int `json:"max_concurrent_observations"`
+	PollIntervalSeconds       int `json:"poll_interval_seconds"`
 }
 
-// WatchPolicy is the S part of the operator's watch section.
-type WatchPolicy struct {
-	PollIntervalSeconds       int `json:"poll_interval_seconds,omitempty"`
-	MaxConcurrentRuns         int `json:"max_concurrent_runs,omitempty"`
-	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
-}
-
-func supervisorPolicyOf(o OperatorConfig, r *RepositoryConfig) SupervisorPolicy {
-	policy := SupervisorPolicy{Supervisor: o.Supervisor, Watch: WatchPolicy{
-		PollIntervalSeconds: o.Watch.PollIntervalSeconds, MaxConcurrentRuns: o.Watch.MaxConcurrentRuns,
-		MaxConcurrentObservations: o.Watch.MaxConcurrentObservations,
-	}}
-	if r != nil {
-		policy.RepositoryWatch = r.Watch
+// SupervisorPolicy resolves the effective S policy. It is the ONE place the
+// enforced concurrency and cadence are resolved: every process that drives
+// runs takes its ceilings and interval from here, so what is recorded and
+// what is enforced cannot be two answers.
+func (c OperatorConfig) SupervisorPolicy() (SupervisorPolicy, error) {
+	settings, err := c.WatchSettings()
+	if err != nil {
+		return SupervisorPolicy{}, err
 	}
-	return policy
+	return SupervisorPolicy{
+		MaxConcurrentRuns:         settings.MaxConcurrentRuns,
+		MaxConcurrentObservations: settings.MaxConcurrentObservations,
+		PollIntervalSeconds:       int(settings.PollInterval / time.Second),
+	}, nil
 }
 
-// SupervisorStart is the durable record of one supervisor start: the
-// configuration identity it served under, that identity's C-only content, and
-// the S policy it applied.
+// SupervisorStart is the durable record of one policy generation: a process
+// that drives runs - `serve`, a standalone `autonomy watch`, or a local
+// `run`/`resume`/`refresh` - records, before it drives anything, the
+// configuration identity it runs under, that identity's C-only content, and
+// the effective S policy it enforces.
 type SupervisorStart struct {
 	SchemaVersion string           `json:"schema_version"`
 	ID            string           `json:"id"`
@@ -127,7 +130,7 @@ func ResolveConfigIdentity(store *SQLiteOperationStore, config Config) (Config, 
 	return config, nil
 }
 
-// RecordSupervisorStart durably records this start. It refuses a config
+// RecordSupervisorStart durably records this policy generation. It refuses a config
 // identity that is not the governing authority's: a projection record is
 // evidence that a token is THIS content, and only a process the authority
 // governs may write it.
@@ -140,13 +143,17 @@ func RecordSupervisorStart(store *SQLiteOperationStore, config Config, now time.
 		return SupervisorStart{}, fmt.Errorf("this process binds as configuration %s and the governing authority as %s; a supervisor start is recorded only under the governing configuration",
 			short12(config.Digest.Global), short12(authority.Binding.Config.Global))
 	}
-	policyDigest, err := Digest(config.Policy)
+	policy, err := config.SupervisorPolicy()
+	if err != nil {
+		return SupervisorStart{}, err
+	}
+	policyDigest, err := Digest(policy)
 	if err != nil {
 		return SupervisorStart{}, err
 	}
 	start := SupervisorStart{
 		SchemaVersion: SupervisorStartSchemaVersion, StartedAt: now,
-		Config: config.Digest, Effective: config.Effective, PolicyDigest: policyDigest, Policy: config.Policy,
+		Config: config.Digest, Effective: config.Effective, PolicyDigest: policyDigest, Policy: policy,
 	}
 	if start.ID, err = Digest(struct {
 		Config    ConfigDigest `json:"config"`

@@ -316,9 +316,11 @@ members above, in either layer) are **supervisor operating policy** (ADR-0003
 category S). Changing one takes effect at the next `serve` start, with an
 ordinary restart: it is not a controller configuration change, it needs no
 `controller re-adopt`, and it never parks, re-identifies or rewrites a run.
-Each start records the policy it applied (`supervisor_starts`, and
-`supervisor policy` on the banner; `autonomy status` names the latest policy
-digest).
+Every process that drives runs (`serve`, a standalone `autonomy watch`, or a
+local `run`/`resume`/`refresh`) records the policy it actually enforces - the
+resolved values, defaults and stricter-wins included - before driving
+(`supervisor_starts`, and `supervisor policy` on the banner; `autonomy status`
+names the latest policy digest).
 
 One ordering rule: start the controller that understands this once with the
 configuration unchanged before editing these members. That first start is what

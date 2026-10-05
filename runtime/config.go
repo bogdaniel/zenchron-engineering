@@ -681,9 +681,7 @@ type Config struct {
 	Digest ConfigDigest
 	// Effective is the digest of the controller-effective (category C)
 	// content alone: the configuration with its S members cleared.
-	Effective ConfigDigest
-	// Policy is the supervisor operating policy (category S) as stated.
-	Policy         SupervisorPolicy
+	Effective      ConfigDigest
 	OperatorPath   string
 	RepositoryPath string
 }
@@ -736,7 +734,6 @@ func LoadConfig(explicitPath, repositoryRoot string) (Config, error) {
 	if config.Effective.Global, err = Digest(controllerEffectiveOperator(operator)); err != nil {
 		return Config{}, &ConfigError{Path: operatorPath, Detail: err.Error()}
 	}
-	config.Policy = supervisorPolicyOf(operator, nil)
 	if repositoryRoot == "" {
 		return config, nil
 	}
@@ -761,7 +758,6 @@ func LoadConfig(explicitPath, repositoryRoot string) (Config, error) {
 	if config.Effective.Repository, err = Digest(controllerEffectiveRepository(repository)); err != nil {
 		return Config{}, &ConfigError{Path: repositoryPath, Detail: err.Error()}
 	}
-	config.Policy = supervisorPolicyOf(operator, &repository)
 	return config, nil
 }
 

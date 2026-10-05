@@ -377,10 +377,16 @@ controller-effective digest before its destination satisfies all of §2.
   B3. They must be given a freeze point before those fields leave the digest.
   Tracked in #345.
 - **B4: SupervisorPolicy generation (#346, done for the fields below).** Every
-  `serve` start writes a durable `supervisor_starts` record: the configuration
-  identity it served under, that identity's controller-effective (C-only)
-  digest, and the SupervisorPolicyDigest over the S values it applied. Status
-  names the latest policy digest and the serve banner prints it. No hot reload.
+  process that drives runs - `serve`, a standalone `autonomy watch`, and a local
+  `run`/`resume`/`refresh` - writes a durable `supervisor_starts` record before
+  it drives anything: the configuration identity it runs under, that identity's
+  controller-effective (C-only) digest, and the SupervisorPolicyDigest over the
+  **effective** S values it enforces (defaults applied, supervisor/watch
+  stricter-wins combined, repository tightening applied - the one resolution
+  its supervisor and schedulers are built from), so a changed shipped default
+  is a different policy. It refuses under a configuration the governing
+  authority does not govern. Status names the latest policy digest and the
+  serve banner prints it. No hot reload.
   Moved out of C: `supervisor.*`, `watch.poll_interval_seconds`,
   `watch.max_concurrent_runs`, `watch.max_concurrent_observations` and the
   repository-layer `watch.*`. Not moved: `agents.<id>.unattended` (it

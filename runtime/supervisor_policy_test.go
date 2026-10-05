@@ -66,10 +66,16 @@ func TestSupervisorPolicyLeavesTheControllerEffectiveDigest(t *testing.T) {
 	if two.Effective != ten.Effective {
 		t.Fatal("a supervisor ceiling still decides the controller-effective configuration")
 	}
-	p2, _ := Digest(two.Policy)
-	p10, _ := Digest(ten.Policy)
-	if p2 == p10 {
-		t.Fatal("the supervisor policy digest does not see the ceiling")
+	p2, err := two.SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p10, err := ten.SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2 == p10 || p10.MaxConcurrentRuns != 10 {
+		t.Fatalf("the supervisor policy does not carry the ceiling: %+v %+v", p2, p10)
 	}
 	base := configWith(t, dir, "")
 	watch := configWith(t, dir, `"watch": {"poll_interval_seconds": 30, "max_concurrent_runs": 3, "max_concurrent_observations": 4}`)
@@ -192,5 +198,35 @@ func TestIdentityResolutionRules(t *testing.T) {
 	canonical, err := ResolveConfigIdentity(store, configWith(t, dir, ceilingTen))
 	if err != nil || canonical.Digest != config.Effective {
 		t.Fatalf("an authority naming C-only content resolved %+v (%v)", canonical.Digest, err)
+	}
+}
+
+// TestTheRecordedPolicyIsTheEnforcedPolicy: the policy a driver records is the
+// one it enforces - defaults applied and the supervisor/watch members combined
+// stricter-wins - never merely what the file states. Two files that state
+// different things but resolve to the same enforcement are the same policy,
+// and an unstated member records the shipped default as an explicit value.
+func TestTheRecordedPolicyIsTheEnforcedPolicy(t *testing.T) {
+	dir := t.TempDir()
+	unstated, err := configWith(t, dir, "").SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unstated != (SupervisorPolicy{MaxConcurrentRuns: 1, MaxConcurrentObservations: DefaultMaxConcurrentObservations, PollIntervalSeconds: DefaultWatchPollSeconds}) {
+		t.Fatalf("an unstated policy records %+v, not the defaults it enforces", unstated)
+	}
+	explicit, err := configWith(t, dir, `"supervisor": {"max_concurrent_runs": 1, "max_concurrent_observations": 2, "poll_interval_seconds": 60}`).SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit != unstated {
+		t.Fatalf("stating the defaults recorded %+v and leaving them unstated %+v: the same enforcement is two policies", explicit, unstated)
+	}
+	combined, err := configWith(t, dir, `"supervisor": {"max_concurrent_runs": 10, "poll_interval_seconds": 30}, "watch": {"max_concurrent_runs": 3, "poll_interval_seconds": 90}`).SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if combined.MaxConcurrentRuns != 3 || combined.PollIntervalSeconds != 90 {
+		t.Fatalf("recorded %+v, want the stricter ceiling 3 and the longer interval 90 the supervisor enforces", combined)
 	}
 }
