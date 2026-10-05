@@ -149,8 +149,8 @@ func (s *SQLiteOperationStore) RunJournalActivity() (map[string]time.Time, error
 	return activity, rows.Err()
 }
 
-func (s *SQLiteOperationStore) queryRuns(where string) ([]EngineeringRun, error) {
-	rows, err := s.db.Query(`SELECT document FROM runs` + where + ` ORDER BY created_unix_nano ASC, id ASC`)
+func (s *SQLiteOperationStore) queryRuns(where string, args ...any) ([]EngineeringRun, error) {
+	rows, err := s.db.Query(`SELECT document FROM runs`+where+` ORDER BY created_unix_nano ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}

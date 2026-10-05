@@ -236,17 +236,23 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 		// journal; everything without that evidence parks exactly as before.
 		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller, r.wasTransitionActivated()),
 	}
-	for _, op := range state.succeeded(OpSourceObserve) {
+	state.collectSources()
+	return state, nil
+}
+
+// collectSources folds the run's succeeded source observations into the state,
+// which is where its pinned base comes from.
+func (s *runState) collectSources() {
+	for _, op := range s.succeeded(OpSourceObserve) {
 		var record sourceRecord
 		if len(op.Result) == 0 || json.Unmarshal(op.Result, &record) != nil {
 			continue
 		}
-		state.sources = append(state.sources, record)
+		s.sources = append(s.sources, record)
 	}
-	if n := len(state.sources); n > 0 {
-		state.source = &state.sources[n-1]
+	if n := len(s.sources); n > 0 {
+		s.source = &s.sources[n-1]
 	}
-	return state, nil
 }
 
 // succeeded returns the run's succeeded operations of one kind in durable
@@ -470,6 +476,13 @@ var externalWaitReasons = map[string]bool{
 	// would fix the detection and keep the accounting lie.
 	"execution_provider_unavailable":   true,
 	"assurance_dependency_unavailable": true,
+	// Every host verification slot is held by another run (#490). The run
+	// executes nothing while it waits, and charging it would turn the host's
+	// verification capacity into this run's run_wall_budget_exhausted - the
+	// exact conversion of capacity exhaustion into failure #490 forbids. The
+	// wait is bounded by the verifications holding the slots, each of which
+	// runs under its own physical deadline.
+	ReasonVerificationCapacity: true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
@@ -1820,6 +1833,27 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err != nil {
 		return false, Outcome{}, err
 	}
+	if leased != nil {
+		// THE DRIVER OWNS THIS LEASE UNTIL IT RETURNS, and no longer (#485).
+		// Every exit below - finished, settled, refused, or a store error
+		// between any two of its writes - ends here, and a lease still on the
+		// row then is a claim that this live process is driving work it has
+		// stopped driving. Relinquish removes that claim and only that claim;
+		// if its own write fails, the next scan in this process recovers it.
+		//
+		// A PANIC is not one of those exits. Nothing in the driving path
+		// recovers one, so it ends the process, and a crashed process cleans
+		// nothing up: its lease is recovered by the dead-owner rule, from
+		// durable state, exactly as for any other crash. The panic is
+		// re-raised unchanged rather than written through.
+		granted := *leased.Lease
+		defer func() {
+			if crashed := recover(); crashed != nil {
+				panic(crashed)
+			}
+			_ = r.scheduler.Relinquish(leased.ID, granted)
+		}()
+	}
 	if leased == nil {
 		// A pause that committed after this pass's check is why the store
 		// refused (#86). The run is left as it is rather than settled on the
@@ -1827,7 +1861,17 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		if paused, err := r.deps.Store.RunPaused(state.run.ID); err != nil || paused {
 			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
 		}
-		outcome, err := r.settle(state, waitingOr(live, Waiting), "operation_unavailable")
+		reason := "operation_unavailable"
+		if consumesVerification(planned.Kind) {
+			saturated, err := r.scheduler.VerificationSaturated(state.run.ID)
+			if err != nil {
+				return false, Outcome{}, err
+			}
+			if saturated {
+				reason = ReasonVerificationCapacity
+			}
+		}
+		outcome, err := r.settle(state, waitingOr(live, Waiting), reason)
 		return false, outcome, err
 	}
 	if leased.ID != planned.ID {

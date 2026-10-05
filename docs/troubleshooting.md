@@ -418,6 +418,13 @@ consumed-feedback digest. Start a new generation with the agent you want:
 live generation was created by a different controller build or configuration.
 Restore that configuration, or use `--new-generation`.
 
+**`issue N already has live run ... under another configuration, plan stage or
+batch`.** The issue's live work belongs to another identity space (#58).
+Continue it with the controller or plan that owns it, or start fresh work
+deliberately with `autonomy run issue N --new-generation`. Automatic intake
+reports the same boundary and creates nothing; an issue whose runs have all
+finished - under any configuration - is never re-enrolled by a standing label.
+
 **`run ... was cancelled (operator_stop); explicit operator intent is not
 withdrawn by asking again`.** A run id is deterministic from the repository, the
 issue and the configuration digest, so `autonomy run issue N` addresses the same

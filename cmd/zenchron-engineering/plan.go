@@ -235,6 +235,10 @@ func openPlanReader(flags autonomyFlags, overrides autonomyOverrides) (*planRead
 	if err != nil {
 		return nil, err
 	}
+	if config, err = runtime.ResolveConfigIdentity(store, config); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	registry, err := planning.LoadRegistry(config.PlanningDir)
 	if err != nil {
 		_ = store.Close()

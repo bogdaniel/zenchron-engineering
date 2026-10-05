@@ -166,6 +166,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 			return runtime.ExitFailed, err
 		}
 	}
+	// THE SUPERVISOR POLICY THIS GENERATION RUNS UNDER, recorded once per
+	// start (ADR-0003 B4) and only now that the configuration identity is
+	// the governing one. A start that cannot record its policy does not
+	// serve: an S value nothing durable names is one nobody can audit.
+	policy, err := built.recordPolicyGeneration()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -197,6 +205,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
 	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
+	fmt.Fprintf(stdout, "  supervisor policy %s (max_concurrent_runs %d)\n", policy.PolicyDigest[:12], ceilingOf(built))
 	fmt.Fprintf(stdout, "  transitions       %s\n", inflight)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
@@ -354,14 +363,13 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 	if err != nil {
 		return nil, err
 	}
-	ceiling, err := c.maxConcurrentRuns()
+	// One resolution of the effective supervisor policy: the values recorded
+	// for this start are the values this supervisor is built with (B4).
+	policy, err := c.config.SupervisorPolicy()
 	if err != nil {
 		return nil, err
 	}
-	observations, err := c.maxConcurrentObservations()
-	if err != nil {
-		return nil, err
-	}
+	ceiling, observations := policy.MaxConcurrentRuns, policy.MaxConcurrentObservations
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store: c.store,
 		// A SUCCESSOR STARTS SHUT. It admits work when the durable record says
@@ -379,7 +387,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		// The supervisor's turn envelope is the sum of both class ceilings;
 		// the engines' schedulers enforce each one durably (#85).
 		MaxConcurrentObservations: observations,
-		PollInterval:              settings.PollInterval,
+		PollInterval:              time.Duration(policy.PollIntervalSeconds) * time.Second,
 		Discovery:                 discovery,
 		Agents:                    c.agents,
 		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
@@ -443,16 +451,19 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlOrchestrate:
+		view, err := supervisor.Orchestrate(ctx, request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlStatus:
-		ceiling, err := c.maxConcurrentRuns()
+		policy, err := c.config.SupervisorPolicy()
 		if err != nil {
 			return controlError(err)
 		}
-		observations, err := c.maxConcurrentObservations()
-		if err != nil {
-			return controlError(err)
-		}
-		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, observations, time.Now().UTC())
+		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, policy.MaxConcurrentRuns,
+			policy.MaxConcurrentObservations, policy.MaxConcurrentVerifications, time.Now().UTC())
 		if err != nil {
 			return controlError(err)
 		}
@@ -760,21 +771,30 @@ func controlError(err error) runtime.ControlResponse {
 // to report the error, and a function four callers now trust to state the
 // ceiling must not be able to invent one.
 func (c *composition) maxConcurrentRuns() (int, error) {
-	settings, err := c.config.WatchSettings()
-	if err != nil {
-		return 0, err
-	}
-	return settings.MaxConcurrentRuns, nil
+	policy, err := c.config.SupervisorPolicy()
+	return policy.MaxConcurrentRuns, err
 }
 
-// maxConcurrentObservations is the observation-class ceiling (#85), resolved
-// from the same settings for the same reason.
+// maxConcurrentObservations is the observation-class ceiling (#85), from the
+// same effective supervisor policy every driving process records (B4).
 func (c *composition) maxConcurrentObservations() (int, error) {
-	settings, err := c.config.WatchSettings()
-	if err != nil {
-		return 0, err
-	}
-	return settings.MaxConcurrentObservations, nil
+	policy, err := c.config.SupervisorPolicy()
+	return policy.MaxConcurrentObservations, err
+}
+
+// maxConcurrentVerifications is the verification ceiling (#490), from the same
+// effective supervisor policy.
+func (c *composition) maxConcurrentVerifications() (int, error) {
+	policy, err := c.config.SupervisorPolicy()
+	return policy.MaxConcurrentVerifications, err
+}
+
+// recordPolicyGeneration records, before this process drives any run, the
+// configuration identity and the effective supervisor policy it drives under
+// (ADR-0003 B4). It refuses under a configuration the governing authority
+// does not govern, so no S value ever drives work that no durable record names.
+func (c *composition) recordPolicyGeneration() (runtime.SupervisorStart, error) {
+	return runtime.RecordSupervisorStart(c.store, c.config, time.Now().UTC())
 }
 
 // ---------------------------------------------------------------------------
@@ -855,15 +875,12 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	}
 	defer built.release()
 
-	ceiling, err := built.maxConcurrentRuns()
+	policy, err := built.config.SupervisorPolicy()
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	observations, err := built.maxConcurrentObservations()
-	if err != nil {
-		return runtime.ExitFailed, err
-	}
-	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, observations, time.Now().UTC())
+	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, policy.MaxConcurrentRuns,
+		policy.MaxConcurrentObservations, policy.MaxConcurrentVerifications, time.Now().UTC())
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -881,8 +898,11 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	// The ceiling bounds workers, not runs, so the two counts are printed as
 	// the two facts they are rather than as one ratio that is true of neither.
 	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
-	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d paused, %d unavailable\n\n",
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d paused, %d unavailable\n",
 		fleet.Active, fleet.Working, fleet.Capacity, fleet.Observing, fleet.ObservationCapacity, fleet.Runnable, fleet.Waiting, fleet.Paused, fleet.Unavailable)
+	// A verification is work, so this line refines the counts above (#490).
+	fmt.Fprintf(stdout, "Verify:     %d verifying / %d, %d awaiting a verification slot\n\n",
+		fleet.Verifying, fleet.VerificationCapacity, fleet.AwaitingVerification)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",
@@ -1324,4 +1344,13 @@ func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime
 		snapshot.WorkAdmission = runtime.AdmissionClosed
 	}
 	return snapshot
+}
+
+// ceilingOf is the resolved work ceiling this start applies, for the banner.
+func ceilingOf(c *composition) int {
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return 0
+	}
+	return ceiling
 }

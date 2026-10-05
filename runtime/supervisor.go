@@ -136,6 +136,9 @@ type SupervisorReport struct {
 	// looked at. A plan awaiting approval appears here saying so, which is how
 	// an operator sees that the runtime is waiting on THEM rather than on work.
 	Plans []PlanTickReport `json:"plans,omitempty"`
+	// Orchestration names, bounded, each batch child this pass could not
+	// create or each handoff it could not admit (#470). Empty is healthy.
+	Orchestration []string `json:"orchestration,omitempty"`
 	// Error is a tick that could not enumerate work. It is REPORTED rather
 	// than returned, because a supervisor that exited on one unreadable read
 	// would take every healthy run down with it - the same isolation rule that
@@ -239,6 +242,8 @@ type Supervisor struct {
 	// started inside the window survives a supersession that changed it, and
 	// the invalidations are computed against a plan that has already moved.
 	plansMu sync.Mutex
+	// orchestrationMu serializes deciding a new batch's child run identities.
+	orchestrationMu sync.Mutex
 	// enginesMu guards the engine cache, which several run goroutines reach
 	// concurrently inside one tick. It is separate from mu on purpose: the
 	// lifecycle flags are read by operator commands, and a slow engine
@@ -668,6 +673,7 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	// decides when a run executes.
 	if !report.Draining {
 		report.Plans = s.reconcilePlans(ctx)
+		report.Orchestration = s.reconcileOrchestration(ctx)
 	}
 	runs, err := s.deps.Store.ActiveRuns()
 	if err != nil {

@@ -486,6 +486,22 @@ The supervisor starts at most `max_concurrent_runs + max_concurrent_observations
 turns at once. That bounds goroutines only: a turn whose next operation's class
 is full is refused by the store and returns.
 
+**Verification capacity** (#490) is a third ceiling inside the same durable
+acquisition. A work operation that runs an expensive host verifier - today
+`assurance.go` - additionally needs one of `max_concurrent_verifications`
+(default 2) slots, counted exactly like a class ceiling: other runs holding a
+leased verification operation, in the same statement as the lease. It is not a
+second queue: the pending operation row is the queue entry and the lease is the
+slot, so a restart reconstructs occupancy from durable rows and never runs a
+held verification twice. A verification is still work, so the verification
+ceiling only narrows `max_concurrent_runs`. A refused verification starts
+nothing, spends no attempt, and leaves the run waiting with the reason
+`verification_capacity_unavailable`, an external wait that does not spend
+active-work budget; the next pass that finds a free slot runs it with its
+ordinary semantics. Provider reasoning, semantic assurance and gofmt
+remediation are not verification. A provider's own tool use inside
+`execution.invoke` is not gated by this ceiling.
+
 `status` shows the fleet as six mutually exclusive counts over nonterminal
 runs: **working** (holds a work operation), **observing** (holds an observation),
 **runnable** (holds nothing and has a pending work operation the scheduler could
@@ -495,7 +511,22 @@ observing) and **unavailable** (its journal could not be replayed). They are rea
 they are the same after a restart. Runnable uses the scheduler's own
 eligibility test; the one approximation is liveness, which a read never probes,
 so an abandoned lease counts as working or observing until a scheduler
-reclaims it.
+reclaims it. Two more counts refine them and are not part of the partition:
+**verifying** (working runs holding a verification slot, shown against
+`max_concurrent_verifications`) and **awaiting verification** (runnable runs
+whose next operation is a verification).
+
+A lease is abandoned in one of two ways, and both are recovered without a
+restart. A **dead** owner's expired lease is reclaimed by any scheduler, as
+before. A lease left by **this** still-running supervisor — a driver whose pass
+returned or failed (for example on a store error) before it finished its
+operation — is given back by that driver on its way out, and if even that write
+fails, the supervisor's next scan removes it, because the supervisor knows which
+leases its own drivers hold (#485). Only the lease is removed: the operation's
+state, attempt accounting and history stay what the journal says, and a
+journalled outcome is still applied from the journal. A live owner's lease that
+one of its drivers still holds — this supervisor's or another process's — is
+never taken.
 
 What the work ceiling bounds is **reconciliation work**, not specifically the
 expensive part of it: assurance, commits and publication are work too, so the

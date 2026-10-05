@@ -299,6 +299,13 @@ type Dependencies struct {
 	// MaxConcurrentObservations is the operator's observation-class ceiling
 	// (#85). Zero means the default.
 	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the operator's verification ceiling
+	// (#490). Zero means the default.
+	MaxConcurrentVerifications int
+	// DriverLeases is the process's record of which leases its drivers hold
+	// (#485). Every engine of one process receives the SAME instance; nil
+	// leaves a lease this process stranded to the dead-owner rule alone.
+	DriverLeases *DriverLeases
 }
 
 // Outcome is what one Reconcile settled on. It is the CLI's whole answer.
@@ -458,9 +465,11 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		agents: d.Agents,
 		scheduler: Scheduler{
 			Store: d.Store, Clock: d.Clock, Owner: d.Owner, Liveness: d.Liveness,
-			LeaseDuration:             time.Minute,
-			MaxConcurrentRuns:         resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
-			MaxConcurrentObservations: d.MaxConcurrentObservations,
+			LeaseDuration:              time.Minute,
+			MaxConcurrentRuns:          resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
+			MaxConcurrentObservations:  d.MaxConcurrentObservations,
+			MaxConcurrentVerifications: d.MaxConcurrentVerifications,
+			Drivers:                    d.DriverLeases,
 		},
 		flow:       KernelFlow{},
 		repo:       repo,
@@ -705,8 +714,34 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal, nil, domain.StageBudget{})
-			return StartOutcome{RunID: created}, err
+			//
+			// Continuing (not an explicit new generation) never starts a run
+			// beside live work the source already has in ANOTHER identity
+			// space (#58): a configuration change is not authority to run the
+			// same issue twice.
+			if mode == NewGeneration {
+				created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRun)
+				return StartOutcome{RunID: created}, err
+			}
+			decision, err := r.sourceDecision(issue)
+			if err != nil {
+				return StartOutcome{}, err
+			}
+			if decision.State == SourceLiveElsewhere {
+				return StartOutcome{}, &SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}
+			}
+			// The decision above is a read; the claim re-decides "no live run
+			// of this source" in the same statement as the insert, so a start
+			// under another configuration racing this one cannot also win.
+			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRunUnlessSourceLive)
+			if err != nil {
+				return StartOutcome{}, err
+			}
+			if _, found, err := r.deps.Store.Run(created); err != nil || found {
+				return StartOutcome{RunID: created}, err
+			}
+			// The claim lost to a live run the read did not see; name it.
+			return StartOutcome{}, r.liveSourceRunError(issue, goal)
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
 			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
@@ -831,7 +866,10 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, stageBudget domain.StageBudget) (string, error) {
+// claim is the conditional insert that decides which process creates the run:
+// ClaimRun for an identity, ClaimUnseenSourceRun when the source must also have
+// no history at all (#58).
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, orchestration *RunOrchestrationBinding, stageBudget domain.StageBudget, claim func(EngineeringRun) (bool, error)) (string, error) {
 	now := r.deps.Clock.Now()
 	budgets := r.deps.Budgets.defaults().tightenedBy(stageBudget)
 	run := EngineeringRun{
@@ -854,16 +892,17 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 		// afterwards: the genesis event is hashed against this row, and a row
 		// that gained its binding later would leave the two disagreeing about
 		// what the run is.
-		Plan:      plan,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Plan:          plan,
+		Orchestration: orchestration,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	// ClaimRun is the cross-process source claim: one conditional INSERT on the
 	// derived identity, so the database decides which process created this run.
 	// A caller that loses adopts the winner's run - it must not fall through to
 	// PutRun, whose upsert would overwrite the row the winner already hashed
 	// its genesis event against. See source_claim.go.
-	claimed, err := r.deps.Store.ClaimRun(run)
+	claimed, err := claim(run)
 	if err != nil {
 		return "", err
 	}
@@ -1507,6 +1546,6 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
-	created, err := r.createRun(ctx, runID, goal, &binding, binding.StageBudget)
+	created, err := r.createRun(ctx, runID, goal, &binding, nil, binding.StageBudget, r.deps.Store.ClaimRun)
 	return StartOutcome{RunID: created}, err
 }

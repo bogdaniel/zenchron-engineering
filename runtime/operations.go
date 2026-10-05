@@ -836,6 +836,16 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			}}
 		}
 	}
+	// THE ORCHESTRATION HANDOFF SLOT (#470), prepared and emptied before the
+	// invocation and only for a run an orchestration batch created. Every
+	// other run is given no path and is unchanged.
+	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
+	if err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
 	// THE BUILD SCRATCH, owned by the runtime and scoped to this attempt. An
 	// invocation whose contract obliges `go test` has to be able to EXECUTE the
 	// binary that command links, and the default temporary location is noexec
@@ -918,6 +928,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
+		HandoffPath:            handoffPath,
 		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
@@ -1227,6 +1238,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				SubjectCommit: subject.Commit,
 				SubjectTree:   subject.Tree,
 			}})
+			// The handoff is read only HERE, for an invocation that completed:
+			// an unfinished one contributes no handoff, exactly as it
+			// contributes no verdict. A missing or invalid one is journalled
+			// as such rather than failing the execution - failing it would
+			// quarantine the work (#390) and make a retry redo it, so the
+			// batch item reports handoff_pending instead (#470).
+			if handoffPath != "" {
+				events = append(events, handoffObservation(handoffPath, operation.ID, physicalAttempt))
+			}
 		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.

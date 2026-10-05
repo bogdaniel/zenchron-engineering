@@ -160,7 +160,7 @@ func autonomyResume(ctx context.Context, engine engineeringRuntime, built *compo
 	if code, detail, refused := resumeRefusal(run, runID, events); refused {
 		return code, errors.New(detail)
 	}
-	return reconcile(ctx, engine, runID, stdout)
+	return reconcile(ctx, engine, built, runID, stdout)
 }
 
 // resumeRefusal is the complete, ordered list of persisted conditions a plain
@@ -326,6 +326,11 @@ func autonomyRefresh(ctx context.Context, engine engineeringRuntime, built *comp
 	}
 	view.Successor = successor
 
+	if built != nil {
+		if _, err := built.recordPolicyGeneration(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	outcome, err := engine.Reconcile(ctx, successor)
 	if err != nil {
 		return exitFor(err, runtime.ExitFailed), err

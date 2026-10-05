@@ -37,6 +37,7 @@ import (
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
+	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
@@ -276,6 +277,8 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		// `run issue N` starts one governed run, `plan issue N` proposes the
 		// decomposition that several of them would execute.
 		return autonomyPlan(context.Background(), rest, overrides, stdout)
+	case "orchestrate":
+		return autonomyOrchestrate(rest, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
@@ -441,7 +444,7 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		} else {
 			fmt.Fprintf(stdout, "created generation %s\n", outcome.RunID)
 		}
-		return reconcile(ctx, engine, outcome.RunID, stdout)
+		return reconcile(ctx, engine, built, outcome.RunID, stdout)
 	case "resume":
 		return autonomyResume(ctx, engine, built, runID, stdout)
 	case "refresh":
@@ -537,7 +540,16 @@ func observeFeedback(ctx context.Context, engine engineeringRuntime, runID strin
 	_, _ = observer.ObserveFeedback(ctx, runID)
 }
 
-func reconcile(ctx context.Context, engine engineeringRuntime, runID string, stdout io.Writer) (int, error) {
+// reconcile drives one run in THIS process. A local drive enforces the
+// effective supervisor policy through its scheduler like any driver, so a
+// composed one records its policy generation first (ADR-0003 B4); an injected
+// test runtime has no composition and nothing to record.
+func reconcile(ctx context.Context, engine engineeringRuntime, built *composition, runID string, stdout io.Writer) (int, error) {
+	if built != nil {
+		if _, err := built.recordPolicyGeneration(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	observeFeedback(ctx, engine, runID)
 	outcome, err := engine.Reconcile(ctx, runID)
 	if err != nil {
@@ -568,9 +580,12 @@ func writeJSON(stdout io.Writer, value any) error {
 // construction with a different repository target, rather than two wirings that
 // can drift apart.
 type composition struct {
-	config      runtime.Config
-	store       *runtime.SQLiteOperationStore
-	owner       string
+	config runtime.Config
+	store  *runtime.SQLiteOperationStore
+	owner  string
+	// drivers is the one record of leases this process's drivers hold
+	// (#485), shared by every engine the composition builds.
+	drivers     *runtime.DriverLeases
 	model       domain.ProjectModel
 	policy      domain.EngineeringPolicy
 	artifacts   runtime.ArtifactStore
@@ -640,6 +655,12 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		return nil, err
 	}
 	release := func() { _ = store.Close() }
+	// The configuration identity this process binds as is decided against
+	// the governing authority before anything uses it (ADR-0003 B4).
+	if config, err = runtime.ResolveConfigIdentity(store, config); err != nil {
+		release()
+		return nil, err
+	}
 
 	// The owner identity and the OS ownership lock must be the same string:
 	// the lock is the crash-safe evidence NewLockOwnerLiveness reads to decide
@@ -732,7 +753,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		semantic = semanticAssuranceProvider(config, artifacts)
 	}
 	return &composition{
-		config: config, store: store, owner: owner, model: model, policy: policy,
+		config: config, store: store, owner: owner, drivers: runtime.NewDriverLeases(), model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
 		agents: registry, agent: agent, feedback: feedback, planning: customization,
@@ -772,6 +793,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		return nil, err
 	}
 	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
+	verifications, err := c.maxConcurrentVerifications()
 	if err != nil {
 		return nil, err
 	}
@@ -817,8 +842,10 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		// same reason the supervisor and the fleet view do - one resolution of
 		// the operator's configuration, so advertised and enforced cannot be
 		// different numbers.
-		OperatorMaxConcurrentRuns: ceiling,
-		MaxConcurrentObservations: observations,
+		OperatorMaxConcurrentRuns:  ceiling,
+		MaxConcurrentObservations:  observations,
+		MaxConcurrentVerifications: verifications,
+		DriverLeases:               c.drivers,
 	})
 }
 
@@ -1254,6 +1281,11 @@ func autonomyWatch(parent context.Context, flags autonomyFlags, overrides autono
 
 	settings, err := built.watchSettings()
 	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	// A standalone watcher drives runs under the moved S policy exactly as
+	// `serve` does, so it records its policy generation before it polls.
+	if _, err := built.recordPolicyGeneration(); err != nil {
 		return runtime.ExitInvalid, err
 	}
 	controller := overrides.Watch

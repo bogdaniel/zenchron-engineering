@@ -384,6 +384,53 @@ CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequenc
 -- latest run.paused/run.unpaused event. This partial index makes the common
 -- never-paused case an empty probe rather than a scan of the run's journal.
 CREATE INDEX events_run_pause ON events(run_id, sequence) WHERE type IN ('run.paused', 'run.unpaused');
+`, `
+-- Basic explicit orchestration (#470), in the SAME database as runs and the
+-- journal. Both tables are insert-only: a batch is written once with every
+-- item's child run already decided, and an admitted handoff is immutable. Item
+-- state is never stored; it is projected from the child runs on every read.
+CREATE TABLE orchestration_batches (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE TABLE orchestration_handoffs (
+	id                 TEXT PRIMARY KEY,
+	batch_id           TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoffs_by_run ON orchestration_handoffs(run_id, admitted_unix_nano, id);
+-- A reported handoff the runtime decided it can never admit (its report is
+-- gone or no longer the journalled document). Insert-only, keyed by the same
+-- identity an admission would have had, so one invocation is settled once.
+CREATE TABLE orchestration_handoff_refusals (
+	id                TEXT PRIMARY KEY,
+	batch_id          TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoff_refusals_by_run ON orchestration_handoff_refusals(run_id);
+`, `
+-- One row per supervisor start (ADR-0003 B4): the configuration identity it
+-- served under, that identity's controller-effective (C-only) content, and the
+-- supervisor operating policy (S) it applied. Insert-only. A row is also the
+-- evidence that a configuration identity token names exactly that C content,
+-- which is what lets an S-only edit keep the identity.
+CREATE TABLE supervisor_starts (
+	id                   TEXT PRIMARY KEY,
+	started_unix_nano    INTEGER NOT NULL,
+	config_global        TEXT NOT NULL,
+	config_repository    TEXT NOT NULL,
+	effective_global     TEXT NOT NULL,
+	effective_repository TEXT NOT NULL,
+	policy_digest        TEXT NOT NULL,
+	document             TEXT NOT NULL
+);
+CREATE INDEX supervisor_starts_projection ON supervisor_starts(config_global, config_repository, effective_global, effective_repository);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -435,7 +482,13 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
 	// reads state it is about to overwrite (journal sequence allocation) waits
 	// on busy_timeout instead of failing an unretryable upgrade in WAL mode.
-	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	//
+	// busy_timeout is SQLite's own bounded wait for the write lock. Ten
+	// drivers writing at once could wait past 5s, and a write that gives up
+	// fails its pass - which since #485 costs that pass and, truthfully, an
+	// attempt it had started, but should not happen for mere contention.
+	// 15s stays under the 30s control-request deadline.
+	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -621,14 +674,16 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // runtime decodes - and never from the denormalized kind column, which nothing
 // verifies; the observation kinds are bound parameters generated from
 // OperationCapacityClass, so there is no second list. A row whose document
-// carries no kind is counted as work, which is the closed direction.
+// carries no kind is counted as work, which is the closed direction. A
+// verification operation (#490) is additionally counted against the
+// verification ceiling the same way, from the same document kind.
 //
 // The same statement also refuses an operation while ANOTHER operation of the
 // same run holds a lease. That is what makes "a run holds at most one active
 // operation" a durable fact rather than a property of whoever drives it: a
 // second process can never observe a run beside the work another process is
 // doing on it.
-func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
+func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -650,8 +705,21 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 		args = append(args, kind)
 	}
 	args = append(args, acquiringObservation, ceiling)
+	// The verification ceiling (#490) is asked only of a verification
+	// operation, and counted exactly as the class ceiling is: other runs
+	// holding a leased verification operation, read from the document's kind.
+	acquiringVerification := 0
+	if consumesVerification(op.Kind) {
+		acquiringVerification = 1
+	}
+	args = append(args, acquiringVerification, op.RunID)
+	for _, kind := range verificationKinds {
+		args = append(args, kind)
+	}
+	args = append(args, maxVerifications)
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
 	kinds := strings.TrimSuffix(strings.Repeat("?,", len(observation)), ",")
+	verifying := strings.TrimSuffix(strings.Repeat("?,", len(verificationKinds)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
 		  AND NOT EXISTS (SELECT 1 FROM run_operations AS other
@@ -664,7 +732,11 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL
-		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?`,
+		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?
+		  AND (? = 0 OR (SELECT COUNT(DISTINCT run_id) FROM run_operations
+		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
+		         AND json_extract(document, '$.lease') IS NOT NULL
+		         AND json_extract(document, '$.kind') IN (`+verifying+`)) < ?)`,
 		args...)
 	if err != nil {
 		return 0, false, err

@@ -127,14 +127,25 @@ type Fleet struct {
 	// Paused + Unavailable == Active. Paused (#86) is a paused run holding no
 	// active operation; one still settling counts as Working or Observing. They are read from durable operation rows, never
 	// from a supervisor's memory; see capacityState.
-	ObservationCapacity int          `json:"observation_capacity,omitempty"`
-	Working             int          `json:"working"`
-	Observing           int          `json:"observing"`
-	Runnable            int          `json:"runnable"`
-	Waiting             int          `json:"waiting"`
-	Paused              int          `json:"paused"`
-	Unavailable         int          `json:"unavailable"`
-	Runs                []RunSummary `json:"runs"`
+	ObservationCapacity int `json:"observation_capacity,omitempty"`
+	Working             int `json:"working"`
+	Observing           int `json:"observing"`
+	Runnable            int `json:"runnable"`
+	Waiting             int `json:"waiting"`
+	Paused              int `json:"paused"`
+	Unavailable         int `json:"unavailable"`
+	// The verification view (#490). VerificationCapacity is the verification
+	// ceiling, omitted like ObservationCapacity by a reader that does not know
+	// the configuration. A verification is work, so these REFINE the partition
+	// above rather than joining it: Verifying counts the Working runs holding
+	// a verification slot, and AwaitingVerification the Runnable runs whose
+	// next operation is a verification - while Verifying equals
+	// VerificationCapacity, they are waiting on verification capacity, and
+	// each one's reason says so once a driver has been refused.
+	VerificationCapacity int          `json:"verification_capacity,omitempty"`
+	Verifying            int          `json:"verifying"`
+	AwaitingVerification int          `json:"awaiting_verification"`
+	Runs                 []RunSummary `json:"runs"`
 	// Plans is the plan-level view beside the runs. An operator with a plan
 	// awaiting their approval is being waited ON, and that has to be visible in
 	// the same place they look to see whether anything is happening.
@@ -142,6 +153,9 @@ type Fleet struct {
 	// SupervisorRunning reports whether a persistent supervisor currently owns
 	// the control endpoint for this state directory.
 	SupervisorRunning bool `json:"supervisor_running"`
+	// SupervisorPolicy is the SupervisorPolicyDigest of the most recent
+	// supervisor start (ADR-0003 B4), or empty when no start has recorded one.
+	SupervisorPolicy string `json:"supervisor_policy,omitempty"`
 	// ControlEndpoint is the mechanism and path, so an operator can see the
 	// authority boundary they are relying on.
 	ControlEndpoint string `json:"control_endpoint,omitempty"`
@@ -304,9 +318,9 @@ func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 // is unreadable: that run reports its own error and the rest are still
 // answered, because a fleet view whose whole value is "show me everything" must
 // not be lost to one bad row.
-func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity, observationCapacity int, now time.Time) (Fleet, error) {
+func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity, observationCapacity, verificationCapacity int, now time.Time) (Fleet, error) {
 	fleet, err := fleetStatus(store, stateDir, capacity, now, nil)
-	fleet.ObservationCapacity = observationCapacity
+	fleet.ObservationCapacity, fleet.VerificationCapacity = observationCapacity, verificationCapacity
 	return fleet, err
 }
 
@@ -327,6 +341,11 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
 	fleet.Plans = summarizePlans(store)
+	if start, found, err := store.LatestSupervisorStart(); err != nil {
+		return Fleet{}, err
+	} else if found {
+		fleet.SupervisorPolicy = start.PolicyDigest
+	}
 	byRun, err := capacityOperations(store)
 	if err != nil {
 		return Fleet{}, err
@@ -339,7 +358,15 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 			case summary.Error != "":
 				fleet.Unavailable++
 			default:
-				switch state := capacityState(byRun[run.ID], now); {
+				state := capacityState(byRun[run.ID], now)
+				holding, awaiting := verificationOccupancy(byRun[run.ID], now)
+				if state == CapacityWork && holding {
+					fleet.Verifying++
+				}
+				if state == capacityRunnable && awaiting {
+					fleet.AwaitingVerification++
+				}
+				switch {
 				case state == CapacityWork:
 					fleet.Working++
 				case state == CapacityObservation:
@@ -446,12 +473,34 @@ func capacityState(all map[string]RunOperation, now time.Time) CapacityClass {
 		return active
 	}
 	for _, op := range all {
-		if op.State != Leased && op.State != Running && OperationCapacityClass(op.Kind) == CapacityWork &&
-			leasable(op, all, now, false) && !OperationExpired(op, now) {
+		if OperationCapacityClass(op.Kind) == CapacityWork && runnableNow(op, all, now) {
 			return capacityRunnable
 		}
 	}
 	return capacityWaiting
+}
+
+// runnableNow is an operation holding nothing that Next would lease now.
+func runnableNow(op RunOperation, all map[string]RunOperation, now time.Time) bool {
+	return op.State != Leased && op.State != Running && leasable(op, all, now, false) && !OperationExpired(op, now)
+}
+
+// verificationOccupancy places one run against the verification ceiling
+// (#490): holding a verification slot, or runnable with a verification to
+// lease. They refine Working and Runnable and are never a partition member of
+// their own, because a verification is work.
+func verificationOccupancy(all map[string]RunOperation, now time.Time) (holding, awaiting bool) {
+	for _, op := range all {
+		if holdsVerificationSlot(op) {
+			return true, false
+		}
+	}
+	for _, op := range all {
+		if consumesVerification(op.Kind) && runnableNow(op, all, now) {
+			return false, true
+		}
+	}
+	return false, false
 }
 
 func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {
