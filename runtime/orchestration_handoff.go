@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -30,7 +31,19 @@ type handoffRecords struct {
 	refused  map[string]string
 }
 
-func loadHandoffRecords(store *SQLiteOperationStore, runID string) (handoffRecords, error) {
+// orchestrationHandoffStore is the durable admission boundary. Tests interleave
+// an independent journal writer at the conditional insert, after binding proof.
+type orchestrationHandoffStore interface {
+	Run(string) (EngineeringRun, bool, error)
+	Events(string) ([]EngineeringEvent, error)
+	RunHandoffs(string) ([]orchestration.EngineeringHandoff, error)
+	RunHandoffRefusals(string) (map[string]string, error)
+	RefuseHandoff(string, string, string, string, time.Time) error
+	AdmitHandoff(orchestration.EngineeringHandoff) (bool, error)
+	AdmitCheckpointHandoff(orchestration.EngineeringHandoff, int64) (bool, error)
+}
+
+func loadHandoffRecords(store orchestrationHandoffStore, runID string) (handoffRecords, error) {
 	handoffs, err := store.RunHandoffs(runID)
 	if err != nil {
 		return handoffRecords{}, err
@@ -85,29 +98,33 @@ func inspectHandoff(runID string, events []EngineeringEvent, operations map[stri
 	}
 	// A report from an invocation that changed nothing will never be bound:
 	// only a mutation is committed, and a handoff binds to a commit. Saying
-	// so is better than reporting it as awaiting a commit forever.
+	// so is better than reporting it as awaiting a commit forever. The one
+	// exception is a continuation that completed its checkpoint (#489): that
+	// checkpoint IS a runtime-owned commit, and admission decides it.
 	var result mutationResult
 	if producing, ok := operations[reported.OperationID]; ok && producing.State == Succeeded &&
 		len(producing.Result) > 0 && json.Unmarshal(producing.Result, &result) == nil && !result.Mutated {
-		finding.observation = orchestration.HandoffRefused
-		finding.detail = "unbindable: the invocation that reported this handoff changed nothing, so there is no committed candidate to bind it to"
-		return finding, nil
+		if _, continued := completedCheckpoint(producing); !continued {
+			finding.observation = orchestration.HandoffRefused
+			finding.detail = "unbindable: the invocation that reported this handoff changed nothing, so there is no committed candidate to bind it to"
+			return finding, nil
+		}
 	}
 	finding.detail = "awaiting the commit of the reporting invocation's output and admission by the supervisor"
 	return finding, nil
 }
 
 // admitOrchestratedHandoff binds the latest reported handoff of one batch item
-// to the exact candidate the runtime committed from that invocation's output,
-// and persists it immutably. It does nothing until that commit exists, and
-// nothing for a handoff already admitted.
+// to the exact candidate the runtime committed for that invocation, and
+// persists it immutably. It does nothing until that commit exists, and nothing
+// for a handoff already admitted.
 //
 // Every binding comes from the runtime's own records: the commit operation
-// whose idempotency key IS the reporting operation, that commit's own
-// journalled event, and the journal projected up to it. The report is the only
-// worker-authored part, and it is admitted only if the slot still holds the
-// exact document whose digest was journalled when the invocation completed.
-func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batch orchestration.Batch, item orchestration.BatchItem, now time.Time) error {
+// handoffCommitOf names, that commit's own journalled event, and the journal
+// projected up to it. The report is the only worker-authored part, and it is
+// admitted only if the slot still holds the exact document whose digest was
+// journalled when the invocation completed.
+func admitOrchestratedHandoff(store orchestrationHandoffStore, stateDir string, batch orchestration.Batch, item orchestration.BatchItem, now time.Time) error {
 	run, found, err := store.Run(item.RunID)
 	if err != nil || !found {
 		return err
@@ -129,17 +146,29 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 		return err
 	}
 	reported := *finding.reported
-	commit, committed := succeededOperation(snapshot.Operations, OpCandidateCommit, operationKey(OpCandidateCommit, reported.OperationID))
-	if !committed {
+	// From here on, a report that cannot be admitted is a DECISION, recorded
+	// once, not an error repeated every pass: the item settles to
+	// handoff_pending with the reason instead of reading as running forever.
+	refuse := func(reason string) error {
+		return store.RefuseHandoff(finding.handoffID, batch.ID, run.ID, reason, now)
+	}
+	commit, refusal, err := handoffCommitOf(snapshot.Operations, events, reported.OperationID)
+	if err != nil {
+		return err
+	}
+	if refusal != "" {
+		return refuse(refusal)
+	}
+	if commit.operationID == "" {
 		return nil
 	}
 	upTo, payload := -1, CandidateCommittedPayload{}
 	for i, event := range events {
-		if event.OperationID != commit.ID {
+		if event.OperationID != commit.operationID {
 			continue
 		}
 		switch event.Type {
-		case EventCandidateCommitted:
+		case commit.event:
 			if payload, err = decodePayload[CandidateCommittedPayload](event.Payload); err != nil {
 				return err
 			}
@@ -148,14 +177,8 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 			upTo = max(upTo, i)
 		}
 	}
-	// From here on, a report that cannot be admitted is a DECISION, recorded
-	// once, not an error repeated every pass: the item settles to
-	// handoff_pending with the reason instead of reading as running forever.
-	refuse := func(reason string) error {
-		return store.RefuseHandoff(finding.handoffID, batch.ID, run.ID, reason, now)
-	}
 	if payload.Commit == "" {
-		return refuse("the commit of the reporting invocation journalled no completed candidate")
+		return refuse("the commit this handoff binds to journalled no candidate")
 	}
 	// The run AS IT STOOD when that commit landed, so the base and contract
 	// bound are the ones the commit was made and reassessed against, read
@@ -179,7 +202,7 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 	if !present || err != nil || digest != reported.ReportSHA256 {
 		return refuse(fmt.Sprintf("the report is no longer the document journalled when the invocation completed (present=%t, error=%v)", present, err))
 	}
-	_, err = store.AdmitHandoff(orchestration.EngineeringHandoff{
+	handoff := orchestration.EngineeringHandoff{
 		SchemaVersion: orchestration.EngineeringHandoffSchemaVersion,
 		ID:            finding.handoffID, BatchID: batch.ID, Issue: item.Issue, RunID: run.ID,
 		Producer: orchestration.HandoffProducer{AgentID: run.AgentID, OperationID: reported.OperationID, Attempt: reported.Attempt},
@@ -189,8 +212,106 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 		Governance:   orchestration.HandoffGovernance{ContractID: projected.Contract.ID, ContractRevision: projected.Contract.Revision},
 		Observed:     orchestration.HandoffObserved{ChangedPathCount: payload.PathCount, ChangedPathsDigest: payload.PathsDigest},
 		ReportSHA256: digest, ProducerReport: report, AdmittedAt: now,
-	})
+	}
+	if commit.event == EventCandidateCheckpointed {
+		// The snapshot proves the binding; SQLite must keep that proof current
+		// through insertion despite journal appends by other run drivers.
+		// A lost insert leaves no handoff; the next pass replays and refuses
+		// the superseded checkpoint (or finds an already-admitted handoff).
+		_, err = store.AdmitCheckpointHandoff(handoff, events[len(events)-1].Sequence)
+		return err
+	}
+	_, err = store.AdmitHandoff(handoff)
 	return err
+}
+
+// handoffCommit is the runtime-owned commit a reported handoff binds to: the
+// commit operation, and the event type that journalled its candidate.
+type handoffCommit struct {
+	operationID string
+	event       string
+}
+
+// handoffCommitOf decides which runtime-owned commit the reporting invocation's
+// handoff binds to. A zero commit with no refusal means admission waits.
+//
+//  1. An invocation whose output the runtime committed binds to that commit.
+//  2. A continuation that changed nothing and completed its checkpoint binds
+//     to that checkpoint, under checkpointCommitOf's proof (#489).
+//  3. Anything else has no commit to bind to (inspectHandoff says so).
+func handoffCommitOf(operations map[string]RunOperation, events []EngineeringEvent, reportingID string) (handoffCommit, string, error) {
+	if commit, ok := succeededOperation(operations, OpCandidateCommit, operationKey(OpCandidateCommit, reportingID)); ok {
+		return handoffCommit{commit.ID, EventCandidateCommitted}, "", nil
+	}
+	checkpoint, ok := completedCheckpoint(operations[reportingID])
+	if !ok {
+		return handoffCommit{}, "", nil
+	}
+	return checkpointCommitOf(events, reportingID, checkpoint)
+}
+
+// completedCheckpoint names the checkpoint commit a succeeded, zero-delta
+// continuation was created to complete, from the operation's own durable
+// binding (continuation|<commit>) and the runtime's admission of its
+// checkpoint-completion claim - never from anything the provider wrote.
+func completedCheckpoint(op RunOperation) (string, bool) {
+	var result mutationResult
+	if op.Kind != OpExecutionInvoke || op.State != Succeeded || len(op.Result) == 0 ||
+		json.Unmarshal(op.Result, &result) != nil || result.Mutated || !result.CheckpointResolved {
+		return "", false
+	}
+	checkpoint, continued := strings.CutPrefix(bindingOf(op), invocationContinuationPrefix)
+	return checkpoint, continued && checkpoint != ""
+}
+
+// checkpointCommitOf is the specific binding proof for a continuation that
+// completed checkpoint C without a newer mutation (#489). It is NOT "there is
+// a current candidate, so bind to it": each answer comes from the journal,
+// and any answer that is not exactly one is a refusal.
+//
+//   - C was journalled as a checkpoint exactly once, by a runtime commit;
+//   - nothing after that checkpoint moved the candidate head, so C is still
+//     the run's current candidate and nothing superseded it;
+//   - the reporting continuation's own execution.completed names C's exact
+//     commit and tree as the subject it completed.
+func checkpointCommitOf(events []EngineeringEvent, reportingID, checkpoint string) (handoffCommit, string, error) {
+	at, found := -1, 0
+	var tree string
+	for i, event := range events {
+		if event.Type != EventCandidateCheckpointed {
+			continue
+		}
+		payload, err := decodePayload[CandidateCommittedPayload](event.Payload)
+		if err != nil {
+			return handoffCommit{}, "", err
+		}
+		if payload.Commit == checkpoint {
+			at, tree, found = i, payload.Tree, found+1
+		}
+	}
+	if found != 1 {
+		return handoffCommit{}, fmt.Sprintf("unbindable: the continuation's checkpoint %s is journalled %d times, not exactly once", checkpoint, found), nil
+	}
+	completed := false
+	for _, event := range events[at+1:] {
+		switch event.Type {
+		case EventCandidateCommitted, EventCandidateCheckpointed, EventCandidateBaseIntegrated:
+			return handoffCommit{}, fmt.Sprintf("unbindable: checkpoint %s was superseded as the run's candidate before its continuation's handoff was admitted", checkpoint), nil
+		case EventExecutionCompleted:
+			if event.OperationID != reportingID {
+				continue
+			}
+			payload, err := decodePayload[ExecutionCompletedPayload](event.Payload)
+			if err != nil {
+				return handoffCommit{}, "", err
+			}
+			completed = payload.SubjectCommit == checkpoint && payload.SubjectTree == tree
+		}
+	}
+	if !completed {
+		return handoffCommit{}, fmt.Sprintf("unbindable: the continuation's completion is not journalled against checkpoint %s and its exact tree", checkpoint), nil
+	}
+	return handoffCommit{events[at].OperationID, EventCandidateCheckpointed}, "", nil
 }
 
 func succeededOperation(operations map[string]RunOperation, kind, key string) (RunOperation, bool) {

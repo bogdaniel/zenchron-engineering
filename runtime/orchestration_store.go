@@ -101,6 +101,23 @@ func decodeOrchestrationBatch(document string) (orchestration.Batch, error) {
 // already admitted under this identity is left exactly as it was, so a second
 // admission pass cannot rewrite history.
 func (s *SQLiteOperationStore) AdmitHandoff(handoff orchestration.EngineeringHandoff) (bool, error) {
+	return s.admitHandoff(handoff, 0)
+}
+
+// AdmitCheckpointHandoff inserts only if no candidate movement followed the
+// journal snapshot that proved the checkpoint binding. validatedThrough is that
+// snapshot's last run-local sequence. SQLite serializes the conditional INSERT
+// with AppendEvent's writes, including writers using another store/process.
+// false means either the proof lost currentness or this identity already exists;
+// the caller must replay before making another admission decision.
+func (s *SQLiteOperationStore) AdmitCheckpointHandoff(handoff orchestration.EngineeringHandoff, validatedThrough int64) (bool, error) {
+	if validatedThrough <= 0 {
+		return false, errors.New("checkpoint handoff admission requires a validated journal sequence")
+	}
+	return s.admitHandoff(handoff, validatedThrough)
+}
+
+func (s *SQLiteOperationStore) admitHandoff(handoff orchestration.EngineeringHandoff, validatedThrough int64) (bool, error) {
 	if err := handoff.Validate(); err != nil {
 		return false, err
 	}
@@ -109,8 +126,16 @@ func (s *SQLiteOperationStore) AdmitHandoff(handoff orchestration.EngineeringHan
 		return false, err
 	}
 	result, err := s.db.Exec(`INSERT INTO orchestration_handoffs (id, batch_id, run_id, admitted_unix_nano, document)
-		VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
-		handoff.ID, handoff.BatchID, handoff.RunID, handoff.AdmittedAt.UnixNano(), string(document))
+		SELECT ?, ?, ?, ?, ?
+		WHERE ? = 0 OR (
+			EXISTS (SELECT 1 FROM events WHERE stream_kind = ? AND run_id = ? AND sequence = ?)
+			AND NOT EXISTS (SELECT 1 FROM events WHERE stream_kind = ? AND run_id = ?
+				AND sequence > ? AND type IN (?, ?, ?))
+		) ON CONFLICT(id) DO NOTHING`,
+		handoff.ID, handoff.BatchID, handoff.RunID, handoff.AdmittedAt.UnixNano(), string(document),
+		validatedThrough, streamRun, handoff.RunID, validatedThrough,
+		streamRun, handoff.RunID, validatedThrough,
+		EventCandidateCommitted, EventCandidateCheckpointed, EventCandidateBaseIntegrated)
 	if err != nil {
 		return false, err
 	}

@@ -31,6 +31,16 @@ const (
 	fleetRepositorySeeded
 	fleetPartialHandoff
 	fleetFails
+	// The checkpoint shapes (#489): the first invocation mutates and is cut
+	// off, so the runtime checkpoints it; the continuation completes that
+	// checkpoint with a bound checkpoint-completion claim and a handoff.
+	// ThenComplete changes nothing further, ThenMutate changes more, and
+	// ThenRestatesSHA writes a handoff restating the checkpoint commit.
+	fleetCheckpointThenComplete
+	fleetCheckpointThenMutate
+	fleetCheckpointThenRestatesSHA
+	// fleetNoChangeHandoff changes nothing and writes a valid handoff.
+	fleetNoChangeHandoff
 )
 
 const fleetPartialReport = `{"schema_version":"0.1","outcome":"partial","summary":"Half of it.","unresolved":["the migration"]}`
@@ -78,6 +88,7 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 	p.active++
 	p.peak = max(p.peak, p.active)
 	p.invocations[request.RunID]++
+	invocation := p.invocations[request.RunID]
 	p.requests[request.RunID] = request
 	behaviour := p.behaviour[request.RunID]
 	p.mu.Unlock()
@@ -101,12 +112,17 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 	time.Sleep(p.hold)
 	// Prose that LOOKS like a handoff, in the place a transcript would be. It
 	// must never become one.
+	if behaviour == fleetNoChangeHandoff {
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
+	}
 	if err := os.WriteFile(filepath.Join(request.CandidateDir, "candidate.go"),
 		[]byte("package candidate\n// handoff: {\"outcome\":\"completed\"} done\nconst Run = \""+request.RunID+"\"\n"), 0o600); err != nil {
 		return ExecutionResult{}, err
 	}
 	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}
 	switch behaviour {
+	case fleetCheckpointThenComplete, fleetCheckpointThenMutate, fleetCheckpointThenRestatesSHA:
+		return fleetContinue(request, behaviour, invocation)
 	case fleetFails:
 		// A perfect handoff from an invocation that FAILED. It must never be
 		// read: an unfinished invocation contributes no handoff.
@@ -137,6 +153,30 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 		}
 	}
 	return result, nil
+}
+
+// fleetContinue is the checkpoint shape: invocation 1 rewrites candidate.go
+// and is cut off; every later one (a continuation) rewrites it identically -
+// zero delta - unless told to mutate further, states a checkpoint-completion
+// claim bound to the exact subject it was shown, and writes its handoff.
+func fleetContinue(request ExecutionRequest, behaviour fleetBehaviour, invocation int) (ExecutionResult, error) {
+	if invocation == 1 {
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureUnknown}},
+			&ProviderStopError{Reason: StopIterationBudget, Detail: "reasoning iterations exceeded 16"}
+	}
+	if behaviour == fleetCheckpointThenMutate {
+		if err := os.WriteFile(filepath.Join(request.CandidateDir, "continued.go"), []byte("package candidate\n"), 0o600); err != nil {
+			return ExecutionResult{}, err
+		}
+	}
+	report := fleetValidReport
+	if behaviour == fleetCheckpointThenRestatesSHA {
+		report = `{"schema_version":"0.1","outcome":"completed","summary":"s","candidate_revision":"` + request.Candidate.Revision + `"}`
+	}
+	return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded, Resolution: &FeedbackResolution{
+		SchemaVersion: FeedbackResolutionSchemaVersion, Resolution: FeedbackResolutionCheckpointComplete,
+		Subject: request.Candidate.Revision, Tree: request.Candidate.Tree,
+	}}, os.WriteFile(request.HandoffPath, []byte(report), 0o600)
 }
 
 // request returns the latest request one run's worker received.
