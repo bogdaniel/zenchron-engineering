@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func requireOneDeterministicFailure(t *testing.T, f *phase8Fixture, id, kind, co
 	if op.MaxAttempts != 3 || op.Attempt != 1 || op.AttemptIdentity != 1 {
 		t.Fatalf("%s spent %d budget / %d physical attempts of %d; want one of three", kind, op.Attempt, op.AttemptIdentity, op.MaxAttempts)
 	}
-	if op.Failure == nil || op.Failure.Classification != deterministicLocal || op.Failure.Code != code ||
+	if op.Failure == nil || op.Failure.Classification != deterministicLocal || op.Failure.Code != code || op.Failure.BindingScope != deterministicBindingScope ||
 		!isSHA256Hex(op.Failure.Signature) || !isSHA256Hex(op.Failure.BindingSHA256) {
 		t.Fatalf("failure identity %+v", op.Failure)
 	}
@@ -197,6 +198,138 @@ func TestRelevantCandidateChangeEnablesAnotherDeterministicAttempt(t *testing.T)
 	}
 }
 
+func TestCandidateOnlyFailureDoesNotRetryAfterPolicyOrModelChanges(t *testing.T) {
+	f, _ := newRoutingFixture(t, 3, providerAnswer{
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		mutate: func(dir string) error { return os.WriteFile(filepath.Join(dir, ".env"), []byte("fixture\n"), 0600) },
+	})
+	id := f.start()
+	f.reconcile(id)
+	before := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.sensitive_path")
+	f.deps.Policy.Revision = "irrelevant-revision"
+	rule := f.deps.Policy.Rules["service-unknown"]
+	deny := []domain.Action{{Type: "unrelated", Target: "unrelated"}}
+	rule.Effect.Prohibitions = &deny
+	f.deps.Policy.Rules["service-unknown"] = rule
+	f.deps.ProjectModel.Revision = "irrelevant-model"
+	reopen(t, f)
+	if out := f.reconcile(id); out.Reason != ReasonDeterministicFailureUnchanged {
+		t.Fatalf("unrelated policy/model renewed candidate retry: %+v", out)
+	}
+	after := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.sensitive_path")
+	if !reflect.DeepEqual(before.Failure, after.Failure) {
+		t.Fatalf("unrelated policy/model changed failure identity: %+v / %+v", before.Failure, after.Failure)
+	}
+	if err := os.WriteFile(filepath.Join(candidateDir(f.stateDir, id), ".env"), []byte("different opaque fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(id)
+	requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.sensitive_path")
+	// The actual name repair, under the same changed policy, remains eligible.
+	dir := candidateDir(f.stateDir, id)
+	if err := os.Rename(filepath.Join(dir, ".env"), filepath.Join(dir, "candidate.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "candidate.go"), []byte("package candidate\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(id)
+	op := f.state(id).snapshot.Operations[before.ID]
+	if op.Attempt != 2 || op.State != Succeeded || op.Failure != nil {
+		t.Fatalf("candidate repair did not renew retry: %+v", op)
+	}
+}
+
+func TestIndexFlagFailureRequiresFlagChange(t *testing.T) {
+	f, _ := newRoutingFixture(t, 3, providerAnswer{
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		mutate: func(dir string) error {
+			if err := writesCandidate(dir); err != nil {
+				return err
+			}
+			_, err := runGit(dir, "update-index", "--assume-unchanged", "README.md")
+			return err
+		},
+	})
+	id := f.start()
+	f.reconcile(id)
+	before := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.index_flags")
+	f.deps.Policy.Revision = "unrelated"
+	reopen(t, f)
+	dir := candidateDir(f.stateDir, id)
+	if err := os.WriteFile(filepath.Join(dir, "candidate.go"), []byte("package candidate // changed bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(id)
+	requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.index_flags")
+	mustGit(t, dir, "update-index", "--no-assume-unchanged", "README.md")
+	f.reconcile(id)
+	if op := f.state(id).snapshot.Operations[before.ID]; op.Attempt != 2 || op.State != Succeeded {
+		t.Fatalf("flag repair did not enable retry: %+v", op)
+	}
+}
+
+func TestStagedCredentialFailureIgnoresChangesOutsideItsSubject(t *testing.T) {
+	f, _ := newRoutingFixture(t, 3, providerAnswer{
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		mutate: func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "leaked.txt"), []byte(githubClassicTokenValue()), 0600)
+		},
+	})
+	id := f.start()
+	f.reconcile(id)
+	before := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.staged_credential_value")
+	if string(before.Failure.CheckPath) != "leaked.txt" {
+		t.Fatalf("typed check subject %+v", before.Failure)
+	}
+	f.deps.Policy.Revision = "unrelated"
+	reopen(t, f)
+	dir := candidateDir(f.stateDir, id)
+	if err := os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("unrelated bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dir, "update-index", "--chmod=+x", "leaked.txt")
+	f.reconcile(id)
+	requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.staged_credential_value")
+	if err := os.WriteFile(filepath.Join(dir, "leaked.txt"), []byte("ordinary safe fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(id)
+	if op := f.state(id).snapshot.Operations[before.ID]; op.Attempt != 2 || op.State != Succeeded {
+		t.Fatalf("credential subject repair did not enable retry: %+v", op)
+	}
+}
+
+func TestResidueFailureRequiresResidueRepair(t *testing.T) {
+	f := newPhase8Fixture(t)
+	withAfterCommitUpdateRef(t, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "residue.go"), []byte("package residue\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	id := f.start()
+	f.reconcile(id)
+	before := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.residue")
+	f.deps.Policy.Revision = "unrelated"
+	reopen(t, f)
+	dir := candidateDir(f.stateDir, id)
+	if err := os.WriteFile(filepath.Join(dir, "residue.go"), []byte("package residue // changed bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(id)
+	requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "candidate.residue")
+	if err := os.Remove(filepath.Join(dir, "residue.go")); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(id)
+	if op := f.state(id).snapshot.Operations[before.ID]; op.Attempt != 2 || op.State != Succeeded {
+		t.Fatalf("residue repair did not enable retry: %+v", op)
+	}
+	if _, _, count := runtimeCommitsPastBase(t, f, id); count != "1" {
+		t.Fatalf("recovery produced %s commits, want one", count)
+	}
+}
+
 func TestRelevantPolicyChangeEnablesCheckpointRecovery(t *testing.T) {
 	f, id := checkpointConflictFixture(t)
 	f.reconcile(id)
@@ -215,6 +348,25 @@ func TestRelevantPolicyChangeEnablesCheckpointRecovery(t *testing.T) {
 	}
 	if _, _, count := runtimeCommitsPastBase(t, f, id); count != "1" {
 		t.Fatalf("recovery made %s commits", count)
+	}
+}
+
+func TestRelevantModelChangeEnablesCheckpointRecovery(t *testing.T) {
+	f, id := checkpointConflictFixture(t)
+	f.reconcile(id)
+	before := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "policy.compile")
+	boundaries := map[string]domain.CriticalBoundary{
+		"service": {Type: "service", Paths: []string{"candidate.go"}},
+	}
+	f.deps.ProjectModel.CriticalBoundaries = &boundaries
+	f.deps.ProjectModel.Revision = "2"
+	reopen(t, f)
+	f.reconcile(id)
+	if op := f.state(id).snapshot.Operations[before.ID]; op.Attempt != 2 || op.State != Succeeded || op.Failure != nil {
+		t.Fatalf("model inputs did not enable checkpoint recovery: %+v", op)
+	}
+	if _, _, count := runtimeCommitsPastBase(t, f, id); count != "1" {
+		t.Fatalf("model recovery made %s commits", count)
 	}
 }
 
@@ -257,7 +409,7 @@ func TestRestartBetweenDeterministicFailureAndReconciliationDoesNotRepeat(t *tes
 		t.Fatalf("restart outcome %+v", out)
 	}
 	after := requireOneDeterministicFailure(t, f, id, OpCandidateCommit, "policy.compile")
-	if *before.Failure != *after.Failure {
+	if !reflect.DeepEqual(before.Failure, after.Failure) {
 		t.Fatalf("restart changed failure: %+v / %+v", before.Failure, after.Failure)
 	}
 }
@@ -282,4 +434,27 @@ func TestUnclassifiedFailureIsNotGuessedDeterministic(t *testing.T) {
 	if out.Reason != OpCandidateCommit+attemptsExhaustedSuffix || op.Attempt != 3 || op.Failure != nil {
 		t.Fatalf("unknown analyzer failure was guessed deterministic: %+v / %+v", out, op)
 	}
+}
+
+func TestUnclassifiedRecoveryInfrastructureFailureIsNotGuessedDeterministic(t *testing.T) {
+	f := newPhase8Fixture(t)
+	withAfterCommitUpdateRef(t, func(dir string) {
+		store := subjectStoreDir(dir)
+		if err := os.RemoveAll(store); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(store, []byte("unavailable object-store directory\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	id := f.start()
+	out := f.reconcile(id)
+	op := failedOperation(t, f, id, OpCandidateCommit)
+	if out.Reason != OpCandidateCommit+attemptsExhaustedSuffix || op.Attempt != 3 || op.Failure != nil {
+		t.Fatalf("recovery I/O failure was guessed deterministic: %+v / %+v", out, op)
+	}
+	if _, _, count := runtimeCommitsPastBase(t, f, id); count != "1" {
+		t.Fatalf("I/O failure lost or repeated the runtime commit: %s", count)
+	}
+	notPublished(t, f, id)
 }

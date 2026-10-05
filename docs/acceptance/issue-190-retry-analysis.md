@@ -87,6 +87,26 @@ No model reasoning, error-string match, sleep or retry timer decides equality.
 - Restart after `operation.after` and before the next reconciliation retains
   the failure identity and refuses another attempt.
 - An identical unclassified analyzer error remains unclassified.
+- Unavailable post-commit recovery storage remains an I/O error, rather than
+  inheriting the original integrity refusal's deterministic classification.
+- Candidate-only failures survive policy/model edits without another attempt.
+  Name, flag and residue checks also ignore byte edits that cannot fix their
+  predicate. Actual path/flag/residue repairs renew eligibility. Staged credential
+  identity captures its file subject and ignores other files/index mode bits.
+- A changed boundary model that actually changes compiled facts recovers the
+  existing checkpoint, just as a repaired policy does.
+
+`runtime/deterministic_wait_accounting_test.go` adds explicit timestamp proof:
+the durable failure opens a wait, an hour of idle time stays excluded across
+restart, the same operation's retry closes it at `operation.before`, two minutes
+of recovery and three later minutes are charged, and another restart retains
+that closed interval. Advancing past the frozen wall limit then stops the run.
+Separate timestamp cases preserve other operations' probes and a new failure's
+new wait. The scope inventory is normative in the runtime spec above; no common
+source/policy/configuration basis remains for candidate-only checks.
+Journal round trips preserve captured filename bytes. Restart with an older
+draft's unversioned binding reports unresolved identity without granting a new
+attempt merely because the binding definition changed.
 
 Existing retry-routing, connectivity, provider-wait, deadline, checkpoint,
 reviewer-protocol and post-commit recovery tests cover the preserved paths.

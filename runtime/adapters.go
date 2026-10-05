@@ -594,7 +594,7 @@ func GuardCandidatePathShape(root string, paths []string) error {
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return deterministicRefusal("candidate.symlink", fmt.Errorf("symlink candidate path %q", normalized))
+			return deterministicPathRefusal("candidate.symlink", normalized, fmt.Errorf("symlink candidate path %q", normalized))
 		}
 	}
 	return nil
@@ -637,7 +637,7 @@ func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normal
 		// credential_policy.go permanently unopenable by the engineering
 		// system that has to maintain them.
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
-			return deterministicRefusal("candidate.sensitive_path", fmt.Errorf("sensitive candidate path %q", normalized))
+			return deterministicPathRefusal("candidate.sensitive_path", normalized, fmt.Errorf("sensitive candidate path %q", normalized))
 		}
 		size, ok := sizeOf(normalized)
 		if !ok {

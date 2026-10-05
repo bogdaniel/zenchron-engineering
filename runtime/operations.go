@@ -45,10 +45,10 @@ type journalEntry struct {
 // effect is a handler's complete answer: what to journal, what to remember on
 // the operation, and how the operation ended.
 type effect struct {
-	deterministicCode string
-	events            []journalEntry
-	result            any
-	state             OperationState
+	failure *OperationFailure
+	events  []journalEntry
+	result  any
+	state   OperationState
 	// interrupted is set only by invokeExecution, and only when an operator
 	// stop ended the attempt: no provider was started, or the provider's
 	// executor committed the stop as the owner of its termination (#213).
@@ -66,7 +66,7 @@ func failed(err error) effect {
 	if cause == TransportUnrecognized {
 		cause = ""
 	}
-	return effect{state: OperationFailed, deterministicCode: deterministicCode(err), result: struct {
+	return effect{state: OperationFailed, failure: deterministicIdentity(err), result: struct {
 		Error          string         `json:"error"`
 		FailureClass   FailureClass   `json:"failure_class,omitempty"`
 		TransportCause TransportCause `json:"transport_cause,omitempty"`
@@ -2022,7 +2022,7 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	var recovered *CommitResult
 	if err != nil {
 		if workspace, recovered, err = r.recoverRuntimeCommit(state, prior, err); err != nil {
-			return effect{state: OperationFailed, deterministicCode: deterministicCode(err), result: commitFailure{
+			return effect{state: OperationFailed, failure: deterministicIdentity(err), result: commitFailure{
 				Error: boundedDetail(err.Error()), Stage: commitStageWorkspace,
 				RuntimeCommit: prior, UnprovenHead: r.refusedHead(state, prior),
 			}}
@@ -2147,7 +2147,7 @@ type observedHead struct {
 }
 
 func commitFailed(stage string, err error, made *runtimeCommit) effect {
-	return effect{state: OperationFailed, deterministicCode: deterministicCode(err), result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
+	return effect{state: OperationFailed, failure: deterministicIdentity(err), result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
 }
 
 func candidateCommitMessage(state *runState) string {
@@ -2230,7 +2230,7 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	}
 	head, err := readHead(dir)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	if prior == nil {
 		return refuse("no attempt recorded a runtime commit, so the head is unproven")
@@ -2243,15 +2243,15 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	// Commit records lists both sides.
 	store, err := subjectStore(dir, head.Commit)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	paths, err := diffPaths(store, expected, head.Commit, "--no-renames")
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	metadata, err := gitMetadataDigest(dir)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	switch {
 	case pathsDigest(paths) != prior.PathsDigest:
@@ -2261,10 +2261,10 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	}
 	residue, err := dirtyPathsOutside(dir, prior.ExcludedPaths)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	if len(residue) > 0 {
-		return refuse("work is still uncommitted: " + quotedPaths(residue))
+		return nil, nil, deterministicRefusal("candidate.residue", fmt.Errorf("%v; work is still uncommitted: %s", cause, quotedPaths(residue)))
 	}
 	return &CandidateWorkspace{
 			Dir: dir, BaseRevision: state.baseRevision(), TrustedMetadata: metadata,

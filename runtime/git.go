@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -831,19 +832,31 @@ func quotedPaths(paths []string) string {
 // when also assume-unchanged) or assume-unchanged (any lowercase tag) in
 // `git ls-files -v`.
 func refuseIndexFlags(dir string) error {
-	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	flagged, err := flaggedIndexEntries(dir)
 	if err != nil {
 		return err
 	}
+	if len(flagged) == 0 {
+		return nil
+	}
+	return deterministicRefusal("candidate.index_flags", fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", flagged[0][2:]))
+}
+
+func flaggedIndexEntries(dir string) ([]string, error) {
+	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var flagged []string
 	for _, rec := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
 		if len(rec) < 3 {
 			continue
 		}
 		if tag := rec[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
-			return deterministicRefusal("candidate.index_flags", fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", rec[2:]))
+			flagged = append(flagged, rec)
 		}
 	}
-	return nil
+	return flagged, nil
 }
 
 // stagedBlob is one staged addition or modification: the blob the commit
@@ -944,6 +957,10 @@ func guardStagedContent(dir string, paths []string, blobs []stagedBlob, maxBytes
 			return data, nil
 		}
 		if err := credentialContentVerdict(b.path, b.size, read, "staged blob is unreadable"); err != nil {
+			var material *CredentialMaterialError
+			if errors.As(err, &material) && material.Kind == CredentialMaterialValue {
+				return deterministicRefusal("candidate.staged_credential_value", err)
+			}
 			return err
 		}
 	}
@@ -1010,7 +1027,7 @@ func refuseWorktreeDivergence(dir string, blobs []stagedBlob) error {
 	}
 	for i, b := range blobs {
 		if hashes[i] != b.id {
-			return deterministicRefusal("candidate.worktree_divergence", fmt.Errorf("staged candidate path %q differs from its worktree file", b.path))
+			return deterministicPathRefusal("candidate.worktree_divergence", b.path, fmt.Errorf("staged candidate path %q differs from its worktree file", b.path))
 		}
 	}
 	return nil
