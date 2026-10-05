@@ -498,6 +498,80 @@ contract, and fresh exact-tree assurance.
 
 ### Retry dispositions
 
+An identical deterministic failure with no intervening relevant state change
+is not a retry candidate (#190). The shared operation gate checks this before
+`StartWithin`, so withholding an attempt spends neither attempt budget nor a
+physical attempt identity. It applies to every operation kind, including an
+operation the scheduler selected while the planner wanted a different one.
+
+Known local checks and the pure policy compiler supply typed failure causes.
+The runtime records an optional `failure` object on `operation.after`:
+`classification: deterministic_local`, a runtime-authored `code`, a canonical
+SHA-256 `signature` of that check, its typed `check_path_base64` when it has a file
+subject, and the operation binding, plus `binding_sha256`
+over relevant durable inputs. No diagnostic prose is parsed or hashed to make
+this decision, and no provider can supply the object. An error from an analyzer,
+subprocess or filesystem is not guessed deterministic merely because it repeats.
+The file subject uses Go's JSON byte-slice encoding (base64), preserving
+exact filesystem bytes instead of letting JSON replace a non-UTF-8 filename.
+
+Input bindings are check-specific. Sharing an operation does not make its
+source, policy, model or controller configuration inputs to a candidate-only
+check. Only state capable of changing the owning check renews eligibility:
+
+| Check | Relevant durable input |
+| --- | --- |
+| `policy.compile` | Compiler version, pinned source, governing contract, ProjectModel, policy and committed subject. No index or uncommitted scratch. |
+| `candidate.sensitive_path` | Whether the captured refused path would still be carried by staging. Changing its bytes or unrelated policy cannot fix its name. |
+| `candidate.credential_file`, `candidate.symlink` | The captured path's existence and file kind/name predicate. |
+| `candidate.index_flags` | Flagged index entries, without blob bytes or index timestamps. |
+| `candidate.residue` | Dirty candidate paths outside the recorded commit's exclusions. Changing residue bytes without removing its dirty path does not fix cleanliness. |
+| `candidate.metadata_integrity` | Expected revision/metadata, recorded recovery proof and observed Git metadata; no producing-operation/checkpoint labels. Failed recovery I/O is not a local integrity verdict. |
+| `candidate.visible_credential_value` | The captured candidate-visible file's content/existence/kind; no index or policy. Directory links are not followed. |
+| `candidate.staged_credential_value`, `candidate.worktree_divergence` | The captured file's bytes, index blob entries, baseline entry and resolved conversion attributes/configuration. No unrelated file content or index mode bits. |
+| `candidate.size_limit`, `candidate.empty_tree_diff` | Eligible candidate content, index, base tree and resolved conversions; size ceiling for size, executable/kind modes for tree difference. |
+| `candidate.empty`, `candidate.path_shape`, `candidate.scratch_only`, `candidate.exclusion_record_limit` | Changed paths and the structural eligibility/exclusion decision, as consumed by the owning check. |
+| `format.go_paths_missing`, `contract.semantic_claim_missing`, `kernel.source_unpinned`, `operation.handler_missing` | Respectively: Go paths, required semantic claims, source presence, installed handler implementation identity. |
+
+Index timestamps, attempt counters, journal cursor, leases, waits and time are
+excluded. Binding happens after the failed operation's partial effects, so a
+commit already made cannot count as an intervening fix on the next reconciliation.
+
+An unchanged binding settles `waiting/deterministic_failure_unchanged`. Candidate
+material and recorded runtime commits stay preserved; no assurance, publication
+or acceptance is granted by the wait. Relevant state change permits another
+attempt under the original ceilings and ordinary integrity/authority checks.
+The wait excludes idle time from active-work accounting, including downtime
+after the journalled failure and before settling the wait; the existing lifecycle
+deadline still applies. The failed operation owns that interval. Its next
+`operation.before` closes the deterministic wait at actual retry resumption;
+other operations' probes only add their work, without closing it. Retry time and
+elapsed time after recovery count normally, including after restart. A new
+deterministic failure opens a new interval. Transient classes and provider
+correction routes retain their existing semantics. Explicit `unknown` still stops; an unclassified error
+keeps its legacy budget-bounded behavior.
+
+Failure to observe inputs records `binding_error` and an empty input digest,
+persists the original outcome (including a commit already produced), and returns
+the observation error. Missing identity never proves equality. A later comparison
+also reports unreadable inputs without starting another attempt; once readable,
+an unbound prior outcome cannot prove unchanged state.
+An older draft failure missing the captured subject needed by a scoped check is
+also unresolved: it cannot manufacture another attempt by guessing the subject.
+`binding_scope: check-input-v1` identifies the scoped binding definition. An
+older draft's broad, unversioned digest or an unsupported scope cannot be
+compared as if a hash-format change were a relevant input change. Its durable
+outcome remains readable, but comparison reports unavailable identity without
+starting another attempt. No journal is rewritten or backfilled.
+
+Compatibility: the field is optional, so historical records have no inferred or
+backfilled classification. It uses the existing operation JSON and journal; no
+SQLite migration, budget reset or history rewrite occurs. New readers accept old
+journals. Older strict readers can reject new lifecycle payloads containing
+`failure`; downgrade of a store written by this version requires a compatible
+reader, not stripping the field or rewriting the journal. Mixed controllers
+remain subject to the existing identity, lease and succession gates.
+
 `RouteFailure` is the only routing table: every failure class has exactly one
 route. Some classes also carry a typed **retry disposition**, persisted on the
 operation as `retry_disposition`, which owns how a retry is accounted. The

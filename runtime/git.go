@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -422,7 +423,7 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return CommitResult{}, err
 	}
 	if len(paths) == 0 {
-		return CommitResult{}, fmt.Errorf("candidate has no changes")
+		return CommitResult{}, deterministicRefusal("candidate.empty", fmt.Errorf("candidate has no changes"))
 	}
 	// THE FILESYSTEM GATE COVERS EVERY OBSERVED PATH, because the runtime is
 	// about to join all of them onto the workspace root and stat them.
@@ -442,7 +443,7 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// left behind are named so the answer is not mistaken for "nothing
 	// happened".
 	if len(eligible) == 0 {
-		return CommitResult{}, fmt.Errorf("candidate holds no change a runtime commit can carry, only runtime-owned scratch: %s", quotedPaths(debris.Excluded))
+		return CommitResult{}, deterministicRefusal("candidate.scratch_only", fmt.Errorf("candidate holds no change a runtime commit can carry, only runtime-owned scratch: %s", quotedPaths(debris.Excluded)))
 	}
 	// THE EXCLUSION HAS TO FIT IN THE RECORD OF IT. Every excluded path is
 	// journalled in full - not truncated, not digested - so a workspace whose
@@ -455,7 +456,7 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 	// function, so the gate and the schema cannot drift into disagreeing about
 	// what is recordable. It is a deliberate ceiling, and it names every path.
 	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
-		return CommitResult{}, fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded))
+		return CommitResult{}, deterministicRefusal("candidate.exclusion_record_limit", fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded)))
 	}
 	// AN INDEX FLAG HIDES CONTENT FROM THE GATES BELOW (#435). The gates read
 	// worktree files; the commit carries index blobs. skip-worktree and
@@ -549,7 +550,7 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return CommitResult{}, err
 	}
 	if len(staged) == 0 {
-		return CommitResult{}, fmt.Errorf("candidate changes stage nothing a runtime commit can carry")
+		return CommitResult{}, deterministicRefusal("candidate.empty_tree_diff", fmt.Errorf("candidate changes stage nothing a runtime commit can carry"))
 	}
 	if err := guardStagedContent(store, staged, blobs, maxBytes); err != nil {
 		return CommitResult{}, err
@@ -607,7 +608,7 @@ func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResul
 		return result, err
 	}
 	if len(residue) > 0 {
-		return result, fmt.Errorf("candidate not clean after runtime commit: %s", quotedPaths(residue))
+		return result, deterministicRefusal("candidate.residue", fmt.Errorf("candidate not clean after runtime commit: %s", quotedPaths(residue)))
 	}
 	return result, nil
 }
@@ -831,19 +832,31 @@ func quotedPaths(paths []string) string {
 // when also assume-unchanged) or assume-unchanged (any lowercase tag) in
 // `git ls-files -v`.
 func refuseIndexFlags(dir string) error {
-	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	flagged, err := flaggedIndexEntries(dir)
 	if err != nil {
 		return err
 	}
+	if len(flagged) == 0 {
+		return nil
+	}
+	return deterministicRefusal("candidate.index_flags", fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", flagged[0][2:]))
+}
+
+func flaggedIndexEntries(dir string) ([]string, error) {
+	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var flagged []string
 	for _, rec := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
 		if len(rec) < 3 {
 			continue
 		}
 		if tag := rec[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
-			return fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", rec[2:])
+			flagged = append(flagged, rec)
 		}
 	}
-	return nil
+	return flagged, nil
 }
 
 // stagedBlob is one staged addition or modification: the blob the commit
@@ -944,6 +957,10 @@ func guardStagedContent(dir string, paths []string, blobs []stagedBlob, maxBytes
 			return data, nil
 		}
 		if err := credentialContentVerdict(b.path, b.size, read, "staged blob is unreadable"); err != nil {
+			var material *CredentialMaterialError
+			if errors.As(err, &material) && material.Kind == CredentialMaterialValue {
+				return deterministicRefusal("candidate.staged_credential_value", err)
+			}
 			return err
 		}
 	}
@@ -1010,7 +1027,7 @@ func refuseWorktreeDivergence(dir string, blobs []stagedBlob) error {
 	}
 	for i, b := range blobs {
 		if hashes[i] != b.id {
-			return fmt.Errorf("staged candidate path %q differs from its worktree file", b.path)
+			return deterministicPathRefusal("candidate.worktree_divergence", b.path, fmt.Errorf("staged candidate path %q differs from its worktree file", b.path))
 		}
 	}
 	return nil

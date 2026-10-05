@@ -482,6 +482,16 @@ account. That time is a floor: a parked
 run gets a supervisor turn at most every 4 poll intervals, so the probe can
 land up to that much later.
 
+**A run waits with `deterministic_failure_unchanged`.**
+
+The operation already established a local contradiction against the same relevant
+inputs. `autonomy events RUN` shows its `operation.after` failure code, signature,
+input digest and original diagnostic; an existing runtime commit remains recorded
+there even if observation or reassessment failed. Correct the relevant candidate,
+contract, source, policy or environment through its ordinary governed path, then
+reconcile. Waiting longer or raising an attempt ceiling cannot resolve the
+contradiction. No authority or budget is renewed by this wait.
+
 **A run fails with `..._attempts_exhausted` or `..._failure_not_retryable`.**
 The named operation ran out of its budget, or produced a class that does not
 route to a retry. `autonomy logs RUN` shows what the worker actually said;

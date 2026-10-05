@@ -455,6 +455,7 @@ const ReasonGoalStateReached = "goal_state_reached"
 const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
 
 var externalWaitReasons = map[string]bool{
+	ReasonDeterministicFailureUnchanged: true,
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
@@ -567,6 +568,7 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSince time.Time, openWork time.Duration) {
 	var waitingSince time.Time
 	var work time.Duration
+	var deterministicOperation string
 	started := map[string]time.Time{}
 	closeWait := func(at time.Time) {
 		if waitingSince.IsZero() {
@@ -575,13 +577,16 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 		if idle := at.Sub(waitingSince) - work; idle > 0 {
 			excluded += idle
 		}
-		waitingSince, work = time.Time{}, 0
+		waitingSince, work, deterministicOperation = time.Time{}, 0, ""
 		started = map[string]time.Time{}
 	}
 	for _, event := range events {
 		switch event.Type {
 		case EventRunWaiting:
 			if externalWaitReasons[payloadReason(event.Payload)] {
+				if payloadReason(event.Payload) != ReasonDeterministicFailureUnchanged {
+					deterministicOperation = ""
+				}
 				if waitingSince.IsZero() {
 					waitingSince = event.OccurredAt
 				}
@@ -591,15 +596,25 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 		case EventRunCompleted, EventRunFailed, EventRunCancelled:
 			closeWait(event.OccurredAt)
 		case EventOperationBefore:
+			// This exact operation passed the retry gate and really resumed.
+			// Probes for other operations cannot resolve its contradiction.
+			if event.OperationID != "" && event.OperationID == deterministicOperation {
+				closeWait(event.OccurredAt)
+			}
 			if !waitingSince.IsZero() && event.OperationID != "" {
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
 			// The after record is durable before run.waiting. A crash in that
 			// gap must preserve external-wait accounting as well as the deadline.
-			if waitingSince.IsZero() {
-				var op RunOperation
-				if decodeJSON(event.Payload, &op) == nil {
+			var op RunOperation
+			if decodeJSON(event.Payload, &op) == nil {
+				if op.State == OperationFailed && op.Failure != nil {
+					if waitingSince.IsZero() {
+						waitingSince = event.OccurredAt
+					}
+					deterministicOperation = event.OperationID
+				} else if waitingSince.IsZero() {
 					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
 						waitingSince = event.OccurredAt
 					}
@@ -1945,6 +1960,16 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Failed, leased.Kind+"_failure_not_retryable")
 		return false, outcome, err
 	}
+	if identical, err := r.identicalDeterministicFailure(state, *leased); err != nil || identical {
+		if err != nil {
+			return false, Outcome{}, err
+		}
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Waiting, ReasonDeterministicFailureUnchanged)
+		return false, outcome, err
+	}
 	started, err := r.scheduler.StartWithin(leased.ID, state.attemptLimit(r.deps.Clock.Now()))
 	if err != nil {
 		return false, Outcome{}, err
@@ -1978,6 +2003,10 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	// Even a failure to observe retry inputs must not lose the attempt's
+	// outcome or a commit it already made. Persist it before reporting that
+	// observation error; missing input identity never proves equality.
+	bindingErr := r.recordDeterministicFailure(state, &finished, produced.failure)
 	// The disposition is recorded from the class; the wait and its timing only
 	// while a successor attempt exists, so the last attempt stops truthfully.
 	if finished.State == OperationFailed {
@@ -2003,6 +2032,9 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		if readErr != nil || !found || stored.State != OperationCancelled {
 			return false, Outcome{}, err
 		}
+	}
+	if bindingErr != nil {
+		return false, Outcome{}, bindingErr
 	}
 	// The next pass reloads, finds run.cancelled in replay and settles the run
 	// cancelled through the ordinary terminal path.
