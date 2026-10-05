@@ -291,6 +291,12 @@ label from a live run's issue withdraws consent and the run waits at
 `opt_in_removed`. `autonomy watch` runs the discovery loop on its own, without
 the supervisor, for an operator who wants intake and nothing else.
 
+Discovery decides from the issue's whole history, under every configuration it
+was ever worked under (#58). Only an issue with no run at all gets one; an issue
+whose runs have all finished stays finished; and an issue with live work in
+another identity space is reported, not paralleled. A configuration change is
+never itself a reason to start an issue again.
+
 ## See also
 
 - [orchestration.md](orchestration.md) — `autonomy orchestrate`: one explicit issue batch, mandatory handoffs, one status

@@ -710,7 +710,21 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{})
+			//
+			// Continuing (not an explicit new generation) never starts a run
+			// beside live work the source already has in ANOTHER identity
+			// space (#58): a configuration change is not authority to run the
+			// same issue twice.
+			if mode == AdoptCompatibleGeneration {
+				decision, err := r.sourceDecision(issue)
+				if err != nil {
+					return StartOutcome{}, err
+				}
+				if decision.State == SourceLiveElsewhere {
+					return StartOutcome{}, &SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}
+				}
+			}
+			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRun)
 			return StartOutcome{RunID: created}, err
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
@@ -836,7 +850,10 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, orchestration *RunOrchestrationBinding, stageBudget domain.StageBudget) (string, error) {
+// claim is the conditional insert that decides which process creates the run:
+// ClaimRun for an identity, ClaimUnseenSourceRun when the source must also have
+// no history at all (#58).
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, orchestration *RunOrchestrationBinding, stageBudget domain.StageBudget, claim func(EngineeringRun) (bool, error)) (string, error) {
 	now := r.deps.Clock.Now()
 	budgets := r.deps.Budgets.defaults().tightenedBy(stageBudget)
 	run := EngineeringRun{
@@ -869,7 +886,7 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 	// A caller that loses adopts the winner's run - it must not fall through to
 	// PutRun, whose upsert would overwrite the row the winner already hashed
 	// its genesis event against. See source_claim.go.
-	claimed, err := r.deps.Store.ClaimRun(run)
+	claimed, err := claim(run)
 	if err != nil {
 		return "", err
 	}
@@ -1513,6 +1530,6 @@ func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, b
 		}
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
-	created, err := r.createRun(ctx, runID, goal, &binding, nil, binding.StageBudget)
+	created, err := r.createRun(ctx, runID, goal, &binding, nil, binding.StageBudget, r.deps.Store.ClaimRun)
 	return StartOutcome{RunID: created}, err
 }
