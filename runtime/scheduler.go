@@ -231,6 +231,10 @@ type Scheduler struct {
 	MaxConcurrentRuns int
 	// MaxConcurrentObservations is the observation-class ceiling (#85).
 	MaxConcurrentObservations int
+	// Drivers is this process's record of the leases its drivers hold
+	// (#485). Shared by every Scheduler with this Owner; nil recovers only
+	// dead owners' leases.
+	Drivers *DriverLeases
 }
 
 func (s Scheduler) defaults() Scheduler {
@@ -408,12 +412,20 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 			continue
 		}
 		op.State = Leased
-		op.Lease = &Lease{Owner: s.Owner, HeartbeatAt: now, ExpiresAt: now.Add(s.LeaseDuration)}
+		// The grant is issued - and recorded as held - BEFORE the durable
+		// acquisition (#485), so no sibling driver in this process can read
+		// the new lease as one nobody here holds. The caller that receives the
+		// operation owns that grant from here and ends it with Relinquish.
+		grant := s.Drivers.issue()
+		op.Lease = &Lease{Owner: s.Owner, HeartbeatAt: now, ExpiresAt: now.Add(s.LeaseDuration), Grant: grant}
 		// Taking the lease IS taking the run-driving slot: the ceiling and the
 		// compare-and-set are one durable write. A refusal here is either a
 		// lost CAS or a full ceiling; both mean another driver owns the work,
 		// so the scan continues past it exactly as before.
 		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns, s.MaxConcurrentObservations)
+		if err != nil || !acquired {
+			s.Drivers.release(grant)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -455,8 +467,17 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 // The write is a compare-and-set, so two schedulers reclaiming the same
 // operation cannot both win, and a lost race simply leaves the operation
 // counted - the conservative answer.
+//
+// A lease THIS process left behind is the other abandoned shape (#485): its
+// owner is alive, so the dead-owner rule never applies, yet no driver here
+// holds it - the pass that took it returned without finishing it. DriverLeases
+// is what proves that, and only for a grant it issued itself; any other
+// lease is still reclaimable only when its owner is dead and it has expired.
 func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool, error) {
-	if candidate.Lease == nil || !CanAcquire(candidate, now, s.Liveness.Alive(candidate.Lease.Owner)) {
+	abandoned := func(op RunOperation) bool {
+		return op.Lease != nil && (CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) || s.stranded(op))
+	}
+	if !abandoned(candidate) {
 		return false, nil
 	}
 	op, revision, ok, err := s.Store.Operation(candidate.ID)
@@ -466,7 +487,7 @@ func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool
 	if op.State != Leased && op.State != Running {
 		return true, nil
 	}
-	if op.Lease == nil || !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+	if !abandoned(op) {
 		return false, nil
 	}
 	// ONLY the lease is dropped. The row goes on saying the attempt was leased

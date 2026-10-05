@@ -1826,6 +1826,27 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	if err != nil {
 		return false, Outcome{}, err
 	}
+	if leased != nil {
+		// THE DRIVER OWNS THIS LEASE UNTIL IT RETURNS, and no longer (#485).
+		// Every exit below - finished, settled, refused, or a store error
+		// between any two of its writes - ends here, and a lease still on the
+		// row then is a claim that this live process is driving work it has
+		// stopped driving. Relinquish removes that claim and only that claim;
+		// if its own write fails, the next scan in this process recovers it.
+		//
+		// A PANIC is not one of those exits. Nothing in the driving path
+		// recovers one, so it ends the process, and a crashed process cleans
+		// nothing up: its lease is recovered by the dead-owner rule, from
+		// durable state, exactly as for any other crash. The panic is
+		// re-raised unchanged rather than written through.
+		granted := *leased.Lease
+		defer func() {
+			if crashed := recover(); crashed != nil {
+				panic(crashed)
+			}
+			_ = r.scheduler.Relinquish(leased.ID, granted)
+		}()
+	}
 	if leased == nil {
 		// A pause that committed after this pass's check is why the store
 		// refused (#86). The run is left as it is rather than settled on the

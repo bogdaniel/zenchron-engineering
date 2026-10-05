@@ -571,9 +571,12 @@ func writeJSON(stdout io.Writer, value any) error {
 // construction with a different repository target, rather than two wirings that
 // can drift apart.
 type composition struct {
-	config      runtime.Config
-	store       *runtime.SQLiteOperationStore
-	owner       string
+	config runtime.Config
+	store  *runtime.SQLiteOperationStore
+	owner  string
+	// drivers is the one record of leases this process's drivers hold
+	// (#485), shared by every engine the composition builds.
+	drivers     *runtime.DriverLeases
 	model       domain.ProjectModel
 	policy      domain.EngineeringPolicy
 	artifacts   runtime.ArtifactStore
@@ -735,7 +738,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		semantic = semanticAssuranceProvider(config, artifacts)
 	}
 	return &composition{
-		config: config, store: store, owner: owner, model: model, policy: policy,
+		config: config, store: store, owner: owner, drivers: runtime.NewDriverLeases(), model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
 		agents: registry, agent: agent, feedback: feedback, planning: customization,
@@ -822,6 +825,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		// different numbers.
 		OperatorMaxConcurrentRuns: ceiling,
 		MaxConcurrentObservations: observations,
+		DriverLeases:              c.drivers,
 	})
 }
 

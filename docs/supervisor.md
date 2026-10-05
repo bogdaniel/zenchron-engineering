@@ -497,6 +497,18 @@ eligibility test; the one approximation is liveness, which a read never probes,
 so an abandoned lease counts as working or observing until a scheduler
 reclaims it.
 
+A lease is abandoned in one of two ways, and both are recovered without a
+restart. A **dead** owner's expired lease is reclaimed by any scheduler, as
+before. A lease left by **this** still-running supervisor — a driver whose pass
+returned or failed (for example on a store error) before it finished its
+operation — is given back by that driver on its way out, and if even that write
+fails, the supervisor's next scan removes it, because the supervisor knows which
+leases its own drivers hold (#485). Only the lease is removed: the operation's
+state, attempt accounting and history stay what the journal says, and a
+journalled outcome is still applied from the journal. A live owner's lease that
+one of its drivers still holds — this supervisor's or another process's — is
+never taken.
+
 What the work ceiling bounds is **reconciliation work**, not specifically the
 expensive part of it: assurance, commits and publication are work too, so the
 bound is coarser than "N concurrent provider invocations". A slot is held for as long as the run
