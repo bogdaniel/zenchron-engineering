@@ -51,6 +51,11 @@ controller created it)`, then drives the run until it settles.
 - adoption is refused when a DIFFERENT controller build or configuration created
   the live generation: reconciling it here would drive another controller's work
   under this one.
+- an ordinary start is also refused when the issue's live run lives in another
+  identity space - created under a previous configuration, or by a plan stage or
+  an orchestration batch - because a configuration change is not authority to
+  run the same issue twice. The refusal names that run. `--new-generation` is
+  the deliberate way to start fresh work beside it.
 - `--dangerous-permission-bypass` requests the provider's unsafe permission
   mode for this invocation. It is refused before any process starts unless that
   agent's configuration also sets `allow_permission_bypass`. Two independent

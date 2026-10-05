@@ -353,36 +353,56 @@ func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, n
 // Claiming and driving
 // ---------------------------------------------------------------------------
 
-// claim resolves the durable run for each consented issue, creating one where
-// none exists. Creation goes through StartOrResumeIssueRun, which derives the
-// identity from the repository, the issue and the configuration digest and
-// takes it with the atomic source claim - so two watchers that discover the
-// same issue converge on one run instead of racing to create two.
+// claim resolves the durable run for each consented issue from the SOURCE'S
+// whole history (#58), across every configuration identity space:
+//
+//   - a live run in this controller's space is resumed;
+//   - a live run anywhere else is reported as a boundary and never paralleled;
+//   - a source whose runs are all terminal is settled, and a standing label
+//     does not start it again - a new generation is an explicit operator act;
+//   - only a source with no history at all gets a run, through a claim that
+//     re-checks "no history" in the same statement, so two watchers - even
+//     under different configurations - cannot both create one.
 //
 // Claiming makes no forge call and holds no capacity: it is discovery, and it
 // happens whether or not there is a slot to drive anything in.
 func (w *WatchController) claim(ctx context.Context, engine *EngineeringRuntime, report *RepositoryWatchReport, issues []int) []string {
 	runIDs := make([]string, 0, len(issues))
 	for _, issue := range issues {
-		runID, live, exhausted, err := issueRun(engine, issue)
+		// This controller's own live run is resumed from its own identity
+		// space alone: driving work already admitted must not depend on
+		// unrelated history being readable. Only deciding to CREATE work
+		// reads the source's whole history.
+		own, live, err := engine.liveRunInThisSpace(issue)
 		if err != nil {
 			report.note(fmt.Sprintf("issue %d: %v", issue, err))
 			continue
 		}
-		switch {
-		case live:
-			runIDs = append(runIDs, runID)
-		case exhausted:
-			// Every generation of this issue has already terminated. Discovery
-			// does not re-run finished work: starting a new generation is an
-			// explicit operator action, not something a standing label repeats.
-		default:
-			created, err := engine.StartOrResumeIssueRun(ctx, issue)
+		if live {
+			runIDs = append(runIDs, own)
+			continue
+		}
+		decision, err := engine.sourceDecision(issue)
+		if err != nil {
+			report.note(fmt.Sprintf("issue %d: %v", issue, err))
+			continue
+		}
+		switch decision.State {
+		case SourceLive:
+			runIDs = append(runIDs, decision.RunID)
+		case SourceLiveElsewhere:
+			report.note((&SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}).Error())
+		case SourceSettled:
+			// Finished work stays finished, whatever configuration finished it.
+		case SourceUnseen:
+			created, claimed, err := engine.claimUnseenSource(ctx, issue)
 			if err != nil {
 				report.note(fmt.Sprintf("issue %d: %v", issue, err))
 				continue
 			}
-			runIDs = append(runIDs, created)
+			if claimed {
+				runIDs = append(runIDs, created)
+			}
 		}
 	}
 	return runIDs
@@ -463,7 +483,7 @@ func (w *WatchController) markOptInRestored(engine *EngineeringRuntime, report *
 // there is nothing to record on. An absent run is left absent and a terminal
 // run is left terminal: watch never fabricates or revives one.
 func (w *WatchController) liveRun(engine *EngineeringRuntime, report *RepositoryWatchReport, issue int) (*runState, bool) {
-	runID, live, _, err := issueRun(engine, issue)
+	runID, live, err := engine.liveRunInThisSpace(issue)
 	if err != nil {
 		report.note(fmt.Sprintf("issue %d: %v", issue, err))
 		return nil, false
@@ -491,38 +511,6 @@ func (w *WatchController) appendOptIn(engine *EngineeringRuntime, report *Reposi
 		return false
 	}
 	return true
-}
-
-// issueRun resolves the durable run for one issue WITHOUT creating anything. It
-// probes the same deterministic identity space StartOrResumeIssueRun does and
-// answers one of three things: a live run to resume, that every generation of
-// this issue has terminated, or that this issue has no run at all.
-func issueRun(engine *EngineeringRuntime, issue int) (runID string, live bool, exhausted bool, err error) {
-	goal := issueGoal(engine.deps.Repository.Identity, issue)
-	for generation := 0; generation < maxRunGenerations; generation++ {
-		id, err := issueRunID(engine.deps.Repository.Identity, issue, engine.deps.ConfigDigest, generation)
-		if err != nil {
-			return "", false, false, err
-		}
-		run, ok, err := engine.deps.Store.Run(id)
-		if err != nil {
-			return "", false, false, err
-		}
-		if !ok {
-			return "", false, generation > 0, nil
-		}
-		if run.Repository != engine.deps.Repository.Identity || run.Goal != goal {
-			return "", false, false, &RunConflictError{RunID: id, Detail: "durable run describes different work"}
-		}
-		snapshot, err := engine.deps.Store.Replay(id)
-		if err != nil {
-			return "", false, false, err
-		}
-		if !terminalDisposition(snapshot.Disposition) {
-			return id, true, false, nil
-		}
-	}
-	return "", false, true, nil
 }
 
 // ---------------------------------------------------------------------------

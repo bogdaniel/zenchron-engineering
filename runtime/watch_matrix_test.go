@@ -696,13 +696,13 @@ func TestWatchMatrixA_ConcurrentDiscoveryClaimsOneRun(t *testing.T) {
 		claimed[runID] = true
 		// Each watcher resolves the same LIVE run through its own handle.
 		for _, peer := range []*watchPeer{first, second} {
-			got, live, _, err := issueRun(peer.engine, issue)
+			decision, err := peer.engine.sourceDecision(issue)
 			if err != nil {
 				t.Fatalf("%s: %v", peer.name, err)
 			}
-			if !live || got != runID {
-				t.Fatalf("%s resolved %q (live=%v) for issue %d, want the one claimed run %s",
-					peer.name, got, live, issue, runID)
+			if decision.State != SourceLive || decision.RunID != runID {
+				t.Fatalf("%s resolved %q (%s) for issue %d, want the one claimed run %s",
+					peer.name, decision.RunID, decision.State, issue, runID)
 			}
 		}
 		assertClaimedOnce(t, second.store, runID)

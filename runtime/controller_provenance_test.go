@@ -172,10 +172,14 @@ func TestConfigurationDoesNotMasqueradeAsADifferentBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondRun, err := second.StartOrResumeIssueRun(context.Background(), fixture.issue)
+	// The first run is still live, so the second configuration starts its own
+	// run only when explicitly asked to (#58): a configuration change alone is
+	// not authority to run the issue twice.
+	started, err := second.StartIssueRun(context.Background(), fixture.issue, NewGeneration)
 	if err != nil {
 		t.Fatal(err)
 	}
+	secondRun := started.RunID
 	if firstRun == secondRun {
 		t.Fatal("a configuration change did not produce a different run")
 	}
