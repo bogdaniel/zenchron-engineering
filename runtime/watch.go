@@ -369,6 +369,19 @@ func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, n
 func (w *WatchController) claim(ctx context.Context, engine *EngineeringRuntime, report *RepositoryWatchReport, issues []int) []string {
 	runIDs := make([]string, 0, len(issues))
 	for _, issue := range issues {
+		// This controller's own live run is resumed from its own identity
+		// space alone: driving work already admitted must not depend on
+		// unrelated history being readable. Only deciding to CREATE work
+		// reads the source's whole history.
+		own, live, err := engine.liveRunInThisSpace(issue)
+		if err != nil {
+			report.note(fmt.Sprintf("issue %d: %v", issue, err))
+			continue
+		}
+		if live {
+			runIDs = append(runIDs, own)
+			continue
+		}
 		decision, err := engine.sourceDecision(issue)
 		if err != nil {
 			report.note(fmt.Sprintf("issue %d: %v", issue, err))
@@ -470,17 +483,17 @@ func (w *WatchController) markOptInRestored(engine *EngineeringRuntime, report *
 // there is nothing to record on. An absent run is left absent and a terminal
 // run is left terminal: watch never fabricates or revives one.
 func (w *WatchController) liveRun(engine *EngineeringRuntime, report *RepositoryWatchReport, issue int) (*runState, bool) {
-	decision, err := engine.sourceDecision(issue)
+	runID, live, err := engine.liveRunInThisSpace(issue)
 	if err != nil {
 		report.note(fmt.Sprintf("issue %d: %v", issue, err))
 		return nil, false
 	}
-	if decision.State != SourceLive {
+	if !live {
 		return nil, false
 	}
-	state, err := engine.load(decision.RunID)
+	state, err := engine.load(runID)
 	if err != nil {
-		report.note(decision.RunID + ": " + err.Error())
+		report.note(runID + ": " + err.Error())
 		return nil, false
 	}
 	if terminalDisposition(state.snapshot.Disposition) {

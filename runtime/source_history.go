@@ -56,6 +56,39 @@ func (s *SQLiteOperationStore) ClaimUnseenSourceRun(run EngineeringRun) (bool, e
 	return claimed == 1, err
 }
 
+// ClaimRunUnlessSourceLive is ClaimRun conditioned on the source having no
+// LIVE run, decided in the same statement. It is the ordinary start's claim:
+// finished history does not stop an explicit start, but two starts under
+// different configurations - different run identities, so ClaimRun alone
+// cannot collide them - must not both create live work for one source.
+//
+// Liveness here is the run row's disposition. A row the journal has since
+// settled reads live until it is projected, which only ever refuses a start
+// that could have proceeded, never admits one that should not.
+func (s *SQLiteOperationStore) ClaimRunUnlessSourceLive(run EngineeringRun) (bool, error) {
+	if run.ID == "" || run.Goal == "" {
+		return false, fmt.Errorf("a source claim needs the run id and its source goal")
+	}
+	document, err := CanonicalJSON(run)
+	if err != nil {
+		return false, err
+	}
+	result, err := s.db.Exec(`INSERT INTO runs (`+sqliteRunColumns+`)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM runs WHERE repository = ? AND json_extract(document, '$.goal') = ?
+			AND COALESCE(json_extract(document, '$.disposition'), '') NOT IN (?, ?, ?))
+		ON CONFLICT(id) DO NOTHING`,
+		run.ID, run.Repository, run.Base.ID, run.Base.Revision, run.Contract.ID, run.Contract.Revision,
+		run.Candidate.Branch, run.Candidate.Revision, run.Candidate.Tree, run.ControllerSHA256,
+		run.CreatedAt.UnixNano(), string(document), run.Repository, run.Goal,
+		string(Completed), string(Failed), string(Cancelled))
+	if err != nil {
+		return false, err
+	}
+	claimed, err := result.RowsAffected()
+	return claimed == 1, err
+}
+
 // SourceState is what a source's whole durable history says about it.
 type SourceState string
 
@@ -173,4 +206,53 @@ func (r *EngineeringRuntime) claimUnseenSource(ctx context.Context, issue int) (
 		return "", false, err
 	}
 	return created, true, nil
+}
+
+// liveRunInThisSpace resolves this controller's OWN live run for a source by
+// probing only its own identity space, replaying only those runs. It is what a
+// protective transition - consent withdrawn, a credential lost - targets: such
+// a stop must land on the work this controller drives even when some
+// unrelated historical run elsewhere cannot be read, so it deliberately does
+// not depend on the whole source history the way starting work does.
+func (r *EngineeringRuntime) liveRunInThisSpace(issue int) (string, bool, error) {
+	goal := issueGoal(r.deps.Repository.Identity, issue)
+	for generation := 0; generation < maxRunGenerations; generation++ {
+		id, err := issueRunID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest, generation)
+		if err != nil {
+			return "", false, err
+		}
+		run, ok, err := r.deps.Store.Run(id)
+		if err != nil {
+			return "", false, err
+		}
+		if !ok {
+			return "", false, nil
+		}
+		if run.Repository != r.deps.Repository.Identity || run.Goal != goal {
+			return "", false, &RunConflictError{RunID: id, Detail: "durable run describes different work"}
+		}
+		snapshot, err := r.deps.Store.Replay(id)
+		if err != nil {
+			return "", false, err
+		}
+		if !terminalDisposition(snapshot.Disposition) {
+			return id, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// liveSourceRunError names the live run an ordinary start's claim lost to - the
+// one ClaimRunUnlessSourceLive saw, read the same way it read it.
+func (r *EngineeringRuntime) liveSourceRunError(issue int, goal string) error {
+	runs, err := r.deps.Store.SourceRuns(r.deps.Repository.Identity, goal)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if !terminalDisposition(run.Disposition) {
+			return &SourceLiveElsewhereError{Issue: issue, RunID: run.ID}
+		}
+	}
+	return fmt.Errorf("issue %d: the start lost its claim, and no live run of the source is visible now; retry", issue)
 }

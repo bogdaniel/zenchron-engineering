@@ -715,17 +715,29 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 			// beside live work the source already has in ANOTHER identity
 			// space (#58): a configuration change is not authority to run the
 			// same issue twice.
-			if mode == AdoptCompatibleGeneration {
-				decision, err := r.sourceDecision(issue)
-				if err != nil {
-					return StartOutcome{}, err
-				}
-				if decision.State == SourceLiveElsewhere {
-					return StartOutcome{}, &SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}
-				}
+			if mode == NewGeneration {
+				created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRun)
+				return StartOutcome{RunID: created}, err
 			}
-			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRun)
-			return StartOutcome{RunID: created}, err
+			decision, err := r.sourceDecision(issue)
+			if err != nil {
+				return StartOutcome{}, err
+			}
+			if decision.State == SourceLiveElsewhere {
+				return StartOutcome{}, &SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}
+			}
+			// The decision above is a read; the claim re-decides "no live run
+			// of this source" in the same statement as the insert, so a start
+			// under another configuration racing this one cannot also win.
+			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRunUnlessSourceLive)
+			if err != nil {
+				return StartOutcome{}, err
+			}
+			if _, found, err := r.deps.Store.Run(created); err != nil || found {
+				return StartOutcome{RunID: created}, err
+			}
+			// The claim lost to a live run the read did not see; name it.
+			return StartOutcome{}, r.liveSourceRunError(issue, goal)
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
 			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}

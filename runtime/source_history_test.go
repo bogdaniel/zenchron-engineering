@@ -209,3 +209,106 @@ func TestClassifySource(t *testing.T) {
 		}
 	}
 }
+
+// TestOrdinaryStartsUnderTwoConfigurationsCreateOneLiveRun: ordinary starts
+// racing under different configurations derive different run identities, so
+// only a claim that re-decides "no live run of this source" in the insert
+// itself keeps them from both creating live work.
+func TestOrdinaryStartsUnderTwoConfigurationsCreateOneLiveRun(t *testing.T) {
+	fixture := newWatchFixture(t)
+	changed := configChange(t, fixture)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		engine := fixture.runtime
+		if i%2 == 1 {
+			engine = changed
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := engine.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
+			var elsewhere *SourceLiveElsewhereError
+			if err != nil && !errors.As(err, &elsewhere) {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if runs := runsFor(t, fixture, fixture.issue); len(runs) != 1 {
+		t.Fatalf("%d live runs for one source after racing ordinary starts", len(runs))
+	}
+}
+
+// TestConsentWithdrawalDoesNotDependOnUnrelatedHistory: a protective stop
+// lands on this controller's live run even when an old run of the same source,
+// under another configuration, cannot be replayed.
+func TestConsentWithdrawalDoesNotDependOnUnrelatedHistory(t *testing.T) {
+	fixture := newWatchFixture(t)
+	optIn(fixture.forge, fixture.issue, time.Unix(1_700_000_000, 0).UTC())
+	old := settledUnder(t, fixture, fixture.issue, Completed, "merged")
+	changed := configChange(t, fixture)
+	current, err := changed.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher := watchOver(t, fixture, []GitHubRepo{repoA},
+		map[string]*EngineeringRuntime{repoA.String(): changed}, fixture.forge, nil)
+	tick(t, watcher)
+	if _, err := fixture.store.db.Exec(`UPDATE events SET event_hash = 'tampered' WHERE run_id = ? AND sequence = 1`, old); err != nil {
+		t.Fatal(err)
+	}
+	// Still consented: the corrupt old run must not stop this controller
+	// driving the work it already owns.
+	fixture.clock.advance(2 * watchPollInterval)
+	if driven := only(t, tick(t, watcher)).Driven; !containsRun(driven, current.RunID) {
+		t.Fatalf("unrelated corrupt history stopped this controller driving its own live run: driven %v", driven)
+	}
+	optOut(fixture.forge, fixture.issue)
+	fixture.clock.advance(2 * watchPollInterval)
+	tick(t, watcher)
+	snapshot, err := fixture.store.Replay(current.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Disposition != Waiting || snapshot.Reason != WatchWaitingOptInRemoved {
+		t.Fatalf("consent was withdrawn but the live run is %s (%s): unrelated history blocked a protective stop", snapshot.Disposition, snapshot.Reason)
+	}
+	events, err := fixture.store.Events(current.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countType(events, EventSourceOptInRemoved) != 1 {
+		t.Fatalf("opt-in removal journalled %d times, want once", countType(events, EventSourceOptInRemoved))
+	}
+}
+
+// TestAnOrdinaryStartsClaimDecidesIndependentlyOfItsRead pins the atomic half
+// deterministically. Another configuration's run reads settled in its journal
+// while its row still reads live - so the start's read says "go" - and only
+// the claim, re-deciding "no live run of this source" in the insert itself,
+// can refuse. A plain ClaimRun here is the race the concurrent test samples.
+func TestAnOrdinaryStartsClaimDecidesIndependentlyOfItsRead(t *testing.T) {
+	fixture := newWatchFixture(t)
+	changed := configChange(t, fixture)
+	other, err := changed.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := changed.settle(fixture.state(other.RunID), Completed, "merged"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE runs SET document = json_set(document, '$.disposition', 'active') WHERE id = ?`, other.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if decision, err := fixture.runtime.sourceDecision(fixture.issue); err != nil || decision.State != SourceSettled {
+		t.Fatalf("setup: the read should see a settled source, got %+v (%v)", decision, err)
+	}
+	_, err = fixture.runtime.StartIssueRun(context.Background(), fixture.issue, AdoptCompatibleGeneration)
+	var elsewhere *SourceLiveElsewhereError
+	if !errors.As(err, &elsewhere) || elsewhere.RunID != other.RunID {
+		t.Fatalf("err = %v, want the claim's refusal naming %s", err, other.RunID)
+	}
+	if runs := runsFor(t, fixture, fixture.issue); len(runs) != 1 {
+		t.Fatalf("the read's stale answer admitted a second run: %d runs", len(runs))
+	}
+}
