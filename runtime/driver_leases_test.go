@@ -120,8 +120,8 @@ type acquireHook struct {
 	after func()
 }
 
-func (s *acquireHook) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
-	revision, acquired, err := s.MemoryOperationStore.AcquireOperation(op, expected, maxRuns, maxObservations)
+func (s *acquireHook) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
+	revision, acquired, err := s.MemoryOperationStore.AcquireOperation(op, expected, maxRuns, maxObservations, maxVerifications)
 	if acquired && s.after != nil {
 		after := s.after
 		s.after = nil

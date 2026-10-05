@@ -288,6 +288,7 @@ Waiting reasons, in the vocabulary `status` prints:
 | `execution_provider_rate_limited` | the provider asked to be called less often | wait; repeated rate limiting means the configured concurrency is above what that account tolerates |
 | `execution_provider_account_unavailable` | the provider refused at its own account boundary before any reasoning happened | repair the account, then `resume` |
 | `assurance_dependency_unavailable` | the verifier's environment is not there: no toolchain in the image, a missing or empty module cache, or a module the offline cache does not hold | provision it, then `resume`; the same run re-derives assurance against the same commit and tree |
+| `verification_capacity_unavailable` | the next operation is a host verification and every `max_concurrent_verifications` slot is held by another run; nothing was started and no attempt was spent | nothing: it runs when a slot frees. Not a verification failure; raise the ceiling only if the host can carry more |
 | `state_storage_exhausted` | the local state ceiling was reached before a candidate clone was allocated | free space or raise `storage.max_state_bytes`; nothing is ever reclaimed automatically to make room |
 | `github_auth_required` | the forge credential is gone | `gh auth login`, then `resume` |
 | `opt_in_removed` | the opt-in label was removed, withdrawing consent | restore the label; resuming does not restore consent |

@@ -49,7 +49,7 @@ func TestReadStoreFleetCacheFollowsTheJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uncached, err := FleetStatus(store, dir, 0, 0, at.Add(time.Hour))
+	uncached, err := FleetStatus(store, dir, 0, 0, 0, at.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestReadStoreFleetCacheDoesNotHideJournalCorruption(t *testing.T) {
 			if after.Runs[0].Error == "" {
 				t.Fatal("a journal edited in place was served from cache as healthy")
 			}
-			uncached, err := FleetStatus(store, dir, 0, 0, at)
+			uncached, err := FleetStatus(store, dir, 0, 0, 0, at)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -47,7 +47,8 @@ import (
 // moved to category S cleared, so it no longer contributes to identity.
 func controllerEffectiveOperator(o OperatorConfig) OperatorConfig {
 	o.Supervisor = SupervisorConfig{}
-	o.Watch.PollIntervalSeconds, o.Watch.MaxConcurrentRuns, o.Watch.MaxConcurrentObservations = 0, 0, 0
+	o.Watch.PollIntervalSeconds, o.Watch.MaxConcurrentRuns = 0, 0
+	o.Watch.MaxConcurrentObservations, o.Watch.MaxConcurrentVerifications = 0, 0
 	return o
 }
 
@@ -65,9 +66,10 @@ func controllerEffectiveRepository(r RepositoryConfig) RepositoryConfig {
 // values would let a binary that changed a shipped default enforce a
 // different policy under the same digest.
 type SupervisorPolicy struct {
-	MaxConcurrentRuns         int `json:"max_concurrent_runs"`
-	MaxConcurrentObservations int `json:"max_concurrent_observations"`
-	PollIntervalSeconds       int `json:"poll_interval_seconds"`
+	MaxConcurrentRuns          int `json:"max_concurrent_runs"`
+	MaxConcurrentObservations  int `json:"max_concurrent_observations"`
+	MaxConcurrentVerifications int `json:"max_concurrent_verifications"`
+	PollIntervalSeconds        int `json:"poll_interval_seconds"`
 }
 
 // SupervisorPolicy resolves the effective S policy. It is the ONE place the
@@ -80,9 +82,10 @@ func (c OperatorConfig) SupervisorPolicy() (SupervisorPolicy, error) {
 		return SupervisorPolicy{}, err
 	}
 	return SupervisorPolicy{
-		MaxConcurrentRuns:         settings.MaxConcurrentRuns,
-		MaxConcurrentObservations: settings.MaxConcurrentObservations,
-		PollIntervalSeconds:       int(settings.PollInterval / time.Second),
+		MaxConcurrentRuns:          settings.MaxConcurrentRuns,
+		MaxConcurrentObservations:  settings.MaxConcurrentObservations,
+		MaxConcurrentVerifications: settings.MaxConcurrentVerifications,
+		PollIntervalSeconds:        int(settings.PollInterval / time.Second),
 	}, nil
 }
 

@@ -1,6 +1,9 @@
 package runtime
 
-import "sort"
+import (
+	"slices"
+	"sort"
+)
 
 // CapacityClass is WHICH BOUNDED RESOURCE an operation consumes (#85). It is
 // not a statement about cost: an observation is in its own class because it
@@ -58,6 +61,51 @@ func observationKindList() []string {
 	}
 	sort.Strings(kinds)
 	return kinds
+}
+
+// verificationKinds are the WORK operations that also consume host
+// verification capacity (#490): each runs an expensive local verifier on the
+// host - assurance.go runs gofmt, go vet and go test against the exact tree.
+// A verification operation is still work, so it is bounded by
+// max_concurrent_runs AND by max_concurrent_verifications; the second ceiling
+// can only narrow how many runs drive work at once, never widen it.
+//
+// Provider reasoning (execution.invoke), semantic assurance (a provider call)
+// and the cheap gofmt remediation are not listed: what they consume is the
+// provider or nothing expensive locally. A kind not listed here is never
+// gated by verification capacity, which is the direction that cannot starve
+// work; the capacity test states every listed kind.
+var verificationKinds = []string{OpAssuranceGo}
+
+// consumesVerification reports whether kind needs a verification slot.
+func consumesVerification(kind string) bool { return slices.Contains(verificationKinds, kind) }
+
+// holdsVerificationSlot is the durable occupancy the store counts: a leased or
+// running verification operation that still carries its lease.
+func holdsVerificationSlot(op RunOperation) bool {
+	return op.Lease != nil && (op.State == Leased || op.State == Running) && consumesVerification(op.Kind)
+}
+
+// ReasonVerificationCapacity is the wait of a run whose next operation is a
+// verification that was refused because every verification slot is held by
+// another run (#490). It is not a verdict, not a failure and not a reason to
+// remediate: nothing ran, and no attempt or retry budget was spent.
+const ReasonVerificationCapacity = "verification_capacity_unavailable"
+
+// DefaultMaxConcurrentVerifications is the verification ceiling when no layer
+// states one. Two is the low end of the band #490's dogfood ruling named: one
+// go test of this size already spreads across every core, ten at once
+// overloaded the host into ten-minute test timeouts, and one would serialize
+// every verification of a fleet behind the slowest.
+const DefaultMaxConcurrentVerifications = 2
+
+// resolveMaxConcurrentVerifications applies the default and the floor of one:
+// zero or less means unstated.
+func resolveMaxConcurrentVerifications(ceiling int) int {
+	if ceiling <= 0 {
+		return DefaultMaxConcurrentVerifications
+	}
+	return ceiling
 }
 
 // DefaultMaxConcurrentObservations is the observation ceiling when no layer

@@ -263,6 +263,12 @@ type SupervisorConfig struct {
 	// has its own bound. Zero means "not stated here", which falls back to the
 	// watch bound and then to DefaultMaxConcurrentObservations.
 	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
+	// MaxConcurrentVerifications is the operator-authorized ceiling on runs
+	// running an expensive host verifier at once (#490). A verification is
+	// work, so it narrows max_concurrent_runs and never adds to it. Zero means
+	// "not stated here", which falls back to the watch bound and then to
+	// DefaultMaxConcurrentVerifications.
+	MaxConcurrentVerifications int `json:"max_concurrent_verifications,omitempty"`
 	// PollIntervalSeconds is how often a quiet supervisor looks again. Zero
 	// means "not stated here".
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
@@ -516,6 +522,9 @@ type WatchConfig struct {
 	// MaxConcurrentObservations is the watch-scope observation ceiling, combined
 	// with the supervisor's exactly as MaxConcurrentRuns is.
 	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
+	// MaxConcurrentVerifications is the watch-scope verification ceiling,
+	// combined with the supervisor's in the same way.
+	MaxConcurrentVerifications int `json:"max_concurrent_verifications,omitempty"`
 }
 
 // GCConfig is the operator's retention window for `autonomy gc`. It is
@@ -646,9 +655,10 @@ type RepositoryBudgets struct {
 // and no Label member - enrolment and the opt-in label are operator authority,
 // and repositoryWatchScope refuses either name before decoding.
 type RepositoryWatch struct {
-	PollIntervalSeconds       *int `json:"poll_interval_seconds,omitempty"`
-	MaxConcurrentRuns         *int `json:"max_concurrent_runs,omitempty"`
-	MaxConcurrentObservations *int `json:"max_concurrent_observations,omitempty"`
+	PollIntervalSeconds        *int `json:"poll_interval_seconds,omitempty"`
+	MaxConcurrentRuns          *int `json:"max_concurrent_runs,omitempty"`
+	MaxConcurrentObservations  *int `json:"max_concurrent_observations,omitempty"`
+	MaxConcurrentVerifications *int `json:"max_concurrent_verifications,omitempty"`
 }
 
 // RepositoryConfig is the tighten-only layer.
@@ -669,7 +679,9 @@ var repositoryScope = map[string]bool{"budgets": true, "watch": true}
 // and "label" are absent on purpose: a repository that could name either would
 // be enrolling itself into watch, which is exactly the authority this layer
 // does not have.
-var repositoryWatchScope = map[string]bool{"poll_interval_seconds": true, "max_concurrent_runs": true, "max_concurrent_observations": true}
+var repositoryWatchScope = map[string]bool{
+	"poll_interval_seconds": true, "max_concurrent_runs": true, "max_concurrent_observations": true, "max_concurrent_verifications": true,
+}
 
 // Config is the governing configuration for one process invocation, together
 // with the digest of exactly the two layers that produced it.
@@ -915,23 +927,26 @@ func (c *OperatorConfig) tightenWatch(watch *RepositoryWatch) error {
 	if err != nil {
 		return &ConfigError{Detail: err.Error()}
 	}
-	if proposed := watch.MaxConcurrentRuns; proposed != nil {
-		if *proposed < 1 {
-			return &ConfigError{Detail: "watch.max_concurrent_runs must be at least 1"}
+	for _, ceiling := range []struct {
+		name     string
+		proposed *int
+		bound    int
+		into     *int
+	}{
+		{"max_concurrent_runs", watch.MaxConcurrentRuns, settings.MaxConcurrentRuns, &c.Watch.MaxConcurrentRuns},
+		{"max_concurrent_observations", watch.MaxConcurrentObservations, settings.MaxConcurrentObservations, &c.Watch.MaxConcurrentObservations},
+		{"max_concurrent_verifications", watch.MaxConcurrentVerifications, settings.MaxConcurrentVerifications, &c.Watch.MaxConcurrentVerifications},
+	} {
+		if ceiling.proposed == nil {
+			continue
 		}
-		if *proposed > settings.MaxConcurrentRuns {
-			return &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten watch.max_concurrent_runs: %d exceeds the operator bound %d", *proposed, settings.MaxConcurrentRuns)}
+		if *ceiling.proposed < 1 {
+			return &ConfigError{Detail: "watch." + ceiling.name + " must be at least 1"}
 		}
-		c.Watch.MaxConcurrentRuns = *proposed
-	}
-	if proposed := watch.MaxConcurrentObservations; proposed != nil {
-		if *proposed < 1 {
-			return &ConfigError{Detail: "watch.max_concurrent_observations must be at least 1"}
+		if *ceiling.proposed > ceiling.bound {
+			return &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten watch.%s: %d exceeds the operator bound %d", ceiling.name, *ceiling.proposed, ceiling.bound)}
 		}
-		if *proposed > settings.MaxConcurrentObservations {
-			return &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten watch.max_concurrent_observations: %d exceeds the operator bound %d", *proposed, settings.MaxConcurrentObservations)}
-		}
-		c.Watch.MaxConcurrentObservations = *proposed
+		*ceiling.into = *ceiling.proposed
 	}
 	if proposed := watch.PollIntervalSeconds; proposed != nil {
 		operatorSeconds := int(settings.PollInterval / time.Second)
@@ -961,6 +976,8 @@ type WatchSettings struct {
 	MaxConcurrentRuns int
 	// MaxConcurrentObservations is the resolved observation ceiling (#85).
 	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the resolved verification ceiling (#490).
+	MaxConcurrentVerifications int
 }
 
 // validRepositoryPart bounds one side of owner/name to the characters GitHub
@@ -982,19 +999,23 @@ func validRepositoryPart(part string) bool {
 	return true
 }
 
+// stricterCeiling combines a watch and a supervisor concurrency ceiling: the
+// smaller STATED value wins, and zero or less means unstated.
+func stricterCeiling(watch, supervisor int) int {
+	if supervisor > 0 && (watch <= 0 || supervisor < watch) {
+		return supervisor
+	}
+	return watch
+}
+
 func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 	// The supervisor bounds and the watch bounds are combined by taking the
 	// STRICTER of the two, so stating one can never loosen the other and a
 	// repository that tightens the watch bound still tightens the effective
 	// one.
-	ceiling := c.Watch.MaxConcurrentRuns
-	if stated := c.Supervisor.MaxConcurrentRuns; stated > 0 && (ceiling <= 0 || stated < ceiling) {
-		ceiling = stated
-	}
-	observations := c.Watch.MaxConcurrentObservations
-	if stated := c.Supervisor.MaxConcurrentObservations; stated > 0 && (observations <= 0 || stated < observations) {
-		observations = stated
-	}
+	ceiling := stricterCeiling(c.Watch.MaxConcurrentRuns, c.Supervisor.MaxConcurrentRuns)
+	observations := stricterCeiling(c.Watch.MaxConcurrentObservations, c.Supervisor.MaxConcurrentObservations)
+	verifications := stricterCeiling(c.Watch.MaxConcurrentVerifications, c.Supervisor.MaxConcurrentVerifications)
 	interval := time.Duration(c.Watch.PollIntervalSeconds) * time.Second
 	// Only a STATED supervisor interval participates. Treating an unset zero
 	// as a candidate would let the absence of one member erase a malformed
@@ -1004,10 +1025,11 @@ func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 		interval = stated
 	}
 	settings := WatchSettings{
-		Label:                     strings.TrimSpace(c.Watch.Label),
-		PollInterval:              interval,
-		MaxConcurrentRuns:         resolveMaxConcurrentRuns(0, ceiling),
-		MaxConcurrentObservations: resolveMaxConcurrentObservations(observations),
+		Label:                      strings.TrimSpace(c.Watch.Label),
+		PollInterval:               interval,
+		MaxConcurrentRuns:          resolveMaxConcurrentRuns(0, ceiling),
+		MaxConcurrentObservations:  resolveMaxConcurrentObservations(observations),
+		MaxConcurrentVerifications: resolveMaxConcurrentVerifications(verifications),
 	}
 	if settings.Label == "" {
 		settings.Label = DefaultWatchLabel
@@ -1252,6 +1274,9 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if c.Supervisor.MaxConcurrentObservations < 0 {
 		return refuse("supervisor.max_concurrent_observations must not be negative")
+	}
+	if c.Supervisor.MaxConcurrentVerifications < 0 {
+		return refuse("supervisor.max_concurrent_verifications must not be negative")
 	}
 	if seconds := c.Supervisor.PollIntervalSeconds; seconds != 0 && seconds < MinWatchPollSeconds {
 		return refuse(fmt.Sprintf("supervisor.poll_interval_seconds must be at least %d", MinWatchPollSeconds))
