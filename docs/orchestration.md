@@ -110,6 +110,13 @@ change the candidate binds to its own newer commit, never to C, and an
 invocation with neither a commit nor a completed checkpoint stays unbindable.
 Nothing the worker writes names the commit: the report cannot carry one.
 
+Checkpoint admission uses a conditional SQLite insert against the validated
+journal sequence: if a candidate-moving event commits after the snapshot was
+read but before insertion, no handoff is inserted. The next admission pass,
+including after restart, replays that movement and records the refusal. Journal
+appends and the conditional insertion serialize in the same durable store;
+currentness holds through the admission commit.
+
 If the slot no longer holds exactly the journalled document when admission
 runs (it was changed or removed), that handoff is durably refused once and the
 item settles to `handoff_pending` with the reason. Admission needs no execution

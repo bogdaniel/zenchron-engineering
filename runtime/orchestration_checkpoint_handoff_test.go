@@ -240,3 +240,157 @@ func TestAHandoffWithNoCommitAndNoCheckpointStaysUnbindable(t *testing.T) {
 		t.Fatalf("handoff %s reason %q, want unbindable", item.Handoff, item.Reason)
 	}
 }
+
+// The wrapper intercepts only the durable I/O boundary, after the real admission
+// code has validated C and the report. Its insert still uses the real SQLite
+// store; the competing append uses a separately opened connection.
+type interleavedCheckpointHandoffStore struct {
+	*SQLiteOperationStore
+	beforeInsert func(orchestration.EngineeringHandoff, int64)
+}
+
+func (s interleavedCheckpointHandoffStore) AdmitCheckpointHandoff(handoff orchestration.EngineeringHandoff, sequence int64) (bool, error) {
+	s.beforeInsert(handoff, sequence)
+	return s.SQLiteOperationStore.AdmitCheckpointHandoff(handoff, sequence)
+}
+
+func TestCheckpointHandoffLosesToCandidateMovementBeforeInsert(t *testing.T) {
+	for _, eventType := range []string{EventCandidateCommitted, EventCandidateCheckpointed, EventCandidateBaseIntegrated} {
+		t.Run(eventType, func(t *testing.T) {
+			fixture, view, runID := checkpointedRun(t, fleetCheckpointThenComplete)
+			executeWithoutAdmission(t, fixture, runID)
+			checkpoint := theCheckpoint(t, fixture, runID)
+			writer, err := OpenSQLiteOperationStore(fixture.stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { writer.Close() })
+			batch, found, err := fixture.store.OrchestrationBatch(view.BatchID)
+			if err != nil || !found {
+				t.Fatalf("batch found=%t: %v", found, err)
+			}
+			interleaved := false
+			store := interleavedCheckpointHandoffStore{SQLiteOperationStore: fixture.store,
+				beforeInsert: func(handoff orchestration.EngineeringHandoff, sequence int64) {
+					interleaved = true
+					if handoff.Subject.CandidateRevision != checkpoint.Commit || handoff.Subject.CandidateTree != checkpoint.Tree {
+						t.Fatalf("admission did not validate checkpoint C: %+v", handoff.Subject)
+					}
+					events, err := writer.Events(runID)
+					if err != nil || len(events) == 0 || sequence != events[len(events)-1].Sequence {
+						t.Fatalf("admission did not anchor the current journal: sequence=%d err=%v", sequence, err)
+					}
+					if _, refusal, err := checkpointCommitOf(events, handoff.Producer.OperationID, checkpoint.Commit); err != nil || refusal != "" {
+						t.Fatalf("C was not current before the interleaving: refusal=%q err=%v", refusal, err)
+					}
+					var payload any = CandidateCommittedPayload{
+						Commit: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40), PathCount: 1, PathsDigest: "later",
+					}
+					if eventType == EventCandidateBaseIntegrated {
+						payload = CandidateBaseIntegratedPayload{Strategy: "rebase", BaseRevision: fixture.base,
+							Commit: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40)}
+					}
+					raw, err := marshalPayloadJSON(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					appended, err := writer.AppendEvent(EngineeringEvent{
+						SchemaVersion: SchemaVersion, ID: newEventID(runID), RunID: runID,
+						Type: eventType, OperationID: "op-concurrent-candidate-movement",
+						OccurredAt: fixture.clock.Now(), Payload: raw,
+					})
+					if err != nil || appended.Sequence <= sequence {
+						t.Fatalf("competing append did not commit after the validated snapshot: %+v (%v)", appended, err)
+					}
+				}}
+			if err := admitOrchestratedHandoff(store, fixture.stateDir, batch, batch.Items[0], fixture.clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if !interleaved {
+				t.Fatal("admission never reached the checkpoint insert boundary")
+			}
+			if handoffs, err := fixture.store.RunHandoffs(runID); err != nil || len(handoffs) != 0 {
+				t.Fatalf("checkpoint C was admitted after a concurrent candidate movement: %d handoffs (%v)", len(handoffs), err)
+			}
+			// Crash/reopen before another pass can record the refusal. The
+			// journal alone must preserve the lost admission across replay.
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenSQLiteOperationStore(fixture.stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { reopened.Close() })
+			fixture.store = reopened
+			if _, err := reopened.Replay(runID); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				admitOnce(t, fixture, view.BatchID)
+				if handoffs, err := reopened.RunHandoffs(runID); err != nil || len(handoffs) != 0 {
+					t.Fatalf("replay admitted stale checkpoint C: %d handoffs (%v)", len(handoffs), err)
+				}
+				item := itemFor(t, fixture.status(view.BatchID), runID)
+				if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.Reason, "superseded") {
+					t.Fatalf("handoff %s reason %q, want durable superseded refusal after restart", item.Handoff, item.Reason)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointHandoffAllowsNonMovingEventsBeforeInsert(t *testing.T) {
+	for _, eventType := range []string{EventCandidateQuarantined, EventCandidateExternalChanged} {
+		t.Run(eventType, func(t *testing.T) {
+			fixture, view, runID := checkpointedRun(t, fleetCheckpointThenComplete)
+			executeWithoutAdmission(t, fixture, runID)
+			checkpoint := theCheckpoint(t, fixture, runID)
+			batch, found, err := fixture.store.OrchestrationBatch(view.BatchID)
+			if err != nil || !found {
+				t.Fatalf("batch found=%t: %v", found, err)
+			}
+			interleaved := false
+			store := interleavedCheckpointHandoffStore{SQLiteOperationStore: fixture.store,
+				beforeInsert: func(handoff orchestration.EngineeringHandoff, sequence int64) {
+					interleaved = true
+					// A missing or invented high-water mark cannot authorize insertion.
+					for _, invalid := range []int64{0, -1, sequence + 1} {
+						inserted, err := fixture.store.AdmitCheckpointHandoff(handoff, invalid)
+						if inserted || (invalid <= 0 && err == nil) || (invalid > 0 && err != nil) {
+							t.Fatalf("invalid cursor %d: inserted=%t err=%v", invalid, inserted, err)
+						}
+					}
+					var payload any = CandidateExternalChangedPayload{
+						ExpectedRevision: checkpoint.Commit, ObservedRevision: strings.Repeat("a", 40),
+					}
+					if eventType == EventCandidateQuarantined {
+						payload = CandidateQuarantinedPayload{OperationID: "op-quarantine", Attempt: 1,
+							Subject: checkpoint.Commit, PathsDigest: "quarantined", Location: "quarantine"}
+					}
+					raw, err := marshalPayloadJSON(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := fixture.store.AppendEvent(EngineeringEvent{
+						SchemaVersion: SchemaVersion, ID: newEventID(runID), RunID: runID,
+						Type: eventType, OccurredAt: fixture.clock.Now(), Payload: raw,
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}}
+			if err := admitOrchestratedHandoff(store, fixture.stateDir, batch, batch.Items[0], fixture.clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if !interleaved {
+				t.Fatal("admission never reached the checkpoint insert boundary")
+			}
+			if handoff := onlyHandoff(t, fixture, runID); handoff.Subject.CandidateRevision != checkpoint.Commit {
+				t.Fatalf("handoff bound %s, want checkpoint %s", handoff.Subject.CandidateRevision, checkpoint.Commit)
+			}
+		})
+	}
+}

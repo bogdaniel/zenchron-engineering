@@ -31,7 +31,19 @@ type handoffRecords struct {
 	refused  map[string]string
 }
 
-func loadHandoffRecords(store *SQLiteOperationStore, runID string) (handoffRecords, error) {
+// orchestrationHandoffStore is the durable admission boundary. Tests interleave
+// an independent journal writer at the conditional insert, after binding proof.
+type orchestrationHandoffStore interface {
+	Run(string) (EngineeringRun, bool, error)
+	Events(string) ([]EngineeringEvent, error)
+	RunHandoffs(string) ([]orchestration.EngineeringHandoff, error)
+	RunHandoffRefusals(string) (map[string]string, error)
+	RefuseHandoff(string, string, string, string, time.Time) error
+	AdmitHandoff(orchestration.EngineeringHandoff) (bool, error)
+	AdmitCheckpointHandoff(orchestration.EngineeringHandoff, int64) (bool, error)
+}
+
+func loadHandoffRecords(store orchestrationHandoffStore, runID string) (handoffRecords, error) {
 	handoffs, err := store.RunHandoffs(runID)
 	if err != nil {
 		return handoffRecords{}, err
@@ -112,7 +124,7 @@ func inspectHandoff(runID string, events []EngineeringEvent, operations map[stri
 // projected up to it. The report is the only worker-authored part, and it is
 // admitted only if the slot still holds the exact document whose digest was
 // journalled when the invocation completed.
-func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batch orchestration.Batch, item orchestration.BatchItem, now time.Time) error {
+func admitOrchestratedHandoff(store orchestrationHandoffStore, stateDir string, batch orchestration.Batch, item orchestration.BatchItem, now time.Time) error {
 	run, found, err := store.Run(item.RunID)
 	if err != nil || !found {
 		return err
@@ -190,7 +202,7 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 	if !present || err != nil || digest != reported.ReportSHA256 {
 		return refuse(fmt.Sprintf("the report is no longer the document journalled when the invocation completed (present=%t, error=%v)", present, err))
 	}
-	_, err = store.AdmitHandoff(orchestration.EngineeringHandoff{
+	handoff := orchestration.EngineeringHandoff{
 		SchemaVersion: orchestration.EngineeringHandoffSchemaVersion,
 		ID:            finding.handoffID, BatchID: batch.ID, Issue: item.Issue, RunID: run.ID,
 		Producer: orchestration.HandoffProducer{AgentID: run.AgentID, OperationID: reported.OperationID, Attempt: reported.Attempt},
@@ -200,7 +212,16 @@ func admitOrchestratedHandoff(store *SQLiteOperationStore, stateDir string, batc
 		Governance:   orchestration.HandoffGovernance{ContractID: projected.Contract.ID, ContractRevision: projected.Contract.Revision},
 		Observed:     orchestration.HandoffObserved{ChangedPathCount: payload.PathCount, ChangedPathsDigest: payload.PathsDigest},
 		ReportSHA256: digest, ProducerReport: report, AdmittedAt: now,
-	})
+	}
+	if commit.event == EventCandidateCheckpointed {
+		// The snapshot proves the binding; SQLite must keep that proof current
+		// through insertion despite journal appends by other run drivers.
+		// A lost insert leaves no handoff; the next pass replays and refuses
+		// the superseded checkpoint (or finds an already-admitted handoff).
+		_, err = store.AdmitCheckpointHandoff(handoff, events[len(events)-1].Sequence)
+		return err
+	}
+	_, err = store.AdmitHandoff(handoff)
 	return err
 }
 
