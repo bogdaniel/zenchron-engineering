@@ -191,7 +191,11 @@ to the same state digest. Status shows `paused {since, reason, operator}` per
 run and a fleet **paused** count (a paused run holding no active operation),
 taken out of runnable/waiting, so
 `working + observing + runnable + waiting + paused + unavailable == active`. A
-paused run still settling counts as working or observing.
+paused run still settling counts as working or observing. The verification
+counts (#490) refine this partition rather than join it: `verifying` is the
+working runs holding a verification slot and `awaiting_verification` the
+runnable runs whose next operation is a verification, beside
+`verification_capacity`.
 
 Upgrade and rollback. The binary that introduces pause adds one migration,
 the partial index `events_run_pause`, applied with the schema version bump in

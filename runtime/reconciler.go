@@ -476,6 +476,13 @@ var externalWaitReasons = map[string]bool{
 	// would fix the detection and keep the accounting lie.
 	"execution_provider_unavailable":   true,
 	"assurance_dependency_unavailable": true,
+	// Every host verification slot is held by another run (#490). The run
+	// executes nothing while it waits, and charging it would turn the host's
+	// verification capacity into this run's run_wall_budget_exhausted - the
+	// exact conversion of capacity exhaustion into failure #490 forbids. The
+	// wait is bounded by the verifications holding the slots, each of which
+	// runs under its own physical deadline.
+	ReasonVerificationCapacity: true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
@@ -1854,7 +1861,17 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		if paused, err := r.deps.Store.RunPaused(state.run.ID); err != nil || paused {
 			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
 		}
-		outcome, err := r.settle(state, waitingOr(live, Waiting), "operation_unavailable")
+		reason := "operation_unavailable"
+		if consumesVerification(planned.Kind) {
+			saturated, err := r.scheduler.VerificationSaturated(state.run.ID)
+			if err != nil {
+				return false, Outcome{}, err
+			}
+			if saturated {
+				reason = ReasonVerificationCapacity
+			}
+		}
+		outcome, err := r.settle(state, waitingOr(live, Waiting), reason)
 		return false, outcome, err
 	}
 	if leased.ID != planned.ID {

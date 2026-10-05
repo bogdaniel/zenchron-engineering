@@ -51,14 +51,14 @@ type pauseAtAcquisition struct {
 	fired bool
 }
 
-func (p *pauseAtAcquisition) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
+func (p *pauseAtAcquisition) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
 	if !p.fired && op.Kind == OpExecutionInvoke {
 		p.fired = true
 		if _, err := PauseRun(p.other, p.f.clock.Now(), p.runID, "investigating", "bogdan"); err != nil {
 			p.t.Fatal(err)
 		}
 	}
-	return p.OperationStore.AcquireOperation(op, expected, maxRuns, maxObservations)
+	return p.OperationStore.AcquireOperation(op, expected, maxRuns, maxObservations, maxVerifications)
 }
 
 // TestAPauseAtAcquisitionIsRefusedByTheStore is the decisive case (#86): the
@@ -126,7 +126,7 @@ func TestPausedCountsPartitionActive(t *testing.T) {
 	if _, err := PauseRun(f.store, f.clock.Now(), paused, "count me", "bogdan"); err != nil {
 		t.Fatal(err)
 	}
-	fleet, err := FleetStatus(f.store, f.stateDir, 1, 2, f.clock.Now())
+	fleet, err := FleetStatus(f.store, f.stateDir, 1, 2, 2, f.clock.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestPausedCountsPartitionActive(t *testing.T) {
 	if _, err := UnpauseRun(f.store, f.clock.Now(), paused, "bogdan"); err != nil {
 		t.Fatal(err)
 	}
-	fleet, err = FleetStatus(f.store, f.stateDir, 1, 2, f.clock.Now())
+	fleet, err = FleetStatus(f.store, f.stateDir, 1, 2, 2, f.clock.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestASettlingPausedRunCountsAsItsActiveClass(t *testing.T) {
 			if err != nil || view.Settling == nil {
 				t.Fatalf("the pause does not report the settling operation: %+v %v", view, err)
 			}
-			fleet, err := FleetStatus(store, dir, 2, 2, now)
+			fleet, err := FleetStatus(store, dir, 2, 2, 2, now)
 			if err != nil {
 				t.Fatal(err)
 			}

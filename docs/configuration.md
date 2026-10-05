@@ -311,7 +311,23 @@ run slot, so a run waiting on review still notices its review while another
 run's long work holds every run slot. Every other operation kind, including
 any kind added later, is work and counts against `max_concurrent_runs`.
 
-These concurrency and polling members (`supervisor.*` and the three `watch.*`
+`supervisor.max_concurrent_verifications` and
+`watch.max_concurrent_verifications` bound how many runs may run an expensive
+host verifier at once (#490): today `assurance.go`, which runs gofmt, go vet
+and go test against the exact candidate tree. Same rules again - stricter
+stated value wins, zero means unstated, a negative operator value is refused,
+a repository may only tighten - and the default is 2. It is a third, separate
+ceiling, never derived from `max_concurrent_runs`: ten providers can reason at
+once while only two verifications use the host. A verification is still work,
+so it also needs a run slot; this ceiling only ever narrows how much runs at
+once and never adds to it. A verification that finds every slot held is not
+started: the run waits with the reason `verification_capacity_unavailable`,
+spends no assurance attempt, and is not charged active-work budget for the
+wait. It is never a verification failure and never remediation. An admitted
+verifier keeps its ordinary timeout semantics, and the provider attempt wall is
+unchanged - capacity is bounded by admission, not by stretching deadlines.
+
+These concurrency and polling members (`supervisor.*` and the four `watch.*`
 members above, in either layer) are **supervisor operating policy** (ADR-0003
 category S). Changing one takes effect at the next `serve` start, with an
 ordinary restart: it is not a controller configuration change, it needs no
@@ -380,6 +396,7 @@ May name:
 | `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or the operator `wall_limit_seconds` when the operator states none) |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.max_concurrent_observations` | at least 1, at or below the effective operator observation ceiling |
+| `watch.max_concurrent_verifications` | at least 1, at or below the effective operator verification ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 
 May not name, and is refused with `repository configuration may not set "X": it

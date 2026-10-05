@@ -299,6 +299,9 @@ type Dependencies struct {
 	// MaxConcurrentObservations is the operator's observation-class ceiling
 	// (#85). Zero means the default.
 	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the operator's verification ceiling
+	// (#490). Zero means the default.
+	MaxConcurrentVerifications int
 	// DriverLeases is the process's record of which leases its drivers hold
 	// (#485). Every engine of one process receives the SAME instance; nil
 	// leaves a lease this process stranded to the dead-owner rule alone.
@@ -462,10 +465,11 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		agents: d.Agents,
 		scheduler: Scheduler{
 			Store: d.Store, Clock: d.Clock, Owner: d.Owner, Liveness: d.Liveness,
-			LeaseDuration:             time.Minute,
-			MaxConcurrentRuns:         resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
-			MaxConcurrentObservations: d.MaxConcurrentObservations,
-			Drivers:                   d.DriverLeases,
+			LeaseDuration:              time.Minute,
+			MaxConcurrentRuns:          resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
+			MaxConcurrentObservations:  d.MaxConcurrentObservations,
+			MaxConcurrentVerifications: d.MaxConcurrentVerifications,
+			Drivers:                    d.DriverLeases,
 		},
 		flow:       KernelFlow{},
 		repo:       repo,
