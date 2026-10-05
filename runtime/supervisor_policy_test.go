@@ -78,9 +78,26 @@ func TestSupervisorPolicyLeavesTheControllerEffectiveDigest(t *testing.T) {
 		t.Fatalf("the supervisor policy does not carry the ceiling: %+v %+v", p2, p10)
 	}
 	base := configWith(t, dir, "")
-	watch := configWith(t, dir, `"watch": {"poll_interval_seconds": 30, "max_concurrent_runs": 3, "max_concurrent_observations": 4}`)
+	watch := configWith(t, dir, `"watch": {"poll_interval_seconds": 30, "max_concurrent_runs": 3, "max_concurrent_observations": 4, "max_concurrent_verifications": 1}`)
 	if watch.Effective != base.Effective {
 		t.Fatal("watch cadence and concurrency still decide the controller-effective configuration")
+	}
+	// The verification ceiling (#490) is S: it is in the recorded policy and
+	// never in the controller-effective identity.
+	verify := configWith(t, dir, `"supervisor": {"max_concurrent_verifications": 1}`)
+	if verify.Effective != base.Effective {
+		t.Fatal("the verification ceiling decides the controller-effective configuration")
+	}
+	pv, err := verify.SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := base.SupervisorPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pv.MaxConcurrentVerifications != 1 || pb.MaxConcurrentVerifications != DefaultMaxConcurrentVerifications {
+		t.Fatalf("the supervisor policy does not carry the effective verification ceiling: %+v %+v", pv, pb)
 	}
 	if labelled := configWith(t, dir, `"watch": {"label": "other-label"}`); labelled.Effective == base.Effective {
 		t.Fatal("the watch label is authority (C) and must still decide the controller-effective configuration")
@@ -212,10 +229,11 @@ func TestTheRecordedPolicyIsTheEnforcedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unstated != (SupervisorPolicy{MaxConcurrentRuns: 1, MaxConcurrentObservations: DefaultMaxConcurrentObservations, PollIntervalSeconds: DefaultWatchPollSeconds}) {
+	if unstated != (SupervisorPolicy{MaxConcurrentRuns: 1, MaxConcurrentObservations: DefaultMaxConcurrentObservations,
+		MaxConcurrentVerifications: DefaultMaxConcurrentVerifications, PollIntervalSeconds: DefaultWatchPollSeconds}) {
 		t.Fatalf("an unstated policy records %+v, not the defaults it enforces", unstated)
 	}
-	explicit, err := configWith(t, dir, `"supervisor": {"max_concurrent_runs": 1, "max_concurrent_observations": 2, "poll_interval_seconds": 60}`).SupervisorPolicy()
+	explicit, err := configWith(t, dir, `"supervisor": {"max_concurrent_runs": 1, "max_concurrent_observations": 2, "max_concurrent_verifications": 2, "poll_interval_seconds": 60}`).SupervisorPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -114,7 +114,7 @@ func TestFleetSummaryReportsHeldMaterial(t *testing.T) {
 		Type: EventRunFailed, OccurredAt: base, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
-	fleet, err := FleetStatus(store, dir, 0, 0, base)
+	fleet, err := FleetStatus(store, dir, 0, 0, 0, base)
 	if err != nil {
 		t.Fatal(err)
 	}

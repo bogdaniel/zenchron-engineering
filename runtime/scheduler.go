@@ -57,8 +57,12 @@ type OperationStore interface {
 	//
 	// The ceiling is PER CAPACITY CLASS (#85): only other runs holding an
 	// active operation of the acquired operation's class are counted, against
-	// maxRuns for work and maxObservations for observation.
-	AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error)
+	// maxRuns for work and maxObservations for observation. A verification
+	// operation (#490) is work that ALSO needs a verification slot: it is
+	// refused while maxVerifications other runs hold a verification operation,
+	// in the same statement, so the ceiling is durable and race-safe exactly
+	// as the class ceilings are.
+	AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error)
 }
 
 // MemoryOperationStore is the in-process test double for OperationStore. It
@@ -171,7 +175,7 @@ func (s *MemoryOperationStore) PutOperation(op RunOperation, expected int64) (in
 // in test code, which is worth less than the rule it would imitate. The rule is
 // stated against SQLite, where the run document and the acquisition are one
 // statement, by TestSQLiteAStoppedRunsOperationIsNeverAcquired.
-func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
+func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -185,17 +189,23 @@ func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if class == CapacityObservation {
 		ceiling = maxObservations
 	}
-	driven := map[string]bool{}
+	driven, verifying := map[string]bool{}, map[string]bool{}
 	for id, stored := range s.operations {
-		if stored.RunID == op.RunID && id != op.ID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
+		active := stored.Lease != nil && (stored.State == Leased || stored.State == Running)
+		if stored.RunID == op.RunID && id != op.ID && active {
 			return 0, false, nil
 		}
-		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) &&
-			OperationCapacityClass(stored.Kind) == class {
+		if stored.RunID == op.RunID || !active {
+			continue
+		}
+		if OperationCapacityClass(stored.Kind) == class {
 			driven[stored.RunID] = true
 		}
+		if holdsVerificationSlot(stored) {
+			verifying[stored.RunID] = true
+		}
 	}
-	if len(driven) >= ceiling {
+	if len(driven) >= ceiling || (consumesVerification(op.Kind) && len(verifying) >= maxVerifications) {
 		return 0, false, nil
 	}
 	s.operations[op.ID] = copyOperation(op)
@@ -231,6 +241,8 @@ type Scheduler struct {
 	MaxConcurrentRuns int
 	// MaxConcurrentObservations is the observation-class ceiling (#85).
 	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the verification ceiling (#490).
+	MaxConcurrentVerifications int
 	// Drivers is this process's record of the leases its drivers hold
 	// (#485). Shared by every Scheduler with this Owner; nil recovers only
 	// dead owners' leases.
@@ -255,6 +267,7 @@ func (s Scheduler) defaults() Scheduler {
 		s.MaxConcurrentRuns = defaultMaxConcurrentRuns
 	}
 	s.MaxConcurrentObservations = resolveMaxConcurrentObservations(s.MaxConcurrentObservations)
+	s.MaxConcurrentVerifications = resolveMaxConcurrentVerifications(s.MaxConcurrentVerifications)
 	return s
 }
 
@@ -422,7 +435,7 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		// compare-and-set are one durable write. A refusal here is either a
 		// lost CAS or a full ceiling; both mean another driver owns the work,
 		// so the scan continues past it exactly as before.
-		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns, s.MaxConcurrentObservations)
+		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns, s.MaxConcurrentObservations, s.MaxConcurrentVerifications)
 		if err != nil || !acquired {
 			s.Drivers.release(grant)
 		}
@@ -435,6 +448,26 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		return &op, nil
 	}
 	return nil, nil
+}
+
+// VerificationSaturated reports whether other runs hold every verification
+// slot (#490). It is what lets a refused verification say it is waiting on
+// capacity rather than that the operation was merely unavailable. It reads the
+// same durable occupancy AcquireOperation counts, so it is true after a
+// restart exactly when the acquisition would still refuse.
+func (s Scheduler) VerificationSaturated(runID string) (bool, error) {
+	s = s.defaults()
+	all, err := s.Store.AllOperations()
+	if err != nil {
+		return false, err
+	}
+	verifying := map[string]bool{}
+	for _, op := range all {
+		if op.RunID != runID && holdsVerificationSlot(op) {
+			verifying[op.RunID] = true
+		}
+	}
+	return len(verifying) >= s.MaxConcurrentVerifications, nil
 }
 
 // reclaimAbandoned drops the lease of one leased or running operation that NO

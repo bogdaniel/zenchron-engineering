@@ -315,7 +315,7 @@ func TestEngineAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot(t *testing.T)
 	if len(fixture.provider.requests) != invocations {
 		t.Fatal("run B executed work while A held the only work slot")
 	}
-	fleet, err := FleetStatus(fixture.store, fixture.stateDir, 1, 2, fixture.clock.Now())
+	fleet, err := FleetStatus(fixture.store, fixture.stateDir, 1, 2, 2, fixture.clock.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +431,7 @@ func TestAnUnreadableRunIsUnavailableNotWaiting(t *testing.T) {
 	if _, err := rawJournalDB(t, dir).Exec(`UPDATE events SET event_hash = ? WHERE run_id = 'r' AND sequence = 2`, strings.Repeat("0", 64)); err != nil {
 		t.Fatal(err)
 	}
-	fleet, err := FleetStatus(store, dir, 1, 2, at)
+	fleet, err := FleetStatus(store, dir, 1, 2, 2, at)
 	if err != nil {
 		t.Fatal(err)
 	}

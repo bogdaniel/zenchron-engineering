@@ -35,7 +35,7 @@ func TestSQLiteAcquisitionMatchesTerminalDisposition(t *testing.T) {
 				t.Fatal(err)
 			}
 			leased := leasedAt(op, "driver", now)
-			gotRevision, acquired, err := acquirer.AcquireOperation(leased, revision, 1, 1)
+			gotRevision, acquired, err := acquirer.AcquireOperation(leased, revision, 1, 1, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -75,7 +75,7 @@ type stopAtAcquisition struct {
 	fired   bool
 }
 
-func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations int) (int64, bool, error) {
+func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
 	if !s.fired && op.Kind == OpExecutionInvoke {
 		s.fired = true
 		if _, err := CancelRun(s.fixture.store, s.fixture.runtime.scheduler, s.fixture.clock.Now(), s.runID, "operator/stop"); err != nil {
@@ -89,7 +89,7 @@ func (s *stopAtAcquisition) AcquireOperation(op RunOperation, expected int64, ma
 			s.t.Fatalf("the stop did not commit before the acquisition: %q", run.Disposition)
 		}
 	}
-	return s.OperationStore.AcquireOperation(op, expected, maxRuns, maxObservations)
+	return s.OperationStore.AcquireOperation(op, expected, maxRuns, maxObservations, maxVerifications)
 }
 
 // TestAStopAtAcquisitionNeverExecutesTheWorkItStopped is the cancel-versus-
