@@ -229,10 +229,11 @@ func TestTheRecordedPolicyIsTheEnforcedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unstated != (SupervisorPolicy{MaxConcurrentRuns: 1, MaxConcurrentObservations: DefaultMaxConcurrentObservations, PollIntervalSeconds: DefaultWatchPollSeconds}) {
+	if unstated != (SupervisorPolicy{MaxConcurrentRuns: 1, MaxConcurrentObservations: DefaultMaxConcurrentObservations,
+		MaxConcurrentVerifications: DefaultMaxConcurrentVerifications, PollIntervalSeconds: DefaultWatchPollSeconds}) {
 		t.Fatalf("an unstated policy records %+v, not the defaults it enforces", unstated)
 	}
-	explicit, err := configWith(t, dir, `"supervisor": {"max_concurrent_runs": 1, "max_concurrent_observations": 2, "poll_interval_seconds": 60}`).SupervisorPolicy()
+	explicit, err := configWith(t, dir, `"supervisor": {"max_concurrent_runs": 1, "max_concurrent_observations": 2, "max_concurrent_verifications": 2, "poll_interval_seconds": 60}`).SupervisorPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
