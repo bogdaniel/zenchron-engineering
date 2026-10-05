@@ -98,6 +98,18 @@ contract, changed-path count and digest, and producer all come from the
 runtime's own records. The worker's report stays a claim; it authorizes
 nothing, satisfies no evidence and changes no contract.
 
+A continuation that completes a runtime-owned checkpoint without changing
+anything further has no commit of its own (#489). Its handoff binds to that
+checkpoint, and only when the runtime's own records prove all three: the
+continuation's durable binding names checkpoint C and its checkpoint-completion
+claim was admitted against C; C was journalled as a checkpoint exactly once and
+nothing after it moved the candidate head, so C is still the run's candidate;
+and the continuation's own completion is journalled against C's exact commit
+and tree. Any other answer refuses the handoff durably. A continuation that did
+change the candidate binds to its own newer commit, never to C, and an
+invocation with neither a commit nor a completed checkpoint stays unbindable.
+Nothing the worker writes names the commit: the report cannot carry one.
+
 If the slot no longer holds exactly the journalled document when admission
 runs (it was changed or removed), that handoff is durably refused once and the
 item settles to `handoff_pending` with the reason. Admission needs no execution
