@@ -367,7 +367,7 @@ func operationPayload(raw json.RawMessage) error {
 	if operation.ID == "" || operation.RunID == "" {
 		return errors.New("operation lifecycle payload requires an operation id and run id")
 	}
-	return nil
+	return operation.Failure.validate()
 }
 
 // strictJSON decodes exactly one JSON value into target, rejecting unknown

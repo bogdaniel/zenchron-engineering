@@ -498,6 +498,52 @@ contract, and fresh exact-tree assurance.
 
 ### Retry dispositions
 
+An identical deterministic failure with no intervening relevant state change
+is not a retry candidate (#190). The shared operation gate checks this before
+`StartWithin`, so withholding an attempt spends neither attempt budget nor a
+physical attempt identity. It applies to every operation kind, including an
+operation the scheduler selected while the planner wanted a different one.
+
+Known local checks and the pure policy compiler supply typed failure causes.
+The runtime records an optional `failure` object on `operation.after`:
+`classification: deterministic_local`, a runtime-authored `code`, a canonical
+SHA-256 `signature` of that check and operation binding, and `binding_sha256`
+over relevant durable inputs. No diagnostic prose is parsed or hashed to make
+this decision, and no provider can supply the object. An error from an analyzer,
+subprocess or filesystem is not guessed deterministic merely because it repeats.
+
+The input binding includes pinned source, contract, base/candidate, ProjectModel,
+policy content and controller/configuration identity. Policy resolution binds the
+committed subject; candidate checks additionally bind Git metadata, semantic
+index entries and workspace content. Index timestamps, attempt counters, journal
+cursor, leases, waits and time are excluded. Binding happens after the failed
+operation's partial effects, so a commit already made cannot count as an
+intervening fix on the next reconciliation.
+
+An unchanged binding settles `waiting/deterministic_failure_unchanged`. Candidate
+material and recorded runtime commits stay preserved; no assurance, publication
+or acceptance is granted by the wait. Relevant state change permits another
+attempt under the original ceilings and ordinary integrity/authority checks.
+The wait excludes idle time from active-work accounting, including downtime
+after the journalled failure and before settling the wait; the existing lifecycle
+deadline still applies. Transient classes and provider correction routes retain
+their existing semantics. Explicit `unknown` still stops; an unclassified error
+keeps its legacy budget-bounded behavior.
+
+Failure to observe inputs records `binding_error` and an empty input digest,
+persists the original outcome (including a commit already produced), and returns
+the observation error. Missing identity never proves equality. A later comparison
+also reports unreadable inputs without starting another attempt; once readable,
+an unbound prior outcome cannot prove unchanged state.
+
+Compatibility: the field is optional, so historical records have no inferred or
+backfilled classification. It uses the existing operation JSON and journal; no
+SQLite migration, budget reset or history rewrite occurs. New readers accept old
+journals. Older strict readers can reject new lifecycle payloads containing
+`failure`; downgrade of a store written by this version requires a compatible
+reader, not stripping the field or rewriting the journal. Mixed controllers
+remain subject to the existing identity, lease and succession gates.
+
 `RouteFailure` is the only routing table: every failure class has exactly one
 route. Some classes also carry a typed **retry disposition**, persisted on the
 operation as `retry_disposition`, which owns how a retry is accounted. The

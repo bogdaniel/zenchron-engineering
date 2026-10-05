@@ -594,7 +594,7 @@ func GuardCandidatePathShape(root string, paths []string) error {
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink candidate path %q", normalized)
+			return deterministicRefusal("candidate.symlink", fmt.Errorf("symlink candidate path %q", normalized))
 		}
 	}
 	return nil
@@ -637,7 +637,7 @@ func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normal
 		// credential_policy.go permanently unopenable by the engineering
 		// system that has to maintain them.
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
-			return fmt.Errorf("sensitive candidate path %q", normalized)
+			return deterministicRefusal("candidate.sensitive_path", fmt.Errorf("sensitive candidate path %q", normalized))
 		}
 		size, ok := sizeOf(normalized)
 		if !ok {
@@ -645,7 +645,7 @@ func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normal
 		}
 		total += size
 		if maxBytes > 0 && total > maxBytes {
-			return fmt.Errorf("candidate exceeds size ceiling")
+			return deterministicRefusal("candidate.size_limit", fmt.Errorf("candidate exceeds size ceiling"))
 		}
 	}
 	return nil
@@ -654,7 +654,7 @@ func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normal
 func normalizedCandidatePath(p string) (string, error) {
 	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{p}, PathsKnown: true})
 	if err != nil || filepath.IsAbs(p) || len(normalized.Paths) != 1 {
-		return "", fmt.Errorf("unsafe candidate path %q", p)
+		return "", deterministicRefusal("candidate.path_shape", fmt.Errorf("unsafe candidate path %q", p))
 	}
 	return normalized.Paths[0], nil
 }

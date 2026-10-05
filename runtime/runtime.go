@@ -399,6 +399,7 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
+	Failure *OperationFailure `json:"failure,omitempty"`
 	// RetryNotBefore is purely "not eligible before"; it survives restart and
 	// carries no meaning of its own. RetryDisposition says why and how the
 	// wait is accounted (retryDispositions).

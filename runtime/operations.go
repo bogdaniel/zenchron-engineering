@@ -45,9 +45,10 @@ type journalEntry struct {
 // effect is a handler's complete answer: what to journal, what to remember on
 // the operation, and how the operation ended.
 type effect struct {
-	events []journalEntry
-	result any
-	state  OperationState
+	deterministicCode string
+	events            []journalEntry
+	result            any
+	state             OperationState
 	// interrupted is set only by invokeExecution, and only when an operator
 	// stop ended the attempt: no provider was started, or the provider's
 	// executor committed the stop as the owner of its termination (#213).
@@ -65,7 +66,7 @@ func failed(err error) effect {
 	if cause == TransportUnrecognized {
 		cause = ""
 	}
-	return effect{state: OperationFailed, result: struct {
+	return effect{state: OperationFailed, deterministicCode: deterministicCode(err), result: struct {
 		Error          string         `json:"error"`
 		FailureClass   FailureClass   `json:"failure_class,omitempty"`
 		TransportCause TransportCause `json:"transport_cause,omitempty"`
@@ -115,7 +116,7 @@ func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op Run
 		OpGitHubObserve:     r.observeGitHub,
 	}[op.Kind]
 	if !ok {
-		return failed(fmt.Errorf("no handler for operation kind %q", op.Kind))
+		return failed(deterministicRefusal("operation.handler_missing", fmt.Errorf("no handler for operation kind %q", op.Kind)))
 	}
 	return handler(ctx, state, op)
 }
@@ -1965,7 +1966,7 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 	}
 	goPaths := FormatPaths(paths)
 	if len(goPaths) == 0 {
-		return failed(fmt.Errorf("format failure has no Go paths"))
+		return failed(deterministicRefusal("format.go_paths_missing", fmt.Errorf("format failure has no Go paths")))
 	}
 	if err := (LocalGofmt{}).Format(ctx, workspace.Dir, goPaths); err != nil {
 		return failed(err)
@@ -2021,7 +2022,7 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	var recovered *CommitResult
 	if err != nil {
 		if workspace, recovered, err = r.recoverRuntimeCommit(state, prior, err); err != nil {
-			return effect{state: OperationFailed, result: commitFailure{
+			return effect{state: OperationFailed, deterministicCode: deterministicCode(err), result: commitFailure{
 				Error: boundedDetail(err.Error()), Stage: commitStageWorkspace,
 				RuntimeCommit: prior, UnprovenHead: r.refusedHead(state, prior),
 			}}
@@ -2146,7 +2147,7 @@ type observedHead struct {
 }
 
 func commitFailed(stage string, err error, made *runtimeCommit) effect {
-	return effect{state: OperationFailed, result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
+	return effect{state: OperationFailed, deterministicCode: deterministicCode(err), result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
 }
 
 func candidateCommitMessage(state *runState) string {
@@ -2504,7 +2505,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	}
 	claims := state.semanticClaims()
 	if len(claims) == 0 {
-		return failed(fmt.Errorf("no semantic claim is required by this contract"))
+		return failed(deterministicRefusal("contract.semantic_claim_missing", fmt.Errorf("no semantic claim is required by this contract")))
 	}
 	paths, err := candidatePaths(workspace.Dir, state.pinnedBase(), commit)
 	if err != nil {
@@ -3097,7 +3098,7 @@ func (r *EngineeringRuntime) buildKernel(state *runState) (KernelState, error) {
 // decision identity #7 derives from it.
 func (r *EngineeringRuntime) buildKernelAt(state *runState, workspaceDir, commit string) (KernelState, error) {
 	if state.source == nil {
-		return KernelState{}, fmt.Errorf("the source snapshot has not been pinned")
+		return KernelState{}, deterministicRefusal("kernel.source_unpinned", fmt.Errorf("the source snapshot has not been pinned"))
 	}
 	text, err := r.untrustedSource(*state.source)
 	if err != nil {
