@@ -60,7 +60,7 @@ terms nobody approved.
   "default_agent": "codex",
   "github": {"credential_mode": "github-cli"},
   "budgets": {
-    "wall_limit_seconds": 1800,
+    "wall_limit_seconds": 21600,
     "max_execution_attempts": 2,
     "max_execution_continuations": 8,
     "max_remediation_attempts": 2,
