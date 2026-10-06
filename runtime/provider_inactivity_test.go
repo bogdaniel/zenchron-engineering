@@ -537,10 +537,12 @@ func TestTheProviderInactivityBudgetIsFiniteAndTightenOnly(t *testing.T) {
 	if absent.ProviderInactivitySeconds != DefaultProviderInactivitySeconds {
 		t.Fatalf("absent resolved to %ds, want the %ds default", absent.ProviderInactivitySeconds, DefaultProviderInactivitySeconds)
 	}
-	// The default is well inside the documented 1800s wall limit, which is the
-	// property that makes it a stall detector rather than a second ceiling.
-	if DefaultProviderInactivitySeconds >= 1800 {
-		t.Fatalf("the default inactivity window %ds does not bite before the documented wall limit", DefaultProviderInactivitySeconds)
+	// The shipped inactivity detector must bite well before the shipped
+	// last-resort physical fuse. They answer different questions; making the
+	// inactivity default reach the fuse would turn the fuse back into the stall
+	// detector #238 removed.
+	if DefaultProviderInactivitySeconds*time.Second >= DefaultAttemptWallLimit {
+		t.Fatalf("the default inactivity window %ds does not bite before the shipped attempt fuse %s", DefaultProviderInactivitySeconds, DefaultAttemptWallLimit)
 	}
 	// A run constructed without going through the configuration layer is still
 	// bounded. Zero here would mean "this provider may stall forever".
