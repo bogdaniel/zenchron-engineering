@@ -175,7 +175,7 @@ provider_inactivity_seconds bounds how long ONE provider invocation may go
 
 attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
                             is min(this, remaining run work) at attempt start;
-                            absent derives to wall_limit_seconds per run
+                            absent derives to min(3h, wall_limit_seconds) for new runs
 ```
 
 `wall_limit_seconds` is cumulative across every attempt; the attempt limit is
