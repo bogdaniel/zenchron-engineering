@@ -54,11 +54,14 @@ func TestOrchestrationStatusUsesCurrentDurableLifecycle(t *testing.T) {
 		journalFinished bool
 		rowFinished     bool
 		rowDisposition  Disposition
+		paused          bool
 		want            orchestration.ItemState
 		transitional    bool
 	}{
 		{name: "queued source observation", kind: OpSourceObserve, wait: ReasonObservationCapacity, want: orchestration.ItemQueued},
 		{name: "queued execution", kind: OpExecutionInvoke, wait: ReasonWorkCapacity, want: orchestration.ItemQueued},
+		{name: "operator pause overrides capacity queue", wait: ReasonObservationCapacity, paused: true, want: orchestration.ItemWaiting},
+		{name: "operator pause over active disposition", paused: true, want: orchestration.ItemWaiting, transitional: true},
 		{name: "acquired operation", kind: OpExecutionInvoke, acquire: true, want: orchestration.ItemRunning},
 		{name: "operation running", kind: OpExecutionInvoke, acquire: true, start: true, want: orchestration.ItemRunning},
 		{name: "waiting disposition while operation resumes", kind: OpExecutionInvoke, wait: ReasonWorkCapacity, acquire: true, start: true, want: orchestration.ItemRunning, transitional: true},
@@ -122,6 +125,11 @@ func TestOrchestrationStatusUsesCurrentDurableLifecycle(t *testing.T) {
 					}
 				}
 			}
+			if tc.paused {
+				if _, err := PauseRun(store, time.Unix(150, 0).UTC(), run.ID, "operator maintenance", "operator"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			batchID := lifecycleBatch(t, store, run.ID)
 			check := func(read *SQLiteOperationStore) {
 				t.Helper()
@@ -133,10 +141,13 @@ func TestOrchestrationStatusUsesCurrentDurableLifecycle(t *testing.T) {
 				if item.State != tc.want || (item.Observation == "transitioning") != tc.transitional {
 					t.Fatalf("item=%+v, want state %q transitioning=%v", item, tc.want, tc.transitional)
 				}
+				if tc.paused && item.Paused == nil {
+					t.Fatal("operator pause disappeared from status")
+				}
 				if tc.acquire && !tc.rowFinished && !item.Executing {
 					t.Fatal("owned operation vanished from status")
 				}
-				if tc.wait == ReasonObservationCapacity && !tc.acquire && (item.Capacity == nil || item.Capacity.Class != CapacityObservation || item.Capacity.Ceiling != 2) {
+				if tc.wait == ReasonObservationCapacity && !tc.acquire && !tc.paused && (item.Capacity == nil || item.Capacity.Class != CapacityObservation || item.Capacity.Ceiling != 2) {
 					t.Fatalf("capacity=%+v", item.Capacity)
 				}
 				if item.Executing && (item.State == orchestration.ItemCompleted || item.State == orchestration.ItemPartial || item.State == orchestration.ItemHandoffPending) {
@@ -428,6 +439,18 @@ func TestGrantedVerificationToolPreventsProducerSettlement(t *testing.T) {
 	if item.State != orchestration.ItemRunning || !item.Executing || len(item.VerificationTools) != 1 {
 		t.Fatalf("held nested tool reported settled: %+v", item)
 	}
+	lifecycleEvent(t, store, "r", EventRunFailed, dispositionRecord{Reason: "run_wall_budget_exhausted"})
+	run.Disposition, run.Reason = Failed, "run_wall_budget_exhausted"
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	view, err = OrchestrationStatus(store, dir, batchID, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := view.Items[0]; item.State != orchestration.ItemFailed || !item.Executing || item.Observation != "transitioning" {
+		t.Fatalf("terminal run hid retained ownership: %+v", item)
+	}
 	s.Liveness = OwnerLivenessFunc(func(owner string) bool { return owner != "tool-owner" })
 	if err := s.ReleaseVerification(permit); err != nil {
 		t.Fatal(err)
@@ -436,7 +459,7 @@ func TestGrantedVerificationToolPreventsProducerSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Items[0].Executing || view.Items[0].State != orchestration.ItemHandoffPending {
+	if view.Items[0].Executing || view.Items[0].State != orchestration.ItemFailed {
 		t.Fatalf("released tool prevents settlement: %+v", view.Items[0])
 	}
 }

@@ -37,6 +37,7 @@ type OrchestrationItemView struct {
 	// for this item, when there is one.
 	Reason   string        `json:"reason,omitempty"`
 	Capacity *CapacityWait `json:"capacity,omitempty"`
+	Paused   *RunPause     `json:"paused,omitempty"`
 	// Observation marks a durable transition between journal and row writes.
 	Observation       string      `json:"observation,omitempty"`
 	Phase             Phase       `json:"phase,omitempty"`
@@ -127,6 +128,7 @@ func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.Ba
 		return fail(fmt.Errorf("%s", summary.Error))
 	}
 	out.AgentID, out.Phase, out.Disposition, out.Reason = summary.Agent, summary.Phase, summary.Disposition, summary.Reason
+	out.Paused = summary.Paused
 	out.Branch = summary.Branch
 	out.CandidateRevision, out.CandidateTree = summary.CandidateRevision, summary.CandidateTree
 	out.PullRequest, out.PRState = summary.PullRequest, summary.PRState
@@ -186,7 +188,13 @@ func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.Ba
 	if out.Executing {
 		activity = orchestration.ActivityWorking
 		out.Capacity = nil
-		if summary.Disposition == Waiting || summary.Disposition == Completed {
+		if summary.Disposition != Active || summary.Paused != nil {
+			out.Observation = "transitioning"
+		}
+	} else if summary.Paused != nil {
+		activity = orchestration.ActivityWaiting
+		out.Capacity = nil
+		if summary.Disposition != Waiting {
 			out.Observation = "transitioning"
 		}
 	} else if out.Capacity != nil && summary.Disposition == Waiting {

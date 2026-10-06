@@ -155,6 +155,12 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 		if item.Capacity != nil {
 			reason = fmt.Sprintf("%s (%s ceiling %d)", reason, item.Capacity.Class, item.Capacity.Ceiling)
 		}
+		if item.Paused != nil {
+			reason = fmt.Sprintf("%s; paused: %s", reason, item.Paused.Reason)
+		}
+		if item.Executing && item.State != orchestration.ItemRunning {
+			reason += "; work still owned"
+		}
 		if item.Observation != "" {
 			reason = fmt.Sprintf("%s [%s]", reason, item.Observation)
 		}

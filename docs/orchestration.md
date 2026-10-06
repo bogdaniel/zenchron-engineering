@@ -161,7 +161,10 @@ SQLite snapshot. A crash can still leave durable journal/row disagreement;
 that item is counted as unknown with `observation: "transitioning"`. An owned
 operation resuming from a recorded wait reports `running`, preserves the run's
 recorded disposition and reason, and explicitly marks that transition. The text
-view prints these observations too. No batch can report completed, partial or
+view prints these observations too. An operator pause overrides a queued
+capacity wait and remains visible as `paused`; it does not interrupt work
+already owned. Terminal runs retaining owned work remain explicitly
+transitioning until ownership is released. No batch can report completed, partial or
 handoff-pending producer work while that child owns an operation or a granted
 nested verification tool. Retained tool grants remain visible in
 `verification_tools` until cleanup releases them durably.
