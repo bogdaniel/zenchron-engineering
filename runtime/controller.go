@@ -208,12 +208,13 @@ type RunBudgets struct {
 	// run active work), so a stop at this bound leaves the run able to admit a
 	// successor, while a stop at the run's remaining work exhausts the run.
 	//
-	// It is FROZEN at run creation (absent in configuration derives to
-	// WallLimit) and read back EXACTLY - never from live configuration, never
-	// as min(live, persisted). omitempty, and absent means the run predates
-	// #328 and keeps the legacy rule: the attempt is bounded by its
-	// operation's own remaining WallBudget, nothing else. Nothing is
-	// backfilled.
+	// It is FROZEN at run creation. An absent configuration value derives to
+	// min(DefaultAttemptWallLimit, WallLimit), then is read back EXACTLY - never
+	// from live configuration, never as min(live, persisted). An explicitly
+	// configured shorter fuse stays shorter. omitempty, and absent on a
+	// persisted run means the run predates #328 and keeps the legacy rule: the
+	// attempt is bounded by its operation's own remaining WallBudget, nothing
+	// else. Nothing is backfilled.
 	AttemptWallLimit time.Duration `json:"attempt_wall_limit,omitempty"`
 }
 
@@ -477,6 +478,17 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	}, nil
 }
 
+// DefaultAttemptWallLimit is the shipped last-resort fuse for one physical
+// provider invocation (#497). It is deliberately much larger than the
+// provider-inactivity window: inactivity answers "has the provider stopped
+// moving?", while this fuse answers "has this one process been alive
+// pathologically long despite every other safeguard?".
+//
+// It is resolved only when a new run freezes its RunPolicy. Configuration keeps
+// an unstated attempt wall unstated so upgrading the binary does not rewrite the
+// operator configuration digest. A shorter run wall always wins.
+const DefaultAttemptWallLimit = 3 * time.Hour
+
 func (b RunBudgets) defaults() RunBudgets {
 	if b.WallLimit <= 0 {
 		b.WallLimit = time.Hour
@@ -503,10 +515,14 @@ func (b RunBudgets) defaults() RunBudgets {
 	}
 	// THE ABSENT ATTEMPT LIMIT IS DERIVED HERE, not in the configuration
 	// layer, so it never enters the controller-effective digest (ADR-0003 §4).
-	// It derives to the run budget: an operator who states nothing keeps the
-	// one-attempt-may-spend-the-run shape they had, and every stop at that
-	// bound is now reported truthfully as run active-work exhaustion.
-	if b.AttemptWallLimit <= 0 || b.AttemptWallLimit > b.WallLimit {
+	// #497 makes that unstated value a generous, finite physical fuse rather
+	// than another spelling of the run's whole active-work budget. The run wall
+	// still wins when it is shorter: one attempt never holds more authority
+	// than the run it belongs to.
+	if b.AttemptWallLimit <= 0 {
+		b.AttemptWallLimit = DefaultAttemptWallLimit
+	}
+	if b.AttemptWallLimit > b.WallLimit {
 		b.AttemptWallLimit = b.WallLimit
 	}
 	return b
