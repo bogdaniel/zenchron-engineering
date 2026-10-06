@@ -456,8 +456,9 @@ type BudgetConfig struct {
 	// ABSENT STAYS ABSENT in the digested form - omitempty, never resolved in
 	// resolved() - so upgrading the binary does not move the Global digest of
 	// any existing configuration (ADR-0003 §4). An absent value is derived at
-	// run creation, as the run's wall limit, and frozen into run.Budgets. A
-	// stated value may not exceed wall_limit_seconds, and 0 means absent.
+	// run creation, as min(DefaultAttemptWallLimit, run wall), and frozen into
+	// run.Budgets. A stated value may not exceed wall_limit_seconds, and 0 means
+	// absent.
 	AttemptWallLimitSeconds int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
@@ -644,8 +645,8 @@ type RepositoryBudgets struct {
 	// choosing how long its own provider may stall.
 	ProviderInactivitySeconds *int `json:"provider_inactivity_seconds,omitempty"`
 	// AttemptWallLimitSeconds is tighten-only too. Its ceiling is the
-	// operator's stated attempt limit, or the run wall limit when the operator
-	// states none - the value an absent limit is derived to at run creation.
+	// operator's stated attempt limit, or min(DefaultAttemptWallLimit, run wall)
+	// when absent - the same rule used at new-run creation.
 	AttemptWallLimitSeconds *int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
@@ -870,7 +871,9 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	continuations := tightened.Budgets.continuations()
 	attemptWall := tightened.Budgets.AttemptWallLimitSeconds
 	if attemptWall <= 0 {
-		attemptWall = tightened.Budgets.WallLimitSeconds
+		attemptWall = int((RunBudgets{
+			WallLimit: time.Duration(tightened.Budgets.WallLimitSeconds) * time.Second,
+		}).defaults().AttemptWallLimit / time.Second)
 	}
 	proposals := []struct {
 		name     string
