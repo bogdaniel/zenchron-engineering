@@ -88,7 +88,7 @@ worker, the CLI you already authenticated.
   },
   "github": {"credential_mode": "github-cli"},
   "budgets": {
-    "wall_limit_seconds": 1800,
+    "wall_limit_seconds": 21600,
     "max_execution_attempts": 2,
     "max_remediation_attempts": 2,
     "max_assurance_attempts": 2
@@ -97,7 +97,11 @@ worker, the CLI you already authenticated.
 ```
 
 With exactly one agent configured, `default_agent` is that agent and may be
-omitted. `assurance.image` must be a `sha256:` digest, because the program that
+omitted. The 21600-second wall budget is six hours of cumulative active work;
+because this example omits `attempt_wall_limit_seconds`, each new run freezes
+the shipped 3-hour physical-attempt fuse. A stalled provider is still governed
+independently by the 600-second inactivity default. `assurance.image` must be a
+`sha256:` digest, because the program that
 decides whether a candidate passed must not change underneath a run. The
 `ProjectModel` and `EngineeringPolicy` are schema-validated documents; the
 shapes are in `schemas/project-model.schema.json` and
