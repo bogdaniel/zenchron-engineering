@@ -47,6 +47,10 @@ func (s *SQLiteOperationStore) VerificationPermits() ([]VerificationPermit, erro
 	if err != nil {
 		return nil, err
 	}
+	return scanVerificationPermits(rows)
+}
+
+func scanVerificationPermits(rows *sql.Rows) ([]VerificationPermit, error) {
 	defer rows.Close()
 	var permits []VerificationPermit
 	for rows.Next() {

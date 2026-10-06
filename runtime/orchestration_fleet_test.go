@@ -322,7 +322,13 @@ func (f *fleetFixture) drive(supervisor *Supervisor, batchID string) Orchestrati
 		settled := 0
 		for _, item := range view.Items {
 			switch item.State {
-			case orchestration.ItemCompleted, orchestration.ItemPartial, orchestration.ItemHandoffPending, orchestration.ItemFailed, orchestration.ItemStopped:
+			case orchestration.ItemHandoffPending:
+				// Admission is a later supervisor pass; wait for its durable
+				// decision before asserting this fixture's final transfer outcome.
+				if item.Handoff != orchestration.HandoffReported {
+					settled++
+				}
+			case orchestration.ItemCompleted, orchestration.ItemPartial, orchestration.ItemFailed, orchestration.ItemStopped:
 				settled++
 			}
 		}

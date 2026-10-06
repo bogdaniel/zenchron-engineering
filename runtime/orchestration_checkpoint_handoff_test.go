@@ -179,8 +179,8 @@ func TestASupersededCheckpointIsRefused(t *testing.T) {
 		t.Fatalf("a superseded checkpoint's handoff was admitted: %d (%v)", len(handoffs), err)
 	}
 	item := itemFor(t, fixture.status(view.BatchID), runID)
-	if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.Reason, "superseded") {
-		t.Fatalf("handoff %s reason %q, want a durable superseded refusal", item.Handoff, item.Reason)
+	if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.HandoffReason, "superseded") {
+		t.Fatalf("handoff %s reason %q, want a durable superseded refusal", item.Handoff, item.HandoffReason)
 	}
 }
 
@@ -236,8 +236,8 @@ func TestAHandoffWithNoCommitAndNoCheckpointStaysUnbindable(t *testing.T) {
 		t.Fatalf("%d handoffs admitted (%v)", len(handoffs), err)
 	}
 	item := itemFor(t, fixture.status(view.BatchID), runID)
-	if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.Reason, "unbindable") {
-		t.Fatalf("handoff %s reason %q, want unbindable", item.Handoff, item.Reason)
+	if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.HandoffReason, "unbindable") {
+		t.Fatalf("handoff %s reason %q, want unbindable", item.Handoff, item.HandoffReason)
 	}
 }
 
@@ -335,8 +335,8 @@ func TestCheckpointHandoffLosesToCandidateMovementBeforeInsert(t *testing.T) {
 					t.Fatalf("replay admitted stale checkpoint C: %d handoffs (%v)", len(handoffs), err)
 				}
 				item := itemFor(t, fixture.status(view.BatchID), runID)
-				if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.Reason, "superseded") {
-					t.Fatalf("handoff %s reason %q, want durable superseded refusal after restart", item.Handoff, item.Reason)
+				if item.Handoff != orchestration.HandoffRefused || !strings.Contains(item.HandoffReason, "superseded") {
+					t.Fatalf("handoff %s reason %q, want durable superseded refusal after restart", item.Handoff, item.HandoffReason)
 				}
 			}
 		})
