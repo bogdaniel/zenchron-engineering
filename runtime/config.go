@@ -456,8 +456,9 @@ type BudgetConfig struct {
 	// ABSENT STAYS ABSENT in the digested form - omitempty, never resolved in
 	// resolved() - so upgrading the binary does not move the Global digest of
 	// any existing configuration (ADR-0003 §4). An absent value is derived at
-	// run creation, as the run's wall limit, and frozen into run.Budgets. A
-	// stated value may not exceed wall_limit_seconds, and 0 means absent.
+	// run creation as min(DefaultAttemptWallLimit, the run's wall limit), and
+	// frozen into run.Budgets. A stated value may not exceed
+	// wall_limit_seconds, and 0 means absent.
 	AttemptWallLimitSeconds int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
@@ -644,8 +645,9 @@ type RepositoryBudgets struct {
 	// choosing how long its own provider may stall.
 	ProviderInactivitySeconds *int `json:"provider_inactivity_seconds,omitempty"`
 	// AttemptWallLimitSeconds is tighten-only too. Its ceiling is the
-	// operator's stated attempt limit, or the run wall limit when the operator
-	// states none - the value an absent limit is derived to at run creation.
+	// operator's stated attempt limit, or min(DefaultAttemptWallLimit, the
+	// operator run wall) when the operator states none. If this repository also
+	// tightens its run wall, that narrower wall is the ceiling as well.
 	AttemptWallLimitSeconds *int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
@@ -870,7 +872,13 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	continuations := tightened.Budgets.continuations()
 	attemptWall := tightened.Budgets.AttemptWallLimitSeconds
 	if attemptWall <= 0 {
-		attemptWall = tightened.Budgets.WallLimitSeconds
+		attemptWall = min(tightened.Budgets.WallLimitSeconds, int(DefaultAttemptWallLimit/time.Second))
+	}
+	// A repository may tighten both bounds in one document. Its attempt limit
+	// cannot sit above the run wall it is simultaneously choosing for itself,
+	// even when both remain below the operator's independent ceilings.
+	if budgets.WallLimitSeconds != nil && *budgets.WallLimitSeconds < attemptWall {
+		attemptWall = *budgets.WallLimitSeconds
 	}
 	proposals := []struct {
 		name     string
@@ -904,7 +912,8 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	}
 	tightened.Budgets.MaxExecutionContinuations = &continuations
 	// Written back only when the repository stated one, so an absent limit
-	// stays absent and is derived at run creation like the operator's.
+	// stays absent and receives the shipped fuse only when a new run freezes its
+	// policy.
 	if budgets.AttemptWallLimitSeconds != nil {
 		tightened.Budgets.AttemptWallLimitSeconds = attemptWall
 	}
