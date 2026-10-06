@@ -223,15 +223,18 @@ continuation the run can no longer admit. The reasons are
 
 It may be absent, and absent is the shipped default: it stays out of the
 configuration digest (so upgrading changes no existing configuration's
-identity), and each new run derives it at creation as its own
-`wall_limit_seconds` - one attempt may still spend the whole run, exactly as
-before, but a stop there is now reported as run exhaustion rather than as a
-retry. State a smaller value (for example 1800 inside a 5400 run) to give a run
-room for successors. A stated value above `wall_limit_seconds` is refused at
-load; 0 means absent. The value is frozen into the run at creation and read
-back exactly: editing the configuration never changes a live run, and runs
-created before this bound existed keep their original rule (the attempt is
-bounded by its operation's own remaining budget).
+identity), and each new run derives it at creation as
+`min(3 hours, wall_limit_seconds)`. Three hours is a last-resort physical
+fuse, not the expected duration of engineering work; the independent
+`provider_inactivity_seconds` window remains the earlier detector for a
+provider that has stopped making recognized progress. An operator may state a
+different finite value deliberately, but it may never exceed
+`wall_limit_seconds`. The repository layer can only tighten the effective
+operator ceiling; it cannot turn an omitted 3-hour fuse into a longer one.
+The effective value is frozen into the run at creation and read back exactly:
+editing the configuration never changes a live run, and runs created before
+this bound existed keep their original rule (the attempt is bounded by its
+operation's own remaining budget).
 
 `provider_inactivity_seconds` bounds how long ONE provider invocation may go
 without recognized provider progress. It is a third dimension: `wall_limit_seconds` bounds
@@ -367,7 +370,7 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
-| `budgets.attempt_wall_limit_seconds` | Wall bound of ONE physical provider attempt, distinct from the cumulative run budget `wall_limit_seconds`. Frozen per run at creation. At most `wall_limit_seconds`. | absent: each run derives its own `wall_limit_seconds` |
+| `budgets.attempt_wall_limit_seconds` | Last-resort wall fuse of ONE physical provider attempt, distinct from the cumulative run budget `wall_limit_seconds`. Frozen per run at creation. At most `wall_limit_seconds`. | absent: `min(10800, wall_limit_seconds)` (3 hours) |
 | `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; for Codex, output lines other than its known transport-retry chatter, and a Codex inactivity kill is always `provider_no_progress` rather than a transport class read from its output; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
@@ -393,7 +396,7 @@ May name:
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
 | `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
-| `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or the operator `wall_limit_seconds` when the operator states none) |
+| `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value; when the operator omits it, at or below `min(10800, operator wall_limit_seconds)`, and never above this repository layer's own tightened `wall_limit_seconds` |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.max_concurrent_observations` | at least 1, at or below the effective operator observation ceiling |
 | `watch.max_concurrent_verifications` | at least 1, at or below the effective operator verification ceiling |
