@@ -120,7 +120,7 @@ transition atomically. The shared ceiling counts assurance leases and granted
 tool permits; a nested grant consumes no additional work slot or attempt.
 Only durable admission permits execution. Capacity wait is excluded from run,
 plan and operation active-work accounting; tool execution is charged. The existing
-absolute attempt deadline remains unchanged (the hard-fuse follow-up is #497).
+absolute attempt deadline remains fixed; capacity waiting does not extend it.
 
 Native adapters wrap exactly their existing contract-required executable grants
 with attempt-owned PATH shims. Requests pass through the existing scratch grant;
@@ -261,6 +261,18 @@ overruled. Both layers decode strictly - exactly one JSON value, no duplicate
 members, no unknown members - and each digests to a stable SHA-256 over its
 canonical form, so a run records exactly which configuration governed it
 rather than a path that may have moved.
+
+The physical provider-attempt wall is a last-resort hard fuse (#497), separate
+from provider inactivity and cumulative run active-work authority. An unstated
+`attempt_wall_limit_seconds` remains absent from canonical operator configuration
+and its digest. New runs freeze `min(3h, wall_limit_seconds)`; an explicit
+operator value is preserved, subject to the run ceiling. Repository tightening
+against an unstated operator limit uses the same `min(3h, operator wall_limit)`
+ceiling. Existing frozen policies and pre-#328 operation-remainder semantics
+are retained. Each physical attempt fixes its deadline to the smaller of its
+frozen fuse and remaining run active work, with that exact instant and bound
+recorded in provenance. Recognized progress and known tool execution remain
+supervised by the existing inactivity oracle; none can extend the physical fuse.
 
 ## Candidate repository boundary
 

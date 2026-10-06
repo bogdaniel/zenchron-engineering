@@ -196,7 +196,15 @@ an absent "none" as the run's value.
 
 `attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
 different resource from `wall_limit_seconds`, which is the run's CUMULATIVE
-active-work budget across every attempt and operation (#328). Each attempt's
+active-work budget across every attempt and operation (#328). When the operator
+omits it, a new run freezes `min(3 hours, wall_limit_seconds)` as a last-resort
+hard fuse (#497). An explicitly stated value remains exact, including a shorter
+25-minute fuse; it cannot exceed the run wall. Existing runs retain their frozen
+values, and pre-#328 runs retain their legacy operation-remainder rule. The absent
+field stays absent in canonical configuration, so upgrading the binary does not
+change configuration digests. No live operator file is rewritten. Provider
+inactivity remains a separate bound, defaulting to 600 seconds, and verification
+capacity waits retain their existing accounting. Each attempt's
 deadline is fixed when it starts, as `start + min(attempt limit, remaining run
 active work)`, and is durable, so a restart resumes the same instant and a
 successor attempt never receives a fresh envelope of either kind. When an
@@ -367,7 +375,7 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
-| `budgets.attempt_wall_limit_seconds` | Wall bound of ONE physical provider attempt, distinct from the cumulative run budget `wall_limit_seconds`. Frozen per run at creation. At most `wall_limit_seconds`. | absent: each run derives its own `wall_limit_seconds` |
+| `budgets.attempt_wall_limit_seconds` | Wall bound of ONE physical provider attempt, distinct from the cumulative run budget `wall_limit_seconds`. Frozen per run at creation. At most `wall_limit_seconds`. | absent: new runs freeze `min(10800, wall_limit_seconds)` seconds |
 | `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; for Codex, output lines other than its known transport-retry chatter, and a Codex inactivity kill is always `provider_no_progress` rather than a transport class read from its output; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
@@ -393,7 +401,7 @@ May name:
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
 | `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
-| `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or the operator `wall_limit_seconds` when the operator states none) |
+| `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or `min(10800, operator wall_limit_seconds)` when the operator states none) |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
 | `watch.max_concurrent_observations` | at least 1, at or below the effective operator observation ceiling |
 | `watch.max_concurrent_verifications` | at least 1, at or below the effective operator verification ceiling |
