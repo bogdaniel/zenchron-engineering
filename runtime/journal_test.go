@@ -692,7 +692,7 @@ func TestReducersRefuseAnEventWithoutItsHash(t *testing.T) {
 // deliberately absent: they must decide from the events alone (#453).
 var stateDigestReaders = map[string]bool{
 	"runtime/journal.go:appendToStream":                true, // allocates both
-	"runtime/journal.go:AppendEvent":                   true, // run row insert
+	"runtime/journal.go:appendEventWithMutation":       true, // run row insert
 	"runtime/journal.go:queryStreamEventsLimited":      true, // column/document agreement
 	"runtime/journal.go:sqliteEventColumns":            true,
 	"runtime/journal.go:sqlitePlanEventColumns":        true,

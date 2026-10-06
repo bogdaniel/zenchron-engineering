@@ -431,6 +431,14 @@ CREATE TABLE supervisor_starts (
 	document             TEXT NOT NULL
 );
 CREATE INDEX supervisor_starts_projection ON supervisor_starts(config_global, config_repository, effective_global, effective_repository);
+`, `
+-- Nested grants share the operation database and its scheduler authority.
+-- They consume verification only; their parent already holds the work slot.
+CREATE TABLE verification_permits (
+	id TEXT PRIMARY KEY,
+	revision INTEGER NOT NULL,
+	document TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -712,14 +720,12 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if consumesVerification(op.Kind) {
 		acquiringVerification = 1
 	}
-	args = append(args, acquiringVerification, op.RunID)
-	for _, kind := range verificationKinds {
-		args = append(args, kind)
-	}
+	count, verificationArgs := verificationCountSQL()
+	args = append(args, acquiringVerification)
+	args = append(args, verificationArgs...)
 	args = append(args, maxVerifications)
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
 	kinds := strings.TrimSuffix(strings.Repeat("?,", len(observation)), ",")
-	verifying := strings.TrimSuffix(strings.Repeat("?,", len(verificationKinds)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
 		  AND NOT EXISTS (SELECT 1 FROM run_operations AS other
@@ -729,14 +735,14 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
 		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
 		  AND NOT (`+runPausedSQL("run_operations.run_id")+`)
+		  AND NOT EXISTS (SELECT 1 FROM verification_permits AS held
+		       WHERE json_extract(held.document, '$.state') = 'granted'
+		         AND json_extract(held.document, '$.parent.RunID') = run_operations.run_id)
 		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL
 		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?
-		  AND (? = 0 OR (SELECT COUNT(DISTINCT run_id) FROM run_operations
-		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
-		         AND json_extract(document, '$.lease') IS NOT NULL
-		         AND json_extract(document, '$.kind') IN (`+verifying+`)) < ?)`,
+		  AND (? = 0 OR (`+count+`) < ?)`,
 		args...)
 	if err != nil {
 		return 0, false, err

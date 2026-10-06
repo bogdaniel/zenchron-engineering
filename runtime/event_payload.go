@@ -40,6 +40,7 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
+	EventVerificationPermitChanged: payloadSchema(func(p VerificationPermit) error { return p.validate() }),
 	EventReviewContinuationGranted: payloadSchema(func(p ReviewContinuationGrant) error {
 		if p.ActiveBaseline < 0 || p.Allowance <= 0 || p.Allowance > 30*time.Minute {
 			return errors.New("invalid review continuation envelope")
@@ -300,6 +301,25 @@ var eventPayloads = map[string]payloadValidator{
 // validateEventPayload enforces the byte ceiling and the per-type schema. It
 // runs before the append transaction, so a refused event writes no row.
 func validateEventPayload(e EngineeringEvent) error {
+	if e.Type == EventVerificationPermitChanged {
+		var p VerificationPermit
+		if err := strictJSON(e.Payload, &p); err != nil {
+			return err
+		}
+		if p.Parent.RunID != e.RunID || p.Parent.OperationID != e.OperationID {
+			return errors.New("verification observation does not match its parent")
+		}
+		at := p.RequestedAt
+		if p.GrantedAt != nil {
+			at = *p.GrantedAt
+		}
+		if p.ReleasedAt != nil {
+			at = *p.ReleasedAt
+		}
+		if !e.OccurredAt.Equal(at) {
+			return errors.New("verification observation does not match its transition time")
+		}
+	}
 	validate, implemented := eventPayloads[e.Type]
 	if !implemented {
 		if eventTypes[e.Type] {

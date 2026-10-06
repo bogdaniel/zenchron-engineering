@@ -102,6 +102,9 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 1 && args[0] == gitBrokerSubcommand {
 		return gitBroker(args[1:])
 	}
+	if len(args) >= 1 && args[0] == "__verification-tool" {
+		return verificationTool(args[1:])
+	}
 	if len(args) >= 1 && args[0] == "autonomy" {
 		return autonomy(args[1:], autonomyOverrides{}, stdout)
 	}

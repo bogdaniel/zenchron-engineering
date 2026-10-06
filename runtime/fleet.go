@@ -37,8 +37,9 @@ import (
 // that used to require a database or a path convention - where is the workspace,
 // where are the logs - are answered here.
 type RunSummary struct {
-	RunID      string `json:"run_id"`
-	Repository string `json:"repository"`
+	VerificationTools []VerificationPermit `json:"verification_tools,omitempty"`
+	RunID             string               `json:"run_id"`
+	Repository        string               `json:"repository"`
 	// Issue is the source issue number, or zero for a run whose goal is not an
 	// issue.
 	Issue int `json:"issue,omitempty"`
@@ -136,12 +137,11 @@ type Fleet struct {
 	Unavailable         int `json:"unavailable"`
 	// The verification view (#490). VerificationCapacity is the verification
 	// ceiling, omitted like ObservationCapacity by a reader that does not know
-	// the configuration. A verification is work, so these REFINE the partition
-	// above rather than joining it: Verifying counts the Working runs holding
-	// a verification slot, and AwaitingVerification the Runnable runs whose
-	// next operation is a verification - while Verifying equals
-	// VerificationCapacity, they are waiting on verification capacity, and
-	// each one's reason says so once a driver has been refused.
+	// the configuration. Verifying counts occupied resource slots: assurance
+	// leases plus nested tool grants, including cleanup still awaiting proof.
+	// AwaitingVerification counts runnable assurance runs and working providers
+	// whose tools are waiting with no tool already executing. Neither is added
+	// to the mutually exclusive run partition above.
 	VerificationCapacity int          `json:"verification_capacity,omitempty"`
 	Verifying            int          `json:"verifying"`
 	AwaitingVerification int          `json:"awaiting_verification"`
@@ -350,8 +350,30 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	if err != nil {
 		return Fleet{}, err
 	}
+	permits, err := store.VerificationPermits()
+	if err != nil {
+		return Fleet{}, err
+	}
+	toolsByRun := map[string][]VerificationPermit{}
+	for _, p := range permits {
+		toolsByRun[p.Parent.RunID] = append(toolsByRun[p.Parent.RunID], p)
+		if p.State == VerificationGranted {
+			fleet.Verifying++
+		}
+	}
 	for _, run := range runs {
 		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
+		summary.VerificationTools = toolsByRun[run.ID]
+		toolWaiting, toolHolding := false, false
+		for _, p := range summary.VerificationTools {
+			op := byRun[run.ID][p.Parent.OperationID]
+			toolWaiting = toolWaiting || (p.State == VerificationWaiting && op.State == Running && op.AttemptIdentity == p.Parent.Attempt)
+			toolHolding = toolHolding || p.State == VerificationGranted
+		}
+		if toolWaiting && !toolHolding && summary.Executing {
+			fleet.AwaitingVerification++
+			summary.Reason = ReasonVerificationCapacity
+		}
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
 			switch {
@@ -359,6 +381,10 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 				fleet.Unavailable++
 			default:
 				state := capacityState(byRun[run.ID], now)
+				if toolHolding && state != CapacityWork && state != CapacityObservation {
+					state = capacityWaiting
+					summary.Reason = ReasonVerificationCleanup
+				}
 				holding, awaiting := verificationOccupancy(byRun[run.ID], now)
 				if state == CapacityWork && holding {
 					fleet.Verifying++
