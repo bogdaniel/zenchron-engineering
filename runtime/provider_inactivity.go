@@ -62,9 +62,9 @@ var ErrProviderInactive = errors.New("the provider produced no output within its
 // It is ten minutes, and it is derived from this repository's own conventions
 // rather than picked:
 //
-//   - the documented operator wall limit is 1800s (docs/configuration.md), so
-//     600s bites at a third of the budget it is protecting instead of after
-//     it;
+//   - the shipped physical-attempt fuse is 3h (#497), so 600s detects a
+//     non-moving provider eighteen times sooner instead of asking the last-
+//     resort process bound to act as the stall detector;
 //   - 600s is already this repository's stated bound for "a bounded operation
 //     that has produced nothing is stuck" - it is the Go test timeout the
 //     suite runs under, and the same 600s hang appears in the #238 evidence;
