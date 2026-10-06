@@ -159,7 +159,8 @@ func providerInactivityLimit(ctx context.Context) time.Duration {
 // evidence that the invocation is moving. The cancel and the durable recorder
 // are shared; the timing is not.
 type inactivityWatch struct {
-	policy *inactivityPolicy
+	policy       *inactivityPolicy
+	verification *verificationExecution
 	// start is the monotonic origin, so every duration below survives a
 	// wall-clock adjustment. last is nanoseconds since start.
 	start time.Time
@@ -263,6 +264,9 @@ func armInactivityWatch(ctx context.Context) *inactivityWatch {
 	w := &inactivityWatch{
 		policy: policy, start: time.Now(),
 		quit: make(chan struct{}), stopped: make(chan struct{}), ended: ctx.Done(),
+	}
+	if v, ok := verificationExecutionFrom(ctx); ok {
+		w.verification = &v
 	}
 	if policy.record != nil {
 		w.recorder = newProgressRecorder(policy.record, progressRecordInterval(policy.limit))
@@ -479,7 +483,18 @@ func (o observation) progress(final bool) ProviderProgress {
 
 // silent reports how long it has been since output arrived.
 func (w *inactivityWatch) silent() time.Duration {
-	return time.Since(w.start) - time.Duration(w.last.Load())
+	since := w.start.Add(time.Duration(w.last.Load()))
+	now := time.Now()
+	silent := now.Sub(since)
+	if w.verification != nil {
+		var err error
+		silent, err = w.verification.silence(since, now)
+		if err != nil {
+			w.policy.cancel(err)
+			return 0
+		}
+	}
+	return max(silent, 0)
 }
 
 // complete records that the PROCESS FINISHED FIRST.

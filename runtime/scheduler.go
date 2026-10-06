@@ -361,6 +361,12 @@ func dependenciesSatisfied(op RunOperation, all map[string]RunOperation) bool {
 // scheduler owns the operation, so the scan continues past it.
 func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	s = s.defaults()
+	if err := s.reclaimVerificationPermits(); err != nil {
+		return nil, err
+	}
+	if pending, err := s.VerificationCleanupPending(runID); err != nil || pending {
+		return nil, err
+	}
 	ops, err := s.Store.Operations(runID)
 	if err != nil {
 		return nil, err
@@ -467,7 +473,19 @@ func (s Scheduler) VerificationSaturated(runID string) (bool, error) {
 			verifying[op.RunID] = true
 		}
 	}
-	return len(verifying) >= s.MaxConcurrentVerifications, nil
+	nested := 0
+	if store, ok := s.Store.(VerificationPermitStore); ok {
+		permits, err := store.VerificationPermits()
+		if err != nil {
+			return false, err
+		}
+		for _, permit := range permits {
+			if permit.State == VerificationGranted {
+				nested++
+			}
+		}
+	}
+	return len(verifying)+nested >= s.MaxConcurrentVerifications, nil
 }
 
 // reclaimAbandoned drops the lease of one leased or running operation that NO
@@ -600,7 +618,11 @@ func (s Scheduler) StartWithin(id string, limit *AttemptLimit) (RunOperation, er
 		// so nothing observed how that attempt ended and nothing classified it.
 		abandoned := op.ActiveSince != nil
 		if abandoned {
-			if orphaned := now.Sub(*op.ActiveSince); orphaned > 0 {
+			waiting, err := s.operationVerificationWait(*op, now)
+			if err != nil {
+				return err
+			}
+			if orphaned := now.Sub(*op.ActiveSince) - waiting; orphaned > 0 {
 				op.ConsumedExecution += orphaned
 				op.LastAttemptExecution = orphaned
 			}
@@ -764,7 +786,11 @@ func (s Scheduler) finishAt(id string, state OperationState, retryAt time.Time, 
 			if !endedAt.IsZero() && endedAt.Before(ended) {
 				ended = endedAt
 			}
-			spent := ended.Sub(*op.ActiveSince)
+			wait, err := s.operationVerificationWait(*op, ended)
+			if err != nil {
+				return err
+			}
+			spent := ended.Sub(*op.ActiveSince) - wait
 			if spent < 0 {
 				spent = 0
 			}

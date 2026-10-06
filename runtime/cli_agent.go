@@ -340,7 +340,9 @@ type CLIAgentProvider struct {
 	// GitBroker is the argv that decides one provider Git command - the
 	// controller's own executable and its broker subcommand. See git_guard.go
 	// for why it is a parameter and not something the boundary discovers.
-	GitBroker []string
+	GitBroker          []string
+	VerificationBroker []string
+	verificationBin    string
 	// RequireGitGuard makes the #241 boundary a PRECONDITION of dispatch
 	// rather than a best effort.
 	//
@@ -500,6 +502,9 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	// spelling fail closed rather than reach the candidate repository. See
 	// git_guard.go, including what it does not claim.
 	env := []string{"PATH=" + p.gitGuard.SearchPath(searchPath)}
+	if p.verificationBin != "" {
+		env[0] = "PATH=" + p.verificationBin + string(os.PathListSeparator) + p.gitGuard.SearchPath(searchPath)
+	}
 	env = append(env, p.gitGuard.Env()...)
 	env = append(env, p.toolchainEnv()...)
 	// GOENV IS THE NULL DEVICE FOR EVERY WORKER, toolchain or not, scratch or
@@ -1073,7 +1078,7 @@ func agentPrompt(request ExecutionRequest) string {
 // Execute runs the bounded worker. The result is an OBSERVATION: it makes no
 // acceptance claim, and whether the candidate actually changed is established
 // from the workspace by the caller, never from what the worker said.
-func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest) (observed ExecutionResult, executeErr error) {
 	// Taken off the context so no probe below is ever handed the lock.
 	writer := candidateWriterFrom(ctx)
 	ctx = withCandidateWriter(ctx, nil)
@@ -1145,6 +1150,26 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 	}
 	p.gitGuard = guard
+	if v, ok := verificationExecutionFrom(ctx); ok && len(request.RequiredTools) != 0 {
+		searchPath := p.Toolchain.SearchPath()
+		if searchPath == "" {
+			searchPath = os.Getenv("PATH")
+		}
+		p.verificationBin, err = prepareVerificationTools(v, request.RequiredTools, p.VerificationBroker, p.gitGuard.SearchPath(searchPath), request.ScratchDir)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		var grant verificationToolGrant
+		if err := readVerificationMessage(filepath.Join(filepath.Dir(p.verificationBin), "grant.json"), &grant); err != nil {
+			return ExecutionResult{}, err
+		}
+		var stop func() error
+		ctx, stop, err = serveVerificationTools(ctx, v, grant)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		defer func() { executeErr = errors.Join(executeErr, stop()) }()
+	}
 	if err := p.probe(ctx, spec, home); err != nil {
 		return ExecutionResult{}, err
 	}

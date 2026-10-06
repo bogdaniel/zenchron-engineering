@@ -1091,8 +1091,9 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// resolved. A controller that cannot name its own executable
 			// prepares no guard and says so in provenance rather than
 			// pretending to one.
-			StateDir:  config.StateDir,
-			GitBroker: gitBrokerCommand(),
+			StateDir:           config.StateDir,
+			GitBroker:          gitBrokerCommand(),
+			VerificationBroker: verificationBrokerCommand(),
 			// AND IT IS REQUIRED HERE. This is the production composition: it
 			// always intends the boundary, so a broker it could not resolve is
 			// a controller that cannot enforce #241 rather than a composition

@@ -189,6 +189,9 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	if lock != nil {
 		cmd.ExtraFiles = []*os.File{lock}
 	}
+	if toolLock, ok := ctx.Value(verificationOwnerFileKey{}).(*os.File); ok {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, toolLock)
+	}
 	stopWatch := watch.watchUntilComplete()
 	owner, err := runBoundedProcess(ctx, cmd, grace)
 	// THE WATCH IS STOPPED AND JOINED BEFORE ANYTHING ELSE HAPPENS, and the

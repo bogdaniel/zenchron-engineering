@@ -521,15 +521,18 @@ func (s *runState) activeElapsed(now time.Time) time.Duration {
 	// conditions() asks several times per pass - through the same arithmetic
 	// the plan's ceiling uses.
 	excluded, openSince, openWork := s.externalWait()
-	return activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)
+	openWork += liveExternalWork(s.events, openSince, now)
+	return max(0, activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)-verificationWait(s.events, "", s.run.CreatedAt, now))
 }
 
 // externalWait folds the journal once: the total of the CLOSED external-wait
 // intervals, the start of an open one, and the work performed inside it.
 //
 // An external wait is a STATE, not the gap between two adjacent events. It opens
-// at the run.waiting that declared an external reason and closes only at the
-// next DISPOSITION event - a wait for a different reason, or a terminal event.
+// at the run.waiting that declared an external reason and normally closes at
+// the next DISPOSITION event - a different reason, or a terminal event.
+// A deterministic retry closes its own wait when it actually resumes. Held
+// nested tools suspend idle exclusion until their timestamped release.
 // It deliberately does not close on operation events, because recordDisposition
 // appends run.waiting only when the disposition or reason CHANGES:
 //
@@ -569,39 +572,57 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 	var waitingSince time.Time
 	var work time.Duration
 	var deterministicOperation string
+	declaredWait := false
+	tools := map[string]bool{}
 	started := map[string]time.Time{}
 	closeWait := func(at time.Time) {
 		if waitingSince.IsZero() {
 			return
 		}
-		if idle := at.Sub(waitingSince) - work; idle > 0 {
+		pendingWork := work
+		for _, began := range started {
+			if began.Before(waitingSince) {
+				began = waitingSince
+			}
+			pendingWork += max(0, at.Sub(began))
+		}
+		if idle := at.Sub(waitingSince) - pendingWork; idle > 0 {
 			excluded += idle
 		}
 		waitingSince, work, deterministicOperation = time.Time{}, 0, ""
-		started = map[string]time.Time{}
 	}
 	for _, event := range events {
 		switch event.Type {
 		case EventRunWaiting:
 			if externalWaitReasons[payloadReason(event.Payload)] {
+				declaredWait = true
 				if payloadReason(event.Payload) != ReasonDeterministicFailureUnchanged {
 					deterministicOperation = ""
 				}
-				if waitingSince.IsZero() {
+				if waitingSince.IsZero() && len(tools) == 0 {
 					waitingSince = event.OccurredAt
 				}
 				continue
 			}
+			declaredWait = false
 			closeWait(event.OccurredAt)
 		case EventRunCompleted, EventRunFailed, EventRunCancelled:
+			declaredWait = false
 			closeWait(event.OccurredAt)
 		case EventOperationBefore:
 			// This exact operation passed the retry gate and really resumed.
 			// Probes for other operations cannot resolve its contradiction.
 			if event.OperationID != "" && event.OperationID == deterministicOperation {
+				declaredWait = false
 				closeWait(event.OccurredAt)
 			}
-			if !waitingSince.IsZero() && event.OperationID != "" {
+			if event.OperationID != "" {
+				if old, ok := started[event.OperationID]; ok && !waitingSince.IsZero() {
+					if old.Before(waitingSince) {
+						old = waitingSince
+					}
+					work += max(0, event.OccurredAt.Sub(old))
+				}
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
@@ -610,24 +631,47 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 			var op RunOperation
 			if decodeJSON(event.Payload, &op) == nil {
 				if op.State == OperationFailed && op.Failure != nil {
-					if waitingSince.IsZero() {
+					declaredWait = true
+					if waitingSince.IsZero() && len(tools) == 0 {
 						waitingSince = event.OccurredAt
 					}
 					deterministicOperation = event.OperationID
 				} else if waitingSince.IsZero() {
 					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
-						waitingSince = event.OccurredAt
+						declaredWait = true
+						if len(tools) == 0 {
+							waitingSince = event.OccurredAt
+						}
 					}
 				}
 			}
 			if waitingSince.IsZero() || event.OperationID == "" {
+				delete(started, event.OperationID)
 				continue
 			}
 			if at, ok := started[event.OperationID]; ok {
+				if at.Before(waitingSince) {
+					at = waitingSince
+				}
 				if spent := event.OccurredAt.Sub(at); spent > 0 {
 					work += spent
 				}
 				delete(started, event.OperationID)
+			}
+		case EventVerificationPermitChanged:
+			var permit VerificationPermit
+			if decodeJSON(event.Payload, &permit) != nil {
+				continue
+			} // validated at append
+			if permit.State == VerificationGranted {
+				tools[permit.ID] = true
+				closeWait(event.OccurredAt)
+			}
+			if permit.State == VerificationReleased {
+				delete(tools, permit.ID)
+				if declaredWait && len(tools) == 0 && waitingSince.IsZero() {
+					waitingSince = event.OccurredAt
+				}
 			}
 		}
 	}
@@ -642,7 +686,8 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 // means exactly what it means for a run's own wall budget.
 func ActiveElapsed(run EngineeringRun, events []EngineeringEvent, now time.Time) time.Duration {
 	excluded, openSince, openWork := foldExternalWait(events)
-	return activeFrom(run.CreatedAt, excluded, openSince, openWork, now)
+	openWork += liveExternalWork(events, openSince, now)
+	return max(0, activeFrom(run.CreatedAt, excluded, openSince, openWork, now)-verificationWait(events, "", run.CreatedAt, now))
 }
 
 // activeFrom is the arithmetic itself, over a fold either caller supplies. It
@@ -1877,6 +1922,13 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
 		}
 		reason := "operation_unavailable"
+		pending, err := r.scheduler.VerificationCleanupPending(state.run.ID)
+		if err != nil {
+			return false, Outcome{}, err
+		}
+		if pending {
+			reason = ReasonVerificationCleanup
+		}
 		if consumesVerification(planned.Kind) {
 			saturated, err := r.scheduler.VerificationSaturated(state.run.ID)
 			if err != nil {

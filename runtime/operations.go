@@ -926,6 +926,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureRunCancelled, ExecutionResult{}, errStoppedBeforeProvider),
 		}}
 	}
+	executing = withVerificationExecution(executing, r.scheduler,
+		ExecutionAttemptRef{state.run.ID, operation.ID, physicalAttempt}, r.deps.StateDir)
 	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
@@ -999,6 +1001,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	recorded := func(e effect) effect {
 		e.events = append(append([]journalEntry(nil), attemptProvenance...), e.events...)
 		return e
+	}
+	// A tool may outlive an interrupted provider. Until its ownership is
+	// settled, even quarantine or checkpointing could race that writer.
+	pendingTools, toolErr := r.scheduler.VerificationCleanupPending(state.run.ID)
+	if toolErr != nil || pendingTools {
+		class := FailureUnknown
+		if result.Failure != nil {
+			class = result.Failure.Classification
+		}
+		cause := errors.Join(execErr, toolErr)
+		if pendingTools {
+			cause = errors.Join(cause, errors.New("nested verification cleanup remains unverified"))
+		}
+		return recorded(effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: class, ProviderExecuted: reachedWorker(result, execErr)},
+			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, class, result, cause),
+		}})
 	}
 	if err := workspace.AssertIntegrity(); err != nil {
 		return recorded(r.restoreCandidate(workspace, err))

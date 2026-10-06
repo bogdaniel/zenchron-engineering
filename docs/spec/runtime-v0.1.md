@@ -112,6 +112,27 @@ one-sided by construction - an owner is alive unless it can be positively
 proven gone - so an unparseable owner identity, another host, or an
 unreadable process all refuse takeover rather than allow it.
 
+Nested verification (#496) shares this scheduler and database. A canonical-JSON
+`VerificationPermit` binds the parent run, operation, physical attempt, controller
+owner, tool execution identity and ownership lock, with `waiting`, `granted` and
+`released` states. Its row and timestamped `verification.permit_changed` event
+transition atomically. The shared ceiling counts assurance leases and granted
+tool permits; a nested grant consumes no additional work slot or attempt.
+Only durable admission permits execution. Capacity wait is excluded from run,
+plan and operation active-work accounting; tool execution is charged. The existing
+absolute attempt deadline remains unchanged (the hard-fuse follow-up is #497).
+
+Native adapters wrap exactly their existing contract-required executable grants
+with attempt-owned PATH shims. Requests pass through the existing scratch grant;
+the controller performs store transactions and signs replies with an attempt key
+whose public half is in the runtime-owned descriptor. No database write permission,
+provider hook, network permission or executable permission is added. `candidate.run`
+uses the same permit owner before entering the existing sandbox. Tool descendants
+retain the ownership fd; recovery requires death plus expiry, and container grants
+also require exact-container reconciliation. Unknown cleanup retains occupancy.
+Native `operator_trusted` workers can deliberately bypass PATH or alter their own
+execution environment; this mechanism never establishes protected isolation.
+
 ## Operator pause
 
 Status: **frozen** (#86, maintainer decision of 2026-10-03, including both
