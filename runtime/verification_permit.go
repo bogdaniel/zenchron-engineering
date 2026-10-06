@@ -217,21 +217,42 @@ func (s Scheduler) reclaimVerificationPermits() error {
 		return err
 	}
 	for _, p := range permits {
-		if p.State == VerificationReleased || s.Clock.Now().Before(p.ExpiresAt) || s.verificationOwnerAlive(p) {
-			continue
-		}
-		// Death and expiry are both required, as for the enclosing lease.
-		if p.Sandbox != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_, err := p.Sandbox.sandbox(p.ID).ReconcileDockerOperation(ctx)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("nested verification cleanup remains uncertain: %w", err)
+		if err := s.reclaimVerificationPermit(p); err != nil {
+			var uncertain *verificationCleanupUncertain
+			if errors.As(err, &uncertain) {
+				// This permit remains durable and occupies its slot. Its own run is
+				// blocked by VerificationCleanupPending; unrelated runs remain eligible.
+				continue
 			}
+			return err
 		}
-		if err := s.ReleaseVerification(p); err != nil {
-			return fmt.Errorf("reclaim verification: %w", err)
+	}
+	return nil
+}
+
+type verificationCleanupUncertain struct{ cause error }
+
+func (e *verificationCleanupUncertain) Error() string {
+	return "nested verification cleanup remains uncertain: " + e.cause.Error()
+}
+func (e *verificationCleanupUncertain) Unwrap() error { return e.cause }
+
+func (s Scheduler) reclaimVerificationPermit(p VerificationPermit) error {
+	s = s.defaults()
+	if p.State == VerificationReleased || s.Clock.Now().Before(p.ExpiresAt) || s.verificationOwnerAlive(p) {
+		return nil
+	}
+	// Death and expiry are both required, as for the enclosing lease.
+	if p.Sandbox != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := p.Sandbox.sandbox(p.ID).ReconcileDockerOperation(ctx)
+		cancel()
+		if err != nil {
+			return &verificationCleanupUncertain{cause: err}
 		}
+	}
+	if err := s.ReleaseVerification(p); err != nil {
+		return fmt.Errorf("reclaim verification: %w", err)
 	}
 	return nil
 }

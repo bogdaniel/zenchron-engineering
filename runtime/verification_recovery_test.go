@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"os"
 	"testing"
 	"time"
 )
@@ -159,5 +160,73 @@ func TestNestedVerificationRestartCannotResumeWorkBeforeToolCleanup(t *testing.T
 	s.Liveness = OwnerLivenessFunc(func(owner string) bool { return owner != "tool-owner" })
 	if leased := mustNext(t, s, parent.RunID); leased == nil || leased.ID != next.ID {
 		t.Fatal("proven tool cleanup did not restore work eligibility")
+	}
+}
+
+func TestNestedVerificationUncertainCleanupIsLocal(t *testing.T) {
+	dir, store := openJournal(t)
+	s := verificationScheduler(store, "controller", 10, 1)
+	parent := nestedParent(t, store, s, "affected")
+	binding := &VerificationSandbox{StateDir: t.TempDir(), Image: "verifier"}
+	p, err := s.requestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, "docker", "dead-tool", binding, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.AcquireVerification(p); !ok || err != nil {
+		t.Fatalf("grant: %v/%v", ok, err)
+	}
+	sandbox := binding.sandbox(p.ID)
+	record, err := sandbox.operationRecordPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unreadable record cannot prove that no container remains.
+	if err := os.MkdirAll(record, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Finish(parent.ID, OperationFailed); err != nil {
+		t.Fatal(err)
+	}
+	next := planKind(t, s, parent.RunID, OpContractCompile)
+	reopened, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	store, s.Store = reopened, reopened
+	s.Clock = &fakeClock{now: s.Clock.Now().Add(2 * time.Minute)}
+	s.Liveness = OwnerLivenessFunc(func(owner string) bool { return owner != "dead-tool" })
+	if leased := mustNext(t, s, parent.RunID); leased != nil {
+		t.Fatal("uncertain cleanup resumed affected run")
+	}
+	if full, err := s.VerificationSaturated("other"); !full || err != nil {
+		t.Fatalf("uncertain cleanup lost capacity: %v/%v", full, err)
+	}
+	for _, kind := range []string{OpExecutionInvoke, OpSourceObserve} {
+		id := kind
+		if err := store.PutRun(newJournalRun(id)); err != nil {
+			t.Fatal(err)
+		}
+		planKind(t, s, id, kind)
+		leased := mustNext(t, s, id)
+		if leased == nil {
+			t.Fatalf("unrelated %s blocked", kind)
+		}
+		if _, err := s.Start(leased.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Finish(leased.ID, Succeeded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if leased := mustNext(t, s, parent.RunID); leased == nil || leased.ID != next.ID {
+		t.Fatal("proven cleanup did not resume affected run")
+	}
+	current, _, _, err := store.VerificationPermit(p.ID)
+	if err != nil || current.State != VerificationReleased {
+		t.Fatalf("release not durable: %+v/%v", current, err)
 	}
 }

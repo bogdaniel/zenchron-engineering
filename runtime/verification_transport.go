@@ -215,6 +215,10 @@ func reconcileVerificationRequests(v verificationExecution, grant verificationTo
 					return err
 				}
 			}
+		} else if p.State == VerificationGranted {
+			if err := v.Scheduler.reclaimVerificationPermit(p); err != nil {
+				return err
+			}
 		} else if p.State == VerificationWaiting {
 			if _, err := v.Scheduler.AcquireVerification(p); err != nil {
 				return err

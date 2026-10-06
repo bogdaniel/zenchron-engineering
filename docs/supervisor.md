@@ -525,7 +525,12 @@ releases a held permit only after expiry and proof its ownership lock is no long
 held; container-backed work additionally uses the existing exact-container recovery.
 Unresolved tool cleanup blocks new operations for that run with
 `verification_tool_cleanup_pending`; uncertainty never permits a second attempt
-to overlap the old tool. This cleanup interval remains charged as tool work.
+to overlap the old tool. Uncertain container cleanup retains that permit and its
+verification slot while unrelated work and observation runs remain eligible.
+The native request service also reconciles granted permits after wrapper death;
+proven cleanup and expiry release the permit durably without another scheduler
+request, restoring provider inactivity accounting. This cleanup interval remains
+charged as tool work.
 The forward SQLite migration adds permit storage without resetting existing
 budgets or backfilling grants. Older binaries refuse the newer schema; rollback
 requires a compatible reader or a pre-upgrade database backup.

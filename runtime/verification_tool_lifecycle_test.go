@@ -248,6 +248,7 @@ func TestNestedVerificationDescendantOwnershipSurvivesWrapperDeath(t *testing.T)
 
 func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *testing.T) {
 	dir, store, s := toolFixture(t, 1)
+	s.LeaseDuration = 100 * time.Millisecond
 	parent := nestedParent(t, store, s, "producer")
 	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
 	target := t.TempDir()
@@ -256,19 +257,20 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 		t.Fatal(err)
 	}
 	marker := filepath.Join(target, "started")
+	executionCount := filepath.Join(target, "executions")
 	// Tools can close inherited descriptors. The existing death guard must
 	// therefore retain ownership throughout its graceful/forced cleanup.
-	script := "#!/bin/sh\nexec 3>&-\ntrap '' TERM HUP INT\nprintf '%s' \"$$\" > \"$1\"\nexec cat \"$2\"\n"
+	script := "#!/bin/sh\nprintf . >> \"$3\"\nexec 3>&-\ntrap '' TERM HUP INT\nprintf '%s' \"$$\" > \"$1\"\nexec cat \"$2\"\n"
 	if err := os.WriteFile(filepath.Join(target, "probe"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	descriptor, _, stop := nativeVerificationFixture(t, v, target, context.Background())
+	descriptor, grant, stop := nativeVerificationFixture(t, v, target, context.Background())
 	t.Cleanup(func() {
 		if err := stop(); err != nil {
 			t.Error(err)
 		}
 	})
-	wrapper := exec.Command(os.Args[0], "-test.run=^TestVerificationBrokerHelper$", "--", descriptor, "probe", marker, fifo)
+	wrapper := exec.Command(os.Args[0], "-test.run=^TestVerificationBrokerHelper$", "--", descriptor, "probe", marker, fifo, executionCount)
 	wrapper.Env = append(os.Environ(), "ZENCHRON_TEST_VERIFICATION=1")
 	if err := wrapper.Start(); err != nil {
 		t.Fatal(err)
@@ -298,6 +300,70 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 	}
 	if saturated, err := s.VerificationSaturated("other"); !saturated || err != nil {
 		t.Fatal("restart released capacity while the death guard was still cleaning up a live tool")
+	}
+	// No further Scheduler.Next, acquisition, release request, or service stop:
+	// the existing controller request loop must converge the orphan itself.
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	var released VerificationPermit
+	for released.State != VerificationReleased {
+		permits, err := reopened.VerificationPermits()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(permits) == 0 {
+			entries, err := os.ReadDir(grant.RequestDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if !strings.HasSuffix(entry.Name(), ".request.json") {
+					continue
+				}
+				var request verificationRequest
+				if err := readVerificationMessage(filepath.Join(grant.RequestDir, entry.Name()), &request); err != nil {
+					t.Fatal(err)
+				}
+				reply, err := readVerificationReply(grant, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				released = reply.Permit
+			}
+		}
+		if released.State == VerificationReleased {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatal("request service stranded a granted orphan")
+		}
+	}
+	if processFromFileAlive(marker) {
+		t.Fatal("released capacity before tool cleanup")
+	}
+	current, _, found, err := reopened.VerificationPermit(released.ID)
+	if err != nil || !found || current.State != VerificationReleased || current.ReleasedAt == nil {
+		t.Fatalf("release not durable: %+v/%v", current, err)
+	}
+	v.Scheduler.Store = reopened
+	silence, err := v.silence(*current.GrantedAt, current.ReleasedAt.Add(5*time.Second))
+	if err != nil || silence != 5*time.Second {
+		t.Fatalf("orphan still suppresses inactivity: %s/%v", silence, err)
+	}
+	count, err := os.ReadFile(executionCount)
+	if err != nil || string(count) != "." {
+		t.Fatalf("tool execution duplicated: %q/%v", count, err)
+	}
+	operations, err := reopened.Operations(parent.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].AttemptIdentity != parent.AttemptIdentity {
+		t.Fatal("orphan recovery duplicated the parent attempt")
 	}
 }
 
