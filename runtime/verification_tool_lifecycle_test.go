@@ -300,3 +300,28 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 		t.Fatal("restart released capacity while the death guard was still cleaning up a live tool")
 	}
 }
+
+func TestNestedVerificationToolLockOverridesTheSchedulerProcessProbe(t *testing.T) {
+	dir, store, s := toolFixture(t, 1)
+	parent := nestedParent(t, store, s, "producer")
+	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	p, lock, err := v.begin(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := v.finish(p, lock, nil); err != nil {
+			t.Error(err)
+		}
+	})
+	s.Clock = &fakeClock{now: time.Now().Add(2 * time.Minute)}
+	// A process probe can report the wrapper gone while an ownership lock
+	// still covers its live execution. The durable tool binding must win.
+	s.Liveness = OwnerLivenessFunc(func(owner string) bool { return owner == s.Owner })
+	if _, err := s.Next(parent.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if saturated, err := s.VerificationSaturated("other"); !saturated || err != nil {
+		t.Fatal("a process-only probe released a held tool ownership lock")
+	}
+}

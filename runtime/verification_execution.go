@@ -40,7 +40,7 @@ func (v verificationExecution) begin(ctx context.Context, sandbox *VerificationS
 	if err != nil {
 		return VerificationPermit{}, nil, err
 	}
-	p, err := v.Scheduler.requestVerification(v.Parent, id, owner, sandbox, "")
+	p, err := v.Scheduler.requestVerification(v.Parent, id, owner, sandbox, v.StateDir)
 	if err != nil {
 		return p, nil, errors.Join(err, lock.Release())
 	}
