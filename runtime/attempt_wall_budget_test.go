@@ -189,9 +189,11 @@ func nearly(got, want time.Duration) bool {
 	return got <= want && want-got < time.Minute
 }
 
-// INVARIANT: an absent attempt limit is derived at run creation to the run
-// budget (capped by any narrower stage budget), a stated one is kept, and the
-// configuration layer never resolves it - so it is absent from Config.RunBudgets.
+// INVARIANT (#497): an absent attempt limit is derived at run creation to the
+// shipped hard fuse, capped by the run budget (and by any narrower stage
+// budget). A stated one is kept, and the configuration layer never resolves
+// the absent member - so it stays absent from Config.RunBudgets and from the
+// existing configuration digest.
 func TestAttemptWallLimitDefaultsAreDerivedAtRunCreation(t *testing.T) {
 	var config Config
 	config.Budgets = BudgetConfig{WallLimitSeconds: 5400, MaxExecutionAttempts: 2, MaxRemediationAttempts: 2, MaxAssuranceAttempts: 2}
@@ -199,7 +201,11 @@ func TestAttemptWallLimitDefaultsAreDerivedAtRunCreation(t *testing.T) {
 		t.Fatalf("configuration resolved an absent attempt limit to %s; it must stay absent until run creation", got)
 	}
 	if got := config.RunBudgets().defaults().AttemptWallLimit; got != 5400*time.Second {
-		t.Fatalf("absent attempt limit derived to %s, want the run budget 1h30m", got)
+		t.Fatalf("a run wall below the shipped fuse derived attempt limit %s, want the run budget 1h30m", got)
+	}
+	config.Budgets.WallLimitSeconds = 6 * 60 * 60
+	if got := config.RunBudgets().defaults().AttemptWallLimit; got != DefaultAttemptWallLimit {
+		t.Fatalf("a wide run derived attempt limit %s, want the shipped hard fuse %s", got, DefaultAttemptWallLimit)
 	}
 	config.Budgets.AttemptWallLimitSeconds = 1800
 	if got := config.RunBudgets().defaults().AttemptWallLimit; got != 1800*time.Second {
@@ -219,7 +225,47 @@ func TestAttemptWallLimitDefaultsAreDerivedAtRunCreation(t *testing.T) {
 	fixture, _ := wallFixture(t, RunBudgets{WallLimit: time.Hour, MaxExecutionAttempts: 2})
 	runID := fixture.start()
 	if frozen := fixture.state(runID).run.Budgets.AttemptWallLimit; frozen != time.Hour {
-		t.Fatalf("run froze attempt limit %s, want the derived 1h", frozen)
+		t.Fatalf("run froze attempt limit %s, want the run-capped 1h", frozen)
+	}
+	wide, _ := wallFixture(t, RunBudgets{WallLimit: 6 * time.Hour, MaxExecutionAttempts: 2})
+	wideRun := wide.start()
+	if frozen := wide.state(wideRun).run.Budgets.AttemptWallLimit; frozen != DefaultAttemptWallLimit {
+		t.Fatalf("wide run froze attempt limit %s, want the shipped hard fuse %s", frozen, DefaultAttemptWallLimit)
+	}
+}
+
+// INVARIANT (#497): healthy long work is not ended merely because it exceeds
+// the old 25-minute operational value. With enough run authority, the default
+// physical fuse is three hours; a 90-minute provider return is therefore an
+// ordinary provider-owned ending. The provider-specific progress/inactivity
+// oracle is tested separately by #238/#322 and is intentionally not duplicated
+// here.
+func TestAHealthyNinetyMinuteAttemptFitsInsideTheDefaultHardFuse(t *testing.T) {
+	fixture, provider := wallFixture(t,
+		RunBudgets{WallLimit: 6 * time.Hour, MaxExecutionAttempts: 2},
+		wallStep{spend: 90 * time.Minute, complete: true})
+	runID := fixture.start()
+	fixture.reconcile(runID)
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider invocations = %d, want one", len(provider.requests))
+	}
+	if got := attemptAuthority(provider.requests[0]); !nearly(got, DefaultAttemptWallLimit) {
+		t.Fatalf("default physical attempt authority = %s, want %s", got, DefaultAttemptWallLimit)
+	}
+	var provenance *InvocationProvenance
+	for _, event := range journalOf(t, fixture.runtime, runID) {
+		if event.Type != EventExecutionAttemptProvenance {
+			continue
+		}
+		p, err := decodePayload[ExecutionAttemptProvenance](event.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provenance = &p.Invocation
+	}
+	if provenance == nil || provenance.TerminationCause != "provider_returned" || provenance.DeadlineBound != BoundAttemptWall {
+		t.Fatalf("90m provider ending provenance = %+v, want provider_returned under the 3h attempt fuse", provenance)
 	}
 }
 
@@ -320,6 +366,34 @@ func TestAttemptWallLimitAboveTheRunBudgetIsRefused(t *testing.T) {
 	tightened, err := base.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{WallLimitSeconds: seconds(900)}})
 	if err != nil || tightened.Budgets.AttemptWallLimitSeconds != 0 {
 		t.Fatalf("an unstated repository attempt limit became %d (%v)", tightened.Budgets.AttemptWallLimitSeconds, err)
+	}
+
+	// #497: with a run budget above the shipped fuse, an absent operator value
+	// authorizes only that fuse. The repository may tighten it, never widen it
+	// back toward the larger run wall. If it tightens both fields, its own run
+	// wall is also an upper bound.
+	wide := base
+	wide.Budgets.WallLimitSeconds = 6 * 60 * 60
+	wide.Budgets.AttemptWallLimitSeconds = 0
+	for _, tc := range []struct {
+		name        string
+		runWall     *int
+		attemptWall int
+		refused     bool
+	}{
+		{"repository narrows the shipped 3h fuse", nil, 2 * 60 * 60, false},
+		{"repository cannot widen the shipped 3h fuse", nil, 4 * 60 * 60, true},
+		{"repository attempt cannot exceed its simultaneously tightened run wall", seconds(2 * 60 * 60), 150 * 60, true},
+		{"repository may match its simultaneously tightened run wall", seconds(2 * 60 * 60), 2 * 60 * 60, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := wide.Tighten(RepositoryConfig{Budgets: &RepositoryBudgets{
+				WallLimitSeconds: tc.runWall, AttemptWallLimitSeconds: seconds(tc.attemptWall),
+			}})
+			if refused := err != nil; refused != tc.refused {
+				t.Fatalf("Tighten() = %v, want refused=%v", err, tc.refused)
+			}
+		})
 	}
 }
 
