@@ -520,9 +520,9 @@ Claude's `--safe-mode` remains in force. The original runtime PATH is restored
 inside the admitted tool subtree, so its subprocesses share that execution's
 permit. Deliberate absolute-path or environment bypass by an `operator_trusted`
 worker remains a residual risk; native shims are not protected isolation.
-Cancellation and process death retain uncertain ownership. A restart releases a
-held permit only after expiry and proof its ownership lock is no longer held;
-container-backed work additionally uses the existing exact-container recovery.
+Tools and their existing death guards retain ownership through cleanup. A restart
+releases a held permit only after expiry and proof its ownership lock is no longer
+held; container-backed work additionally uses the existing exact-container recovery.
 Unresolved tool cleanup blocks new operations for that run with
 `verification_tool_cleanup_pending`; uncertainty never permits a second attempt
 to overlap the old tool. This cleanup interval remains charged as tool work.

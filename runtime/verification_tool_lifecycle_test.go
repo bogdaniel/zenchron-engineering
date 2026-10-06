@@ -25,10 +25,11 @@ func nativeVerificationFixture(t *testing.T, v verificationExecution, target str
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := readVerificationMessage(descriptor, &grant); err != nil {
+	var published verificationToolGrant
+	if err := readVerificationMessage(descriptor, &published); err != nil {
 		t.Fatal(err)
 	}
-	return descriptor, grant, stop
+	return descriptor, published, stop
 }
 
 func TestNestedVerificationNativeToolCancellationFuseAndShutdown(t *testing.T) {
@@ -242,5 +243,60 @@ func TestNestedVerificationDescendantOwnershipSurvivesWrapperDeath(t *testing.T)
 	current, _, _, err := reopened.VerificationPermit(p.ID)
 	if err != nil || current.State != VerificationReleased {
 		t.Fatal("proved descendant death did not release expired capacity")
+	}
+}
+
+func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *testing.T) {
+	dir, store, s := toolFixture(t, 1)
+	parent := nestedParent(t, store, s, "producer")
+	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	target := t.TempDir()
+	fifo := filepath.Join(target, "block")
+	if _, err := (OSCommandExecutor{}).Run(context.Background(), "mkfifo", []string{fifo}, target, os.Environ(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(target, "started")
+	// Tools can close inherited descriptors. The existing death guard must
+	// therefore retain ownership throughout its graceful/forced cleanup.
+	script := "#!/bin/sh\nexec 3>&-\ntrap '' TERM HUP INT\nprintf '%s' \"$$\" > \"$1\"\nexec cat \"$2\"\n"
+	if err := os.WriteFile(filepath.Join(target, "probe"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, _, stop := nativeVerificationFixture(t, v, target, context.Background())
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	wrapper := exec.Command(os.Args[0], "-test.run=^TestVerificationBrokerHelper$", "--", descriptor, "probe", marker, fifo)
+	wrapper.Env = append(os.Environ(), "ZENCHRON_TEST_VERIFICATION=1")
+	if err := wrapper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wrapper.Process.Kill(); _ = wrapper.Wait() }()
+	if err := waitForFile(marker, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapper.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapper.Wait(); err == nil {
+		t.Fatal("killed wrapper succeeded")
+	}
+	reopened, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	s.Store = reopened
+	s.Clock = &fakeClock{now: time.Now().Add(2 * time.Minute)}
+	if err := s.reclaimVerificationPermits(); err != nil {
+		t.Fatal(err)
+	}
+	if !processFromFileAlive(marker) {
+		t.Fatal("fixture did not reach the guard cleanup interval")
+	}
+	if saturated, err := s.VerificationSaturated("other"); !saturated || err != nil {
+		t.Fatal("restart released capacity while the death guard was still cleaning up a live tool")
 	}
 }
