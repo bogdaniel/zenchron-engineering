@@ -313,7 +313,9 @@ const preAttemptLimitDigest = "f27735e735903084e3ed587d74fb95f75ba8728a36da7c485
 
 // INVARIANT: a stated attempt limit above the run budget is refused at load,
 // and a repository may only tighten it - against the operator's stated limit,
-// or against the run budget when the operator states none.
+// or against min(the shipped hard fuse, the operator run budget) when the
+// operator states none. Its own simultaneously tightened run wall narrows that
+// ceiling again.
 func TestAttemptWallLimitAboveTheRunBudgetIsRefused(t *testing.T) {
 	var base OperatorConfig
 	if err := json.Unmarshal([]byte(operatorConfigJSON("/fixed")), &base); err != nil {
