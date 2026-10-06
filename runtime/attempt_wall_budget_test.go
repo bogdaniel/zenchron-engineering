@@ -211,6 +211,11 @@ func TestAttemptWallLimitDefaultsAreDerivedAtRunCreation(t *testing.T) {
 	if got := config.RunBudgets().defaults().AttemptWallLimit; got != 1800*time.Second {
 		t.Fatalf("stated attempt limit became %s, want 30m", got)
 	}
+	config.Budgets.AttemptWallLimitSeconds = 4 * 60 * 60
+	if got := config.RunBudgets().defaults().AttemptWallLimit; got != 4*time.Hour {
+		t.Fatalf("explicit operator fuse became %s, want the stated 4h even though the shipped default is 3h", got)
+	}
+	config.Budgets.AttemptWallLimitSeconds = 1800
 	// A plan stage that narrows the run budget below the attempt limit narrows
 	// the attempt with it.
 	narrowed := config.RunBudgets().defaults().tightenedBy(domain.StageBudget{MaxWallSeconds: 600})
