@@ -64,25 +64,40 @@ func (s *runState) producerStageFinished() bool {
 	return finished
 }
 
-func capacityWaitFor(events []EngineeringEvent, reason string) (*CapacityWait, error) {
+// Supersession is durable: starting the matching resource proves it was
+// reacquired, even if the controller never records its next disposition.
+func capacityWaitFor(events []EngineeringEvent, reason string) (*CapacityWait, bool, error) {
+	started := map[CapacityClass]bool{}
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
 		switch event.Type {
 		case EventRunCompleted, EventRunFailed, EventRunCancelled:
-			return nil, nil
+			return nil, false, nil
+		case EventOperationBefore:
+			var op RunOperation
+			if err := decodeJSON(event.Payload, &op); err != nil {
+				return nil, false, err
+			}
+			started[OperationCapacityClass(op.Kind)] = true
+			if consumesVerification(op.Kind) {
+				started[CapacityVerification] = true
+			}
 		case EventRunWaiting:
 			var record dispositionRecord
 			if err := decodeJSON(event.Payload, &record); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if record.Reason != reason || record.Capacity == nil {
-				return nil, nil
+				return nil, false, nil
 			}
 			if err := record.Capacity.validate(reason); err != nil {
-				return nil, err
+				return nil, false, err
 			}
-			return record.Capacity, nil
+			if started[record.Capacity.Class] {
+				return nil, true, nil
+			}
+			return record.Capacity, false, nil
 		}
 	}
-	return nil, nil
+	return nil, false, nil
 }
