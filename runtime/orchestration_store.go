@@ -145,7 +145,11 @@ func (s *SQLiteOperationStore) admitHandoff(handoff orchestration.EngineeringHan
 
 // RunHandoffs reads every handoff admitted for one run, oldest first.
 func (s *SQLiteOperationStore) RunHandoffs(runID string) ([]orchestration.EngineeringHandoff, error) {
-	rows, err := s.db.Query(`SELECT document FROM orchestration_handoffs WHERE run_id = ? ORDER BY admitted_unix_nano ASC, id ASC`, runID)
+	return queryRunHandoffs(s.db, runID)
+}
+
+func queryRunHandoffs(q eventQuerier, runID string) ([]orchestration.EngineeringHandoff, error) {
+	rows, err := q.Query(`SELECT document FROM orchestration_handoffs WHERE run_id = ? ORDER BY admitted_unix_nano ASC, id ASC`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +186,11 @@ func (s *SQLiteOperationStore) RefuseHandoff(id, batchID, runID, reason string, 
 // RunHandoffRefusals maps every refused handoff identity of one run to its
 // recorded reason.
 func (s *SQLiteOperationStore) RunHandoffRefusals(runID string) (map[string]string, error) {
-	rows, err := s.db.Query(`SELECT id, reason FROM orchestration_handoff_refusals WHERE run_id = ?`, runID)
+	return queryRunHandoffRefusals(s.db, runID)
+}
+
+func queryRunHandoffRefusals(q eventQuerier, runID string) (map[string]string, error) {
+	rows, err := q.Query(`SELECT id, reason FROM orchestration_handoff_refusals WHERE run_id = ?`, runID)
 	if err != nil {
 		return nil, err
 	}

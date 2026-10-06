@@ -119,13 +119,15 @@ currentness holds through the admission commit.
 
 If the slot no longer holds exactly the journalled document when admission
 runs (it was changed or removed), that handoff is durably refused once and the
-item settles to `handoff_pending` with the reason. Admission needs no execution
+item retains its current lifecycle; once the producer stage finishes, it
+reports `handoff_pending` with the reason. Admission needs no execution
 authority: it reads only the batch, the run's journal and the state directory,
 so a report is still finalized after its agent is removed from configuration.
 
 A missing or invalid handoff does not fail the run: failing it would quarantine
-the work and make a retry redo it. The item reports `handoff_pending` with the
-reason, and the child keeps its own governed lifecycle.
+the work and make a retry redo it. The refusal remains visible as a handoff
+observation and separate `handoff_reason` while execution, commit,
+reassessment, assurance or remediation continues. Only finished producer work reports `handoff_pending`.
 
 ## Status
 
@@ -136,13 +138,46 @@ Item state is projected from the child run on every read:
 | state | meaning |
 | --- | --- |
 | `not_created` | the batch is recorded; the child's creation has not landed yet |
-| `queued` | live child, not holding a scheduler slot and not waiting |
-| `running` | holding a slot, or its handoff awaits admission |
+| `queued` | live child awaiting its turn or known scheduler capacity; capacity names its class and ceiling |
+| `running` | currently holding a scheduler slot, including commit, assurance and remediation |
 | `waiting` | live child in a typed wait or an operator pause |
-| `handoff_pending` | the latest finished invocation transferred no admissible handoff, or the child ended without one |
-| `completed` | the latest finished invocation's admitted handoff reports `completed` |
-| `partial` | the latest finished invocation's admitted handoff reports unresolved work, named in the reason |
+| `handoff_pending` | producer stage finished, no operation owned, and handoff admission is the remaining orchestration obligation |
+| `completed` | producer stage finished, no operation owned, and its admitted handoff reports `completed` |
+| `partial` | producer stage finished, no operation owned, and its admitted handoff reports unresolved work, named in the reason |
 | `failed` / `stopped` | the child run failed or was cancelled |
 
 A failing or waiting child never stops its siblings. `autonomy status RUN` and
 `autonomy logs RUN` remain the drill-down for one child.
+
+Lifecycle takes precedence over the latest invocation's handoff. Producer-stage
+completion is the runtime's durable `goal_state_reached` marker after the latest
+engineering work operation, or a completed child run. New work invalidates an
+older marker until reconciliation reaches the goal again. Unchanged observation polls retain the existing deduplicated wait.
+Current-head assurance, CI or review failures also prevent producer completion.
+A failed or stopped child retains its terminal outcome even if an earlier handoff was admitted.
+
+Status reads all child lifecycle, operation and handoff records in one read-only
+SQLite snapshot. A crash can still leave durable journal/row disagreement;
+that item is counted as unknown with `observation: "transitioning"`. An owned
+operation resuming from a recorded wait reports `running`, preserves the run's
+recorded disposition and reason, and explicitly marks that transition. The text
+view prints these observations too. No batch can report completed, partial or
+handoff-pending producer work while that child owns an operation or a granted
+nested verification tool. Retained tool grants remain visible in
+`verification_tools` until cleanup releases them durably.
+
+Recognized capacity waits use `work_capacity_unavailable`,
+`observation_capacity_unavailable` or `verification_capacity_unavailable` and
+an optional `capacity` object containing `class` and the enforced `ceiling`.
+The scheduler records that object in `run.waiting` at refusal, so restarting or
+changing configuration cannot rewrite the explanation. Known capacity queue
+time follows the existing external-wait budget accounting; no attempt ran.
+Other acquisition refusals retain `operation_unavailable` when their cause is
+unknown. Capacity observations grant no scheduling or execution authority.
+
+This adds optional JSON metadata, with no database migration or rewriting of
+old events. Historical waits without capacity metadata remain readable and
+keep their original explanation; a current refusal can record the new metadata.
+Older binaries can replay the journal but do not project these corrected
+lifecycle states or expose the new capacity fields. Use the current binary for
+truthful status; downgrade does not remove the recorded facts.

@@ -72,10 +72,10 @@ var eventPayloads = map[string]payloadValidator{
 	// nothing, and strict because a recorded claim must be complete.
 	EventRunCreated: optionalPayload(payloadSchema(RunCreatedPayload.validate)),
 
-	EventRunWaiting:   dispositionPayload(false),
-	EventRunCompleted: dispositionPayload(false),
-	EventRunFailed:    dispositionPayload(true),
-	EventRunCancelled: dispositionPayload(false),
+	EventRunWaiting:   dispositionPayload(false, true),
+	EventRunCompleted: dispositionPayload(false, false),
+	EventRunFailed:    dispositionPayload(true, false),
+	EventRunCancelled: dispositionPayload(false, false),
 	// A pause records who asked and why; an unpause records who asked. Neither
 	// carries a disposition, a reason code or any authority (#86).
 	EventRunPaused: payloadSchema(func(p RunPausePayload) error {
@@ -341,36 +341,6 @@ func validateEventPayload(e EngineeringEvent) error {
 		}
 	}
 	return validate(e.Payload)
-}
-
-// dispositionPayload is what Reduce reads from the run disposition events.
-// Only run.failed may carry held material (#203); on any other disposition it
-// is refused rather than ignored.
-func dispositionPayload(mayHold bool) payloadValidator {
-	return func(raw json.RawMessage) error {
-		if len(raw) == 0 {
-			return nil
-		}
-		var payload dispositionRecord
-		if err := strictJSON(raw, &payload); err != nil {
-			return err
-		}
-		switch {
-		case payload.HeldMaterial == nil:
-			return nil
-		case !mayHold:
-			return errors.New("held_material is recorded only on run.failed")
-		}
-		return payload.HeldMaterial.validate()
-	}
-}
-
-// dispositionRecord is the run disposition payload. HeldMaterial is present
-// only on a budget-boundary failure that held valuable material (#203); every
-// older event, and every other disposition, has none.
-type dispositionRecord struct {
-	Reason       string        `json:"reason,omitempty"`
-	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
 }
 
 // operationPayload is the RunOperation lifecycle payload Reduce folds into the

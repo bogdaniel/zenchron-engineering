@@ -1,6 +1,9 @@
 package runtime
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -32,7 +35,10 @@ type OrchestrationItemView struct {
 	State   orchestration.ItemState `json:"state"`
 	// Reason is the waiting, blocking, refusal or read-failure explanation
 	// for this item, when there is one.
-	Reason            string      `json:"reason,omitempty"`
+	Reason   string        `json:"reason,omitempty"`
+	Capacity *CapacityWait `json:"capacity,omitempty"`
+	// Observation marks a durable transition between journal and row writes.
+	Observation       string      `json:"observation,omitempty"`
 	Phase             Phase       `json:"phase,omitempty"`
 	Disposition       Disposition `json:"disposition,omitempty"`
 	Executing         bool        `json:"executing,omitempty"`
@@ -43,8 +49,11 @@ type OrchestrationItemView struct {
 	PRState           string      `json:"pull_request_state,omitempty"`
 	// Handoff is the latest handoff observation, and HandoffID the latest
 	// admitted handoff's identity, when one exists.
-	Handoff   orchestration.HandoffObservation `json:"handoff"`
-	HandoffID string                           `json:"handoff_id,omitempty"`
+	Handoff           orchestration.HandoffObservation `json:"handoff"`
+	HandoffID         string                           `json:"handoff_id,omitempty"`
+	HandoffReason     string                           `json:"handoff_reason,omitempty"`
+	Operation         string                           `json:"operation,omitempty"`
+	VerificationTools []VerificationPermit             `json:"verification_tools,omitempty"`
 }
 
 // OrchestrationStatus projects one batch. A child that cannot be read is
@@ -58,54 +67,102 @@ func OrchestrationStatus(store *SQLiteOperationStore, stateDir, batchID string, 
 	if !found {
 		return OrchestrationView{}, fmt.Errorf("unknown orchestration batch %q", batchID)
 	}
-	byRun, err := capacityOperations(store)
+	tx, err := store.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return OrchestrationView{}, err
 	}
+	defer tx.Rollback()
 	view := OrchestrationView{
 		BatchID: batch.ID, Repository: batch.Repository, AgentID: batch.AgentID,
 		RequestedBy: batch.RequestedBy, CreatedAt: batch.CreatedAt,
 	}
 	for _, item := range batch.Items {
-		projected := projectOrchestrationItem(store, stateDir, item, byRun[item.RunID], now)
+		projected := projectOrchestrationItem(tx, stateDir, item, now)
 		view.Counts.Add(projected.State)
 		view.Items = append(view.Items, projected)
+	}
+	if err := tx.Commit(); err != nil {
+		return OrchestrationView{}, err
 	}
 	return view, nil
 }
 
-func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item orchestration.BatchItem, operations map[string]RunOperation, now time.Time) OrchestrationItemView {
+func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.BatchItem, now time.Time) OrchestrationItemView {
 	out := OrchestrationItemView{Issue: item.Issue, RunID: item.RunID, Handoff: orchestration.HandoffNone}
 	fail := func(err error) OrchestrationItemView {
 		out.State, out.Reason = "", boundedDetail(err.Error())
 		return out
 	}
-	run, found, err := store.Run(item.RunID)
-	if err != nil {
-		return fail(err)
-	}
-	if !found {
+	var document string
+	err := tx.QueryRow(`SELECT document FROM runs WHERE id = ?`, item.RunID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
 		out.State = orchestration.ItemNotCreated
 		return out
 	}
-	summary := summarizeRun(store, stateDir, run, now)
+	if err != nil {
+		return fail(err)
+	}
+	run, err := decodeRun(document)
+	if err != nil {
+		return fail(err)
+	}
+	events, err := queryEvents(tx, run.ID)
+	if err != nil {
+		return fail(err)
+	}
+	rows, err := tx.Query(`SELECT document FROM run_operations WHERE run_id = ? ORDER BY created_unix_nano ASC, id ASC`, run.ID)
+	if err != nil {
+		return fail(err)
+	}
+	owned, err := scanOperations(rows)
+	if err != nil {
+		return fail(err)
+	}
+	operations := make(map[string]RunOperation, len(owned))
+	for _, op := range owned {
+		operations[op.ID] = op
+	}
+	summary := summarizeRunEvents(stateDir, run, events, now)
 	if summary.Error != "" {
 		return fail(fmt.Errorf("%s", summary.Error))
 	}
 	out.AgentID, out.Phase, out.Disposition, out.Reason = summary.Agent, summary.Phase, summary.Disposition, summary.Reason
-	out.Executing, out.Branch = summary.Executing, summary.Branch
+	out.Branch = summary.Branch
 	out.CandidateRevision, out.CandidateTree = summary.CandidateRevision, summary.CandidateTree
 	out.PullRequest, out.PRState = summary.PullRequest, summary.PRState
-
-	events, err := store.Events(run.ID)
+	for _, op := range owned {
+		if op.Lease != nil && (op.State == Leased || op.State == Running) {
+			out.Executing, out.Operation = true, op.Kind
+		}
+	}
+	toolRows, err := tx.Query(`SELECT id, document FROM verification_permits
+		WHERE json_extract(document, '$.parent.RunID') = ?
+		AND COALESCE(json_extract(document, '$.state'), '') <> 'released' ORDER BY id`, run.ID)
 	if err != nil {
 		return fail(err)
+	}
+	out.VerificationTools, err = scanVerificationPermits(toolRows)
+	if err != nil {
+		return fail(err)
+	}
+	for _, permit := range out.VerificationTools {
+		if permit.State == VerificationGranted {
+			out.Executing = true
+		}
 	}
 	snapshot, err := Reduce(run, events)
 	if err != nil {
 		return fail(err)
 	}
-	records, err := loadHandoffRecords(store, run.ID)
+	admitted, err := queryRunHandoffs(tx, run.ID)
+	if err != nil {
+		return fail(err)
+	}
+	refused, err := queryRunHandoffRefusals(tx, run.ID)
+	records := handoffRecords{admitted: map[string]orchestration.EngineeringHandoff{}, refused: refused}
+	for _, handoff := range admitted {
+		records.admitted[handoff.ID] = handoff
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -113,9 +170,32 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 	if err != nil {
 		return fail(err)
 	}
-	out.Handoff = finding.observation
+	out.Handoff, out.HandoffReason = finding.observation, boundedDetail(finding.detail)
 	if finding.observation == orchestration.HandoffAdmitted {
 		out.HandoffID = finding.handoffID
+	}
+	if err := orchestrationLifecycleCoherent(run, snapshot, operations); err != nil {
+		out.Observation = "transitioning"
+		return fail(err)
+	}
+	out.Capacity, err = capacityWaitFor(events, summary.Reason)
+	if err != nil {
+		return fail(err)
+	}
+	activity := runActivity(summary, operations, now)
+	if out.Executing {
+		activity = orchestration.ActivityWorking
+		out.Capacity = nil
+		if summary.Disposition == Waiting || summary.Disposition == Completed {
+			out.Observation = "transitioning"
+		}
+	} else if out.Capacity != nil && summary.Disposition == Waiting {
+		activity = orchestration.ActivityIdle
+	} else if summary.producerFinished {
+		activity = orchestration.ActivityFinished
+	} else if summary.Disposition == Waiting && summary.Reason == ReasonGoalStateReached && summary.Paused == nil {
+		activity = orchestration.ActivityIdle
+		out.Observation = "transitioning"
 	}
 	termination, err := runTermination(summary.Disposition)
 	if err != nil {
@@ -123,7 +203,7 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 	}
 	facts := orchestration.ChildFacts{
 		Exists: true, Termination: termination, Handoff: finding.observation,
-		Activity: runActivity(summary, operations, now),
+		Activity: activity,
 	}
 	if finding.admitted != nil {
 		facts.HandoffOutcome = finding.admitted.ProducerReport.Outcome
@@ -135,7 +215,7 @@ func projectOrchestrationItem(store *SQLiteOperationStore, stateDir string, item
 	out.State = state
 	// The handoff explains the item only where the handoff is what the item
 	// is waiting on; a failed or stopped child keeps its own run's reason.
-	if finding.detail != "" && (state == orchestration.ItemHandoffPending || state == orchestration.ItemRunning) {
+	if finding.detail != "" && state == orchestration.ItemHandoffPending {
 		out.Reason = boundedDetail(finding.detail)
 	}
 	if state == orchestration.ItemPartial {

@@ -148,7 +148,17 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 		if state == "" {
 			state = "unknown"
 		}
-		fmt.Fprintf(stdout, "#%-6d %-16s %-38s %-9s %-24s %s\n", item.Issue, state, item.RunID, item.Handoff, location, item.Reason)
+		reason := item.Reason
+		if item.HandoffReason != "" && item.HandoffReason != reason {
+			reason = fmt.Sprintf("%s; handoff: %s", reason, item.HandoffReason)
+		}
+		if item.Capacity != nil {
+			reason = fmt.Sprintf("%s (%s ceiling %d)", reason, item.Capacity.Class, item.Capacity.Ceiling)
+		}
+		if item.Observation != "" {
+			reason = fmt.Sprintf("%s [%s]", reason, item.Observation)
+		}
+		fmt.Fprintf(stdout, "#%-6d %-16s %-38s %-9s %-24s %s\n", item.Issue, state, item.RunID, item.Handoff, location, reason)
 	}
 	return runtime.ExitCompleted, nil
 }

@@ -90,11 +90,11 @@ func TestItemStateIsAProjectionThatFailsClosed(t *testing.T) {
 		{ChildFacts{true, RunLive, ActivityIdle, HandoffNone, ""}, ItemQueued},
 		{ChildFacts{true, RunLive, ActivityWorking, HandoffNone, ""}, ItemRunning},
 		{ChildFacts{true, RunLive, ActivityWaiting, HandoffNone, ""}, ItemWaiting},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffReported, ""}, ItemRunning},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffRefused, ""}, ItemHandoffPending},
-		{ChildFacts{true, RunLive, ActivityWorking, HandoffAdmitted, OutcomeCompleted}, ItemCompleted},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffReported, ""}, ItemQueued},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffRefused, ""}, ItemQueued},
+		{ChildFacts{true, RunLive, ActivityWorking, HandoffAdmitted, OutcomeCompleted}, ItemRunning},
 		// A valid, admitted transfer of PARTIAL work is not completed work.
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffAdmitted, OutcomePartial}, ItemPartial},
+		{ChildFacts{true, RunLive, ActivityFinished, HandoffAdmitted, OutcomePartial}, ItemPartial},
 		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffAdmitted, OutcomePartial}, ItemPartial},
 		// A provider that succeeded and a run that ended are still not a
 		// completed item without an admitted handoff.
