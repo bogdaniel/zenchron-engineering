@@ -97,6 +97,12 @@ matches:
 7. Any other path inside a package is covered by that package's whole run.
 8. Anything else, such as `go.mod`, fails safe to the whole package.
 
+Whenever the plan falls back to the whole package (rules 3, 4, 6 and 8), the
+race job escalates **every** `race: true` domain. Broad or unknown impact must
+never carry less race evidence than a narrow, known one. That is a large run, an
+estimated 15–20 minutes of CI, but it still stops short of the full
+`go test -race ./runtime`, which stays the job of T3.
+
 The job prints why each domain was selected:
 
 ```text
