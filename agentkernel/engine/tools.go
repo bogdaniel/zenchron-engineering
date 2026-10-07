@@ -28,6 +28,7 @@ func (r *run) toolRound(ctx context.Context, calls []api.ToolCall) ([]api.Messag
 		}
 		res, err := r.dispatch(ctx, call)
 		if t, stop := r.afterDispatch(call, err); stop {
+			r.observeUncertainMutation(ctx, call, res, err)
 			return nil, t, false
 		}
 		kind := api.EventToolExecuted
@@ -53,7 +54,18 @@ func (r *run) dispatch(ctx context.Context, call api.ToolCall) (api.ToolResult, 
 		Artifacts:   &meteredStore{inner: r.e.artifacts, r: r},
 		Producer:    r.req.ExecutionID + "/" + r.req.AttemptID + "/" + call.ID,
 		OutputLimit: r.e.outputLimit,
+		StepBudget:  r.chargeStep,
 	})
+}
+
+// chargeStep reserves one tool call for each composite-tool step beyond the
+// first, so a macro is metered like the individual calls it performs.
+func (r *run) chargeStep(context.Context) error {
+	if _, ok := r.ledger.reserve(amount{api.DimensionToolCalls, 1}); !ok {
+		return fmt.Errorf("no tool calls remain")
+	}
+	r.count(func(a *account) { a.toolCalls++ })
+	return nil
 }
 
 // afterDispatch orders the stop conditions a dispatch can raise: a failed
@@ -110,4 +122,19 @@ func (s *meteredStore) Put(ctx context.Context, in api.ArtifactInput) (api.Artif
 
 func (s *meteredStore) Get(ctx context.Context, ref api.ArtifactRef) ([]byte, error) {
 	return s.inner.Get(ctx, ref)
+}
+
+// observeUncertainMutation records that a possibly mutating tool ran before the
+// execution stopped, so the host never reads "exhausted" or "failed" as "no
+// side effect happened". A recording failure leaves nothing more to record.
+func (r *run) observeUncertainMutation(ctx context.Context, call api.ToolCall, res api.ToolResult, err error) {
+	if !res.Mutated || r.recordingFailure() != nil {
+		return
+	}
+	detail := "side effect outcome uncertain: " + string(res.Status)
+	if err != nil {
+		detail += " " + err.Error()
+	}
+	// The settlement that follows reports a recording failure if this fails.
+	_ = r.emit(ctx, api.Event{Kind: api.EventToolExecuted, ToolCall: call.ID, Grant: res.Grant, Detail: detail})
 }

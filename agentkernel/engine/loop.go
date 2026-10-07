@@ -48,6 +48,11 @@ func (r *run) loop(ctx context.Context, c call, messages []api.Message) api.Term
 			// execution output budget); either way the host envelope ended
 			// the output, so this is output-token exhaustion.
 			return r.exhausted(api.DimensionOutputTokens, "provider stopped at the output-token bound")
+		case resp.Stop != api.StopEnd:
+			// An incomplete, paused or unrecognized stop is not a finished
+			// loop; reporting it as completed would overstate what ran.
+			return r.termination(api.OutcomeFailed, api.CauseProviderFailed,
+				"provider stopped without completing: "+string(resp.Stop))
 		default:
 			r.finalText = resp.Text
 			return r.termination(api.OutcomeCompleted, api.CauseLoopCompleted, "provider stopped proposing tools")
@@ -153,6 +158,7 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 		}
 		return api.ProviderResponse{}, perr, api.Termination{}, false
 	}
+	resp.Usage = plausibleUsage(resp.Usage)
 	r.settleCall(c, resp, estIn, maxOut, money, latency)
 	if err := r.emit(ctx, api.Event{Kind: api.EventProviderResponse, Detail: "stop " + string(resp.Stop), Usage: &resp.Usage}); err != nil {
 		return fail(r.recordingFailed("provider responded with stop " + string(resp.Stop)))
@@ -195,4 +201,15 @@ func asProviderError(err error) *api.ProviderError {
 		return perr
 	}
 	return &api.ProviderError{Class: api.ProviderTransport, Detail: "untyped provider error: " + err.Error()}
+}
+
+// plausibleUsage drops negative reported counts to unknown. Settling a
+// negative count would credit the ledger and renew budget the host bounded.
+func plausibleUsage(u api.TokenUsage) api.TokenUsage {
+	for _, c := range []**int64{&u.Input, &u.Output, &u.CachedInput, &u.CacheWriteInput} {
+		if *c != nil && **c < 0 {
+			*c = nil
+		}
+	}
+	return u
 }

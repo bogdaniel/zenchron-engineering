@@ -20,7 +20,6 @@ const (
 	EventToolRefused      EventKind = "tool.refused"
 	EventToolExecuted     EventKind = "tool.executed"
 	EventArtifactRecorded EventKind = "artifact.recorded"
-	EventBudgetExhausted  EventKind = "budget.exhausted"
 	EventSettled          EventKind = "execution.settled"
 )
 

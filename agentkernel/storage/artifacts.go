@@ -234,16 +234,24 @@ func (s *FileArtifacts) Put(ctx context.Context, in api.ArtifactInput) (api.Arti
 	framed := append(append(header, '\n'), in.Data...)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// An existing copy counts as stored only if it verifies; a corrupt one is
+	// rewritten in place (its key is already in the accounting).
+	existing := false
 	if _, err := os.Lstat(s.path(ref)); err == nil {
-		return ref, nil
+		if _, err := s.Get(ctx, ref); err == nil {
+			return ref, nil
+		}
+		existing = true
 	}
-	if s.used+ref.Size > s.maxBytes {
+	if !existing && s.used+ref.Size > s.maxBytes {
 		return api.ArtifactRef{}, fmt.Errorf("%w: %d + %d > %d bytes", ErrCapacity, s.used, ref.Size, s.maxBytes)
 	}
 	if err := writeAtomic(s.root, refKey(ref), framed); err != nil {
 		return api.ArtifactRef{}, err
 	}
-	s.used += ref.Size
+	if !existing {
+		s.used += ref.Size
+	}
 	return ref, nil
 }
 

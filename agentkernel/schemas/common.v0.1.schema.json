@@ -39,7 +39,7 @@
       "enum": [
         "execution.started", "execution.refused", "context.compiled", "routing.decided",
         "provider.requested", "provider.responded", "provider.failed", "tool.proposed",
-        "tool.refused", "tool.executed", "artifact.recorded", "budget.exhausted", "execution.settled"
+        "tool.refused", "tool.executed", "artifact.recorded", "execution.settled"
       ]
     },
     "artifact_ref": {

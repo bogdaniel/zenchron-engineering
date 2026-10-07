@@ -181,3 +181,29 @@ func TestArtifactsConcurrentPutGet(t *testing.T) {
 		})
 	}
 }
+
+// A Put over a corrupt existing copy must repair it, not report it stored.
+func TestFileArtifactsPutRepairsCorruptCopy(t *testing.T) {
+	ctx := context.Background()
+	s, err := OpenFileArtifacts(filepath.Join(t.TempDir(), "a"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := s.Put(ctx, input("exact bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.path(ref), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	used := s.used
+	if _, err := s.Put(ctx, input("exact bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Get(ctx, ref); err != nil || string(got) != "exact bytes" {
+		t.Fatalf("Get after repairing Put = %q, %v", got, err)
+	}
+	if s.used != used {
+		t.Fatalf("repair changed accounting %d -> %d", used, s.used)
+	}
+}

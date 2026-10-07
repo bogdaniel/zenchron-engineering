@@ -18,7 +18,6 @@ import (
 // ledger's spend and so renews the budget; no adapter refuses negative counts
 // (providers/openai, providers/anthropic, providers/local decode *int64 as is).
 func TestFindingNegativeReportedUsageRenewsBudget(t *testing.T) {
-	t.Skip("FINDING F1: engine settles negative reported usage, renewing the output/input budget (engine/loop.go settleCall, engine/budget.go settle)")
 	negative := toolUse(call("c1", "read_file", map[string]any{"path": "notes.txt"}))
 	negative.Response.Usage = api.TokenUsage{Input: api.Count(-1_000_000), Output: api.Count(-1_000_000)}
 	steps := []scripted.Step{negative}
@@ -53,7 +52,6 @@ func (r *fakeRunner) Run(context.Context, api.CommandRequest) (api.CommandResult
 // is never emitted, and nothing in the result says a possibly mutating
 // command ran: the host cannot tell an uncertain mutation from no mutation.
 func TestFindingCommandRanButResultHidesIt(t *testing.T) {
-	t.Skip("FINDING F2: command side effect not observable when its output exceeds the artifact budget (engine/tools.go afterDispatch, tools/command.go runCommand)")
 	runner := &fakeRunner{}
 	cmd, err := tools.NewCommand(runner, t.TempDir())
 	if err != nil {
@@ -86,7 +84,6 @@ func TestFindingCommandRanButResultHidesIt(t *testing.T) {
 // settles completed/loop_completed, collapsing an unknown provider state into
 // the success-shaped outcome.
 func TestFindingUnknownStopSettlesCompleted(t *testing.T) {
-	t.Skip("FINDING F3: StopOther and empty tool_use settle completed/loop_completed (engine/loop.go loop default case)")
 	for name, stop := range map[string]api.StopReason{"other": api.StopOther, "tool_use without calls": api.StopToolUse} {
 		t.Run(name, func(t *testing.T) {
 			p := scripted.New(scripted.Step{Response: api.ProviderResponse{Text: "partial", Stop: stop, Usage: usage(10, 10)}})

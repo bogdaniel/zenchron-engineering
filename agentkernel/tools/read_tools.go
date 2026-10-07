@@ -133,6 +133,9 @@ func (w *Workspace) search(ctx context.Context, inv Invocation) (api.ToolResult,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if d.IsDir() && strings.EqualFold(d.Name(), ".git") {
+			return fs.SkipDir
+		}
 		if !d.Type().IsRegular() {
 			return nil
 		}

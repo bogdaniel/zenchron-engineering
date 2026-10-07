@@ -17,6 +17,15 @@ fi
 
 for platform in linux/amd64 darwin/arm64 windows/amd64; do
   export GOOS="${platform%/*}" GOARCH="${platform#*/}"
+  # Capture first: a process substitution's exit status is invisible to
+  # pipefail, and an unresolvable import (a parent-module path) is exactly
+  # what makes go list fail.
+  if ! deps="$(go list -deps -test ./... 2>&1)"; then
+    echo "imports: $platform: go list failed:" >&2
+    echo "$deps" >&2
+    fail=1
+    continue
+  fi
   while IFS= read -r pkg; do
     [[ -z "$pkg" ]] && continue
     if [[ "$pkg" == "$module" || "$pkg" == "$module"/* ]]; then
@@ -27,7 +36,7 @@ for platform in linux/amd64 darwin/arm64 windows/amd64; do
       echo "imports: $platform: non-stdlib dependency $pkg" >&2
       fail=1
     fi
-  done < <(go list -deps -test ./... | sort -u)
+  done < <(sort -u <<<"$deps")
 done
 
 if [[ $fail -ne 0 ]]; then

@@ -53,6 +53,9 @@ type Invocation struct {
 	Producer string
 	// OutputLimit bounds ToolResult.Output in bytes; full bytes go to an artifact.
 	OutputLimit int
+	// StepBudget, when set, charges one step of a composite tool beyond its
+	// first against the execution budget; an error stops the composition.
+	StepBudget func(ctx context.Context) error
 }
 
 // Broker owns registration and proposal validation.
@@ -131,6 +134,8 @@ type Env struct {
 	Artifacts   api.ArtifactStore
 	Producer    string
 	OutputLimit int
+	// StepBudget is passed to every Invocation (see Invocation.StepBudget).
+	StepBudget func(ctx context.Context) error
 }
 
 // Dispatch validates and runs one proposal. A refusal (unknown tool, no
@@ -145,7 +150,7 @@ func (b *Broker) Dispatch(ctx context.Context, call api.ToolCall, env Env) (api.
 	}
 	res, err := t.Invoke(ctx, Invocation{
 		Call: call, Grant: grant, Arguments: call.Arguments, Artifacts: env.Artifacts,
-		Producer: env.Producer, OutputLimit: env.OutputLimit,
+		Producer: env.Producer, OutputLimit: env.OutputLimit, StepBudget: env.StepBudget,
 	})
 	res.CallID, res.Grant = call.ID, grant.Handle
 	var unknown error
@@ -217,9 +222,10 @@ func covers(g api.Capability, scope Scope) bool {
 }
 
 // rootFor returns the granted root containing p. p must be a clean
-// workspace-relative path; anything else is contained by no root.
+// workspace-relative path outside repository metadata; anything else is
+// contained by no root.
 func rootFor(g api.Capability, p string) (string, bool) {
-	if !api.ValidRelativePath(p) {
+	if !api.ValidRelativePath(p) || isGitMetadata(p) {
 		return "", false
 	}
 	for _, r := range g.Roots {
@@ -280,4 +286,17 @@ func cut(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// isGitMetadata reports whether p names or descends into a .git entry. Writes
+// there (hooks, config) would execute or redirect code on the host, and reads
+// expose remotes and credentials, so no grant reaches them. The comparison is
+// case-insensitive because macOS and Windows file systems are.
+func isGitMetadata(p string) bool {
+	for _, part := range strings.Split(p, "/") {
+		if strings.EqualFold(part, ".git") {
+			return true
+		}
+	}
+	return false
 }

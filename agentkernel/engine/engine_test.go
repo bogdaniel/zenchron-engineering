@@ -164,6 +164,7 @@ func TestRefusalAndOutputBound(t *testing.T) {
 	}{
 		api.StopRefused:   {api.OutcomeFailed, api.CauseProviderRefused, ""},
 		api.StopMaxTokens: {api.OutcomeExhausted, api.CauseBudgetExhausted, api.DimensionOutputTokens},
+		api.StopOther:     {api.OutcomeFailed, api.CauseProviderFailed, ""},
 	}
 	for stop, c := range cases {
 		t.Run(string(stop), func(t *testing.T) {

@@ -259,3 +259,28 @@ func TestSameDirRefusesSwappedRoot(t *testing.T) {
 		t.Fatalf("matching root refused: %v", err)
 	}
 }
+
+// Repository metadata is out of reach of every grant, including a grant over
+// the whole workspace: a write to .git/hooks would run code on the host.
+func TestGitMetadataIsNeverReachable(t *testing.T) {
+	f := newFixture(t, map[string]string{".git/config": "[remote] url=secret\n", "src/a.txt": "inside\n"})
+	before := digests(t, f.root, f.outside)
+	env := f.env(api.ModeReadWrite,
+		grant("r", api.CapabilityFileRead, "."), grant("s", api.CapabilityFileSearch, "."),
+		grant("w", api.CapabilityFileWrite, "."))
+	for _, p := range []string{".git/config", ".GIT/config", ".git/hooks/pre-commit", "src/.git/x"} {
+		for _, c := range []api.ToolCall{
+			call("read_file", map[string]string{"path": p}),
+			call("write_file", map[string]string{"path": p, "content": "x", "expected_sha256": Absent}),
+		} {
+			if res, err := f.broker.Dispatch(context.Background(), c, env); err != nil || res.Status == api.ToolOK {
+				t.Errorf("%s %q: got %+v, %v; want refusal", c.Name, p, res, err)
+			}
+		}
+	}
+	res, err := f.broker.Dispatch(context.Background(), call("search", map[string]string{"path": ".", "pattern": "secret"}), env)
+	if err != nil || strings.Contains(res.Output, "secret") {
+		t.Errorf("search reached .git: %+v, %v", res, err)
+	}
+	sameDigests(t, before, digests(t, f.root, f.outside))
+}

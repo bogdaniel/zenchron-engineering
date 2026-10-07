@@ -140,11 +140,11 @@ func (r ExecutionRequest) Validate(now time.Time) error {
 	if r.Version != ExecutionVersion {
 		return invalid("version", "unsupported version %q", r.Version)
 	}
-	for field, id := range map[string]string{
-		"execution_id": r.ExecutionID, "attempt_id": r.AttemptID, "workspace.id": r.Workspace.ID,
+	for _, f := range []struct{ field, id string }{
+		{"execution_id", r.ExecutionID}, {"attempt_id", r.AttemptID}, {"workspace.id", r.Workspace.ID},
 	} {
-		if !ValidIdentifier(id) {
-			return invalid(field, "invalid identifier %q", id)
+		if !ValidIdentifier(f.id) {
+			return invalid(f.field, "invalid identifier %q", f.id)
 		}
 	}
 	if strings.TrimSpace(r.Objective) == "" || len(r.Objective) > MaxObjectiveBytes {
@@ -316,14 +316,16 @@ func (b Budget) validate(now time.Time) error {
 	if b.Deadline.IsZero() || !b.Deadline.After(now) {
 		return invalid("budget.deadline", "must be in the future")
 	}
-	positives := map[string]int64{
-		"budget.max_iterations": int64(b.MaxIterations), "budget.max_tool_calls": int64(b.MaxToolCalls),
-		"budget.max_input_tokens": b.MaxInputTokens, "budget.max_output_tokens": b.MaxOutputTokens,
-		"budget.max_artifact_bytes": b.MaxArtifactBytes,
-	}
-	for field, v := range positives {
-		if v <= 0 {
-			return invalid(field, "must be positive")
+	for _, f := range []struct {
+		field string
+		v     int64
+	}{
+		{"budget.max_iterations", int64(b.MaxIterations)}, {"budget.max_tool_calls", int64(b.MaxToolCalls)},
+		{"budget.max_input_tokens", b.MaxInputTokens}, {"budget.max_output_tokens", b.MaxOutputTokens},
+		{"budget.max_artifact_bytes", b.MaxArtifactBytes},
+	} {
+		if f.v <= 0 {
+			return invalid(f.field, "must be positive")
 		}
 	}
 	if b.MaxProviderRetries < 0 || b.MaxProviderRetries > MaxProviderRetries {
