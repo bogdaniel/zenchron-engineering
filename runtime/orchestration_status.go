@@ -23,6 +23,9 @@ type OrchestrationView struct {
 	CreatedAt   time.Time               `json:"created_at"`
 	Counts      orchestration.Counts    `json:"counts"`
 	Items       []OrchestrationItemView `json:"items"`
+	// OpenDecisions are the batch's live DecisionRequests (#473): each is a
+	// typed wait on human or designated authority that no worker can answer.
+	OpenDecisions []orchestration.EngineeringMessage `json:"open_decisions,omitempty"`
 }
 
 // OrchestrationItemView is one item: its projected state beside the child
@@ -82,6 +85,11 @@ func OrchestrationStatus(store *SQLiteOperationStore, stateDir, batchID string, 
 		view.Counts.Add(projected.State)
 		view.Items = append(view.Items, projected)
 	}
+	messages, err := queryScopeMessages(tx, batch.ID)
+	if err != nil {
+		return OrchestrationView{}, err
+	}
+	view.OpenDecisions = orchestration.OpenDecisions(messages)
 	if err := tx.Commit(); err != nil {
 		return OrchestrationView{}, err
 	}

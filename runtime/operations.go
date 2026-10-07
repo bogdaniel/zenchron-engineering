@@ -841,6 +841,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation and only for a run an orchestration batch created. Every
 	// other run is given no path and is unchanged.
 	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
+	// The message slot (#473) beside it, and the admitted messages routed to
+	// this run's unit, under the same rule: orchestrated runs only.
+	var messagePath, communication string
+	if err == nil {
+		messagePath, err = r.prepareMessageSlot(state, operation.ID, physicalAttempt)
+	}
+	if err == nil && messagePath != "" {
+		communication, err = communicationContext(r.deps.Store, state.run)
+	}
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureUnknown},
@@ -932,6 +941,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
 		HandoffPath:            handoffPath,
+		MessagePath:            messagePath,
+		Communication:          communication,
 		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
@@ -1266,6 +1277,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// batch item reports handoff_pending instead (#470).
 			if handoffPath != "" {
 				events = append(events, handoffObservation(handoffPath, operation.ID, physicalAttempt))
+			}
+			if messagePath != "" {
+				if entry, wrote := messageObservation(messagePath, operation.ID, physicalAttempt); wrote {
+					events = append(events, entry)
+				}
 			}
 		}
 	}
