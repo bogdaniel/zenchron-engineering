@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Historical: superseded by common.v0.2.schema.json; retained as the contract Gate A evidence was produced under.",
+  "title": "agentkernel.execution/v0.1 shared definitions",
+  "description": "Types shared by the execution request, result and event contracts. Mirrors agentkernel/api. Referenced by relative URI from the sibling schemas.",
+  "$defs": {
+    "version": {
+      "description": "api.ExecutionVersion. Any other value is refused.",
+      "const": "agentkernel.execution/v0.1"
+    },
+    "identifier": {
+      "description": "api.ValidIdentifier: opaque identifier.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256_digest": {
+      "description": "api.ValidDigest: canonical content digest, as produced by api.Digest.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "description": "RFC 3339 time, as encoded by Go time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "isolation": {
+      "description": "api.Isolation.",
+      "enum": ["unproven", "host_proven"]
+    },
+    "context_kind": {
+      "description": "api.ContextKind.",
+      "enum": ["instruction", "constraint", "task", "observation", "source", "dependency", "test", "memory", "background"]
+    },
+    "trust": {
+      "description": "api.Trust. Only host content may become a system instruction.",
+      "enum": ["host", "workspace", "tool_output", "model_derived", "memory"]
+    },
+    "event_kind": {
+      "description": "api.EventKind.",
+      "enum": [
+        "execution.started", "execution.refused", "context.compiled", "routing.decided",
+        "provider.requested", "provider.responded", "provider.failed", "tool.proposed",
+        "tool.refused", "tool.executed", "artifact.recorded", "execution.settled"
+      ]
+    },
+    "artifact_ref": {
+      "description": "api.ArtifactRef: identifies stored bytes exactly. The digest pattern and size minimum are contract rules; ExecutionRequest.Validate does not check a context item's ref.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "size", "media_type", "producer"],
+      "properties": {
+        "digest": {"$ref": "#/$defs/sha256_digest"},
+        "size": {"type": "integer", "minimum": 0},
+        "media_type": {"type": "string"},
+        "producer": {"type": "string"}
+      }
+    },
+    "nullable_count": {
+      "description": "A token count; null is unknown, never zero.",
+      "type": ["integer", "null"]
+    },
+    "token_usage": {
+      "description": "api.TokenUsage. Every count is present; null means unknown. input counts every input token; cached_input (cache reads) and cache_write_input (cache writes) are the parts of input billed at their own rates.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "cached_input", "cache_write_input"],
+      "properties": {
+        "input": {"$ref": "#/$defs/nullable_count"},
+        "output": {"$ref": "#/$defs/nullable_count"},
+        "cached_input": {"$ref": "#/$defs/nullable_count"},
+        "cache_write_input": {"$ref": "#/$defs/nullable_count"}
+      }
+    }
+  }
+}

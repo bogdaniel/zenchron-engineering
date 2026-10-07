@@ -17,6 +17,8 @@ import (
 
 const (
 	schemaDir    = "../schemas"
+	currentGlob  = "*.v0.2.schema.json"
+	historyGlob  = "*.v0.1.schema.json"
 	requestFile  = "execution-request.v0.2.schema.json"
 	resultFile   = "execution-result.v0.2.schema.json"
 	eventFile    = "event.v0.2.schema.json"
@@ -138,7 +140,13 @@ func TestValidRequestExamplesDecodeValidateAndRoundTrip(t *testing.T) {
 func TestValidResultAndEventExamplesDecodeStrictlyAndRoundTrip(t *testing.T) {
 	for _, path := range glob(t, filepath.Join(validDir, "result-*.json")) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			assertRoundTrip(t, readFile(t, path), strictDecode[api.ExecutionResult])
+			data := readFile(t, path)
+			assertRoundTrip(t, data, strictDecode[api.ExecutionResult])
+			res, _ := strictDecode[api.ExecutionResult](data)
+			if res.Version != api.ExecutionVersion || res.Provenance.KernelVersion != api.KernelVersion {
+				t.Fatalf("example is %s / %s, want current %s / %s",
+					res.Version, res.Provenance.KernelVersion, api.ExecutionVersion, api.KernelVersion)
+			}
 		})
 	}
 	for _, path := range glob(t, filepath.Join(validDir, "event-*.json")) {
@@ -190,7 +198,7 @@ type schemaSet map[string]map[string]any
 func loadSchemas(t *testing.T) schemaSet {
 	t.Helper()
 	set := schemaSet{}
-	for _, path := range glob(t, filepath.Join(schemaDir, "*.schema.json")) {
+	for _, path := range glob(t, filepath.Join(schemaDir, currentGlob)) {
 		var doc map[string]any
 		if err := json.Unmarshal(readFile(t, path), &doc); err != nil {
 			t.Fatalf("parse %s: %v", path, err)
@@ -230,4 +238,16 @@ func (s schemaSet) resolve(t *testing.T, file, ref string) (string, string) {
 	}
 	s.node(t, target, pointer)
 	return target, pointer
+}
+
+// TestHistoricalSchemasParse: the v0.1 schemas are kept as the contract Gate
+// A evidence was produced under. They must stay valid JSON; they are not
+// checked against the current Go types.
+func TestHistoricalSchemasParse(t *testing.T) {
+	for _, path := range glob(t, filepath.Join(schemaDir, historyGlob)) {
+		var doc map[string]any
+		if err := json.Unmarshal(readFile(t, path), &doc); err != nil {
+			t.Errorf("parse %s: %v", path, err)
+		}
+	}
 }

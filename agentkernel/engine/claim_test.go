@@ -202,25 +202,69 @@ func TestUnsettledAttemptBlocksTheNext(t *testing.T) {
 	}
 }
 
-// TestV01RecordDeadlineIsNotAnEnvelopeBound: an admission record written by a
-// v0.1 kernel (same encoding; its first attempt's deadline stored in the
-// envelope) admits a new attempt with a later deadline under v0.2, and that
-// attempt still starts from the recorded consumption.
-func TestV01RecordDeadlineIsNotAnEnvelopeBound(t *testing.T) {
-	root := t.TempDir()
-	first := attempt("att-1")
-	first.Budget.MaxIterations = 3
-	data, err := json.Marshal(map[string]any{
-		"budget":   first.Budget,
+// putRecord writes a raw admission record for exec-1, as an earlier kernel
+// would have: att-1 settled with 2 iterations consumed.
+func putRecord(t *testing.T, root string, version string, budget api.Budget) []byte {
+	t.Helper()
+	rec := map[string]any{
+		"budget":   budget,
 		"attempts": []map[string]any{{"attempt_id": "att-1", "consumed": map[string]int64{"iterations": 2}}},
-	})
+	}
+	if version != "" {
+		rec["version"] = version
+	}
+	data, err := json.Marshal(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := openRecords(t, root).Put(context.Background(), admissionPartition, "exec-1", data); err != nil {
 		t.Fatal(err)
 	}
-	f := newFixture(t, []scripted.Step{toolUse(readCall("b", "a.txt")), end("never")}, withAdmissions(openRecords(t, root)))
+	return data
+}
+
+// TestUnreadableAdmissionVersionFailsClosed: a legacy unversioned (v0.1)
+// record, or one of an unknown version, is never reinterpreted. A new attempt
+// is refused before any side effect, the record is left as it was, and the
+// refusal leaves no claim held, so it repeats as the same refusal.
+func TestUnreadableAdmissionVersionFailsClosed(t *testing.T) {
+	for name, tc := range map[string]struct{ version, reason string }{
+		"legacy_v0.1": {"", "legacy unversioned (v0.1) admission state; explicit recovery or migration is required"},
+		"unknown":     {"agentkernel.admission/v9", `unknown version "agentkernel.admission/v9"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			before := putRecord(t, root, tc.version, attempt("att-1").Budget)
+			records := openRecords(t, root)
+			f := newFixture(t, []scripted.Step{end("never")}, withAdmissions(records))
+			for range 2 {
+				res := f.next(t, attempt("att-2"))
+				wantRefused(t, res, tc.reason)
+				if u := res.Usage; u.ProviderCalls != 0 || u.Iterations != 0 || u.ToolCalls != 0 || len(f.provider.Requests()) != 0 {
+					t.Fatalf("refused attempt had side effects: usage %+v, %d provider calls", u, len(f.provider.Requests()))
+				}
+			}
+			if _, err := records.Get(context.Background(), claimPartition, "exec-1"); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("claim after refusal: %v, want none held", err)
+			}
+			after, err := records.Get(context.Background(), admissionPartition, "exec-1")
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("record changed by a refused attempt: %s (%v)", after, err)
+			}
+		})
+	}
+}
+
+// TestVersionedAdmissionRecordAdmits: a v0.2 record admits a new attempt with
+// a later deadline, which starts from the recorded consumption; the kernel
+// writes the version on the record it extends.
+func TestVersionedAdmissionRecordAdmits(t *testing.T) {
+	root := t.TempDir()
+	first := attempt("att-1")
+	first.Budget.MaxIterations = 3
+	putRecord(t, root, "agentkernel.admission/v0.2", first.Budget)
+	records := openRecords(t, root)
+	f := newFixture(t, []scripted.Step{toolUse(readCall("b", "a.txt")), end("never")}, withAdmissions(records))
 	second := attempt("att-2")
 	second.Budget.MaxIterations = 3
 	second.Budget.Deadline = first.Budget.Deadline.Add(time.Hour)
@@ -229,5 +273,18 @@ func TestV01RecordDeadlineIsNotAnEnvelopeBound(t *testing.T) {
 	if res.Termination.Dimension != api.DimensionIterations || len(f.provider.Requests()) != 1 {
 		t.Fatalf("dimension %q after %d calls: want admitted with 2 of 3 iterations already spent",
 			res.Termination.Dimension, len(f.provider.Requests()))
+	}
+	data, err := records.Get(context.Background(), admissionPartition, "exec-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &rec); err != nil || rec.Version != "agentkernel.admission/v0.2" {
+		t.Fatalf("record version %q (%v), want agentkernel.admission/v0.2", rec.Version, err)
+	}
+	if ids := settledAttempts(t, records); len(ids) != 2 || ids[1] != "att-2" {
+		t.Fatalf("recorded attempts %v, want [att-1 att-2]", ids)
 	}
 }

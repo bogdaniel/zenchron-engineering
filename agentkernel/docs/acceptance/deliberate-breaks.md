@@ -423,8 +423,20 @@ before the next; `go test -count=1 ./engine/ ./tests/conformance/ ./api/`.
 
 | Rule | Patch | Decisive failure | Restored |
 | --- | --- | --- | --- |
-| a new attempt may carry a later deadline | `widenedBound` compares the deadline again | `admission_test.go:75: termination blocked/invalid_request (budget widens deadline …), want exhausted/budget_exhausted` (`later_deadline_new_attempt_admitted_from_consumed`); `claim_test.go:228` (`TestV01RecordDeadlineIsNotAnEnvelopeBound`); `budget_integrity_test.go:81` (`TestA05DeadlineIsAttemptScoped`) | passes |
+| a new attempt may carry a later deadline | `widenedBound` compares the deadline again | `admission_test.go:75: termination blocked/invalid_request (budget widens deadline …), want exhausted/budget_exhausted` (`later_deadline_new_attempt_admitted_from_consumed`); `budget_integrity_test.go:81` (`TestA05DeadlineIsAttemptScoped`) | passes |
 | the same `attempt_id` is refused, whatever its deadline | settled-attempt check disabled | `admission_test.go:86: termination completed/loop_completed …, want blocked/invalid_request` (`same_attempt_later_deadline_refused`); `budget_integrity_test.go:75: same attempt with a later deadline: {Outcome:exhausted …}` | passes |
 | cumulative bounds still cannot widen | `max_tool_calls` case removed | `admission_test.go:111` (`widened_max_tool_calls`); `budget_integrity_test.go:81: later deadline with a widened tool-call bound: {Outcome:exhausted …}` | passes |
-| consumption carries forward | `ledger.restore` dropped | `admission_test.go:75` (later-deadline attempt completed instead of exhausting iterations); `claim_test.go:228`; `TestPriorConsumptionIsCountedOnce` | passes |
+| consumption carries forward | `ledger.restore` dropped | `admission_test.go:75` (later-deadline attempt completed instead of exhausting iterations); `TestPriorConsumptionIsCountedOnce` | passes |
 | v0.1 requests are refused | `Validate` also accepts `agentkernel.execution/v0.1` | `execution_test.go:85` (`TestA04RefusedBeforeAnySideEffect/v0.1_version`); `schema_test.go:164: want *api.ValidationError on "version", got <nil>` (`request-v0.1-version.json`) | passes |
+
+Review corrections on #530 (versioned admission records, kernel identity,
+historical v0.1 artifacts), same procedure:
+
+| Rule | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| a legacy unversioned (v0.1) record fails closed | `versionRefusal` accepts any unversioned record | `claim_test.go:242: termination completed/loop_completed …, want blocked/invalid_request` (`TestUnreadableAdmissionVersionFailsClosed/legacy_v0.1`) | passes |
+| an unknown record version fails closed | unknown version accepted | `claim_test.go:242` (`TestUnreadableAdmissionVersionFailsClosed/unknown`) | passes |
+| every new record carries `agentkernel.admission/v0.2` | version not written on creation | `admission_test.go:47: detail "… legacy unversioned (v0.1) admission state …", want it to say "already admitted"` (and `:60`, `:75`, `:86`, `:111`) | passes |
+| the version refusal leaves no claim held | `releaseClaim` skipped on admission refusal | `claim_test.go:242: detail "attempt \"att-2\" already admitted …", want … legacy …` (second run); `budget_integrity_test.go:50` | passes |
+| `api.KernelVersion` is `agentkernel/0.2.0` | reverted to `agentkernel/0.1.0-gate-a` | `schema_test.go:147: example is agentkernel.execution/v0.2 / agentkernel/0.2.0, want current … / agentkernel/0.1.0-gate-a` | passes |
+| v0.1 schemas are retained | `*.v0.1.schema.json` deleted | `schema_test.go:241: glob ../schemas/*.v0.1.schema.json: <nil> (0 matches)` (`TestHistoricalSchemasParse`) | passes |

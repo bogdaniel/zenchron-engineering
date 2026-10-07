@@ -174,8 +174,10 @@ the principle forbids (no learned selection, no eligibility creation).
    contract was corrected to `agentkernel.execution/v0.2` under #518 with the
    repository owner's approval (comment 6047604378, item 1; scope
    `agentkernel/**` for this purpose only): the deadline is attempt-scoped,
-   every other bound stays execution-scoped and cumulative, and v0.1 requests
-   are refused (execution spec §11.2). Gate A's acceptance record stays bound
+   every other bound stays execution-scoped and cumulative, v0.1 requests
+   are refused, and admission records are versioned so legacy v0.1 records
+   fail closed pending explicit recovery; `api.KernelVersion` is
+   `agentkernel/0.2.0` (execution spec §11.2). Gate A's acceptance record stays bound
    to the v0.1 commit it measured.
 
 ## 9. Alternatives considered

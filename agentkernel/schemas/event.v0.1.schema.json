@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Historical: superseded by event.v0.2.schema.json; retained as the contract Gate A evidence was produced under.",
+  "title": "agentkernel.execution/v0.1 Event",
+  "description": "Mirrors api.Event, emitted by the kernel to an api.EventSink. Enough for host accounting; never a second engineering journal. execution_id and attempt_id are echoed from the request and not pattern-checked. Not expressed here: seq is strictly increasing within one attempt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "execution_id", "attempt_id", "seq", "kind", "observed_at", "source"],
+  "properties": {
+    "version": {"$ref": "common.v0.1.schema.json#/$defs/version"},
+    "execution_id": {"type": "string"},
+    "attempt_id": {"type": "string"},
+    "seq": {"type": "integer", "minimum": 0},
+    "kind": {"$ref": "common.v0.1.schema.json#/$defs/event_kind"},
+    "observed_at": {"$ref": "common.v0.1.schema.json#/$defs/timestamp"},
+    "source": {"type": "string"},
+    "detail": {"type": "string"},
+    "tool_call": {"type": "string"},
+    "grant": {"type": "string"},
+    "ref": {"$ref": "common.v0.1.schema.json#/$defs/artifact_ref"},
+    "usage": {"$ref": "common.v0.1.schema.json#/$defs/token_usage"}
+  }
+}

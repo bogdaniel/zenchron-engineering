@@ -18,12 +18,17 @@ const (
 	claimPartition     = "agentkernel.admission_claims"
 )
 
+// admissionVersion is written on every admission record. A record of any
+// other version, an unversioned (v0.1) one included, is not reinterpreted:
+// admission refuses until an explicit recovery or migration exists.
+const admissionVersion = "agentkernel.admission/v0.2"
+
 // admissionRecord is what the kernel remembers about one execution_id: the
 // envelope its first attempt was admitted with, which every later attempt
 // shares, and what each settled attempt consumed. Budget.Deadline is stored
-// but never compared: since v0.2 the deadline is attempt-scoped (execution
-// spec §11.1), so a record written under v0.1 is read unchanged.
+// but never compared: the deadline is attempt-scoped (execution spec §11.1).
 type admissionRecord struct {
+	Version  string          `json:"version,omitempty"`
 	Budget   api.Budget      `json:"budget"`
 	Attempts []attemptRecord `json:"attempts"`
 }
@@ -117,6 +122,9 @@ func (r *run) admissionNotRecorded(err error) api.Termination {
 
 // admissionRefusal names why req may not start, or returns "".
 func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
+	if reason := versionRefusal(rec, req.ExecutionID); reason != "" {
+		return reason
+	}
 	for _, a := range rec.Attempts {
 		if a.AttemptID == req.AttemptID {
 			return fmt.Sprintf("attempt %q already admitted for execution %q", req.AttemptID, req.ExecutionID)
@@ -129,6 +137,21 @@ func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
 		return fmt.Sprintf("budget widens %s beyond the envelope of execution %q", bound, req.ExecutionID)
 	}
 	return ""
+}
+
+// versionRefusal names why rec cannot be read under this contract, or
+// returns "". An unversioned record without attempts holds no state and is
+// treated as absent.
+func versionRefusal(rec admissionRecord, executionID string) string {
+	switch {
+	case rec.Version == admissionVersion, rec.Version == "" && len(rec.Attempts) == 0:
+		return ""
+	case rec.Version == "":
+		return fmt.Sprintf("execution %q has legacy unversioned (v0.1) admission state; "+
+			"explicit recovery or migration is required before a %s attempt", executionID, admissionVersion)
+	}
+	return fmt.Sprintf("execution %q has admission state of unknown version %q; "+
+		"explicit recovery or migration is required", executionID, rec.Version)
 }
 
 // widenedBound names the first cumulative bound of next that is wider than
@@ -181,8 +204,11 @@ func (r *run) recordConsumption(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if reason := versionRefusal(rec, r.req.ExecutionID); reason != "" {
+		return errors.New(reason)
+	}
 	if len(rec.Attempts) == 0 {
-		rec.Budget = r.req.Budget
+		rec.Version, rec.Budget = admissionVersion, r.req.Budget
 	}
 	rec.Attempts = append(rec.Attempts, attemptRecord{AttemptID: r.req.AttemptID, Consumed: r.ledger.consumed()})
 	return r.e.saveAdmission(ctx, r.req.ExecutionID, rec)
