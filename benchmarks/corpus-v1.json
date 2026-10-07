@@ -1,0 +1,59 @@
+{
+  "schema_version": "1",
+  "benchmark": "zenchron-leverage",
+  "corpus_version": "serve-v1",
+  "minimum_per_class": 3,
+  "status": "specification_not_measured",
+  "cases": [
+    {
+      "id": "trivial/documentation",
+      "class": "trivial/documentation",
+      "acceptance_specification": "Correct a real setup instruction; verify the documented command."
+    },
+    {
+      "id": "normal_behavior",
+      "class": "normal_behavior",
+      "acceptance_specification": "Repair an observable behavior with a regression check."
+    },
+    {
+      "id": "api_business_rule",
+      "class": "api_business_rule",
+      "acceptance_specification": "Change a business rule; check allowed and rejected API inputs."
+    },
+    {
+      "id": "security_sensitive",
+      "class": "security_sensitive",
+      "acceptance_specification": "Repair an authorization check; test permitted and forbidden callers."
+    },
+    {
+      "id": "hidden_scope_expansion",
+      "class": "hidden_scope_expansion",
+      "acceptance_specification": "Reveal a material dependency after assignment; review expanded scope before acceptance."
+    },
+    {
+      "id": "failing_tests_remediation",
+      "class": "failing_tests_remediation",
+      "acceptance_specification": "Supply a failing regression; accept only after the exact candidate passes."
+    },
+    {
+      "id": "review_feedback",
+      "class": "review_feedback",
+      "acceptance_specification": "Give equivalent independent review feedback; verify the correction."
+    },
+    {
+      "id": "provider_wait",
+      "class": "provider_wait",
+      "acceptance_specification": "Exercise a controlled transient/quota wait; verify recovery and preserve waiting observations."
+    },
+    {
+      "id": "base_drift_conflict",
+      "class": "base_drift_conflict",
+      "acceptance_specification": "Advance the base with a conflict; require valid resolution and refreshed checks."
+    },
+    {
+      "id": "concurrent_cohort",
+      "class": "concurrent_cohort",
+      "acceptance_specification": "Run two independent changes on distinct workers; fail one, verify the other progresses and both meet their criteria."
+    }
+  ]
+}
