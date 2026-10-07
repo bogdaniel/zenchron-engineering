@@ -8,14 +8,15 @@ disappearing.
 | Tier | What | When | Where |
 |------|------|------|-------|
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
-| T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects; high-risk domains also under `-race` | every PR | `go run ./ci/evidence` |
+| T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
+| T1 race | the selected tests of high-risk (`race: true`) domains under `-race`, as a parallel job | every PR | `go run ./ci/evidence -race` |
 | T2 | `go test -timeout 30m ./...` | today: every PR and every push to `main` (the required `go` check) | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
 ## Status
 
-Stages 0–3 and the T3 sweep are in place. T0 and T1 run as the `evidence` job
-beside the required `go` check. They are **not yet a merge gate**, and the full
+Stages 0–3 and the T3 sweep are in place. T0 and T1 run as the `evidence` and
+`evidence-race` jobs beside the required `go` check. They are **not yet a merge gate**, and the full
 suite has **not** moved post-merge.
 
 That cannot happen in CI configuration alone. Adoption today treats the tip of
@@ -38,6 +39,26 @@ Measured from CI runs of the `go` job on 2026-10-06 and 2026-10-07:
 - `runtime` accounts for 655 s of the test time, and every other package takes
   under 7 s (`cmd/zenchron-engineering` 7 s, the rest under 1.1 s);
 - strict required checks mean a PR whose base moves runs the whole job again.
+
+A local `go test -json ./runtime` (1302 s, about twice CI's time) gives the
+serial cost of each domain. Locally, `scheduler` takes 180 s, `orchestration`
+154 s, `planning` 144 s, `handoff` 133 s, `supervisor` 126 s and `workgraph`
+113 s. Every other domain takes under 110 s. Under `-race`, the `handoff`
+domain takes 507 s instead of 127 s, which is why the race escalation runs as
+its own job.
+
+The 25 most recent merged PRs, replayed through the selector:
+
+- docs-only and CI-only PRs select only the guards;
+- narrow fixes select 70–300 tests, about 1.5–3 minutes of CI time;
+- the feature PRs of the #470/#472/#473/#492 kind each touch five to ten domains.
+  They select 500–1100 tests, 4–7 minutes of CI time, which is still about half
+  of today's full run;
+- one PR in the 25 changed an unclassified dependency (`domain/`, `schemas/`)
+  and failed safe to the whole package.
+
+So the 2–5 minute target holds for narrow PRs. Wide PRs gain less, because they
+legitimately need wide evidence.
 
 ## The impact registry
 
