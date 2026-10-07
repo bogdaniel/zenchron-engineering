@@ -21,6 +21,9 @@ func (undeletable) Delete(context.Context, string, string) error { return errors
 const (
 	legacyRecord  = `{"budget":{},"attempts":[{"attempt_id":"att-1","consumed":{"iterations":2}}]}`
 	unknownRecord = `{"version":"agentkernel.admission/v9","budget":{},"attempts":[]}`
+	// emptyLegacy is a present unversioned record holding no attempts: still
+	// legacy state, never "no record".
+	emptyLegacy = `{"budget":{},"attempts":[]}`
 )
 
 func versionRun(t *testing.T, records storage.Records, record string) *run {
@@ -49,8 +52,10 @@ func claimHolder(t *testing.T, records storage.Records) string {
 // delete, a claim written and then "released" would still be there.
 func TestUnreadableRecordIsRefusedBeforeClaiming(t *testing.T) {
 	for name, tc := range map[string]struct{ record, detail string }{
-		"legacy_v0.1": {legacyRecord, "legacy unversioned (v0.1)"},
-		"unknown":     {unknownRecord, "unknown version"},
+		"legacy_v0.1":          {legacyRecord, "legacy unversioned (v0.1)"},
+		"legacy_zero_attempts": {emptyLegacy, "legacy unversioned (v0.1)"},
+		"legacy_empty_object":  {`{}`, "legacy unversioned (v0.1)"},
+		"unknown":              {unknownRecord, "unknown version"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			records := undeletable{storage.NewMemoryRecords()}
@@ -91,5 +96,32 @@ func TestLegacyRecordAfterClaimReleasesTheClaim(t *testing.T) {
 				t.Fatalf("claim held by %q, want %q", holder, tc.wantHolder)
 			}
 		})
+	}
+}
+
+// TestAbsentRecordIsANewExecution: only a missing record is new; the attempt
+// is admitted and holds the claim.
+func TestAbsentRecordIsANewExecution(t *testing.T) {
+	records := storage.NewMemoryRecords()
+	e := &Engine{admissions: records, clock: api.NewManualClock(time.Unix(0, 0))}
+	r := newRun(e, context.Background(), api.ExecutionRequest{ExecutionID: "exec-1", AttemptID: "att-1"})
+	if term, ok := r.admit(context.Background()); !ok {
+		t.Fatalf("admit = %+v; want an absent record admitted", term)
+	}
+	if holder := claimHolder(t, records); holder != "att-1" {
+		t.Fatalf("claim held by %q, want att-1", holder)
+	}
+}
+
+// TestSettlementNeverExtendsALegacyRecord: a present unversioned record seen
+// at settlement, even one with no attempts, is not extended or upgraded.
+func TestSettlementNeverExtendsALegacyRecord(t *testing.T) {
+	records := storage.NewMemoryRecords()
+	r := versionRun(t, records, emptyLegacy)
+	if err := r.recordConsumption(context.Background()); err == nil || !strings.Contains(err.Error(), "legacy unversioned (v0.1)") {
+		t.Fatalf("recordConsumption = %v; want the legacy refusal", err)
+	}
+	if got, err := records.Get(context.Background(), admissionPartition, "exec-1"); err != nil || string(got) != emptyLegacy {
+		t.Fatalf("legacy record rewritten: %s (%v)", got, err)
 	}
 }

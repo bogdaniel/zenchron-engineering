@@ -75,11 +75,11 @@ func (rec admissionRecord) consumed() map[api.BudgetDimension]int64 {
 // explicitly.
 func (r *run) admit(ctx context.Context) (api.Termination, bool) {
 	ctx = context.WithoutCancel(ctx)
-	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	rec, present, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
 	if err != nil {
 		return r.admissionNotRecorded(err), false
 	}
-	if reason := versionRefusal(rec, r.req.ExecutionID); reason != "" {
+	if reason := versionRefusal(rec, present, r.req.ExecutionID); reason != "" {
 		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason), false
 	}
 	err = r.e.admissions.PutIfAbsent(ctx, claimPartition, r.req.ExecutionID, []byte(r.req.AttemptID))
@@ -97,11 +97,11 @@ func (r *run) admit(ctx context.Context) (api.Termination, bool) {
 // the claim (another attempt settled, or a v0.1 kernel wrote a legacy
 // record), and releases the claim on every refusal.
 func (r *run) admitClaimed(ctx context.Context) (api.Termination, bool) {
-	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	rec, present, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
 	if err != nil {
 		return r.releaseClaim(ctx, r.admissionNotRecorded(err)), false
 	}
-	if reason := admissionRefusal(rec, r.req); reason != "" {
+	if reason := admissionRefusal(rec, present, r.req); reason != "" {
 		return r.releaseClaim(ctx, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason)), false
 	}
 	r.ledger.restore(rec.consumed())
@@ -140,8 +140,8 @@ func (r *run) admissionNotRecorded(err error) api.Termination {
 }
 
 // admissionRefusal names why req may not start, or returns "".
-func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
-	if reason := versionRefusal(rec, req.ExecutionID); reason != "" {
+func admissionRefusal(rec admissionRecord, present bool, req api.ExecutionRequest) string {
+	if reason := versionRefusal(rec, present, req.ExecutionID); reason != "" {
 		return reason
 	}
 	for _, a := range rec.Attempts {
@@ -159,11 +159,12 @@ func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
 }
 
 // versionRefusal names why rec cannot be read under this contract, or
-// returns "". An unversioned record without attempts holds no state and is
-// treated as absent.
-func versionRefusal(rec admissionRecord, executionID string) string {
+// returns "". Only an absent record is new; a present one is read only at
+// admissionVersion, whatever it contains: an unversioned (v0.1) record with
+// no attempts or an empty budget is still legacy state.
+func versionRefusal(rec admissionRecord, present bool, executionID string) string {
 	switch {
-	case rec.Version == admissionVersion, rec.Version == "" && len(rec.Attempts) == 0:
+	case !present, rec.Version == admissionVersion:
 		return ""
 	case rec.Version == "":
 		return fmt.Sprintf("execution %q has legacy unversioned (v0.1) admission state; "+
@@ -219,34 +220,35 @@ func (r *run) settleAdmission(ctx context.Context) error {
 // recordConsumption appends this attempt to its execution's record. Only the
 // claim holder calls it, so the read-modify-write cannot interleave.
 func (r *run) recordConsumption(ctx context.Context) error {
-	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	rec, present, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
 	if err != nil {
 		return err
 	}
-	if reason := versionRefusal(rec, r.req.ExecutionID); reason != "" {
+	if reason := versionRefusal(rec, present, r.req.ExecutionID); reason != "" {
 		return errors.New(reason)
 	}
-	if len(rec.Attempts) == 0 {
+	if !present {
 		rec.Version, rec.Budget = admissionVersion, r.req.Budget
 	}
 	rec.Attempts = append(rec.Attempts, attemptRecord{AttemptID: r.req.AttemptID, Consumed: r.ledger.consumed()})
 	return r.e.saveAdmission(ctx, r.req.ExecutionID, rec)
 }
 
-// loadAdmission returns the execution's record; an absent one is empty.
-func (e *Engine) loadAdmission(ctx context.Context, executionID string) (admissionRecord, error) {
+// loadAdmission returns the execution's record and whether one is stored;
+// only storage.ErrNotFound means absent.
+func (e *Engine) loadAdmission(ctx context.Context, executionID string) (admissionRecord, bool, error) {
 	var rec admissionRecord
 	data, err := e.admissions.Get(ctx, admissionPartition, executionID)
 	if errors.Is(err, storage.ErrNotFound) {
-		return rec, nil
+		return rec, false, nil
 	}
 	if err != nil {
-		return rec, err
+		return rec, false, err
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return rec, fmt.Errorf("admission record unreadable: %w", err)
+		return rec, true, fmt.Errorf("admission record unreadable: %w", err)
 	}
-	return rec, nil
+	return rec, true, nil
 }
 
 func (e *Engine) saveAdmission(ctx context.Context, executionID string, rec admissionRecord) error {

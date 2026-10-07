@@ -217,25 +217,42 @@ func putRecord(t *testing.T, root string, version string, budget api.Budget) []b
 	if err != nil {
 		t.Fatal(err)
 	}
+	return putRaw(t, root, data)
+}
+
+// putRaw stores data as exec-1's admission record.
+func putRaw(t *testing.T, root string, data []byte) []byte {
+	t.Helper()
 	if err := openRecords(t, root).Put(context.Background(), admissionPartition, "exec-1", data); err != nil {
 		t.Fatal(err)
 	}
 	return data
 }
 
-// TestUnreadableAdmissionVersionFailsClosed: a legacy unversioned (v0.1)
-// record, or one of an unknown version, is never reinterpreted. A new attempt
+// TestUnreadableAdmissionVersionFailsClosed: a present legacy unversioned
+// (v0.1) record, whatever it contains (no attempts, an empty object), or one
+// of an unknown version, is never reinterpreted. A new attempt
 // is refused before any side effect and before any claim, the record is left
 // as it was, and no claim exists afterwards, so it repeats as the same
 // refusal.
 func TestUnreadableAdmissionVersionFailsClosed(t *testing.T) {
-	for name, tc := range map[string]struct{ version, reason string }{
-		"legacy_v0.1": {"", "legacy unversioned (v0.1) admission state; explicit recovery or migration is required"},
-		"unknown":     {"agentkernel.admission/v9", `unknown version "agentkernel.admission/v9"`},
+	const legacy = "legacy unversioned (v0.1) admission state; explicit recovery or migration is required"
+	for name, tc := range map[string]struct {
+		put    func(t *testing.T, root string) []byte
+		reason string
+	}{
+		"legacy_v0.1": {func(t *testing.T, root string) []byte { return putRecord(t, root, "", attempt("att-1").Budget) }, legacy},
+		"legacy_zero_attempts": {func(t *testing.T, root string) []byte {
+			return putRaw(t, root, []byte(`{"budget":{},"attempts":[]}`))
+		}, legacy},
+		"legacy_empty_object": {func(t *testing.T, root string) []byte { return putRaw(t, root, []byte(`{}`)) }, legacy},
+		"unknown": {func(t *testing.T, root string) []byte {
+			return putRecord(t, root, "agentkernel.admission/v9", attempt("att-1").Budget)
+		}, `unknown version "agentkernel.admission/v9"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			before := putRecord(t, root, tc.version, attempt("att-1").Budget)
+			before := tc.put(t, root)
 			records := openRecords(t, root)
 			f := newFixture(t, []scripted.Step{end("never")}, withAdmissions(records))
 			for range 2 {

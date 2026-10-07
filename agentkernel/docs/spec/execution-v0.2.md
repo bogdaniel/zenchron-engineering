@@ -446,12 +446,15 @@ admission. It holds two partitions per `execution_id`:
 After validation and before any side effect, `run.admit`:
 
 0. reads the record **without claiming** and refuses
-   `blocked/invalid_request` a record it cannot read under this contract: an
-   unversioned (v0.1) record with any attempt ("legacy unversioned (v0.1)
+   `blocked/invalid_request` a record it cannot read under this contract: a
+   present unversioned (v0.1) record ("legacy unversioned (v0.1)
    admission state; explicit recovery or migration is required …") or a
    record of any other version ("admission state of unknown version …").
-   Absent state (no record, or an unversioned record with no attempts) is
-   eligible; a `agentkernel.admission/v0.2` record takes the normal path.
+   Presence is decided at the storage lookup: only a missing record
+   (`storage.ErrNotFound`) is a new execution. A present
+   `agentkernel.admission/v0.2` record takes the normal path; a present
+   unversioned record is legacy whatever it contains (no attempts, an empty
+   budget, `{}`).
    Because this precedes the claim, an incompatible-version refusal never
    creates a claim and leaves none behind. Such a record is never
    reinterpreted, migrated or expired; it refuses every attempt of that
@@ -480,7 +483,8 @@ After validation and before any side effect, `run.admit`:
    never added together, since each already includes the ones before it.
 
 At settlement the claim holder appends its ledger's cumulative charge to the
-record (refusing to extend a record of another version) and then deletes
+record (creating it at `agentkernel.admission/v0.2` only when absent, and
+refusing to extend a present record of another version) and then deletes
 the claim; the read-modify-write happens only while holding the
 claim, so it needs no other lock. If either write fails the result is
 `incomplete/recording_failed` with the observed outcome in `detail`, and the
@@ -531,12 +535,13 @@ deadline; v0.1 refused that as a widening of the execution envelope.
 - Admission records are versioned: every new record carries
   `version: agentkernel.admission/v0.2`. v0.1 records carry none, and their
   stored deadline was an execution bound, so they are not reinterpreted
-  under v0.2: a non-empty unversioned record, like a record of an unknown
-  version, fails closed (`blocked/invalid_request`, before any side effect
+  under v0.2: any present unversioned record, even one with no attempts,
+  like a record of an unknown version, fails closed (`blocked/invalid_request`, before any side effect
   and before any claim, leaving the record unchanged) until an explicit
   recovery or migration protocol exists. No auto-migration and no expiry
   (`engine` `TestUnreadableRecordIsRefusedBeforeClaiming`,
   `TestLegacyRecordAfterClaimReleasesTheClaim`,
+  `TestSettlementNeverExtendsALegacyRecord`, `TestAbsentRecordIsANewExecution`,
   `TestUnreadableAdmissionVersionFailsClosed`,
   `TestVersionedAdmissionRecordAdmits`).
 
