@@ -46,6 +46,17 @@ func TestWorkGraphRefusesAMalformedRequestBeforeSendingIt(t *testing.T) {
 			t.Errorf("%s: code=%d err=%v, want an invalid-request refusal", name, code, err)
 		}
 	}
+	// A flag where the subject belongs is the usage error it is, never read
+	// as a graph id or a proposal path.
+	for name, args := range map[string][]string{
+		"flag as graph id": {"workgraph", "status", "--text"},
+		"flag as proposal": {"workgraph", "adopt", "--agent", "claude", valid},
+	} {
+		code, err := autonomy(args, offlineOverrides(), &bytes.Buffer{})
+		if err == nil || code != runtime.ExitInvalid || err.Error() != workgraphUsage {
+			t.Errorf("%s: code=%d err=%v, want the usage refusal", name, code, err)
+		}
+	}
 	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
 	t.Chdir(dir)
 	_, err := autonomy([]string{"workgraph", "adopt", valid, "--agent", "openai-responses", "--config", configPath},

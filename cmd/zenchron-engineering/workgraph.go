@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -19,7 +20,9 @@ const workgraphUsage = "usage: zenchron-engineering autonomy workgraph " +
 // autonomyWorkGraph is the WorkGraph operator surface (#472): adopt a proposed
 // revision, or read one graph's units, dependencies and frontier.
 func autonomyWorkGraph(args []string, stdout io.Writer) (int, error) {
-	if len(args) < 2 {
+	// The subject - a graph id or a proposal path - comes first; a flag there
+	// is a usage error, never read as one.
+	if len(args) < 2 || strings.HasPrefix(args[1], "--") {
 		return runtime.ExitInvalid, errors.New(workgraphUsage)
 	}
 	flags, err := parseAutonomyFlags(args[2:])

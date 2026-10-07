@@ -277,7 +277,7 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	// follow.
 	invocations := UnknownBudget()
 	if limit := state.providerInvocationLimit(); limit > 0 {
-		left := limit - state.projection.Attempts[OpExecutionInvoke]
+		left := limit - state.providerInvocationsSpent()
 		if left < 0 {
 			left = 0
 		}

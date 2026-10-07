@@ -59,6 +59,9 @@ const (
 	OpPullRequestCreate = "pull_request.create"
 	OpPullRequestUpdate = "pull_request.update"
 	OpGitHubObserve     = "github.observe"
+	// OpHandoffRepair is the one result-only correction of a refused
+	// orchestration handoff (#492, handoff_repair.go).
+	OpHandoffRepair = "handoff.repair"
 )
 
 // publicationKinds are the operations that change protected remote state.
@@ -1067,6 +1070,7 @@ var operationSpecs = []operationSpec{
 	{OpExecutionInvoke, bindExecutionInvoke},
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
+	{OpHandoffRepair, bindHandoffRepair},
 	{OpAssuranceGo, bindAssuranceGo},
 	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
@@ -1135,6 +1139,13 @@ func (s *runState) attemptsFor(kind string) int {
 		return s.budgets().MaxRemediationAttempts
 	case OpAssuranceGo, OpAssuranceSemantic:
 		return s.budgets().MaxAssuranceAttempts
+	case OpHandoffRepair:
+		// NOT the repair budget, which is one started operation
+		// (startedRepair). The second attempt exists only for a crash between
+		// the scheduler starting the row and operation.before being
+		// journalled: no provider was reached, and failing the run for it
+		// would be worse than the invocation it never made.
+		return 2
 	default:
 		return 3
 	}
@@ -1319,7 +1330,29 @@ func (s *runState) providerInvocationCeilingReached() bool {
 	if _, wanted := bindExecutionInvoke(s); !wanted {
 		return false
 	}
-	return s.projection.Attempts[OpExecutionInvoke] >= limit
+	return s.providerInvocationsSpent() >= limit
+}
+
+// providerInvocationsSpent is the run total MaxProviderInvocations bounds:
+// every begun engineering invocation and every handoff repair that reached a
+// provider (#492). It is the one definition the ceiling, a successor's
+// availability and the remaining-budget view all read.
+func (s *runState) providerInvocationsSpent() int {
+	return providerInvocationsSpent(s.projection, s.snapshot.Operations)
+}
+
+func providerInvocationsSpent(projection RunProjection, operations map[string]RunOperation) int {
+	spent := projection.Attempts[OpExecutionInvoke]
+	for _, op := range operations {
+		if repairReachedProvider(op) {
+			spent++
+		}
+	}
+	return spent
+}
+
+func (s *runState) providerCeiling() providerCeiling {
+	return providerCeiling{limit: s.providerInvocationLimit(), spent: s.providerInvocationsSpent()}
 }
 
 // providerInvocationLimit is the run's total, taken from what the run
@@ -2047,8 +2080,9 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, Outcome{}, err
 	}
 	produced := r.handle(ctx, state, started)
-	// Only invokeExecution ever sets interrupted: a running provider is the one
-	// started attempt a stop reaches (#213); every other kind is unchanged.
+	// Only the provider-backed handlers set interrupted - invokeExecution and
+	// repairHandoff (#492): a running provider is the one started attempt a
+	// stop reaches (#213); every other kind is unchanged.
 	interrupted := produced.interrupted
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
