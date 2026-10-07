@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // #327: every provider-executed run attempt durably records the invocation
@@ -52,9 +53,9 @@ func (p *provenanceProvider) Execute(_ context.Context, request ExecutionRequest
 			return ExecutionResult{}, err
 		}
 	}
-	result := ExecutionResult{ProviderID: "claude", Attempt: request.Attempt, Outcome: Succeeded, Failure: step.failure}
+	result := ExecutionResult{ProviderID: "claude", Attempt: request.Attempt, Outcome: execution.Succeeded, Failure: step.failure}
 	if step.failure != nil || step.err != nil {
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 	}
 	if step.invocation != nil {
 		invocation := *step.invocation

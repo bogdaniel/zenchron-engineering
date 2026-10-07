@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
@@ -161,16 +162,16 @@ func (p *fleetProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	// Prose that LOOKS like a handoff, in the place a transcript would be. It
 	// must never become one.
 	if behaviour == fleetNoChangeHandoff {
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
 	}
 	if behaviour == fleetNoChangeInvalidHandoff {
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetCompletedUnresolvedReport), 0o600)
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetCompletedUnresolvedReport), 0o600)
 	}
 	if err := os.WriteFile(filepath.Join(request.CandidateDir, "candidate.go"),
 		[]byte("package candidate\n// handoff: {\"outcome\":\"completed\"} done\nconst Run = \""+request.RunID+"\"\n"), 0o600); err != nil {
 		return ExecutionResult{}, err
 	}
-	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}
+	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Succeeded}
 	switch behaviour {
 	case fleetCheckpointThenComplete, fleetCheckpointThenMutate, fleetCheckpointThenRestatesSHA:
 		return fleetContinue(request, behaviour, invocation)
@@ -182,7 +183,7 @@ func (p *fleetProvider) Execute(ctx context.Context, request ExecutionRequest) (
 				return ExecutionResult{}, err
 			}
 		}
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed,
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Failed,
 			Failure: &ProviderFailure{Classification: FailureUnknown}}, nil
 	case fleetValidHandoff:
 		if request.HandoffPath != "" {
@@ -226,7 +227,7 @@ func (p *fleetProvider) repair(ctx context.Context, request ExecutionRequest) (E
 	if p.onRepair != nil {
 		p.onRepair(request.RunID)
 	}
-	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}
+	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Succeeded}
 	write := func(document string) (ExecutionResult, error) {
 		return result, os.WriteFile(request.HandoffPath, []byte(document), 0o600)
 	}
@@ -238,7 +239,7 @@ func (p *fleetProvider) repair(ctx context.Context, request ExecutionRequest) (E
 	case repairRestatesCandidate:
 		return write(`{"schema_version":"0.1","outcome":"completed","summary":"s","candidate_revision":"` + request.Candidate.Revision + `"}`)
 	case repairFails:
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed, Executed: true, Failure: &ProviderFailure{Classification: FailureUnknown}},
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Failed, Executed: true, Failure: &ProviderFailure{Classification: FailureUnknown}},
 			errors.New("the provider process exited 1")
 	case repairStoppedMidway, repairFinishesDespiteStop:
 		select {
@@ -250,13 +251,13 @@ func (p *fleetProvider) repair(ctx context.Context, request ExecutionRequest) (E
 			return ExecutionResult{}, err
 		}
 		if behaviour == repairFinishesDespiteStop {
-			return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded, Executed: true}, nil
+			return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Succeeded, Executed: true}, nil
 		}
 		class := FailureControllerShutdown
 		if ownerOfCancellation(ctx) == OwnerOperatorStop {
 			class = FailureRunCancelled
 		}
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationCancelled, Executed: true, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Cancelled, Executed: true, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
 	case repairMutatesCandidate:
 		dir := candidateDir(stateDir, request.RunID)
 		for name, content := range map[string]string{"candidate.go": "package candidate\n// rewritten by the repair\n", "planted.go": "package candidate\n"} {
@@ -275,7 +276,7 @@ func (p *fleetProvider) repair(ctx context.Context, request ExecutionRequest) (E
 // claim bound to the exact subject it was shown, and writes its handoff.
 func fleetContinue(request ExecutionRequest, behaviour fleetBehaviour, invocation int) (ExecutionResult, error) {
 	if invocation == 1 {
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureUnknown}},
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureUnknown}},
 			&ProviderStopError{Reason: StopIterationBudget, Detail: "reasoning iterations exceeded 16"}
 	}
 	if behaviour == fleetCheckpointThenMutate {
@@ -293,7 +294,7 @@ func fleetContinue(request ExecutionRequest, behaviour fleetBehaviour, invocatio
 	}); err != nil {
 		return ExecutionResult{}, err
 	}
-	return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(report), 0o600)
+	return ExecutionResult{ProviderID: "fleet-worker", Outcome: execution.Succeeded}, os.WriteFile(request.HandoffPath, []byte(report), 0o600)
 }
 
 // request returns the latest request one run's worker received.

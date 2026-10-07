@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // PermissionBypassRefusedError is the typed refusal for an unsafe
@@ -988,40 +989,6 @@ func resolvesDeclaredExecutable(candidate string) bool {
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
-// InvocationProvenance is the durable, non-secret record of HOW one attempt was
-// invoked. It is what makes a constrained native run and an explicitly
-// authorized bypass run distinguishable forever.
-//
-// The explanatory core - command, modes, bounds, termination and the
-// structured-progress counters - is domain.InvocationObservation, embedded so
-// the wire shape stays flat and unchanged, and so a run attempt's journal event
-// and a planning revision carry ONE definition of it (#327). What is added here
-// is who ran, and the #241 refusals only a run attempt has.
-type InvocationProvenance struct {
-	AgentID      string    `json:"agent_id"`
-	ProviderKind string    `json:"provider_kind"`
-	TrustMode    TrustMode `json:"trust_mode"`
-	Model        string    `json:"model,omitempty"`
-	// DeadlineBound is WHICH bound this attempt's execution_deadline is
-	// (#328): the physical-attempt wall, or the run's remaining active work
-	// when that was smaller. The runtime decided it when the attempt started
-	// and records it here, beside the deadline it explains; no adapter sets it.
-	// Empty for an attempt of a run that predates the attempt limit.
-	DeadlineBound AttemptBound `json:"deadline_bound,omitempty"`
-	domain.InvocationObservation
-	// GitRefusals are the destructive Git operations the runtime refused during
-	// this invocation, bounded and carrying no provider-chosen operand.
-	//
-	// They are OBSERVATION, not failure. A provider that reached for a
-	// destructive recovery, was refused, and then did the work properly
-	// succeeded - and the refusal is still the most interesting thing that
-	// happened, because it is where expensive reasoning was nearly lost.
-	//
-	// They are folded into the operation result as a count and the latest
-	// shape, which is why the attempt-provenance event carries none of them.
-	GitRefusals []GitRefusal `json:"git_refusals,omitempty"`
-}
-
 // maxProvenanceArgs bounds the recorded vector. Every native CLI the runtime
 // builds produces well under this; the ceiling exists so a future spec cannot
 // grow an event payload past the canonical ceiling by accident.
@@ -1277,7 +1244,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// the one that runs unattended in a read-only mode - cannot drift apart
 	// about whether a stalling provider is bounded at all.
 	if limit := request.Budgets.InactivityLimit; limit > 0 {
-		bounded, release := withProviderInactivity(ctx, limit, providerProgressRecorder(ctx))
+		bounded, release := withProviderInactivity(ctx, limit, execution.ProgressRecorder(ctx))
 		defer release()
 		ctx = bounded
 	}
@@ -1317,7 +1284,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		claimed, err := claimCandidateWriter(ctx, request.CandidateDir, candidateWriterSettle)
 		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
-			return notStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), notStarted
+			return execution.NotStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), notStarted
 		}
 		if err != nil {
 			return ExecutionResult{}, err
@@ -1347,7 +1314,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// executor's recorded cause says only why nothing ran.
 	var notStarted *ProviderNotStartedError
 	if errors.As(runErr, &notStarted) {
-		return notStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), runErr
+		return execution.NotStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), runErr
 	}
 	owner := output.Owner
 	killed := owner != OwnerUndecided && owner != OwnerProviderExited
@@ -1417,7 +1384,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	}
 	result := ExecutionResult{
 		ProviderID: p.Agent.ID, Model: invocation.Model(), AuthMode: authMode,
-		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
+		Attempt: request.Attempt, Outcome: execution.Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
 	// THE SEMANTIC ANSWER, exposed only when the structured stream itself
@@ -1436,14 +1403,14 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// the candidate writer lock after the group was stopped is background
 	// work this invocation walked away from, writing the candidate (#168).
 	if streamed.UnresolvedBackgroundWork || (output.EscapedWriter && !killed) {
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 		result.Failure = &ProviderFailure{
 			Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: artifacts[0].Path,
 		}
 		return result, runErr
 	}
 	if runErr != nil || killed {
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 		// The typed condition the PROVIDER ITSELF stated, read only from the
 		// narrow terminal surface. FailureUnknown here means the CLI named
 		// nothing this runtime recognizes, which is the fail-closed answer and
@@ -1510,7 +1477,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// failure of the work: it is the stop, recorded as the stop. A
 			// provider that had already exited is OwnerProviderExited and
 			// never reaches here, however long its pipes stayed open.
-			result.Outcome = OperationCancelled
+			result.Outcome = execution.Cancelled
 			result.Failure.Classification = FailureRunCancelled
 			provenance.TerminationCause = TerminationRunStopped
 		case killed:
@@ -1521,7 +1488,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// This does not weaken `stop RUN`: operator cancellation is a
 			// separate durable act that journals run.cancelled, and the
 			// Cancelled disposition takes precedence over every wait.
-			result.Outcome = OperationCancelled
+			result.Outcome = execution.Cancelled
 			result.Failure.Classification = FailureControllerShutdown
 		}
 		// The PRIMARY failure is returned untouched, and the structured result
@@ -1542,7 +1509,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// a usage limit may be stated only on stderr, never as a typed field.
 			recognized = classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
 		}
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
@@ -1878,18 +1845,4 @@ func (p CLIAgentProvider) refuseUnsupportedObligations(request ExecutionRequest)
 		AgentID: p.Agent.ID, Missing: missing,
 		Declared: append([]string(nil), p.Toolchain.RequiredTools...),
 	}
-}
-
-// notStartedResult is the answer for a provider the executor never started
-// because its context had already ended (#213). It carries no invocation
-// provenance and no transcript: nothing ran. The class names why nothing ran,
-// from the cause the executor recorded at the refusal.
-func notStartedResult(providerID, model, authMode string, attempt int, notStarted *ProviderNotStartedError) ExecutionResult {
-	result := ExecutionResult{ProviderID: providerID, Model: model, AuthMode: authMode, Attempt: attempt, Outcome: OperationCancelled}
-	class := cancellationClass(notStarted.Cause)
-	if class != FailureControllerShutdown && class != FailureRunCancelled {
-		result.Outcome = OperationFailed // a runtime bound ended it, not a cancellation
-	}
-	result.Failure = &ProviderFailure{Classification: class}
-	return result
 }

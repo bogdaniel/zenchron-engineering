@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // fakePlanningProvider models a registered agent performing a planning
@@ -83,7 +84,7 @@ func (p *fakePlanningProvider) Execute(_ context.Context, request ExecutionReque
 		return ExecutionResult{}, err
 	}
 	result := ExecutionResult{
-		ProviderID: "planner", Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
+		ProviderID: "planner", Attempt: request.Attempt, Outcome: execution.Succeeded, Artifacts: artifacts,
 		Invocation: &InvocationProvenance{InvocationObservation: domain.InvocationObservation{PermissionMode: "read-only"}},
 		Failure:    p.failure,
 	}
@@ -95,7 +96,7 @@ func (p *fakePlanningProvider) Execute(_ context.Context, request ExecutionReque
 		result.Invocation.FinalResultObserved = true
 	}
 	if p.failure != nil {
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 	}
 	return result, p.err
 }

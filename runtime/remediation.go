@@ -13,6 +13,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // Fake providers make planner and boundary tests independent of a real Codex
@@ -109,7 +110,7 @@ func AssuranceRerun(ctx context.Context, provider AssuranceProvider, request Ass
 	if secondErr != nil {
 		class := FailureUnknown
 		if ctx.Err() != nil {
-			class = cancellationClass(context.Cause(ctx)) // a cancelled confirmation is not unjudged-and-done
+			class = execution.CancellationClass(context.Cause(ctx)) // a cancelled confirmation is not unjudged-and-done
 		} else if second.FailureClass != "" {
 			class = second.FailureClass // the verifier said what went wrong
 		}
@@ -343,7 +344,7 @@ type FakeReviewerProvider struct {
 
 func NewFakeReviewerProvider(verdicts ...ReviewerResult) *FakeReviewerProvider {
 	return &FakeReviewerProvider{
-		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "claude", Outcome: Succeeded}},
+		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "claude", Outcome: execution.Succeeded}},
 		Verdicts:              verdicts,
 	}
 }

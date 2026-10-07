@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // claudeHelpExcerpt is the real `claude --help` shape (2.1.282) around the
@@ -420,7 +422,7 @@ func TestStructuredProgressRefreshesTheWindowAndStderrDoesNot(t *testing.T) {
 		started := time.Now()
 		result, err := provider.Execute(context.Background(), request)
 		elapsed := time.Since(started)
-		if err != nil || result.Outcome != Succeeded {
+		if err != nil || result.Outcome != execution.Succeeded {
 			t.Fatalf("a Claude emitting progress was failed: %v %#v", err, result.Failure)
 		}
 		if elapsed <= inactivityWindow {
@@ -543,7 +545,7 @@ func TestTheFinalResultIsSeenPastTheCaptureCeiling(t *testing.T) {
 		"i=0\nwhile [ $i -lt 100 ]; do "+strings.TrimSuffix(emit(claudeAssistant("m", "", claudeText)), "\n")+
 			"; i=$((i+1)); done\n"+emit(claudeResult(false, "success", 0)))
 	result, err := provider.Execute(context.Background(), request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("the result past the ceiling was not seen: %v %#v", err, result.Failure)
 	}
 	transcript, readErr := os.ReadFile(result.Artifacts[0].Path)
@@ -614,7 +616,7 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.failed != (result.Outcome == OperationFailed) {
+			if tc.failed != (result.Outcome == execution.Failed) {
 				t.Fatalf("outcome = %q, want failed=%v", result.Outcome, tc.failed)
 			}
 			if result.Invocation.PermissionDenials != tc.denials {
@@ -662,7 +664,7 @@ func TestAnAbandonedBackgroundShellFailsAValidResult(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Outcome != OperationFailed {
+		if result.Outcome != execution.Failed {
 			t.Fatalf("outcome = %q, want OperationFailed", result.Outcome)
 		}
 		if result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
@@ -881,7 +883,7 @@ func TestTheProviderInactivityMinimumIsRefusedBeforeAnyRun(t *testing.T) {
 func TestAFinalResultWithoutATrailingNewlineIsParsed(t *testing.T) {
 	provider, request := claudeProcess(t, "printf '%s' '"+claudeResult(false, "success", 0)+"'\n")
 	result, err := provider.Execute(context.Background(), request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("an unterminated final result failed the run: %v %#v", err, result.Failure)
 	}
 }
@@ -951,7 +953,7 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	recorded, release := make(chan string, 1), make(chan struct{})
 	var once sync.Once
 	defer once.Do(func() { close(release) })
-	ctx := withProviderProgressRecorder(context.Background(), func(progress ProviderProgress) {
+	ctx := execution.WithProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		select {
 		case recorded <- progress.Key:
 		default:
@@ -981,7 +983,7 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	}
 	select {
 	case result := <-done:
-		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != events {
+		if result.Outcome != execution.Succeeded || result.Invocation.StructuredEvents != events {
 			t.Fatalf("outcome %q with %d events", result.Outcome, result.Invocation.StructuredEvents)
 		}
 	case <-time.After(5 * time.Second):
@@ -1011,7 +1013,7 @@ func TestARequiredResultFieldCannotFailOpen(t *testing.T) {
 			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
 			fake.outputs = []CommandOutput{{Stdout: []byte(line + "\n")}}
 			result, err := provider.Execute(context.Background(), request)
-			if err != nil || result.Outcome != OperationFailed {
+			if err != nil || result.Outcome != execution.Failed {
 				t.Fatalf("exit 0 with %s ended %q (%v)", line, result.Outcome, err)
 			}
 		})
@@ -1072,7 +1074,7 @@ func TestExecutionResultAnswerIsExposedOnlyByClaudesStructuredStream(t *testing.
 	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
 	fake.outputs = []CommandOutput{{Stdout: []byte(claudeResultWithAnswer(false, answer) + "\n")}}
 	result, err := provider.Execute(context.Background(), request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("execute: %v %#v", err, result.Failure)
 	}
 	if strings.Contains(result.Answer, "ghp_") || !strings.Contains(result.Answer, "[REDACTED]") {
@@ -1085,7 +1087,7 @@ func TestExecutionResultAnswerIsExposedOnlyByClaudesStructuredStream(t *testing.
 	codex, codexRequest, codexFake := agentFixture(t, AgentKindCodexCLI)
 	codexFake.outputs = []CommandOutput{{Stdout: []byte("done\n")}}
 	codexResult, err := codex.Execute(context.Background(), codexRequest)
-	if err != nil || codexResult.Outcome != Succeeded {
+	if err != nil || codexResult.Outcome != execution.Succeeded {
 		t.Fatalf("codex execute: %v %#v", err, codexResult.Failure)
 	}
 	if codexResult.Answer != "" {
@@ -1133,7 +1135,7 @@ func TestErrorMaxTurnsFailsClosedAsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != FailureUnknown {
+	if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != FailureUnknown {
 		t.Fatalf("error_max_turns ended %q with %#v, want a fail-closed unknown", result.Outcome, result.Failure)
 	}
 }
@@ -1183,7 +1185,7 @@ func TestClaudeAutomaticDetachmentOutranksFailedFinalResults(t *testing.T) {
 				claudeResult(true, "error_during_execution", 0),
 			}, "\n") + "\n")}}
 			result, _ := provider.Execute(context.Background(), request)
-			if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
+			if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
 				t.Fatalf("plan=%v processFailed=%v: outcome=%v failure=%+v", plan, processFailed, result.Outcome, result.Failure)
 			}
 		}

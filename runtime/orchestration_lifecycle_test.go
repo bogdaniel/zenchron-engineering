@@ -409,7 +409,7 @@ func TestGrantedVerificationToolPreventsProducerSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycleEvent(t, store, "r", EventOperationBefore, op)
-	permit, err := s.RequestVerification(ExecutionAttemptRef{op.RunID, op.ID, op.AttemptIdentity}, "tool", "tool-owner")
+	permit, err := s.RequestVerification(ExecutionAttemptRef{RunID: op.RunID, OperationID: op.ID, Attempt: op.AttemptIdentity}, "tool", "tool-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

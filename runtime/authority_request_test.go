@@ -293,7 +293,10 @@ func TestAuthorityRequestIdDigestsEveryBinding(t *testing.T) {
 		"decision":       func(a AuthorityRequest) AuthorityRequest { a.Decision.Revision += "x"; return a },
 		"status":         func(a AuthorityRequest) AuthorityRequest { a.Status = domain.AuthorityIncomplete; return a },
 		"requirement":    func(a AuthorityRequest) AuthorityRequest { a.Requires = []string{"other"}; return a },
-		"evidence":       func(a AuthorityRequest) AuthorityRequest { a.Evidence = append(a.Evidence, Ref{"e", "1"}); return a },
+		"evidence": func(a AuthorityRequest) AuthorityRequest {
+			a.Evidence = append(a.Evidence, Ref{ID: "e", Revision: "1"})
+			return a
+		},
 	} {
 		moved, err := mutate(request).identify()
 		if err != nil {

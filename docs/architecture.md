@@ -169,6 +169,23 @@ Implemented as a named agent registry: a stable agent id, a provider kind and an
 explicit trust mode are three separate facts, and no package in this kernel
 knows any of them. See [`agents.md`](agents.md).
 
+### Execution port
+
+Every execution implementation sits behind one host seam, `execution.Port`
+(ADR-0005, #521), in the top-level `execution/` package:
+
+```text
+EngineeringRun -> host (runtime) -> execution.Port -> native providers; later the kernel adapter
+```
+
+The host owns run and attempt identity, budgets, cancellation provenance, the
+process termination owner, journal and evidence recording, candidate authority
+and durable waits. An implementation owns one bounded model/tool execution and
+its usage and progress observations. `execution/` imports only the standard
+library and `domain`; its adapters import no host or governance package and
+are composed only in `cmd/`. `execution/architecture_test.go` enforces all
+three.
+
 ### AssuranceProvider
 
 Tests, CI, static analyzers, enterprise systems and human review can produce or

@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // shortWriterSettle keeps refusal tests fast; the production bound is 15s.
@@ -233,10 +235,10 @@ type retryingProvider struct{ countingProvider }
 func (p *retryingProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	p.calls++
 	if p.calls == 1 {
-		return ExecutionResult{ProviderID: "counting", Outcome: OperationFailed,
+		return ExecutionResult{ProviderID: "counting", Outcome: execution.Failed,
 			Failure: &ProviderFailure{Classification: FailureProviderNoProgress}}, nil
 	}
-	return ExecutionResult{ProviderID: "counting", Outcome: Succeeded}, nil
+	return ExecutionResult{ProviderID: "counting", Outcome: execution.Succeeded}, nil
 }
 
 // M2 through the runtime: a retry of execution on the same run is not refused

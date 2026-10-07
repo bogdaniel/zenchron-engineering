@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // budgetProvider is an execution provider that can be told, per invocation,
@@ -55,7 +57,7 @@ func (p *budgetProvider) Execute(_ context.Context, request ExecutionRequest) (E
 		}
 	}
 	if step.stop == StopCompleted {
-		result := ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+		result := ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}
 		if step.resolve {
 			resolution := FeedbackResolution{SchemaVersion: FeedbackResolutionSchemaVersion, Subject: request.Candidate.Revision}
 			if request.Purpose == InvocationContinuation {
@@ -70,7 +72,7 @@ func (p *budgetProvider) Execute(_ context.Context, request ExecutionRequest) (E
 		}
 		return result, nil
 	}
-	return ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed},
+	return ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed},
 		&ProviderStopError{Reason: step.stop, Detail: step.detail}
 }
 

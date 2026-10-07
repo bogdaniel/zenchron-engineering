@@ -37,7 +37,7 @@ func TestNestedVerificationDoesNotTakeAnotherWorkSlot(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			p, err := s.RequestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, fmt.Sprintf("tool-%d", i), "tool-owner")
+			p, err := s.RequestVerification(ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, fmt.Sprintf("tool-%d", i), "tool-owner")
 			if err != nil {
 				t.Error(err)
 				return

@@ -1,5 +1,7 @@
 package runtime
 
+import "github.com/bogdaniel/zenchron-engineering/execution"
+
 // typedResults is what the HOST read from the runtime-owned result slots of
 // one invocation (#521). It never comes from a provider: ExecutionResult has
 // no field a provider could fill with a verdict or a resolution, so the only
@@ -37,7 +39,7 @@ type typedResults struct {
 // which a deferred candidate-writer stop error could follow without undoing.
 func readTypedResultSlots(reviewerResultPath, feedbackResolutionPath string, result *ExecutionResult) typedResults {
 	var typed typedResults
-	if result.Outcome != Succeeded || result.Failure != nil {
+	if result.Outcome != execution.Succeeded || result.Failure != nil {
 		return typed
 	}
 	diagnosticRef := ""
@@ -47,7 +49,7 @@ func readTypedResultSlots(reviewerResultPath, feedbackResolutionPath string, res
 	if reviewerResultPath != "" {
 		review, err := ReadReviewerResult(reviewerResultPath)
 		if err != nil {
-			result.Outcome = OperationFailed
+			result.Outcome = execution.Failed
 			result.Failure = &ProviderFailure{
 				Classification: FailureReviewerProtocolIncomplete, RawDiagnosticRef: diagnosticRef,
 			}
@@ -59,7 +61,7 @@ func readTypedResultSlots(reviewerResultPath, feedbackResolutionPath string, res
 	if feedbackResolutionPath != "" {
 		resolution, err := ReadFeedbackResolution(feedbackResolutionPath)
 		if err != nil {
-			result.Outcome = OperationFailed
+			result.Outcome = execution.Failed
 			result.Failure = &ProviderFailure{Classification: FailureVerification, RawDiagnosticRef: diagnosticRef}
 			return typed
 		}

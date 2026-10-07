@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // closedLoopStages is the #119 shape: one producer, one independent reviewer
@@ -854,7 +855,7 @@ type dyingReviewerProvider struct {
 func (p *dyingReviewerProvider) Execute(ctx context.Context, r ExecutionRequest) (ExecutionResult, error) {
 	result, err := p.FakeReviewerProvider.Execute(ctx, r)
 	if r.ReviewerResultPath != "" {
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 		result.Failure = &ProviderFailure{Classification: p.class}
 		// The verdict file stays on disk; the host does not read it out of a
 		// failed invocation (readTypedResultSlots).
@@ -1392,7 +1393,7 @@ type outcomeOnlyFailureReviewerProvider struct {
 func (p *outcomeOnlyFailureReviewerProvider) Execute(ctx context.Context, r ExecutionRequest) (ExecutionResult, error) {
 	result, err := p.FakeReviewerProvider.Execute(ctx, r)
 	if r.ReviewerResultPath != "" {
-		result.Outcome = OperationCancelled
+		result.Outcome = execution.Cancelled
 	}
 	return result, err
 }

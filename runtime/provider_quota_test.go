@@ -13,6 +13,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // quotaProvider refuses at its own capacity boundary before doing any work,
@@ -32,7 +34,7 @@ func (p *quotaProvider) Isolation() ProviderIsolation {
 func (p *quotaProvider) Execute(context.Context, ExecutionRequest) (ExecutionResult, error) {
 	p.requests++
 	return ExecutionResult{
-		ProviderID: "codex", Outcome: OperationFailed,
+		ProviderID: "codex", Outcome: execution.Failed,
 		Failure: &ProviderFailure{Classification: p.class},
 	}, nil
 }

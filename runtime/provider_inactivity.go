@@ -45,18 +45,6 @@ import (
 	"time"
 )
 
-// ErrProviderInactive is the cause a cancelled provider context carries when
-// the inactivity policy - not the deadline, not a shutdown, not the operator -
-// is what ended the invocation.
-//
-// It is a CAUSE rather than a return value because the thing that observes the
-// silence is the process runner, several frames below the adapter that has to
-// classify it, and context.Cause is the one channel that already crosses that
-// boundary. Without it an inactivity kill was indistinguishable from a
-// supervisor shutdown through ctx.Err() alone, and those two mean opposite
-// things to a run: one is a dead provider, the other is a resumable pause.
-var ErrProviderInactive = errors.New("the provider produced no output within its inactivity bound")
-
 // DefaultProviderInactivitySeconds is the shipped no-progress window.
 //
 // It is ten minutes, and it is derived from this repository's own conventions
@@ -110,31 +98,6 @@ func withProviderInactivity(ctx context.Context, limit time.Duration, record fun
 	bounded, cancel := context.WithCancelCause(ctx)
 	policy := &inactivityPolicy{limit: limit, cancel: cancel, record: record}
 	return context.WithValue(bounded, inactivityPolicyKey{}, policy), func() { cancel(nil) }
-}
-
-type progressRecorderKey struct{}
-
-// withProviderProgressRecorder supplies the DURABLE half of the policy: where
-// observed progress is written so that status can report it and a restart can
-// read it back.
-//
-// It is separate from the bound itself because the two come from different
-// places. The bound is a budget and travels with the request, like every other
-// budget; the recorder is the caller's own durable operation state, which an
-// adapter must not know the shape of. A caller that keeps none - the planner,
-// a probe, a test - supplies none, and the bound still applies.
-func withProviderProgressRecorder(ctx context.Context, record func(ProviderProgress)) context.Context {
-	if record == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, progressRecorderKey{}, record)
-}
-
-// providerProgressRecorder returns the caller's durable progress recorder, or
-// nil when none was supplied.
-func providerProgressRecorder(ctx context.Context) func(ProviderProgress) {
-	record, _ := ctx.Value(progressRecorderKey{}).(func(ProviderProgress))
-	return record
 }
 
 // providerInactivityCause reports whether this context was ended by the
@@ -199,24 +162,6 @@ type observation struct {
 	at  time.Time
 	// suspendedSince is when a structured main-thread tool opened, or zero.
 	suspendedSince time.Time
-}
-
-// ProviderProgress is one durable observation of a live provider invocation,
-// as Scheduler.RecordProviderProgress receives it.
-type ProviderProgress struct {
-	// Key is the progress fingerprint; the durable instant moves only when it
-	// changes.
-	Key string
-	// Age is how long before this write the progress was OBSERVED. The row
-	// must say when the work moved, not when the coalescer wrote it (#352).
-	Age time.Duration
-	// Suspended reports a structured main-thread tool held open (#322), and
-	// SuspendedAge how long before this write it opened.
-	Suspended    bool
-	SuspendedAge time.Duration
-	// Final is the recorder's closing write: the process has ended under an
-	// observing controller, so nothing it observed is still unwritten.
-	Final bool
 }
 
 // progressRecordInterval is how often one process may write durable progress:
