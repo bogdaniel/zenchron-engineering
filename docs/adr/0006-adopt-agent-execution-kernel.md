@@ -1,10 +1,12 @@
 # ADR-0006: Adopt the Agent Execution Kernel for Brokered API Execution
 
-- Status: Proposed
+- Status: Proposed (moves to Accepted when merged, after ADR-0005 from #521
+  PR B is on `main`)
 - Date: 2026-10-07
 - Issue: #518 (Gate B of #446; absorbs #477). Prerequisite: the #445
-  execution/provider-boundary slice #521 (its execution-port decision is
-  ADR-0005). Related: #67, #70, #103, #66.
+  execution/provider-boundary slice #521; its execution-port decision is
+  ADR-0005, established by #521 PR B, which merges before this ADR. Related:
+  #67, #70, #103, #66.
 - Naming: "ExecutionPort" below is the port #521 freezes as `execution.Port`.
 
 ## Context
@@ -101,11 +103,18 @@ is never a sixth one. This resolves contradiction 3.
   the existing `openai` kind. Nothing changes for the default worker: no
   automatic provider switch, no subscription-to-API fallback, no billing
   change.
-- **Rollback:** disable or remove the agent, and new runs use the existing path
-  while it still exists. Recorded attempts keep their recorded provider kind
-  and provenance. Kernel DTOs persist only as versioned artifacts
-  (`agentkernel.execution/v0.1`), never as canonical host records. Turning the
-  feature off never reinterprets an already recorded attempt.
+- **Rollback during the dogfood window:** both loops exist, so disabling or
+  removing the kernel agent kind routes new runs back to the existing
+  `OpenAIProvider` path. This is a configuration change.
+- **Rollback after retirement:** once the old loop is deleted at #518's named
+  removal step, no flag can bring it back. Rollback then means a code and
+  deployment rollback to a release that still contains it. The removal step
+  therefore lands only after the parity tests pass, and in its own revertible
+  change.
+- **In both cases** recorded attempts keep their recorded provider kind and
+  provenance. Kernel DTOs persist only as versioned artifacts
+  (`agentkernel.execution/v0.1`), never as canonical host records, so neither
+  kind of rollback reinterprets an already recorded attempt.
 
 ### Amendment of the YAGNI position
 
@@ -184,5 +193,6 @@ contradiction.
   authority. `completed` means the loop ended, not that the objective was met.
 - Host authorities stay with their current owners, with no sixth termination
   owner.
-- Enabling, disabling or rolling back never reinterprets recorded attempts.
+- Enabling, disabling or rolling back (by configuration during dogfood, by
+  code/deployment after retirement) never reinterprets recorded attempts.
 - The YAGNI amendment covers this scope only.
