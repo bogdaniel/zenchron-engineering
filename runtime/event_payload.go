@@ -152,14 +152,21 @@ var eventPayloads = map[string]payloadValidator{
 		if p.Outcome != orchestration.OutcomeCompleted && p.Outcome != orchestration.OutcomePartial {
 			return fmt.Errorf("handoff outcome %q is not a recognized outcome", p.Outcome)
 		}
+		if (p.RepairOperationID == "") != (p.RepairAttempt == 0) {
+			return errors.New("a repaired handoff report names both its repair operation and attempt, or neither")
+		}
 		return errors.Join(
 			required("operation_id", p.OperationID),
 			positive("attempt", p.Attempt),
+			nonNegative("repair_attempt", p.RepairAttempt),
 			required("report_sha256", p.ReportSHA256))
 	}),
 	EventHandoffRefused: payloadSchema(func(p HandoffRefusedPayload) error {
 		if p.Kind != HandoffMissing && p.Kind != HandoffInvalid {
 			return fmt.Errorf("handoff refusal kind %q is not a recognized kind", p.Kind)
+		}
+		if p.Repairable && (p.Kind != HandoffInvalid || p.ReportSHA256 == "") {
+			return errors.New("only an invalid report with a digest of its refused bytes is repairable")
 		}
 		return errors.Join(
 			required("operation_id", p.OperationID),

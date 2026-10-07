@@ -1912,6 +1912,9 @@ func (r PlanReconciler) providerInvocations(runID string) (int, error) {
 		if operation.Kind == OpExecutionInvoke {
 			total += operation.Attempt
 		}
+		if repairReachedProvider(operation) {
+			total++
+		}
 	}
 	return total, nil
 }

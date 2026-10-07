@@ -176,6 +176,12 @@ const (
 	// revision and never unbound dirty state. It carries no findings: nothing
 	// judged the work, it was simply cut off.
 	InvocationContinuation InvocationPurpose = "continuation"
+	// InvocationHandoffRepair rewrites ONE handoff document the strict decoder
+	// refused, and nothing else (#492). It runs in an empty runtime-owned
+	// directory instead of the candidate workspace, is denied the unsafe
+	// permission bypass, and is given no tools, findings or feedback: the
+	// engineering is already committed and this invocation cannot reach it.
+	InvocationHandoffRepair InvocationPurpose = "handoff_repair"
 )
 
 // UpstreamContext is one completed upstream producer's output as the downstream
