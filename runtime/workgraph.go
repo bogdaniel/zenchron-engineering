@@ -83,7 +83,11 @@ func (s *Supervisor) AdoptWorkGraph(ctx context.Context, request ControlRequest)
 	if err != nil {
 		return WorkGraphView{}, err
 	}
-	return WorkGraphStatus(s.deps.Store, s.deps.StateDir, proposed.ID, s.deps.Clock.Now())
+	holds, err := s.workUnitHolds(proposed.ID)
+	if err != nil {
+		return WorkGraphView{}, err
+	}
+	return WorkGraphStatus(s.deps.Store, s.deps.StateDir, proposed.ID, s.deps.Clock.Now(), holds)
 }
 
 // adoptRevision admits one proposed revision against durable state.
@@ -153,7 +157,13 @@ func (s *Supervisor) reconcileWorkGraphs() []string {
 func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 	s.orchestrationMu.Lock()
 	defer s.orchestrationMu.Unlock()
-	view, err := WorkGraphStatus(s.deps.Store, s.deps.StateDir, graphID, s.deps.Clock.Now())
+	// FAILS CLOSED. A hold source that cannot answer is not "no holds": the
+	// pass reports it and activates nothing for this graph.
+	holds, err := s.workUnitHolds(graphID)
+	if err != nil {
+		return []string{boundedDetail(graphID + ": " + err.Error())}
+	}
+	view, err := WorkGraphStatus(s.deps.Store, s.deps.StateDir, graphID, s.deps.Clock.Now(), holds)
 	if err != nil {
 		return []string{boundedDetail(graphID + ": " + err.Error())}
 	}
@@ -170,13 +180,22 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 	return problems
 }
 
+// workUnitHolds asks the readiness owner outside the graph what it is holding.
+func (s *Supervisor) workUnitHolds(graphID string) (map[string]orchestration.DecisionWait, error) {
+	if s.deps.WorkUnitHolds == nil {
+		return nil, nil
+	}
+	return s.deps.WorkUnitHolds(graphID)
+}
+
 // activateWorkUnit claims one unit's child run, exactly once.
 //
-// The child is an ordinary #470 one-issue batch, whose identity is a pure
-// function of repository, agent and issue, so a crash between writing the batch
-// and recording the activation replays onto the same batch and the same run
-// instead of creating a second. The activation's primary key makes the record
-// itself write-once.
+// The child is an ordinary #470 batch over one issue whose identity is a pure
+// function of repository, agent, issue, THIS GRAPH, THIS UNIT and the exact
+// input set. So a crash between writing the batch and recording the activation
+// replays onto the same batch and the same run instead of creating a second, and
+// nothing else in the system can land on that identity. The activation's primary
+// key makes the record itself write-once.
 //
 // The caller holds s.orchestrationMu: deciding a child run identity must not
 // race another writer deciding the same one.
@@ -191,9 +210,27 @@ func (s *Supervisor) activateWorkUnit(graph WorkGraphView, unit WorkGraphUnitVie
 	if err != nil {
 		return err
 	}
-	batchID, err := orchestration.BatchID(graph.Repository, graph.AgentID, []int{unit.Issue})
+	// THE BATCH IS THIS UNIT EXECUTION'S, not the issue's. Its identity binds
+	// the graph, the unit and the exact input set, so replaying a crashed
+	// activation finds the run it already created and nothing else can: a
+	// completed run from an earlier direct orchestration of the same issue, or
+	// from another graph, or from this unit against other inputs, is a
+	// different batch and therefore never satisfies this unit.
+	origin := orchestration.BatchOrigin{GraphID: graph.GraphID, UnitID: unit.UnitID, Inputs: unit.Inputs}
+	batchID, err := orchestration.WorkUnitBatchID(graph.Repository, graph.AgentID, unit.Issue, origin)
 	if err != nil {
 		return err
+	}
+	// The digest the projection computed and the digest of what is about to be
+	// recorded must be ONE answer. They are computed by the same function over
+	// the same set; a disagreement means this pass is acting on a projection it
+	// no longer describes, and it refuses rather than activating.
+	digest, err := unit.Inputs.Digest()
+	if err != nil {
+		return err
+	}
+	if digest != unit.InputsDigest {
+		return fmt.Errorf("unit %s projects inputs digest %s and its recorded input set digests %s", unit.UnitID, unit.InputsDigest, digest)
 	}
 	stored, found, err := s.deps.Store.OrchestrationBatch(batchID)
 	if err != nil {
@@ -204,7 +241,7 @@ func (s *Supervisor) activateWorkUnit(graph WorkGraphView, unit WorkGraphUnitVie
 		if err != nil {
 			return err
 		}
-		planned, err := engine.planOrchestrationBatch(batchID, []int{unit.Issue}, graph.RequestedBy, reserved)
+		planned, err := engine.planOrchestrationBatch(batchID, []int{unit.Issue}, graph.RequestedBy, reserved, &origin)
 		if err != nil {
 			return err
 		}
@@ -212,11 +249,13 @@ func (s *Supervisor) activateWorkUnit(graph WorkGraphView, unit WorkGraphUnitVie
 			return err
 		}
 	}
-	// A one-issue batch has exactly one item, and its identity proves it is
-	// this issue's. Checked rather than assumed: the child run this activation
-	// names must be the one that issue's work goes through.
+	// Checked rather than assumed: the batch this activation points at must be
+	// THIS unit execution's, over this issue alone.
 	if len(stored.Items) != 1 || stored.Items[0].Issue != unit.Issue {
 		return fmt.Errorf("batch %s does not describe issue %d alone", batchID, unit.Issue)
+	}
+	if stored.Origin == nil || stored.Origin.GraphID != graph.GraphID || stored.Origin.UnitID != unit.UnitID {
+		return fmt.Errorf("batch %s does not describe unit %s of graph %s", batchID, unit.UnitID, graph.GraphID)
 	}
 	_, err = s.deps.Store.ActivateWorkUnit(WorkUnitActivation{
 		GraphID: graph.GraphID, UnitID: unit.UnitID, BatchID: batchID, RunID: stored.Items[0].RunID,

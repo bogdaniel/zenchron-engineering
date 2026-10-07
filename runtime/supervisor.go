@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // SupervisorDependencies is the complete input. Like the runtime's own
@@ -89,6 +90,21 @@ type SupervisorDependencies struct {
 	// already reports for it rather than accepted and left to fail deep inside
 	// the run it starts. Nil disables the check.
 	AgentProber func(ResolvedAgent) AgentProber
+	// WorkUnitHolds reports the readiness holds one WorkGraph's units are under
+	// from an owner OUTSIDE the graph: unresolved decisions the work needs
+	// before it may run (#472's seam for #508).
+	//
+	// It is the ONLY way a unit is held. #472 owns no decision record, no
+	// authority and no persistence for one, so nothing here supplies it yet and
+	// a nil source holds nothing. A held unit is simply not in the frontier, so
+	// the pass does not activate it; when the source stops reporting the hold,
+	// the ordinary frontier computation includes it again. There is no path by
+	// which a worker answers its own hold.
+	//
+	// A source that fails holds NOTHING ANSWERED: the graph is reported and
+	// left alone for that pass rather than activated past a hold that may
+	// exist.
+	WorkUnitHolds func(graphID string) (map[string]orchestration.DecisionWait, error)
 	// Plans is the plan lifecycle service, or the zero value when no plan has
 	// ever been proposed. It is what the plan reconciler resolves assignments
 	// through, and it contacts nothing.

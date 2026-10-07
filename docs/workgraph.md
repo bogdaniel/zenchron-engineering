@@ -69,6 +69,19 @@ So between a worker finishing and its handoff being admitted, the unit reads as
 admitted handoff whose report says `partial` does not satisfy either: unresolved
 work named by the producer is not a completed input.
 
+A dependency does not only gate time — it **delivers**. When a unit is activated,
+the exact admitted outputs it consumes are recorded with the batch that owns its
+child run, and that child's invocation is given them: each upstream unit id, run,
+commit, tree, the admitted handoff identity, the producer's own report, and the
+diff that change contains. The report is another worker's words, so it reaches
+the invocation framed and neutralized as untrusted data, exactly as a reviewer's
+upstream diff already does.
+
+Composing upstream *code* into a downstream candidate is #475's. What #472
+guarantees is that the recorded input set is a fact about the execution rather
+than bookkeeping beside it: the invocation receives the handoffs its activation
+was bound to, and a run bound to anything else receives none of them.
+
 Provider kind appears nowhere in graph progression. The same graph advances
 identically under any agent whose adapter can write the typed result directory,
 and an agent that cannot is refused at adoption — nothing it produced could ever
@@ -77,12 +90,17 @@ satisfy a dependent unit.
 ## Adoption, revisions and mutation
 
 - The graph identity is a pure function of repository, agent and **name**; a
-  revision's identity is its **contents**. Resubmitting the same proposal — after
-  a lost reply, or from another terminal — finds the revision already adopted.
+  revision's identity is its **contents**, canonicalized by unit id and by
+  dependency reference. Two documents that describe the same graph therefore have
+  the same revision identity however the proposer ordered them, and resubmitting
+  the same proposal — after a lost reply, from another terminal, or re-emitted in
+  another order by a planner — finds the revision already adopted.
 - `--agent` is required. A graph never falls back to the default agent.
 - A revision is an **append**. Adopting revision N+1 leaves N and every
   activation exactly as they were, so a revision can never reset a budget a
   child run has already consumed.
+- An **unresolved decision** can hold a unit even when every dependency is
+  satisfied; see below.
 - Adoption **starts nothing**. The next supervisor pass activates whatever the
   frontier then says is runnable. A unit that stays `ready` across several
   passes is one the supervisor could not activate; `serve` logs the reason,
@@ -94,11 +112,16 @@ satisfy a dependent unit.
 Refused deterministically, before anything executes:
 
 - a dependency cycle, a self-dependency, a repeated or unknown dependency;
-- a duplicate unit id, or two units performing one issue (they would collide on
-  one child run);
+- a duplicate unit id, or two units performing one issue (each would get its own
+  bound child execution, and one live run per issue means one of them could never
+  start);
 - a role outside the catalogue, a missing purpose, id or issue;
-- more than 32 units (the same cohort bound a #470 batch has, and the bound
-  that keeps a proposal inside one control request);
+- more than 32 units, or a document above 6 KiB. The document bound is the one
+  that matters: per-field limits multiply out past any single control request, so
+  the graph's own content is bounded by the number the proposal reader and the
+  control transport use. A graph this build accepts is a graph an operator can
+  actually submit, and that is asserted against the real request-line ceiling
+  rather than reasoned about;
 - a first revision other than 1, a revision that skips, and a different
   document under a revision already adopted;
 - a mutation that **removes** a unit already activated, or changes its issue,
@@ -121,6 +144,7 @@ document, the activation records and the child runs on each read.
 | `blocked` | a dependency is not satisfied; the reason names it and says whether anything could still satisfy it |
 | `ready` | runnable: every dependency is satisfied by an admitted output, and no child run is claimed yet |
 | `invalidated` | activated, but its dependencies no longer present the outputs it was activated against |
+| `awaiting_decision` | every dependency is satisfied, and a readiness owner outside the graph is holding the work on an unresolved decision |
 | `unknown` | activated, and its child run could not be read |
 | anything else | the activated child's own #470 item state: `not_created`, `queued`, `running`, `waiting`, `handoff_pending`, `completed`, `partial`, `failed`, `stopped` |
 
@@ -139,8 +163,9 @@ below one failure says so rather than only the unit directly above it.
 Once completed is **not** always completed.
 
 When a unit is activated, the exact upstream outputs it consumes — each
-dependency's admitted candidate revision and tree — are digested and recorded
-with the activation. If an upstream output is later replaced (its run transfers
+dependency's unit, run, admitted handoff, candidate revision and tree, with the
+producer's own report — are recorded with the batch that owns its child run, and
+their digest with the activation. If an upstream output is later replaced (its run transfers
 another admitted handoff bound to a different candidate), or an upstream unit
 stops being satisfied at all, the recorded digest no longer matches and the
 affected downstream units become `invalidated` rather than silently staying
@@ -150,20 +175,30 @@ complete.
 frontier, nothing downstream of it is, and no pass re-performs it. Re-performing
 invalidated work is remediation, which #472 deliberately does not do.
 
-## A unit's child run is its issue's one-issue batch
+## A unit's child run is the unit's, not the issue's
 
-Activating a unit writes — or finds — the #470 batch for exactly
-(repository, agent, that one issue). Two consequences follow from that identity,
-and neither is adoption of foreign work:
+Activating a unit writes — or finds — a #470 batch whose identity binds the
+**graph**, the **unit** and the **exact input set** it consumes, over that one
+issue. The issue number alone never names it.
 
-- if that batch already exists from an earlier direct `autonomy orchestrate`,
-  the unit uses the child run it already owns. Work already done with an
-  admitted handoff therefore satisfies the unit immediately.
-- that also holds when the existing run is terminal and **failed**: the unit
-  inherits it, and the branch below it is dead. A one-issue batch is bound to
-  its first run generation for the lifetime of the batch, so re-performing that
-  issue needs a batch generation #470 does not yet offer. Use a distinct issue,
-  or stop and resubmit the underlying work, until it does.
+That is the whole correctness property. Reuse is valid only where durable state
+proves it is the same unit execution against the same exact inputs:
+
+- replaying a crashed activation finds the batch and child run it already
+  created, so no replay or recovery produces a second child;
+- an earlier direct `autonomy orchestrate` of the same issue is a **different**
+  batch, so however finished that run is, it never satisfies this unit — it never
+  executed against these inputs;
+- another graph's unit on the same issue is a different batch too;
+- the same unit against different inputs is a different batch, and an already
+  activated unit whose inputs have since moved is `invalidated` rather than
+  re-pointed.
+
+The existing "one live run per issue" law still applies, and it applies to a
+graph the same way it applies to anything else: a unit whose issue already has a
+live run this graph did not create is **refused** rather than adopting it, the
+refusal is reported in the supervisor's `work_graphs` tick lines, and the unit
+stays `ready` until that run reaches a terminal disposition.
 
 ## Restart and replay
 
@@ -173,6 +208,22 @@ keyed by graph and unit. So a crash between writing the batch and recording the
 activation replays onto the same batch and the same run, a restart reproduces
 the identical frontier, and no replay or recovery produces a second child run
 for a unit.
+
+## Unresolved decisions
+
+A unit can be held by a readiness owner **outside** the graph: an unresolved
+decision the work needs before it may run. Such a unit reads `awaiting_decision`,
+is not in the frontier, and is therefore never activated; everything downstream
+of it waits, but is not reported as a dead branch. The moment the owner stops
+reporting the hold, the ordinary frontier computation includes the unit again and
+it runs like anything else.
+
+The graph **represents** holds and resolves none. #472 owns no decision record,
+no authority and no persistence for one — that is #508 — and there is no path by
+which a worker answers its own hold. A hold source that cannot answer holds
+everything: the pass reports it and activates nothing for that graph rather than
+proceeding past a hold that may exist. Until #508 persists them, nothing supplies
+holds, so `autonomy workgraph status` shows none.
 
 ## Not in this ticket
 

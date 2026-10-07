@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -262,4 +263,201 @@ func raw(t *testing.T, revision int, units []WorkUnit) WorkGraph {
 func mutate(units []WorkUnit, edit func([]WorkUnit)) []WorkUnit {
 	edit(units)
 	return units
+}
+
+// TestRevisionDigestIsOrderInsensitive: two documents that describe the SAME
+// graph have the same content identity, however the proposer ordered the units
+// or their dependency lists. Without it, re-emitting an unchanged graph in
+// another order would read as a changed revision and be refused as a conflict.
+func TestRevisionDigestIsOrderInsensitive(t *testing.T) {
+	forward := composed(t, 1, diamond())
+	baseline, err := forward.RevisionDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// REORDERED UNITS: d, c, b, a.
+	reversed := diamond()
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	shuffled := composed(t, 1, reversed)
+	digest, err := shuffled.RevisionDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != baseline {
+		t.Fatalf("reordering the units changed the revision identity: %s then %s", baseline, digest)
+	}
+
+	// REORDERED DEPENDENCIES: d depends on c, b rather than b, c.
+	swapped := diamond()
+	swapped[3].DependsOn = []string{"c", "b"}
+	rewritten := composed(t, 1, swapped)
+	digest, err = rewritten.RevisionDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != baseline {
+		t.Fatalf("reordering a dependency list changed the revision identity: %s then %s", baseline, digest)
+	}
+
+	// Canonicalizing is a question, not a mutation: the caller's own document
+	// is left exactly as it was submitted, and that is what gets stored.
+	if fmt.Sprint(rewritten.Units[3].DependsOn) != "[c b]" {
+		t.Fatalf("asking for the digest reordered the caller's document: %v", rewritten.Units[3].DependsOn)
+	}
+
+	// And a REAL change still changes it.
+	changed := diamond()
+	changed[3].DependsOn = []string{"b"}
+	altered := composed(t, 1, changed)
+	digest, err = altered.RevisionDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == baseline {
+		t.Fatal("dropping a dependency did not change the revision identity")
+	}
+}
+
+// TestWorkUnitBatchIdentityIsPerUnitExecution is the #472 binding law: a graph
+// unit's child batch is THIS unit's, against THESE inputs. Issue number alone
+// never names it, so no unit can be satisfied by work performed for something
+// else.
+func TestWorkUnitBatchIdentityIsPerUnitExecution(t *testing.T) {
+	inputs := WorkUnitInputs{{UnitID: "a", UnitOutput: UnitOutput{HandoffID: "handoff-a",
+		RunID: "run-a", CandidateRevision: "c1", CandidateTree: "tree-c1"}}}
+	origin := BatchOrigin{GraphID: "graph-1", UnitID: "b", Inputs: inputs}
+	unit, err := WorkUnitBatchID("acme/repo", "claude", 102, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := BatchID("acme/repo", "claude", []int{102})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unit == direct {
+		t.Fatal("a work unit execution shares its batch identity with a direct orchestration of the same issue")
+	}
+	same, err := WorkUnitBatchID("acme/repo", "claude", 102, origin)
+	if err != nil || same != unit {
+		t.Fatalf("the same unit execution named two batches: %s then %s (%v)", unit, same, err)
+	}
+	replaced := WorkUnitInputs{{UnitID: "a", UnitOutput: UnitOutput{HandoffID: "handoff-a2",
+		RunID: "run-a", CandidateRevision: "c9", CandidateTree: "tree-c9"}}}
+	for name, other := range map[string]BatchOrigin{
+		"another graph": {GraphID: "graph-2", UnitID: "b", Inputs: inputs},
+		"another unit":  {GraphID: "graph-1", UnitID: "c", Inputs: inputs},
+		"other inputs":  {GraphID: "graph-1", UnitID: "b", Inputs: replaced},
+		"no inputs":     {GraphID: "graph-1", UnitID: "b"},
+	} {
+		id, err := WorkUnitBatchID("acme/repo", "claude", 102, other)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if id == unit {
+			t.Fatalf("%s names the same batch execution", name)
+		}
+	}
+	// The input ORDER is not part of the identity; the set is.
+	pair := WorkUnitInputs{inputs[0], replaced[0]}
+	pair[1].UnitID = "z"
+	flipped := WorkUnitInputs{pair[1], pair[0]}
+	left, err := WorkUnitBatchID("acme/repo", "claude", 102, BatchOrigin{GraphID: "graph-1", UnitID: "b", Inputs: pair})
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := WorkUnitBatchID("acme/repo", "claude", 102, BatchOrigin{GraphID: "graph-1", UnitID: "b", Inputs: flipped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != right {
+		t.Fatalf("one input set in two orders named two batches: %s then %s", left, right)
+	}
+	for name, broken := range map[string]BatchOrigin{
+		"no graph": {UnitID: "b", Inputs: inputs},
+		"no unit":  {GraphID: "graph-1", Inputs: inputs},
+		"bad input": {GraphID: "graph-1", UnitID: "b",
+			Inputs: WorkUnitInputs{{UnitID: "a", UnitOutput: UnitOutput{RunID: "run-a"}}}},
+	} {
+		if _, err := WorkUnitBatchID("acme/repo", "claude", 102, broken); err == nil {
+			t.Errorf("an origin with %s named a batch", name)
+		}
+	}
+}
+
+// TestAnOriginBearingBatchDescribesOneUnitExecution keeps the stored document
+// honest: a graph-owned batch performs one unit over one issue.
+func TestAnOriginBearingBatchDescribesOneUnitExecution(t *testing.T) {
+	origin := &BatchOrigin{GraphID: "graph-1", UnitID: "b", Inputs: WorkUnitInputs{{UnitID: "a",
+		UnitOutput: UnitOutput{HandoffID: "h", RunID: "run-a", CandidateRevision: "c", CandidateTree: "t"}}}}
+	id, err := WorkUnitBatchID("acme/repo", "claude", 102, *origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := Batch{SchemaVersion: BatchSchemaVersion, ID: id, Repository: "acme/repo", AgentID: "claude",
+		CreatedAt: time.Unix(1700000000, 0).UTC(), Origin: origin,
+		Items: []BatchItem{{Issue: 102, RunID: "run-102"}}}
+	if err := batch.Validate(); err != nil {
+		t.Fatalf("a one-unit batch was refused: %v", err)
+	}
+	// Two issues under one unit origin is not one unit execution.
+	twoIssues := batch
+	twoIssues.Items = []BatchItem{{Issue: 102, RunID: "run-102"}, {Issue: 103, RunID: "run-103"}}
+	if err := twoIssues.Validate(); err == nil || !strings.Contains(err.Error(), "a unit performs one") {
+		t.Fatalf("err = %v, want a refusal of a multi-issue unit batch", err)
+	}
+	// The origin is part of the identity: stripping it leaves a document that
+	// does not match its own id.
+	stripped := batch
+	stripped.Origin = nil
+	if err := stripped.Validate(); err == nil || !strings.Contains(err.Error(), "does not match the identity") {
+		t.Fatalf("err = %v, want a refusal of a batch whose origin was removed", err)
+	}
+	// A DIRECT batch still validates exactly as it did before origins existed.
+	directID, err := BatchID("acme/repo", "claude", []int{102})
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct := batch
+	direct.ID, direct.Origin = directID, nil
+	if err := direct.Validate(); err != nil {
+		t.Fatalf("a direct batch was refused: %v", err)
+	}
+}
+
+// TestTheDocumentBoundIsWhatTheTransportCarries: a graph this package accepts is
+// a graph an operator can actually submit. The per-field bounds alone cannot say
+// that, so the document itself is bounded.
+func TestTheDocumentBoundIsWhatTheTransportCarries(t *testing.T) {
+	wide := make([]WorkUnit, MaxWorkGraphUnits)
+	for i := range wide {
+		wide[i] = WorkUnit{ID: fmt.Sprintf("unit-%02d", i), Role: domain.RoleImplementer, Issue: 500 + i,
+			Purpose: strings.Repeat("x", maxUnitPurposeBytes)}
+	}
+	_, err := WorkGraphProposal{Name: "m2-o1", Revision: 1, Units: wide}.
+		Compose("acme/repo", "claude", "operator@example", time.Unix(1700000000, 0).UTC())
+	if err == nil || !strings.Contains(err.Error(), "one control request carries") {
+		t.Fatalf("err = %v, want a refusal of an untransportable graph", err)
+	}
+	// A graph within the bound is accepted, and its document really is within
+	// it - measured, not assumed.
+	narrow := make([]WorkUnit, MaxWorkGraphUnits)
+	for i := range narrow {
+		narrow[i] = WorkUnit{ID: fmt.Sprintf("unit-%02d", i), Role: domain.RoleImplementer, Issue: 500 + i,
+			Purpose: "land the thing"}
+	}
+	graph, err := WorkGraphProposal{Name: "m2-o1", Revision: 1, Units: narrow}.
+		Compose("acme/repo", "claude", "operator@example", time.Unix(1700000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("a graph of %d small units was refused: %v", MaxWorkGraphUnits, err)
+	}
+	size, err := graph.documentBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size > MaxWorkGraphDocumentBytes {
+		t.Fatalf("an accepted graph's document is %d bytes, above the %d byte bound", size, MaxWorkGraphDocumentBytes)
+	}
 }

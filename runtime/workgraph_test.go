@@ -53,9 +53,24 @@ func (f *fleetFixture) adoptGraph(supervisor *Supervisor, agent string, revision
 	return view
 }
 
+// holds are readiness holds a test injects as an outside owner would (#508).
+// The graph never writes them; it only has to represent them.
+func (f *fleetFixture) hold(unitID, reference, detail string) {
+	f.t.Helper()
+	if f.holds == nil {
+		f.holds = map[string]orchestration.DecisionWait{}
+	}
+	f.holds[unitID] = orchestration.DecisionWait{Reference: reference, Detail: detail}
+}
+
+func (f *fleetFixture) release(unitID string) {
+	f.t.Helper()
+	delete(f.holds, unitID)
+}
+
 func (f *fleetFixture) graph(graphID string) WorkGraphView {
 	f.t.Helper()
-	view, err := WorkGraphStatus(f.store, f.stateDir, graphID, f.clock.Now())
+	view, err := WorkGraphStatus(f.store, f.stateDir, graphID, f.clock.Now(), f.holds)
 	if err != nil {
 		f.t.Fatal(err)
 	}

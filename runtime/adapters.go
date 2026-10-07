@@ -178,19 +178,40 @@ const (
 	InvocationContinuation InvocationPurpose = "continuation"
 )
 
-// UpstreamContext is one completed upstream stage's output as a downstream
-// stage sees it.
+// UpstreamContext is one completed upstream producer's output as the downstream
+// work that consumes it sees it: a plan stage's output to a later stage, or a
+// WorkGraph unit's admitted handoff to the unit that depends on it (#472).
 type UpstreamContext struct {
+	// StageID is the producer's identity in whichever graph names it: a plan
+	// stage id, or a WorkGraph unit id.
 	StageID string
 	RunID   string
 	Commit  string
 	Tree    string
+	// Handoff is the admitted #470 handoff this output was transferred by, for
+	// a WorkGraph unit's upstream. It is what makes a dependency edge DELIVER
+	// rather than only gate: the consuming invocation is given the exact
+	// handoff its activation was bound to, not merely a commit.
+	//
+	// Nil for a plan stage, which has no handoff. Every field inside it is
+	// worker-authored, and it is framed as untrusted data like the diff.
+	Handoff *UpstreamHandoff
 	// Diff is the change that stage produced, bounded by the runtime. Empty
 	// means the runtime could not read it, which is stated rather than hidden.
 	Diff string
 	// Truncated reports that the diff was cut to the runtime's bound, so a
 	// reviewer knows it is reading part of a change rather than all of it.
 	Truncated bool
+}
+
+// UpstreamHandoff is the producer's own admitted report, as the consumer sees
+// it. The runtime owns the identity; the worker wrote everything else.
+type UpstreamHandoff struct {
+	ID              string
+	Outcome         string
+	Summary         string
+	Unresolved      []string
+	RecommendedNext []string
 }
 
 type Finding struct {

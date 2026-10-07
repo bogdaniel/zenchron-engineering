@@ -1,12 +1,20 @@
 package orchestration
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
+// output is a complete admitted output, as the runtime supplies one: the
+// subject AND the producer's own report, bound to the run that transferred it.
 func output(revision string) *UnitOutput {
-	return &UnitOutput{HandoffID: "handoff-" + revision, CandidateRevision: revision, CandidateTree: "tree-" + revision}
+	return &UnitOutput{
+		HandoffID: "handoff-" + revision, RunID: "run-" + revision,
+		CandidateRevision: revision, CandidateTree: "tree-" + revision,
+		Outcome: OutcomeCompleted, Summary: "did the " + revision + " part",
+		RecommendedNext: []string{"review " + revision},
+	}
 }
 
 func project(t *testing.T, facts map[string]UnitFacts) WorkGraphProjection {
@@ -308,4 +316,129 @@ func TestCountsAddUpToEveryUnit(t *testing.T) {
 		counts.Activated.Total != 2 || counts.Activated.Completed != 1 || counts.Activated.Failed != 1 {
 		t.Fatalf("counts = %+v", counts)
 	}
+}
+
+// TestTheProjectionCarriesTheExactConsumedInputs: a runnable unit's input set is
+// the readable, complete record of the admitted outputs it consumes, not just a
+// digest - that is what a child run's execution is later given.
+func TestTheProjectionCarriesTheExactConsumedInputs(t *testing.T) {
+	root := project(t, nil)
+	unlocked := project(t, map[string]UnitFacts{"a": {
+		Activated: true, ActivationInputsDigest: readyDigest(t, root, "a"),
+		Item: ItemCompleted, Output: output("c1"),
+	}})
+	inputs := unlocked.Units["b"].Inputs
+	if len(inputs) != 1 {
+		t.Fatalf("b consumes %d inputs, want one: %+v", len(inputs), inputs)
+	}
+	want := WorkUnitInput{UnitID: "a", UnitOutput: *output("c1")}
+	if fmt.Sprint(inputs[0]) != fmt.Sprint(want) {
+		t.Fatalf("b's input = %+v, want %+v", inputs[0], want)
+	}
+	if err := inputs.Validate(); err != nil {
+		t.Fatalf("a projected input set is not a valid one: %v", err)
+	}
+	// The root's input set is empty and still digests, so an activation always
+	// records something to be compared against.
+	if len(root.Units["a"].Inputs) != 0 || root.Units["a"].InputsDigest == "" {
+		t.Fatalf("the root unit's inputs = %+v digest = %q", root.Units["a"].Inputs, root.Units["a"].InputsDigest)
+	}
+	// The digest describes the SET, not the walk order.
+	reversed := WorkUnitInputs{want, {UnitID: "z", UnitOutput: UnitOutput{
+		HandoffID: "h", RunID: "r", CandidateRevision: "c", CandidateTree: "t"}}}
+	forward := WorkUnitInputs{reversed[1], reversed[0]}
+	left, err := reversed.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := forward.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != right {
+		t.Fatalf("one input set in two orders digests differently: %s then %s", left, right)
+	}
+}
+
+func TestWorkUnitInputsRefuseWhatCannotNameItsOutput(t *testing.T) {
+	subject := UnitOutput{HandoffID: "h", RunID: "r", CandidateRevision: "c", CandidateTree: "t"}
+	complete := WorkUnitInput{UnitID: "a", UnitOutput: subject}
+	without := func(edit func(*UnitOutput)) WorkUnitInputs {
+		missing := subject
+		edit(&missing)
+		return WorkUnitInputs{{UnitID: "a", UnitOutput: missing}}
+	}
+	for name, broken := range map[string]WorkUnitInputs{
+		"no unit":     {{UnitOutput: subject}},
+		"no run":      without(func(o *UnitOutput) { o.RunID = "" }),
+		"no handoff":  without(func(o *UnitOutput) { o.HandoffID = "" }),
+		"no revision": without(func(o *UnitOutput) { o.CandidateRevision = "" }),
+		"no tree":     without(func(o *UnitOutput) { o.CandidateTree = "" }),
+		"repeated":    {complete, complete},
+	} {
+		if err := broken.Validate(); err == nil {
+			t.Errorf("an input set with %s validated", name)
+		}
+	}
+	if err := (WorkUnitInputs{complete}).Validate(); err != nil {
+		t.Fatalf("a complete input set was refused: %v", err)
+	}
+}
+
+// TestAReadinessHoldKeepsAUnitOutOfTheFrontier is the #508 integration seam:
+// #472 represents an unresolved decision and resolves nothing. A held unit whose
+// dependencies are ALL satisfied is still not runnable, and the moment its owner
+// stops reporting the hold the ordinary frontier includes it again.
+func TestAReadinessHoldKeepsAUnitOutOfTheFrontier(t *testing.T) {
+	root := project(t, nil)
+	settled := map[string]UnitFacts{"a": {
+		Activated: true, ActivationInputsDigest: readyDigest(t, root, "a"),
+		Item: ItemCompleted, Output: output("c1"),
+	}}
+	runnable := project(t, settled)
+	assertFrontier(t, runnable, "b", "c")
+
+	held := map[string]UnitFacts{}
+	for id, fact := range settled {
+		held[id] = fact
+	}
+	held["b"] = UnitFacts{AwaitingDecision: &DecisionWait{Reference: "decision-7", Detail: "the operator must choose the schema"}}
+	holding := project(t, held)
+	assertStates(t, holding, map[string]UnitState{
+		"a": UnitState(ItemCompleted), "b": UnitAwaitingDecision, "c": UnitReady, "d": UnitBlocked,
+	})
+	assertFrontier(t, holding, "c")
+	if !strings.Contains(holding.Units["b"].Reason, `held on unresolved decision "decision-7"`) ||
+		!strings.Contains(holding.Units["b"].Reason, "choose the schema") {
+		t.Fatalf("the hold does not explain itself: %q", holding.Units["b"].Reason)
+	}
+	if holding.Units["b"].AwaitingDecision == nil {
+		t.Fatal("the held unit does not carry its hold")
+	}
+	// A held unit still records the inputs it WOULD consume, so lifting the
+	// hold does not change what it is activated against.
+	if holding.Units["b"].InputsDigest != runnable.Units["b"].InputsDigest {
+		t.Fatal("holding a unit changed the inputs it consumes")
+	}
+	// Held is not dead: d waits rather than reading as a dead branch.
+	if strings.Contains(holding.Units["d"].Reason, "will never") {
+		t.Fatalf("a held dependency reads as dead: %q", holding.Units["d"].Reason)
+	}
+	// RESOLVED: the ordinary frontier computation includes it again.
+	delete(held, "b")
+	released := project(t, held)
+	assertFrontier(t, released, "b", "c")
+	var counts WorkGraphCounts
+	for _, unit := range composed(t, 1, diamond()).Units {
+		counts.Add(holding.Units[unit.ID].State)
+	}
+	if counts.AwaitingDecision != 1 || counts.Total != 4 {
+		t.Fatalf("counts = %+v", counts)
+	}
+	// A hold on a unit whose dependencies are NOT satisfied changes nothing:
+	// the dependency is still the honest reason.
+	blockedAndHeld := project(t, map[string]UnitFacts{
+		"b": {AwaitingDecision: &DecisionWait{Reference: "decision-9"}},
+	})
+	assertStates(t, blockedAndHeld, map[string]UnitState{"b": UnitBlocked})
 }

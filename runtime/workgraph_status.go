@@ -43,9 +43,14 @@ type WorkGraphUnitView struct {
 	State     orchestration.UnitState `json:"state"`
 	Reason    string                  `json:"reason,omitempty"`
 	// InputsDigest is the digest of the upstream outputs this unit would be,
-	// or was correctly, activated against.
-	InputsDigest string `json:"inputs_digest,omitempty"`
-	RunID        string `json:"run_id,omitempty"`
+	// or was correctly, activated against, and Inputs is that same set,
+	// readable - what an activation records so the child run's execution can be
+	// given the exact outputs it consumes.
+	InputsDigest string                       `json:"inputs_digest,omitempty"`
+	Inputs       orchestration.WorkUnitInputs `json:"inputs,omitempty"`
+	// AwaitingDecision is a readiness hold from an owner outside the graph.
+	AwaitingDecision *orchestration.DecisionWait `json:"awaiting_decision,omitempty"`
+	RunID            string                      `json:"run_id,omitempty"`
 	// Child is the child run's own #470 projection, when this unit is
 	// activated. The graph does not restate what that view already says.
 	Child *OrchestrationItemView `json:"child,omitempty"`
@@ -56,7 +61,13 @@ type WorkGraphUnitView struct {
 // WorkGraphStatus projects one graph's current revision. A unit whose child
 // cannot be read is reported as unknown on its own line and blocks only what
 // depends on it.
-func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now time.Time) (WorkGraphView, error) {
+// holds are readiness holds keyed by unit id, reported by an owner OUTSIDE this
+// graph: the supervisor asks SupervisorDependencies.WorkUnitHolds and passes
+// what it answered, and a read with no source - the CLI's, today - passes none.
+// #472 owns no decision record, no authority and no persistence for one, so
+// nothing supplies holds yet; #508 does.
+func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now time.Time,
+	holds map[string]orchestration.DecisionWait) (WorkGraphView, error) {
 	graph, found, err := store.WorkGraph(graphID)
 	if err != nil {
 		return WorkGraphView{}, err
@@ -82,6 +93,9 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 	for _, unit := range graph.Units {
 		activation, activated := activations[unit.ID]
 		if !activated {
+			if hold, held := holds[unit.ID]; held {
+				facts[unit.ID] = orchestration.UnitFacts{AwaitingDecision: &hold}
+			}
 			continue
 		}
 		child := projectOrchestrationItem(tx, stateDir, orchestration.BatchItem{Issue: unit.Issue, RunID: activation.RunID}, now)
@@ -122,7 +136,8 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 		out := WorkGraphUnitView{
 			UnitID: unit.ID, Purpose: unit.Purpose, Role: unit.Role, Issue: unit.Issue,
 			DependsOn: unit.DependsOn, State: decided.State, Reason: decided.Reason,
-			InputsDigest: decided.InputsDigest,
+			InputsDigest: decided.InputsDigest, Inputs: decided.Inputs,
+			AwaitingDecision: decided.AwaitingDecision,
 		}
 		if activation, activated := activations[unit.ID]; activated {
 			child := children[unit.ID]
@@ -146,9 +161,17 @@ func admittedOutput(tx *sql.Tx, runID, handoffID string) (*orchestration.UnitOut
 		if handoff.ID != handoffID {
 			continue
 		}
+		// The producer's own report travels with the subject. It is the
+		// handoff: a downstream unit given only a commit has the change and
+		// not what the producer said about it. It stays worker-authored text.
 		return &orchestration.UnitOutput{
-			HandoffID: handoff.ID, CandidateRevision: handoff.Subject.CandidateRevision,
-			CandidateTree: handoff.Subject.CandidateTree,
+			HandoffID: handoff.ID, RunID: handoff.RunID,
+			CandidateRevision: handoff.Subject.CandidateRevision,
+			CandidateTree:     handoff.Subject.CandidateTree,
+			Outcome:           handoff.ProducerReport.Outcome,
+			Summary:           handoff.ProducerReport.Summary,
+			Unresolved:        handoff.ProducerReport.Unresolved,
+			RecommendedNext:   handoff.ProducerReport.RecommendedNext,
 		}, nil
 	}
 	return nil, fmt.Errorf("run %s projects as completed on handoff %s, which is not admitted", runID, handoffID)

@@ -39,6 +39,17 @@ const WorkGraphSchemaVersion = "0.1"
 // number - the scheduler owns the only one.
 const MaxWorkGraphUnits = MaxBatchItems
 
+// MaxWorkGraphDocumentBytes bounds one graph's CONTENT - its name, revision and
+// units - as canonical JSON.
+//
+// It exists because the per-field bounds below cannot prove transportability:
+// 32 units of bounded purpose and bounded dependency lists multiply out well
+// past any single control request. A graph this package ACCEPTS must be a graph
+// an operator can actually submit, so the document itself is bounded, once, by
+// the number the proposal reader uses - rather than left to arithmetic over
+// field limits that silently stops fitting.
+const MaxWorkGraphDocumentBytes = 6 << 10
+
 const (
 	maxWorkGraphNameBytes = 200
 	maxUnitIDBytes        = 64
@@ -118,7 +129,37 @@ func (g WorkGraph) RevisionDigest() (string, error) {
 		ID       string     `json:"id"`
 		Revision int        `json:"revision"`
 		Units    []WorkUnit `json:"units"`
-	}{g.ID, g.Revision, g.Units})
+	}{g.ID, g.Revision, g.canonicalUnits()})
+}
+
+// canonicalUnits is the units in a canonical order: by unit id, with each
+// dependency list sorted. Two documents that describe the same graph therefore
+// have the same content identity, however the proposer happened to order them.
+//
+// It copies. Sorting g.Units in place would reorder the caller's own slice as a
+// side effect of asking a question about it, and the document an operator
+// submitted is the document that is stored.
+func (g WorkGraph) canonicalUnits() []WorkUnit {
+	units := make([]WorkUnit, len(g.Units))
+	for i, unit := range g.Units {
+		unit.DependsOn = sortedCopy(unit.DependsOn)
+		units[i] = unit
+	}
+	sort.Slice(units, func(i, j int) bool { return units[i].ID < units[j].ID })
+	return units
+}
+
+// documentBytes is the canonical content this graph would be transported as.
+func (g WorkGraph) documentBytes() (int, error) {
+	document, err := domain.CanonicalJSON(struct {
+		Name     string     `json:"name"`
+		Revision int        `json:"revision"`
+		Units    []WorkUnit `json:"units"`
+	}{g.Name, g.Revision, g.Units})
+	if err != nil {
+		return 0, err
+	}
+	return len(document), nil
 }
 
 // WorkGraphProposal is a proposed revision as an operator - or, later, a planner
@@ -202,10 +243,12 @@ func (g WorkGraph) Validate() error {
 		if unit.Issue <= 0 {
 			return fmt.Errorf("work unit %q names issue %d; a unit performs one existing issue", unit.ID, unit.Issue)
 		}
-		// TWO UNITS ON ONE ISSUE would resolve to one child run identity, so
-		// the graph would show two units advancing on one run's single output.
+		// TWO UNITS ON ONE ISSUE describe the same work twice. Each would get
+		// its own bound child execution, and the runtime allows one live run
+		// per issue, so one of them could never start - a graph that can never
+		// finish, refused when it is proposed rather than discovered later.
 		if other, taken := issues[unit.Issue]; taken {
-			return fmt.Errorf("work units %q and %q both perform issue %d, which has one child run", other, unit.ID, unit.Issue)
+			return fmt.Errorf("work units %q and %q both perform issue %d, which can have one live run", other, unit.ID, unit.Issue)
 		}
 		issues[unit.Issue] = unit.ID
 	}
@@ -224,8 +267,17 @@ func (g WorkGraph) Validate() error {
 			}
 		}
 	}
-	_, err = topologicalOrder(g.Units)
-	return err
+	if _, err := topologicalOrder(g.Units); err != nil {
+		return err
+	}
+	size, err := g.documentBytes()
+	if err != nil {
+		return err
+	}
+	if size > MaxWorkGraphDocumentBytes {
+		return fmt.Errorf("work graph document is %d bytes, above the %d byte bound one control request carries", size, MaxWorkGraphDocumentBytes)
+	}
+	return nil
 }
 
 // ValidateMutation is the deterministic gate a proposed next revision passes

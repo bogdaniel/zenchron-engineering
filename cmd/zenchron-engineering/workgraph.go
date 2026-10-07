@@ -16,12 +16,6 @@ import (
 const workgraphUsage = "usage: zenchron-engineering autonomy workgraph " +
 	"{adopt <proposal.json> --agent <id> [--repo owner/name] [--text]|status <graph> [--text]} [--config <path>]"
 
-// maxWorkGraphProposalBytes bounds the file this command will read at all. A
-// proposal is untrusted input whether an operator or a model wrote it, and it
-// has to fit inside one bounded control request line, so it is bounded well
-// below that ceiling rather than refused at the socket.
-const maxWorkGraphProposalBytes = 4 << 10
-
 // autonomyWorkGraph is the WorkGraph operator surface (#472): adopt a proposed
 // revision, or read one graph's units, dependencies and frontier.
 func autonomyWorkGraph(args []string, stdout io.Writer) (int, error) {
@@ -103,7 +97,7 @@ func workGraphStatus(flags autonomyFlags, graphID string, stdout io.Writer) (int
 		return runtime.ExitFailed, err
 	}
 	defer store.Close()
-	view, err := runtime.WorkGraphStatus(store, config.StateDir, graphID, time.Now().UTC())
+	view, err := runtime.WorkGraphStatus(store, config.StateDir, graphID, time.Now().UTC(), nil)
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -120,14 +114,17 @@ func readWorkGraphProposal(path string) (orchestration.WorkGraphProposal, error)
 		return orchestration.WorkGraphProposal{}, err
 	}
 	defer file.Close()
-	document, err := io.ReadAll(io.LimitReader(file, maxWorkGraphProposalBytes+1))
+	// ONE bound, the core's. A proposal this reader accepts is a proposal the
+	// core accepts is a proposal one control request carries; there is no
+	// second number here to drift from that one.
+	document, err := io.ReadAll(io.LimitReader(file, orchestration.MaxWorkGraphDocumentBytes+1))
 	if err != nil {
 		return orchestration.WorkGraphProposal{}, err
 	}
-	if len(document) > maxWorkGraphProposalBytes {
+	if len(document) > orchestration.MaxWorkGraphDocumentBytes {
 		return orchestration.WorkGraphProposal{}, fmt.Errorf(
-			"work graph proposal %s is above the %d byte bound one control request carries; a graph names at most %d units",
-			path, maxWorkGraphProposalBytes, orchestration.MaxWorkGraphUnits)
+			"work graph proposal %s is above the %d byte bound one control request carries",
+			path, orchestration.MaxWorkGraphDocumentBytes)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(document))
 	decoder.DisallowUnknownFields()
