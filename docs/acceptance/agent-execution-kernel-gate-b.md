@@ -31,7 +31,7 @@ A commit cannot contain its own hash, so the binding lands in a later commit
 that changes only this file; verify with
 `git diff --name-only EVIDENCE_HEAD <binding commit>`.
 
-EVIDENCE_HEAD: recorded by the binding commit (see the PR).
+EVIDENCE_HEAD: `ac4b61f614922730761e473f017c2b8aabcaa017` (branch `claude/518-gateb-adapter`)
 
 | Item | Value |
 | --- | --- |
