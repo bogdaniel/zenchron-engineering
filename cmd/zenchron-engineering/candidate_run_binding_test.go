@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -196,4 +200,76 @@ func newCompositionFixture(t *testing.T) compositionFixture {
 func captureBoundBroker(p candidateBoundProvider, request runtime.ExecutionRequest) (runtime.ToolBroker, error) {
 	bound, err := p.bind(request)
 	return bound.Broker, err
+}
+
+// TestCandidateBoundProviderProbesRequiredToolsInTheContainer is the #522
+// regression. The runtime discovers the probe by asserting exactly this
+// anonymous interface on the execution provider; a wrapper that drops it sends
+// an OpenAI agent's required tools to the host PATH, where the loop never runs.
+//
+// "sh" resolves on any host PATH, so a host probe would report nothing missing.
+// The container probe here reaches a Docker that refuses every call, so the
+// wrapped provider must report it missing - and must have asked Docker.
+func TestCandidateBoundProviderProbesRequiredToolsInTheContainer(t *testing.T) {
+	fixture := newCompositionFixture(t)
+	built, err := newComposition(autonomyFlags{Config: fixture.configPath}, autonomyOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer built.release()
+	bound := built.provider.(candidateBoundProvider)
+	docker := &refusingExecutor{}
+	bound.base.Broker.Sandbox.Executor = docker
+
+	var provider runtime.ExecutionProvider = bound
+	prober, ok := provider.(interface {
+		MissingTools(context.Context, []string) []string
+	})
+	if !ok {
+		t.Fatal("candidateBoundProvider hides MissingTools, so required tools are probed on the host PATH")
+	}
+	// A tool that exists ONLY on this test's host PATH: the old host-PATH
+	// fallback would find it and report nothing missing on every machine,
+	// whereas the container probe (refused here) must report it missing.
+	tool := hostOnlyTool(t)
+	if _, err := exec.LookPath(tool); err != nil {
+		t.Fatalf("precondition: %s must be on the host PATH: %v", tool, err)
+	}
+	if got := prober.MissingTools(context.Background(), []string{tool}); len(got) != 1 || got[0] != tool {
+		t.Fatalf("missing tools = %v, want [%s] from the refused container probe", got, tool)
+	}
+	if len(docker.calls) == 0 || docker.calls[0][0] != "docker" {
+		t.Fatalf("the probe never reached the sandbox: %v", docker.calls)
+	}
+}
+
+// hostOnlyTool puts an executable that exists nowhere else on a PATH holding
+// only a test directory, and returns its name.
+func hostOnlyTool(t *testing.T) string {
+	t.Helper()
+	const name = "zenchron-host-only-probe-tool"
+	dir := t.TempDir()
+	file := filepath.Join(dir, name)
+	if goruntime.GOOS == "windows" {
+		file += ".exe"
+	}
+	if err := os.WriteFile(file, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	return name
+}
+
+// refusingExecutor records every command and fails all of them.
+type refusingExecutor struct{ calls [][]string }
+
+func (e *refusingExecutor) LookPath(string) error { return nil }
+
+func (e *refusingExecutor) Run(_ context.Context, name string, args []string, _ string, _ []string, _ time.Duration) (runtime.CommandOutput, error) {
+	e.calls = append(e.calls, append([]string{name}, args...))
+	return runtime.CommandOutput{}, errors.New("docker refused")
+}
+
+func (e *refusingExecutor) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (runtime.CommandOutput, error) {
+	return e.Run(ctx, name, args, dir, env, grace)
 }
