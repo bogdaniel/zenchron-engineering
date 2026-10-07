@@ -82,7 +82,9 @@ named by that exact physical attempt and emptied before the invocation starts:
 - `outcome` is `completed` (nothing unresolved) or `partial` (naming what is
   unresolved). Anything else, an unknown member, a wrong version, malformed or
   trailing JSON, an oversized document (32 KiB), an oversized summary (4 KiB) or
-  list (16 items of 1 KiB) is refused, never repaired.
+  list (16 items of 1 KiB) is refused, never truncated or reinterpreted. A
+  protocol mistake may receive one result-only correction (see below); a
+  bound never does.
 - The worker never restates the run, issue, branch, commit, tree, changed paths,
   contract or agent. The decoder refuses those members.
 - The file is read by the runtime, and only for an invocation that completed.
@@ -128,6 +130,55 @@ A missing or invalid handoff does not fail the run: failing it would quarantine
 the work and make a retry redo it. The refusal remains visible as a handoff
 observation and separate `handoff_reason` while execution, commit,
 reassessment, assurance or remediation continues. Only finished producer work reports `handoff_pending`.
+
+## Handoff protocol repair
+
+A worker that finished its engineering and then wrote a handoff the strict
+decoder refused - `completed` beside an `unresolved` list, a misspelled or
+restated member, truncated JSON - has a protocol problem, not an engineering
+one (#492). Re-running the engineering to fix a typed document would spend a
+whole invocation, and a fresh attempt budget, on work already committed. The
+runtime grants exactly one result-only correction instead:
+
+- **Who.** The decoder classifies its own refusal when the invocation completes
+  (`repairable` on `handoff.refused`): a bounded, readable document that
+  misstates the protocol is repairable; a size or encoding bound, a missing
+  file, an unreadable slot or a storage error is not. A repairable refusal is
+  repaired only if the reporting invocation's output is bound to a
+  runtime-owned commit by the same binding admission uses, and nothing has
+  superseded it: no later engineering invocation, and no candidate movement
+  after that commit other than the deterministic gofmt commit of the same
+  output. An unbindable, stale, oversized or unreadable result never reaches a
+  model. No transcript or final message is read.
+- **Budget.** One `handoff.repair` operation per engineering invocation, keyed
+  by that invocation's identity. It is spent when the operation's
+  `operation.before` is journalled, before any provider is reached, so neither
+  a restart nor a controller lost mid-repair can mint a second one. A second
+  invalid document is the end: no third invocation. The repair does not
+  consume the engineering attempt or provider-invocation budgets, and it is
+  bounded by one per engineering invocation.
+- **Boundary.** The repair runs in an empty runtime-owned directory, never in
+  the candidate workspace; it may write only its own fresh slot, is given no
+  tools, findings or feedback, and is denied the provider's unsafe permission
+  bypass (an agent run with the bypass therefore cannot repair). It is shown
+  the exact refusal and the refused bytes as delimited data, the protocol, and
+  the candidate commit and tree as context it must not restate. The runtime
+  measures the candidate (head, tree, Git metadata and every work-tree byte)
+  before and after: a repair that changed it has its document refused and the
+  candidate restored to the committed revision.
+- **Result.** The corrected document crosses the same strict decoder, and the
+  ordinary admission path binds it to the engineering invocation's commit. The
+  admitted `EngineeringHandoff` keeps the engineering invocation as `producer`
+  and names the repair in `protocol_repair`. Anything else - a refused,
+  missing or unproduced document, a provider failure, a mutated candidate -
+  journals a follow-up `handoff.refused` that names the repair outcome, and the
+  item settles `handoff_pending` with it visible. The engineering is never
+  invoked again for it.
+
+Status reports each item's `handoff_repair` (`pending`, `ineligible`,
+`running`, `interrupted`, `repaired`, `refused` or `failed`, with
+`handoff_repair_detail`) and the batch's `handoff_repairs` (`started`,
+`repaired`).
 
 ## Status
 

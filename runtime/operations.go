@@ -114,6 +114,7 @@ func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op Run
 		OpPullRequestCreate: r.createPullRequest,
 		OpPullRequestUpdate: r.updatePullRequest,
 		OpGitHubObserve:     r.observeGitHub,
+		OpHandoffRepair:     r.repairHandoff,
 	}[op.Kind]
 	if !ok {
 		return failed(deterministicRefusal("operation.handler_missing", fmt.Errorf("no handler for operation kind %q", op.Kind)))

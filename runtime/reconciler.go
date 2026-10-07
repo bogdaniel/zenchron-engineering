@@ -59,6 +59,9 @@ const (
 	OpPullRequestCreate = "pull_request.create"
 	OpPullRequestUpdate = "pull_request.update"
 	OpGitHubObserve     = "github.observe"
+	// OpHandoffRepair is the one result-only correction of a refused
+	// orchestration handoff (#492, handoff_repair.go).
+	OpHandoffRepair = "handoff.repair"
 )
 
 // publicationKinds are the operations that change protected remote state.
@@ -1067,6 +1070,7 @@ var operationSpecs = []operationSpec{
 	{OpExecutionInvoke, bindExecutionInvoke},
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
+	{OpHandoffRepair, bindHandoffRepair},
 	{OpAssuranceGo, bindAssuranceGo},
 	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
@@ -1135,6 +1139,13 @@ func (s *runState) attemptsFor(kind string) int {
 		return s.budgets().MaxRemediationAttempts
 	case OpAssuranceGo, OpAssuranceSemantic:
 		return s.budgets().MaxAssuranceAttempts
+	case OpHandoffRepair:
+		// NOT the repair budget, which is one started operation
+		// (startedRepair). The second attempt exists only for a crash between
+		// the scheduler starting the row and operation.before being
+		// journalled: no provider was reached, and failing the run for it
+		// would be worse than the invocation it never made.
+		return 2
 	default:
 		return 3
 	}

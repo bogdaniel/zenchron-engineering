@@ -16,13 +16,22 @@ import (
 // derived entirely from durable state, so it reads the same whether or not a
 // supervisor is running, and the same after a restart.
 type OrchestrationView struct {
-	BatchID     string                  `json:"batch_id"`
-	Repository  string                  `json:"repository"`
-	AgentID     string                  `json:"agent_id"`
-	RequestedBy string                  `json:"requested_by,omitempty"`
-	CreatedAt   time.Time               `json:"created_at"`
-	Counts      orchestration.Counts    `json:"counts"`
-	Items       []OrchestrationItemView `json:"items"`
+	BatchID     string               `json:"batch_id"`
+	Repository  string               `json:"repository"`
+	AgentID     string               `json:"agent_id"`
+	RequestedBy string               `json:"requested_by,omitempty"`
+	CreatedAt   time.Time            `json:"created_at"`
+	Counts      orchestration.Counts `json:"counts"`
+	// HandoffRepairs counts the batch's one-per-invocation handoff protocol
+	// repairs (#492) that were started, and how many of those were repaired.
+	HandoffRepairs HandoffRepairCounts     `json:"handoff_repairs"`
+	Items          []OrchestrationItemView `json:"items"`
+}
+
+// HandoffRepairCounts is the batch aggregate of handoff protocol repairs.
+type HandoffRepairCounts struct {
+	Started  int `json:"started"`
+	Repaired int `json:"repaired"`
 }
 
 // OrchestrationItemView is one item: its projected state beside the child
@@ -50,11 +59,16 @@ type OrchestrationItemView struct {
 	PRState           string      `json:"pull_request_state,omitempty"`
 	// Handoff is the latest handoff observation, and HandoffID the latest
 	// admitted handoff's identity, when one exists.
-	Handoff           orchestration.HandoffObservation `json:"handoff"`
-	HandoffID         string                           `json:"handoff_id,omitempty"`
-	HandoffReason     string                           `json:"handoff_reason,omitempty"`
-	Operation         string                           `json:"operation,omitempty"`
-	VerificationTools []VerificationPermit             `json:"verification_tools,omitempty"`
+	Handoff       orchestration.HandoffObservation `json:"handoff"`
+	HandoffID     string                           `json:"handoff_id,omitempty"`
+	HandoffReason string                           `json:"handoff_reason,omitempty"`
+	// HandoffRepair is where the latest handoff's one protocol repair stands
+	// (#492): pending, ineligible, running, interrupted, repaired, refused or
+	// failed; empty when no repair applies.
+	HandoffRepair       string               `json:"handoff_repair,omitempty"`
+	HandoffRepairDetail string               `json:"handoff_repair_detail,omitempty"`
+	Operation           string               `json:"operation,omitempty"`
+	VerificationTools   []VerificationPermit `json:"verification_tools,omitempty"`
 }
 
 // OrchestrationStatus projects one batch. A child that cannot be read is
@@ -80,6 +94,13 @@ func OrchestrationStatus(store *SQLiteOperationStore, stateDir, batchID string, 
 	for _, item := range batch.Items {
 		projected := projectOrchestrationItem(tx, stateDir, item, now)
 		view.Counts.Add(projected.State)
+		switch projected.HandoffRepair {
+		case HandoffRepairRepaired:
+			view.HandoffRepairs.Repaired++
+			view.HandoffRepairs.Started++
+		case HandoffRepairRunning, HandoffRepairInterrupted, HandoffRepairRefused, HandoffRepairFailed:
+			view.HandoffRepairs.Started++
+		}
 		view.Items = append(view.Items, projected)
 	}
 	if err := tx.Commit(); err != nil {
@@ -173,6 +194,11 @@ func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.Ba
 		return fail(err)
 	}
 	out.Handoff, out.HandoffReason = finding.observation, boundedDetail(finding.detail)
+	repair, err := inspectHandoffRepair(events, snapshot.Operations)
+	if err != nil {
+		return fail(err)
+	}
+	out.HandoffRepair, out.HandoffRepairDetail = repair.state, boundedDetail(repair.detail)
 	if finding.observation == orchestration.HandoffAdmitted {
 		out.HandoffID = finding.handoffID
 	}
