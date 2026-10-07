@@ -63,6 +63,15 @@ Import rules, enforced by `execution/architecture_test.go`:
   this module imports `agentkernel/...`. Gate B relaxes the second half to
   exactly `execution/agentkernel`.
 
+PR C adds **R4**, enforced by `runtime/execution_boundary_test.go`: the host
+files (`scheduler.go`, `operations.go`, `reconciler.go`, `supervisor.go`,
+`controller*.go`, `planner.go`, `handoff_repair.go`, `orchestration.go`,
+`workgraph.go`, `plan_reconciler.go`) reference no identifier declared in a
+provider file, and make no anonymous interface assertion on `deps.Provider`.
+A capability is a named runtime interface (`ToolchainProber`,
+`IsolationReporter`, `TypedResultWriter`) that each provider asserts at
+compile time.
+
 ### What stays in `runtime`, deliberately
 
 `RouteFailure` and the host-only failure classes; the capability interfaces;

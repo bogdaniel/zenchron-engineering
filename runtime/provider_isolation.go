@@ -18,6 +18,14 @@ type IsolationReporter interface {
 	Isolation() ProviderIsolation
 }
 
+// Every native provider states its boundary (#521); losing the method would
+// silently make it ineligible, so it fails to compile instead.
+var (
+	_ IsolationReporter = CLIAgentProvider{}
+	_ IsolationReporter = NativeCodexProvider{}
+	_ IsolationReporter = OpenAIProvider{}
+)
+
 // RequireProtectedIsolation reports whether a provider may be used for
 // PROTECTED autonomous execution. It fails closed: a provider that reports no
 // isolation at all, or reports any required property as unproven, is

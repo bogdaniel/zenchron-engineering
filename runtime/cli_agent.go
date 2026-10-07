@@ -39,10 +39,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -936,57 +934,13 @@ func (p CLIAgentProvider) Probe(ctx context.Context) AgentReadiness {
 }
 
 // missingTools is the declared required tools this worker's environment cannot
-// resolve, in declaration order.
-//
-// Resolution happens against the BROKERED path when one is declared. An
-// operator who declares required tools without a path is asking about the
-// inherited environment, which is answered honestly rather than refused: the
-// two halves of the toolchain are independently useful.
+// resolve, in declaration order, looked up through this adapter's executor.
 func (p CLIAgentProvider) missingTools() []string {
-	var missing []string
-	for _, tool := range p.Toolchain.RequiredTools {
-		if tool = strings.TrimSpace(tool); tool == "" {
-			continue
-		}
-		if !p.resolvesTool(tool) {
-			missing = append(missing, tool)
-		}
-	}
-	return missing
+	return missingToolchainTools(p.Toolchain, p.executor().LookPath)
 }
 
 func (p CLIAgentProvider) resolvesTool(tool string) bool {
-	if len(p.Toolchain.Path) > 0 {
-		for _, dir := range p.Toolchain.Path {
-			if strings.TrimSpace(dir) == "" {
-				continue
-			}
-			// An absolute candidate confines lookup to the declared directory.
-			candidate, err := filepath.Abs(filepath.Join(dir, tool))
-			if err != nil {
-				continue
-			}
-			if resolvesDeclaredExecutable(candidate) {
-				return true
-			}
-		}
-		return false
-	}
-	return p.executor().LookPath(tool) == nil
-}
-
-// resolvesDeclaredExecutable checks the declared toolchain's executable files.
-// On Unix, retain the file-mode readiness check: LookPath additionally uses
-// access syscalls on some platforms, which can be denied by the supervisor's
-// sandbox even when the worker's execution environment permits the tool.
-// Windows requires native extension lookup (PATHEXT), not Unix mode bits.
-func resolvesDeclaredExecutable(candidate string) bool {
-	if runtime.GOOS == "windows" {
-		_, err := exec.LookPath(candidate)
-		return err == nil
-	}
-	info, err := os.Stat(candidate)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+	return toolchainResolves(p.Toolchain, tool, p.executor().LookPath)
 }
 
 // maxProvenanceArgs bounds the recorded vector. Every native CLI the runtime
@@ -1745,58 +1699,6 @@ func prepareValidationScratch(candidate, scratch string) error {
 		}
 	}
 	return os.MkdirAll(filepath.Join(build, "cache"), 0700)
-}
-
-// ExecCapableScratchBase answers where THIS execution boundary allows the
-// runtime to create scratch that Go may execute from.
-//
-// An environment that has already published runtime-owned exec-capable scratch
-// wins: the verifier sandbox mounts one and names it in GOTMPDIR, and a future
-// sandboxed worker would do the same. The variable is read from the runtime's
-// OWN process environment, which is set by the operator or by the sandbox that
-// launched it - never by a candidate, which has no way to reach it.
-//
-// Otherwise the caller's runtime-owned directory is used, and only if there is
-// none does this fall back to the process default.
-func ExecCapableScratchBase(preferred string) string {
-	if published := strings.TrimSpace(os.Getenv("GOTMPDIR")); published != "" {
-		return published
-	}
-	if trimmed := strings.TrimSpace(preferred); trimmed != "" {
-		return trimmed
-	}
-	return os.TempDir()
-}
-
-// ExecutionScratchDir composes the per-attempt scratch path for one invocation.
-//
-// It is built from scheduler identity exactly as the attempt transcript and the
-// reviewer result are, so two attempts never share a build directory and a
-// replay arrives at the same path from the journal alone.
-//
-// It lives under the RUN, beside the candidate workspace and the assurance
-// checkouts, because that is where the collector already looks. Scratch is not
-// evidence and nothing reads it after the invocation ends, but it holds a Go
-// build cache that a remediation attempt re-uses - deleting it per invocation
-// would make every retry recompile the world, and this workload is bounded by
-// wall time. It is retired with the run instead.
-//
-// The operation component is a DIGEST, not the encoded identity the transcript
-// uses (#331). This path is the worker's TMPDIR, and an operation id encodes to
-// ~150 bytes of %XX escapes: SQLite URI-decodes a "file:" path, and a Unix
-// socket address is bounded near 104 bytes, so the worker's own tests broke on
-// the directory rather than on the change. The path is recomputed from
-// identity; it is not an identity or authority input and is never read back,
-// so a 64-bit digest keeps it unique and replayable without the escapes.
-func ExecutionScratchDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
-	if err := attempt.Validate(); err != nil {
-		return "", err
-	}
-	operation := sha256.Sum256([]byte(attempt.OperationID))
-	return filepath.Join(ExecCapableScratchBase(stateDir), "runs",
-		encodePathComponent(attempt.RunID), executionScratchDir,
-		hex.EncodeToString(operation[:8]),
-		fmt.Sprintf("attempt-%d", attempt.Attempt)), nil
 }
 
 // ToolchainObligationError is the typed refusal for an invocation whose contract

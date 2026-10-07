@@ -273,3 +273,11 @@ func (e *refusingExecutor) Run(_ context.Context, name string, args []string, _ 
 func (e *refusingExecutor) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (runtime.CommandOutput, error) {
 	return e.Run(ctx, name, args, dir, env, grace)
 }
+
+// The wrapper binds a provider whose tools are confined to the candidate
+// workspace, so it must not gain the typed result capability (#521).
+func TestCandidateBoundProviderWritesNoTypedResults(t *testing.T) {
+	if _, ok := any(candidateBoundProvider{}).(runtime.TypedResultWriter); ok {
+		t.Fatal("candidateBoundProvider must not claim the typed result capability")
+	}
+}
