@@ -195,7 +195,9 @@ a real defect: `max_execution_attempts` bounds retries of ONE execution binding,
 while `max_provider_invocations` is the RUN TOTAL across every binding. A
 continuation is a new binding with its own attempt allowance, so a plan's
 remaining aggregate carried as an attempt ceiling can be spent more than once.
-The plan's remainder is carried as the total.
+The plan's remainder is carried as the total. The total refuses the next
+invocation the run would dispatch, never the one that spent its last unit: that
+invocation's output is still committed, assured and handed off (#514).
 
 `child_runs`, `provider_invocations` and `wall_seconds` are attributed by the
 reconciler and ENFORCED against the envelope before a stage starts. Wall time is
