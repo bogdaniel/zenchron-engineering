@@ -374,3 +374,35 @@ the shared `execute` helper call inside the named test.
 | Guard | Patch | Decisive failure | Restored |
 | --- | --- | --- | --- |
 | `os.Link` (fails if the name exists) in `FileRecords.PutIfAbsent` | replaced by `os.Rename` (overwrites) | `records_process_test.go:61: 8 processes created the claim, want exactly 1` | passes |
+
+## Second review (adversarial): `a7f97a5`
+
+Commit `a7f97a5` repaired the second, adversarial review's findings F1–F9 and
+the buffered-channel concern (`gate-a.md` §7). Same protocol: guard removed or
+weakened as described, focused test failed with the line below, guard
+restored, test passed. File:line values are as recorded; the
+`budget_test.go:131` line is inside `TestUnansweredProviderCallKeepsReservations`,
+and `host_test.go:83` / `:113` are the `dispatchWithin` calls in
+`TestHostToolHandOff` / `TestCommandHandOff`.
+
+| Finding | Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- | --- |
+| F1 | ledger subtraction check | removed | `overflow_test.go:26: 2 provider calls: a second call was admitted after a reported input of 9223372036854775807 consumed max_input_tokens` (`TestHugeReportedInputStopsFurtherCalls`) | passes |
+| F1 | saturating ledger addition | removed | `budget_test.go:87: input_tokens consumed -2, want saturation at MaxInt64` (`TestLedgerSaturatesInsteadOfWrapping`) | passes |
+| F1 | negative-prior guard on restore | removed | `budget_test.go:87: tool_calls consumed -5, want saturation at MaxInt64` | passes |
+| F1 | saturated cost is unknown | saturated cost reported known | `budget_test.go:105: cost of 9223372036854775807 tokens reported known` (`TestOutOfRangePriceIsUnknown`) | passes |
+| F1 | price range guard | removed | `budget_test.go:114: price(NaN) = 0, want saturation at MaxInt64`; on amd64 the partial break fails at `budget_test.go:105 ... -9223372036854775808 micros` | passes |
+| F2 | exact-type check on `Clock` and `Artifacts` in `engine.New` | removed | `seal_test.go:59: engine.New accepted it (err <nil>)` (`TestNewRefusesHostCodeInKernelPorts`) | passes |
+| F2 | exact-type check on tools in `tools.NewBroker` | removed | `host_test.go:155: NewBroker accepted a host type embedding a kernel tool` (`TestConstructorsRefuseHostCode`) | passes |
+| F3 | admission restores the largest cumulative record | records summed again | `admission_test.go:189: attempt 4 exhausted/budget_exhausted/iterations no model turns remain after only 3 of 5 iterations were used` (`TestPriorConsumptionIsCountedOnce`) | passes |
+| F4 | tool hand-off IDs are kernel sequences | model tool-call ID reused as the hand-off ID | `handoff_ids_test.go:92: hand-off ID "exec-1/att-1/event-3" sent for 2 different requests` (`TestModelToolCallIDsNeverBecomeHandOffIDs`) | passes |
+| F4 | repeated model tool-call ID refused | refusal removed | `handoff_ids_test.go:97: the repeated model tool-call ID was dispatched as "exec-1/att-1/tool-2"` | passes |
+| F5 | Anthropic adapter: a negative or overflowing usage part makes input unknown | guard removed | `anthropic_test.go:211: ...want input and both cache parts unknown` (`TestNegativeOrOverflowingUsagePartMakesInputUnknown`) | passes |
+| F5 | engine: same rule in `plausibleUsage` | guard removed | `overflow_test.go:62: reported input 10 cached <nil> write <nil>; a negative part must make all three unknown` (`TestNegativeUsagePartMakesInputUnknown`) | passes |
+| F6 | `Exchange` never offers a call once its bound is over | expired-bound check removed | `handoff_test.go:140: call 1: err handoff: not answered: x did not answer call id within 0s, want ErrNotTaken` (`TestExpiredBoundHandsNothingOver`) | passes |
+| F7 | `search` skips any `.git` entry | directories only | `file_tools_test.go:267: search echoed .git file content: "other/.GIT:1: gitdir: gitsecret ..."` (`TestSearchSkipsGitFiles`) | passes |
+| F8 | a closed reply channel is no answer | closed reply read as a value | `handoff_test.go:160: closed reply read as answer <nil> (err <nil>), want ErrNoAnswer` (`TestClosedReplyIsNoAnswer`); engine: `handoff_ids_test.go:124: nothing was recorded, yet the result reports 6 recorded events and completed/loop_completed` (`TestClosedEventReplyIsRecordingFailure`) | passes |
+| F9 | every widening dimension in `widenedBound` | dimensions removed | `admission_test.go:86` / `:96`: want `blocked/invalid_request` (`TestReentryCannotRenewBudget`, `widened_*`) | passes |
+| F9 | an unanswered provider call (`ErrNoAnswer`) keeps its reservations | reservations released | `budget_test.go:131: input_tokens charged 0 after handoff: not answered, want 10` (`TestUnansweredProviderCallKeepsReservations`) | passes |
+| F9 | tool and command hand-offs are bounded by the run context | bound removed | `host_test.go:113` / `:83`: `Dispatch still waiting 2s after its context ended` (`TestCommandHandOff`, `TestHostToolHandOff`) | passes |
+| buffered channels | `engine.New`, `tools.NewHostTool`, `tools.NewCommand` refuse a buffered hand-off channel | `cap == 0` check removed | `seal_test.go:59` (engine, `TestNewRefusesHostCodeInKernelPorts`); `host_test.go:161: NewHostTool accepted a buffered calls channel`; `host_test.go:164: NewCommand accepted a buffered runner channel` (`TestConstructorsRefuseHostCode`) | passes |
