@@ -33,15 +33,19 @@ An adapter MUST:
    call, from `Binding.CredentialHandle`.
 
 An adapter MAY implement `api.TokenEstimator`; none in Gate A does, so the
-engine uses `context.ApproximateTokens`. An untyped error from an adapter is
+engine uses `context.ApproximateTokens` for context fitting and reserves the
+byte upper bound of execution spec §7.4 against `max_input_tokens`. An
+estimator reporting `exact: true` is reserved as is, so it must never
+undercount; a negative count fails the execution closed. An untyped error from an adapter is
 treated by the engine as a non-retryable `transport` failure.
 
 `StopReason`: `end`, `tool_use`, `max_tokens`, `refused`, `other`. The engine
 completes only on `end` without tool calls; `other`, or `tool_use` without
 calls, settles `failed/provider_failed` (execution spec §5). Negative usage
-counts from any adapter are treated as unknown by the engine
-(`engine.plausibleUsage`); adapters themselves pass counts through as
-decoded.
+counts, and an impossible cache partition (`cached_input` or
+`cache_write_input`, alone or together, exceeding `input`), are treated as
+unknown by the engine (`engine.plausibleUsage`, execution spec §7.5);
+adapters themselves pass counts through as decoded.
 
 ## 2. Shared wire mechanics (`providers/internal/wire`)
 

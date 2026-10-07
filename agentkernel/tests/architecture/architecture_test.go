@@ -344,7 +344,7 @@ var allowedDeps = map[string][]string{
 	"storage":                 {"api"},
 	"memory":                  {"api", "internal/strictjson", "storage"},
 	"intelligence":            {"api", "internal/strictjson", "storage"},
-	"engine":                  {"api", "context", "routing", "tools"},
+	"engine":                  {"api", "context", "routing", "storage", "tools"},
 	"providers/internal/wire": {"api"},
 	"providers/conformance":   {"api"},
 	"providers/scripted":      {"api"},

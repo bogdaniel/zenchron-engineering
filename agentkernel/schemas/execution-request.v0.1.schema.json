@@ -133,7 +133,7 @@
       }
     },
     "budget": {
-      "description": "api.Budget. deadline must be after the validation time (Validate only).",
+      "description": "api.Budget: the envelope of the whole execution (every attempt of one execution_id together; a later attempt may not widen it and starts from what earlier attempts consumed, execution spec 11.1). deadline must be after the validation time (Validate only).",
       "type": "object",
       "additionalProperties": false,
       "required": ["deadline", "max_iterations", "max_tool_calls", "max_input_tokens", "max_output_tokens", "max_artifact_bytes", "max_provider_retries"],

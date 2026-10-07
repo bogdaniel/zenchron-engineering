@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 )
@@ -29,6 +30,11 @@ type run struct {
 	exhaustedBy api.BudgetDimension
 	acct        account
 
+	// settleBy bounds terminal recording; set once when settlement begins.
+	settleBy time.Time
+	// admitted is set once this attempt holds an admission (admission.go).
+	admitted bool
+
 	routing    *api.RoutingDecision
 	manifest   *api.ContextManifest
 	provenance api.Provenance
@@ -51,8 +57,10 @@ func newRun(e *Engine, parent context.Context, req api.ExecutionRequest) *run {
 
 // emit records one event. After the first recording failure nothing more is
 // recorded and every later emit returns that failure, so the caller stops
-// further side effects. Recording ignores cancellation of the execution:
-// the sink must still see how a cancelled execution ended.
+// further side effects. Recording ignores cancellation of the execution (the
+// sink must still see how a cancelled execution ended) but never outlasts
+// its bound (run.bounded): a sink that does not return in time is a
+// recording failure.
 func (r *run) emit(ctx context.Context, ev api.Event) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -62,7 +70,9 @@ func (r *run) emit(ctx context.Context, ev api.Event) error {
 	r.seq++
 	ev.Version, ev.ExecutionID, ev.AttemptID = api.ExecutionVersion, r.req.ExecutionID, r.req.AttemptID
 	ev.Seq, ev.ObservedAt, ev.Source = r.seq, r.e.clock.Now(), eventSource
-	if err := r.e.events.Record(context.WithoutCancel(ctx), ev); err != nil {
+	terminal := ev.Kind == api.EventRefused || ev.Kind == api.EventSettled
+	record := func(ctx context.Context) error { return r.e.events.Record(ctx, ev) }
+	if err := r.bounded(ctx, terminal, "event sink", record); err != nil {
 		r.recordErr = fmt.Errorf("event %d (%s) not recorded: %w", ev.Seq, ev.Kind, err)
 		return r.recordErr
 	}
@@ -70,6 +80,23 @@ func (r *run) emit(ctx context.Context, ev api.Event) error {
 		Seq: ev.Seq, Kind: ev.Kind, Detail: ev.Detail, ToolCall: ev.ToolCall, Grant: ev.Grant, Ref: ev.Ref,
 	})
 	return nil
+}
+
+// beginSettlement fixes the settlement deadline the first time it is called.
+func (r *run) beginSettlement() {
+	if r.settleBy.IsZero() {
+		r.settleBy = time.Now().Add(r.e.settleTimeout)
+	}
+}
+
+// failRecording marks a record the host relies on as not written, unless an
+// earlier failure is already the one reported.
+func (r *run) failRecording(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.recordErr == nil {
+		r.recordErr = err
+	}
 }
 
 func (r *run) recordingFailure() error {
@@ -88,6 +115,14 @@ func (r *run) exhausted(dim api.BudgetDimension, detail string) api.Termination 
 	return t
 }
 
+// estimatorFailed settles a provider token estimator that returned a
+// negative count. Such a count would mint context or input capacity, so the
+// execution fails closed instead of using it.
+func (r *run) estimatorFailed(count int64) api.Termination {
+	return r.termination(api.OutcomeFailed, api.CauseProviderFailed,
+		fmt.Sprintf("provider token estimator returned a negative count (%d)", count))
+}
+
 func (r *run) recordingFailed(observed string) api.Termination {
 	detail := r.recordingFailure().Error()
 	if observed != "" {
@@ -101,6 +136,12 @@ func (r *run) recordingFailed(observed string) api.Termination {
 // cancellation included) can change that termination except a failure to
 // record it, which the result then states alongside the observed outcome.
 func (r *run) finish(ctx context.Context, t api.Termination) api.ExecutionResult {
+	r.beginSettlement()
+	if r.admitted {
+		if err := r.settleAdmission(ctx); err != nil {
+			r.failRecording(err)
+		}
+	}
 	if r.recordingFailure() != nil && t.Cause != api.CauseRecordingFailed {
 		t = r.recordingFailed(describe(t))
 	}

@@ -33,6 +33,8 @@ const (
 
 // ExecutionRequest is everything one bounded execution may use. Every bound is
 // explicit and finite; the kernel never widens one with a default.
+// ExecutionID keys the execution-wide Budget; AttemptID is admitted at most
+// once per ExecutionID.
 type ExecutionRequest struct {
 	Version     string            `json:"version"`
 	ExecutionID string            `json:"execution_id"`
@@ -69,8 +71,14 @@ type Constraints struct {
 	InstructionDigest string `json:"instruction_digest"`
 }
 
-// Budget is the finite envelope of one execution. Every numeric bound is
-// required and positive except MaxProviderRetries, which may be zero.
+// Budget is the finite envelope of one execution: every attempt of one
+// ExecutionID together. The kernel admits each AttemptID once, refuses an
+// attempt that widens the first admitted budget or starts beside an
+// unsettled one, and charges a later attempt with what earlier attempts
+// consumed. Envelopes spanning several executions remain the host's. Every
+// numeric bound is required and positive except MaxProviderRetries, which
+// may be zero. MaxInputTokens is a hard bound: without an exact provider
+// count each call reserves a byte upper bound of its input.
 type Budget struct {
 	Deadline           time.Time     `json:"deadline"`
 	MaxIterations      int           `json:"max_iterations"`

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestConcurrentReservationsCannotOverspend(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, ok := l.reserve(amount{api.DimensionToolCalls, 1}, amount{api.DimensionOutputTokens, 7}); ok {
+			if _, err := l.reserve(amount{api.DimensionToolCalls, 1}, amount{api.DimensionOutputTokens, 7}); err == nil {
 				mu.Lock()
 				granted++
 				mu.Unlock()
@@ -36,11 +37,29 @@ func TestConcurrentReservationsCannotOverspend(t *testing.T) {
 
 func TestSettleKeepsOverrun(t *testing.T) {
 	l := newLedger(api.Budget{MaxInputTokens: 100})
-	if _, ok := l.reserve(amount{api.DimensionInputTokens, 50}); !ok {
+	if _, err := l.reserve(amount{api.DimensionInputTokens, 50}); err != nil {
 		t.Fatal("reservation refused")
 	}
 	l.settle(api.DimensionInputTokens, 50, 120) // provider reported more than estimated
-	if dim, ok := l.reserve(amount{api.DimensionInputTokens, 0}); ok || dim != api.DimensionInputTokens {
+	if dim, err := l.reserve(amount{api.DimensionInputTokens, 0}); err == nil || dim != api.DimensionInputTokens {
 		t.Fatal("overrun forgotten: reservation admitted past the limit")
+	}
+}
+
+// TestNegativeReservationCannotRenewBudget: a negative amount (a broken token
+// estimator, say) is refused at the root with a distinct error, takes none of
+// a multi-dimension reservation, and can never lower what was used.
+func TestNegativeReservationCannotRenewBudget(t *testing.T) {
+	l := newLedger(api.Budget{MaxInputTokens: 100, MaxOutputTokens: 100})
+	if _, err := l.reserve(amount{api.DimensionInputTokens, 100}); err != nil {
+		t.Fatal(err)
+	}
+	dim, err := l.reserve(amount{api.DimensionOutputTokens, 10}, amount{api.DimensionInputTokens, -50})
+	if !errors.Is(err, errNegativeAmount) || dim != api.DimensionInputTokens {
+		t.Fatalf("negative reservation: dim %q err %v, want input_tokens errNegativeAmount", dim, err)
+	}
+	if l.remaining(api.DimensionInputTokens) != 0 || l.remaining(api.DimensionOutputTokens) != 100 {
+		t.Fatalf("negative reservation changed the ledger: input left %d, output left %d",
+			l.remaining(api.DimensionInputTokens), l.remaining(api.DimensionOutputTokens))
 	}
 }

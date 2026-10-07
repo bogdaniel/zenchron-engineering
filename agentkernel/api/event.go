@@ -42,6 +42,11 @@ type Event struct {
 
 // EventSink records events. A returned error means the event is not recorded;
 // the kernel then stops further side effects and settles recording_failed.
+// Record's context ignores the execution's cancellation but carries a
+// deadline (the budget deadline, or a settlement grace for terminal events);
+// a call that has not returned by then is abandoned and is a recording
+// failure. Record should honour its context: one that does not keeps its
+// goroutine alive, though never the execution.
 type EventSink interface {
 	Record(ctx context.Context, event Event) error
 }

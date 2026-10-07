@@ -83,6 +83,9 @@ type Provider interface {
 }
 
 // TokenEstimator is an optional provider capability for local token counts.
+// Its counts are untrusted: a negative one fails the execution closed. An
+// estimate marked Exact is reserved against max_input_tokens as is, so it
+// must never undercount; an inexact one is used only to fit context.
 type TokenEstimator interface {
 	EstimateTokens(text string) TokenEstimate
 }

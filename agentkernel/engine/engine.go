@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 	kcontext "github.com/bogdaniel/zenchron-engineering/agentkernel/context"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/routing"
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/tools"
 )
 
@@ -39,19 +41,37 @@ type Config struct {
 	// OutputLimit bounds each tool result's inline output in bytes; required
 	// when Broker is set.
 	OutputLimit int
+	// Admissions holds one admission record per execution_id, so a re-entered
+	// attempt is refused and a later attempt starts from what earlier ones
+	// consumed. Nil means an in-memory store owned by this Engine: the
+	// envelope is then enforced within this Engine instance only. Enforcement
+	// across restarts needs a durable store (storage.FileRecords); across
+	// concurrently running Engines it also needs host serialization.
+	Admissions storage.Records
+	// SettleTimeout is the settlement grace: the longest terminal recording
+	// may take, and the longest an in-flight recording may continue after a
+	// host cancellation. Zero means DefaultSettleTimeout; negative is refused.
+	// The kernel never runs past the budget deadline (or a cancellation) by
+	// more than this grace, provided providers and tools honour their
+	// context (recording ports and the Admissions store are abandoned at
+	// their bound instead).
+	SettleTimeout time.Duration
 }
 
 // Engine implements api.Executor.
 type Engine struct {
-	providers    map[string]api.Provider
-	broker       *tools.Broker
-	artifacts    api.ArtifactStore
-	events       api.EventSink
-	clock        api.Clock
-	sources      []api.ContextSource
-	observations []routing.Observation
-	staleAfter   time.Duration
-	outputLimit  int
+	providers     map[string]api.Provider
+	broker        *tools.Broker
+	artifacts     api.ArtifactStore
+	events        api.EventSink
+	clock         api.Clock
+	sources       []api.ContextSource
+	observations  []routing.Observation
+	staleAfter    time.Duration
+	outputLimit   int
+	admissions    storage.Records
+	admitMu       sync.Mutex
+	settleTimeout time.Duration
 }
 
 var _ api.Executor = (*Engine)(nil)
@@ -72,6 +92,17 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Broker != nil && (cfg.Artifacts == nil || cfg.OutputLimit <= 0) {
 		return nil, errors.New("engine: a broker needs an artifact store and a positive output limit")
 	}
+	if cfg.SettleTimeout < 0 {
+		return nil, errors.New("engine: settle timeout must not be negative")
+	}
+	settle := cfg.SettleTimeout
+	if settle == 0 {
+		settle = DefaultSettleTimeout
+	}
+	admissions := cfg.Admissions
+	if admissions == nil {
+		admissions = storage.NewMemoryRecords()
+	}
 	for i, s := range cfg.Sources {
 		if s == nil {
 			return nil, fmt.Errorf("engine: source %d is nil", i)
@@ -80,7 +111,7 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{
 		providers: cfg.Providers, broker: cfg.Broker, artifacts: cfg.Artifacts, events: cfg.Events,
 		clock: cfg.Clock, sources: cfg.Sources, observations: cfg.Observations, staleAfter: cfg.StaleAfter,
-		outputLimit: cfg.OutputLimit,
+		outputLimit: cfg.OutputLimit, admissions: admissions, settleTimeout: settle,
 	}, nil
 }
 
@@ -89,15 +120,24 @@ func New(cfg Config) (*Engine, error) {
 func (e *Engine) Execute(ctx context.Context, req api.ExecutionRequest) (api.ExecutionResult, error) {
 	r := newRun(e, ctx, req)
 	if err := req.Validate(e.clock.Now()); err != nil {
-		t := r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, err.Error())
-		if rerr := r.emit(ctx, api.Event{Kind: api.EventRefused, Detail: err.Error()}); rerr != nil {
-			t = r.recordingFailed(describe(t))
-		}
-		return r.finish(ctx, t), nil
+		return r.refuse(ctx, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, err.Error())), nil
+	}
+	if t, ok := r.admit(ctx); !ok {
+		return r.refuse(ctx, t), nil
 	}
 	runCtx, cancel := context.WithDeadline(ctx, req.Budget.Deadline)
 	defer cancel()
 	return r.finish(ctx, r.execute(runCtx)), nil
+}
+
+// refuse settles a request that never started: it records the refusal and
+// settles without any provider, tool or source call.
+func (r *run) refuse(ctx context.Context, t api.Termination) api.ExecutionResult {
+	r.beginSettlement()
+	if err := r.emit(ctx, api.Event{Kind: api.EventRefused, Detail: t.Detail}); err != nil && t.Cause != api.CauseRecordingFailed {
+		t = r.recordingFailed(describe(t))
+	}
+	return r.finish(ctx, t)
 }
 
 // execute binds, routes and compiles, then runs the loop.

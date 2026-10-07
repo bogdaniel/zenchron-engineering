@@ -119,8 +119,17 @@ required, nothing is defaulted.
   containment and reaping belong to the host's `api.CommandRunner`.
 - **No CLI parity.** The OpenAI and Anthropic adapters are raw API adapters,
   not native coding-CLI adapters.
-- **Budgets are per `Execute` call.** The kernel keeps no attempt history; a
-  host must pass only its remaining envelope.
+- **Budget envelope is per execution, enforced per Engine store.** Every
+  attempt of one `execution_id` shares one envelope: re-entry, widening and
+  starting beside an unsettled attempt are refused (execution spec §11.1).
+  The default admission store is in-memory; enforcement across restarts
+  needs `engine.Config.Admissions` backed by `storage.FileRecords`, and
+  several processes sharing one store must serialize admission. Envelopes
+  spanning executions remain the host's.
+- **Bounded recording, not bounded adapters.** A stuck `EventSink` or
+  `ContextSource` is abandoned after the deadline (or cancellation) plus
+  `SettleTimeout`; providers, tools and `CommandRunner`s are never abandoned
+  and must honour their context.
 - **Live verification: none.** Adapters are verified against fake transports
   shaped from primary documentation retrieved 2026-10-07.
 - **File-backed stores refuse Windows** (`storage.prepareRoot`): directory

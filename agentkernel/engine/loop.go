@@ -25,7 +25,7 @@ func (r *run) loop(ctx context.Context, c call, messages []api.Message) api.Term
 		if t, stop := r.interrupted(ctx); stop {
 			return t
 		}
-		if _, ok := r.ledger.reserve(amount{api.DimensionIterations, 1}); !ok {
+		if _, err := r.ledger.reserve(amount{api.DimensionIterations, 1}); err != nil {
 			return r.exhausted(api.DimensionIterations, "no model turns remain")
 		}
 		r.count(func(a *account) { a.iterations++ })
@@ -72,7 +72,11 @@ func (r *run) interrupted(ctx context.Context) (api.Termination, bool) {
 		t.Cancellation = api.CancellationOf(r.parent)
 		return t, true
 	}
-	if ctx.Err() != nil || !r.e.clock.Now().Before(r.req.Budget.Deadline) {
+	// The wall-clock comparison closes a timer race: a bounded port call
+	// abandoned at the deadline can return before ctx's own deadline timer
+	// has fired, and the run must not take another step in that gap.
+	wallPassed := !time.Now().Before(r.req.Budget.Deadline)
+	if ctx.Err() != nil || wallPassed || !r.e.clock.Now().Before(r.req.Budget.Deadline) {
 		return r.exhausted(api.DimensionDeadline, "budget deadline reached"), true
 	}
 	return api.Termination{}, false
@@ -99,7 +103,7 @@ func (r *run) turn(ctx context.Context, c call, messages []api.Message) (api.Pro
 			}
 		}
 		if perr.Retryable {
-			if _, ok := r.ledger.reserve(amount{api.DimensionRetries, 1}); ok {
+			if _, err := r.ledger.reserve(amount{api.DimensionRetries, 1}); err == nil {
 				r.count(func(a *account) { a.retries++ })
 				continue
 			}
@@ -124,20 +128,29 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 		return fail(t)
 	}
 	prompt := promptText(messages, c.specs)
-	estIn := c.estimate(prompt).Count
+	est := c.estimate(prompt)
+	if est.Count < 0 {
+		return fail(r.estimatorFailed(est.Count))
+	}
 	maxOut := min(c.binding.MaxOutputTokens, r.ledger.remaining(api.DimensionOutputTokens))
 	if maxOut <= 0 {
 		return fail(r.exhausted(api.DimensionOutputTokens, "no output tokens remain"))
 	}
-	if estIn > c.binding.ContextWindow-maxOut {
+	// Fitting the context window is an estimate; the input budget is not.
+	if est.Count > c.binding.ContextWindow-maxOut {
 		return fail(r.exhausted(api.DimensionInputTokens, "transcript no longer fits the context window"))
 	}
+	in := inputReservation(est, prompt, len(messages)+len(c.specs))
 	// Money is reserved at a true worst case: the provider cannot accept more
 	// input than its context window. A local estimate is not a bound, and a
 	// hard ceiling must not rest on one.
 	money := worstCaseCost(c.binding.ContextWindow, maxOut, c.binding.Pricing)
-	reservation := []amount{{api.DimensionInputTokens, estIn}, {api.DimensionOutputTokens, maxOut}, {api.DimensionMoney, money}}
-	if dim, ok := r.ledger.reserve(reservation...); !ok {
+	reservation := []amount{{api.DimensionInputTokens, in}, {api.DimensionOutputTokens, maxOut}, {api.DimensionMoney, money}}
+	if dim, err := r.ledger.reserve(reservation...); err != nil {
+		if errors.Is(err, errNegativeAmount) {
+			return fail(r.termination(api.OutcomeFailed, api.CauseProviderFailed,
+				fmt.Sprintf("negative %s reservation refused", dim)))
+		}
 		return fail(r.exhausted(dim, "the next model turn cannot be reserved"))
 	}
 	ev := api.Event{Kind: api.EventProviderRequest, Detail: fmt.Sprintf("binding %s attempt %d max_output %d", c.binding.ID, n+1, maxOut)}
@@ -148,10 +161,10 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 	resp, err := c.provider.Complete(ctx, api.ProviderRequest{Binding: c.binding, Messages: messages, Tools: c.specs, MaxOutputTokens: maxOut})
 	latency := r.e.clock.Now().Sub(start)
 	if err != nil {
-		// Usage of a failed call is unknown: input stays charged at the
-		// estimate, money keeps the worst case, output is released.
+		// Usage of a failed call is unknown: input stays charged at its
+		// reservation, money keeps the worst case, output is released.
 		r.ledger.settle(api.DimensionOutputTokens, maxOut, 0)
-		r.count(func(a *account) { a.recordCall(estIn, 0, nil, c.binding.Pricing, latency) })
+		r.count(func(a *account) { a.recordCall(est.Count, 0, nil, c.binding.Pricing, latency) })
 		perr := asProviderError(err)
 		if rerr := r.emit(ctx, api.Event{Kind: api.EventProviderError, Detail: perr.Error()}); rerr != nil {
 			return fail(r.recordingFailed("provider error " + string(perr.Class)))
@@ -159,7 +172,7 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 		return api.ProviderResponse{}, perr, api.Termination{}, false
 	}
 	resp.Usage = plausibleUsage(resp.Usage)
-	r.settleCall(c, resp, estIn, maxOut, money, latency)
+	r.settleCall(c, resp, est.Count, in, maxOut, money, latency)
 	if err := r.emit(ctx, api.Event{Kind: api.EventProviderResponse, Detail: "stop " + string(resp.Stop), Usage: &resp.Usage}); err != nil {
 		return fail(r.recordingFailed("provider responded with stop " + string(resp.Stop)))
 	}
@@ -167,12 +180,13 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 }
 
 // settleCall replaces the worst-case reservation with reported usage where it
-// exists. Unreported output keeps its full reservation; unpriced or partly
-// reported usage keeps the worst-case money charge.
-func (r *run) settleCall(c call, resp api.ProviderResponse, estIn, maxOut, money int64, latency time.Duration) {
+// exists. Unreported input keeps its upper-bound reservation, unreported
+// output its full reservation; unpriced or partly reported usage keeps the
+// worst-case money charge. estIn is the observation-only estimate.
+func (r *run) settleCall(c call, resp api.ProviderResponse, estIn, in, maxOut, money int64, latency time.Duration) {
 	u := resp.Usage
 	if u.Input != nil {
-		r.ledger.settle(api.DimensionInputTokens, estIn, *u.Input)
+		r.ledger.settle(api.DimensionInputTokens, in, *u.Input)
 	}
 	if u.Output != nil {
 		r.ledger.settle(api.DimensionOutputTokens, maxOut, *u.Output)
@@ -180,7 +194,9 @@ func (r *run) settleCall(c call, resp api.ProviderResponse, estIn, maxOut, money
 	if actual, known := actualCost(u, c.binding.Pricing); known {
 		r.ledger.settle(api.DimensionMoney, money, actual)
 	}
-	estOut := c.estimate(resp.Text + promptText([]api.Message{{ToolCalls: resp.ToolCalls}}, nil)).Count
+	// The output estimate is an observation only and never reaches the
+	// ledger; an implausible negative one contributes nothing.
+	estOut := max(c.estimate(resp.Text+promptText([]api.Message{{ToolCalls: resp.ToolCalls}}, nil)).Count, 0)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.acct.recordCall(estIn, estOut, &u, c.binding.Pricing, latency)
@@ -203,13 +219,31 @@ func asProviderError(err error) *api.ProviderError {
 	return &api.ProviderError{Class: api.ProviderTransport, Detail: "untyped provider error: " + err.Error()}
 }
 
-// plausibleUsage drops negative reported counts to unknown. Settling a
-// negative count would credit the ledger and renew budget the host bounded.
+// plausibleUsage drops implausible reported counts to unknown, so they can
+// neither credit the ledger nor price a call below its worst case. A negative
+// count is unknown. Cached and cache-write input are parts of input: when
+// input is reported and a part exceeds it, or the known parts together do,
+// the partition is impossible and input and both parts become unknown.
 func plausibleUsage(u api.TokenUsage) api.TokenUsage {
 	for _, c := range []**int64{&u.Input, &u.Output, &u.CachedInput, &u.CacheWriteInput} {
 		if *c != nil && **c < 0 {
 			*c = nil
 		}
 	}
+	if u.Input == nil {
+		return u
+	}
+	cached, written := knownOrZero(u.CachedInput), knownOrZero(u.CacheWriteInput)
+	// Compared by subtraction so huge counts cannot overflow past the check.
+	if cached > *u.Input || written > *u.Input-cached {
+		u.Input, u.CachedInput, u.CacheWriteInput = nil, nil, nil
+	}
 	return u
+}
+
+func knownOrZero(n *int64) int64 {
+	if n == nil {
+		return 0
+	}
+	return *n
 }

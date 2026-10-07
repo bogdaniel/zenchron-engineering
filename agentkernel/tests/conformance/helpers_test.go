@@ -122,10 +122,11 @@ type kernel struct {
 }
 
 type config struct {
-	providers map[string]api.Provider
-	sources   []api.ContextSource
-	artifacts api.ArtifactStore
-	extra     []tools.Tool
+	providers  map[string]api.Provider
+	sources    []api.ContextSource
+	artifacts  api.ArtifactStore
+	extra      []tools.Tool
+	admissions storage.Records
 }
 
 // newKernel builds an engine over the real broker and file tools in a fresh
@@ -154,7 +155,7 @@ func newKernel(t *testing.T, c config) *kernel {
 	k := &kernel{sink: &sink{}, dir: dir, artifacts: arts}
 	k.engine, err = engine.New(engine.Config{
 		Providers: c.providers, Broker: broker, Artifacts: arts, Events: k.sink,
-		Clock: fixedClock{epoch}, Sources: c.sources, OutputLimit: 256,
+		Clock: fixedClock{epoch}, Sources: c.sources, OutputLimit: 256, Admissions: c.admissions,
 	})
 	if err != nil {
 		t.Fatal(err)

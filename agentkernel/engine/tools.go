@@ -19,7 +19,7 @@ func (r *run) toolRound(ctx context.Context, calls []api.ToolCall) ([]api.Messag
 		if t, stop := r.interrupted(ctx); stop {
 			return nil, t, false
 		}
-		if _, ok := r.ledger.reserve(amount{api.DimensionToolCalls, 1}); !ok {
+		if _, err := r.ledger.reserve(amount{api.DimensionToolCalls, 1}); err != nil {
 			return nil, r.exhausted(api.DimensionToolCalls, "no tool calls remain"), false
 		}
 		r.count(func(a *account) { a.toolCalls++ })
@@ -61,7 +61,7 @@ func (r *run) dispatch(ctx context.Context, call api.ToolCall) (api.ToolResult, 
 // chargeStep reserves one tool call for each composite-tool step beyond the
 // first, so a macro is metered like the individual calls it performs.
 func (r *run) chargeStep(context.Context) error {
-	if _, ok := r.ledger.reserve(amount{api.DimensionToolCalls, 1}); !ok {
+	if _, err := r.ledger.reserve(amount{api.DimensionToolCalls, 1}); err != nil {
 		return fmt.Errorf("no tool calls remain")
 	}
 	r.count(func(a *account) { a.toolCalls++ })
@@ -99,7 +99,7 @@ type meteredStore struct {
 
 func (s *meteredStore) Put(ctx context.Context, in api.ArtifactInput) (api.ArtifactRef, error) {
 	n := int64(len(in.Data))
-	if dim, ok := s.r.ledger.reserve(amount{api.DimensionArtifactBytes, n}); !ok {
+	if dim, err := s.r.ledger.reserve(amount{api.DimensionArtifactBytes, n}); err != nil {
 		s.r.mu.Lock()
 		s.r.exhaustedBy = dim
 		s.r.mu.Unlock()

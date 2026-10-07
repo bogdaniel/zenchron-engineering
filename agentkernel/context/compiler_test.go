@@ -238,3 +238,27 @@ func TestInvalidInputRefused(t *testing.T) {
 		t.Fatal("negative reserved output must be refused")
 	}
 }
+
+// TestNegativeEstimateIsRefused: a negative count would make context free
+// capacity; Compile refuses it whether it comes from a required or an
+// optional item, rather than selecting with it.
+func TestNegativeEstimateIsRefused(t *testing.T) {
+	negativeFor := func(id string) kcontext.Estimator {
+		return func(text string) api.TokenEstimate {
+			if strings.Contains(text, id) {
+				return api.TokenEstimate{Count: -1000, Exact: true}
+			}
+			return exact(text)
+		}
+	}
+	for _, id := range []string{"req-body", "opt-body"} {
+		_, err := kcontext.Compile(kcontext.Input{
+			Required: []api.ContextItem{required("r", api.ContextTask, api.TrustHost, "req-body")},
+			Optional: []api.ContextItem{item("o", api.ContextSourceCode, api.TrustWorkspace, "opt-body")},
+			Window:   100, ReservedOutput: 10, Estimate: negativeFor(id),
+		})
+		if !errors.Is(err, kcontext.ErrNegativeEstimate) {
+			t.Fatalf("%s: err %v, want ErrNegativeEstimate", id, err)
+		}
+	}
+}

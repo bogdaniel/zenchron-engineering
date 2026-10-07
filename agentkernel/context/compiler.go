@@ -5,6 +5,7 @@ package context
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -37,6 +38,11 @@ type InsufficientCapacityError struct {
 }
 
 func (e *InsufficientCapacityError) Error() string { return "required context exceeds capacity" }
+
+// ErrNegativeEstimate reports an estimator that returned a negative count.
+// A negative count would make context appear to free capacity, so Compile
+// refuses it rather than using or clamping it.
+var ErrNegativeEstimate = errors.New("context: estimator returned a negative token count")
 
 // Manifest reasons. A duplicate's reason is "duplicate of <id>".
 const (
@@ -73,6 +79,9 @@ func Compile(in Input) (Output, error) {
 	if err := c.addRequired(in.Required); err != nil {
 		return Output{}, err
 	}
+	if c.badEstimate != nil {
+		return Output{}, c.badEstimate
+	}
 	if c.used > c.capacity {
 		return Output{}, &InsufficientCapacityError{Needed: c.used, Available: max(c.capacity, 0)}
 	}
@@ -82,6 +91,9 @@ func Compile(in Input) (Output, error) {
 	}
 	for _, it := range candidates {
 		c.addOptional(it)
+	}
+	if c.badEstimate != nil {
+		return Output{}, c.badEstimate
 	}
 	manifest := api.ContextManifest{
 		Entries: c.entries,
@@ -107,6 +119,8 @@ type compilation struct {
 	// owners maps a content digest to the first item that carried it.
 	owners      map[string]string
 	requiredIDs map[string]bool
+	// badEstimate is the first negative estimate; Compile returns it.
+	badEstimate error
 }
 
 func newCompilation(in Input) *compilation {
@@ -125,6 +139,13 @@ func newCompilation(in Input) *compilation {
 
 func (c *compilation) tokens(text string) api.TokenEstimate {
 	t := c.estimate(text)
+	if t.Count < 0 {
+		if c.badEstimate == nil {
+			c.badEstimate = fmt.Errorf("%w (%d)", ErrNegativeEstimate, t.Count)
+		}
+		// Counted as nothing so no capacity is freed before Compile refuses.
+		t.Count = 0
+	}
 	if !t.Exact {
 		c.exact = false
 	}

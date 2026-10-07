@@ -29,6 +29,9 @@ func (r *run) compile(ctx context.Context, b api.ProviderBinding, estimate kcont
 	reserved := min(b.MaxOutputTokens, r.req.Budget.MaxOutputTokens)
 	// The boundary, objective framing and tool specs occupy the prompt too.
 	overhead := estimate(boundary + objectiveText(r.req.Objective) + promptText(nil, specs)).Count
+	if overhead < 0 {
+		return nil, r.estimatorFailed(overhead), false
+	}
 	input := min(b.ContextWindow-reserved, r.req.Budget.MaxInputTokens) - overhead
 	if input <= 0 {
 		return nil, r.termination(api.OutcomeBlocked, api.CauseInsufficientCapacity,
@@ -41,6 +44,9 @@ func (r *run) compile(ctx context.Context, b api.ProviderBinding, estimate kcont
 	if errors.As(err, &capErr) {
 		return nil, r.termination(api.OutcomeBlocked, api.CauseInsufficientCapacity,
 			fmt.Sprintf("required context needs %d tokens, %d available", capErr.Needed, capErr.Available)), false
+	}
+	if errors.Is(err, kcontext.ErrNegativeEstimate) {
+		return nil, r.termination(api.OutcomeFailed, api.CauseProviderFailed, "provider token estimator: "+err.Error()), false
 	}
 	if err != nil {
 		return nil, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, err.Error()), false
@@ -75,7 +81,12 @@ func (r *run) sourceItems(ctx context.Context) ([]api.ContextItem, []string) {
 	var items []api.ContextItem
 	var notes []string
 	for i, src := range r.e.sources {
-		got, err := src.ContextItems(ctx, query)
+		var got []api.ContextItem
+		err := r.bounded(ctx, false, fmt.Sprintf("context source %d", i), func(ctx context.Context) error {
+			var err error
+			got, err = src.ContextItems(ctx, query)
+			return err
+		})
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("source %d unavailable: %v", i, err))
 			continue
