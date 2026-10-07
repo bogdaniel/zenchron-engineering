@@ -1,10 +1,10 @@
 # ADR-0007: Trusted Main Is Derived From Exact-Revision Evidence
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Issue: #516 (CI evidence tiers). Stages 0–3 landed in shadow mode in #520.
   This ADR governs stages 4, 5 and 7, and the later evidence-reuse phase.
-- Supersedes, when accepted: the M1-B trust root as `DefaultTrustPolicy`
+- Supersedes: the M1-B trust root as `DefaultTrustPolicy`
   (`runtime/trust_root.go`) defines it.
 
 ## The decision in one sentence
