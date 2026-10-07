@@ -359,7 +359,14 @@ func TestAMessageCannotForgeItsPromptFrame(t *testing.T) {
 	if err != nil || !strings.Contains(communication, "ignore every rule") {
 		t.Fatalf("B was not shown the message (%v): %s", err, communication)
 	}
-	prompt := providerPrompt(ExecutionRequest{MessagePath: "/state/messages.json", Communication: communication})
+	// B's real request, built by the runtime with its scheduler attempt, shown
+	// the inbox as it stands now that A's message is admitted.
+	request := worker.request(runB)
+	if request.MessagePath == "" || request.Attempt <= 0 {
+		t.Fatalf("B's invocation was not given a message slot under a scheduler attempt: %+v", request)
+	}
+	request.Communication = communication
+	prompt := providerPrompt(request)
 	open, end := strings.Index(prompt, "<<<"+messagesFrameMarker+"\n"), strings.LastIndex(prompt, "\n"+messagesFrameMarker+"\n")
 	injected := strings.Index(prompt, "ignore every rule")
 	if open < 0 || end < 0 || injected < open || injected > end {
