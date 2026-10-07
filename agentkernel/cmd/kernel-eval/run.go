@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,7 +62,7 @@ func (h *harness) runTask(ctx context.Context, trial int, t task, modes []mode) 
 // execute runs one task in one mode on a fresh copy of its fixture.
 func (h *harness) execute(ctx context.Context, t task, m mode, st *cache, dir string, obs *observation) error {
 	ws := filepath.Join(dir, "workspace")
-	if err := copyTree(h.c.fixtureDir(t.Fixture), ws); err != nil {
+	if err := os.CopyFS(ws, os.DirFS(h.c.fixtureDir(t.Fixture))); err != nil {
 		return err
 	}
 	if m == modeDrift {
@@ -127,7 +126,7 @@ func newEngine(ws string, provider api.Provider, sources []api.ContextSource) (*
 	if err != nil {
 		return nil, err
 	}
-	readFiles, err := w.ReadFiles(nil)
+	readFiles, err := w.ReadFiles()
 	if err != nil {
 		return nil, err
 	}
@@ -183,31 +182,6 @@ type discardEvents struct{}
 func (discardEvents) Record(context.Context, api.Event) error { return nil }
 
 func millis(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
-
-// copyTree copies the regular files of src into dst, which must not exist.
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		if !d.Type().IsRegular() {
-			return fmt.Errorf("fixture entry %s is not a regular file", p)
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0o644)
-	})
-}
 
 func applyDrift(ws string, sc driftScenario) error {
 	for _, ch := range sc.Changes {

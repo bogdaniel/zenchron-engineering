@@ -9,14 +9,14 @@ import (
 // into indexed packages are static; everything else stays visibly possible,
 // dynamic or unresolved rather than being dropped.
 func (e *extractor) call(owner string, c *ast.CallExpr) {
-	fun := unparen(c.Fun)
+	fun := ast.Unparen(c.Fun)
 	for {
 		switch x := fun.(type) {
 		case *ast.IndexExpr:
-			fun = unparen(x.X)
+			fun = ast.Unparen(x.X)
 			continue
 		case *ast.IndexListExpr:
-			fun = unparen(x.X)
+			fun = ast.Unparen(x.X)
 			continue
 		}
 		break
@@ -27,7 +27,7 @@ func (e *extractor) call(owner string, c *ast.CallExpr) {
 	case *ast.SelectorExpr:
 		e.callSelector(owner, f)
 	case *ast.StarExpr:
-		if !e.namesType(unparen(f.X)) {
+		if !e.namesType(ast.Unparen(f.X)) {
 			e.addCall(owner, calleeText(fun), CallDynamic, "call through a dereferenced function pointer", c.Pos())
 		}
 	case *ast.FuncLit:
@@ -69,7 +69,7 @@ func (e *extractor) callSelector(owner string, sel *ast.SelectorExpr) {
 		e.callSelection(owner, sel, s)
 		return
 	}
-	if x, ok := unparen(sel.X).(*ast.Ident); ok {
+	if x, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
 		if pn, ok := e.info.Uses[x].(*types.PkgName); ok {
 			e.callQualified(owner, sel, pn.Imported().Path())
 			return

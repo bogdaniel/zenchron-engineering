@@ -30,7 +30,7 @@ an `api` interface or a constructor argument.
 
 | Concern | Owner (package / type) | Not owned here |
 | --- | --- | --- |
-| Contract, versions, strict decoding, validation | `api`: `ExecutionRequest.Validate`, `DecodeRequest`, `ExecutionVersion` | host admission, policy |
+| Contract, versions, strict decoding, validation | `api`: `ExecutionRequest.Validate`, `DecodeRequest`, `ExecutionVersion`; the one strict JSON decoder in `internal/strictjson` | host admission, policy |
 | One bounded execution, settlement | `engine`: `Engine.Execute`, `run.finish` | durable attempts, retries across attempts |
 | Resource accounting | `engine`: `ledger` (atomic multi-dimension reservations), `account` | run/plan budgets, global capacity |
 | Cancellation provenance | `api.CancellationOf`, `api.Cancellation` | the host's termination owners |
@@ -58,14 +58,18 @@ reviewed allow-map and prints the actual graph (edge list and Mermaid) under
 
 ```mermaid
 flowchart TD
-  api["api"]
+  strictjson["internal/strictjson"]
+  api["api"] --> strictjson
   context["context"] --> api
   routing["routing"] --> api
   tools["tools"] --> api
+  tools --> strictjson
   storage["storage"] --> api
   memory["memory"] --> api
+  memory --> strictjson
   memory --> storage
   intelligence["intelligence"] --> api
+  intelligence --> strictjson
   intelligence --> storage
   engine["engine"] --> api
   engine --> context
@@ -77,6 +81,7 @@ flowchart TD
   anthropic["providers/anthropic"] --> api
   anthropic --> wire
   local["providers/local"] --> api
+  local --> strictjson
   local --> wire
   scripted["providers/scripted"] --> api
   conformance["providers/conformance"] --> api

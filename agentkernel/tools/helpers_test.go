@@ -41,7 +41,7 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 	if f.store, err = storage.NewMemoryArtifacts(1 << 20); err != nil {
 		t.Fatal(err)
 	}
-	macro, err := f.ws.ReadFiles(nil)
+	macro, err := f.ws.ReadFiles()
 	if err != nil {
 		t.Fatal(err)
 	}

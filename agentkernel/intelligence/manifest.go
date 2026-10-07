@@ -134,6 +134,21 @@ type manifestBuild struct {
 	stats    *Stats
 }
 
+// BuildManifest returns the manifest an index over root and scope binds,
+// without extracting anything, so a caller with no index can still bind the
+// same workspace digest.
+func BuildManifest(ctx context.Context, root string, scope Scope) (Manifest, error) {
+	root, err := canonicalRoot(root)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if scope, err = scope.canonical(); err != nil {
+		return Manifest{}, err
+	}
+	m, _, err := buildManifest(ctx, root, scope, &Stats{})
+	return m, err
+}
+
 func buildManifest(ctx context.Context, root string, scope Scope, stats *Stats) (Manifest, map[string][]byte, error) {
 	mb := &manifestBuild{root: root, scope: scope, contents: map[string][]byte{}, stats: stats}
 	var err error

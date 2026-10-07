@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/strictjson"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 )
 
@@ -291,9 +292,7 @@ func (s *Store) load(ctx context.Context, p Partition) (loaded, error) {
 // partition; anything else is corrupt rather than silently reinterpreted.
 func decode(data []byte, p Partition, key string) (Record, bool) {
 	var r Record
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&r); err != nil || dec.More() {
+	if strictjson.Decode(data, &r) != nil {
 		return Record{}, false
 	}
 	if r.Validate() != nil || r.ID != key || r.Partition != p {

@@ -23,7 +23,7 @@ func TestMacroStepsAreChargedToTheToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read, err := ws.ReadFiles(nil)
+	read, err := ws.ReadFiles()
 	if err != nil {
 		t.Fatal(err)
 	}

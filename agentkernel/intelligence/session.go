@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -110,7 +111,7 @@ func (s *session) prepare() error {
 	}
 	s.goDirs = goDirs(s.manifest)
 	s.dirOf, s.pathOf = map[string]string{}, map[string]string{}
-	for _, dir := range sortedKeys(s.goDirs) {
+	for _, dir := range slices.Sorted(maps.Keys(s.goDirs)) {
 		ip, inModule := importPathFor(s.modules, dir)
 		if !inModule {
 			s.incomplete = append(s.incomplete, Incomplete{Kind: IncompleteNoModule, Path: dir,
@@ -125,7 +126,7 @@ func (s *session) prepare() error {
 // unaffected base facts.
 func (s *session) extract() ([]DirFacts, error) {
 	var out []DirFacts
-	for _, dir := range sortedKeys(s.goDirs) {
+	for _, dir := range slices.Sorted(maps.Keys(s.goDirs)) {
 		if err := s.ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -254,13 +255,4 @@ func (s *session) importStatus(p string) string {
 		return ImportStdlibNotIndexed
 	}
 	return ImportExternalNotIndexed
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
 }

@@ -1,15 +1,14 @@
 package intelligence
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/strictjson"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 )
 
@@ -57,7 +56,7 @@ func Load(ctx context.Context, rec storage.Records, key string) (*Index, error) 
 		return nil, err
 	}
 	var r cacheRecord
-	if err := decodeStrict(b, &r); err != nil {
+	if err := strictjson.Decode(b, &r); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCacheInvalid, err)
 	}
 	switch {
@@ -67,7 +66,7 @@ func Load(ctx context.Context, rec storage.Records, key string) (*Index, error) 
 		return nil, fmt.Errorf("%w: checksum mismatch", ErrCacheInvalid)
 	}
 	var snap Snapshot
-	if err := decodeStrict(r.Snapshot, &snap); err != nil {
+	if err := strictjson.Decode(r.Snapshot, &snap); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCacheInvalid, err)
 	}
 	if snap.Identity.Key() != key || snap.Overlay != nil {
@@ -127,16 +126,4 @@ func joinReason(a, b string) string {
 		return b
 	}
 	return a + "; " + b
-}
-
-func decodeStrict(b []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return fmt.Errorf("trailing data after JSON value")
-	}
-	return nil
 }

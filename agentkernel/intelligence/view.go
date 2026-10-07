@@ -1,6 +1,7 @@
 package intelligence
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -58,13 +59,7 @@ func (v *View) ContextItems(ctx context.Context, q api.ContextQuery) ([]api.Cont
 		items = append(items, v.dirItems(df, terms)...)
 	}
 	slices.SortFunc(items, func(a, b api.ContextItem) int {
-		if a.Score != b.Score {
-			if a.Score > b.Score {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.ID, b.ID)
+		return cmp.Or(cmp.Compare(b.Score, a.Score), strings.Compare(a.ID, b.ID))
 	})
 	if q.Limit > 0 && len(items) > q.Limit {
 		items = items[:q.Limit]

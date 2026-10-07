@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"slices"
 	"strconv"
+
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/strictjson"
 )
 
 // The broker enforces exactly this JSON Schema subset, and NewBroker refuses
@@ -40,7 +41,7 @@ type rawProp struct {
 
 func parseSchema(data json.RawMessage) (objectSchema, error) {
 	var raw rawSchema
-	if err := decodeStrict(data, &raw); err != nil {
+	if err := strictjson.Decode(data, &raw); err != nil {
 		return objectSchema{}, fmt.Errorf("input schema: %w", err)
 	}
 	if raw.Type != "object" || raw.AdditionalProperties == nil || *raw.AdditionalProperties {
@@ -69,7 +70,7 @@ func parseSchema(data json.RawMessage) (objectSchema, error) {
 // fields: unknown fields, wrong types, nulls, duplicate keys and trailing data.
 func (s objectSchema) validate(args json.RawMessage) error {
 	var fields map[string]json.RawMessage
-	if err := decodeStrict(args, &fields); err != nil {
+	if err := strictjson.Decode(args, &fields); err != nil {
 		return err
 	}
 	if fields == nil {
@@ -112,72 +113,4 @@ func hasType(value json.RawMessage, typ string) bool {
 		return !slices.ContainsFunc(items, func(it json.RawMessage) bool { return !hasType(it, "string") })
 	}
 	return false
-}
-
-// decodeStrict decodes one JSON value, refusing unknown struct fields,
-// duplicate object keys and trailing data.
-func decodeStrict(data []byte, v any) error {
-	if err := rejectDuplicateKeys(data); err != nil {
-		return err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("trailing data after JSON value")
-	}
-	return nil
-}
-
-// rejectDuplicateKeys walks the token stream because encoding/json silently
-// keeps the last of two duplicate keys, which would let a second "path" hide
-// behind the first one a reviewer reads. (Same rule as api's request decoder,
-// which is unexported there.)
-func rejectDuplicateKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	type frame struct {
-		keys    map[string]bool
-		object  bool
-		wantKey bool
-	}
-	var stack []*frame
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		var top *frame
-		if len(stack) > 0 {
-			top = stack[len(stack)-1]
-		}
-		if d, ok := tok.(json.Delim); ok {
-			if d == '}' || d == ']' {
-				stack = stack[:len(stack)-1]
-				continue
-			}
-			if top != nil && top.object {
-				top.wantKey = true
-			}
-			stack = append(stack, &frame{keys: map[string]bool{}, object: d == '{', wantKey: d == '{'})
-			continue
-		}
-		if top == nil || !top.object {
-			continue
-		}
-		if !top.wantKey {
-			top.wantKey = true
-			continue
-		}
-		key := tok.(string)
-		if top.keys[key] {
-			return fmt.Errorf("duplicate key %q", key)
-		}
-		top.keys[key] = true
-		top.wantKey = false
-	}
 }

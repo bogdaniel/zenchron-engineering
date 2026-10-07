@@ -1,17 +1,17 @@
 package api
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"path"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/strictjson"
 )
 
 // MaxObjectiveBytes bounds the objective text.
@@ -62,75 +62,17 @@ func DecodeRequest(data []byte) (ExecutionRequest, error) {
 }
 
 func decodeStrict(data []byte, v any) error {
-	if err := rejectDuplicateKeys(data); err != nil {
-		return err
+	err := strictjson.DecodeCanonical(data, v)
+	var ke *strictjson.KeyError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &ke):
+		return invalid(ke.Key, "%s", ke.Reason)
+	case errors.Is(err, strictjson.ErrTrailingData):
+		return invalid("$", "%v", err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return invalid("$", "decode: %v", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return invalid("$", "trailing data after JSON value")
-	}
-	return nil
-}
-
-// rejectDuplicateKeys also refuses non-lower-case keys and walks the token stream because encoding/json silently
-// keeps the last of two duplicate keys, which would let a conflicting field
-// hide behind an earlier one.
-func rejectDuplicateKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	type frame struct {
-		keys     map[string]bool
-		isObject bool
-		wantKey  bool
-	}
-	var stack []*frame
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return invalid("$", "decode: %v", err)
-		}
-		var top *frame
-		if len(stack) > 0 {
-			top = stack[len(stack)-1]
-		}
-		if d, ok := tok.(json.Delim); ok {
-			switch d {
-			case '{', '[':
-				if top != nil && top.isObject {
-					top.wantKey = true
-				}
-				stack = append(stack, &frame{keys: map[string]bool{}, isObject: d == '{', wantKey: d == '{'})
-			default:
-				stack = stack[:len(stack)-1]
-			}
-			continue
-		}
-		if top == nil || !top.isObject {
-			continue
-		}
-		if !top.wantKey {
-			top.wantKey = true
-			continue
-		}
-		key := tok.(string)
-		// encoding/json matches field names case-insensitively, so "Mode"
-		// would silently override "mode". Canonical keys are lower case.
-		if strings.ToLower(key) != key {
-			return invalid(key, "non-canonical key spelling")
-		}
-		if top.keys[key] {
-			return invalid(key, "duplicate key")
-		}
-		top.keys[key] = true
-		top.wantKey = false
-	}
+	return invalid("$", "decode: %v", err)
 }
 
 // Validate refuses a request that is malformed, internally conflicting, asks
@@ -243,10 +185,6 @@ func (it ContextItem) Validate() error {
 	return nil
 }
 
-var validCapabilities = []CapabilityKind{
-	CapabilityFileRead, CapabilityFileSearch, CapabilityFileWrite, CapabilityCommand,
-}
-
 func validateGrants(grants []Capability, mode Mode) error {
 	handles := map[string]bool{}
 	for i, g := range grants {
@@ -258,11 +196,10 @@ func validateGrants(grants []Capability, mode Mode) error {
 			return invalid(field, "duplicate handle %q", g.Handle)
 		}
 		handles[g.Handle] = true
-		if !slices.Contains(validCapabilities, g.Kind) {
+		if !g.Kind.Known() {
 			return invalid(field, "unknown kind %q", g.Kind)
 		}
-		mutating := g.Kind == CapabilityFileWrite || g.Kind == CapabilityCommand
-		if mode == ModeReadOnly && mutating {
+		if mode == ModeReadOnly && g.Kind.Mutating() {
 			return invalid(field, "kind %q is not grantable in read_only mode", g.Kind)
 		}
 		if err := g.validateShape(); err != nil {

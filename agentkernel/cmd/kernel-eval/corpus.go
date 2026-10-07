@@ -2,14 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/intelligence"
@@ -122,7 +121,7 @@ func loadCorpus(dir string) (*corpus, error) {
 		return nil, err
 	}
 	for _, f := range c.Fixtures {
-		m, err := manifestOf(c.fixtureDir(f))
+		m, err := intelligence.BuildManifest(context.Background(), c.fixtureDir(f), intelligence.Scope{})
 		if err != nil {
 			return nil, fmt.Errorf("fixture %s: %w", f, err)
 		}
@@ -221,30 +220,4 @@ func resolveDigests(args json.RawMessage, workspace string) (json.RawMessage, er
 		return []byte(api.Digest(data))
 	})
 	return out, failure
-}
-
-// manifestOf lists every regular file under root in the intelligence manifest
-// shape, so the baseline (no intelligence) binds the same workspace digest an
-// index would. Symlinks and other entries are skipped, as the index skips them.
-func manifestOf(root string) (intelligence.Manifest, error) {
-	var m intelligence.Manifest
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.Type().IsRegular() {
-			return err
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		m.Files = append(m.Files, intelligence.FileEntry{
-			Path: filepath.ToSlash(rel), Digest: api.Digest(data), Size: int64(len(data)),
-		})
-		return nil
-	})
-	slices.SortFunc(m.Files, func(a, b intelligence.FileEntry) int { return strings.Compare(a.Path, b.Path) })
-	return m, err
 }

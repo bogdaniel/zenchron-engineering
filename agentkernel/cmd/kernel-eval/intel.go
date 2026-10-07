@@ -54,7 +54,7 @@ func (s *timedSource) ContextItems(ctx context.Context, q api.ContextQuery) ([]a
 // prepare binds the workspace digest and, outside the baseline, opens the
 // file-backed index and memory stores the mode calls for.
 func (h *harness) prepare(ctx context.Context, t task, m mode, st *cache, ws string, obs *observation) (runEnv, error) {
-	man, err := manifestOf(ws)
+	man, err := intelligence.BuildManifest(ctx, ws, intelligence.Scope{})
 	if err != nil {
 		return runEnv{}, err
 	}
@@ -94,7 +94,7 @@ func (h *harness) prepare(ctx context.Context, t task, m mode, st *cache, ws str
 // without a preceding cold run. It is setup, not an observation.
 func (h *harness) prime(ctx context.Context, t task, st *cache, dir string) error {
 	ws := filepath.Join(dir, "prime")
-	if err := copyTree(h.c.fixtureDir(t.Fixture), ws); err != nil {
+	if err := os.CopyFS(ws, os.DirFS(h.c.fixtureDir(t.Fixture))); err != nil {
 		return err
 	}
 	rec, err := storage.OpenFileRecords(st.indexDir)

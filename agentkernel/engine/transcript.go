@@ -87,13 +87,12 @@ type toolMessage struct {
 // renderToolResult keeps status, errors, exit code, truncation and the full
 // artifact reference visible to the model alongside the bounded output.
 func renderToolResult(res api.ToolResult) api.Message {
-	data, err := json.Marshal(toolMessage{
+	// Strings, ints and bools only (invalid UTF-8 is coerced, not refused), so
+	// encoding cannot fail.
+	data, _ := json.Marshal(toolMessage{
 		Status: res.Status, Grant: res.Grant, ExitCode: res.ExitCode, Truncated: res.Truncated,
 		FullOutput: res.FullOutput, Mutated: res.Mutated, Error: res.Error, Output: res.Output,
 	})
-	if err != nil { // only strings and ints: cannot fail, but never send an empty result silently
-		data = []byte(fmt.Sprintf(`{"status":%q,"error":"tool result not encodable"}`, res.Status))
-	}
 	return api.Message{Role: api.RoleTool, ToolCallID: res.CallID, Content: string(data), IsError: res.Status != api.ToolOK}
 }
 

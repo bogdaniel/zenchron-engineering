@@ -9,8 +9,9 @@
 //	Authorization: Bearer <secret>      (only when the binding names a credential handle)
 //	body: api.ProviderRequest as JSON
 //
-//	200 body: api.ProviderResponse as JSON, decoded strictly (unknown fields
-//	refused); a null usage count means unknown, never zero.
+//	200 body: api.ProviderResponse as JSON, decoded strictly (unknown fields,
+//	duplicate keys and trailing data refused); a null usage count means
+//	unknown, never zero.
 //	non-2xx: classified like any HTTP provider; {"error":{"message":...}}
 //	is used for the detail when present.
 //
@@ -19,15 +20,15 @@
 package local
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"slices"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/strictjson"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/providers/internal/wire"
 )
 
@@ -87,13 +88,11 @@ func (p *Provider) Complete(ctx context.Context, req api.ProviderRequest) (api.P
 
 func parse(raw []byte) (api.ProviderResponse, *api.ProviderError) {
 	var resp api.ProviderResponse
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&resp); err != nil {
-		return api.ProviderResponse{}, wire.Malformed("decode response: %v", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	switch err := strictjson.Decode(raw, &resp); {
+	case errors.Is(err, strictjson.ErrTrailingData):
 		return api.ProviderResponse{}, wire.Malformed("trailing data after response")
+	case err != nil:
+		return api.ProviderResponse{}, wire.Malformed("decode response: %v", err)
 	}
 	if !slices.Contains(knownStops, resp.Stop) {
 		return api.ProviderResponse{}, wire.Malformed("unknown stop %q", resp.Stop)

@@ -26,14 +26,11 @@ type Tool interface {
 	// with the grant the broker selected. It must recheck its own guards at
 	// side-effect time (paths, preconditions) rather than trust the broker.
 	Invoke(ctx context.Context, inv Invocation) (api.ToolResult, error)
-}
-
-// Scoped is required of every registered tool (every capability kind is
-// scoped): it names what a call would touch so the broker can select a grant
-// that covers it. A file tool returns workspace-relative Paths; a command
-// tool returns the Command name. Scope only reads already-validated
-// arguments; it can never create or widen a grant.
-type Scoped interface {
+	// Scope names what a call would touch so the broker can select a grant
+	// that covers it (every capability kind is scoped). A file tool returns
+	// workspace-relative Paths; a command tool returns the Command name.
+	// Scope only reads already-validated arguments; it can never create or
+	// widen a grant.
 	Scope(arguments json.RawMessage) (Scope, error)
 }
 
@@ -83,11 +80,8 @@ func NewBroker(tools ...Tool) (*Broker, error) {
 		if _, dup := b.tools[spec.Name]; dup {
 			return nil, fmt.Errorf("tools[%d]: duplicate name %q", i, spec.Name)
 		}
-		if !slices.Contains(knownKinds, t.Kind()) {
+		if !t.Kind().Known() {
 			return nil, fmt.Errorf("tool %q: unknown kind %q", spec.Name, t.Kind())
-		}
-		if _, ok := t.(Scoped); !ok {
-			return nil, fmt.Errorf("tool %q: every capability kind is scoped, so the tool must implement Scoped", spec.Name)
 		}
 		schema, err := parseSchema(spec.InputSchema)
 		if err != nil {
@@ -99,18 +93,10 @@ func NewBroker(tools ...Tool) (*Broker, error) {
 	return b, nil
 }
 
-var knownKinds = []api.CapabilityKind{
-	api.CapabilityFileRead, api.CapabilityFileSearch, api.CapabilityFileWrite, api.CapabilityCommand,
-}
-
-func mutating(kind api.CapabilityKind) bool {
-	return kind == api.CapabilityFileWrite || kind == api.CapabilityCommand
-}
-
 // permitted is the structural mode rule: outside read_write, a mutating kind
 // is never offered or run, whatever grants claim.
 func permitted(kind api.CapabilityKind, mode api.Mode) bool {
-	return !mutating(kind) || mode == api.ModeReadWrite
+	return !kind.Mutating() || mode == api.ModeReadWrite
 }
 
 // Specs returns the specs of tools runnable under at least one grant in mode,
@@ -157,7 +143,7 @@ func (b *Broker) Dispatch(ctx context.Context, call api.ToolCall, env Env) (api.
 	if err != nil {
 		res.Status = api.ToolError
 		res.Error = strings.TrimSpace(res.Error + " " + err.Error())
-		if mutating(t.Kind()) || res.Mutated {
+		if t.Kind().Mutating() || res.Mutated {
 			// A write or command that failed mid-way may have changed state.
 			unknown = fmt.Errorf("tool %q: outcome unknown: %w", call.Name, err)
 		}
@@ -196,7 +182,7 @@ func (b *Broker) admit(call api.ToolCall, env Env) (Tool, api.Capability, string
 }
 
 func scopeOf(t Tool, args json.RawMessage) (Scope, error) {
-	scope, err := t.(Scoped).Scope(args)
+	scope, err := t.Scope(args)
 	if err != nil {
 		return Scope{}, err
 	}

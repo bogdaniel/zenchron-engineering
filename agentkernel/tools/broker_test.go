@@ -41,10 +41,6 @@ func TestNewBrokerRefusesInvalidRegistrations(t *testing.T) {
 			t.Errorf("%s: NewBroker accepted", name)
 		}
 	}
-	type bare struct{ Tool }
-	if _, err := NewBroker(bare{read("plain")}); err == nil {
-		t.Error("a tool without Scope was registered")
-	}
 }
 
 func TestSpecsOfferOnlyGrantedPermittedTools(t *testing.T) {

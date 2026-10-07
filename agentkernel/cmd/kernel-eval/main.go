@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,7 +81,7 @@ func parseModes(s string) ([]mode, error) {
 	var modes []mode
 	for _, name := range strings.Split(s, ",") {
 		m := mode(strings.TrimSpace(name))
-		if !containsMode(allModes, m) || containsMode(modes, m) {
+		if !slices.Contains(allModes, m) || slices.Contains(modes, m) {
 			return nil, fmt.Errorf("-mode: unknown or repeated mode %q", name)
 		}
 		modes = append(modes, m)
@@ -88,20 +89,11 @@ func parseModes(s string) ([]mode, error) {
 	// Run order matters: warm and drift reuse the cold run's stores.
 	var ordered []mode
 	for _, m := range allModes {
-		if containsMode(modes, m) {
+		if slices.Contains(modes, m) {
 			ordered = append(ordered, m)
 		}
 	}
 	return ordered, nil
-}
-
-func containsMode(list []mode, m mode) bool {
-	for _, x := range list {
-		if x == m {
-			return true
-		}
-	}
-	return false
 }
 
 func evaluate(ctx context.Context, h *harness, trials int, modes []mode) (report, error) {

@@ -44,9 +44,9 @@ command. Both are known gaps, not oversights in the broker.
 ## 3. Broker (`tools.Broker`)
 
 `tools.NewBroker(tools...)` refuses a nil tool, a name outside
-`^[A-Za-z0-9_-]{1,64}$`, a duplicate name, an unknown kind, a tool that does
-not implement `tools.Scoped`, and an input schema outside the enforceable
-subset (§3.2).
+`^[A-Za-z0-9_-]{1,64}$`, a duplicate name, an unknown kind, and an input
+schema outside the enforceable subset (§3.2). Every tool implements
+`Tool.Scope`; the interface requires it, since every capability kind is scoped.
 
 **Offering** (`Broker.Specs(grants, mode)`): a tool is offered, in
 registration order, only when at least one grant of its kind exists and the mode
@@ -60,7 +60,7 @@ in the boundary text.
 2. `OutputLimit > 0`;
 3. the mode permits the tool's kind (mutating kinds only in `read_write`);
 4. the arguments match the tool's schema exactly (§3.2);
-5. `Scoped.Scope(arguments)` succeeds and names something: at least one path
+5. `Tool.Scope(arguments)` succeeds and names something: at least one path
    for file kinds, a command name for `command.run`;
 6. some grant of the tool's kind covers the whole scope: every path lies under
    one of its roots (`rootFor`: lexical containment after
@@ -111,7 +111,7 @@ unenforced.
 `tools.NewWorkspace(root, snapshot)` requires a clean absolute path to an
 existing directory. Tools: `ReadFile()` → `read_file` (`file.read`),
 `Search()` → `search` (`file.search`), `WriteFile()` → `write_file` and
-`ApplyPatch()` → `apply_patch` (`file.write`), `ReadFiles(beforeStep)` →
+`ApplyPatch()` → `apply_patch` (`file.write`), `ReadFiles()` →
 `read_files` (`file.read`, §6).
 
 ### 4.1 Path guards (`Workspace.open`)
@@ -195,14 +195,12 @@ at construction). The kernel never spawns, contains or reaps a process.
 
 ## 6. Macro: `read_files`
 
-`Workspace.ReadFiles(beforeStep)` reads 1–16 paths in order. Admission requires
+`Workspace.ReadFiles()` reads 1–16 paths in order. Admission requires
 one `file.read` grant covering every path. Each step is dispatched through an
 internal broker holding only `read_file`, under only the admitted grant, in
 `read_only` mode, with `OutputLimit / len(paths)` (at least 1) and producer
-`<producer>/step-<i>`; capability is therefore rechecked per step. A non-nil
-`beforeStep(ctx, i)` is an additional host per-step hook; an error stops the
-macro. Independently, the first step rides on the macro call's own tool-call
-reservation and every later step is charged through `Invocation.StepBudget`
+`<producer>/step-<i>`; capability is therefore rechecked per step. The first
+step rides on the macro call's own tool-call reservation and every later step is charged through `Invocation.StepBudget`
 (the engine's `run.chargeStep`); a refused charge stops the macro with a
 `budget:` step failure (`TestMacroStepsAreChargedToTheToolBudget`). Per-step
 artifact bytes are metered as usual, so a macro cannot hide work from the

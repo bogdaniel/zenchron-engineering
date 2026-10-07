@@ -336,20 +336,21 @@ func (m module) parentReference(pkg, lit string) string {
 // fails until it is reviewed and added. cmd/, examples/ and tests/ may import
 // any module package. Test files may additionally import testSupport.
 var allowedDeps = map[string][]string{
-	"api":                     {},
+	"internal/strictjson":     {},
+	"api":                     {"internal/strictjson"},
 	"context":                 {"api"},
 	"routing":                 {"api"},
-	"tools":                   {"api"},
+	"tools":                   {"api", "internal/strictjson"},
 	"storage":                 {"api"},
-	"memory":                  {"api", "storage"},
-	"intelligence":            {"api", "storage"},
+	"memory":                  {"api", "internal/strictjson", "storage"},
+	"intelligence":            {"api", "internal/strictjson", "storage"},
 	"engine":                  {"api", "context", "routing", "tools"},
 	"providers/internal/wire": {"api"},
 	"providers/conformance":   {"api"},
 	"providers/scripted":      {"api"},
 	"providers/openai":        {"api", "providers/internal/wire"},
 	"providers/anthropic":     {"api", "providers/internal/wire"},
-	"providers/local":         {"api", "providers/internal/wire"},
+	"providers/local":         {"api", "internal/strictjson", "providers/internal/wire"},
 }
 
 var unrestrictedRoots = []string{"cmd", "examples", "tests"}

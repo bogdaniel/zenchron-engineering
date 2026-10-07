@@ -35,14 +35,7 @@ func TestReadFilesStopsAtFirstFailureWithCompletedSteps(t *testing.T) {
 
 func TestReadFilesRechecksCapabilityAndBudgetPerStep(t *testing.T) {
 	f := newFixture(t, map[string]string{"a/x.txt": "ax\n", "b/x.txt": "bx\n"})
-	var steps []int
-	macro, err := f.ws.ReadFiles(func(_ context.Context, step int) error {
-		steps = append(steps, step)
-		if step == 1 {
-			return errors.New("tool budget exhausted")
-		}
-		return nil
-	})
+	macro, err := f.ws.ReadFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,10 +49,17 @@ func TestReadFilesRechecksCapabilityAndBudgetPerStep(t *testing.T) {
 	if err != nil || res.Status != api.ToolError || strings.Contains(res.Output, "bx") {
 		t.Fatalf("step outside grant ran: %+v, %v", res, err)
 	}
-	steps = nil
+	// The first step rides on the call's own budget; the next is charged and
+	// refused, so exactly one step completes.
+	charges := 0
+	inv.StepBudget = func(context.Context) error {
+		charges++
+		return errors.New("tool budget exhausted")
+	}
 	inv.Arguments = []byte(`{"paths":["a/x.txt","a/x.txt","a/x.txt"]}`)
 	res, err = macro.Invoke(context.Background(), inv)
-	if err != nil || res.Status != api.ToolError || !strings.Contains(res.Error, "budget") || len(steps) != 2 {
-		t.Fatalf("budget hook not honoured: %+v, %v, steps %v", res, err, steps)
+	if err != nil || res.Status != api.ToolError || !strings.Contains(res.Error, "step 1") ||
+		!strings.Contains(res.Error, "budget") || charges != 1 || strings.Count(res.Output, "ax") != 1 {
+		t.Fatalf("step budget not honoured: %+v, %v, charges %d", res, err, charges)
 	}
 }

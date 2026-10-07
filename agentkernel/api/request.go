@@ -100,6 +100,19 @@ const (
 	CapabilityCommand    CapabilityKind = "command.run"
 )
 
+// Known reports whether k is one of the kinds above.
+func (k CapabilityKind) Known() bool {
+	switch k {
+	case CapabilityFileRead, CapabilityFileSearch, CapabilityFileWrite, CapabilityCommand:
+		return true
+	}
+	return false
+}
+
+// Mutating reports whether k can change workspace or host state; such kinds
+// exist only in read_write mode.
+func (k CapabilityKind) Mutating() bool { return k == CapabilityFileWrite || k == CapabilityCommand }
+
 // Capability is a host-owned grant. Authority never comes from a tool name or
 // argument; a tool runs only under a grant of its kind.
 type Capability struct {

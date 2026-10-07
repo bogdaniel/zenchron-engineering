@@ -279,16 +279,6 @@ func isInterfaceMethod(f *types.Func) bool {
 	return recv != nil && types.IsInterface(recv.Type())
 }
 
-func unparen(x ast.Expr) ast.Expr {
-	for {
-		p, ok := x.(*ast.ParenExpr)
-		if !ok {
-			return x
-		}
-		x = p.X
-	}
-}
-
 var reflectCallNames = map[string]bool{"Call": true, "CallSlice": true, "MethodByName": true}
 
 func isTypeExpr(x ast.Expr) bool {
