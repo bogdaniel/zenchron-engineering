@@ -112,8 +112,11 @@ required, nothing is defaulted.
 - **Not production-enabled.** Gate B is pending.
 - **Not crash-resumable.** Stores reopen after a restart; an in-flight
   execution does not resume and an uncertain mutation is never replayed.
-- **No protected-isolation claim.** File-tool guards (`os.Root`, symlinked-root
-  refusal, re-check before rename) are development-grade; provenance reports
+- **No protected-isolation claim.** File-tool guards (`os.Root`, refusal of a
+  symlink in any path component, a post-open `os.SameFile` recheck, refusal of
+  hard-linked files on unix only, re-check before rename) are
+  development-grade; a concurrent same-user parent-directory swap is not
+  excluded (capabilities spec §4.1, §9); provenance reports
   `isolation: unproven` unless the host proves otherwise. `.git` paths are
   refused; credential-shaped names and contents are not. Process spawning,
   containment and reaping belong to the host's `api.CommandRunner`.
@@ -126,10 +129,11 @@ required, nothing is defaulted.
   needs `engine.Config.Admissions` backed by `storage.FileRecords`, and
   several processes sharing one store must serialize admission. Envelopes
   spanning executions remain the host's.
-- **Bounded recording, not bounded adapters.** A stuck `EventSink` or
-  `ContextSource` is abandoned after the deadline (or cancellation) plus
-  `SettleTimeout`; providers, tools and `CommandRunner`s are never abandoned
-  and must honour their context.
+- **Bounded recording, not bounded adapters.** A stuck `EventSink`,
+  `ContextSource` or admission store is abandoned after the deadline (or
+  cancellation) plus `SettleTimeout`; its goroutine is left running until it
+  returns. Providers, tools and `CommandRunner`s are never abandoned and must
+  honour their context.
 - **Live verification: none.** Adapters are verified against fake transports
   shaped from primary documentation retrieved 2026-10-07.
 - **File-backed stores refuse Windows** (`storage.prepareRoot`): directory

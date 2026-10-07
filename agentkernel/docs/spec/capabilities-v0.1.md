@@ -265,8 +265,18 @@ Stores (`storage`):
 - `FileArtifacts`/`FileRecords` write atomically (temp file, fsync, rename,
   directory fsync) under an explicit absolute root and refuse Windows.
 - `FileArtifacts.Put` counts an existing file for the same key as stored only
-  if it verifies; a corrupt copy is rewritten in place without double-counting
-  capacity.
+  if it verifies; a corrupt copy is rewritten in place.
+- Capacity accounting. An artifact store's capacity bound applies to the
+  artifact data bytes actually occupying the store, never to sizes claimed by
+  stored metadata. On open, a file-backed store counts each artifact file as
+  its length minus a parseable header line, and counts a file with no
+  parseable header in full, so corruption can only over-count and never frees
+  capacity. Rewriting a corrupt artifact is charged against the bound for its
+  growth over the bytes it was counted as occupying, and is refused with a
+  capacity error rather than exceeding the bound. Deleting an artifact frees
+  exactly the bytes it was counted as occupying (`FileArtifacts.counted`,
+  `occupiedSize`; `storage`
+  `TestFileArtifactsAccountOccupiedBytesNotHeaderClaims`).
 
 ## 9. Isolation claim
 

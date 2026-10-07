@@ -135,9 +135,26 @@ lacks it.
    probing, `PriorAttemptFailure` gating: host-side, no kernel equivalent.
 10. **Defaults.** Root defaults zero bounds to finite values; the kernel refuses
     zero, so the adapter supplies every bound explicitly.
-11. **Attempt identity and budgets.** `Execute` keeps no history: the same
-    `execution_id`/`attempt_id` re-entered gets a fresh ledger (F7). The
-    adapter passes only the host's remaining envelope.
+11. **Attempt identity and budgets.** The kernel enforces one budget
+    envelope per `execution_id` through its admission store (execution spec
+    §11.1): a re-entered `attempt_id` is refused, a later attempt cannot widen
+    the first budget and starts from recorded consumption, and an unsettled
+    prior attempt blocks the next. Gate B must:
+    - map the host's attempt identity onto `execution_id`/`attempt_id`
+      consistently: one host execution is always one `execution_id`, and one
+      host attempt (`RunID`, `OperationID`, `Attempt`) is always one
+      `attempt_id`, so a retried or resumed host attempt can never present a
+      fresh `execution_id` that escapes the envelope;
+    - supply a durable `engine.Config.Admissions` (the default is in-memory,
+      scoped to one `Engine` instance), and, if several processes or Engines
+      share it, either give the store an atomic compare-and-put or serialize
+      admission of one `execution_id` in the host: `FileRecords` has no
+      compare-and-put, so read-then-write admission can race across
+      processes;
+    - decide how an unsettled attempt (crash, failed settlement write) is
+      resolved, since the kernel refuses every later attempt of that
+      execution;
+    - keep envelopes that span executions (run, plan, operator) host-owned.
 12. **Harness/host seams.** No exported manifest-digest helper outside
     `intelligence.Build`/`Open` (the host computes `WorkspaceRef.ManifestDigest`
     itself); `ExecutionResult` has no structured per-call tool results
@@ -185,7 +202,10 @@ An indefinite two-owner loop is not an option.
    and a matching kernel `cancellation`; no sixth owner.
 4. Journal append failure → `recording_failed`, no further side effect.
 5. Budgets: run and plan budgets decrease by kernel-reported usage only; unknown
-   stays unknown; retries never renew.
+   stays unknown; retries never renew. Host attempt identity maps onto
+   `execution_id`/`attempt_id` consistently, and two host processes admitting
+   attempts of one `execution_id` against a shared admission store admit at
+   most one (atomic compare-and-put or host serialization).
 6. Durable waits: rate-limited/unavailable/quota route to existing waits; the
    kernel never polls.
 7. Candidate integrity: writer guard, credential guard, commit content guard

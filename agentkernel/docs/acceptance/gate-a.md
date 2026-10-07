@@ -6,35 +6,47 @@ started (`docs/integration-plan.md`).
 
 ## 1. Bindings
 
+The record binds the **last code commit** of the branch. A commit cannot
+contain its own hash, so the commit that adds this record is a later one, and
+it changes only `agentkernel/docs/acceptance/`; nothing it touches is built,
+tested or shipped. A reviewer verifies that with
+`git diff --name-only EVIDENCE_HEAD HEAD`, which must list only files under
+`agentkernel/docs/acceptance/`.
+
+EVIDENCE_HEAD: <to be filled after rebase>
+
+BASE: <to be filled after rebase>
+
 | Item | Value |
 | --- | --- |
-| Base | `27b7c30e0088ec28130b34d9604cb12a945f918c` (main, merge of #503) |
-| Branch | `claude/446-agent-kernel-gate-a` |
-| HEAD | `140625655e06ab3d711d5b1e57e1092f75f66962` at time of writing; the working tree also held this documentation update, not yet committed |
+| Branch | `claude/446-agent-kernel-gate-a` (PR #510) |
+| Prerequisite | PR #511 (root test scope fix, review item 1), merged to `main` before the rebase that produces `EVIDENCE_HEAD` |
+| Provenance | original base `27b7c30e0088ec28130b34d9604cb12a945f918c` (main, merge of #503); first record at `140625655e06ab3d711d5b1e57e1092f75f66962`; human review 5443104514 on `f53fedf2652d37060683c177a1061c097dc44a8a`; review fixes `22247ed`, `ece635d`, `c8c54f1` (§6). These hashes predate the rebase. |
 | Toolchain | `go version go1.27.1 darwin/arm64` |
 | Module | `github.com/bogdaniel/zenchron-engineering/agentkernel`, `go 1.25.0`, no `require`, no `go.sum` |
 | Environment | `GOWORK=off`, run from `agentkernel/`; no network, no credentials |
-| CI | `.github/workflows/agent-kernel.yml` (format, vet on linux/amd64, linux/arm64, darwin/arm64, windows/amd64, tests, race, imports, extract, relocate, scope) |
+| CI | `.github/workflows/agent-kernel.yml` (format, vet on linux/amd64, linux/arm64, darwin/arm64, windows/amd64, tests, race, imports, extract, relocate, scope) and the root required check `go` (`.github/workflows/ci.yml`) |
 
 ## 2. Commands and results
 
-Run on 2026-10-07 against the HEAD above plus the uncommitted docs. Every
-command exited 0.
+Re-run on the evidence head after rebase. The previous results (recorded on
+`1406256`) predate review 5443104514 and are not evidence for the current
+code.
 
 | Command | Decisive output |
 | --- | --- |
-| `test -z "$(gofmt -l .)"` | no files listed |
-| `go vet ./...` | no output |
-| `go test -count=1 ./...` | `ok` for all 17 packages with tests; no `FAIL` |
-| `go test -race -count=1 ./...` | `ok` for all 17 packages; no race reported |
-| `bash scripts/check-imports.sh` | `imports: ok (github.com/bogdaniel/zenchron-engineering/agentkernel depends only on itself and the standard library)` |
-| `bash scripts/extract.sh` | `extract: ok (github.com/bogdaniel/zenchron-engineering/agentkernel built, vetted and tested in /var/folders/…/agentkernel-extract.h1dnTK)` |
-| `bash scripts/relocate.sh` | `relocate: ok (built and tested as example.invalid/relocated/agentkernel)` |
-| `bash scripts/check-scope.sh` | `scope: ok (base 27b7c30e0088ec28130b34d9604cb12a945f918c)` |
-| `go run ./cmd/kernel-eval -corpus testdata/eval -trials 3 -out <scratch>/kernel-eval.json` | `kernel-eval: planned 108 attempted 108 executed 108 verified 108 verification_failed 0 harness_errors 0 (947 ms)`; outcomes 96 `completed`, 12 `exhausted` (expected by the corpus); modes `baseline`, `cold`, `warm`, `drift`; config digest `sha256:9627784c7e865f74d5c3e804b723f9ad99d8fe80ca046785c6f6f08cd60586c4`; baseline 5 (native CLI vs kernel) `not run: Gate B` |
-
-`git diff --name-only 27b7c30 HEAD` outside `agentkernel/` lists only
-`.github/workflows/agent-kernel.yml`.
+| `test -z "$(gofmt -l .)"` | re-run on the evidence head after rebase |
+| `go vet ./...` | re-run on the evidence head after rebase |
+| `go test -count=1 ./...` | re-run on the evidence head after rebase |
+| `go test -race -count=1 ./...` | re-run on the evidence head after rebase |
+| `bash scripts/check-imports.sh` | re-run on the evidence head after rebase |
+| `bash scripts/extract.sh` | re-run on the evidence head after rebase |
+| `bash scripts/relocate.sh` | re-run on the evidence head after rebase |
+| `bash scripts/check-scope.sh` | re-run on the evidence head after rebase |
+| `go run ./cmd/kernel-eval -corpus testdata/eval -trials 3 -out <scratch>/kernel-eval.json` | re-run on the evidence head after rebase |
+| Gate A workflow (`agent-kernel.yml`) on the PR head | re-run on the evidence head after rebase |
+| root required check `go` on the PR head | re-run on the evidence head after rebase |
+| `git diff --name-only BASE EVIDENCE_HEAD` outside `agentkernel/` | re-run on the evidence head after rebase; must list only `.github/workflows/agent-kernel.yml` |
 
 ## 3. Acceptance rows
 
@@ -48,10 +60,10 @@ the independent review lane's suite.
 | A02 | non-repository document task through supplied tools | `examples/hostport` `TestHostPortDocumentTask` (host `CommandRunner`, `EventSink`, `CredentialSource`, custom tool, `providers/local`) | met with limitation: no non-file capability kind, so the document tool borrows `file.search` (capabilities spec §2) |
 | A03 | multi-step execution, resolvable artifacts, truthful usage, one settlement | `engine` `TestMultiStepToolExecution`, `TestSettlementRecordingFailureKeepsObservedOutcome`; `tools` `TestLargeFileDisclosesExcerptWithExactArtifact` | met |
 | A04 | strict version/capability validation before side effects | `engine` `TestInvalidRequestRefusedBeforeSideEffects`; `api` `TestInvalidRequestExamplesAreRefusedOnTheExpectedField`, `TestDecodeRequestRefusesDuplicateKeys`, `TestDecodeRefusesNonCanonicalKeys`; `tests/conformance` `TestA04RefusedBeforeAnySideEffect`, `TestA04StrictDecodeRefusesAmbiguousJSON` | met |
-| A05 | shared reservations obey limits; retry/re-entry cannot renew | `engine` `TestConcurrentReservationsCannotOverspend` (race), `TestSettleKeepsOverrun`, `TestBudgetDimensions`, `TestRetriesAreBoundedAndNeverRenew`, `TestMacroStepsAreChargedToTheToolBudget`; `tests/conformance` `TestA05ConcurrentExecutionsCannotOverspend`, `TestA05RetriesNeverRenewBudget`, `TestFindingNegativeReportedUsageRenewsBudget` | met with limitation: budgets are per `Execute` call; re-entering the same attempt id starts a fresh ledger, attempts are host-owned (F7); `max_input_tokens` is soft when the provider reports no input count (F6) |
-| A06 | observed completion/failure survives later cancel; no leaks | `engine` `TestObservedOutcomeSurvivesLateCancel`, `TestCancellationProvenance`, `TestDeadlineExhaustion`; `api` `TestCancellationOf`; `tests/conformance` `TestA06ObservedTerminationSurvivesLateCancel`, `TestA06CancelInFlightIsTypedAndReleased`; provider `Cancellation`/`Deadline` conformance cases | met |
-| A07 | missing capability, traversal/symlink escape, stale precondition, output-based privilege cannot mutate | `tools` `TestDispatchRefusesBeforeReachingTheTool`, `TestPathGuardsRefuseEscapesWithoutMutation`, `TestSameDirRefusesSwappedRoot`, `TestWritePreconditionNeverOverwritesNewerContent`, `TestGitMetadataIsNeverReachable`; `tests/conformance` `TestA07ProhibitedInvocationsCannotMutate`, `TestA07StalePreconditionUnderGrantCannotOverwrite`, `TestA07OutputCannotGrantPrivilege` | met with limitation: development-grade guards, isolation `unproven`; credential-shaped names/contents not refused |
-| A08 | filtered output keeps errors and exact artifact; corruption/recording failure explicit | `tools` `TestOutputBoundKeepsErrorExitCodeAndExactArtifact`, `TestRecordingFailureIsExplicit`, `TestCommandFailurePreservesExitStderrAndArtifact`; `storage` `TestFileArtifactsDetectCorruptionAndReopen`; `engine` `TestRecordingFailureStopsSideEffects`, `TestUnknownSideEffectStopsExecution`; `tests/conformance` `TestFindingCommandRanButResultHidesIt` | met |
+| A05 | shared reservations obey limits; retry/re-entry cannot renew | `engine` `TestConcurrentReservationsCannotOverspend` (race), `TestSettleKeepsOverrun`, `TestBudgetDimensions`, `TestRetriesAreBoundedAndNeverRenew`, `TestMacroStepsAreChargedToTheToolBudget`, `TestReentryCannotRenewBudget` (re-entry, widening, later attempt starts from consumed), `TestUnsettledAttemptBlocksTheNext`, `TestAdmissionWriteFailureRefusesBeforeSideEffects`, `TestConcurrentAttemptsAdmitExactlyOne` (race), `TestNegativeReservationCannotRenewBudget`, `TestNegativeEstimateFailsClosed`, `TestImpossibleCachePartitionGrantsNoRefund`, `TestInputBudgetIsAHardBound`; `context` `TestNegativeEstimateIsRefused`; `tests/conformance` `TestA05ConcurrentExecutionsCannotOverspend`, `TestA05RetriesNeverRenewBudget`, `TestA05ReentryAcrossRestartCannotRenewBudget`, `TestA05NegativeEstimateCannotMintBudget`, `TestFindingNegativeReportedUsageRenewsBudget` | met. Stated limits (execution spec §7.4, §11.1): admission is serialized per `Engine`; several processes or Engines sharing one `FileRecords` admission store are **not** atomic (no compare-and-put), so the host must serialize attempts of one `execution_id`; the default in-memory registry holds the envelope only for one `Engine` instance (across restarts it needs a durable `Config.Admissions`); with an inexact estimator a tight `max_input_tokens` can be exhausted by the byte upper-bound reservation before the first provider call (fails closed, never exceeds the bound); envelopes spanning executions remain host-owned |
+| A06 | observed completion/failure survives later cancel; no leaks | `engine` `TestObservedOutcomeSurvivesLateCancel`, `TestCancellationProvenance`, `TestDeadlineExhaustion`, `TestStuckEventSinkCannotHoldExecutionOpen`, `TestStuckContextSourceCannotHoldExecutionOpen`, `TestStuckAdmissionStoreCannotHoldExecutionOpen`, `TestDeadlineHoldsBeforeItsTimerFires`; `api` `TestCancellationOf`; `tests/conformance` `TestA06ObservedTerminationSurvivesLateCancel`, `TestA06CancelInFlightIsTypedAndReleased`; provider `Cancellation`/`Deadline` conformance cases | met with limitation: `Execute` returns within the deadline (or host cancellation) plus one settlement grace even if an `EventSink`, `ContextSource` or admission store blocks (execution spec §4.1), but a port that ignores its context keeps its own goroutine until it returns; providers, tools and `CommandRunner`s are never abandoned and must honour their context |
+| A07 | missing capability, traversal/symlink escape, stale precondition, output-based privilege cannot mutate | `tools` `TestDispatchRefusesBeforeReachingTheTool`, `TestPathGuardsRefuseEscapesWithoutMutation`, `TestSameDirRefusesSwappedRoot`, `TestWritePreconditionNeverOverwritesNewerContent`, `TestGitMetadataIsNeverReachable`, `TestSymlinkAliasToGitMetadataIsRefused` (read and write through `meta -> .git` and similar in-root aliases), `TestSymlinkInsideGrantIsRefused`, `TestCheckOpenedRefusesSwappedFile`, `TestHardLinkAliasToGitMetadataIsRefused` (unix); `tests/conformance` `TestA07ProhibitedInvocationsCannotMutate`, `TestA07StalePreconditionUnderGrantCannotOverwrite`, `TestA07OutputCannotGrantPrivilege` | met with limitation: development-grade guards, isolation `unproven` (capabilities spec §4.1, §9). Residual risk: a concurrent same-user process that swaps a parent directory for a link between the per-component check and the open can redirect that open inside the granted root (`.git` included when the grant covers it); hard links are not detected off unix; credential-shaped names/contents are not refused |
+| A08 | filtered output keeps errors and exact artifact; corruption/recording failure explicit | `tools` `TestOutputBoundKeepsErrorExitCodeAndExactArtifact`, `TestRecordingFailureIsExplicit`, `TestCommandFailurePreservesExitStderrAndArtifact`; `storage` `TestFileArtifactsDetectCorruptionAndReopen`, `TestFileArtifactsPutRepairsCorruptCopy`, `TestFileArtifactsAccountOccupiedBytesNotHeaderClaims`; `engine` `TestRecordingFailureStopsSideEffects`, `TestUnknownSideEffectStopsExecution`; `tests/conformance` `TestFindingCommandRanButResultHidesIt` | met |
 | A09 | required context survives; impossible required context is a typed block; retrieval untrusted | `context` `TestRequiredSurvivesTightBudget`, `TestImpossibleRequiredIsTypedBlock`, `TestRequiredSmuggledAsOptionalIsRefused`, `TestRetrievedContextStaysUntrusted`; `engine` `TestRequiredContextOverCapacityBlocks`, `TestTrustBoundary`; `tests/conformance` `TestA09*`, `TestTrustBoundaryRememberedInstructionsNeverBecomeSystem` | met |
 | A10 | snapshots/overlays handle edit/add/delete/rename/config; base and other tasks untouched | `intelligence` `TestOverlayEditRefreshesDependents`, `TestOverlayAddFile`, `TestOverlayDeleteRemovesRelations`, `TestOverlayRenameMovesProvenance`, `TestOverlayGoModChangeInvalidatesModule`, `TestOverlayBuildTagChangeInvalidatesEverything`, `TestOverlayToolchainChangeInvalidates`, `TestOverlayRefusesUndeclaredWorkspaceDrift`, `TestConcurrentOverlaysAreIsolated` | met |
 | A11 | unresolved edges and suggested-test incompleteness visible | `intelligence` `TestCallEdgesSeparateStaticFromPossibleDynamicUnresolved`, `TestIncompleteAnalysisIsRecorded`, `TestQueriesNeverClaimCompletenessTheyLack`, `TestSuggestedTestsAreInferredAndIncomplete`, `TestViewDependencyItemShowsIncompleteness` | met |
@@ -59,9 +71,9 @@ the independent review lane's suite.
 | A13 | pinned binding survives routing; ineligible/protected-incompatible never chosen | `routing` `TestPinnedPreservedAndNeverFallsBack`, `TestCheaperIneligibleNeverChosen`, `TestProtectedIncompatibleExcluded`, `TestUnknownPriceIsNeverZero`, `TestStaleObservationVisibleAndUnused`, `TestDeterministicTieBreak`; `engine` `TestChosenBindingWithoutAdapterBlocks`; `tests/conformance` `TestA13BindingSurvivesRoutingThroughEngine` | met |
 | A14 | two real adapters pass shared offline conformance; live status truthful | `providers/conformance` run by `openai`, `anthropic`, `local` (`TestConformance`) and `scripted`; adapter tests in providers spec §4 | met with limitation: offline only, **no live call**; wire fixtures are written from documentation retrieved 2026-10-07 (providers spec §6) |
 | A15 | disabled/corrupt/stale cache still correct, degradation explicit | `intelligence` `TestCacheFailuresDegradeToCorrectRebuild`, `TestCacheMissesWhenWorkspaceChanges`; `memory` `TestCorruptionDegradesExplicitlyAndRebuilds`; `tests/conformance` `TestA15CorruptCachesYieldCorrectBoundedExecution`, `TestA15FailingSourceDegradesExplicitly` | met |
-| A16 | restart reopens derived state; no automatic replay of uncertain mutations | `intelligence` `TestCacheReopenAfterRestart`, `TestOverlayOfLoadedIndex`; `memory` `TestReopenAfterRestart`; `storage` `TestFileRecordsReopenAndDetectCorruption`, `TestFileArtifactsDetectCorruptionAndReopen`; `tests/conformance` `TestA16ReopenDerivedStateAfterRestart` | met with limitation: executions are not resumable by design; nothing is replayed |
+| A16 | restart reopens derived state; no automatic replay of uncertain mutations | `intelligence` `TestCacheReopenAfterRestart`, `TestOverlayOfLoadedIndex`; `memory` `TestReopenAfterRestart`; `storage` `TestFileRecordsReopenAndDetectCorruption`, `TestFileArtifactsDetectCorruptionAndReopen`, `TestFileArtifactsAccountOccupiedBytesNotHeaderClaims` (reopen counts occupied bytes, a forged header frees nothing, repair is charged); `tests/conformance` `TestA16ReopenDerivedStateAfterRestart`, `TestA05ReentryAcrossRestartCannotRenewBudget` | met with limitation: executions are not resumable by design; nothing is replayed |
 | A17 | parent dependency, out-of-scope write and extraction failures demonstrated, incl. test/tagged bypass | `docs/acceptance/deliberate-breaks.md`; `tests/architecture` (`TestImportsStayInsideModuleAndStdlib` (walks tagged and ignored files), `TestNoParentCheckoutPathLiterals`, `TestNoSymlinkEscapesModule`, `TestPackageDependencyMap`, `TestNoLinknameDirectives`, `TestModuleMetadataIsSelfContained`); `scripts/check-imports.sh`, `extract.sh`, `check-scope.sh` | met |
-| A18 | no root runtime/default/config/schema/journal/authority change | `scripts/check-scope.sh` pass; diff outside `agentkernel/` is only the new workflow (§2) | met |
+| A18 | no root runtime/default/config/schema/journal/authority change | `scripts/check-scope.sh`; diff outside `agentkernel/` is only the new workflow (§2, re-run on the evidence head). The root test fix for review item 1 is PR #511, a separate prerequisite merged to `main`, not part of this branch | met |
 | A19 | benchmark report with denominators, unknowns, failures, maintenance cost, limits | `docs/benchmarks/methodology.md`, `docs/benchmarks/results-gate-a.json`; this run (§2) | met with limitation: offline scripted fixtures prove mechanics only, not paid-model quality or accepted-change throughput; baseline 5 is Gate B |
 | A20 | docs let a fresh agent build/test/extend/extract | `README.md`, `AGENTS.md`, `docs/adr/0001-extractable-agent-execution-kernel.md`, `docs/architecture.md`, `docs/spec/*`, `docs/concurrency.md`, `docs/integration-plan.md` | met |
 
@@ -79,6 +91,10 @@ independent review, it was fixed in `1406256`. After the fix, breaks 1a–1c are
 also caught by `check-imports.sh` (`go: can't load test package: … no required
 module provides package …`, exit 1).
 
+Every guard added for review 5443104514 (storage, tools, engine, and the root
+#511 scan) was also removed in turn, failed its focused test, and passed again
+when restored; see "Review 5443104514 guards" in `deliberate-breaks.md`.
+
 ## 5. Limitations and unresolved work
 
 Open by design or carried to Gate B:
@@ -87,9 +103,18 @@ Open by design or carried to Gate B:
 - Isolation is `unproven`; credential-shaped names/contents are not refused by
   kernel file tools (`.git` is).
 - No live provider verification; quota and rate limit are both `rate_limited`.
-- `max_input_tokens` is soft when input usage is unreported (F6).
-- Budgets are per `Execute` call; attempt identity and cumulative budgets are
-  host-owned (F7).
+- The execution budget envelope is enforced per `execution_id` through the
+  admission store; admission is atomic only within one `Engine`. Hosts
+  sharing one store across processes must serialize attempts of one
+  `execution_id` (no compare-and-put in Gate A). The default in-memory store
+  holds the envelope for one `Engine` instance only. Envelopes spanning
+  executions are host-owned.
+- With an inexact estimator, a tight `max_input_tokens` can be exhausted by
+  the byte upper-bound reservation before the first provider call.
+- A recording port (sink, source, admission store) that ignores its context
+  is abandoned at its bound but keeps its own goroutine until it returns.
+- Kernel file tools: a concurrent same-user parent-directory swap is not
+  excluded; hard links are refused only on unix.
 - Retry exhaustion has no dedicated termination dimension.
 - `intelligence.index` cache has no retention; memory pins are process-local.
 - Review finding F5 (low) remains open: intelligence hashes and parses whole
@@ -104,5 +129,19 @@ Open by design or carried to Gate B:
   transcript artifact (`docs/integration-plan.md` §5).
 - Root documents (`docs/construction-principles.md` YAGNI, architecture,
   roadmap) are unchanged; amending them is Gate B work.
+
+## 6. Review 5443104514 resolution
+
+Human review 5443104514 (on `f53fedf`) listed seven blocking items.
+
+| # | Item | Resolution | Evidence |
+| --- | --- | --- | --- |
+| 1 | root CI red: the root `ExecutionRequest{` producer scan read the nested module | PR #511, a separate root prerequisite outside the #446 allowlist: the scan stops at any directory with its own `go.mod`; the root identity guard is not weakened and the kernel API is not renamed | `runtime` `TestExecutionRequestScanSkipsNestedModules`; root `go` check green on the evidence head (§2) |
+| 2 | A07: `.git` reachable through an in-workspace symlink alias | `ece635d`: file tools refuse a symlink in any path component (in-root links included; `TestSymlinkInsideGrantIsFollowed` removed), recheck the opened file with `os.SameFile`, and refuse hard-linked files on unix; residual risk documented (capabilities spec §4.1, §9) | `tools` `TestSymlinkAliasToGitMetadataIsRefused`, `TestSymlinkInsideGrantIsRefused`, `TestCheckOpenedRefusesSwappedFile`, `TestHardLinkAliasToGitMetadataIsRefused` |
+| 3 | artifact repair renewed file-store capacity after restart | `22247ed`: capacity counts occupied bytes, never header claims; headerless files count in full; a repair is charged for its growth (capabilities spec §8) | `storage` `TestFileArtifactsAccountOccupiedBytesNotHeaderClaims` |
+| 4 | a negative `TokenEstimator` count minted input capacity; impossible cache partitions refunded money | `c8c54f1`: the ledger refuses negative amounts at the root; a negative estimate fails `failed/provider_failed` before any provider call (compilation, overhead or attempt); an impossible partition makes input and cache parts unknown (execution spec §7.4, §7.5) | `engine` `TestNegativeReservationCannotRenewBudget`, `TestNegativeEstimateFailsClosed`, `TestImpossibleCachePartitionGrantsNoRefund`; `context` `TestNegativeEstimateIsRefused`; `tests/conformance` `TestA05NegativeEstimateCannotMintBudget` |
+| 5 | A05: re-entry renewed the budget; `max_input_tokens` soft | `c8c54f1`: an admission registry keyed by `execution_id` refuses re-entry, widening and starting beside an unsettled attempt, and starts later attempts from recorded consumption (execution spec §11.1); `max_input_tokens` is a hard ledger bound reserving an exact count or a byte upper bound (§7.4); `api.Budget` documents the execution-wide envelope | `engine` `TestReentryCannotRenewBudget`, `TestUnsettledAttemptBlocksTheNext`, `TestAdmissionWriteFailureRefusesBeforeSideEffects`, `TestConcurrentAttemptsAdmitExactlyOne`, `TestInputBudgetIsAHardBound`; `tests/conformance` `TestA05ReentryAcrossRestartCannotRenewBudget`; stated limits in A05 |
+| 6 | event recording outside every cancellation/deadline bound | `c8c54f1`: sink, context-source and admission-store calls run under `run.bounded`: the budget deadline in-loop, one settlement grace (`Config.SettleTimeout`, default 5 s) for terminal recording, shortened to the grace on host cancellation (execution spec §4.1); `run.interrupted` also compares wall time, closing a timer race seen under full-suite load | `engine` `TestStuckEventSinkCannotHoldExecutionOpen`, `TestStuckContextSourceCannotHoldExecutionOpen`, `TestStuckAdmissionStoreCannotHoldExecutionOpen`, `TestDeadlineHoldsBeforeItsTimerFires`. Not met as literally asked: a port that ignores its context keeps its own goroutine (`Execute` does not wait for it); see A06 |
+| 7 | acceptance evidence stale relative to the reviewed head | this record: §1 binds `EVIDENCE_HEAD` and `BASE` after the rebase onto `main` with #511 merged, and §2 is re-run there | §1, §2 |
 
 Gate A: isolated kernel complete. Gate B (production adoption): pending.

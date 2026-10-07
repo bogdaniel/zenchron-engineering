@@ -268,3 +268,71 @@ command above exited 0.
   itself is vacuous for the case it exists for. Coordinator-owned; repair by
   capturing `go list` output into a variable (or a temp file) and failing on
   its exit status before scanning.
+
+## Review 5443104514 guards
+
+Each guard added for human review 5443104514 was removed (or weakened as
+described), the named focused test was run and failed with the line below,
+and the guard was restored and the same test passed again. Breaks were applied
+in the implementing lane's working tree and never committed. Commits:
+`22247ed` (storage, item 3), `ece635d` (tools, item 2), `c8c54f1` (engine,
+items 4–6); the root break belongs to PR #511 (item 1), outside the #446
+allowlist.
+
+File:line values are as recorded when the break ran. `engine/integrity_test.go`
+was revised afterwards (comments and subtests), so its recorded lines no longer
+match the current file; the test and subtest names below locate each check.
+
+### Storage (item 3, `22247ed`)
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| `occupiedSize` counts file length minus the header line, never the header's `size` claim | header-claim accounting restored (the old `storedSize`) | `artifacts_test.go:256: reopen: used = 16, want 41` (`TestFileArtifactsAccountOccupiedBytesNotHeaderClaims`) | passes |
+| `Put` charges a repair for its growth over the counted bytes (`setCount`) | old repair arithmetic (an existing key is never re-charged or re-counted) | `artifacts_test.go:268: repair: used = 25, want 40` | passes |
+
+### Tools (item 2, `ece635d`)
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| `refuseSymlinks` on every component of the requested path | replaced by an `Lstat` of the final name only | `link_alias_test.go:73: read_file "meta/config" leaked .git content: ... [remote] url=gitsecret` (`TestSymlinkAliasToGitMetadataIsRefused`) | passes |
+| `checkOpened` post-open `os.SameFile` against an `Lstat` of the name | `SameFile` check removed | `link_alias_test.go:130: a file whose name was swapped after the open was accepted` (`TestCheckOpenedRefusesSwappedFile`) | passes |
+| `hardLinked` (unix `Nlink > 1`) | always returns false | `link_alias_unix_test.go:18: read_file "src/h" leaked .git content: ... url=gitsecret`; `write_file src/h` also succeeds (`TestHardLinkAliasToGitMetadataIsRefused`) | passes |
+
+### Engine (items 4–6, `c8c54f1`)
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| ledger refuses a negative amount (`errNegativeAmount`, `engine/budget.go`) | check removed | `budget_test.go:59: negative reservation: dim "" err <nil>, want input_tokens errNegativeAmount` (`TestNegativeReservationCannotRenewBudget`) | passes |
+| `context.Compile` refuses a negative estimate (`ErrNegativeEstimate`) | check removed | `compiler_test.go:261: req-body: err <nil>, want ErrNegativeEstimate` (`TestNegativeEstimateIsRefused`) | passes |
+| prompt-overhead estimate check (`engine/compile.go`) | check removed | `integrity_test.go:52: termination completed/loop_completed ..., want failed/provider_failed` (`TestNegativeEstimateFailsClosed/overhead`) | passes |
+| per-attempt estimate check (`engine/loop.go`) | check removed | `0 provider calls, detail "negative input_tokens reservation refused"` (`TestNegativeEstimateFailsClosed/reservation`, recorded at `integrity_test.go:47`): the ledger root still failed closed; the test requires the estimator-named detail | passes |
+| impossible cache partition makes input and cache parts unknown (`plausibleUsage`), sum leg | check removed | `termination completed/loop_completed ..., want exhausted/budget_exhausted` (`TestImpossibleCachePartitionGrantsNoRefund/parts_sum_exceeds_input`, recorded at `:76`) | passes |
+| same, single-part leg | check removed | `termination completed/loop_completed (provider stopped proposing tools), want exhausted/budget_exhausted` (`.../one_part_exceeds_input`, recorded at `:82`) | passes |
+| byte upper-bound input reservation (`inputReservation`) | estimate forced `Exact: true`, so the ~bytes/4 estimate is reserved as is | `termination completed/loop_completed ..., want exhausted/budget_exhausted` (`TestInputBudgetIsAHardBound/estimate_fits_bound_does_not`, recorded at `:102`); `2 provider calls, want 1` (`.../unreported_input_keeps_the_bound`, recorded at `:131`) | passes |
+| re-entry refusal (`admissionRefusal`), engine | check removed | `admission_test.go:49: termination completed/loop_completed ..., want blocked/invalid_request` (`TestReentryCannotRenewBudget/same_attempt_refused`) | passes |
+| re-entry refusal, conformance across restart | check removed | `budget_integrity_test.go:43: termination exhausted/budget_exhausted (no model turns remain), want blocked/invalid_request` (`TestA05ReentryAcrossRestartCannotRenewBudget`) | passes |
+| widening refusal (`widenedBound`) | check removed | `admission_test.go:86: termination completed/loop_completed ..., want blocked/invalid_request` (`TestReentryCannotRenewBudget/widened_*`) | passes |
+| unsettled-prior-attempt refusal | check removed | `admission_test.go:142: termination incomplete/recording_failed (...), want blocked/invalid_request` (`TestUnsettledAttemptBlocksTheNext`) | passes |
+| ledger starts from recorded consumption (`ledger.restore`) | restore removed | `admission_test.go:62: termination completed/loop_completed ..., want exhausted/budget_exhausted` (`TestReentryCannotRenewBudget/later_attempt_starts_from_consumed`) | passes |
+| in-flight marker write error refuses the attempt (`run.admit`) | error ignored | `admission_test.go:156: 1 provider calls, detail "consumption of attempt \"att-1\" not recorded: ..."` (`TestAdmissionWriteFailureRefusesBeforeSideEffects`) | passes |
+| admission serialized by `Engine.admitMu` | mutex removed | `admission_test.go:199: only 0 of 7 concurrent attempts were refused; more than one was admitted` (`TestConcurrentAttemptsAdmitExactlyOne`) | passes |
+| bounded `EventSink.Record` (`run.bounded`) | unbounded call | `record_test.go:91: Execute still running 2.4s after the bound; a stuck sink held it open` (mid-loop, host-cancel and terminal subtests of `TestStuckEventSinkCannotHoldExecutionOpen`) | passes |
+| bounded `ContextSource.ContextItems` | unbounded call | `record_test.go:138: Execute still running after deadline + grace; a stuck source held it open` (`TestStuckContextSourceCannotHoldExecutionOpen`) | passes |
+| host cancellation shortens a bounded wait to the grace | shortening removed | `record_test.go:91: Execute still running 2.1s after the bound` (`TestStuckEventSinkCannotHoldExecutionOpen/mid_loop_host_cancel`) | passes |
+| bounded admission read, write and settlement | unbounded calls | `record_test.go:209: Execute still running 2.4s/2.1s after the bound; a stuck admission store held it open` (`TestStuckAdmissionStoreCannotHoldExecutionOpen`) | passes |
+| wall-clock deadline check in `run.interrupted` (`engine/loop.go`) | wall-time comparison removed | `interrupt_test.go:32: interrupted = {...}, false; want exhausted on the deadline` (`TestDeadlineHoldsBeforeItsTimerFires`) | passes |
+
+Timer race. The wall-clock check closes a race found under full-suite load: a
+bounded port call abandoned at the budget deadline returned before the run
+context's deadline timer fired, so the run took one more step and settled
+`completed` after a stuck context source. It did not reproduce in isolation
+(0 failures in 60 runs of the stuck-source test), so the invariant is pinned
+deterministically by `TestDeadlineHoldsBeforeItsTimerFires`, which uses an
+injected clock that has not reached the deadline and a context with no
+deadline.
+
+### Root prerequisite (item 1, PR #511)
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| the root `ExecutionRequest{` producer scan (`executionRequestOffenders`) stops at any directory with its own `go.mod` | `go.mod` skip removed | `offenders = ["a.go: ..." "nested/b.go: ..."], want only the root module's a.go` (`TestExecutionRequestScanSkipsNestedModules`) | passes |
