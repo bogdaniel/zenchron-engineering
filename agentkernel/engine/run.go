@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -48,6 +50,10 @@ type run struct {
 	manifest   *api.ContextManifest
 	provenance api.Provenance
 	finalText  string
+	// refusal namespaces the hand-off IDs of a run that was never admitted
+	// ("refused-<nonce>/"); empty for admitted runs, whose IDs are unique
+	// because their (execution, attempt) is claimed once.
+	refusal string
 }
 
 func newRun(e *Engine, parent context.Context, req api.ExecutionRequest) *run {
@@ -83,7 +89,7 @@ func (r *run) emit(ctx context.Context, ev api.Event) error {
 	b := r.recordingBound(ev.Kind == api.EventRefused || ev.Kind == api.EventSettled)
 	callCtx, cancel := recordingContext(ctx, b)
 	defer cancel()
-	id := fmt.Sprintf("%s/%s/event-%d", ev.ExecutionID, ev.AttemptID, ev.Seq)
+	id := fmt.Sprintf("%s/%s/%sevent-%d", ev.ExecutionID, ev.AttemptID, r.refusal, ev.Seq)
 	refused, err := handoff.Exchange("event sink", r.e.events, api.EventDelivery{ID: id, Context: callCtx, Request: ev}, b)
 	if err == nil {
 		err = refused
@@ -189,4 +195,13 @@ func describe(t api.Termination) string {
 		s += ": " + t.Detail
 	}
 	return s
+}
+
+// nonce returns 16 random hex digits for refusal ID namespaces.
+func nonce() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("agentkernel: crypto/rand failed: " + err.Error()) // documented never to fail
+	}
+	return hex.EncodeToString(b[:])
 }

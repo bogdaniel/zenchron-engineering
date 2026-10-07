@@ -171,8 +171,12 @@ kernel side is one function, `internal/handoff.Exchange`:
   attempt's dispatched tool calls. No part comes from model output: the
   model's tool-call ID could repeat, or mimic another port's ID. A proposal
   whose tool-call ID repeats an earlier one of the attempt is refused back to
-  the model (`tool.refused`) and never dispatched. The kernel never sends one
-  ID twice; a host seeing it again treats it as the same request.
+  the model (`tool.refused`) and never dispatched. A request refused before
+  admission (validation, re-entry, a held claim) can share its execution and
+  attempt IDs with an admitted run, so its events use
+  `<execution>/<attempt>/refused-<nonce>/event-<seq>` with a fresh random
+  nonce per refusal. The kernel never sends one ID twice; a host seeing it
+  again treats it as the same request.
 - Queue capacities: the `Serve*` helpers return unbuffered channels and answer
   one call at a time; reply channels have capacity 1. A host wanting parallel
   answers runs its own workers on its own channel.

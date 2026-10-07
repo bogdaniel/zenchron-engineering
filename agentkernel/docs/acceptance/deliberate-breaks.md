@@ -406,3 +406,9 @@ and `host_test.go:83` / `:113` are the `dispatchWithin` calls in
 | F9 | an unanswered provider call (`ErrNoAnswer`) keeps its reservations | reservations released | `budget_test.go:131: input_tokens charged 0 after handoff: not answered, want 10` (`TestUnansweredProviderCallKeepsReservations`) | passes |
 | F9 | tool and command hand-offs are bounded by the run context | bound removed | `host_test.go:113` / `:83`: `Dispatch still waiting 2s after its context ended` (`TestCommandHandOff`, `TestHostToolHandOff`) | passes |
 | buffered channels | `engine.New`, `tools.NewHostTool`, `tools.NewCommand` refuse a buffered hand-off channel | `cap == 0` check removed | `seal_test.go:59` (engine, `TestNewRefusesHostCodeInKernelPorts`); `host_test.go:161: NewHostTool accepted a buffered calls channel`; `host_test.go:164: NewCommand accepted a buffered runner channel` (`TestConstructorsRefuseHostCode`) | passes |
+
+### Refusal ID namespace (second-review re-verification)
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| per-refusal nonce namespace in `run.refuse` | `r.refusal = ""` | `refusal_ids_test.go:42: hand-off ID "exec-1/att-1/event-1" sent for 3 different events: [execution.started execution.refused execution.refused]` | passes |

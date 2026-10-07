@@ -183,3 +183,12 @@ capabilities and providers specs.
 | — | buffered hand-off channels let "not taken" be reported for a call the host had already received | hand-off channels must be unbuffered (`cap == 0`): `engine.New`, `tools.NewHostTool` and `tools.NewCommand` refuse a buffered one | `engine` `TestNewRefusesHostCodeInKernelPorts`; `tools` `TestConstructorsRefuseHostCode` |
 
 Gate A: isolated kernel complete. Gate B (production adoption): pending.
+
+### Second review re-verification (`a7f97a5`)
+
+The second reviewer re-verified findings 1–9 and the buffered-channel concern
+as closed and found one more defect: a refused request reused the admitted
+run's event hand-off IDs (`<execution>/<attempt>/event-1`), which a host
+deduplicating by ID would ack without recording. Refused runs now use a
+per-refusal nonce namespace (`…/refused-<nonce>/event-<seq>`); regression
+`engine` `TestRefusedRequestNeverReusesAnAdmittedEventID`.

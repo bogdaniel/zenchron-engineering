@@ -178,6 +178,11 @@ func (e *Engine) Execute(ctx context.Context, req api.ExecutionRequest) (api.Exe
 // settles without any provider, tool or source call.
 func (r *run) refuse(ctx context.Context, t api.Termination) api.ExecutionResult {
 	r.beginSettlement()
+	// A refused request was never admitted, so it may share its execution
+	// and attempt IDs with an admitted run (re-entry, a held claim). A
+	// per-refusal nonce keeps its event IDs from ever repeating one that run
+	// already sent, which a host deduplicating by ID would silently drop.
+	r.refusal = "refused-" + nonce() + "/"
 	if err := r.emit(ctx, api.Event{Kind: api.EventRefused, Detail: t.Detail}); err != nil && t.Cause != api.CauseRecordingFailed {
 		t = r.recordingFailed(describe(t))
 	}
