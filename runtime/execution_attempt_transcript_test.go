@@ -359,6 +359,29 @@ func TestExecutionRequestScanSkipsNestedModules(t *testing.T) {
 	}
 }
 
+// TestExecutionRequestScanMatchesTheHostTypeOnly: the scan counts literals of
+// the host request type, under every spelling it has, and nothing that merely
+// shares its name. Gate B's adapter builds agentkernel's api.ExecutionRequest
+// inside the root module (#518), which is not a producer of this type.
+func TestExecutionRequestScanMatchesTheHostTypeOnly(t *testing.T) {
+	cases := map[string]int{
+		`x := ExecutionRequest{RunID: "r"}`:         1,
+		`x := runtime.ExecutionRequest{RunID: "r"}`: 1,
+		`x := execution.Request{RunID: "r"}`:        1,
+		`x := []ExecutionRequest{{RunID: "r"}}`:     1,
+		`x := api.ExecutionRequest{Version: "v"}`:   0,
+		`x := api.ProviderRequest{Binding: b}`:      0,
+		`x := ValidateExecutionRequest{}`:           0,
+		`x := kernel.Request{}`:                     0,
+		`x := Request{}`:                            0,
+	}
+	for source, want := range cases {
+		if got := len(executionRequestLiterals(source)); got != want {
+			t.Errorf("%s: %d literals, want %d", source, got, want)
+		}
+	}
+}
+
 // executionRequestOffenders scans the module rooted at root for ExecutionRequest
 // literals that omit the scheduler attempt. Nested modules are skipped.
 func executionRequestOffenders(root string) ([]string, error) {
@@ -407,36 +430,72 @@ func executionRequestOffenders(root string) ([]string, error) {
 	return offenders, err
 }
 
-// executionRequestLiterals returns the body of every ExecutionRequest composite
-// literal in a file, matching braces so a nested literal does not end it early.
+// executionRequestLiterals returns the body of every composite literal of the
+// host execution request type in a file, matching braces so a nested literal
+// does not end it early. The host type is runtime.ExecutionRequest, an alias of
+// execution.Request since #521: a literal counts when it is spelled
+// ExecutionRequest{ unqualified or qualified by runtime, or execution.Request{.
+// A same-named type of another package (agentkernel's api.ExecutionRequest,
+// built by the Gate B adapter) is a different type and is not a producer.
 func executionRequestLiterals(source string) []string {
 	var bodies []string
-	for _, marker := range []string{"ExecutionRequest{", "runtime.ExecutionRequest{"} {
+	for _, marker := range []struct{ name, qualifiers string }{
+		{"ExecutionRequest{", ",,runtime,"},
+		{"Request{", ",execution,"},
+	} {
 		from := 0
 		for {
-			at := strings.Index(source[from:], marker)
+			at := strings.Index(source[from:], marker.name)
 			if at < 0 {
 				break
 			}
-			start := from + at + len(marker)
-			depth := 1
-			end := start
-			for end < len(source) && depth > 0 {
-				switch source[end] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-				}
-				end++
-			}
-			// A map of requests keyed by name has its literals inside; those
-			// are found by the same scan on the next iteration.
-			bodies = append(bodies, source[start:min(end, len(source))])
+			at += from
+			start := at + len(marker.name)
 			from = start
+			if !hostRequestQualifier(source[:at], marker.qualifiers) {
+				continue
+			}
+			bodies = append(bodies, literalBody(source, start))
 		}
 	}
 	return bodies
+}
+
+// hostRequestQualifier reports whether the identifier ending a match is
+// qualified by one of qualifiers (a ",a,b," list; "" meaning unqualified).
+func hostRequestQualifier(before, qualifiers string) bool {
+	if before != "" && isIdentByte(before[len(before)-1]) {
+		return false // part of a longer identifier, e.g. ValidateExecutionRequest{
+	}
+	if !strings.HasSuffix(before, ".") {
+		return strings.Contains(qualifiers, ",,")
+	}
+	i := len(before) - 1
+	for i > 0 && isIdentByte(before[i-1]) {
+		i--
+	}
+	return strings.Contains(qualifiers, ","+before[i:len(before)-1]+",")
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
+// literalBody returns the brace-balanced body starting just after an opening
+// brace. A map of requests keyed by name has its literals inside; those are
+// found by the same scan.
+func literalBody(source string, start int) string {
+	depth, end := 1, start
+	for end < len(source) && depth > 0 {
+		switch source[end] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+		end++
+	}
+	return source[start:min(end, len(source))]
 }
 
 func firstLine(body string) string {
