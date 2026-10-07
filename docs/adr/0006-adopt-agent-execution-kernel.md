@@ -1,12 +1,11 @@
 # ADR-0006: Adopt the Agent Execution Kernel for Brokered API Execution
 
-- Status: Proposed (moves to Accepted when merged, after ADR-0005 from #521
-  PR B is on `main`)
+- Status: Accepted
+- Accepted: 2026-10-08
 - Date: 2026-10-07
 - Issue: #518 (Gate B of #446; absorbs #477). Prerequisite: the #445
   execution/provider-boundary slice #521; its execution-port decision is
-  ADR-0005, established by #521 PR B, which merges before this ADR. Related:
-  #67, #70, #103, #66.
+  ADR-0005 (accepted, #526). Related: #67, #70, #103, #66.
 - Naming: "ExecutionPort" below is the port #521 freezes as `execution.Port`.
 
 ## Context
