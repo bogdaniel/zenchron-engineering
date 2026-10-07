@@ -107,6 +107,10 @@ type ForgeGovernance interface {
 	// bypass disclosure the forge omitted is reported as undisclosed, never as
 	// empty - see TrustedMainRuleset.BypassActorsKnown.
 	Rulesets(ctx context.Context, repo GitHubRepo) ([]TrustedMainRuleset, error)
+	// RevisionEvidence reports every attempt of every CI job the forge ran
+	// against exactly this revision, as reported and unjudged. Whether any of
+	// it is T2 evidence is decided by TrustedRevisionPolicy, not here.
+	RevisionEvidence(ctx context.Context, repo GitHubRepo, revision string) ([]T2Attempt, error)
 	// GovernanceProvenance names the identity these observations came from.
 	GovernanceProvenance() CredentialProvenance
 }
@@ -382,4 +386,56 @@ func (o GitHubGovernanceObserver) Rulesets(ctx context.Context, repo GitHubRepo)
 		rulesets = append(rulesets, observed)
 	}
 	return rulesets, nil
+}
+
+// RevisionEvidence reads GitHub Actions runs whose head is exactly revision,
+// and every job of every attempt of each. Attempts are read individually
+// because a re-run replaces a run's latest jobs: reading only the latest would
+// hide the red a later green followed, which is the inconsistency ADR-0007
+// requires to stay visible.
+func (o GitHubGovernanceObserver) RevisionEvidence(ctx context.Context, repo GitHubRepo, revision string) ([]T2Attempt, error) {
+	if !isCommitSHA(revision) {
+		return nil, fmt.Errorf("T2 evidence is only observed for an exact commit, not %q", revision)
+	}
+	var runs struct {
+		WorkflowRuns []struct {
+			ID         int64  `json:"id"`
+			Path       string `json:"path"`
+			Event      string `json:"event"`
+			HeadBranch string `json:"head_branch"`
+			HeadSHA    string `json:"head_sha"`
+			RunAttempt int    `json:"run_attempt"`
+		} `json:"workflow_runs"`
+	}
+	if err := o.get(ctx, repo, repoPath(repo)+"/actions/runs?per_page=100&head_sha="+revision, &runs); err != nil {
+		return nil, err
+	}
+	// ponytail: one page of runs and one page of jobs per attempt; a single
+	// commit has a handful of runs, page if a workflow ever exceeds 100 jobs.
+	attempts := []T2Attempt{}
+	for _, run := range runs.WorkflowRuns {
+		for attempt := 1; attempt <= run.RunAttempt; attempt++ {
+			var jobs struct {
+				Jobs []struct {
+					Name        string    `json:"name"`
+					HeadSHA     string    `json:"head_sha"`
+					Status      string    `json:"status"`
+					Conclusion  string    `json:"conclusion"`
+					CompletedAt time.Time `json:"completed_at"`
+				} `json:"jobs"`
+			}
+			path := fmt.Sprintf("%s/actions/runs/%d/attempts/%d/jobs?per_page=100", repoPath(repo), run.ID, attempt)
+			if err := o.get(ctx, repo, path, &jobs); err != nil {
+				return nil, err
+			}
+			for _, job := range jobs.Jobs {
+				attempts = append(attempts, T2Attempt{
+					RunID: run.ID, Attempt: attempt, Workflow: run.Path, Event: run.Event, Branch: run.HeadBranch,
+					HeadSHA: job.HeadSHA, Job: job.Name, Status: job.Status, Conclusion: job.Conclusion,
+					CompletedAt: job.CompletedAt,
+				})
+			}
+		}
+	}
+	return attempts, nil
 }

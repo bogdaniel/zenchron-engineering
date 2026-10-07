@@ -21,7 +21,7 @@ func goodRuleset() TrustedMainRuleset {
 }
 
 func TestTrustRootAcceptsOnlyAGateWorthTrusting(t *testing.T) {
-	if err := VerifyTrustRoot(goodRuleset(), DefaultTrustPolicy()); err != nil {
+	if err := VerifyTrustRoot(goodRuleset(), DefaultBranchIntegrityPolicy()); err != nil {
 		t.Fatalf("the intended trust root was refused: %v", err)
 	}
 
@@ -82,25 +82,11 @@ func TestTrustRootAcceptsOnlyAGateWorthTrusting(t *testing.T) {
 		"no merge method stated": {
 			func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = nil }, "no merge method is stated",
 		},
-		"no required check": {
-			func(r *TrustedMainRuleset) { r.RequiredChecks = nil }, "no status check is required",
-		},
-		"required check absent": {
-			func(r *TrustedMainRuleset) { r.RequiredChecks.Checks = nil }, "is absent or bound to a different app",
-		},
-		"required check from another app": {
-			func(r *TrustedMainRuleset) {
-				r.RequiredChecks.Checks = []RequiredCheck{{Context: "go", IntegrationID: 99999}}
-			}, "bound to a different app",
-		},
-		"checks not strict": {
-			func(r *TrustedMainRuleset) { r.RequiredChecks.Strict = false }, "not strict",
-		},
 	} {
 		t.Run("refuse "+name, func(t *testing.T) {
 			r := goodRuleset()
 			tc.mutate(&r)
-			err := VerifyTrustRoot(r, DefaultTrustPolicy())
+			err := VerifyTrustRoot(r, DefaultBranchIntegrityPolicy())
 			if err == nil {
 				t.Fatal("a ruleset that is not a trust root was accepted")
 			}
@@ -111,6 +97,26 @@ func TestTrustRootAcceptsOnlyAGateWorthTrusting(t *testing.T) {
 	}
 }
 
+// TestBranchIntegrityRequiresNoCheck is ADR-0007 §1: which checks a pull
+// request must pass is merge policy, and a renamed, relaxed or removed CI check
+// must never be able to break adoption. Trust in a revision comes from its own
+// T2 evidence instead (trusted_revision.go).
+func TestBranchIntegrityRequiresNoCheck(t *testing.T) {
+	for name, mutate := range map[string]func(*TrustedMainRuleset){
+		"no required checks": func(r *TrustedMainRuleset) { r.RequiredChecks = nil },
+		"go no longer required": func(r *TrustedMainRuleset) {
+			r.RequiredChecks.Checks = []RequiredCheck{{Context: "evidence", IntegrationID: 15368}}
+		},
+		"checks not strict": func(r *TrustedMainRuleset) { r.RequiredChecks.Strict = false },
+	} {
+		r := goodRuleset()
+		mutate(&r)
+		if err := VerifyTrustRoot(r, DefaultBranchIntegrityPolicy()); err != nil {
+			t.Errorf("%s: branch integrity refused over a check: %v", name, err)
+		}
+	}
+}
+
 // TestTrustRootReportsEveryGapAtOnce: an operator repairing a ruleset should
 // see the whole gap, not discover it one round trip at a time.
 func TestTrustRootReportsEveryGapAtOnce(t *testing.T) {
@@ -118,10 +124,10 @@ func TestTrustRootReportsEveryGapAtOnce(t *testing.T) {
 	r.Enforcement = "disabled"
 	r.BypassActors = 2
 	r.PullRequest.AllowedMergeMethods = []string{"squash"}
-	r.RequiredChecks.Strict = false
+	r.Deletion = false
 
 	var refusal *TrustRootError
-	err := VerifyTrustRoot(r, DefaultTrustPolicy())
+	err := VerifyTrustRoot(r, DefaultBranchIntegrityPolicy())
 	if err == nil {
 		t.Fatal("a thoroughly broken ruleset was accepted")
 	}

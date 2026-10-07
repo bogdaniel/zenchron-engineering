@@ -40,7 +40,8 @@
         "runtime/trust_root.go",
         "runtime/governance.go",
         "runtime/credential_boundary.go",
-        "runtime/controller_source.go"
+        "runtime/controller_source.go",
+        "runtime/trusted_revision.go"
       ],
       "tests": [
         "runtime/adopted_*_test.go",
@@ -49,7 +50,8 @@
         "runtime/credential_boundary_test.go",
         "runtime/doctor_governance_test.go",
         "runtime/controller_provenance_test.go",
-        "runtime/governed_remote_test.go"
+        "runtime/governed_remote_test.go",
+        "runtime/trusted_revision_test.go"
       ]
     },
     {
@@ -231,7 +233,8 @@
         "runtime/transport_chatter.go",
         "runtime/execution_aliases.go",
         "runtime/execution_scratch.go",
-        "runtime/toolchain_probe.go"
+        "runtime/toolchain_probe.go",
+        "runtime/execution_event_transcript.go"
       ],
       "tests": [
         "runtime/provider_*_test.go",
@@ -250,7 +253,8 @@
       "race": true,
       "sources": [
         "runtime/attempt_*.go",
-        "runtime/execution_scratch.go"
+        "runtime/execution_scratch.go",
+        "runtime/execution_event_transcript.go"
       ],
       "tests": [
         "runtime/attempt_*_test.go",

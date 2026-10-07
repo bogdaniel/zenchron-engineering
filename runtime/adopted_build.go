@@ -124,117 +124,6 @@ type BuildEnvironment struct {
 	Digest      string   `json:"digest"`
 }
 
-// AdoptedBuildProvenance is the deterministic record. It is the artifact, and
-// it is also the return value: a caller that wants to know what was built asks
-// the same object the file holds.
-type AdoptedBuildProvenance struct {
-	SchemaVersion string           `json:"schema_version"`
-	Repository    string           `json:"repository"`
-	TrustRoot     TrustRootRecord  `json:"trust_root"`
-	TrustedMain   RevisionRecord   `json:"trusted_main"`
-	Source        RevisionRecord   `json:"source"`
-	Containment   string           `json:"containment_proof"`
-	Kind          string           `json:"controller_kind"`
-	Version       string           `json:"version"`
-	GOOS          string           `json:"goos"`
-	GOARCH        string           `json:"goarch"`
-	BuildFlags    []string         `json:"build_flags"`
-	BuildEnv      BuildEnvironment `json:"build_environment"`
-	BinarySHA256  string           `json:"binary_sha256"`
-	BuiltAt       string           `json:"built_at"`
-	Builder       BuilderRecord    `json:"builder"`
-	OutputPath    string           `json:"output_path"`
-	SelfProbe     SelfProbeRecord  `json:"self_probe"`
-}
-
-// SelfProbeRecord is the binary's own account of itself, checked against what
-// was asked for. There is no "not probed" state: an unprobed build is refused,
-// never recorded.
-type SelfProbeRecord struct {
-	Kind         string `json:"kind"`
-	Version      string `json:"version"`
-	Revision     string `json:"source_revision"`
-	Tree         string `json:"source_tree"`
-	BinarySHA256 string `json:"binary_sha256"`
-	Matched      bool   `json:"matched"`
-}
-
-type TrustRootRecord struct {
-	RulesetID   int64       `json:"ruleset_id"`
-	Name        string      `json:"name"`
-	Digest      string      `json:"digest"`
-	Policy      TrustPolicy `json:"policy"`
-	Enforcement string      `json:"enforcement"`
-	// ObservedBy is the provenance of the identity that disclosed this gate,
-	// with no secret in it. It is recorded because "the ruleset discloses no
-	// bypass actor" and "the identity that asked was not shown any" are
-	// different statements, and a reader of the evidence must be able to tell
-	// which one was made.
-	ObservedBy CredentialProvenance `json:"observed_by"`
-	// Bypass is that same distinction written down rather than left to be
-	// inferred from a zero. An auditor reading this record months later must
-	// be able to see which of the two facts the build actually established.
-	Bypass BypassDisclosure `json:"bypass"`
-}
-
-// BypassDisclosure is what the governance observation ESTABLISHED about who can
-// bypass the trust root.
-//
-// The zero value is "nothing was established", which is the honest reading of a
-// record that carries no disclosure - an absent fact is not a favourable fact,
-// and that is true of a record as much as of a decision. Observed is therefore
-// a separate member from Count rather than Count being allowed to speak for
-// both: {observed:false, count:0} and {observed:true, count:0} are opposite
-// statements that a bare zero would have collapsed into one.
-//
-// A successful adopted build can only ever write {observed:true, count:0}: any
-// other combination is refused before a record exists, so every combination the
-// type can express is either that one or evidence that something was refused.
-type BypassDisclosure struct {
-	// Observed reports that the forge actually disclosed the bypass actor set
-	// to the governance identity that asked.
-	Observed bool `json:"observed"`
-	// Count is the size of that set, meaningful only when Observed is true.
-	Count int `json:"count"`
-	// Detail states which of the two facts this is in one sentence, so the
-	// record cannot be misread by someone skimming for a number.
-	Detail string `json:"detail"`
-}
-
-// describeBypass turns an observed ruleset into the recorded disclosure. It
-// reads the SAME two fields VerifyTrustRoot decides on, so the evidence and the
-// decision can never disagree about what was seen.
-func describeBypass(root TrustedMainRuleset) BypassDisclosure {
-	if !root.BypassActorsKnown {
-		return BypassDisclosure{
-			Detail: "the forge disclosed no bypass actor set to the governance identity, so nothing about bypasses was established by this observation",
-		}
-	}
-	return BypassDisclosure{
-		Observed: true, Count: root.BypassActors,
-		Detail: fmt.Sprintf("the governance identity was shown the bypass actor set and it contained %d actor(s)", root.BypassActors),
-	}
-}
-
-type RevisionRecord struct {
-	Revision string `json:"revision"`
-	Tree     string `json:"tree"`
-}
-
-// BuilderRecord is the identity of the tool that produced the artifact. It may
-// truthfully be unattested - the builder need not itself be adopted - but it
-// must not LIE: a builder whose own attestation could not be resolved records
-// that fact rather than laundering it into "unattested", which would claim a
-// deliberate absence of provenance where there is a failed measurement.
-type BuilderRecord struct {
-	Version         string `json:"version"`
-	SourceRevision  string `json:"source_revision"`
-	Kind            string `json:"kind"`
-	ResolutionError string `json:"resolution_error,omitempty"`
-}
-
-const adoptedBuildSchemaVersion = "adopted-build/1"
-
 // BuildAdoptedController performs the whole proof, then the build, then
 // publishes. Any refusal returns before anything is installed.
 func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, deps AdoptedBuildDeps, self BuilderRecord) (AdoptedBuildProvenance, error) {
@@ -268,12 +157,12 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if observedBy.Role != CredentialRoleGovernance || strings.TrimSpace(observedBy.Method) == "" {
 		return out, fmt.Errorf("the governance observer does not identify itself as a %s credential, so the trust root it reports is of unknown standing and nothing may be called adopted", CredentialRoleGovernance)
 	}
-	// The adoption policy is FROZEN, not a parameter. A caller that could
-	// weaken the trusted ref, the required check, the allowed merge methods or
-	// the strict-check rule and still receive an artifact labelled adopted
-	// would make the label mean whatever the caller wanted. There is exactly
-	// one adoption policy, and this is where it comes from.
-	policy := DefaultTrustPolicy()
+	// The adoption policies are FROZEN, not parameters. A caller that could
+	// weaken the trusted ref, the allowed merge methods, the T2 producer or the
+	// search bound and still receive an artifact labelled adopted would make
+	// the label mean whatever the caller wanted. There is exactly one pair of
+	// adoption policies, and this is where they come from.
+	policy := DefaultBranchIntegrityPolicy()
 	// A cross-target build cannot be asked what it thinks it is, and an
 	// unprobed adopted artifact is refused. Cross-compiling stays available
 	// for unattested builds, which is where it belongs.
@@ -295,17 +184,18 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 		return out, err
 	}
 
-	// 2. Trusted main as GITHUB reports it, not as the local clone remembers.
+	// 2. Trusted main, RESOLVED (ADR-0007): main_head as GITHUB reports it,
+	// not as the local clone remembers, then the newest commit on its
+	// first-parent chain with accepted exact-revision T2 evidence. main_head
+	// itself is never the default source.
 	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
-	trustedMain, err := observeTrustedMain(ctx, deps, request.Repository, branch)
+	resolution, err := resolveTrustedMain(ctx, deps, request.Repository, request.RepositoryDir, branch)
 	if err != nil {
 		return out, err
 	}
+	trustedMain := resolution.TrustedMain
 
-	// 3. Fetch that exact revision, then prove containment against it.
-	if err := deps.Fetch(request.RepositoryDir, trustedMain, branch); err != nil {
-		return out, fmt.Errorf("the trusted revision could not be fetched: %w", err)
-	}
+	// 3. Prove containment against trusted main, not main_head.
 	source := strings.TrimSpace(request.Revision)
 	if source == "" {
 		source = trustedMain
@@ -409,15 +299,11 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if finalDigest != startingDigest {
 		return out, fmt.Errorf("the trust root changed while the build ran (%s -> %s); refusing to publish under a gate that is not the one proven", startingDigest, finalDigest)
 	}
-	finalMain, err := observeTrustedMain(ctx, deps, request.Repository, branch)
+	atPublication, err := resolveTrustedMain(ctx, deps, request.Repository, request.RepositoryDir, branch)
 	if err != nil {
-		return out, fmt.Errorf("trusted main could not be revalidated before publication: %w", err)
+		return out, fmt.Errorf("trusted main could not be re-resolved before publication: %w", err)
 	}
-	if finalMain != trustedMain {
-		if err := deps.Fetch(request.RepositoryDir, finalMain, branch); err != nil {
-			return out, fmt.Errorf("trusted main moved to %s and could not be re-fetched: %w", finalMain, err)
-		}
-	}
+	finalMain := atPublication.TrustedMain
 	if err := proveContained(deps, request.RepositoryDir, source, finalMain); err != nil {
 		return out, err
 	}
@@ -425,18 +311,28 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if err != nil {
 		return out, fmt.Errorf("the trusted main tree could not be established: %w", err)
 	}
+	headTree, err := revisionTree(deps, request.RepositoryDir, atPublication.MainHead)
+	if err != nil {
+		return out, fmt.Errorf("the main_head tree could not be established: %w", err)
+	}
+	revisionPolicy := DefaultTrustedRevisionPolicy()
 
 	out = AdoptedBuildProvenance{
 		SchemaVersion: adoptedBuildSchemaVersion,
 		Repository:    request.Repository.String(),
 		TrustRoot: TrustRootRecord{
 			RulesetID: finalRoot.ID, Name: finalRoot.Name, Digest: finalDigest,
-			Policy: policy, Enforcement: finalRoot.Enforcement, ObservedBy: observedBy,
+			Policy: policy.record(), Enforcement: finalRoot.Enforcement, ObservedBy: observedBy,
 			Bypass: describeBypass(finalRoot),
 		},
-		TrustedMain:  RevisionRecord{Revision: finalMain, Tree: mainTree},
-		Source:       RevisionRecord{Revision: source, Tree: tree},
-		Containment:  fmt.Sprintf("ancestry: %s is an ancestor of trusted main %s, re-derived from the remote-observed head at publication rather than a local ref", source, finalMain),
+		TrustedMain:           RevisionRecord{Revision: finalMain, Tree: mainTree},
+		MainHead:              &RevisionRecord{Revision: atPublication.MainHead, Tree: headTree},
+		TrustedRevisionPolicy: &revisionPolicy,
+		TrustEvidence:         &TrustEvidenceRecord{Kind: TrustEvidenceT2, Observation: &atPublication.Evidence},
+		Skipped:               atPublication.Skipped,
+		Source:                RevisionRecord{Revision: source, Tree: tree},
+		Containment: fmt.Sprintf("ancestry: %s is an ancestor of trusted main %s, resolved at publication from the remote-observed main_head %s "+
+			"by exact-revision T2 evidence on its first-parent chain", source, finalMain, atPublication.MainHead),
 		Kind:         ControllerAdopted,
 		Version:      version,
 		GOOS:         spec.GOOS,
@@ -491,26 +387,23 @@ func ObserveTrustedMainRevision(ctx context.Context, deps AdoptedBuildDeps, repo
 	if deps.Governance == nil || deps.RefSHA == nil {
 		return RevisionRecord{}, fmt.Errorf("the trust root and trusted main cannot be observed, so no revision may be called trusted")
 	}
-	policy := DefaultTrustPolicy()
+	policy := DefaultBranchIntegrityPolicy()
 	if _, err := observeTrustRoot(ctx, deps, repo, policy); err != nil {
 		return RevisionRecord{}, err
 	}
 	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
-	revision, err := observeTrustedMain(ctx, deps, repo, branch)
+	resolution, err := resolveTrustedMain(ctx, deps, repo, repositoryDir, branch)
 	if err != nil {
 		return RevisionRecord{}, err
 	}
-	if err := deps.Fetch(repositoryDir, revision, branch); err != nil {
-		return RevisionRecord{}, fmt.Errorf("the trusted revision could not be fetched: %w", err)
-	}
-	tree, err := revisionTree(deps, repositoryDir, revision)
+	tree, err := revisionTree(deps, repositoryDir, resolution.TrustedMain)
 	if err != nil {
 		return RevisionRecord{}, err
 	}
-	return RevisionRecord{Revision: revision, Tree: tree}, nil
+	return RevisionRecord{Revision: resolution.TrustedMain, Tree: tree}, nil
 }
 
-func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy TrustPolicy) (TrustedMainRuleset, error) {
+func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy BranchIntegrityPolicy) (TrustedMainRuleset, error) {
 	rulesets, err := deps.Governance.Rulesets(ctx, repo)
 	if err != nil {
 		return TrustedMainRuleset{}, fmt.Errorf("the trust root could not be observed, so nothing may be called adopted: %w", err)
@@ -525,13 +418,18 @@ func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRep
 	return root, nil
 }
 
-func observeTrustedMain(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, branch string) (string, error) {
+func observeMainHead(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, branch string) (string, error) {
 	observed, err := deps.RefSHA(ctx, repo, branch)
 	if err != nil {
-		return "", fmt.Errorf("trusted main could not be observed: %w", err)
+		return "", fmt.Errorf("main_head could not be observed: %w", err)
 	}
 	if !observed.Exists || observed.SHA == "" {
-		return "", fmt.Errorf("trusted main %s does not exist in %s", branch, repo)
+		return "", fmt.Errorf("main branch %s does not exist in %s", branch, repo)
+	}
+	// The forge's answer reaches git argv and a forge URL: only an exact
+	// commit name is accepted.
+	if !isCommitSHA(observed.SHA) {
+		return "", fmt.Errorf("the forge reported main_head %q, which is not an exact commit", observed.SHA)
 	}
 	return observed.SHA, nil
 }

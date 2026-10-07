@@ -44,7 +44,22 @@ type adoptedFixture struct {
 // which is its own test, further down.
 type stubGovernance struct {
 	rulesets   func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error)
+	evidence   func(revision string) ([]T2Attempt, error)
 	provenance CredentialProvenance
+}
+
+func (s *stubGovernance) RevisionEvidence(_ context.Context, _ GitHubRepo, revision string) ([]T2Attempt, error) {
+	if s.evidence == nil {
+		return []T2Attempt{t2Attempt(revision, 1, 1, "success")}, nil
+	}
+	return s.evidence(revision)
+}
+
+// t2Attempt is one completed attempt of the pinned producer against revision.
+func t2Attempt(revision string, run int64, attempt int, conclusion string) T2Attempt {
+	p := DefaultTrustedRevisionPolicy()
+	return T2Attempt{RunID: run, Attempt: attempt, Workflow: p.Workflow, Event: p.Event, Branch: p.Branch,
+		HeadSHA: revision, Job: p.Job, Status: "completed", Conclusion: conclusion}
 }
 
 func (s *stubGovernance) Rulesets(ctx context.Context, repo GitHubRepo) ([]TrustedMainRuleset, error) {
@@ -309,7 +324,7 @@ func TestAdoptedBuildRefusesEverythingItCannotProve(t *testing.T) {
 				f.deps.RefSHA = func(context.Context, GitHubRepo, string) (RefObservation, error) {
 					return RefObservation{}, fmt.Errorf("rate limited")
 				}
-			}, "trusted main could not be observed",
+			}, "main_head could not be observed",
 		},
 		"trusted main absent": {
 			func(f *adoptedFixture, _ *AdoptedBuildRequest) {
@@ -697,22 +712,19 @@ func TestAdoptedBuildProvenanceIsWrittenOwnerOnly(t *testing.T) {
 func TestFrozenAdoptionPolicyIsNotCallerWeakenable(t *testing.T) {
 	if fields := reflect.TypeOf(AdoptedBuildRequest{}); true {
 		for i := 0; i < fields.NumField(); i++ {
-			if fields.Field(i).Type == reflect.TypeOf(TrustPolicy{}) {
-				t.Fatalf("AdoptedBuildRequest carries a caller-supplied trust policy in field %q", fields.Field(i).Name)
+			switch fields.Field(i).Type {
+			case reflect.TypeOf(BranchIntegrityPolicy{}), reflect.TypeOf(TrustedRevisionPolicy{}):
+				t.Fatalf("AdoptedBuildRequest carries a caller-supplied adoption policy in field %q", fields.Field(i).Name)
 			}
 		}
 	}
 
 	// And the frozen policy is the one the build actually demands: a trust
 	// root that satisfies anything weaker is refused.
-	frozen := DefaultTrustPolicy()
+	frozen := DefaultBranchIntegrityPolicy()
 	for name, weaken := range map[string]func(*TrustedMainRuleset){
-		"squash allowed":    func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = []string{"merge", "squash"} },
-		"rebase allowed":    func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = []string{"rebase"} },
-		"checks not strict": func(r *TrustedMainRuleset) { r.RequiredChecks.Strict = false },
-		"another check": func(r *TrustedMainRuleset) {
-			r.RequiredChecks.Checks = []RequiredCheck{{Context: "lint", IntegrationID: 15368}}
-		},
+		"squash allowed":     func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = []string{"merge", "squash"} },
+		"rebase allowed":     func(r *TrustedMainRuleset) { r.PullRequest.AllowedMergeMethods = []string{"rebase"} },
 		"another ref":        func(r *TrustedMainRuleset) { r.Targets = []string{"refs/heads/release"} },
 		"undisclosed bypass": func(r *TrustedMainRuleset) { r.BypassActorsKnown = false },
 	} {
