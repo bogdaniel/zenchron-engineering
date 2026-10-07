@@ -304,8 +304,8 @@ match the current file; the test and subtest names below locate each check.
 | --- | --- | --- | --- |
 | ledger refuses a negative amount (`errNegativeAmount`, `engine/budget.go`) | check removed | `budget_test.go:59: negative reservation: dim "" err <nil>, want input_tokens errNegativeAmount` (`TestNegativeReservationCannotRenewBudget`) | passes |
 | `context.Compile` refuses a negative estimate (`ErrNegativeEstimate`) | check removed | `compiler_test.go:261: req-body: err <nil>, want ErrNegativeEstimate` (`TestNegativeEstimateIsRefused`) | passes |
-| prompt-overhead estimate check (`engine/compile.go`) | check removed | `integrity_test.go:52: termination completed/loop_completed ..., want failed/provider_failed` (`TestNegativeEstimateFailsClosed/overhead`) | passes |
-| per-attempt estimate check (`engine/loop.go`) | check removed | `0 provider calls, detail "negative input_tokens reservation refused"` (`TestNegativeEstimateFailsClosed/reservation`, recorded at `integrity_test.go:47`): the ledger root still failed closed; the test requires the estimator-named detail | passes |
+| prompt-overhead estimate check (`engine/compile.go`) | check removed | `integrity_test.go:52: termination completed/loop_completed ..., want failed/provider_failed` (`TestNegativeEstimateFailsClosed/overhead`; removed in `0c2e7ef`) | passes |
+| per-attempt estimate check (`engine/loop.go`) | check removed | `0 provider calls, detail "negative input_tokens reservation refused"` (`TestNegativeEstimateFailsClosed/reservation`, recorded at `integrity_test.go:47`; removed in `0c2e7ef`): the ledger root still failed closed; the test requires the estimator-named detail | passes |
 | impossible cache partition makes input and cache parts unknown (`plausibleUsage`), sum leg | check removed | `termination completed/loop_completed ..., want exhausted/budget_exhausted` (`TestImpossibleCachePartitionGrantsNoRefund/parts_sum_exceeds_input`, recorded at `:76`) | passes |
 | same, single-part leg | check removed | `termination completed/loop_completed (provider stopped proposing tools), want exhausted/budget_exhausted` (`.../one_part_exceeds_input`, recorded at `:82`) | passes |
 | byte upper-bound input reservation (`inputReservation`) | estimate forced `Exact: true`, so the ~bytes/4 estimate is reserved as is | `termination completed/loop_completed ..., want exhausted/budget_exhausted` (`TestInputBudgetIsAHardBound/estimate_fits_bound_does_not`, recorded at `:102`); `2 provider calls, want 1` (`.../unreported_input_keeps_the_bound`, recorded at `:131`) | passes |
@@ -319,8 +319,24 @@ match the current file; the test and subtest names below locate each check.
 | bounded `EventSink.Record` (`run.bounded`) | unbounded call | `record_test.go:91: Execute still running 2.4s after the bound; a stuck sink held it open` (mid-loop, host-cancel and terminal subtests of `TestStuckEventSinkCannotHoldExecutionOpen`) | passes |
 | bounded `ContextSource.ContextItems` | unbounded call | `record_test.go:138: Execute still running after deadline + grace; a stuck source held it open` (`TestStuckContextSourceCannotHoldExecutionOpen`) | passes |
 | host cancellation shortens a bounded wait to the grace | shortening removed | `record_test.go:91: Execute still running 2.1s after the bound` (`TestStuckEventSinkCannotHoldExecutionOpen/mid_loop_host_cancel`) | passes |
-| bounded admission read, write and settlement | unbounded calls | `record_test.go:209: Execute still running 2.4s/2.1s after the bound; a stuck admission store held it open` (`TestStuckAdmissionStoreCannotHoldExecutionOpen`) | passes |
+| bounded admission read, write and settlement | unbounded calls | `record_test.go:209: Execute still running 2.4s/2.1s after the bound; a stuck admission store held it open` (`TestStuckAdmissionStoreCannotHoldExecutionOpen`; removed in `0c2e7ef`) | passes |
 | wall-clock deadline check in `run.interrupted` (`engine/loop.go`) | wall-time comparison removed | `interrupt_test.go:32: interrupted = {...}, false; want exhausted on the deadline` (`TestDeadlineHoldsBeforeItsTimerFires`) | passes |
+
+Superseded by `0c2e7ef` (kept as the record of what `c8c54f1` was checked
+against): the prompt-overhead and per-attempt estimate guards no longer exist,
+because the `api.TokenEstimator` port was removed (`TestNegativeEstimateFailsClosed`
+and conformance `TestA05NegativeEstimateCannotMintBudget` were deleted with
+it); `run.bounded` and `engine/record_test.go` were replaced by
+`internal/handoff.Exchange` and `engine/handoff_test.go`, where
+`TestStuckEventSinkCannotHoldExecutionOpen` and
+`TestStuckContextSourceCannotHoldExecutionOpen` now live and
+`TestStuckAdmissionStoreCannotHoldExecutionOpen` was deleted (the admission
+store is kernel-owned `*storage.FileRecords`, no longer a host port); the
+`Engine.admitMu` admission mutex was replaced by the `PutIfAbsent` claim, and
+`TestUnsettledAttemptBlocksTheNext` and
+`TestAdmissionWriteFailureRefusesBeforeSideEffects` moved to
+`engine/claim_test.go`. The follow-up section below re-breaks the
+replacements.
 
 Timer race. The wall-clock check closes a race found under full-suite load: a
 bounded port call abandoned at the budget deadline returned before the run
@@ -336,3 +352,25 @@ deadline.
 | Guard | Patch | Decisive failure | Restored |
 | --- | --- | --- | --- |
 | the root `ExecutionRequest{` producer scan (`executionRequestOffenders`) stops at any directory with its own `go.mod` | `go.mod` skip removed | `offenders = ["a.go: ..." "nested/b.go: ..."], want only the root module's a.go` (`TestExecutionRequestScanSkipsNestedModules`) | passes |
+
+## Review 5443104514 follow-up: hand-off and atomic admission
+
+Commit `0c2e7ef` (with the module ADR update `a2b551f`) replaced bounded
+synchronous port calls with hand-offs and made admission an atomic claim
+(review items 5 and 6, as decided). Same protocol: guard removed, focused test
+failed with the line below, guard restored, test passed. File:line values are
+as recorded; for `engine/handoff_test.go:157` and `:214` the recorded line is
+the shared `execute` helper call inside the named test.
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| `handoff.Exchange` starts no goroutine (send and wait are `select`s against the bound) | the call is handed off by a kernel goroutine (`go func(){ out <- call }()`) | `engine/handoff_test.go:157: 1 goroutines outlived Execute beyond the 6 running before it: the kernel leaked one` (`TestStuckEventSinkCannotHoldExecutionOpen`; the provider case fails the same way at `:214`, `TestStuckProviderCannotHoldExecutionOpen`); `internal/handoff/handoff_test.go:67: err handoff: not answered ... want ErrNotTaken at the bound` (`TestExchangeNeverTaken`) | passes |
+| the bound timer in `newWait` | timer removed | `engine/handoff_test.go:157: Execute still running 2.4s after the host got stuck; the host held it open` (`TestStuckEventSinkCannotHoldExecutionOpen`) | passes |
+| `FileRecords.PutIfAbsent` links the synced temp file (`os.Link`, fails if the name exists) | `os.Link` replaced by `os.Rename` (replaces an existing name) | `storage/records_test.go:215: 16 writers created the key, want exactly 1` (`TestPutIfAbsentAdmitsExactlyOne`) | passes |
+| `run.admit` refuses when the claim is held (`storage.ErrExists`) | `ErrExists` ignored | `engine/claim_test.go:116: more than one contender was admitted` (`TestTwoEnginesOneRootAdmitExactlyOne`); `engine/claim_test.go:142: termination completed/loop_completed ..., want blocked/invalid_request` (`TestCrashedAttemptBlocksTheNext`); `engine/admission_test.go:144: only 0 of 7 concurrent attempts were refused` (`TestConcurrentAttemptsAdmitExactlyOne`) | passes |
+
+### Cross-process claim (OS processes)
+
+| Guard | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| `os.Link` (fails if the name exists) in `FileRecords.PutIfAbsent` | replaced by `os.Rename` (overwrites) | `records_process_test.go:61: 8 processes created the claim, want exactly 1` | passes |
