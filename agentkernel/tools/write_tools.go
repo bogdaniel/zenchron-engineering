@@ -111,8 +111,13 @@ func (w *Workspace) writeChecked(ctx context.Context, grant api.Capability, p, e
 		return failed("new content exceeds %d bytes", MaxFileBytes)
 	}
 	madeDirs, err := ensureDir(gr, path.Dir(rel))
+	if err == nil {
+		err = refuseSymlinks(gr, path.Dir(rel)) // the temp file and rename land in this directory
+	}
 	if err != nil {
-		return failed("%v", err)
+		res := failed("%v", err)
+		res.Mutated = madeDirs
+		return res
 	}
 	if err := replace(gr, rel, expected, next, mode); err != nil {
 		res := failed("%v", err)
@@ -128,8 +133,10 @@ func (w *Workspace) writeChecked(ctx context.Context, grant api.Capability, p, e
 
 // precondition returns the current content (nil when absent) and the mode a
 // replacement keeps, or an error when the content is not what was expected.
+// No component of rel may be a symlink, so neither the target nor a parent
+// directory can alias a file outside the grant.
 func precondition(gr *os.Root, rel, expected string) ([]byte, fs.FileMode, error) {
-	info, err := gr.Lstat(rel)
+	err := refuseSymlinks(gr, rel)
 	if errors.Is(err, fs.ErrNotExist) {
 		if expected != Absent {
 			return nil, 0, fmt.Errorf("precondition failed: %q does not exist", rel)
@@ -139,8 +146,12 @@ func precondition(gr *os.Root, rel, expected string) ([]byte, fs.FileMode, error
 	if err != nil {
 		return nil, 0, err
 	}
+	info, err := gr.Lstat(rel)
+	if err != nil {
+		return nil, 0, err
+	}
 	if !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("refusing to write %q: not a regular file (symlinks are not written through)", rel)
+		return nil, 0, fmt.Errorf("refusing to write %q: not a regular file", rel)
 	}
 	current, err := readRegular(gr, rel)
 	if err != nil {

@@ -83,8 +83,8 @@ func (w *Workspace) readFile(ctx context.Context, inv Invocation) (api.ToolResul
 }
 
 // Search returns the search tool (file.search): a literal or RE2 pattern over
-// regular files under one granted path. Symlinks are not followed, binary
-// files are skipped, and hits stop at a fixed bound that the output states.
+// regular files under one granted path. A path crossing a symlink is refused,
+// links and hard-linked files under it are skipped, binary files are skipped, and hits stop at a fixed bound that the output states.
 func (w *Workspace) Search() Tool {
 	return &tool{
 		spec: api.ToolSpec{
@@ -125,6 +125,9 @@ func (w *Workspace) search(ctx context.Context, inv Invocation) (api.ToolResult,
 		return failed("%v", err), nil
 	}
 	defer gr.Close()
+	if err := refuseSymlinks(gr, rel); err != nil {
+		return failed("%v", err), nil
+	}
 	var hits []string
 	err = fs.WalkDir(gr.FS(), rel, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {

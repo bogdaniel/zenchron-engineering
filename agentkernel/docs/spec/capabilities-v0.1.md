@@ -120,23 +120,42 @@ existing directory. Tools: `ReadFile()` → `read_file` (`file.read`),
    component, case-insensitively (`rootFor`, `isGitMetadata`;
    `TestGitMetadataIsNeverReachable`).
 2. The workspace root is opened as an `os.Root`.
-3. `refuseSymlinkedRoot`: every component of the granted root is `Lstat`ed;
+3. `refuseSymlinks`: every component of the granted root is `Lstat`ed;
    a symlink anywhere in it is refused — a grant names a directory, not
    wherever a link points.
 4. The granted root is opened as a nested `os.Root`, and `sameDir` re-checks
    with `os.SameFile` that the held directory is still the named one, refusing
    a swap between check and open.
 5. Every subsequent open, stat, mkdir and rename goes through that `os.Root`,
-   which refuses at open time any path — symlinks included — resolving outside
-   the granted root. Symlinks that stay inside the grant are followed
-   (`TestSymlinkInsideGrantIsFollowed`).
+   which refuses at open time any path resolving outside the granted root.
+6. `refuseSymlinks` again, below the granted root: every component of the
+   requested path is `Lstat`ed through the `os.Root` before any open, and a
+   symlink in any of them is refused, including one that stays inside the
+   grant. `os.Root` alone follows in-root links, so without this a link that
+   never names `.git` (`meta -> .git`, `cfg -> .git/config`,
+   `src/x -> ../.git`) would alias repository metadata past the lexical check
+   in step 1 (`TestSymlinkAliasToGitMetadataIsRefused`,
+   `TestSymlinkInsideGrantIsRefused`).
+7. `checkOpened`, after the open: the opened file must be a regular file and
+   `os.SameFile` with an `Lstat` of its name, so a final component swapped for
+   a link or another file between step 6 and the open is refused
+   (`TestCheckOpenedRefusesSwappedFile`).
+8. Hard links: on unix a regular file whose link count (`syscall.Stat_t.Nlink`)
+   exceeds 1 is neither read nor written, and `search` skips it, because a
+   second name aliases a file such as `.git/config` with no symlink anywhere
+   (`TestHardLinkAliasToGitMetadataIsRefused`). Off unix the link count is not
+   visible and hard links are **not** refused; that is a known limitation.
 
 Reads accept only regular files of at most `tools.MaxFileBytes` (8 MiB).
 
 Not guarded: the workspace root path itself may be a symlink (it is resolved
-by `os.Stat`/`os.OpenRoot` at use); credential-shaped names and contents are
-**not** refused by the kernel's tools (the root `runtime.ToolBroker` refuses
-them through `GuardCandidate`; a Gate B gap, see `docs/integration-plan.md`).
+by `os.Stat`/`os.OpenRoot` at use); hard links off unix (step 8); a parent
+directory swapped for a link by a concurrent same-user process between step 6
+and the open (step 7 rechecks only the final component, and an `Lstat` through
+the swapped parent agrees with the open); credential-shaped names and contents
+are **not** refused by the kernel's tools (the root `runtime.ToolBroker`
+refuses them through `GuardCandidate`; a Gate B gap, see
+`docs/integration-plan.md`).
 
 ### 4.2 Snapshot guard
 
@@ -151,8 +170,9 @@ isolation.
 `read_file` output starts with `path`, `digest` (sha256 of the whole file —
 the write precondition) and `lines a-b of n`, then the requested 1-based
 inclusive range. `search` takes a literal or RE2 pattern of 1–1024 bytes, walks
-regular files under one path without following symlinks or entering `.git`
-directories, skips binary (NUL),
+regular files under one path, refusing a path that crosses a symlink (step 6)
+and never following a symlink, entering a `.git` directory or reading a
+hard-linked file below it; it skips binary (NUL),
 unreadable and oversized files, echoes at most 300 bytes per line and stops at
 1000 hits, stating that the result is incomplete.
 
@@ -164,14 +184,18 @@ the digest the caller last read, or `absent` (create only; `apply_patch`
 requires an existing file and exactly one non-empty occurrence of `old_text`).
 `Workspace.writeChecked`:
 
-1. refuses a non-regular target (symlinks are never written through);
+1. refuses a symlink in any component of the target path (§4.1 step 6) and
+   a non-regular or hard-linked target (steps 7–8), so neither the target nor
+   a parent directory can alias a file outside the grant;
 2. compares the current digest with `expected_sha256`; a mismatch fails with
    "re-read before writing" and never overwrites;
-3. bounds new content to 8 MiB; creates missing parent directories;
+3. bounds new content to 8 MiB; creates missing parent directories, then
+   re-checks the whole parent chain for symlinks before staging;
 4. writes a `.zk-<16 hex>.tmp` file with `O_EXCL` in the same directory,
    fsyncs and closes it;
-5. re-checks the precondition, then renames over the target. On any failure
-   the temporary file is removed.
+5. re-checks the precondition, including step 1, so the rename target is
+   still not a symlink, then renames over the target. On any failure the
+   temporary file is removed.
 
 A writer racing between step 5's check and the rename is not excluded; the
 window is narrowed, not closed. `Mutated` is true after a successful write, and
@@ -246,9 +270,14 @@ Stores (`storage`):
 
 ## 9. Isolation claim
 
-**Unproven, development-grade.** The guards above narrow, but do not close,
-races with a concurrent same-user process. `Provenance.Isolation` is the
-chosen binding's host statement (`unproven` or `host_proven`); the kernel
+**Unproven, development-grade.** The guards above refuse every symlink and
+(on unix) every hard-linked file on a requested path, but they narrow rather
+than close races with a concurrent same-user process: one that swaps a parent
+directory for a link between the per-component check and the open can still
+redirect that open to another file inside the granted root (repository
+metadata included, when the grant covers it), and off unix a hard link is
+not detected (§4.1). `Provenance.Isolation` is the chosen binding's host
+statement (`unproven` or `host_proven`); the kernel
 itself never claims protected execution.
 `Constraints.RequireHostProvenIsolation` makes routing admit only
 `host_proven` bindings. A host that needs protected execution must supply it

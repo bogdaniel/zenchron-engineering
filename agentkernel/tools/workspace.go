@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,10 +21,12 @@ const MaxFileBytes = 8 << 20
 //
 // Its path guards are development-grade, not protected isolation, and a host
 // must report them as such: every path is checked lexically against the
-// granted roots, a granted root may not cross a symlink, and every open goes
-// through os.Root, which refuses at open time any path (symlinks included)
-// that would resolve outside the granted root. That narrows, but does not
-// close, races with a concurrent same-user process.
+// granted roots and .git, no component of the granted root or of the path
+// below it may be a symlink, a regular file with more than one hard link is
+// refused (unix only), every open goes through os.Root, and an opened file is
+// rechecked to be the one its name still holds. A concurrent same-user process
+// that swaps a parent directory for a link between the component check and the
+// open is not excluded: the window is narrowed, not closed.
 type Workspace struct {
 	root     string
 	snapshot *SnapshotGuard
@@ -69,7 +72,7 @@ func (w *Workspace) open(grant api.Capability, p string) (*os.Root, string, stri
 		return nil, "", "", err
 	}
 	defer ws.Close()
-	if err := refuseSymlinkedRoot(ws, root); err != nil {
+	if err := refuseSymlinks(ws, root); err != nil {
 		return nil, "", "", err
 	}
 	gr, err := ws.OpenRoot(root)
@@ -88,21 +91,25 @@ func (w *Workspace) open(grant api.Capability, p string) (*os.Root, string, stri
 	return gr, root, rel, nil
 }
 
-// refuseSymlinkedRoot refuses a granted root reached through a symlink: the
-// grant names a directory, not wherever a link currently points.
-func refuseSymlinkedRoot(ws *os.Root, root string) error {
-	if root == "." {
+// refuseSymlinks Lstats every component of p inside r and refuses a symlink
+// in any of them: a grant names directories and files, not wherever a link
+// points, and os.Root alone follows links that stay inside it (a link "meta"
+// to .git would otherwise alias repository metadata). A missing component
+// stops the walk with an fs.ErrNotExist error once every component before it
+// has passed.
+func refuseSymlinks(r *os.Root, p string) error {
+	if p == "." {
 		return nil
 	}
-	parts := strings.Split(root, "/")
+	parts := strings.Split(p, "/")
 	for i := range parts {
 		prefix := strings.Join(parts[:i+1], "/")
-		info, err := ws.Lstat(prefix)
+		info, err := r.Lstat(prefix)
 		if err != nil {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("granted root %q crosses symlink %q", root, prefix)
+			return fmt.Errorf("%q crosses symlink %q", p, prefix)
 		}
 	}
 	return nil
@@ -125,8 +132,12 @@ func sameDir(ws, gr *os.Root, root string) error {
 	return nil
 }
 
-// readRegular reads a regular file inside gr, bounded by MaxFileBytes.
+// readRegular reads a regular file inside gr, bounded by MaxFileBytes, with
+// no symlink in its path and no other hard link to it.
 func readRegular(gr *os.Root, rel string) ([]byte, error) {
+	if err := refuseSymlinks(gr, rel); err != nil {
+		return nil, err
+	}
 	f, err := gr.Open(rel)
 	if err != nil {
 		return nil, err
@@ -136,8 +147,8 @@ func readRegular(gr *os.Root, rel string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%q is not a regular file", rel)
+	if err := checkOpened(gr, rel, info); err != nil {
+		return nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
 	if err != nil {
@@ -147,6 +158,26 @@ func readRegular(gr *os.Root, rel string) ([]byte, error) {
 		return nil, fmt.Errorf("%q exceeds %d bytes", rel, MaxFileBytes)
 	}
 	return data, nil
+}
+
+// checkOpened refuses an opened file that is not a singly linked regular file
+// still named by rel: a final component swapped for a link between
+// refuseSymlinks and the open no longer matches its own Lstat.
+func checkOpened(gr *os.Root, rel string, opened fs.FileInfo) error {
+	if !opened.Mode().IsRegular() {
+		return fmt.Errorf("%q is not a regular file", rel)
+	}
+	named, err := gr.Lstat(rel)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(opened, named) {
+		return fmt.Errorf("%q changed while it was opened", rel)
+	}
+	if hardLinked(opened) {
+		return fmt.Errorf("%q has another hard link; it may alias a file outside the grant", rel)
+	}
+	return nil
 }
 
 // snapshotNote is empty when the workspace still matches the bound manifest.

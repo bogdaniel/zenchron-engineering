@@ -24,7 +24,6 @@ func escapeFixture(t *testing.T) *fixture {
 	symlink(t, filepath.Join(f.outside, "outside.txt"), filepath.Join(f.root, "src", "out")) // absolute, outside workspace
 	symlink(t, f.outside, filepath.Join(f.root, "src", "dirlink"))                           // parent directory escape
 	symlink(t, f.outside, filepath.Join(f.root, "linked"))                                   // granted root itself a link
-	symlink(t, "a.txt", filepath.Join(f.root, "src", "alias"))                               // stays inside the grant
 	return f
 }
 
@@ -64,15 +63,6 @@ func TestPathGuardsRefuseEscapesWithoutMutation(t *testing.T) {
 		}
 	}
 	sameDigests(t, before, digests(t, f.root, f.outside))
-}
-
-func TestSymlinkInsideGrantIsFollowed(t *testing.T) {
-	f := escapeFixture(t)
-	env := f.env(api.ModeReadOnly, grant("r", api.CapabilityFileRead, "src"))
-	res, err := f.broker.Dispatch(context.Background(), call("read_file", map[string]string{"path": "src/alias"}), env)
-	if err != nil || res.Status != api.ToolOK || !strings.HasSuffix(res.Output, "inside\n") {
-		t.Fatalf("in-grant symlink: %+v, %v", res, err)
-	}
 }
 
 func TestWritePreconditionNeverOverwritesNewerContent(t *testing.T) {
