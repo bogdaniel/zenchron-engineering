@@ -40,6 +40,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ControlSocketName is the endpoint file inside the operator state directory.
@@ -114,6 +116,11 @@ type ControlRequest struct {
 	// bounded by orchestration.MaxBatchItems where it is admitted, and by the
 	// request-line ceiling before that.
 	Issues []int `json:"issues,omitempty"`
+	// WorkGraph is a proposed WorkGraph revision (#472). It carries only the
+	// graph's name, the revision it proposes and its units: the repository,
+	// agent and composition time come from the supervisor, so a proposer
+	// cannot state them.
+	WorkGraph *orchestration.WorkGraphProposal `json:"work_graph,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
@@ -187,6 +194,9 @@ const (
 	// ControlOrchestrate creates (or finds) one orchestration batch: Issues,
 	// Agent, Repository and Operator (#470).
 	ControlOrchestrate = "orchestrate"
+	// ControlWorkGraph adopts (or finds) one WorkGraph revision: WorkGraph,
+	// Repository and Agent.
+	ControlWorkGraph = "workgraph"
 	// ControlCommandControllerSnapshot asks the running controller for ONE
 	// coherent observation of itself: which generation it is, whether it holds
 	// the controller role, and whether it is admitting work. It is read-only

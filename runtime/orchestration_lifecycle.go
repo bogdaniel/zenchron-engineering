@@ -24,6 +24,15 @@ func orchestrationLifecycleCoherent(run EngineeringRun, snapshot RunSnapshot, op
 		if (row.State == Leased || row.State == OperationCancelled) && journal.State == Pending {
 			continue
 		}
+		// A retry lease is acquired before StartWithin increments the physical
+		// attempt identity and before the new operation.before is journalled.
+		// During that narrow boundary the row is Leased while the journal still
+		// proves the previous attempt failed. Matching attempt identity is what
+		// makes this acquisition-only transition unambiguous; a cancelled row
+		// paired with a failed journal remains a durable disagreement.
+		if row.State == Leased && journal.State == OperationFailed && row.AttemptIdentity == journal.AttemptIdentity {
+			continue
+		}
 		if row.State != journal.State || row.AttemptIdentity != journal.AttemptIdentity {
 			return fmt.Errorf("transitioning: operation %s row %s/%d and journal %s/%d disagree", id, row.State, row.AttemptIdentity, journal.State, journal.AttemptIdentity)
 		}

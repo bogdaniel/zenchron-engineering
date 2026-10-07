@@ -439,6 +439,70 @@ CREATE TABLE verification_permits (
 	revision INTEGER NOT NULL,
 	document TEXT NOT NULL
 );
+`, `
+-- Typed inter-worker communication (#473). Insert-only, like the handoffs: a
+-- message is immutable once admitted, and a correction is a NEW row naming
+-- the one it supersedes. The partial unique index is the "superseded at most
+-- once" rule, so history stays a chain rather than a fork. seq is admission
+-- order, which is the order every projection reads.
+CREATE TABLE orchestration_messages (
+	seq                INTEGER PRIMARY KEY,
+	id                 TEXT NOT NULL UNIQUE,
+	scope              TEXT NOT NULL,
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	operation_id       TEXT NOT NULL,
+	attempt            INTEGER NOT NULL,
+	supersedes         TEXT,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_messages_by_scope ON orchestration_messages(scope, seq);
+CREATE UNIQUE INDEX orchestration_messages_supersedes ON orchestration_messages(supersedes) WHERE supersedes IS NOT NULL;
+-- An invocation's message report the runtime decided it can never admit,
+-- keyed by the invocation, so it is settled once.
+CREATE TABLE orchestration_message_refusals (
+	id                TEXT PRIMARY KEY,
+	scope             TEXT NOT NULL,
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_message_refusals_by_scope ON orchestration_message_refusals(scope);
+`, `
+-- The WorkGraph (#472). Both tables are insert-only, and neither stores a unit
+-- state: a revision document is immutable, an activation is written once, and
+-- every unit state is projected from these two plus the child runs on each read.
+--
+-- A revision is an APPEND. Adopting revision N+1 leaves N and every activation
+-- exactly as they were, which is what keeps a mutation from resetting a budget
+-- a child run has already consumed.
+CREATE TABLE work_graph_revisions (
+	graph_id          TEXT NOT NULL,
+	revision          INTEGER NOT NULL,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL,
+	PRIMARY KEY (graph_id, revision)
+);
+-- One row per unit whose child run this graph has claimed, with the exact
+-- upstream outputs it was activated against. The primary key is what makes
+-- child association idempotent across replay and recovery: a unit is activated
+-- once, so a lost reply or a crashed pass cannot produce a second child run.
+--
+-- batch_id references the #470 batch that owns the child run - the one whose
+-- identity binds this graph, this unit and this exact input set - so the batch
+-- is durable before any activation can name it. run_id carries NO foreign key:
+-- the batch decides the child identity, and the existing orchestration pass
+-- creates that row afterwards.
+CREATE TABLE work_graph_activations (
+	graph_id            TEXT NOT NULL,
+	unit_id             TEXT NOT NULL,
+	batch_id            TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id              TEXT NOT NULL,
+	inputs_digest       TEXT NOT NULL,
+	activated_unix_nano INTEGER NOT NULL,
+	PRIMARY KEY (graph_id, unit_id)
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

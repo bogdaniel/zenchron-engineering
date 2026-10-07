@@ -31,6 +31,48 @@ type Batch struct {
 	RequestedBy   string      `json:"requested_by,omitempty"`
 	CreatedAt     time.Time   `json:"created_at"`
 	Items         []BatchItem `json:"items"`
+	// Origin names the WorkGraph unit execution this batch exists to perform
+	// (#472), and the EXACT upstream outputs it was created against.
+	//
+	// It is what makes a graph unit's child run its own. Without it a batch's
+	// identity was the issue alone, so a unit would have silently reused
+	// whatever run some earlier, unrelated orchestration of that issue had
+	// already produced - a run that never executed against these inputs - and
+	// read as satisfied by it.
+	//
+	// It is a POINTER member of the identity digest and omitempty, so a direct
+	// operator batch digests, and reads back, exactly as it did before work
+	// graphs existed.
+	Origin *BatchOrigin `json:"origin,omitempty"`
+}
+
+// BatchOrigin is one WorkGraph unit execution: which unit, under which graph,
+// against which exact admitted upstream outputs.
+//
+// Inputs is the whole input set, not its digest, because the batch is the
+// durable record the child run's execution is reconstructed from: the inputs it
+// was activated against have to be readable, not merely checkable.
+type BatchOrigin struct {
+	GraphID string         `json:"graph_id"`
+	UnitID  string         `json:"unit_id"`
+	Inputs  WorkUnitInputs `json:"inputs,omitempty"`
+}
+
+// canonical is the origin with its input set in canonical order. The identity
+// below digests this rather than the member directly: the inputs are a SET, and
+// an identity that moved with the order a caller happened to build them in would
+// name two batches for one unit execution.
+func (o BatchOrigin) canonical() BatchOrigin {
+	o.Inputs = o.Inputs.canonical()
+	return o
+}
+
+// Validate refuses an origin that does not name one unit execution.
+func (o BatchOrigin) Validate() error {
+	if strings.TrimSpace(o.GraphID) == "" || strings.TrimSpace(o.UnitID) == "" {
+		return errors.New("a work graph batch origin names its graph and its unit")
+	}
+	return o.Inputs.Validate()
 }
 
 // BatchItem is one explicit issue and the one child run that performs it.
@@ -66,11 +108,30 @@ func NormalizeIssues(issues []int) ([]int, error) {
 	return out, nil
 }
 
-// BatchID is the deterministic identity of a request: the same repository,
-// agent and issue set always name the same batch. That is what makes a lost
-// control reply harmless - sending the same request again finds the batch it
-// already created instead of creating a second fleet.
+// BatchID is the deterministic identity of a direct operator request: the same
+// repository, agent and issue set always name the same batch. That is what makes
+// a lost control reply harmless - sending the same request again finds the batch
+// it already created instead of creating a second fleet.
 func BatchID(repository, agentID string, issues []int) (string, error) {
+	return batchIdentity(repository, agentID, issues, nil)
+}
+
+// WorkUnitBatchID is the deterministic identity of ONE WorkGraph unit execution
+// (#472): the same unit of the same graph against the same exact inputs always
+// names the same batch, and a different unit, graph or input set never does.
+//
+// That is the whole correctness property. Replaying a crashed activation finds
+// the batch and child run it already created; nothing else can, so no unit can
+// be satisfied by work performed for something other than itself against other
+// inputs.
+func WorkUnitBatchID(repository, agentID string, issue int, origin BatchOrigin) (string, error) {
+	if err := origin.Validate(); err != nil {
+		return "", err
+	}
+	return batchIdentity(repository, agentID, []int{issue}, &origin)
+}
+
+func batchIdentity(repository, agentID string, issues []int, origin *BatchOrigin) (string, error) {
 	normalized, err := NormalizeIssues(issues)
 	if err != nil {
 		return "", err
@@ -78,11 +139,17 @@ func BatchID(repository, agentID string, issues []int) (string, error) {
 	if strings.TrimSpace(repository) == "" || strings.TrimSpace(agentID) == "" {
 		return "", errors.New("an orchestration batch needs a repository and an execution agent")
 	}
+	identity := origin
+	if origin != nil {
+		canonical := origin.canonical()
+		identity = &canonical
+	}
 	digest, err := domain.Digest(struct {
-		Repository string `json:"repository"`
-		Agent      string `json:"agent"`
-		Issues     []int  `json:"issues"`
-	}{strings.ToLower(repository), agentID, normalized})
+		Repository string       `json:"repository"`
+		Agent      string       `json:"agent"`
+		Issues     []int        `json:"issues"`
+		Origin     *BatchOrigin `json:"origin,omitempty"`
+	}{strings.ToLower(repository), agentID, normalized, identity})
 	if err != nil {
 		return "", err
 	}
@@ -105,7 +172,17 @@ func (b Batch) Validate() error {
 		runs[item.RunID] = true
 		issues = append(issues, item.Issue)
 	}
-	id, err := BatchID(b.Repository, b.AgentID, issues)
+	if b.Origin != nil {
+		if err := b.Origin.Validate(); err != nil {
+			return err
+		}
+		// A unit performs ONE issue. An origin over several would claim one
+		// unit execution produced several issues' output.
+		if len(b.Items) != 1 {
+			return fmt.Errorf("orchestration batch %s names a work graph unit and %d issues; a unit performs one", b.ID, len(b.Items))
+		}
+	}
+	id, err := batchIdentity(b.Repository, b.AgentID, issues, b.Origin)
 	if err != nil {
 		return err
 	}

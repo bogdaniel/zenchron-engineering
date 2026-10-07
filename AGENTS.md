@@ -96,6 +96,9 @@ The operator-facing system is documented, not inferred:
   local control endpoint
 - `docs/agents.md` — named execution agents, trust modes, provenance and the
   provider-handoff refusal
+- `docs/workgraph.md` — the durable operational dependency graph: work units,
+  dependency edges satisfied by admitted handoffs, the runnable frontier, and
+  deterministic graph mutation validation
 - `docs/planning.md` — operator-defined agent profiles, instruction packs,
   context policies, plan templates, and the plan approval boundary
 - `docs/spec/planning-v0.1.md` — the normative M2 planning artifacts
@@ -103,7 +106,7 @@ The operator-facing system is documented, not inferred:
   `docs/running-multiple-tasks.md`, `docs/github-feedback.md`,
   `docs/configuration.md`, `docs/troubleshooting.md`
 
-Seven distinctions in that surface are frequently collapsed by a reader in a
+Eight distinctions in that surface are frequently collapsed by a reader in a
 hurry, and collapsing any of them is a defect:
 
 - **agent id != provider kind != trust mode.** They are three separate facts.
@@ -114,6 +117,14 @@ hurry, and collapsing any of them is a defect:
   specialization of a worker; an execution agent is the installed worker. One
   agent backs several profiles, and one role resolves to whichever profile is
   eligible.
+- **EngineeringPlan != WorkGraph.** A plan answers which stages one objective
+  requires, resolves them to profiles and owns the approval boundary. A
+  WorkGraph is the durable operational dependency graph that advances existing
+  issue-backed work units through admitted handoffs. Neither is the other's
+  storage, and neither restates a fact the other owns. A `WorkUnit` is also not
+  a `PlanStage`: a unit performs one existing issue as an ordinary
+  `EngineeringRun`, and its dependency is satisfied by an admitted
+  `EngineeringHandoff`, never by a provider exiting.
 - **EngineeringPlanTemplate != EngineeringPlan.** A template is reusable
   planning input with no governance or execution authority. A plan is a
   validated, approved, immutable revision.
