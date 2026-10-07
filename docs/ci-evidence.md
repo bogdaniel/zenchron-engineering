@@ -26,7 +26,8 @@ full-suite `go` check, strictly, on every merge (`DefaultTrustPolicy` in
 refuses the ruleset and adoption fails closed. That is correct behaviour, but it
 would stop adoption. Separating `main_head` from `trusted_main`, and letting
 adoption consume `trusted_main`, changes the frozen M1-B trust root. It needs an
-ADR before the PR gate can drop the full suite (stages 4, 5 and 7).
+ADR before the PR gate can drop the full suite (stages 4, 5 and 7). That ADR is
+ADR-0007, proposed in #528.
 
 ## Baseline (stage 0)
 
@@ -47,18 +48,28 @@ serial cost of each domain. Locally, `scheduler` takes 180 s, `orchestration`
 domain takes 507 s instead of 127 s, which is why the race escalation runs as
 its own job.
 
-The 25 most recent merged PRs, replayed through the selector:
+The 30 most recent merged PRs (#461 to #527), replayed through the selector.
+CI times are estimated as half the local times; race is estimated at four times
+the plain run:
 
-- docs-only and CI-only PRs select only the guards;
-- narrow fixes select 70–300 tests, about 1.5–3 minutes of CI time;
-- the feature PRs of the #470/#472/#473/#492 kind each touch five to ten domains.
-  They select 500–1100 tests, 4–7 minutes of CI time, which is still about half
-  of today's full run;
-- one PR in the 25 changed an unclassified dependency (`domain/`, `schemas/`)
-  and failed safe to the whole package.
+- 9 PRs were docs-only, CI-only, or outside `runtime`, and selected only the
+  guards;
+- 10 narrow and medium `runtime` PRs selected 75–850 tests, about 0.5–5 minutes
+  of CI time for the plain T1 run;
+- 11 PRs touched `runtime/operations.go` (or an unclassified dependency such as
+  the new `execution/` package) and ran the whole `runtime` package, about 11
+  minutes;
+- the race escalation is the long pole: about 2–6 minutes for narrow PRs, and
+  10–20 minutes for wide ones.
 
-So the 2–5 minute target holds for narrow PRs. Wide PRs gain less, because they
-legitimately need wide evidence.
+So the 2–5 minute target holds today for narrow PRs that avoid
+`operations.go`. Two things stand between that and most PRs:
+
+- **Splitting `operations.go` (#495).** It is the biggest latency lever. Until
+  it lands, more than a third of runtime PRs will run the whole package, and
+  that cost is honest, not overhead.
+- **How race escalation gates merging.** That is a stage-7 decision for
+  ADR-0007.
 
 ## The impact registry
 
@@ -66,20 +77,25 @@ legitimately need wide evidence.
 The workflow has no path list of its own. Each domain names the source globs
 whose change selects it, and the test-file globs (or test names) that make up
 its evidence. `race: true` marks a high-risk domain, which also runs its tests
-under `-race`. `always: true` marks the source-scan guards.
+under `-race`. `always: true` marks the source-scan guards. `whole` lists
+cross-domain hotspots. Today that is only `runtime/operations.go`, which
+recent PRs changed for review, provider and toolchain semantics alike.
 
 Selection is deterministic. Each changed path is handled by the first rule that
 matches:
 
 1. **Inert** paths, such as docs and Markdown, select no behavioural evidence.
 2. A test file outside `runtime` is covered, because its package runs whole.
-3. A changed `runtime` test file runs its own tests. A test file with no
-   tests of its own is a shared helper, so it fails safe to the whole package.
-4. A path matched by a domain's sources selects that domain.
-5. An unclassified path in `runtime`, or in a package `runtime` imports, **fails
-   safe** to the whole `runtime` package.
-6. Any other path inside a package is covered by that package's whole run.
-7. Anything else, such as `go.mod`, fails safe to the whole package.
+3. A **hotspot** runs the whole `runtime` package.
+4. A `runtime` test file with no tests of its own is a shared helper, so it
+   fails safe to the whole package.
+5. A changed or deleted `runtime` test file selects every domain whose `tests`
+   it matches. Those domains then run in full, including their race policy.
+   A source path selects every domain whose `sources` it matches.
+6. Any other path in `runtime` (including a test file no domain owns), or in a
+   package `runtime` imports, **fails safe** to the whole `runtime` package.
+7. Any other path inside a package is covered by that package's whole run.
+8. Anything else, such as `go.mod`, fails safe to the whole package.
 
 The job prints why each domain was selected:
 
@@ -97,7 +113,7 @@ it.
 
 The conformance tests in `ci/evidence` run in T1 on every PR. They fail when:
 
-- a `runtime` source file is not classified by any domain;
+- a `runtime` source file is not classified by any domain or hotspot;
 - a `runtime` test file is not reachable from any domain;
 - a pattern matches no file, a named test does not exist, or a domain selects
   no tests.

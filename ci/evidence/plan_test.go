@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,15 +16,16 @@ func fixture() (Registry, Repo) {
 		Domains: []Domain{
 			{Name: "guards", Why: "w", Always: true, Run: []string{"TestGuard"}},
 			{Name: "handoff", Why: "w", Sources: []string{"runtime/handoff_*.go", "orchestration/handoff.go"}, Tests: []string{"runtime/*handoff*_test.go"}},
-			{Name: "controller", Why: "w", Race: true, Sources: []string{"runtime/controller*.go"}, Tests: []string{"runtime/controller_*_test.go"}},
+			{Name: "controller", Why: "w", Race: true, Sources: []string{"runtime/controller*.go"}, Tests: []string{"runtime/controller_*_test.go", "runtime/shutdown_*_test.go"}},
 		},
 	}
 	repo := Repo{
 		TestsInFile: map[string][]string{
-			"runtime/guard_test.go":            {"TestGuard"},
-			"runtime/handoff_repair_test.go":   {"TestHandoffRepair"},
-			"runtime/controller_crash_test.go": {"TestControllerCrash"},
-			"runtime/helpers_test.go":          {},
+			"runtime/guard_test.go":              {"TestGuard"},
+			"runtime/handoff_repair_test.go":     {"TestHandoffRepair"},
+			"runtime/controller_crash_test.go":   {"TestControllerCrash"},
+			"runtime/helpers_test.go":            {},
+			"runtime/shutdown_semantics_test.go": {"TestShutdown"},
 		},
 		DepDirs:     []string{"orchestration", "domain"},
 		PackageDirs: []string{"runtime", "orchestration", "domain", "cmd/zenchron-engineering"},
@@ -76,17 +79,46 @@ func TestInertAndOtherPackageChangesSelectOnlyAlwaysEvidence(t *testing.T) {
 
 func TestARaceDomainEscalatesOnlyItsOwnTests(t *testing.T) {
 	got := plan("runtime/controller_succession.go", "runtime/handoff_slot.go")
-	if !slices.Equal(got.Race, []string{"TestControllerCrash"}) {
+	if !slices.Equal(got.Race, []string{"TestControllerCrash", "TestShutdown"}) {
 		t.Fatalf("race = %v", got.Race)
 	}
 }
 
-func TestAChangedTestFileRunsItsOwnTests(t *testing.T) {
-	if got := plan("runtime/handoff_repair_test.go"); !slices.Contains(got.Run, "TestHandoffRepair") || got.Whole {
+func TestAChangedTestFileSelectsItsWholeDomainAndRacePolicy(t *testing.T) {
+	// The file matches the domain's tests, not its sources.
+	got := plan("runtime/shutdown_semantics_test.go")
+	if got.Whole || !slices.Equal(got.Run, []string{"TestControllerCrash", "TestGuard", "TestShutdown"}) ||
+		!slices.Equal(got.Race, []string{"TestControllerCrash", "TestShutdown"}) {
 		t.Fatalf("plan = %+v", got)
 	}
-	if got := plan("runtime/deleted_test.go"); got.Whole || !slices.Equal(got.Run, []string{"TestGuard"}) {
+	// Deleted: the file no longer exists, but its domain still owns the path.
+	if got := plan("runtime/shutdown_gone_test.go"); got.Whole || !slices.Contains(got.Race, "TestControllerCrash") {
 		t.Fatalf("deleted test file: plan = %+v", got)
+	}
+	if got := plan("runtime/unowned_test.go"); !got.Whole {
+		t.Fatalf("test file no domain owns: plan = %+v, want whole", got)
+	}
+}
+
+func TestAHotspotRunsTheWholePackage(t *testing.T) {
+	reg, repo := fixture()
+	// The hotspot is also a controller source: being classified must not
+	// narrow it back to one domain.
+	reg.Whole = []string{"runtime/controller_operations.go"}
+	if got := PlanEvidence(reg, repo, []string{"runtime/controller_operations.go"}); !got.Whole {
+		t.Fatalf("plan = %+v, want whole", got)
+	}
+}
+
+func TestTestFunctionsReadsDeclarationsNotText(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "x_test.go")
+	source := "package x\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\n\nfunc TestMultiline(\n\tt *testing.T,\n) {}\n\nfunc TestMain(m *testing.M) {}\n\nfunc helper(t *testing.T) {}\n\n// func TestInComment(t *testing.T) {}\n"
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := testFunctions(file)
+	if err != nil || !slices.Equal(got, []string{"TestOne", "TestMultiline"}) {
+		t.Fatalf("tests = %v, %v", got, err)
 	}
 }
 

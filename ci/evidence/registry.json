@@ -14,6 +14,9 @@
     ".gitignore",
     "LICENSE"
   ],
+  "whole": [
+    "runtime/operations.go"
+  ],
   "domains": [
     {
       "name": "guards",
@@ -79,7 +82,6 @@
         "runtime/control_session.go",
         "runtime/doctor.go",
         "runtime/operator.go",
-        "runtime/operations.go",
         "runtime/watch*.go",
         "runtime/connectivity.go",
         "runtime/fleet.go",
@@ -164,11 +166,13 @@
         "runtime/communication_*.go",
         "runtime/orchestration_handoff.go",
         "orchestration/handoff.go",
-        "orchestration/communication*.go"
+        "orchestration/communication*.go",
+        "runtime/typed_result_slots.go"
       ],
       "tests": [
         "runtime/*handoff*_test.go",
-        "runtime/communication_test.go"
+        "runtime/communication_test.go",
+        "runtime/typed_result_*_test.go"
       ]
     },
     {
@@ -224,7 +228,10 @@
         "runtime/agent_*.go",
         "runtime/agents.go",
         "runtime/adapters.go",
-        "runtime/transport_chatter.go"
+        "runtime/transport_chatter.go",
+        "runtime/execution_aliases.go",
+        "runtime/execution_scratch.go",
+        "runtime/toolchain_probe.go"
       ],
       "tests": [
         "runtime/provider_*_test.go",
@@ -242,12 +249,14 @@
       "why": "Attempt identity, cancellation and termination provenance.",
       "race": true,
       "sources": [
-        "runtime/attempt_*.go"
+        "runtime/attempt_*.go",
+        "runtime/execution_scratch.go"
       ],
       "tests": [
         "runtime/attempt_*_test.go",
         "runtime/execution_*_test.go",
-        "runtime/validation_scratch_test.go"
+        "runtime/validation_scratch_test.go",
+        "runtime/cancellation_*_test.go"
       ]
     },
     {
@@ -259,7 +268,8 @@
         "runtime/semantic_assurance.go",
         "runtime/typed_result_capability.go",
         "runtime/reviewer_result.go",
-        "runtime/review_continuation.go"
+        "runtime/review_continuation.go",
+        "runtime/typed_result_slots.go"
       ],
       "tests": [
         "runtime/verification_*_test.go",
@@ -267,7 +277,8 @@
         "runtime/semantic_*_test.go",
         "runtime/reviewer_*_test.go",
         "runtime/review_continuation_test.go",
-        "runtime/nested_verification_test.go"
+        "runtime/nested_verification_test.go",
+        "runtime/typed_result_*_test.go"
       ]
     },
     {
@@ -332,7 +343,8 @@
       "why": "The tool broker, tool surface and sandbox.",
       "sources": [
         "runtime/tool_*.go",
-        "runtime/sandbox.go"
+        "runtime/sandbox.go",
+        "runtime/toolchain_probe.go"
       ],
       "tests": [
         "runtime/tool_*_test.go",

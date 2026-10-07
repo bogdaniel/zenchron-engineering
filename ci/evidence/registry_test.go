@@ -36,8 +36,8 @@ func TestEveryFocusedSourceIsClassified(t *testing.T) {
 			!strings.HasSuffix(f, ".go") || strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		if !slices.ContainsFunc(reg.Domains, func(d Domain) bool { return matchesAny(d.Sources, f) }) {
-			t.Errorf("%s is not classified by any domain's sources", f)
+		if !matchesAny(reg.Whole, f) && !slices.ContainsFunc(reg.Domains, func(d Domain) bool { return matchesAny(d.Sources, f) }) {
+			t.Errorf("%s is not classified by any domain's sources or as a hotspot", f)
 		}
 	}
 }
@@ -57,6 +57,11 @@ func TestNoRegistryRuleIsDead(t *testing.T) {
 	for _, tests := range repo.TestsInFile {
 		for _, name := range tests {
 			known[name] = true
+		}
+	}
+	for _, p := range reg.Whole {
+		if !anyFile(files, p) {
+			t.Errorf("hotspot %q matches no file", p)
 		}
 	}
 	for _, d := range reg.Domains {

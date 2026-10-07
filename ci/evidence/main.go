@@ -9,16 +9,17 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
 const testTimeout = "30m"
-
-var testFunc = regexp.MustCompile(`(?m)^func (Test\w*)\(\w+ \*testing\.T\)`)
 
 func main() {
 	base := flag.String("base", "origin/main", "revision the branch is compared against (merge base)")
@@ -123,13 +124,9 @@ func ScanRepo(root, focused string) (Repo, error) {
 		return repo, err
 	}
 	for _, file := range files {
-		source, err := os.ReadFile(file)
+		tests, err := testFunctions(file)
 		if err != nil {
 			return repo, err
-		}
-		tests := []string{}
-		for _, m := range testFunc.FindAllSubmatch(source, -1) {
-			tests = append(tests, string(m[1]))
 		}
 		repo.TestsInFile[focused+"/"+filepath.Base(file)] = tests
 	}
@@ -148,6 +145,26 @@ func ScanRepo(root, focused string) (Repo, error) {
 	}
 	repo.PackageDirs = moduleDirs(module, all, "")
 	return repo, nil
+}
+
+// testFunctions lists the top-level func TestXxx(*testing.T) declarations in a
+// test file, read through the Go parser rather than a pattern over its text.
+func testFunctions(file string) ([]string, error) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+	tests := []string{}
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") || len(fn.Type.Params.List) != 1 {
+			continue
+		}
+		if star, ok := fn.Type.Params.List[0].Type.(*ast.StarExpr); ok && types.ExprString(star) == "*testing.T" {
+			tests = append(tests, fn.Name.Name)
+		}
+	}
+	return tests, nil
 }
 
 func moduleDirs(module, importPaths, exclude string) []string {

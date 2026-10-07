@@ -25,7 +25,10 @@ type Registry struct {
 	// pull request. Every other package always runs whole in T1.
 	FocusedPackage string   `json:"focused_package"`
 	Inert          []string `json:"inert"`
-	Domains        []Domain `json:"domains"`
+	// Whole names cross-domain hotspots: files whose invariants span so many
+	// domains that any change to them runs the whole focused package.
+	Whole   []string `json:"whole"`
+	Domains []Domain `json:"domains"`
 }
 
 // Domain is an invariant/evidence domain: the sources whose change requires
@@ -60,7 +63,7 @@ func (r Registry) validate() error {
 	if r.FocusedPackage == "" {
 		return fmt.Errorf("registry names no focused package")
 	}
-	patterns := append([]string{}, r.Inert...)
+	patterns := append(append([]string{}, r.Inert...), r.Whole...)
 	seen := map[string]bool{}
 	for _, d := range r.Domains {
 		if d.Name == "" || seen[d.Name] {
@@ -159,25 +162,27 @@ func PlanEvidence(reg Registry, repo Repo, changed []string) Plan {
 			// they affect only their own package, which runs whole.
 			continue
 		}
-		if strings.HasSuffix(p, "_test.go") {
-			tests, exists := repo.TestsInFile[p]
-			switch {
-			case !exists:
-				plan.Reasons = append(plan.Reasons, "nothing to run: "+p+" was deleted")
-			case len(tests) == 0:
-				plan.Whole = true
-				plan.Reasons = append(plan.Reasons, "whole ./"+reg.FocusedPackage+": "+p+" is a shared test helper with no tests of its own")
-			default:
-				for _, t := range tests {
-					run[t] = true
-				}
-				plan.Reasons = append(plan.Reasons, fmt.Sprintf("own tests (%d): %s changed", len(tests), p))
-			}
+		if matchesAny(reg.Whole, p) {
+			plan.Whole = true
+			plan.Reasons = append(plan.Reasons, "whole ./"+reg.FocusedPackage+": "+p+" is a cross-domain hotspot")
 			continue
 		}
+		if tests, exists := repo.TestsInFile[p]; exists && len(tests) == 0 {
+			plan.Whole = true
+			plan.Reasons = append(plan.Reasons, "whole ./"+reg.FocusedPackage+": "+p+" is a shared test helper with no tests of its own")
+			continue
+		}
+		// A changed (or deleted) focused test file selects the domains it is
+		// evidence for, so their whole evidence and race policy run, not just
+		// the tests the file happens to declare.
+		isTest := strings.HasSuffix(p, "_test.go")
 		classified := false
 		for _, d := range reg.Domains {
-			if matchesAny(d.Sources, p) {
+			patterns := d.Sources
+			if isTest {
+				patterns = d.Tests
+			}
+			if matchesAny(patterns, p) {
 				because[d.Name] = append(because[d.Name], p+" changed")
 				classified = true
 			}
