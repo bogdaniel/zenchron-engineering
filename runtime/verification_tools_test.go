@@ -94,7 +94,7 @@ func TestNestedVerificationNativeShimAndCandidateRunShareCapacity(t *testing.T) 
 	dir, store, s := toolFixture(t, 1)
 	protected := nestedParent(t, store, s, "protected")
 	native := nestedParent(t, store, s, "native")
-	ctx := withVerificationExecution(context.Background(), s, ExecutionAttemptRef{protected.RunID, protected.ID, protected.AttemptIdentity}, dir)
+	ctx := withVerificationExecution(context.Background(), s, ExecutionAttemptRef{RunID: protected.RunID, OperationID: protected.ID, Attempt: protected.AttemptIdentity}, dir)
 	client := &controlledVerificationDocker{fakeCommandExecutor: fakeCommandExecutor{found: true}, started: make(chan struct{}), release: make(chan struct{})}
 	broker := ToolBroker{CandidateDir: t.TempDir(), Sandbox: DockerSandbox{Image: "sha256:test", StateDir: dir, Executor: client, Grace: time.Millisecond}}
 	finished := make(chan error, 1)
@@ -116,7 +116,7 @@ func TestNestedVerificationNativeShimAndCandidateRunShareCapacity(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(targetDir, "probe"), []byte("#!/bin/sh\nprintf native\nprintf ran >> "+shellSingleQuoted(marker)+"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	v := verificationExecution{s, ExecutionAttemptRef{native.RunID, native.ID, native.AttemptIdentity}, dir}
+	v := verificationExecution{s, ExecutionAttemptRef{RunID: native.RunID, OperationID: native.ID, Attempt: native.AttemptIdentity}, dir}
 	shim, err := prepareVerificationTools(v, []string{"probe"}, []string{os.Args[0], "-test.run=^TestVerificationBrokerHelper$", "--"}, targetDir+string(os.PathListSeparator)+os.Getenv("PATH"), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestNestedVerificationNativeShimAndCandidateRunShareCapacity(t *testing.T) 
 func TestNestedVerificationToolFailureIsAnObservationAndReleasesCapacity(t *testing.T) {
 	dir, store, s := toolFixture(t, 1)
 	parent := nestedParent(t, store, s, "producer")
-	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	v := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 	target := t.TempDir()
 	if err := os.WriteFile(filepath.Join(target, "test-tool"), []byte("#!/bin/sh\nprintf failing-test\nexit 7\n"), 0700); err != nil {
 		t.Fatal(err)

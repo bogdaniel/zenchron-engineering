@@ -27,7 +27,7 @@ func TestNestedVerificationWaitAccountingSurvivesRestartAndRecovery(t *testing.T
 			s := verificationScheduler(store, "controller", 10, 1)
 			s.Clock = clock
 			holder := nestedParent(t, store, s, "holder")
-			p, err := s.RequestVerification(ExecutionAttemptRef{holder.RunID, holder.ID, holder.AttemptIdentity}, "holder-tool", "holder-owner")
+			p, err := s.RequestVerification(ExecutionAttemptRef{RunID: holder.RunID, OperationID: holder.ID, Attempt: holder.AttemptIdentity}, "holder-tool", "holder-owner")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestNestedVerificationWaitAccountingSurvivesRestartAndRecovery(t *testing.T
 			parent := nestedParent(t, store, s, "budget")
 			recordVerificationOperation(t, store, parent, EventOperationBefore, clock.now)
 			clock.now = origin.Add(20 * time.Second)
-			q, err := s.RequestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, "waiting-tool", "waiting-owner")
+			q, err := s.RequestVerification(ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, "waiting-tool", "waiting-owner")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -125,7 +125,7 @@ func TestNestedVerificationOrphanedToolWorkIsChargedDuringExternalWait(t *testin
 	s.Clock = clock
 	parent := nestedParent(t, store, s, "producer")
 	recordVerificationOperation(t, store, parent, EventOperationBefore, origin)
-	p, err := s.RequestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, "tool", "tool-owner")
+	p, err := s.RequestVerification(ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, "tool", "tool-owner")
 	if err != nil {
 		t.Fatal(err)
 	}

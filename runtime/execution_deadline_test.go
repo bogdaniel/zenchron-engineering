@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 func deadlineScheduler(t *testing.T) (Scheduler, *steppingClock) {
@@ -236,7 +238,7 @@ func TestAProviderIsBoundedByTheOperationsRemainingAuthority(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("the invocation ran %s against 300ms of remaining authority", elapsed)
 	}
-	if result.Outcome == Succeeded {
+	if result.Outcome == execution.Succeeded {
 		t.Fatal("a provider stopped at its bound reported success")
 	}
 	if result.Invocation == nil {
@@ -260,7 +262,7 @@ func TestAProviderFinishingWithinItsAuthoritySucceeds(t *testing.T) {
 	request.Budgets = ProviderBudget{WallLimit: 5 * time.Second}
 	request.Deadline = &deadline
 	result, err := provider.Execute(context.Background(), request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("a provider that finished in time did not succeed: %v %v", result.Outcome, err)
 	}
 	if result.Invocation == nil || result.Invocation.OverranDeadline {
@@ -589,7 +591,7 @@ func TestTheAPIProviderRefusesToSpendAuthorityItNoLongerHas(t *testing.T) {
 	if counted.requests != 0 {
 		t.Fatalf("the provider bought %d inference request(s) with authority it did not have", counted.requests)
 	}
-	if result.Outcome == Succeeded {
+	if result.Outcome == execution.Succeeded {
 		t.Fatalf("an invocation refused for want of authority must not report success: %#v", result)
 	}
 }
@@ -624,7 +626,7 @@ func TestTheAPIProviderIsBoundedByTheOperationDeadlineNotItsOwnDefault(t *testin
 	if elapsed := time.Since(started); elapsed > time.Minute {
 		t.Fatalf("the loop ran %s, far past the deadline it was given", elapsed)
 	}
-	if result.Outcome != OperationCancelled {
+	if result.Outcome != execution.Cancelled {
 		t.Fatalf("a loop stopped by its deadline is not reported as cancelled: %#v", result)
 	}
 }

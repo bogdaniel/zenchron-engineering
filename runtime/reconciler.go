@@ -1327,7 +1327,14 @@ func (s *runState) providerInvocationCeilingReached() bool {
 	// permitted invocation completed the candidate read as failed the moment it
 	// finished - the continuation ceiling has the same exemption, for the same
 	// reason.
-	if _, wanted := bindExecutionInvoke(s); !wanted {
+	//
+	// "Next" is a binding the planner would still DISPATCH: wanted and not yet
+	// satisfied. The binding of the invocation that just succeeded stays wanted
+	// until its output is committed - an initial binding until the candidate
+	// exists - and reading that as a further invocation failed the run before
+	// its last permitted work was ever committed (#514).
+	key, wanted := bindExecutionInvoke(s)
+	if !wanted || s.satisfied(OpExecutionInvoke, key) {
 		return false
 	}
 	return s.providerInvocationsSpent() >= limit

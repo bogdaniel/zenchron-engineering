@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // refusedWrite is attempt 1: it creates material A and reports a refusal that
@@ -27,7 +29,7 @@ func refusedWrite() providerAnswer {
 	return providerAnswer{
 		result: ExecutionResult{
 			ProviderID: "test-provider",
-			Outcome:    OperationFailed,
+			Outcome:    execution.Failed,
 			Failure: &ProviderFailure{
 				Classification:   FailureProviderBackgroundWorkUnresolved,
 				RawDiagnosticRef: "diagnostic-background",
@@ -110,7 +112,7 @@ func TestRefusedMaterialIsNotAdmittedByALaterNoChangeSuccess(t *testing.T) {
 	}
 	fixture, provider := newRoutingFixture(t, 3,
 		refusedWrite(),
-		providerAnswer{result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}},
+		providerAnswer{result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}},
 	)
 	runID := fixture.start()
 	fixture.reconcile(runID)
@@ -138,7 +140,7 @@ func TestRefusedMaterialIsNotAttributedToALaterSuccessThatCreatesB(t *testing.T)
 	fixture, _ := newRoutingFixture(t, 3,
 		refusedWrite(),
 		providerAnswer{
-			result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+			result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 			mutate: writesCandidate,
 		},
 	)
@@ -375,7 +377,7 @@ func (p *plantAtDispatch) PutOperation(op RunOperation, revision int64) (int64, 
 func TestAnOrphanedQuarantineIsAdoptedAfterACrash(t *testing.T) {
 	sawA := false
 	fixture, provider := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 		mutate: func(dir string) error {
 			if _, err := os.Stat(filepath.Join(dir, "refused.go")); err == nil {
 				sawA = true
@@ -424,7 +426,7 @@ func TestAnOrphanedQuarantineIsAdoptedAfterACrash(t *testing.T) {
 // claims are all left alone by this dispatch.
 func TestAnUnrelatedQuarantineIsNotAdopted(t *testing.T) {
 	fixture, provider := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 		mutate: writesCandidate,
 	})
 	runID := fixture.start()

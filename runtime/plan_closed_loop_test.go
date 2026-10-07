@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // closedLoopStages is the #119 shape: one producer, one independent reviewer
@@ -667,10 +668,8 @@ func TestAVerdictIsIdempotentAndAConflictingOneIsRefused(t *testing.T) {
 			invoke = operation
 		}
 	}
-	conflicting := ExecutionResult{ProviderID: "claude", Review: &ReviewerResult{
-		SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted,
-	}}
-	if err := engine.admitReview(state, stage, conflicting, invoke); err == nil {
+	conflicting := &ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted}
+	if err := engine.admitReview(state, stage, "claude", conflicting, invoke); err == nil {
 		t.Fatal("a second, contradicting verdict for one invocation was admitted")
 	}
 	if final := planStageReviewEvents(t, fixture); len(final) != 1 || final[0].Verdict != StageReviewBlocked {
@@ -688,11 +687,11 @@ func TestAVerdictIsIdempotentAndAConflictingOneIsRefused(t *testing.T) {
 	}
 	// A new generation and a new authorizing operation each own their answer.
 	state.run.Plan.Generation++
-	if err := engine.admitReview(state, stage, conflicting, invoke); err != nil {
+	if err := engine.admitReview(state, stage, "claude", conflicting, invoke); err != nil {
 		t.Fatal(err)
 	}
 	invoke.ID += "-next"
-	if err := engine.admitReview(state, stage, conflicting, invoke); err != nil {
+	if err := engine.admitReview(state, stage, "claude", conflicting, invoke); err != nil {
 		t.Fatal(err)
 	}
 	if len(planStageReviewEvents(t, fixture)) != 3 {
@@ -705,7 +704,7 @@ func TestAVerdictIsIdempotentAndAConflictingOneIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	invoke.ID += "-retired"
-	if err := engine.admitReview(state, stage, conflicting, invoke); err == nil || !strings.Contains(err.Error(), "retired") {
+	if err := engine.admitReview(state, stage, "claude", conflicting, invoke); err == nil || !strings.Contains(err.Error(), "retired") {
 		t.Fatalf("retired reviewer was not explicitly refused: %v", err)
 	}
 
@@ -856,11 +855,10 @@ type dyingReviewerProvider struct {
 func (p *dyingReviewerProvider) Execute(ctx context.Context, r ExecutionRequest) (ExecutionResult, error) {
 	result, err := p.FakeReviewerProvider.Execute(ctx, r)
 	if r.ReviewerResultPath != "" {
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 		result.Failure = &ProviderFailure{Classification: p.class}
-		// A failed invocation carries no verdict out of the adapter either: the
-		// production adapter returns before reading the file at all.
-		result.Review = nil
+		// The verdict file stays on disk; the host does not read it out of a
+		// failed invocation (readTypedResultSlots).
 	}
 	return result, err
 }
@@ -1395,7 +1393,7 @@ type outcomeOnlyFailureReviewerProvider struct {
 func (p *outcomeOnlyFailureReviewerProvider) Execute(ctx context.Context, r ExecutionRequest) (ExecutionResult, error) {
 	result, err := p.FakeReviewerProvider.Execute(ctx, r)
 	if r.ReviewerResultPath != "" {
-		result.Outcome = OperationCancelled
+		result.Outcome = execution.Cancelled
 	}
 	return result, err
 }

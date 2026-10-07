@@ -30,7 +30,7 @@ func TestNestedVerificationRestartKeepsHeldCapacityAndExactAttempt(t *testing.T)
 	s := verificationScheduler(store, "controller", 10, 1)
 	s.Clock = clock
 	parent := nestedParent(t, store, s, "producer")
-	ref := ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}
+	ref := ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}
 	p, err := s.RequestVerification(ref, "physical-tool", "tool-owner")
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestNestedVerificationAndAssuranceShareOneCeiling(t *testing.T) {
 	if mustNext(t, s, "assurance") == nil {
 		t.Fatal("assurance slot was not granted")
 	}
-	p, err := s.RequestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, "tool", "tool-owner")
+	p, err := s.RequestVerification(ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, "tool", "tool-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestNestedVerificationAndAssuranceShareOneCeiling(t *testing.T) {
 		t.Fatalf("nested grant: %v/%v", ok, err)
 	}
 	other := nestedParent(t, store, s, "other-producer")
-	q, err := s.RequestVerification(ExecutionAttemptRef{other.RunID, other.ID, other.AttemptIdentity}, "tool", "tool-owner")
+	q, err := s.RequestVerification(ExecutionAttemptRef{RunID: other.RunID, OperationID: other.ID, Attempt: other.AttemptIdentity}, "tool", "tool-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestNestedVerificationRestartCannotResumeWorkBeforeToolCleanup(t *testing.T
 	dir, store := openJournal(t)
 	s := verificationScheduler(store, "old-controller", 10, 2)
 	parent := nestedParent(t, store, s, "producer")
-	p, err := s.RequestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, "physical-tool", "tool-owner")
+	p, err := s.RequestVerification(ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, "physical-tool", "tool-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestNestedVerificationUncertainCleanupIsLocal(t *testing.T) {
 	s := verificationScheduler(store, "controller", 10, 1)
 	parent := nestedParent(t, store, s, "affected")
 	binding := &VerificationSandbox{StateDir: t.TempDir(), Image: "verifier"}
-	p, err := s.requestVerification(ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, "docker", "dead-tool", binding, "")
+	p, err := s.requestVerification(ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, "docker", "dead-tool", binding, "")
 	if err != nil {
 		t.Fatal(err)
 	}

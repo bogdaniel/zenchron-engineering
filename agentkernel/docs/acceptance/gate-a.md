@@ -2,26 +2,29 @@
 
 This records the evidence that the isolated Agent Execution Kernel meets the
 Gate A acceptance rows. It does not record production adoption: Gate B has not
-started (`docs/integration-plan.md`).
+started; it is tracked by #518 (blocked by #445) under parent #446, and
+planned in `docs/integration-plan.md`.
 
 ## 1. Bindings
 
-The record binds the **last code commit** of the branch. A commit cannot
-contain its own hash, so the commit that adds this record is a later one, and
-it changes only `agentkernel/docs/acceptance/`; nothing it touches is built,
-tested or shipped. A reviewer verifies that with
-`git diff --name-only EVIDENCE_HEAD HEAD`, which must list only files under
-`agentkernel/docs/acceptance/`.
+PR #510 was merged into `main` without a separate rebase, after #511. The
+evidence head is therefore the merge commit on `main` that contains both; every
+result in §2 was produced on exactly that tree. A commit cannot contain its own
+hash, so this binding lands in a later commit that changes only
+`agentkernel/docs/acceptance/`; verify with
+`git diff --name-only EVIDENCE_HEAD <binding commit>`.
 
-EVIDENCE_HEAD: <to be filled after rebase>
+EVIDENCE_HEAD: `762bcb60eaec216120e40f502fa55d74f4c07f9c` (main, merge of #510)
 
-BASE: <to be filled after rebase>
+BASE: `f06471deee119dbdb1fa33a00990f744cb30225b` (main, merge of #511; first
+parent of `EVIDENCE_HEAD`). `git diff BASE EVIDENCE_HEAD` is exactly the change
+#510 brought to `main`.
 
 | Item | Value |
 | --- | --- |
 | Branch | `claude/446-agent-kernel-gate-a` (PR #510) |
-| Prerequisite | PR #511 (root test scope fix, review item 1), merged to `main` before the rebase that produces `EVIDENCE_HEAD` |
-| Provenance | original base `27b7c30e0088ec28130b34d9604cb12a945f918c` (main, merge of #503); first record at `140625655e06ab3d711d5b1e57e1092f75f66962`; human review 5443104514 on `f53fedf2652d37060683c177a1061c097dc44a8a`; review fixes `22247ed`, `ece635d`, `c8c54f1`, `0c2e7ef`, the ADR update `a2b551f` (§6), and the second-review repairs `a7f97a5` (§7). These hashes predate the rebase. |
+| Prerequisite | PR #511 (root test scope fix, review item 1), merged to `main` as `BASE` immediately before #510 |
+| Provenance | original base `27b7c30e0088ec28130b34d9604cb12a945f918c` (main, merge of #503); first record at `140625655e06ab3d711d5b1e57e1092f75f66962`; human review 5443104514 on `f53fedf2652d37060683c177a1061c097dc44a8a`; review fixes `22247ed`, `ece635d`, `c8c54f1`, `0c2e7ef`, the ADR update `a2b551f` (§6), and the second-review repairs `a7f97a5` (§7). the refusal-ID fix `f2d4917`; last branch head `86ccf38`, merged with `main` as `8511687`. |
 | Toolchain | `go version go1.27.1 darwin/arm64` |
 | Module | `github.com/bogdaniel/zenchron-engineering/agentkernel`, `go 1.25.0`, no `require`, no `go.sum` |
 | Environment | `GOWORK=off`, run from `agentkernel/`; no network, no credentials |
@@ -29,24 +32,24 @@ BASE: <to be filled after rebase>
 
 ## 2. Commands and results
 
-Re-run on the evidence head after rebase. The previous results (recorded on
-`1406256`) predate review 5443104514 and are not evidence for the current
-code.
+Run on `EVIDENCE_HEAD` (`762bcb6`), 2026-10-07, from `agentkernel/` with
+`GOWORK=off` unless noted. The earlier results recorded on `1406256` predate
+review 5443104514 and are superseded.
 
 | Command | Decisive output |
 | --- | --- |
-| `test -z "$(gofmt -l .)"` | re-run on the evidence head after rebase |
-| `go vet ./...` | re-run on the evidence head after rebase |
-| `go test -count=1 ./...` | re-run on the evidence head after rebase |
-| `go test -race -count=1 ./...` | re-run on the evidence head after rebase |
-| `bash scripts/check-imports.sh` | re-run on the evidence head after rebase |
-| `bash scripts/extract.sh` | re-run on the evidence head after rebase |
-| `bash scripts/relocate.sh` | re-run on the evidence head after rebase |
-| `bash scripts/check-scope.sh` | re-run on the evidence head after rebase |
-| `go run ./cmd/kernel-eval -corpus testdata/eval -trials 3 -out <scratch>/kernel-eval.json` | re-run on the evidence head after rebase |
-| Gate A workflow (`agent-kernel.yml`) on the PR head | re-run on the evidence head after rebase |
-| root required check `go` on the PR head | re-run on the evidence head after rebase |
-| `git diff --name-only BASE EVIDENCE_HEAD` outside `agentkernel/` | re-run on the evidence head after rebase; must list only `.github/workflows/agent-kernel.yml` |
+| `test -z "$(gofmt -l .)"` | no files listed |
+| `go vet ./...` | clean (also `GOOS=windows`) |
+| `go test -count=1 ./...` | 19 packages `ok`, no failures |
+| `go test -race -count=1 ./...` | all packages `ok`, no race reported |
+| `bash scripts/check-imports.sh` | `imports: ok (... depends only on itself and the standard library)` |
+| `bash scripts/extract.sh` | `extract: ok (... built, vetted and tested in <tmp outside the checkout>)` |
+| `bash scripts/relocate.sh` | `relocate: ok (built and tested as example.invalid/relocated/agentkernel)` |
+| `bash scripts/check-scope.sh` | `BASE_REF=f06471d`: `scope: ok (base f06471deee119dbdb1fa33a00990f744cb30225b)` |
+| `go run ./cmd/kernel-eval -corpus testdata/eval -trials 3 -out <scratch>/kernel-eval.json` | `planned 108 attempted 108 executed 108 verified 108 verification_failed 0 harness_errors 0` |
+| Gate A workflow (`agent-kernel.yml`) on `EVIDENCE_HEAD` | run 37670662572 on `762bcb6`: success |
+| root CI (`ci.yml`, job `go`) on `EVIDENCE_HEAD` | run 37670662745 on `762bcb6`: success |
+| `git diff --name-only BASE EVIDENCE_HEAD` outside `agentkernel/` | `.github/workflows/agent-kernel.yml` only (199 files changed in total) |
 
 ## 3. Acceptance rows
 
@@ -73,7 +76,7 @@ the independent review lane's suite.
 | A15 | disabled/corrupt/stale cache still correct, degradation explicit | `intelligence` `TestCacheFailuresDegradeToCorrectRebuild`, `TestCacheMissesWhenWorkspaceChanges`; `memory` `TestCorruptionDegradesExplicitlyAndRebuilds`; `tests/conformance` `TestA15CorruptCachesYieldCorrectBoundedExecution`, `TestA15FailingSourceDegradesExplicitly` | met |
 | A16 | restart reopens derived state; no automatic replay of uncertain mutations | `intelligence` `TestCacheReopenAfterRestart`, `TestOverlayOfLoadedIndex`; `memory` `TestReopenAfterRestart`; `storage` `TestFileRecordsReopenAndDetectCorruption`, `TestFileArtifactsDetectCorruptionAndReopen`, `TestFileArtifactsAccountOccupiedBytesNotHeaderClaims` (reopen counts occupied bytes, a forged header frees nothing, repair is charged); `tests/conformance` `TestA16ReopenDerivedStateAfterRestart`, `TestA05ReentryAcrossRestartCannotRenewBudget` | met with limitation: executions are not resumable by design; nothing is replayed |
 | A17 | parent dependency, out-of-scope write and extraction failures demonstrated, incl. test/tagged bypass | `docs/acceptance/deliberate-breaks.md`; `tests/architecture` (`TestImportsStayInsideModuleAndStdlib` (walks tagged and ignored files), `TestNoParentCheckoutPathLiterals`, `TestNoSymlinkEscapesModule`, `TestPackageDependencyMap`, `TestNoLinknameDirectives`, `TestModuleMetadataIsSelfContained`); `scripts/check-imports.sh`, `extract.sh`, `check-scope.sh` | met |
-| A18 | no root runtime/default/config/schema/journal/authority change | `scripts/check-scope.sh`; diff outside `agentkernel/` is only the new workflow (§2, re-run on the evidence head). The root test fix for review item 1 is PR #511, a separate prerequisite merged to `main`, not part of this branch | met |
+| A18 | no root runtime/default/config/schema/journal/authority change | `scripts/check-scope.sh`; diff outside `agentkernel/` is only the new workflow (§2, `git diff BASE EVIDENCE_HEAD`). The root test fix for review item 1 is PR #511, a separate prerequisite merged to `main`, not part of this branch | met |
 | A19 | benchmark report with denominators, unknowns, failures, maintenance cost, limits | `docs/benchmarks/methodology.md`, `docs/benchmarks/results-gate-a.json`; this run (§2) | met with limitation: offline scripted fixtures prove mechanics only, not paid-model quality or accepted-change throughput; baseline 5 is Gate B |
 | A20 | docs let a fresh agent build/test/extend/extract | `README.md`, `AGENTS.md`, `docs/adr/0001-extractable-agent-execution-kernel.md`, `docs/architecture.md`, `docs/spec/*`, `docs/concurrency.md`, `docs/integration-plan.md` | met |
 
@@ -160,7 +163,7 @@ Human review 5443104514 (on `f53fedf`) listed seven blocking items.
 | 4 | a negative `TokenEstimator` count minted input capacity; impossible cache partitions refunded money | `c8c54f1`: the ledger refuses negative amounts at the root and an impossible partition makes input and cache parts unknown (execution spec §7.5). `0c2e7ef` removed the `api.TokenEstimator` port: input reservation is the kernel's own byte upper bound, so no host count reaches the ledger (§7.4); `context.Compile` still refuses a negative estimate from its estimator | `engine` `TestNegativeReservationCannotRenewBudget`, `TestImpossibleCachePartitionGrantsNoRefund`, `TestInputBudgetIsAHardBound`; `context` `TestNegativeEstimateIsRefused` |
 | 5 | A05: re-entry renewed the budget; `max_input_tokens` soft | `c8c54f1`: one envelope per `execution_id`; re-entry, widening and starting beside an unsettled attempt are refused; later attempts start from recorded consumption; `max_input_tokens` is a hard ledger bound (§7.4). `0c2e7ef`: admission claims the `execution_id` with the new `storage.Records.PutIfAbsent` (`FileRecords`: synced temp file + `os.Link`), atomic across processes on one local filesystem; a losing contender reserves and calls nothing; claims never expire by time (§11.1) | `engine` `TestReentryCannotRenewBudget`, `TestConcurrentAttemptsAdmitExactlyOne`, `TestTwoEnginesOneRootAdmitExactlyOne`, `TestCrashedAttemptBlocksTheNext`, `TestSettlementReleasesTheClaim`, `TestUnsettledAttemptBlocksTheNext`, `TestAdmissionWriteFailureRefusesBeforeSideEffects`, `TestInputBudgetIsAHardBound`; `storage` `TestPutIfAbsentAdmitsExactlyOne`; `tests/conformance` `TestA05ReentryAcrossRestartCannotRenewBudget`; stated limits in A05 |
 | 6 | event recording outside every cancellation/deadline bound | `0c2e7ef`: every host port is a bounded hand-off (`internal/handoff.Exchange`, no goroutine) to host-owned workers (`api.Serve*`, `tools.ServeTool`); enqueue and reply waits are bounded, reply channels hold one value, late replies are discarded, call IDs are stable per attempt (tool IDs are kernel sequences since `a7f97a5`, §7); the kernel never runs host code on its goroutines and no kernel goroutine outlives `Execute` (execution spec §4.1). `c8c54f1`: `run.interrupted` also compares wall time, closing a timer race seen under full-suite load | `engine` `TestStuckEventSinkCannotHoldExecutionOpen`, `TestStuckContextSourceCannotHoldExecutionOpen`, `TestStuckProviderCannotHoldExecutionOpen`, `TestLateHostRepliesAreIgnored`, `TestStuckHostToolIsAnUncertainMutation`, `TestHandOffIDsAreStableAndUnique`, `TestDeadlineHoldsBeforeItsTimerFires`; `internal/handoff` `TestExchange*` (five cases); `tools` `TestHostToolHandOff`, `TestCommandHandOff` |
-| 7 | acceptance evidence stale relative to the reviewed head | this record: §1 binds `EVIDENCE_HEAD` and `BASE` after the rebase onto `main` with #511 merged, and §2 is re-run there | §1, §2 |
+| 7 | acceptance evidence stale relative to the reviewed head | this record: §1 binds `EVIDENCE_HEAD` (`762bcb6`, #510 merged after #511) and `BASE`, and §2 was run there | §1, §2 |
 
 ## 7. Second review (adversarial) resolution
 
@@ -192,4 +195,4 @@ deduplicating by ID would ack without recording. Refused runs now use a
 per-refusal nonce namespace (`…/refused-<nonce>/event-<seq>`); regression
 `engine` `TestRefusedRequestNeverReusesAnAdmittedEventID`.
 
-Gate A: isolated kernel complete. Gate B (production adoption): pending.
+Gate A: isolated kernel complete. Gate B (production adoption, #518): pending.

@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // codexCapableHelp models an installed CLI that advertises the sandbox
@@ -71,7 +73,7 @@ func TestNativeCodexBindsExactCandidateWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ProviderID != "native-codex" || result.Outcome != Succeeded || result.Attempt != 1 {
+	if result.ProviderID != "native-codex" || result.Outcome != execution.Succeeded || result.Attempt != 1 {
 		t.Fatalf("provider observation lost: %#v", result)
 	}
 	call := codexInvocation(t, fake)
@@ -263,7 +265,7 @@ func TestNativeCodexRetriesOnlyRecognizedTransientCapacity(t *testing.T) {
 		if err == nil {
 			t.Fatalf("provider failure was not surfaced for %q", tc.diagnostic)
 		}
-		if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != tc.want {
+		if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != tc.want {
 			t.Fatalf("failure classification for %q = %#v, want %q", tc.diagnostic, result.Failure, tc.want)
 		}
 		if len(result.Artifacts) != 2 {

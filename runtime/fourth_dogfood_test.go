@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // ---------------------------------------------------------------------------
@@ -221,13 +222,15 @@ func (p *interruptedProducer) Execute(_ context.Context, request ExecutionReques
 			return ExecutionResult{}, err
 		}
 	}
-	result := ExecutionResult{ProviderID: "test-provider", Model: "gpt-fixture", Attempt: 1, Outcome: Succeeded}
+	result := ExecutionResult{ProviderID: "test-provider", Model: "gpt-fixture", Attempt: 1, Outcome: execution.Succeeded}
 	if invocation == p.resolveAt {
-		result.Resolution = &FeedbackResolution{
+		if err := writeTypedResultFile(request.FeedbackResolutionPath, FeedbackResolution{
 			SchemaVersion: FeedbackResolutionSchemaVersion,
 			Resolution:    FeedbackResolutionCheckpointComplete,
 			Subject:       request.Candidate.Revision,
 			Tree:          request.Candidate.Tree,
+		}); err != nil {
+			return ExecutionResult{}, err
 		}
 	}
 	if p.completeAt > 0 && invocation >= p.completeAt {
@@ -235,7 +238,7 @@ func (p *interruptedProducer) Execute(_ context.Context, request ExecutionReques
 	}
 	// The observed stop: the provider reasoned, mutated, and was cut off by the
 	// runtime's own iteration bound.
-	result.Outcome = OperationFailed
+	result.Outcome = execution.Failed
 	result.Failure = &ProviderFailure{Classification: FailureUnknown, RawDiagnosticRef: "artifacts/transcript.log"}
 	return result, &ProviderStopError{Reason: StopIterationBudget, Detail: "reasoning iterations exceeded 16"}
 }

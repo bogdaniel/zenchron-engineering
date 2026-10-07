@@ -265,27 +265,10 @@ var planEventTypes = map[string]bool{
 	EventPlanRevisionSuperseded: true, EventPlanAttemptRefused: true, EventPlanStageReviewed: true,
 }
 
-type Ref struct {
-	ID       string `json:"id"`
-	Revision string `json:"revision"`
-}
-type Candidate struct {
-	Branch   string `json:"branch"`
-	Revision string `json:"revision"`
-	Tree     string `json:"tree"`
-}
 type Cursor struct {
 	LastSequence  int64  `json:"last_sequence"`
 	LastEventID   string `json:"last_event_id"`
 	LastEventHash string `json:"last_event_hash,omitempty"`
-}
-type Artifact struct {
-	Path        string `json:"path"`
-	SHA256      string `json:"sha256"`
-	MediaType   string `json:"media_type"`
-	LocalOnly   bool   `json:"local_only"`
-	Sanitized   bool   `json:"sanitized"`
-	Publishable bool   `json:"publishable"`
 }
 type EngineeringRun struct {
 	SchemaVersion    string      `json:"schema_version"`
@@ -696,12 +679,6 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 	}
 	return op.Lease == nil || (!ownerAlive && !now.Before(op.Lease.ExpiresAt))
 }
-
-// AttemptBound names the bound that ended, or would end, one physical provider
-// attempt. The three are different resources and are reported apart (#328):
-// inactivity is the provider not moving, the attempt wall is this ATTEMPT
-// being long enough, and run active work is the whole RUN's cumulative budget.
-type AttemptBound string
 
 const (
 	BoundProviderInactivity AttemptBound = "provider_inactivity"

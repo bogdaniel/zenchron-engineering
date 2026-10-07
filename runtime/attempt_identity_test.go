@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // transcriptProvider writes its transcript through the real evidence store, so
@@ -62,7 +64,7 @@ func (p *transcriptProvider) Execute(_ context.Context, request ExecutionRequest
 	p.stored = append(p.stored, artifacts[0].Path)
 	if quota {
 		return ExecutionResult{
-			ProviderID: "codex", Attempt: request.Attempt, Outcome: OperationFailed,
+			ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Failed,
 			Artifacts: artifacts,
 			Failure:   &ProviderFailure{Classification: FailureProviderQuota, RawDiagnosticRef: artifacts[0].Path},
 		}, nil
@@ -73,7 +75,7 @@ func (p *transcriptProvider) Execute(_ context.Context, request ExecutionRequest
 		}
 	}
 	return ExecutionResult{
-		ProviderID: "codex", Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
+		ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Succeeded, Artifacts: artifacts,
 	}, nil
 }
 
@@ -268,11 +270,11 @@ func (p *crashingProvider) Execute(ctx context.Context, request ExecutionRequest
 		// Dispatched, and then nothing. No transcript is stored, so the slot
 		// this invocation claimed still LOOKS free to the evidence store.
 		return ExecutionResult{
-			ProviderID: "codex", Attempt: request.Attempt, Outcome: OperationFailed,
+			ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Failed,
 			Failure: &ProviderFailure{Classification: FailureProviderQuota},
 		}, nil
 	}
-	return ExecutionResult{ProviderID: "codex", Attempt: request.Attempt, Outcome: Succeeded}, nil
+	return ExecutionResult{ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Succeeded}, nil
 }
 
 // TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt is the crash hole

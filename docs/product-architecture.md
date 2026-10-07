@@ -290,6 +290,10 @@ planning/      the Engineering Planner: plan compilation, graph
                role-to-profile resolution. No scheduler, no policy
                engine, no authority, and no provider names.
 
+execution/     the host execution seam (ADR-0005): the Port an execution
+               implementation satisfies and the vocabulary crossing it.
+               Imports only the standard library and domain; adapters
+               live under execution/<name> and only cmd/ imports them.
 runtime/       the operational layer: scheduler, journal, Git, forge,
                providers, supervisor, plan reconciler. Provider-specific
                knowledge lives here and nowhere below it.

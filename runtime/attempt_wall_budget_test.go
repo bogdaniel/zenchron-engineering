@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 type wallStep struct {
@@ -81,13 +82,13 @@ func (p *wallProvider) Execute(_ context.Context, request ExecutionRequest) (Exe
 	}
 	invocation := &InvocationProvenance{AgentID: "test-provider", InvocationObservation: domain.InvocationObservation{TerminationCause: cause}}
 	if step.complete {
-		return ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded, Invocation: invocation}, nil
+		return ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded, Invocation: invocation}, nil
 	}
 	class := step.class
 	if class == "" {
 		class = FailureExecutionIncomplete
 	}
-	return ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: class}, Invocation: invocation},
+	return ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: class}, Invocation: invocation},
 		errors.New("signal: terminated")
 }
 

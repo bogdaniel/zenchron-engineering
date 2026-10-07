@@ -11,6 +11,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 func failedOperation(t *testing.T, f *phase8Fixture, id, kind string) RunOperation {
@@ -115,7 +116,7 @@ func conflictingObservedPolicy(f *phase8Fixture) {
 func checkpointConflictFixture(t *testing.T) (*phase8Fixture, string) {
 	t.Helper()
 	f, _ := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed,
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed,
 			Failure: &ProviderFailure{Classification: FailureExecutionIncomplete}},
 		mutate: writesCandidate,
 	})
@@ -176,7 +177,7 @@ func TestIdenticalDeterministicContractFailureSpendsOneAttempt(t *testing.T) {
 
 func TestRelevantCandidateChangeEnablesAnotherDeterministicAttempt(t *testing.T) {
 	f, _ := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 		mutate: func(dir string) error { return os.WriteFile(filepath.Join(dir, ".env"), []byte("fixture\n"), 0600) },
 	})
 	id := f.start()
@@ -200,7 +201,7 @@ func TestRelevantCandidateChangeEnablesAnotherDeterministicAttempt(t *testing.T)
 
 func TestCandidateOnlyFailureDoesNotRetryAfterPolicyOrModelChanges(t *testing.T) {
 	f, _ := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 		mutate: func(dir string) error { return os.WriteFile(filepath.Join(dir, ".env"), []byte("fixture\n"), 0600) },
 	})
 	id := f.start()
@@ -242,7 +243,7 @@ func TestCandidateOnlyFailureDoesNotRetryAfterPolicyOrModelChanges(t *testing.T)
 
 func TestIndexFlagFailureRequiresFlagChange(t *testing.T) {
 	f, _ := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 		mutate: func(dir string) error {
 			if err := writesCandidate(dir); err != nil {
 				return err
@@ -271,7 +272,7 @@ func TestIndexFlagFailureRequiresFlagChange(t *testing.T) {
 
 func TestStagedCredentialFailureIgnoresChangesOutsideItsSubject(t *testing.T) {
 	f, _ := newRoutingFixture(t, 3, providerAnswer{
-		result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+		result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 		mutate: func(dir string) error {
 			return os.WriteFile(filepath.Join(dir, "leaked.txt"), []byte(githubClassicTokenValue()), 0600)
 		},

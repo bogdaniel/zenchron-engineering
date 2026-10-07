@@ -22,7 +22,7 @@ func TestNestedVerificationTenNativeParentsExecuteOnlyTwoTools(t *testing.T) {
 	fifos := make([]string, 10)
 	for i := range 10 {
 		parent := nestedParent(t, store, s, fmt.Sprintf("native-%d", i))
-		v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+		v := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 		descriptor, _, stop := nativeVerificationFixture(t, v, target, context.Background())
 		t.Cleanup(func() {
 			if err := stop(); err != nil {
