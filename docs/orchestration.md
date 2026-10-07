@@ -129,6 +129,75 @@ the work and make a retry redo it. The refusal remains visible as a handoff
 observation and separate `handoff_reason` while execution, commit,
 reassessment, assurance or remediation continues. Only finished producer work reports `handoff_pending`.
 
+## Typed messages
+
+Workers in one batch coordinate through four typed messages instead of an
+operator copying transcript text between sessions (#473). Each item is a unit
+named `issue-<number>`. The handoff above is the fifth primitive and is
+unchanged.
+
+| Kind | Worker writes | Routed to |
+|------|---------------|-----------|
+| `collaboration_request` | `target`, `purpose`, `body`; `in_reply_to` makes it the response to a request addressed to the writer | the target unit |
+| `finding` | `subject_handoff`, `category` (`defect`, `risk`, `inconsistency`), `body` | the unit that owns that handoff |
+| `decision_request` | `purpose` (the question), `body` | human or designated authority |
+| `state_update` | `body` | every other unit sees each unit's latest one; it carries no authority |
+
+Any kind may also set `supersedes` to correct one of its own unit's earlier
+messages of that kind. Every other member, kind combination or unknown member is refused.
+
+An orchestrated invocation may write `{"schema_version":"0.1","messages":[...]}`
+(1 to 8 messages, at most 32 KiB) to `messages.json`, in the same runtime-owned
+result directory as its handoff. The runtime clears that slot before the
+invocation and reads it only after the invocation completes. It journals a
+`messages.observed` event with the document digest, or the reason the
+document is refused. Writing nothing is normal. A document left in the
+repository is never read, and transcripts are never parsed for messages.
+
+The supervisor admits observed documents after it admits handoffs. Each one is
+admitted as a whole or refused durably, once. The runtime assigns each admitted
+message its identity (run, operation, attempt and position), its source unit,
+run, agent and attempt, its route, and its subject. A subject is the referenced
+handoff's runtime-bound base, candidate and tree, so nothing the worker
+restates becomes a binding. Admitted messages are insert-only in
+`orchestration_messages`. A correction is a new row, and the database allows
+each record to be superseded only once. Replaying admission after a restart
+produces the same identities and adds no rows. A slot changed after it was
+journalled is refused.
+
+Rules that no message can bypass:
+
+- A Finding applies only to the exact subject it is bound to. Once the owner
+  admits a newer handoff, the older Finding is shown as `stale_findings` and
+  does not apply to the new candidate.
+- A response may answer only a live request. Once its author supersedes a
+  request, a response to the old one is refused.
+- A DecisionRequest stays open until authority answers it. `in_reply_to` may
+  name only a collaboration request addressed to the writer, so no worker,
+  including the requester, can answer one. A `state_update` claiming it was
+  decided changes nothing. Open decisions appear as `open_decisions` in
+  `autonomy orchestrate status` and as `WAITING ON HUMAN DECISION` in the text
+  view.
+- A StateUpdate changes no item state, lifecycle or completion.
+- A batch holds at most 256 messages. Each invocation has a fan-out of at most
+  8 messages, and each message has one recipient.
+
+Each later invocation of a unit receives its own inbox: requests and responses
+addressed to it, current and stale Findings, and the latest update from each
+other unit. Each list is capped at 16 entries and reports how many it omitted.
+The invocation also receives every unit's latest admitted handoff id, so it can
+name one as a Finding subject, and the open decisions. That context is
+admitted data from other workers, never their reasoning. It is rendered inside
+an `UNTRUSTED-INTERWORKER-MESSAGES` frame, exactly like reviewer feedback and
+upstream diffs. Every frame marker in it is neutralized, as it is in those
+frames, so a message cannot close its frame or forge another.
+
+Nothing in this protocol answers a DecisionRequest yet. That needs a separate
+authority surface, which this protocol deliberately does not invent.
+Dependency-driven delivery between units belongs to the WorkGraph (#472). It
+supplies the same three facts a batch supplies today: units, admitted handoff
+subjects and scope history.
+
 ## Status
 
 `autonomy orchestrate status BATCH_ID [--text]` reads the batch from durable

@@ -1148,7 +1148,7 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r)
+	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r) + messageEnvelope(r)
 }
 
 // feedbackResolutionEnvelope states the REQUIRED OUTPUT when a producer
