@@ -286,14 +286,19 @@ func TestTheRepairDecisionIsAFunctionOfTheJournal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if mutate != nil {
-			mutate(snapshot.Operations)
-		}
-		target, err := inspectHandoffRepair(read, snapshot.Operations)
+		projection, err := Project(replayed)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, wanted := bindHandoffRepair(&runState{run: run, events: read, snapshot: snapshot})
+		if mutate != nil {
+			mutate(snapshot.Operations)
+		}
+		state := &runState{run: run, events: read, snapshot: snapshot, projection: projection}
+		target, err := inspectHandoffRepair(read, snapshot.Operations, state.providerCeiling())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, wanted := bindHandoffRepair(state)
 		return target, wanted
 	}
 	refused, onlyPlanned, spent := all[:planned], all[:planned+1], all[:started+1]
@@ -345,19 +350,44 @@ func TestTheRepairDecisionIsAFunctionOfTheJournal(t *testing.T) {
 		!strings.HasPrefix(target.detail, "unbindable: the continuation's checkpoint") {
 		t.Fatalf("an unproven checkpoint binding was still repaired: %+v", target)
 	}
-	later := func(operations map[string]RunOperation) {
-		var producer RunOperation
-		for _, op := range operations {
-			if op.Kind == OpExecutionInvoke {
-				producer = op
-			}
+	// A LATER ENGINEERING START is decided by journal order, never by clock:
+	// the later invocation here was created in the very same instant as the
+	// one that wrote the refused handoff, and still supersedes it.
+	var producer RunOperation
+	for _, op := range snapshotOf(t, run, refused).Operations {
+		if op.Kind == OpExecutionInvoke {
+			producer = op
 		}
-		producer.ID, producer.CreatedAt = "op-later", producer.CreatedAt.Add(time.Second)
-		operations[producer.ID] = producer
 	}
-	if target, wanted := plan(refused, refused, later); wanted || target.state != HandoffRepairIneligible {
-		t.Fatalf("a refusal a later engineering invocation superseded was still repaired: %+v", target)
+	sameInstant := producer
+	sameInstant.ID, sameInstant.Attempt, sameInstant.AttemptIdentity = "op-later", 1, 1
+	sameInstant.IdempotencyKey = operationKey(OpExecutionInvoke, "remediation|same-instant")
+	startedLater, err := marshalPayloadJSON(sameInstant)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if !sameInstant.CreatedAt.Equal(producer.CreatedAt) {
+		t.Fatal("the regression needs two invocations created in the same instant")
+	}
+	later := append(append([]EngineeringEvent(nil), refused...), EngineeringEvent{
+		Type: EventOperationBefore, RunID: runID, OperationID: sameInstant.ID, Payload: startedLater,
+	})
+	if target, wanted := plan(refused, later, nil); wanted || target.state != HandoffRepairIneligible || !strings.Contains(target.detail, "started after") {
+		t.Fatalf("a refusal a same-instant later engineering invocation superseded was still repaired: %+v", target)
+	}
+	// MaxProviderInvocations is a run total the repair spends from: with the
+	// engineering invocation having spent the last one, an otherwise eligible
+	// repair is refused before any provider, and says why.
+	run.Budgets.MaxProviderInvocations = 1
+	if target, wanted := plan(refused, refused, nil); wanted || target.state != HandoffRepairUnbudgeted ||
+		!strings.Contains(target.detail, "spent 1 of its 1 provider invocations") {
+		t.Fatalf("a repair past the provider-invocation ceiling was still offered: %+v", target)
+	}
+	run.Budgets.MaxProviderInvocations = 2
+	if _, wanted := plan(refused, refused, nil); !wanted {
+		t.Fatal("a repair within the provider-invocation ceiling was refused")
+	}
+	run.Budgets.MaxProviderInvocations = 0
 	run.Orchestration = nil
 	if _, wanted := plan(refused, refused, nil); wanted {
 		t.Fatal("a run no batch created was offered a handoff repair")
@@ -478,6 +508,16 @@ func TestAValidHandoffIsNeverRepaired(t *testing.T) {
 	if onlyHandoff(t, fixture, runID).ProtocolRepair != nil {
 		t.Fatal("a valid handoff records a protocol repair")
 	}
+}
+
+// snapshotOf replays one cut of a run's journal.
+func snapshotOf(t *testing.T, run EngineeringRun, events []EngineeringEvent) RunSnapshot {
+	t.Helper()
+	snapshot, err := Reduce(run, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 // crashRepair ends the driving goroutine mid-invocation, as a lost controller

@@ -194,7 +194,15 @@ func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.Ba
 		return fail(err)
 	}
 	out.Handoff, out.HandoffReason = finding.observation, boundedDetail(finding.detail)
-	repair, err := inspectHandoffRepair(events, snapshot.Operations)
+	projected, err := Project(events)
+	if err != nil {
+		return fail(err)
+	}
+	ceiling := providerCeiling{spent: providerInvocationsSpent(projected, snapshot.Operations)}
+	if run.Budgets != nil {
+		ceiling.limit = run.Budgets.MaxProviderInvocations
+	}
+	repair, err := inspectHandoffRepair(events, snapshot.Operations, ceiling)
 	if err != nil {
 		return fail(err)
 	}

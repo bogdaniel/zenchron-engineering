@@ -66,6 +66,13 @@ const (
 	// repairMutatesCandidate reaches past its working directory into the
 	// real candidate workspace, then writes a perfect document.
 	repairMutatesCandidate
+	// repairStoppedMidway calls onRepair (an operator stop), then runs until
+	// its context ends, writes a perfect document anyway, and attributes its
+	// ending the way an executor does: by the cause that ended it.
+	repairStoppedMidway
+	// repairFinishesDespiteStop calls onRepair, waits for the stop to reach
+	// it, then writes a perfect document and exits successfully by itself.
+	repairFinishesDespiteStop
 )
 
 const fleetCompletedUnresolvedReport = `{"schema_version":"0.1","outcome":"completed","summary":"Implemented the change.","unresolved":["the docs page"]}`
@@ -92,6 +99,8 @@ type fleetProvider struct {
 	stateDir       string
 	// crashOnRepair loses the controller in the middle of every repair.
 	crashOnRepair bool
+	// onRepair, when set, runs inside every repair invocation.
+	onRepair func(runID string)
 	// gather, when set, holds invocations until that many are in flight at
 	// once, or the bound passes; once it has been observed, later ones run
 	// free. It cannot create concurrency the scheduler did not grant - every
@@ -119,9 +128,9 @@ func (p *fleetProvider) Isolation() ProviderIsolation {
 	}
 }
 
-func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (p *fleetProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	if request.Purpose == InvocationHandoffRepair {
-		return p.repair(request)
+		return p.repair(ctx, request)
 	}
 	p.mu.Lock()
 	p.active++
@@ -205,7 +214,7 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 }
 
 // repair is the controlled worker invoked as a handoff repair.
-func (p *fleetProvider) repair(request ExecutionRequest) (ExecutionResult, error) {
+func (p *fleetProvider) repair(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	p.mu.Lock()
 	p.repairs[request.RunID]++
 	p.repairRequests[request.RunID] = request
@@ -213,6 +222,9 @@ func (p *fleetProvider) repair(request ExecutionRequest) (ExecutionResult, error
 	p.mu.Unlock()
 	if p.crashOnRepair {
 		crashRepair()
+	}
+	if p.onRepair != nil {
+		p.onRepair(request.RunID)
 	}
 	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}
 	write := func(document string) (ExecutionResult, error) {
@@ -226,8 +238,25 @@ func (p *fleetProvider) repair(request ExecutionRequest) (ExecutionResult, error
 	case repairRestatesCandidate:
 		return write(`{"schema_version":"0.1","outcome":"completed","summary":"s","candidate_revision":"` + request.Candidate.Revision + `"}`)
 	case repairFails:
-		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureUnknown}},
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed, Executed: true, Failure: &ProviderFailure{Classification: FailureUnknown}},
 			errors.New("the provider process exited 1")
+	case repairStoppedMidway, repairFinishesDespiteStop:
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Second):
+			return ExecutionResult{}, errors.New("the repair was never reached by the stop")
+		}
+		if _, err := write(fleetValidReport); err != nil {
+			return ExecutionResult{}, err
+		}
+		if behaviour == repairFinishesDespiteStop {
+			return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded, Executed: true}, nil
+		}
+		class := FailureControllerShutdown
+		if ownerOfCancellation(ctx) == OwnerOperatorStop {
+			class = FailureRunCancelled
+		}
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationCancelled, Executed: true, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
 	case repairMutatesCandidate:
 		dir := candidateDir(stateDir, request.RunID)
 		for name, content := range map[string]string{"candidate.go": "package candidate\n// rewritten by the repair\n", "planted.go": "package candidate\n"} {
