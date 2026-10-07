@@ -3,6 +3,7 @@ module github.com/bogdaniel/zenchron-engineering
 go 1.25.0
 
 require (
+	github.com/bogdaniel/zenchron-engineering/agentkernel v0.0.0
 	github.com/gowebpki/jcs v1.0.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	modernc.org/sqlite v1.57.0
@@ -20,3 +21,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/bogdaniel/zenchron-engineering/agentkernel => ./agentkernel
