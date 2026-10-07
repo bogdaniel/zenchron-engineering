@@ -1274,6 +1274,9 @@ func providerEnvelope(r ExecutionRequest) string {
 	if r.Mode == domain.InvocationModeNonMutatingPlanning {
 		return planningEnvelope(r)
 	}
+	if r.Purpose == InvocationHandoffRepair {
+		return handoffRepairEnvelope(r)
+	}
 	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %s. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), findingSummary(r.Findings)) + reviewerEnvelope(r) + verifierEvidenceEnvelope(r)
 }
 

@@ -67,8 +67,9 @@ func (w executionWatch) settle(out *effect) {
 
 // watchExecution observes durable run cancellation only while the provider
 // execution is active, and may interrupt that provider execution (#213).
-// invokeExecution arms it immediately before Provider.Execute and ends it the
-// moment Execute returns; nothing before or after the provider, and no other
+// invokeExecution and repairHandoff (#492) - the two operations that run a
+// provider - arm it immediately before Provider.Execute and end it the moment
+// Execute returns; nothing before or after the provider, and no other
 // operation kind, is watched. Commit, push, pull request creation and
 // publication are #215, not this.
 //

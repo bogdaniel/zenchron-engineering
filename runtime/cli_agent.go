@@ -1617,6 +1617,12 @@ func validateExecutionBinding(request ExecutionRequest) error {
 		if request.Mode != domain.InvocationModeNonMutatingPlanning {
 			return fmt.Errorf("a planning invocation requires the %q mode", domain.InvocationModeNonMutatingPlanning)
 		}
+	case InvocationHandoffRepair:
+		// It writes exactly one file - the slot - so it cannot be read-only,
+		// and an invocation with no slot would have nothing to repair into.
+		if request.Mode == domain.InvocationModeNonMutatingPlanning || request.HandoffPath == "" || !request.DenyPermissionBypass {
+			return fmt.Errorf("a handoff repair requires the mutating mode, its runtime-owned slot and a denied permission bypass")
+		}
 	default:
 		return fmt.Errorf("invalid invocation purpose")
 	}

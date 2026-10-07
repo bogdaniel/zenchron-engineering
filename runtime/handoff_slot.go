@@ -55,6 +55,12 @@ type HandoffReportedPayload struct {
 	Attempt      int    `json:"attempt"`
 	Outcome      string `json:"outcome"`
 	ReportSHA256 string `json:"report_sha256"`
+	// RepairOperationID and RepairAttempt name the result-only repair
+	// invocation whose slot holds this report (#492). Empty: the engineering
+	// invocation's own slot does. OperationID and Attempt always name the
+	// engineering invocation the report describes.
+	RepairOperationID string `json:"repair_operation_id,omitempty"`
+	RepairAttempt     int    `json:"repair_attempt,omitempty"`
 }
 
 // HandoffRefusedPayload records that a finished invocation transferred no
@@ -64,6 +70,14 @@ type HandoffRefusedPayload struct {
 	Attempt     int    `json:"attempt"`
 	Kind        string `json:"kind"`
 	Detail      string `json:"detail"`
+	// Repairable is the strict decoder's own classification of the refusal
+	// (orchestration.ProtocolRepairable), decided when the invocation
+	// completed. Only a repairable refusal may receive the one result-only
+	// correction #492 allows; an absent value is not repairable.
+	Repairable bool `json:"repairable,omitempty"`
+	// ReportSHA256 is the digest of the refused bytes, so a correction is
+	// shown exactly the document that was refused and nothing written since.
+	ReportSHA256 string `json:"report_sha256,omitempty"`
 }
 
 // HandoffReportPath is the runtime-owned location for ONE invocation's
@@ -91,34 +105,53 @@ func (r *EngineeringRuntime) prepareHandoffSlot(state *runState, operationID str
 }
 
 // readHandoffReport reads one handoff slot. present=false is an absent file,
-// which is not an error and not a handoff. A slot holding anything but a
-// regular file - a directory, or a link the worker planted to make the
-// runtime read something else - is refused rather than followed.
+// which is not an error and not a handoff.
 func readHandoffReport(path string) (report orchestration.HandoffReport, digest string, present bool, err error) {
+	document, digest, present, err := readHandoffDocument(path)
+	if !present || err != nil {
+		return orchestration.HandoffReport{}, digest, present, err
+	}
+	report, err = orchestration.DecodeHandoffReport(document)
+	return report, digest, true, err
+}
+
+// readHandoffDocument reads one handoff slot's bytes, bounded. A slot holding
+// anything but a regular file - a directory, or a link the worker planted to
+// make the runtime read something else - is refused rather than followed.
+func readHandoffDocument(path string) (document []byte, digest string, present bool, err error) {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return orchestration.HandoffReport{}, "", false, nil
+		return nil, "", false, nil
 	}
 	if err != nil {
-		return orchestration.HandoffReport{}, "", true, err
+		return nil, "", true, err
 	}
 	if !info.Mode().IsRegular() {
-		return orchestration.HandoffReport{}, "", true, fmt.Errorf("the handoff slot holds a %s, not a regular file", info.Mode().Type())
+		return nil, "", true, fmt.Errorf("the handoff slot holds a %s, not a regular file", info.Mode().Type())
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return orchestration.HandoffReport{}, "", true, err
+		return nil, "", true, err
 	}
 	defer file.Close()
 	// One byte past the bound is read so an oversized document is refused by
 	// its size rather than mistaken for a truncated one.
-	document, err := io.ReadAll(io.LimitReader(file, orchestration.MaxHandoffReportBytes+1))
+	document, err = io.ReadAll(io.LimitReader(file, orchestration.MaxHandoffReportBytes+1))
 	if err != nil {
-		return orchestration.HandoffReport{}, "", true, err
+		return nil, "", true, err
 	}
 	sum := sha256.Sum256(document)
-	report, err = orchestration.DecodeHandoffReport(document)
-	return report, hex.EncodeToString(sum[:]), true, err
+	return document, hex.EncodeToString(sum[:]), true, nil
+}
+
+// handoffReportPathOf is the slot that holds a journalled report: the repair
+// invocation's when a repair wrote it, the engineering invocation's otherwise.
+func handoffReportPathOf(stateDir, runID string, reported HandoffReportedPayload) (string, error) {
+	slot := ExecutionAttemptRef{RunID: runID, OperationID: reported.OperationID, Attempt: reported.Attempt}
+	if reported.RepairOperationID != "" {
+		slot.OperationID, slot.Attempt = reported.RepairOperationID, reported.RepairAttempt
+	}
+	return HandoffReportPath(stateDir, slot)
 }
 
 // handoffObservation is the journal entry for what one COMPLETED invocation
@@ -134,7 +167,8 @@ func handoffObservation(path, operationID string, attempt int) journalEntry {
 	case err != nil:
 		return journalEntry{Type: EventHandoffRefused, Payload: HandoffRefusedPayload{
 			OperationID: operationID, Attempt: attempt, Kind: HandoffInvalid,
-			Detail: boundedDetail(err.Error()),
+			Detail:     boundedDetail(err.Error()),
+			Repairable: orchestration.ProtocolRepairable(err), ReportSHA256: digest,
 		}}
 	}
 	return journalEntry{Type: EventHandoffReported, Payload: HandoffReportedPayload{
