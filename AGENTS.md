@@ -424,6 +424,6 @@ Before you say a task is complete:
 - Focused race / concurrency tests: `go test -race ./<package> -run '<TestPattern>'`
 - Focused acceptance checks: not applicable; there is no separate acceptance command
 - File-size check: `python3 scripts/check_file_sizes.py` (§4). Not yet run in CI.
-- CI workflow / required checks: `.github/workflows/ci.yml`; the required check on `main` is `go`, and changes to `main` go through a pull request.
+- CI workflow / required checks: `.github/workflows/ci.yml` (job `go`) and `.github/workflows/agent-kernel.yml` (nested `agentkernel/` module). No check is required for merge: the `main` ruleset requires a pull request and blocks deletion and force-push, so CI results are evidence to report, not a merge gate.
 
 Do not disable, skip, lower thresholds, expand exclusions, or edit the checker to make a failing change pass. A deliberate policy change must be explicit in the task and reviewed as such. A draft PR may report checks still pending; merging must satisfy configured repository gates.
