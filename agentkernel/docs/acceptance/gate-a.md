@@ -171,18 +171,17 @@ capabilities and providers specs.
 
 | # | Finding | Resolution in `a7f97a5` | Evidence |
 | --- | --- | --- | --- |
-| F1 | a huge reported count wrapped ledger arithmetic and renewed budget, within or across attempts | ledger arithmetic saturates at `MaxInt64`; an out-of-range price makes cost unknown | `engine` `TestHugeReportedInputStopsFurtherCalls`, `TestOverflowCannotRenewBudgetAcrossAttempts`, `TestLedgerSaturatesInsteadOfWrapping`, `TestOutOfRangePriceIsUnknown` |
-| F2 | the seal could be passed by a host type embedding a kernel type | `engine.New` and `tools.NewBroker` accept only exact kernel types (`Config.Artifacts` `*storage.MemoryArtifacts`/`*storage.FileArtifacts`, `Config.Clock` `api.SystemClock`/`*api.ManualClock`, package `tools`' own tool type); `storage.Artifacts` removed; `api.Clock` is a plain interface | `engine` `TestNewRefusesHostCodeInKernelPorts`; `tools` `TestConstructorsRefuseHostCode` |
-| F3 | admission summed cumulative records, counting prior attempts more than once | admission restores the largest recorded cumulative consumption | `engine` `TestPriorConsumptionIsCountedOnce` |
-| F4 | tool hand-off IDs reused the model's tool-call ID | tool hand-off IDs and artifact producers are kernel sequences `<execution>/<attempt>/tool-<n>`; a repeated model tool-call ID is refused per attempt | `engine` `TestModelToolCallIDsNeverBecomeHandOffIDs` |
-| F5 | a negative or overflowing usage part did not make input unknown | input and both cache parts become unknown, in the Anthropic adapter and in the engine | `providers/anthropic` `TestNegativeOrOverflowingUsagePartMakesInputUnknown`; `engine` `TestNegativeUsagePartMakesInputUnknown` |
-| F6 | `Exchange` could offer a call after its bound was over | an expired bound hands nothing over (`ErrNotTaken`) | `internal/handoff` `TestExpiredBoundHandsNothingOver` |
-| F7 | `search` echoed a `.git` file (a gitdir file, not a directory) | `search` skips any `.git` entry, file or directory | `tools` `TestSearchSkipsGitFiles` |
-| F8 | a closed reply channel read as an answer | a closed reply is no answer (`ErrNoAnswer`); a closed event reply is a recording failure | `internal/handoff` `TestClosedReplyIsNoAnswer`; `engine` `TestClosedEventReplyIsRecordingFailure` |
-| F9 | guards to pin: every widening dimension, reservations kept for an unanswered provider call, the tool hand-off bound | each re-broken and caught (`deliberate-breaks.md`) | `engine` `TestReentryCannotRenewBudget` (`widened_*`), `TestUnansweredProviderCallKeepsReservations`; `tools` `TestCommandHandOff`, `TestHostToolHandOff` |
+| R2-F1 | a huge reported count wrapped ledger arithmetic and renewed budget, within or across attempts | ledger arithmetic saturates at `MaxInt64`; an out-of-range price makes cost unknown | `engine` `TestHugeReportedInputStopsFurtherCalls`, `TestOverflowCannotRenewBudgetAcrossAttempts`, `TestLedgerSaturatesInsteadOfWrapping`, `TestOutOfRangePriceIsUnknown` |
+| R2-F2 | the seal could be passed by a host type embedding a kernel type | `engine.New` and `tools.NewBroker` accept only exact kernel types (`Config.Artifacts` `*storage.MemoryArtifacts`/`*storage.FileArtifacts`, `Config.Clock` `api.SystemClock`/`*api.ManualClock`, package `tools`' own tool type); `storage.Artifacts` removed; `api.Clock` is a plain interface | `engine` `TestNewRefusesHostCodeInKernelPorts`; `tools` `TestConstructorsRefuseHostCode` |
+| R2-F3 | admission summed cumulative records, counting prior attempts more than once | admission restores the largest recorded cumulative consumption | `engine` `TestPriorConsumptionIsCountedOnce` |
+| R2-F4 | tool hand-off IDs reused the model's tool-call ID | tool hand-off IDs and artifact producers are kernel sequences `<execution>/<attempt>/tool-<n>`; a repeated model tool-call ID is refused per attempt | `engine` `TestModelToolCallIDsNeverBecomeHandOffIDs` |
+| R2-F5 | a negative or overflowing usage part did not make input unknown | input and both cache parts become unknown, in the Anthropic adapter and in the engine | `providers/anthropic` `TestNegativeOrOverflowingUsagePartMakesInputUnknown`; `engine` `TestNegativeUsagePartMakesInputUnknown` |
+| R2-F6 | `Exchange` could offer a call after its bound was over | an expired bound hands nothing over (`ErrNotTaken`) | `internal/handoff` `TestExpiredBoundHandsNothingOver` |
+| R2-F7 | `search` echoed a `.git` file (a gitdir file, not a directory) | `search` skips any `.git` entry, file or directory | `tools` `TestSearchSkipsGitFiles` |
+| R2-F8 | a closed reply channel read as an answer | a closed reply is no answer (`ErrNoAnswer`); a closed event reply is a recording failure | `internal/handoff` `TestClosedReplyIsNoAnswer`; `engine` `TestClosedEventReplyIsRecordingFailure` |
+| R2-F9 | guards to pin: every widening dimension, reservations kept for an unanswered provider call, the tool hand-off bound | each re-broken and caught (`deliberate-breaks.md`) | `engine` `TestReentryCannotRenewBudget` (`widened_*`), `TestUnansweredProviderCallKeepsReservations`; `tools` `TestCommandHandOff`, `TestHostToolHandOff` |
 | — | buffered hand-off channels let "not taken" be reported for a call the host had already received | hand-off channels must be unbuffered (`cap == 0`): `engine.New`, `tools.NewHostTool` and `tools.NewCommand` refuse a buffered one | `engine` `TestNewRefusesHostCodeInKernelPorts`; `tools` `TestConstructorsRefuseHostCode` |
 
-Gate A: isolated kernel complete. Gate B (production adoption): pending.
 
 ### Second review re-verification (`a7f97a5`)
 
@@ -192,3 +191,5 @@ run's event hand-off IDs (`<execution>/<attempt>/event-1`), which a host
 deduplicating by ID would ack without recording. Refused runs now use a
 per-refusal nonce namespace (`…/refused-<nonce>/event-<seq>`); regression
 `engine` `TestRefusedRequestNeverReusesAnAdmittedEventID`.
+
+Gate A: isolated kernel complete. Gate B (production adoption): pending.
