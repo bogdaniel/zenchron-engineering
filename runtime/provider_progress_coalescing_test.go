@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 type progressWrite struct {
@@ -246,7 +248,7 @@ func TestALongStructuredToolIsSuspendedDurably(t *testing.T) {
 	log := &progressLog{}
 	var rows []RunOperation
 	var mu sync.Mutex
-	ctx := withProviderProgressRecorder(context.Background(), func(p ProviderProgress) {
+	ctx := execution.WithProgressRecorder(context.Background(), func(p ProviderProgress) {
 		boundRecorder(scheduler, op, log)(p)
 		current, _, _, _ := scheduler.Store.Operation(op.ID)
 		mu.Lock()
@@ -255,7 +257,7 @@ func TestALongStructuredToolIsSuspendedDurably(t *testing.T) {
 	})
 	started := time.Now()
 	result, err := provider.Execute(ctx, request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("a healthy long tool was ended: %v %#v %+v", err, result.Failure, result.Invocation)
 	}
 	if elapsed := time.Since(started); elapsed < toolRuns {
@@ -304,7 +306,7 @@ func TestClosingTheToolResumesInactivityDurably(t *testing.T) {
 	scheduler := liveScheduler()
 	op := plannedExecution(t, scheduler, time.Hour)
 	log := &progressLog{}
-	ctx := withProviderProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
+	ctx := execution.WithProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
 	result, _ := provider.Execute(ctx, request)
 	if result.Failure == nil || result.Failure.Classification != FailureProviderNoProgress {
 		t.Fatalf("failure = %#v, want inactivity once the tool closed", result.Failure)
@@ -339,7 +341,7 @@ func TestASuspensionEndsWithItsAttempt(t *testing.T) {
 			scheduler := liveScheduler()
 			op := plannedExecution(t, scheduler, time.Hour)
 			log := &progressLog{}
-			ctx := withProviderProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
+			ctx := execution.WithProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
 			started := time.Now()
 			result, _ := provider.Execute(ctx, request)
 			if name == "attempt_wall" {
@@ -487,7 +489,7 @@ func TestAnEndedByteOutputProcessLeavesAnExactInactivityDatum(t *testing.T) {
 	scheduler := liveScheduler()
 	op := plannedExecution(t, scheduler, time.Hour)
 	log := &progressLog{}
-	ctx := withProviderProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
+	ctx := execution.WithProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
 	if _, err := provider.Execute(ctx, request); err != nil {
 		t.Fatal(err)
 	}
@@ -904,9 +906,9 @@ func TestAStuckDurableWriteCannotHoldTheInvocation(t *testing.T) {
 		})
 		provider, request := claudeProcess(t, emit(claudeAssistant("M1", "", claudeToolUse("X")))+"sleep 0.3\n"+
 			emit(claudeToolResult("X", ""), claudeResult(false, "success", 0)))
-		ctx := withProviderProgressRecorder(context.Background(), record)
+		ctx := execution.WithProgressRecorder(context.Background(), record)
 		result := run(t, provider, ctx, request, 300*time.Millisecond+progressRecordInterval(inactivityWindow)+time.Second)
-		if result.Outcome != Succeeded || !blocked.Load() {
+		if result.Outcome != execution.Succeeded || !blocked.Load() {
 			t.Fatalf("outcome %q, write blocked %t", result.Outcome, blocked.Load())
 		}
 		// The attempt settles; the stuck write - a suspension - lands after.
@@ -932,7 +934,7 @@ func TestAStuckDurableWriteCannotHoldTheInvocation(t *testing.T) {
 		provider, request, _ := inactivityFixture(t, "while :; do echo working; sleep 0.05; done\n")
 		request.Budgets.InactivityLimit = 4 * time.Second // a one-second interval the bound must not wait out
 		request.Budgets.WallLimit = 500 * time.Millisecond
-		ctx := withProviderProgressRecorder(context.Background(), record)
+		ctx := execution.WithProgressRecorder(context.Background(), record)
 		result := run(t, provider, ctx, request, 500*time.Millisecond+provider.Grace+600*time.Millisecond)
 		if result.Invocation == nil || result.Invocation.TerminationCause != TerminationDeadlineReached || !blocked.Load() {
 			t.Fatalf("provenance %+v, write blocked %t", result.Invocation, blocked.Load())
@@ -1024,7 +1026,7 @@ func TestALiveInvocationGetsNoRecoveryAllowance(t *testing.T) {
 	scheduler := liveScheduler()
 	op := plannedExecution(t, scheduler, time.Hour)
 	log := &progressLog{}
-	ctx := withProviderProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
+	ctx := execution.WithProgressRecorder(context.Background(), boundRecorder(scheduler, op, log))
 	started := time.Now()
 	result, _ := provider.Execute(ctx, request)
 	elapsed := time.Since(started)
@@ -1079,7 +1081,7 @@ func TestAGracefulShutdownLeavesNoRecoveryAllowance(t *testing.T) {
 	runID := fixture.start()
 	var id string
 	fixture.provider.FakeExecutionProvider.Result = ExecutionResult{
-		ProviderID: "test-provider", Outcome: OperationCancelled,
+		ProviderID: "test-provider", Outcome: execution.Cancelled,
 		Failure: &ProviderFailure{Classification: FailureControllerShutdown},
 	}
 	fixture.provider.mutate = func(string) error {

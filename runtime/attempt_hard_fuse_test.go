@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 func TestAttemptHardFuseDefaultIsThreeHoursAndRunBounded(t *testing.T) {
@@ -111,7 +113,7 @@ type hardFuseProgressProvider struct {
 
 func (p *hardFuseProgressProvider) Isolation() ProviderIsolation { return p.provider.Isolation() }
 func (p *hardFuseProgressProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
-	record := providerProgressRecorder(ctx)
+	record := execution.ProgressRecorder(ctx)
 	for step := 1; step <= 18; step++ {
 		p.provider.clock.advance(5 * time.Minute)
 		if request.Deadline == nil || !p.provider.clock.Now().Before(*request.Deadline) {

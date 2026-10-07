@@ -55,7 +55,7 @@ func TestNestedVerificationNativeToolCancellationFuseAndShutdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+			v := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 			service, shutdown := context.WithCancel(context.Background())
 			defer shutdown()
 			descriptor, _, stop := nativeVerificationFixture(t, v, target, service)
@@ -110,7 +110,7 @@ func TestNestedVerificationNativeToolCancellationFuseAndShutdown(t *testing.T) {
 func TestNestedVerificationScratchCannotForgeAControllerGrant(t *testing.T) {
 	dir, store, s := toolFixture(t, 1)
 	holder := nestedParent(t, store, s, "holder")
-	v := verificationExecution{s, ExecutionAttemptRef{holder.RunID, holder.ID, holder.AttemptIdentity}, dir}
+	v := verificationExecution{s, ExecutionAttemptRef{RunID: holder.RunID, OperationID: holder.ID, Attempt: holder.AttemptIdentity}, dir}
 	p, lock, err := v.begin(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestNestedVerificationScratchCannotForgeAControllerGrant(t *testing.T) {
 		}
 	})
 	parent := nestedParent(t, store, s, "native")
-	native := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	native := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 	target := t.TempDir()
 	marker := filepath.Join(target, "executed")
 	if err := os.WriteFile(filepath.Join(target, "probe"), []byte("#!/bin/sh\nprintf ran > "+shellSingleQuoted(marker)+"\n"), 0700); err != nil {
@@ -189,7 +189,7 @@ func TestNestedVerificationScratchCannotForgeAControllerGrant(t *testing.T) {
 func TestNestedVerificationDescendantOwnershipSurvivesWrapperDeath(t *testing.T) {
 	dir, store, s := toolFixture(t, 1)
 	parent := nestedParent(t, store, s, "producer")
-	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	v := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 	p, lock, err := v.begin(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 	dir, store, s := toolFixture(t, 1)
 	s.LeaseDuration = 100 * time.Millisecond
 	parent := nestedParent(t, store, s, "producer")
-	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	v := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 	target := t.TempDir()
 	fifo := filepath.Join(target, "block")
 	if _, err := (OSCommandExecutor{}).Run(context.Background(), "mkfifo", []string{fifo}, target, os.Environ(), time.Second); err != nil {
@@ -370,7 +370,7 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 func TestNestedVerificationToolLockOverridesTheSchedulerProcessProbe(t *testing.T) {
 	dir, store, s := toolFixture(t, 1)
 	parent := nestedParent(t, store, s, "producer")
-	v := verificationExecution{s, ExecutionAttemptRef{parent.RunID, parent.ID, parent.AttemptIdentity}, dir}
+	v := verificationExecution{s, ExecutionAttemptRef{RunID: parent.RunID, OperationID: parent.ID, Attempt: parent.AttemptIdentity}, dir}
 	p, lock, err := v.begin(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)

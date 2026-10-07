@@ -5,12 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"time"
-)
 
-// errRunStopped is the cancellation CAUSE the execution watcher gives the
-// provider's context. It is set only after a successful durable read of the
-// run as Cancelled, never inferred from an error that coincides with a stop.
-var errRunStopped = errors.New("the run was stopped while its execution was running")
+	"github.com/bogdaniel/zenchron-engineering/execution"
+)
 
 // errStoppedBeforeProvider is the diagnostic of an attempt whose run was
 // already stopped when its provider would have started. No provider ran, so no
@@ -20,7 +17,7 @@ var errStoppedBeforeProvider = errors.New("the run was stopped before the provid
 // runStopObserved reports whether ctx was cancelled by the execution watcher
 // because it observed the run's durable disposition as Cancelled.
 func runStopObserved(ctx context.Context) bool {
-	return errors.Is(context.Cause(ctx), errRunStopped)
+	return errors.Is(context.Cause(ctx), execution.ErrRunStopped)
 }
 
 // executionWatch is what the watcher saw while one provider invocation ran.
@@ -74,7 +71,7 @@ func (w executionWatch) settle(out *effect) {
 // publication are #215, not this.
 //
 // It reads the durable run document, so a stop written by another store handle
-// or process is seen, and cancels the provider's context with errRunStopped
+// or process is seen, and cancels the provider's context with execution.ErrRunStopped
 // only after SUCCESSFULLY reading the run as Cancelled. A failed read or a
 // missing run is not a stop: the provider keeps running, the next tick reads
 // again, and the failures are counted for the attempt's diagnostic. Drain and
@@ -94,7 +91,7 @@ func (r *EngineeringRuntime) watchExecution(parent context.Context, runID string
 			return false
 		}
 		if found && run.Disposition == Cancelled {
-			cancel(errRunStopped)
+			cancel(execution.ErrRunStopped)
 			return true
 		}
 		return false

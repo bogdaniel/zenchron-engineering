@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ type isolatedProvider struct {
 
 func newIsolatedProvider(mutate func(dir string) error) *isolatedProvider {
 	return &isolatedProvider{
-		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}},
+		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}},
 		mutate:                mutate,
 	}
 }

@@ -42,6 +42,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bogdaniel/zenchron-engineering/execution"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
@@ -431,7 +432,7 @@ func (r *EngineeringRuntime) repairHandoff(ctx context.Context, state *runState,
 	// The stop ended this repair only if the provider says so, as for an
 	// execution; nothing it wrote after the stop is journalled.
 	if watch.observed && class == FailureRunCancelled {
-		return withProvenance(effect{state: OperationCancelled, interrupted: true, result: record(HandoffRepairFailed, errRunStopped.Error())})
+		return withProvenance(effect{state: OperationCancelled, interrupted: true, result: record(HandoffRepairFailed, execution.ErrRunStopped.Error())})
 	}
 	// A stop or a passed deadline that something else beat still revokes the
 	// authority to turn this answer into a handoff; what ended the provider

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // ---------------------------------------------------------------------------
@@ -597,7 +598,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// writer, and never an operator stop - that is a durable act the
 			// execution watcher observes, not a context.
 			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
-			result := notStartedResult("", "", "", operation.AttemptIdentity, notStarted)
+			result := execution.NotStartedResult("", "", "", operation.AttemptIdentity, notStarted)
 			class := result.Failure.Classification
 			return effect{state: OperationFailed, result: executionRecord{
 				mutationResult: mutationResult{FailureClass: class},
@@ -915,7 +916,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// never through the lease heartbeat: a controller being alive is a
 	// different claim from the work moving, and #238 is the cost of letting the
 	// first stand in for the second.
-	ctx = withProviderProgressRecorder(ctx,
+	ctx = execution.WithProgressRecorder(ctx,
 		func(progress ProviderProgress) {
 			_, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, progress)
 		})
@@ -943,7 +944,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}}
 	}
 	executing = withVerificationExecution(executing, r.scheduler,
-		ExecutionAttemptRef{state.run.ID, operation.ID, physicalAttempt}, r.deps.StateDir)
+		ExecutionAttemptRef{RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt}, r.deps.StateDir)
 	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
@@ -1809,7 +1810,7 @@ func providerOutcome(result ExecutionResult, err error) OperationState {
 		return OperationFailed
 	}
 	if result.Outcome != "" {
-		return result.Outcome
+		return OperationState(result.Outcome) // the host conversion: same strings, host type
 	}
 	return Succeeded
 }

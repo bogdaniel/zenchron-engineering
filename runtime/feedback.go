@@ -45,11 +45,6 @@ import (
 	"time"
 )
 
-// FeedbackClass is where an item came from. It is recorded because the operator
-// question "why did the worker see this" is answered differently for a review
-// of the exact head and for a comment on the source issue.
-type FeedbackClass string
-
 const (
 	// FeedbackReview is a submitted pull-request review.
 	FeedbackReview FeedbackClass = "pull_request_review"

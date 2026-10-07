@@ -49,6 +49,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 const openaiProviderID = "openai-responses"
@@ -545,13 +547,13 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		return ExecutionResult{Executed: exchanged}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext, Executed: exchanged}
+	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: execution.Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext, Executed: exchanged}
 	if stop == StopCompleted {
 		return result, nil
 	}
-	result.Outcome = OperationFailed
+	result.Outcome = execution.Failed
 	if stop == StopCancelled || stop == StopDeadlineExceeded {
-		result.Outcome = OperationCancelled
+		result.Outcome = execution.Cancelled
 	}
 	result.Failure = &ProviderFailure{Classification: classification, RawDiagnosticRef: artifacts[0].Path}
 	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode, Param: providerParam}

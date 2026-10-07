@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 var ErrSandboxUnavailable = fmt.Errorf("required sandbox capability is unavailable or unenforceable")
@@ -767,37 +768,6 @@ func (s ArtifactStore) StoreExecutionAttemptTranscript(providerID string, attemp
 		return nil, err
 	}
 	return s.writeTranscript(prefix, stdout, stderr, true)
-}
-
-// PriorAttemptObservations is the runtime's bounded, deterministic account of
-// what an eligible retry inherited from earlier attempts of the SAME execution
-// binding - and, just as importantly, of what it did not.
-//
-// It is PROVENANCE, not content. Text is the model-visible material and is
-// deliberately not persisted: the observations themselves already exist as the
-// immutable per-attempt artifacts #55 established, and a durable row that
-// duplicated them would grow without bound. What is persisted answers the
-// operator's question - which earlier attempts were supplied, which were
-// dropped by the aggregate bound, which were individually truncated, how many
-// bytes crossed, and a digest proving the assembly was deterministic.
-type PriorAttemptObservations struct {
-	RunID       string `json:"run_id"`
-	OperationID string `json:"operation_id"`
-	Attempt     int    `json:"attempt"`
-	// Supplied, Omitted and Truncated are ascending attempt numbers. Omitted
-	// names an attempt that HAD observations and did not fit the aggregate
-	// bound; Truncated names one whose own observations were cut to the
-	// per-attempt bound. An attempt that observed nothing appears in neither,
-	// because nothing about it was dropped.
-	Supplied  []int  `json:"supplied_attempts,omitempty"`
-	Omitted   []int  `json:"omitted_attempts,omitempty"`
-	Truncated []int  `json:"truncated_attempts,omitempty"`
-	Bytes     int    `json:"bytes"`
-	Digest    string `json:"digest,omitempty"`
-
-	// Text is the assembled model-visible context. It is excluded from the
-	// durable record on purpose; see the type comment.
-	Text string `json:"-"`
 }
 
 const (
@@ -1589,7 +1559,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		// The caller's cancellation is classified exactly as it is for the
 		// verification run below: not a prerequisite verdict (#447).
 		if ctx.Err() != nil {
-			class = cancellationClass(context.Cause(ctx))
+			class = execution.CancellationClass(context.Cause(ctx))
 		}
 		return AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), FailureClass: class}, err
 	}
@@ -1641,7 +1611,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		// never a verdict that spends remediation.
 		switch {
 		case ctx.Err() != nil:
-			result.FailureClass = cancellationClass(context.Cause(ctx))
+			result.FailureClass = execution.CancellationClass(context.Cause(ctx))
 		case verdict:
 			result.FailureClass = FailureVerification
 		default:

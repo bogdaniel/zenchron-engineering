@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // providerAnswer is one scripted provider outcome: what it reports, what it
@@ -66,7 +68,7 @@ func writesCandidate(dir string) error {
 func classifiedFailure(class FailureClass) providerAnswer {
 	return providerAnswer{result: ExecutionResult{
 		ProviderID: "test-provider",
-		Outcome:    OperationFailed,
+		Outcome:    execution.Failed,
 		Failure:    &ProviderFailure{Classification: class, RawDiagnosticRef: "diagnostic-" + string(class)},
 	}}
 }
@@ -182,7 +184,7 @@ func TestTransientProviderFailureIsRetried(t *testing.T) {
 	fixture, provider := newRoutingFixture(t, 3,
 		classifiedFailure(FailureTransientProvider),
 		providerAnswer{
-			result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded},
+			result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded},
 			mutate: writesCandidate,
 		},
 	)

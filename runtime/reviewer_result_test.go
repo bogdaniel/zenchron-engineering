@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // reviewerFixture is one admission question: a reviewer stage, its frozen
@@ -513,7 +514,7 @@ func TestTheAdapterReadsNoVerdictOutOfAFailedInvocation(t *testing.T) {
 				if typed.Review != nil {
 					t.Fatalf("a failed invocation carried a verdict out of the adapter: %+v", typed.Review)
 				}
-				if result.Outcome == Succeeded || result.Failure == nil {
+				if result.Outcome == execution.Succeeded || result.Failure == nil {
 					t.Fatalf("the invocation did not report a failure: %+v", result)
 				}
 				return result.Failure
@@ -545,7 +546,7 @@ func TestAMalformedVerdictFailsAnOtherwiseSuccessfulInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != OperationFailed || result.Failure == nil {
+	if result.Outcome != execution.Failed || result.Failure == nil {
 		t.Fatalf("a malformed verdict did not fail the invocation: %+v", result)
 	}
 	// Never FailureVerification (#374): nothing was judged, so nothing about

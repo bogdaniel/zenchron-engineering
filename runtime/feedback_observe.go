@@ -384,18 +384,6 @@ func (r *EngineeringRuntime) feedbackContext(runID string, pending []FeedbackObs
 	return items
 }
 
-// FeedbackContext is one admitted item as a worker sees it: framed, attributed
-// and delimited. It is DATA. The trusted instruction text tells the worker so,
-// and nothing in this struct is ever treated as an instruction to the system.
-type FeedbackContext struct {
-	Key    string
-	Class  FeedbackClass
-	Actor  string
-	Path   string
-	Commit string
-	Body   string
-}
-
 // feedbackBlock renders admitted feedback for a prompt. The delimiters are the
 // same framing the pinned source text uses, because the trust status is the
 // same: third-party data describing desired behaviour.

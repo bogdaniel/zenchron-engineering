@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // haltingProvider stops the reconcile loop the moment the producer is reached
@@ -24,7 +26,7 @@ type haltingProvider struct {
 
 func newHaltingProvider() *haltingProvider {
 	return &haltingProvider{FakeExecutionProvider: &FakeExecutionProvider{
-		Result: ExecutionResult{ProviderID: "halting-provider", Outcome: Succeeded},
+		Result: ExecutionResult{ProviderID: "halting-provider", Outcome: execution.Succeeded},
 	}}
 }
 

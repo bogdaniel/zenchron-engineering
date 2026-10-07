@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // executeWithHostSlots is what invokeExecution does around a provider: Execute,
@@ -107,12 +109,12 @@ func TestTheHostSlotReadPreservesTheAdapterOutcomes(t *testing.T) {
 				t.Fatalf("review=%+v resolution=%+v", typed.Review, typed.Resolution)
 			}
 			if tc.wantClass == "" {
-				if result.Outcome != Succeeded || result.Failure != nil || typed.ReviewRefusal != nil {
+				if result.Outcome != execution.Succeeded || result.Failure != nil || typed.ReviewRefusal != nil {
 					t.Fatalf("a readable or absent slot failed the invocation: %+v %+v", result, typed.ReviewRefusal)
 				}
 				return
 			}
-			if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != tc.wantClass {
+			if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != tc.wantClass {
 				t.Fatalf("want a %q failure, got %+v", tc.wantClass, result)
 			}
 			if result.Failure.RawDiagnosticRef != result.Artifacts[0].Path {

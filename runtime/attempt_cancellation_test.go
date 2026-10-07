@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // Operator stop reaching a RUNNING execution.invoke (#213). What a stop does to
@@ -156,7 +158,7 @@ func (p *blockingProvider) Execute(ctx context.Context, request ExecutionRequest
 		if ownerOfCancellation(ctx) == OwnerOperatorStop {
 			class = FailureRunCancelled
 		}
-		return ExecutionResult{Outcome: OperationCancelled, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
+		return ExecutionResult{Outcome: execution.Cancelled, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
 	case <-time.After(10 * time.Second):
 		return ExecutionResult{}, errors.New("the provider was never interrupted")
 	}
@@ -216,7 +218,7 @@ type failingProvider struct{ *isolatedProvider }
 
 func (p failingProvider) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	p.requests = append(p.requests, request)
-	return ExecutionResult{Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}, nil
+	return ExecutionResult{Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}, nil
 }
 
 // A controller shutdown cancels the same attempt through the PARENT context.
@@ -432,14 +434,14 @@ func TestARunStopIsNotRecordedAsAControllerShutdown(t *testing.T) {
 	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
 	fake.block = true
 	ctx, cancel := context.WithCancelCause(context.Background())
-	timer := time.AfterFunc(100*time.Millisecond, func() { cancel(errRunStopped) })
+	timer := time.AfterFunc(100*time.Millisecond, func() { cancel(execution.ErrRunStopped) })
 	defer timer.Stop()
 	started := time.Now()
 	result, _ := provider.Execute(ctx, request)
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("the stopped invocation ran %s", elapsed)
 	}
-	if result.Outcome != OperationCancelled || result.Failure == nil || result.Failure.Classification != FailureRunCancelled {
+	if result.Outcome != execution.Cancelled || result.Failure == nil || result.Failure.Classification != FailureRunCancelled {
 		t.Fatalf("a run stop produced %q %#v", result.Outcome, result.Failure)
 	}
 	if result.Invocation == nil || result.Invocation.TerminationCause != TerminationRunStopped {
@@ -491,7 +493,7 @@ type afterReturn struct {
 func (p afterReturn) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	p.requests = append(p.requests, request)
 	defer p.after()
-	return ExecutionResult{Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}, nil
+	return ExecutionResult{Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}, nil
 }
 
 // Required test 2: the tool probe runs before the watch exists, so a stop
@@ -616,7 +618,7 @@ func (p *deadlineThenStop) Execute(ctx context.Context, request ExecutionRequest
 	invocation := &InvocationProvenance{}
 	invocation.TerminationCause = TerminationDeadlineReached
 	return ExecutionResult{
-		Outcome:    OperationFailed,
+		Outcome:    execution.Failed,
 		Failure:    &ProviderFailure{Classification: FailureExecutionIncomplete},
 		Invocation: invocation,
 	}, context.DeadlineExceeded
@@ -744,7 +746,7 @@ func TestTheExecutionWatchSettlesIntoTheDiagnostic(t *testing.T) {
 func TestAProcessThatExitedByItselfIsNotRecordedAsStopped(t *testing.T) {
 	provider, request, _ := agentFixture(t, AgentKindClaudeCode)
 	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(errRunStopped)
+	cancel(execution.ErrRunStopped)
 	result, _ := provider.Execute(ctx, request)
 	if result.Failure != nil && (result.Failure.Classification == FailureRunCancelled || result.Failure.Classification == FailureControllerShutdown) {
 		t.Fatalf("a process that exited by itself was classified %q", result.Failure.Classification)
