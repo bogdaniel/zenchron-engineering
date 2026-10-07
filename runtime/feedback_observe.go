@@ -495,7 +495,33 @@ func upstreamBlock(items []UpstreamContext) string {
 		if strings.TrimSpace(body) == "" {
 			body = "[the runtime could not read this stage's diff]"
 		}
-		out.WriteString("\n" + body + "\n" + upstreamFrameMarker + "\n")
+		out.WriteString("\n" + upstreamHandoffLines(item.Handoff) + body + "\n" + upstreamFrameMarker + "\n")
+	}
+	return out.String()
+}
+
+// upstreamHandoffLines states the producer's admitted handoff report INSIDE the
+// untrusted frame. The report is worker-authored, so it is neutralized and
+// framed exactly as the diff is: it describes what a producer says it did, and
+// it expands nothing the consumer may do.
+func upstreamHandoffLines(handoff *UpstreamHandoff) string {
+	if handoff == nil {
+		return ""
+	}
+	var out strings.Builder
+	// Every value is a ONE-LINE field: neutralizeFramedField is what the frame
+	// header lines already use, and it collapses the newlines that would
+	// otherwise let a producer's summary pose as another labelled line.
+	fmt.Fprintf(&out, "handoff %s outcome %s\nsummary: %s\n",
+		neutralizeFramedField(handoff.ID), neutralizeFramedField(handoff.Outcome),
+		neutralizeFramedField(handoff.Summary))
+	for _, label := range []struct {
+		name  string
+		items []string
+	}{{"unresolved", handoff.Unresolved}, {"recommended next", handoff.RecommendedNext}} {
+		for _, item := range label.items {
+			fmt.Fprintf(&out, "%s: %s\n", label.name, neutralizeFramedField(item))
+		}
 	}
 	return out.String()
 }

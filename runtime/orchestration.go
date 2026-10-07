@@ -101,7 +101,7 @@ func (s *Supervisor) Orchestrate(ctx context.Context, request ControlRequest) (O
 			if err != nil {
 				return err
 			}
-			planned, err := engine.planOrchestrationBatch(id, issues, request.Operator, reserved)
+			planned, err := engine.planOrchestrationBatch(id, issues, request.Operator, reserved, nil)
 			if err != nil {
 				return err
 			}
@@ -180,7 +180,11 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 // reserved names every run identity an existing batch already owns. A batch
 // whose child creation has not landed yet holds an identity no run row shows,
 // and a second batch must not decide the same one.
-func (r *EngineeringRuntime) planOrchestrationBatch(id string, issues []int, requestedBy string, reserved map[string]string) (orchestration.Batch, error) {
+// origin, when set, names the WorkGraph unit execution this batch exists to
+// perform and the exact inputs it consumes (#472). It is part of the batch's
+// identity, so a graph unit's child run is its own and can never be an earlier,
+// unrelated orchestration's run of the same issue.
+func (r *EngineeringRuntime) planOrchestrationBatch(id string, issues []int, requestedBy string, reserved map[string]string, origin *orchestration.BatchOrigin) (orchestration.Batch, error) {
 	live, err := r.deps.Store.ActiveRuns()
 	if err != nil {
 		return orchestration.Batch{}, err
@@ -194,7 +198,7 @@ func (r *EngineeringRuntime) planOrchestrationBatch(id string, issues []int, req
 	batch := orchestration.Batch{
 		SchemaVersion: orchestration.BatchSchemaVersion, ID: id,
 		Repository: r.deps.Repository.Identity, AgentID: r.deps.Agent.ID,
-		RequestedBy: BoundedNote(requestedBy), CreatedAt: r.deps.Clock.Now(),
+		RequestedBy: BoundedNote(requestedBy), CreatedAt: r.deps.Clock.Now(), Origin: origin,
 	}
 	for _, issue := range issues {
 		goal := issueGoal(r.deps.Repository.Identity, issue)

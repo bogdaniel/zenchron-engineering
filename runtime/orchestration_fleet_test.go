@@ -214,6 +214,11 @@ type fleetFixture struct {
 	*phase8Fixture
 	worker   *fleetProvider
 	capacity int
+	// holds are WorkGraph readiness holds a test injects as the owner outside
+	// the graph would (#472's #508 seam). Nil for every #470 test.
+	holds map[string]orchestration.DecisionWait
+	// holdError makes that owner unanswerable, so "fails closed" is testable.
+	holdError error
 }
 
 func newFleetFixture(t *testing.T, capacity int) *fleetFixture {
@@ -254,6 +259,16 @@ func newFleetFixture(t *testing.T, capacity int) *fleetFixture {
 
 // supervisor builds a supervisor over the fixture's CURRENT store, exactly as
 // a restarted `serve` would be built: nothing carried over in memory.
+// holdSource is the readiness owner outside the graph a test plays (#508's seam).
+func (f *fleetFixture) holdSource() func(string) (map[string]orchestration.DecisionWait, error) {
+	return func(string) (map[string]orchestration.DecisionWait, error) {
+		if f.holdError != nil {
+			return nil, f.holdError
+		}
+		return f.holds, nil
+	}
+}
+
 func (f *fleetFixture) supervisor() *Supervisor {
 	f.t.Helper()
 	registry := supervisorRegistry(f.t)
@@ -269,6 +284,7 @@ func (f *fleetFixture) supervisor() *Supervisor {
 		// bound that held only because few runs were driven would not hold.
 		MaxConcurrentObservations: 10,
 		PollInterval:              time.Minute, Agents: registry,
+		WorkUnitHolds: f.holdSource(),
 		Runtime: func(_ GitHubRepo, agent ResolvedAgent) (*EngineeringRuntime, error) {
 			deps := f.deps
 			deps.Store, deps.Agent, deps.Agents = f.store, agent, registry

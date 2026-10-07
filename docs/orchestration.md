@@ -26,8 +26,9 @@ explicit issue list
 ## What it is not
 
 It is **basic explicit orchestration**. It is not automatic roadmap or backlog
-execution, not the later WorkGraph (no dependencies between items), not a
-planner (that is `autonomy plan`, #64), not cross-repository programs, not
+execution, not the WorkGraph (a batch states no dependencies between its items;
+`docs/workgraph.md` is the layer that does, and it consumes the handoff below
+unchanged), not a planner (that is `autonomy plan`, #64), not cross-repository programs, not
 automatic review or remediation routing, not an organization control plane,
 and not the API agent harness (#446).
 
@@ -54,6 +55,12 @@ leased by the same scheduler as any other run.
   batch naming one is refused before anything is written.
 - An issue that already has a live run is refused, and the refused request
   writes nothing. Orchestration does not adopt or race work it did not create.
+- A batch may instead be created by a WorkGraph unit (#472), in which case it
+  carries an `origin` naming that graph, that unit and the exact admitted
+  upstream outputs the unit was activated against. The origin is part of the
+  batch identity, so a unit's child run is the unit's own and is never an
+  earlier, unrelated orchestration's run of the same issue. A direct operator
+  batch carries no origin and is identified, stored and read exactly as before.
 - The batch identity is a pure function of repository, agent and issue set.
   Sending the same request again — after a lost reply, or from another
   terminal — returns the same batch and creates no second run.

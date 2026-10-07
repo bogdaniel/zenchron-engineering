@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // SupervisorDependencies is the complete input. Like the runtime's own
@@ -89,6 +90,26 @@ type SupervisorDependencies struct {
 	// already reports for it rather than accepted and left to fail deep inside
 	// the run it starts. Nil disables the check.
 	AgentProber func(ResolvedAgent) AgentProber
+	// WorkUnitHolds reports the readiness holds one WorkGraph's units are under
+	// from an owner OUTSIDE the graph: unresolved decisions the work needs
+	// before it may run (#472's seam for #508).
+	//
+	// It is the ONLY way a unit is held. #472 owns no decision record, no
+	// authority and no persistence for one, so nothing here supplies it yet and
+	// a nil source holds nothing. A held unit is simply not in the frontier, so
+	// the pass does not activate it; when the source stops reporting the hold,
+	// the ordinary frontier computation includes it again. There is no path by
+	// which a worker answers its own hold.
+	//
+	// A source that fails holds NOTHING ANSWERED: the graph is reported and
+	// left alone for that pass rather than activated past a hold that may
+	// exist.
+	//
+	// A #473 decision_request message is NOT a hold. That is a worker ASKING
+	// for a decision; a hold is the authority that owns the decision saying the
+	// work may not proceed. Wiring worker messages in here would let a worker
+	// hold its own graph, which is the self-answer path in reverse.
+	WorkUnitHolds func(graphID string) (map[string]orchestration.DecisionWait, error)
 	// Plans is the plan lifecycle service, or the zero value when no plan has
 	// ever been proposed. It is what the plan reconciler resolves assignments
 	// through, and it contacts nothing.
@@ -139,6 +160,9 @@ type SupervisorReport struct {
 	// Orchestration names, bounded, each batch child this pass could not
 	// create or each handoff it could not admit (#470). Empty is healthy.
 	Orchestration []string `json:"orchestration,omitempty"`
+	// WorkGraphs names, bounded, each runnable work unit this pass could not
+	// activate (#472). Empty is healthy.
+	WorkGraphs []string `json:"work_graphs,omitempty"`
 	// Error is a tick that could not enumerate work. It is REPORTED rather
 	// than returned, because a supervisor that exited on one unreadable read
 	// would take every healthy run down with it - the same isolation rule that
@@ -673,6 +697,14 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	// decides when a run executes.
 	if !report.Draining {
 		report.Plans = s.reconcilePlans(ctx)
+		// WORK GRAPHS are activated BEFORE batches are reconciled, so a unit
+		// whose dependency became satisfied since the last tick gets its
+		// one-issue batch written, its child run created and then driven in
+		// the SAME pass. Like the plan reconciler above, this is dependency
+		// gating and nothing else: everything below - the ceiling, the
+		// rotation, the leases - remains the only thing that decides when a
+		// run executes.
+		report.WorkGraphs = s.reconcileWorkGraphs()
 		report.Orchestration = s.reconcileOrchestration(ctx)
 	}
 	runs, err := s.deps.Store.ActiveRuns()

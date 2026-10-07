@@ -760,6 +760,16 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// A WORK GRAPH unit's child run receives the exact admitted upstream
+	// handoffs its activation was bound to (#472). An ordinary orchestrated run
+	// and a plan stage run are unchanged: neither has a unit origin.
+	unit, err := r.workUnit(state)
+	if err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
 	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
 	//
 	// It is NOT operation.Attempt. That is the budget counter, and a provider
@@ -932,7 +942,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	executing = withVerificationExecution(executing, r.scheduler,
 		ExecutionAttemptRef{state.run.ID, operation.ID, physicalAttempt}, r.deps.StateDir)
-	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
+	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
 		HandoffPath:            handoffPath,
@@ -987,7 +997,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// The same authority as an instant, so the process bound and the
 		// provenance record cannot describe different realities.
 		Deadline: operation.Deadline,
-	}))
+	})))
 	watch = endWatch()
 	// THE ATTEMPT EXPLAINS ITSELF DURABLY (#327). Provenance exists only for
 	// an invocation that reached a provider, and it is journalled on EVERY
@@ -3472,29 +3482,95 @@ const maxUpstreamDiffBytes = 96 << 10
 func (r *EngineeringRuntime) upstreamOutputs(assignment domain.AgentAssignment) ([]UpstreamContext, error) {
 	outputs := make([]UpstreamContext, 0, len(assignment.Context.UpstreamOutputs))
 	for _, upstream := range assignment.Context.UpstreamOutputs {
-		context := UpstreamContext{
+		context, err := r.withUpstreamDiff(UpstreamContext{
 			StageID: upstream.StageID, RunID: upstream.RunID,
 			Commit: upstream.Candidate, Tree: upstream.Tree,
-		}
-		if upstream.RunID != "" && upstream.Candidate != "" {
-			dir := candidateDir(r.deps.StateDir, upstream.RunID)
-			if dirExists(dir) {
-				run, found, err := r.deps.Store.Run(upstream.RunID)
-				if err != nil {
-					return nil, err
-				}
-				base := ""
-				if found {
-					base = run.Base.Revision
-				}
-				if diff, truncated := readCandidateDiff(dir, base, upstream.Candidate); diff != "" {
-					context.Diff, context.Truncated = diff, truncated
-				}
-			}
+		})
+		if err != nil {
+			return nil, err
 		}
 		outputs = append(outputs, context)
 	}
 	return outputs, nil
+}
+
+// withUpstreamDiff fills in the change an upstream output actually contains.
+//
+// It is ONE reader with two callers - plan stages and WorkGraph units - because
+// "what did this upstream produce" has one answer. Best effort by design: a
+// reclaimed workspace is a missing diff, not a failed invocation, and the
+// consumer is told the diff could not be read rather than handed silence.
+func (r *EngineeringRuntime) withUpstreamDiff(context UpstreamContext) (UpstreamContext, error) {
+	if context.RunID == "" || context.Commit == "" {
+		return context, nil
+	}
+	dir := candidateDir(r.deps.StateDir, context.RunID)
+	if !dirExists(dir) {
+		return context, nil
+	}
+	run, found, err := r.deps.Store.Run(context.RunID)
+	if err != nil {
+		return UpstreamContext{}, err
+	}
+	base := ""
+	if found {
+		base = run.Base.Revision
+	}
+	if diff, truncated := readCandidateDiff(dir, base, context.Commit); diff != "" {
+		context.Diff, context.Truncated = diff, truncated
+	}
+	return context, nil
+}
+
+// workUnitContext is the upstream a WorkGraph unit's child run consumes (#472).
+//
+// It is read from the run's OWN durable binding: the run names the batch that
+// created it, and that batch's origin names the unit and the exact admitted
+// handoffs the unit was activated against. So the invocation receives precisely
+// the inputs the activation recorded, and an invocation of a run bound to some
+// other batch receives none of them.
+//
+// Composing upstream CODE into this candidate is #475's; this carries the exact
+// handoff and subject into the invocation, which is what makes the activation's
+// recorded input set a fact about the execution rather than bookkeeping.
+type workUnitContext struct{ upstream []UpstreamContext }
+
+// apply gives the invocation its upstream. It widens nothing: permissions,
+// prohibitions and acceptance still come from the compiled contract.
+func (w workUnitContext) apply(request ExecutionRequest) ExecutionRequest {
+	if len(w.upstream) > 0 {
+		request.Upstream = w.upstream
+	}
+	return request
+}
+
+func (r *EngineeringRuntime) workUnit(state *runState) (workUnitContext, error) {
+	if state.run.Orchestration == nil || state.run.Orchestration.BatchID == "" {
+		return workUnitContext{}, nil
+	}
+	batch, found, err := r.deps.Store.OrchestrationBatch(state.run.Orchestration.BatchID)
+	if err != nil {
+		return workUnitContext{}, err
+	}
+	if !found || batch.Origin == nil || len(batch.Origin.Inputs) == 0 {
+		return workUnitContext{}, nil
+	}
+	upstream := make([]UpstreamContext, 0, len(batch.Origin.Inputs))
+	for _, input := range batch.Origin.Inputs {
+		context, err := r.withUpstreamDiff(UpstreamContext{
+			StageID: input.UnitID, RunID: input.RunID,
+			Commit: input.CandidateRevision, Tree: input.CandidateTree,
+			Handoff: &UpstreamHandoff{
+				ID: input.HandoffID, Outcome: input.Outcome, Summary: input.Summary,
+				Unresolved: input.Unresolved, RecommendedNext: input.RecommendedNext,
+			},
+		})
+		if err != nil {
+			return workUnitContext{}, err
+		}
+		upstream = append(upstream, context)
+	}
+	return workUnitContext{upstream: upstream}, nil
 }
 
 // readCandidateDiff reads one upstream run's change. It is best effort by
