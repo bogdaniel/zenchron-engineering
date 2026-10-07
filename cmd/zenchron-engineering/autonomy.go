@@ -1133,6 +1133,12 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 // made when the provider is constructed.
 type candidateBoundProvider struct{ base runtime.OpenAIProvider }
 
+// The wrapper must keep every capability of the provider it binds (#522).
+var (
+	_ runtime.IsolationReporter = candidateBoundProvider{}
+	_ runtime.ToolchainProber   = candidateBoundProvider{}
+)
+
 func (p candidateBoundProvider) Isolation() runtime.ProviderIsolation { return p.base.Isolation() }
 
 // MissingTools forwards the container probe (#522). Without it the runtime's

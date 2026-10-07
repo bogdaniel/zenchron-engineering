@@ -3624,12 +3624,10 @@ func (r *EngineeringRuntime) missingWorkerTools(ctx context.Context) []string {
 	if len(toolchain.RequiredTools) == 0 {
 		return nil
 	}
-	if provider, ok := r.deps.Provider.(interface {
-		MissingTools(context.Context, []string) []string
-	}); ok {
-		return provider.MissingTools(ctx, toolchain.RequiredTools)
+	if prober, ok := r.deps.Provider.(ToolchainProber); ok {
+		return prober.MissingTools(ctx, toolchain.RequiredTools)
 	}
-	return CLIAgentProvider{Toolchain: toolchain}.missingTools()
+	return hostMissingTools(toolchain)
 }
 
 // admitReview checks one structured reviewer result and, if it may become
