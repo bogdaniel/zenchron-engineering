@@ -180,7 +180,8 @@ func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.Ba
 		out.Observation = "transitioning"
 		return fail(err)
 	}
-	out.Capacity, err = capacityWaitFor(events, summary.Reason)
+	var capacitySuperseded bool
+	out.Capacity, capacitySuperseded, err = capacityWaitFor(events, summary.Reason)
 	if err != nil {
 		return fail(err)
 	}
@@ -197,6 +198,9 @@ func projectOrchestrationItem(tx *sql.Tx, stateDir string, item orchestration.Ba
 		if summary.Disposition != Waiting {
 			out.Observation = "transitioning"
 		}
+	} else if capacitySuperseded && summary.Disposition == Waiting {
+		out.Observation = "transitioning"
+		return fail(fmt.Errorf("transitioning: capacity was reacquired; awaiting fresh run disposition"))
 	} else if out.Capacity != nil && summary.Disposition == Waiting {
 		activity = orchestration.ActivityIdle
 	} else if summary.producerFinished {

@@ -173,8 +173,14 @@ Recognized capacity waits use `work_capacity_unavailable`,
 `observation_capacity_unavailable` or `verification_capacity_unavailable` and
 an optional `capacity` object containing `class` and the enforced `ceiling`.
 The scheduler records that object in `run.waiting` at refusal, so restarting or
-changing configuration cannot rewrite the explanation. Known capacity queue
-time follows the existing external-wait budget accounting; no attempt ran.
+changing configuration cannot rewrite the explanation. A later `operation.before`
+of the matching resource class supersedes that wait durably; unrelated classes
+and merely planned operations do not. While the operation is owned, status is
+running/transitioning. After it finishes, a crash before the next disposition
+leaves unknown/transitioning status with no current capacity explanation, even
+after restart. A fresh disposition clears that transition; a renewed refusal
+records a fresh wait even if its class and ceiling are unchanged. Known capacity
+queue time follows the existing external-wait budget accounting; no attempt ran.
 Other acquisition refusals retain `operation_unavailable` when their cause is
 unknown. Capacity observations grant no scheduling or execution authority.
 
