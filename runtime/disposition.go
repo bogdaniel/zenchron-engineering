@@ -77,7 +77,7 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 			return nil
 		}
 	}
-	recordedCapacity, err := capacityWaitFor(state.events, reason)
+	recordedCapacity, capacitySuperseded, err := capacityWaitFor(state.events, reason)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disp
 	// Re-observation can discover remediation; an old marker cannot certify it.
 	goalChanged := disposition == Waiting && reason == ReasonGoalStateReached &&
 		!state.producerStageFinished()
-	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason || capacityChanged || goalChanged {
+	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason || capacityChanged || capacitySuperseded || goalChanged {
 		eventType, ok := dispositionEvents[disposition]
 		if !ok {
 			return fmt.Errorf("no journal event for disposition %q", disposition)
