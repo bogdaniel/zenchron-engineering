@@ -203,11 +203,12 @@ stays `ready` until that run reaches a terminal disposition.
 ## Restart and replay
 
 A unit's child run identity comes from the one-issue batch, which is a pure
-function of repository, agent and issue, and an activation row is write-once
-keyed by graph and unit. So a crash between writing the batch and recording the
-activation replays onto the same batch and the same run, a restart reproduces
-the identical frontier, and no replay or recovery produces a second child run
-for a unit.
+function of repository, agent, issue and the unit's origin: the graph, the unit
+and the canonical input set it consumes (`orchestration.WorkUnitBatchID`). An
+activation row is write-once keyed by graph and unit. So a crash between
+writing the batch and recording the activation replays onto the same batch and
+the same run, a restart reproduces the identical frontier, and no replay or
+recovery produces a second child run for a unit.
 
 ## Unresolved decisions
 
