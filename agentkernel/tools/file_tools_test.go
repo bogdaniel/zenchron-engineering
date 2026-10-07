@@ -187,32 +187,8 @@ func TestSearchIsScopedAndBounded(t *testing.T) {
 	}
 }
 
-func TestSnapshotGuardReportsDrift(t *testing.T) {
-	f := newFixture(t, map[string]string{"a.txt": "x"})
-	bound := api.Digest([]byte("manifest-1"))
-	current := bound
-	ws, err := NewWorkspace(f.root, &SnapshotGuard{Bound: bound, Current: func() (string, error) { return current, nil }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := NewBroker(ws.ReadFile())
-	if err != nil {
-		t.Fatal(err)
-	}
-	env := f.env(api.ModeReadOnly, grant("r", api.CapabilityFileRead, "."))
-	res, _ := b.Dispatch(context.Background(), call("read_file", `{"path":"a.txt"}`), env)
-	if strings.Contains(res.Output, "note:") {
-		t.Fatalf("unchanged workspace reported drift: %q", res.Output)
-	}
-	current = api.Digest([]byte("manifest-2"))
-	res, _ = b.Dispatch(context.Background(), call("read_file", `{"path":"a.txt"}`), env)
-	if !strings.Contains(res.Output, "not bound snapshot "+bound) {
-		t.Fatalf("drift not reported: %q", res.Output)
-	}
-	if _, err := NewWorkspace(f.root, &SnapshotGuard{Bound: "nope"}); err == nil {
-		t.Fatal("invalid guard accepted")
-	}
-	if _, err := NewWorkspace("relative", nil); err == nil {
+func TestNewWorkspaceRefusesRelativeRoot(t *testing.T) {
+	if _, err := NewWorkspace("relative"); err == nil {
 		t.Fatal("relative workspace accepted")
 	}
 }

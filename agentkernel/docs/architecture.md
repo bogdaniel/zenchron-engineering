@@ -15,16 +15,19 @@ flowchart LR
     E["engine.Engine<br/>(api.Executor)"]
   end
   H -->|"api.ExecutionRequest + ports"| E
-  E -->|"api.ExecutionResult (observation only)<br/>api.Event via api.EventSink"| H
-  E -->|"api.Provider.Complete"| P["providers/*"]
-  E -->|"tools.Broker.Dispatch"| T["tools + host api.CommandRunner"]
-  E -->|"api.ContextSource.ContextItems"| S["intelligence.View / memory source"]
+  E -->|"api.ExecutionResult (observation only)<br/>api.EventDelivery hand-off"| H
+  E -->|"api.ProviderCall hand-off<br/>(host worker: api.ServeProvider)"| P["providers/*"]
+  E -->|"tools.Broker.Dispatch"| T["kernel file tools<br/>+ CommandCall / HostToolCall hand-offs"]
+  E -->|"api.ContextRequest hand-off<br/>(host worker: api.ServeContext)"| S["intelligence.View / memory source"]
 ```
 
-Arrows are calls, not imports. The kernel imports nothing outside this module
-and the standard library; every host capability (events, clock, artifacts,
-command execution, credentials, context sources, provider transports) arrives as
-an `api` interface or a constructor argument.
+Arrows are calls or hand-offs, not imports. The kernel imports nothing outside
+this module and the standard library. Every port a host can implement
+(events, context sources, providers, commands, host tools) is a channel of
+`api.Call`s served by host-owned workers and waited on within a bound by
+`internal/handoff.Exchange`, which starts no goroutine; what the kernel calls
+directly is kernel-owned (`storage` stores, `api` clocks, `tools` built-ins).
+Execution spec §4.1 lists every host callback and its bound.
 
 ## 2. Responsibility map
 
@@ -39,7 +42,9 @@ an `api` interface or a constructor argument.
 | Provider wire + usage normalization | `providers/openai`, `providers/anthropic`, `providers/local`; shared HTTP mechanics in `providers/internal/wire` | credentials (host `api.CredentialSource`), endpoints |
 | Tool admission | `tools.Broker` (`admit`, `Specs`, `Dispatch`, `bound`) | granting capability |
 | File tools | `tools.Workspace` (`ReadFile`, `Search`, `WriteFile`, `ApplyPatch`, `ReadFiles`) | protected isolation |
-| Commands | `tools.NewCommand` over host `api.CommandRunner` | spawning, containment, reaping |
+| Host port hand-off | `internal/handoff.Exchange` (kernel side), `api.Serve*` / `tools.ServeTool` (host workers) | the workers, their lifetime |
+| Commands | `tools.NewCommand` over a host `api.CommandCall` channel | spawning, containment, reaping |
+| Admission across processes | `engine` `run.admit` over `storage.Records.PutIfAbsent` claims | recovering a crashed attempt's claim |
 | Artifact and record persistence | `storage`: `MemoryArtifacts`, `FileArtifacts`, `MemoryRecords`, `FileRecords` | the host journal / `runtime.db` |
 | Derived memory | `memory.Store`, `memory.Store.Source` | engineering facts, authority |
 | Repository structure | `intelligence`: `Build`, `Open`, `Index.Overlay`, `NewView` | ProjectModel, impact, ownership (#67) |
@@ -59,11 +64,13 @@ reviewed allow-map and prints the actual graph (edge list and Mermaid) under
 ```mermaid
 flowchart TD
   strictjson["internal/strictjson"]
+  handoff["internal/handoff"] --> api
   api["api"] --> strictjson
   context["context"] --> api
   routing["routing"] --> api
   tools["tools"] --> api
   tools --> strictjson
+  tools --> handoff
   storage["storage"] --> api
   memory["memory"] --> api
   memory --> strictjson
@@ -73,7 +80,9 @@ flowchart TD
   intelligence --> storage
   engine["engine"] --> api
   engine --> context
+  engine --> handoff
   engine --> routing
+  engine --> storage
   engine --> tools
   wire["providers/internal/wire"] --> api
   openai["providers/openai"] --> api
@@ -108,9 +117,10 @@ flowchart TD
 Facts the graph makes visible:
 
 - `api` imports nothing from the module; it is the only shared vocabulary.
-- `engine` does not import `storage`, `memory`, `intelligence` or any
-  provider. It reaches them only through `api.ArtifactStore`,
-  `api.ContextSource` and `api.Provider`, so a host composes them.
+- `engine` does not import `memory`, `intelligence` or any provider. It
+  reaches them only through hand-off channels a host serves
+  (`api.ServeContext`, `api.ServeProvider`), so a host composes them. It
+  imports `storage` for the kernel-owned artifact and admission stores.
 - Adapters share HTTP mechanics through `providers/internal/wire`, which is
   unimportable outside `providers/`.
 - `providers/conformance` imports `testing`; it is a test library imported only
@@ -162,9 +172,10 @@ sequenceDiagram
 
 The engine keeps no state across executions. Per execution it holds a `run`
 (transcript, ledger, account, observations); it is discarded when `Execute`
-returns. Durable state exists only where a host supplies it: the `EventSink`,
-the `ArtifactStore`, and `storage.Records` under `memory.Store` or the
-`intelligence` cache. Storage roots are always explicit absolute paths; nothing
+returns. Durable state exists only where a host supplies it: the event sink
+behind its worker, a file-backed `storage.Artifacts`, the admission
+`storage.FileRecords` (claims and consumption per `execution_id`), and
+`storage.Records` under `memory.Store` or the `intelligence` cache. Storage roots are always explicit absolute paths; nothing
 assumes the parent checkout.
 
 ## 6. Trust classes

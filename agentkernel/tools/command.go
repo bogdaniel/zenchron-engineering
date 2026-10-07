@@ -10,15 +10,17 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/handoff"
 )
 
 // NewCommand returns the run_command tool (command.run). The model names a
 // command; argv and timeout come only from the matching CommandGrant, and the
-// process runs through the host's CommandRunner in dir. The full output is
+// process runs in dir through the host's process boundary, reached only by
+// handing a CommandCall to runner (api.ServeCommands). The full output is
 // always recorded as an artifact.
-func NewCommand(runner api.CommandRunner, dir string) (Tool, error) {
+func NewCommand(runner chan<- api.CommandCall, dir string) (Tool, error) {
 	if runner == nil {
-		return nil, errors.New("command tool needs a CommandRunner")
+		return nil, errors.New("command tool needs a command runner channel")
 	}
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
 		return nil, fmt.Errorf("command dir %q must be a clean absolute path", dir)
@@ -48,7 +50,10 @@ func commandScope(args json.RawMessage) (Scope, error) {
 	return Scope{Command: a.Command}, nil
 }
 
-func runCommand(ctx context.Context, runner api.CommandRunner, dir string, inv Invocation) (api.ToolResult, error) {
+// runCommand hands the granted command to the host and waits while ctx
+// lives. A command the host never took did not run; one it took but did
+// not answer is an uncertain side effect.
+func runCommand(ctx context.Context, runner chan<- api.CommandCall, dir string, inv Invocation) (api.ToolResult, error) {
 	scope, err := commandScope(inv.Arguments)
 	if err != nil {
 		return failed("arguments: %v", err), nil
@@ -58,14 +63,22 @@ func runCommand(ctx context.Context, runner api.CommandRunner, dir string, inv I
 		return failed("command %q is not granted", scope.Command), nil
 	}
 	granted := inv.Grant.Commands[i]
-	run, err := runner.Run(ctx, api.CommandRequest{
+	call := api.CommandCall{ID: inv.Producer, Context: ctx, Request: api.CommandRequest{
 		Argv: slices.Clone(granted.Argv), Dir: dir, Timeout: time.Duration(granted.TimeoutSeconds) * time.Second,
-	})
+	}}
+	reply, err := handoff.Exchange("command runner", runner, call, handoff.Bound{Shorten: ctx.Done()})
+	if errors.Is(err, handoff.ErrNotTaken) {
+		return failed("command %q did not run: %v", granted.Name, err), nil
+	}
+	if err == nil {
+		err = reply.Err
+	}
 	// A command may change the workspace; its effect is never assumed absent.
 	res := api.ToolResult{Status: api.ToolError, Mutated: true}
 	if err != nil {
 		return res, fmt.Errorf("command %q did not complete: %w", granted.Name, err)
 	}
+	run := reply.Value
 	full := fmt.Sprintf("exit_code: %d\n--- stdout ---\n%s\n--- stderr ---\n%s\n", run.ExitCode, run.Stdout, run.Stderr)
 	ref, err := record(ctx, inv.Artifacts, inv.Producer, []byte(full))
 	if err != nil {

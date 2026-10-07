@@ -23,29 +23,26 @@ type clauseArgs struct {
 	Term     string `json:"term"`
 }
 
-func (findClause) Spec() api.ToolSpec {
-	return api.ToolSpec{
-		Name:        "find_clause",
-		Description: "Return the numbered paragraphs of a supplied document that mention a term (case-insensitive).",
-		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["document","term"],` +
-			`"properties":{"document":{"type":"string"},"term":{"type":"string"}}}`),
-	}
+// tool registers find_clause as a host tool served by a worker the host
+// owns. It is file.search: the host grants it per document root like any
+// search, and the broker selects the grant from the document argument.
+func (f findClause) tool(workers context.Context) (tools.Tool, error) {
+	return tools.NewHostTool(tools.HostTool{
+		Spec: api.ToolSpec{
+			Name:        "find_clause",
+			Description: "Return the numbered paragraphs of a supplied document that mention a term (case-insensitive).",
+			InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["document","term"],` +
+				`"properties":{"document":{"type":"string"},"term":{"type":"string"}}}`),
+		},
+		Kind:         api.CapabilityFileSearch,
+		PathArgument: "document",
+		Calls:        tools.ServeTool(workers, f.invoke),
+	})
 }
 
-// Kind is file.search: the host grants it per document root like any search.
-func (findClause) Kind() api.CapabilityKind { return api.CapabilityFileSearch }
-
-func (findClause) Scope(arguments json.RawMessage) (tools.Scope, error) {
+func (f findClause) invoke(_ context.Context, inv tools.HostInvocation) (api.ToolResult, error) {
 	var a clauseArgs
-	if err := json.Unmarshal(arguments, &a); err != nil {
-		return tools.Scope{}, err
-	}
-	return tools.Scope{Paths: []string{a.Document}}, nil
-}
-
-func (f findClause) Invoke(_ context.Context, inv tools.Invocation) (api.ToolResult, error) {
-	var a clauseArgs
-	if err := json.Unmarshal(inv.Arguments, &a); err != nil {
+	if err := json.Unmarshal(inv.Call.Arguments, &a); err != nil {
 		return api.ToolResult{Status: api.ToolError, Error: "arguments: " + err.Error()}, nil
 	}
 	// Recheck the grant at use time rather than trust the broker's selection.

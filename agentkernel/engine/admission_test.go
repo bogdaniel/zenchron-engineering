@@ -2,7 +2,6 @@ package engine_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,9 +9,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
-	"github.com/bogdaniel/zenchron-engineering/agentkernel/engine"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/providers/scripted"
-	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 )
 
 func attempt(id string) api.ExecutionRequest {
@@ -105,58 +102,6 @@ func TestReentryCannotRenewBudget(t *testing.T) {
 	})
 }
 
-// flakyRecords fails Put calls from the failFrom-th (1-based) on.
-type flakyRecords struct {
-	*storage.MemoryRecords
-	mu       sync.Mutex
-	puts     int
-	failFrom int
-}
-
-func (f *flakyRecords) Put(ctx context.Context, partition, key string, value []byte) error {
-	f.mu.Lock()
-	f.puts++
-	fail := f.failFrom > 0 && f.puts >= f.failFrom
-	f.mu.Unlock()
-	if fail {
-		return errors.New("records unavailable")
-	}
-	return f.MemoryRecords.Put(ctx, partition, key, value)
-}
-
-func withAdmissions(r storage.Records) option {
-	return func(cfg *engine.Config) { cfg.Admissions = r }
-}
-
-// TestUnsettledAttemptBlocksTheNext: an attempt whose consumption was never
-// recorded (a crash, or a failed settlement write) leaves the execution's
-// consumption unknown, so every later attempt is refused.
-func TestUnsettledAttemptBlocksTheNext(t *testing.T) {
-	records := &flakyRecords{MemoryRecords: storage.NewMemoryRecords(), failFrom: 2}
-	f := newFixture(t, []scripted.Step{end("one"), end("two")}, withAdmissions(records))
-	res := f.next(t, attempt("att-1"))
-	want(t, res, api.OutcomeIncomplete, api.CauseRecordingFailed)
-	if !strings.Contains(res.Termination.Detail, "completed/loop_completed") {
-		t.Fatalf("observed outcome lost: %q", res.Termination.Detail)
-	}
-	wantRefused(t, f.next(t, attempt("att-2")), "unsettled")
-	if len(f.provider.Requests()) != 1 {
-		t.Fatal("attempt after an unsettled one reached the provider")
-	}
-}
-
-// TestAdmissionWriteFailureRefusesBeforeSideEffects: if the in-flight marker
-// cannot be persisted, nothing runs.
-func TestAdmissionWriteFailureRefusesBeforeSideEffects(t *testing.T) {
-	records := &flakyRecords{MemoryRecords: storage.NewMemoryRecords(), failFrom: 1}
-	f := newFixture(t, []scripted.Step{end("never")}, withAdmissions(records))
-	res := f.next(t, request())
-	want(t, res, api.OutcomeIncomplete, api.CauseRecordingFailed)
-	if len(f.provider.Requests()) != 0 || !strings.Contains(res.Termination.Detail, "nothing ran") {
-		t.Fatalf("%d provider calls, detail %q", len(f.provider.Requests()), res.Termination.Detail)
-	}
-}
-
 // gate is a provider whose calls wait for release.
 type gate struct {
 	release chan struct{}
@@ -181,7 +126,7 @@ func (g *gate) Complete(ctx context.Context, _ api.ProviderRequest) (api.Provide
 // other is refused before reaching the provider. Run with -race.
 func TestConcurrentAttemptsAdmitExactlyOne(t *testing.T) {
 	g := &gate{release: make(chan struct{})}
-	f := newFixture(t, nil, withProvider(g))
+	f := newFixture(t, nil, withProvider(t, g))
 	const n = 8
 	results := make(chan api.ExecutionResult, n)
 	for i := range n {

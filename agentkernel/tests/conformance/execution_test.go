@@ -222,11 +222,12 @@ func TestA06ObservedTerminationSurvivesLateCancel(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			before := runtime.NumGoroutine()
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
 			c.step.Before = func() { cancel(api.Cancellation(api.CancelControllerShutdown)) }
 			k := newKernel(t, config{providers: providers(scripted.New(c.step))})
+			// Counted after newKernel: its port workers are the host's goroutines.
+			before := runtime.NumGoroutine()
 			res := k.run(t, ctx, request("a06"))
 			want(t, res, c.outcome, c.cause)
 			if res.Termination.Cancellation != "" {
@@ -249,10 +250,10 @@ func TestA06CancelInFlightIsTypedAndReleased(t *testing.T) {
 		"bare":     {nil, api.CancelUnknown},
 	} {
 		t.Run(name, func(t *testing.T) {
-			before := runtime.NumGoroutine()
 			entered := make(chan struct{})
 			p := scripted.New(scripted.Step{Block: true, Entered: entered})
 			k := newKernel(t, config{providers: providers(p)})
+			before := runtime.NumGoroutine()
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
 			done := make(chan api.ExecutionResult, 1)

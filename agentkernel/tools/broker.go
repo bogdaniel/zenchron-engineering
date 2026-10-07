@@ -1,6 +1,8 @@
 // Package tools is the capability broker: it validates model tool proposals
-// against host grants and dispatches them to host-supplied tool
-// implementations. Generic dispatch lives here; implementations live beside it.
+// against host grants and dispatches them to tool implementations. Generic
+// dispatch lives here; implementations live beside it. Every Tool is built by
+// this package: the built-in file tools, the command tool and host tools
+// (NewHostTool), whose host code is reached only through a bounded hand-off.
 package tools
 
 import (
@@ -16,7 +18,9 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 )
 
-// Tool is one implementation the broker can dispatch to.
+// Tool is one implementation the broker can dispatch to. Only this package
+// implements it, so the broker never calls host code on the kernel's
+// goroutine: a host's own tool is a NewHostTool served by a host worker.
 type Tool interface {
 	// Spec is what the provider sees.
 	Spec() api.ToolSpec
@@ -32,6 +36,7 @@ type Tool interface {
 	// Scope only reads already-validated arguments; it can never create or
 	// widen a grant.
 	Scope(arguments json.RawMessage) (Scope, error)
+	kernelOwned()
 }
 
 // Scope is what one call would touch.

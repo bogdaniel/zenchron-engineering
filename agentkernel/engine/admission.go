@@ -10,49 +10,53 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 )
 
-// admissionPartition is the Records partition holding one admission record
-// per execution_id.
-const admissionPartition = "agentkernel.admissions"
+// admissionPartition holds one admission record per execution_id: the
+// envelope and every settled attempt's consumption. claimPartition holds
+// the execution's in-flight claim, whose value is the claiming attempt id.
+const (
+	admissionPartition = "agentkernel.admissions"
+	claimPartition     = "agentkernel.admission_claims"
+)
 
 // admissionRecord is what the kernel remembers about one execution_id: the
 // envelope its first attempt was admitted with, which every later attempt
-// shares, and each attempt's state.
+// shares, and what each settled attempt consumed.
 type admissionRecord struct {
 	Budget   api.Budget      `json:"budget"`
 	Attempts []attemptRecord `json:"attempts"`
 }
 
-// attemptRecord is one admitted attempt. Until Settled, its consumption is
-// unknown; Consumed is the ledger charge it settled with.
+// attemptRecord is one settled attempt and the ledger charge it settled with.
 type attemptRecord struct {
 	AttemptID string                        `json:"attempt_id"`
-	Settled   bool                          `json:"settled"`
 	Consumed  map[api.BudgetDimension]int64 `json:"consumed,omitempty"`
 }
 
-// admit decides, before any side effect, whether this attempt may run, and
-// if so records it as in flight and charges the ledger with what settled
-// earlier attempts consumed. Budget is the execution-wide envelope: an
-// attempt can never renew or widen it.
+// admit decides, before any side effect, whether this attempt may run.
 //
-// ponytail: admission is serialized by the Engine's mutex, so it is exact
-// within one Engine. Several Engines or processes sharing one Records store
-// can race between Get and Put; that needs a Records with an atomic
-// compare-and-put, which Gate A does not have, or host serialization.
+// The attempt first claims its execution_id with PutIfAbsent: an atomic
+// put-if-absent, so of any number of contenders (goroutines, Engines,
+// processes sharing a FileRecords root) exactly one holds the claim, and the
+// others are refused without reserving budget or calling anything. Only the
+// claim holder reads or writes the execution's record, so that
+// read-modify-write needs no other lock. A claim left by a crashed attempt
+// is never expired by time: its consumption is unknown, so every later
+// attempt is refused until the host recovers it explicitly.
 func (r *run) admit(ctx context.Context) (api.Termination, bool) {
-	r.e.admitMu.Lock()
-	defer r.e.admitMu.Unlock()
-	var rec admissionRecord
-	err := r.bounded(ctx, false, "admission store", func(ctx context.Context) error {
-		var err error
-		rec, err = r.e.loadAdmission(ctx, r.req.ExecutionID)
-		return err
-	})
+	ctx = context.WithoutCancel(ctx)
+	err := r.e.admissions.PutIfAbsent(ctx, claimPartition, r.req.ExecutionID, []byte(r.req.AttemptID))
+	if errors.Is(err, storage.ErrExists) {
+		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, r.claimHeld(ctx)), false
+	}
 	if err != nil {
 		return r.admissionNotRecorded(err), false
 	}
+	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	if err != nil {
+		return r.releaseClaim(ctx, r.admissionNotRecorded(err)), false
+	}
 	if reason := admissionRefusal(rec, r.req); reason != "" {
-		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason), false
+		return r.releaseClaim(ctx, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason)), false
 	}
 	prior := map[api.BudgetDimension]int64{}
 	for _, a := range rec.Attempts {
@@ -60,19 +64,31 @@ func (r *run) admit(ctx context.Context) (api.Termination, bool) {
 			prior[d] += n
 		}
 	}
-	if len(rec.Attempts) == 0 {
-		rec.Budget = r.req.Budget
-	}
-	rec.Attempts = append(rec.Attempts, attemptRecord{AttemptID: r.req.AttemptID})
-	// An abandoned write may still land later; the attempt then reads as
-	// admitted and unsettled, which refuses later attempts: fail closed.
-	save := func(ctx context.Context) error { return r.e.saveAdmission(ctx, r.req.ExecutionID, rec) }
-	if err := r.bounded(ctx, false, "admission store", save); err != nil {
-		return r.admissionNotRecorded(err), false
-	}
 	r.ledger.restore(prior)
 	r.admitted = true
 	return api.Termination{}, true
+}
+
+// claimHeld names why a held claim refuses this attempt.
+func (r *run) claimHeld(ctx context.Context) string {
+	holder, err := r.e.admissions.Get(ctx, claimPartition, r.req.ExecutionID)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("execution %q has an attempt in flight or unsettled (claim unreadable: %v); consumption unknown",
+			r.req.ExecutionID, err)
+	case string(holder) == r.req.AttemptID:
+		return fmt.Sprintf("attempt %q already admitted for execution %q", r.req.AttemptID, r.req.ExecutionID)
+	}
+	return fmt.Sprintf("prior attempt %q in flight or unsettled; consumption unknown", holder)
+}
+
+// releaseClaim drops this attempt's claim after a refusal; nothing ran. If
+// the claim cannot be dropped it stays, which refuses later attempts.
+func (r *run) releaseClaim(ctx context.Context, t api.Termination) api.Termination {
+	if err := r.e.admissions.Delete(ctx, claimPartition, r.req.ExecutionID); err != nil {
+		t.Detail += "; admission claim not released: " + err.Error()
+	}
+	return t
 }
 
 // admissionNotRecorded refuses an attempt whose admission could not be read
@@ -95,11 +111,6 @@ func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
 	}
 	if bound := widenedBound(rec.Budget, req.Budget); bound != "" {
 		return fmt.Sprintf("budget widens %s beyond the envelope of execution %q", bound, req.ExecutionID)
-	}
-	for _, a := range rec.Attempts {
-		if !a.Settled {
-			return fmt.Sprintf("prior attempt %q unsettled; consumption unknown", a.AttemptID)
-		}
 	}
 	return ""
 }
@@ -132,38 +143,34 @@ func widenedBound(first, next api.Budget) string {
 	return ""
 }
 
-// settleAdmission records this attempt's consumption so a later attempt
-// starts from it. Like terminal recording it ignores the caller's
-// cancellation and is abandoned at the settlement deadline (run.bounded); an
-// abandoned write leaves the attempt unsettled, which refuses later attempts.
+// settleAdmission records this attempt's consumption, then releases the
+// claim, so a later attempt starts from it. It ignores the caller's
+// cancellation. If either write fails the claim stays held, which refuses
+// later attempts: the consumption is then unknown, and the kernel fails
+// closed rather than guess.
 func (r *run) settleAdmission(ctx context.Context) error {
-	r.e.admitMu.Lock()
-	defer r.e.admitMu.Unlock()
-	consumed := r.ledger.consumed()
-	err := r.bounded(ctx, true, "admission store", func(ctx context.Context) error {
-		rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
-		if err != nil {
-			return err
-		}
-		if err := settleAttempt(&rec, r.req.AttemptID, consumed); err != nil {
-			return err
-		}
-		return r.e.saveAdmission(ctx, r.req.ExecutionID, rec)
-	})
-	if err != nil {
+	ctx = context.WithoutCancel(ctx)
+	if err := r.recordConsumption(ctx); err != nil {
 		return fmt.Errorf("consumption of attempt %q not recorded: %w", r.req.AttemptID, err)
+	}
+	if err := r.e.admissions.Delete(ctx, claimPartition, r.req.ExecutionID); err != nil {
+		return fmt.Errorf("admission claim of attempt %q not released: %w", r.req.AttemptID, err)
 	}
 	return nil
 }
 
-func settleAttempt(rec *admissionRecord, attemptID string, consumed map[api.BudgetDimension]int64) error {
-	for i := range rec.Attempts {
-		if rec.Attempts[i].AttemptID == attemptID {
-			rec.Attempts[i].Settled, rec.Attempts[i].Consumed = true, consumed
-			return nil
-		}
+// recordConsumption appends this attempt to its execution's record. Only the
+// claim holder calls it, so the read-modify-write cannot interleave.
+func (r *run) recordConsumption(ctx context.Context) error {
+	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	if err != nil {
+		return err
 	}
-	return errors.New("admission record lost the attempt")
+	if len(rec.Attempts) == 0 {
+		rec.Budget = r.req.Budget
+	}
+	rec.Attempts = append(rec.Attempts, attemptRecord{AttemptID: r.req.AttemptID, Consumed: r.ledger.consumed()})
+	return r.e.saveAdmission(ctx, r.req.ExecutionID, rec)
 }
 
 // loadAdmission returns the execution's record; an absent one is empty.

@@ -167,6 +167,13 @@ func (m *memRecords) Put(_ context.Context, partition, key string, value []byte)
 	return nil
 }
 
+func (m *memRecords) PutIfAbsent(ctx context.Context, partition, key string, value []byte) error {
+	if _, err := m.Get(ctx, partition, key); err == nil {
+		return storage.ErrExists
+	}
+	return m.Put(ctx, partition, key, value)
+}
+
 func (m *memRecords) Get(_ context.Context, partition, key string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

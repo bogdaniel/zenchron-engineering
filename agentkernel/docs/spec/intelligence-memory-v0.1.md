@@ -126,6 +126,10 @@ overlays re-check unaffected dependencies from verified bytes.
 
 ### 6. Views (`intelligence.View`, an `api.ContextSource`)
 
+A view reaches an execution only through a host-owned worker
+(`api.ServeContext(ctx, view)`, execution spec §4.1); the engine never calls
+`ContextItems` on its own goroutine. The same holds for `Store.Source(p)` (§12).
+
 `NewView(ix, workspace)` refuses unless `workspace.ManifestDigest` equals the
 snapshot's manifest digest (`ErrSnapshotMismatch`). The host proves the view
 describes the request's bytes by using the intelligence manifest digest (or an

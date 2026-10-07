@@ -18,8 +18,11 @@ type Executor interface {
 `Events`, `Clock` and at least one non-nil entry in `Providers` are required; a
 non-nil `Broker` requires `Artifacts` and `OutputLimit > 0`; `Sources` entries
 must be non-nil. Two fields have stated defaults: `Admissions` (nil: an
-in-memory `storage.Records` owned by the Engine, §11) and `SettleTimeout`
-(zero: `engine.DefaultSettleTimeout`, 5 s; negative is refused; §4.1).
+in-memory `storage.MemoryRecords` owned by the Engine, §11.1) and
+`SettleTimeout` (zero: `engine.DefaultSettleTimeout`, 5 s; negative is
+refused; §4.1). Every port a host can implement is a hand-off channel
+(§4.1); every value the kernel calls directly is of a kernel-owned type
+(`storage.Artifacts`, `*storage.FileRecords`, `api.Clock`, `*tools.Broker`).
 `(*Engine).Execute` always returns a settled result and a nil error, including
 for refused requests.
 
@@ -127,30 +130,59 @@ they are not an engineering journal.
 There is no separate exhaustion event: exhaustion is visible in
 `execution.settled` and in `Termination.dimension`.
 
-### 4.1 Recording bound
+### 4.1 Host ports: bounded hand-off
 
-Every `EventSink.Record` call, every `ContextSource.ContextItems` call and
-every admission-store (`Config.Admissions`) read and write goes through one
-helper (`run.bounded`). The callee's context ignores the
-caller's cancellation, so a cancelled execution still reports how it ended,
-but it carries a deadline, and the kernel waits at most until it:
+Rule: the bounded execution path never synchronously executes host-owned code
+whose termination it cannot enforce. Every host port is a channel of
+`api.Call[Q, R]{ID, Context, Request, Reply}` read by **host-owned workers**
+(`api.ServeEvents`, `api.ServeContext`, `api.ServeProvider`,
+`api.ServeCommands`, `tools.ServeTool`, or the host's own goroutines). The
+kernel side is one function, `internal/handoff.Exchange`:
 
-| Call | Bound |
-| --- | --- |
-| in-loop event, context source, admission read/write before any side effect (§11.1) | `budget.deadline`; if the deadline has passed or the host has cancelled, the settlement grace from now; a host cancellation arriving while the call runs shortens the wait to the grace from that moment |
-| `execution.refused`, `execution.settled` (and the admission settlement write, §11) | one settlement grace (`Config.SettleTimeout`, default 5 s), fixed when settlement begins |
+- it sends the call with a `select` against the bound (enqueueing is bounded),
+  then waits for the reply with a `select` against the bound (waiting is
+  bounded); it starts **no goroutine**, so when the bound passes nothing of
+  the kernel's is left waiting and no kernel goroutine outlives `Execute`;
+- it distinguishes a call **never taken** (`handoff.ErrNotTaken`: the host
+  never saw it, so it had no effect) from one **taken but not answered**
+  (`handoff.ErrNoAnswer`: its effect is unknown);
+- `Reply` is created by the kernel per call with capacity 1, so a worker's
+  single reply never blocks, even after the kernel stopped waiting; a late
+  reply is discarded and changes nothing. Workers never close it.
+- `Context` carries the bound and is cancelled when the kernel stops waiting.
+- `ID` is stable and unique within the attempt: `<execution>/<attempt>/event-<seq>`,
+  `…/source-<i>`, `…/provider-<n>`, and for tools and commands the call's
+  producer `<execution>/<attempt>/<call id>`. The kernel never sends one ID
+  twice; a host seeing it again treats it as the same request.
+- Queue capacities: the `Serve*` helpers return unbuffered channels and answer
+  one call at a time; reply channels have capacity 1. A host wanting parallel
+  answers runs its own workers on its own channel.
 
-A sink call that does not return within its bound is a recording failure
-("event sink did not return within …", §10). A source that does not return is
-noted as unavailable, like any failing source. An admission read or write
-that does not return refuses the attempt ("admission not recorded, nothing
-ran"); a settlement write that does not return settles
-`incomplete/recording_failed` and leaves the attempt unsettled. The kernel stops waiting and
-cancels the callee's context; a callee that ignores its context keeps its own
-goroutine until it returns (a deliberate, documented leak) but never holds
-`Execute` open. `Execute` therefore returns within `budget.deadline` (or the
-host's cancellation) plus one grace, **provided** providers, tools and the
-`CommandRunner` honour their context: those are never abandoned, because abandoning a mutating call would hide its effect.
+The host owns its workers and their lifetime: they must outlive `Execute` (so
+a cancelled execution can still record how it ended) and stop when the host
+cancels their context. A worker whose callee ignores its context strands the
+host's goroutine, never the kernel's.
+
+| Host-owned callback reachable from `Execute` | Reached through | Bound | Not taken | Taken, not answered |
+| --- | --- | --- | --- | --- |
+| `EventSink.Record` (in-loop event) | `Config.Events` | `budget.deadline`; cut to the settlement grace by a host cancellation, also mid-wait; the grace from now once the deadline passed or the host cancelled | recording failure (§10) | recording failure (§10) |
+| `EventSink.Record` (`execution.refused`, `execution.settled`) | `Config.Events` | one settlement grace, fixed when settlement begins | recording failure | recording failure |
+| `ContextSource.ContextItems` | `Config.Sources` | as an in-loop event | source noted unavailable | source noted unavailable |
+| `Provider.Complete`, and the host code adapters call (`CredentialSource`, HTTP `Doer`) | `Config.Providers` (`api.ServeProvider`, for kernel adapters too) | `budget.deadline`; the grace after a host cancellation | no call counted, every reservation released; settles on the deadline or cancellation | call counted with unknown usage, every reservation kept; settles on the deadline or cancellation |
+| `CommandRunner.Run` | `tools.NewCommand(chan<- api.CommandCall, dir)` | the run context (deadline or host cancellation) | tool error, command did not run | `mutated`, outcome unknown: `failed/tool_failed`, observed as `side effect outcome uncertain` |
+| host tools | `tools.NewHostTool(HostTool{…, Calls})` | the run context | tool error, did not run | outcome unknown; for a mutating kind `failed/tool_failed` and observed as uncertain |
+
+Kernel-owned code is called directly, because the kernel controls its
+termination: the built-in file tools, `tools.Broker` (`tools.Tool` is sealed:
+only package `tools` implements it), the stores of package `storage`
+(`storage.Artifacts` is sealed; admissions take `*storage.FileRecords`), and
+the clocks (`api.Clock` is sealed: `api.SystemClock`, `api.ManualClock`).
+Removed host callbacks: `api.TokenEstimator` (token counts are the kernel's
+own, §7.4) and `tools.SnapshotGuard` (a host compares manifests itself).
+
+`Execute` therefore returns within `budget.deadline` (or the host's
+cancellation) plus one settlement grace, plus the kernel's own local
+filesystem I/O for artifacts and admissions.
 
 ## 5. Outcomes and causes
 
@@ -168,14 +200,14 @@ Derived from `engine/engine.go`, `engine/compile.go`, `engine/loop.go`,
 | `exhausted` | `budget_exhausted` | `artifact_bytes` | a tool's artifact write was refused by the ledger |
 | `exhausted` | `budget_exhausted` | `deadline` | the budget deadline passed (clock or run context) |
 | `failed` | `provider_refused` | — | stop `refused` (checked before tool calls) |
-| `failed` | `provider_failed` | — | the provider's `TokenEstimator` returned a negative count, at compilation or before an attempt (detail names the estimator; no provider call follows); the ledger refused a negative reservation; a non-retryable provider error, or a retryable one with no retry allowance, other than the two classes below (untyped adapter errors become non-retryable `transport`); or a response without tool calls whose stop is `other` or `tool_use` ("provider stopped without completing") |
-| `failed` | `tool_failed` | — | `Broker.Dispatch` returned an error: a side effect's outcome is unknown |
+| `failed` | `provider_failed` | — | the ledger refused a negative reservation; a non-retryable provider error, or a retryable one with no retry allowance, other than the two classes below (untyped adapter errors become non-retryable `transport`); or a response without tool calls whose stop is `other` or `tool_use` ("provider stopped without completing") |
+| `failed` | `tool_failed` | — | `Broker.Dispatch` returned an error: a side effect's outcome is unknown (including a command or mutating host tool taken but not answered within its bound, §4.1) |
 | `blocked` | `provider_unavailable` | — | class `rate_limited` or `unavailable` and no retry is permitted |
-| `blocked` | `invalid_request` | — | validation failed; admission refused the attempt (already admitted, a widened budget, or a prior attempt unsettled, §11); or `context.Compile` failed for a reason other than capacity or a negative estimate |
+| `blocked` | `invalid_request` | — | validation failed; admission refused the attempt (already admitted, a widened budget, or a prior attempt in flight or unsettled, §11.1); or `context.Compile` failed for a reason other than capacity |
 | `blocked` | `insufficient_capacity` | — | prompt overhead leaves no input capacity, or required context does not fit |
 | `blocked` | `no_eligible_provider` | — | routing blocked, or the chosen binding has no configured adapter (no fallback) |
 | `cancelled` | `host_cancelled` | — | the caller's context ended; `cancellation` is set (§8) |
-| `incomplete` | `recording_failed` | — | an event could not be recorded, or did not return within its bound (§4.1); the attempt's admission could not be read or written (detail "admission not recorded, nothing ran", no `execution.settled`); or its consumption could not be recorded at settlement (§11) |
+| `incomplete` | `recording_failed` | — | an event was refused, or not taken or acknowledged within its bound (§4.1); the attempt's admission claim could not be written or its record read (detail "admission not recorded, nothing ran", no `execution.settled`); or its consumption could not be recorded, or its claim released, at settlement (§11.1) |
 
 `provider_retries` is a ledger dimension but never a termination dimension:
 running out of retries settles the provider error's own outcome, with
@@ -243,31 +275,23 @@ nothing, so `cost.micros` stays a lower bound (`engine` `TestMoneyCeiling` subte
 `max_input_tokens` is a hard bound. Each attempt reserves
 (`engine.inputReservation`):
 
-- the provider's own count, when its `api.TokenEstimator` reports `exact`;
-- otherwise an upper bound, not an estimate: the UTF-8 byte length of
-  everything sent (every message's role, content, tool-call id, replay bytes
-  and tool calls; every tool spec) plus `messageOverheadTokens` (16) per
-  message and per tool spec for the provider's framing. A byte-level BPE
-  tokenizer never emits more tokens than input bytes. A provider whose framing
-  exceeds the allowance must implement an exact estimator.
+an upper bound, not an estimate, computed by the kernel alone: the UTF-8 byte
+length of everything sent (every message's role, content, tool-call id,
+replay bytes and tool calls; every tool spec) plus `messageOverheadTokens`
+(16) per message and per tool spec for the provider's framing. A byte-level
+BPE tokenizer never emits more tokens than input bytes. No host code supplies
+a count the ledger trusts (there is no provider estimator port).
 
 The reservation settles to the provider-reported `input` when reported and
 plausible (§7.5); otherwise the upper bound stays charged.
 
 Context fitting is a separate concept and stays estimate-based: context
 compilation (§6) and the per-attempt "transcript no longer fits the context
-window" check use the estimate from the provider's `api.TokenEstimator`, or
-`context.ApproximateTokens` (≈4 bytes/token, `exact: false`). Consequently,
-with an inexact estimator a tight `max_input_tokens` can admit context that
-the first reservation then refuses (`exhausted/input_tokens`, before any
-provider call); the bound is never exceeded.
-
-An estimator is untrusted: a negative count fails the execution closed
-(`failed/provider_failed`) before any provider call, whether it appears in
-the prompt-overhead estimate, in `context.Compile` (which returns
-`context.ErrNegativeEstimate`), or before an attempt. An estimated output
-count is observation-only (`usage.estimated.output`); a negative one
-contributes nothing and never reaches the ledger.
+window" check use `context.ApproximateTokens` (≈4 bytes/token,
+`exact: false`). Consequently a tight `max_input_tokens` can admit context
+that the first reservation then refuses (`exhausted/input_tokens`, before any
+provider call); the bound is never exceeded. An estimated output count is
+observation-only (`usage.estimated.output`) and never reaches the ledger.
 
 ### 7.5 Usage (`api.Usage`)
 
@@ -333,8 +357,8 @@ observed completion or failure into `cancelled` (`TestObservedOutcomeSurvivesLat
 
 ## 10. Recording failure
 
-`EventSink.Record` returning an error, or not returning within its bound
-(§4.1), marks the run failed-to-record: no later
+An event sink refusing an event, or not taking or acknowledging it within
+its bound (§4.1: "event sink did not take/answer call … within …"), marks the run failed-to-record: no later
 event is recorded, every subsequent side-effect check stops, and the result is
 `incomplete/recording_failed` with whatever observations were recorded before.
 An artifact store failure inside a tool after a mutation is an unknown outcome
@@ -356,39 +380,54 @@ An artifact store failure inside a tool after a mutation is an unknown outcome
 ### 11.1 Admission: one envelope per execution
 
 `Budget` is the envelope of the whole execution, every attempt of one
-`execution_id` together. The engine keeps one admission record per
-`execution_id` in `Config.Admissions` (`storage.Records`, partition
-`agentkernel.admissions`). After validation and before any side effect,
-`run.admit` refuses, in this order:
+`execution_id` together. The admission store is kernel-owned
+(`Config.Admissions *storage.FileRecords`; nil: an in-memory
+`storage.MemoryRecords` owned by the Engine), so no host code runs inside
+admission. It holds two partitions per `execution_id`:
 
-1. an `(execution_id, attempt_id)` already admitted (re-entry), in any state:
-   `blocked/invalid_request` "attempt … already admitted";
-2. a budget that widens any bound of the first admitted attempt's budget: a
-   later deadline, any larger numeric bound, or any money change other than a
-   lower ceiling in the same currency (adding, removing or re-denominating a
-   ceiling included): `blocked/invalid_request` "budget widens …";
-3. any prior attempt of the execution still in flight, running concurrently or
-   crashed without settling: `blocked/invalid_request` "prior attempt …
-   unsettled; consumption unknown". The kernel fails closed; only the host can
-   resolve an unsettled attempt, by starting a new execution.
+- `agentkernel.admission_claims`: the in-flight **claim**, whose value is the
+  claiming `attempt_id`;
+- `agentkernel.admissions`: the **record**: the first settled attempt's
+  budget (the envelope) and each settled attempt's `attempt_id` and consumed
+  totals.
 
-Otherwise the attempt is recorded in flight before anything runs (a failed
-or timed-out read or write refuses: `incomplete/recording_failed`, "nothing
-ran"; an abandoned write that lands later leaves the attempt admitted and
-unsettled, which fails closed), and its ledger
-starts from the summed consumption of every settled prior attempt, in every
-dimension (money and retries included; the deadline is absolute already). At
-settlement the attempt's consumption is recorded within the settlement grace;
-if that write fails or does not return within the grace, the result is `incomplete/recording_failed` with the
-observed outcome in `detail`, and the attempt stays unsettled, so later
-attempts are refused. A request refused by validation is never admitted.
+After validation and before any side effect, `run.admit`:
 
-Scope of enforcement: admission is serialized by the Engine, so concurrent
-`Execute` calls for one `execution_id` admit exactly one. With the default
-in-memory store the envelope holds for that Engine instance; across restarts
-it needs a durable store (`storage.OpenFileRecords`). Several Engines or
-processes sharing one store can race between read and write (Gate A has no
-atomic compare-and-put); such hosts must serialize admission themselves.
+1. claims the `execution_id` with `Records.PutIfAbsent`. If the claim is held
+   it refuses `blocked/invalid_request`: "attempt … already admitted" when the
+   holder is this `attempt_id`, else "prior attempt … in flight or unsettled;
+   consumption unknown". A failed claim write refuses
+   `incomplete/recording_failed`, "nothing ran". A refused contender reserves
+   nothing, calls no provider and writes no record.
+2. holding the claim, reads the record and refuses (releasing the claim) an
+   `attempt_id` already settled ("already admitted") or a budget that widens
+   any bound of the envelope: a later deadline, any larger numeric bound, or
+   any money change other than a lower ceiling in the same currency
+   ("budget widens …").
+3. starts the ledger from the summed consumption of every settled attempt,
+   in every dimension (money and retries included; the deadline is absolute).
+
+At settlement the claim holder appends its consumption to the record and then
+deletes the claim; the read-modify-write happens only while holding the
+claim, so it needs no other lock. If either write fails the result is
+`incomplete/recording_failed` with the observed outcome in `detail`, and the
+claim stays, so later attempts are refused. A claim left by a crashed attempt
+is never expired by time: its consumption is unknown, so the kernel fails
+closed until the host recovers it through an explicit recovery protocol
+(Gate B / host work, not implemented here). A request refused by validation
+is never admitted.
+
+Atomicity: `PutIfAbsent` is part of the `storage.Records` contract and is
+never a check followed by a write. `MemoryRecords` does it under its mutex.
+`FileRecords` writes the framed value to a synced temp file and `link(2)`s it
+to the record name, which creates the name only if it is absent, atomically,
+with its full content; the directory is then fsynced. Of any number of
+contenders — goroutines, Engines, or processes opening the same root — exactly
+one is admitted. This holds for processes sharing one **local** filesystem
+on Linux and macOS (Windows is refused by the file stores). On network
+filesystems `link` atomicity depends on the server; an NFS client retrying a
+lost reply can report "exists" for its own successful link, which refuses
+the attempt (fail closed), never admits two.
 
 `usage` reports the attempt's own consumption; the ledger enforces the
 execution's. Authority that spans executions (a cumulative spend across
@@ -405,6 +444,7 @@ mutating tool that ran before a stop is observed (F2); `other` and
 `tool_use`-without-calls stops settle `failed`, not `completed` (F3); the
 never-emitted `budget.exhausted` kind was removed. After review 5443104514:
 `max_input_tokens` is a hard bound (§7.4, F6); re-entry and later attempts
-cannot renew the execution's budget (§11.1, F7); negative estimates and
-impossible cache partitions fail closed (§7.4, §7.5); recording is bounded
-(§4.1).
+cannot renew the execution's budget, with admission atomic across processes
+on one local filesystem (§11.1, F7); impossible cache partitions fail closed
+(§7.5) and the provider estimator port was removed (§7.4); every host port is
+a bounded hand-off that leaves no kernel goroutine behind (§4.1).

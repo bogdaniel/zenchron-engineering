@@ -12,10 +12,9 @@ import (
 
 // call is the bound provider side of one execution.
 type call struct {
-	provider api.Provider
-	binding  api.ProviderBinding
-	specs    []api.ToolSpec
-	estimate kcontext.Estimator
+	calls   chan<- api.ProviderCall
+	binding api.ProviderBinding
+	specs   []api.ToolSpec
 }
 
 // loop alternates provider turns and tool rounds until the provider stops
@@ -72,8 +71,8 @@ func (r *run) interrupted(ctx context.Context) (api.Termination, bool) {
 		t.Cancellation = api.CancellationOf(r.parent)
 		return t, true
 	}
-	// The wall-clock comparison closes a timer race: a bounded port call
-	// abandoned at the deadline can return before ctx's own deadline timer
+	// The wall-clock comparison closes a timer race: a hand-off that stopped
+	// waiting at the deadline can return before ctx's own deadline timer
 	// has fired, and the run must not take another step in that gap.
 	wallPassed := !time.Now().Before(r.req.Budget.Deadline)
 	if ctx.Err() != nil || wallPassed || !r.e.clock.Now().Before(r.req.Budget.Deadline) {
@@ -128,10 +127,7 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 		return fail(t)
 	}
 	prompt := promptText(messages, c.specs)
-	est := c.estimate(prompt)
-	if est.Count < 0 {
-		return fail(r.estimatorFailed(est.Count))
-	}
+	est := kcontext.ApproximateTokens(prompt)
 	maxOut := min(c.binding.MaxOutputTokens, r.ledger.remaining(api.DimensionOutputTokens))
 	if maxOut <= 0 {
 		return fail(r.exhausted(api.DimensionOutputTokens, "no output tokens remain"))
@@ -140,13 +136,13 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 	if est.Count > c.binding.ContextWindow-maxOut {
 		return fail(r.exhausted(api.DimensionInputTokens, "transcript no longer fits the context window"))
 	}
-	in := inputReservation(est, prompt, len(messages)+len(c.specs))
+	in := inputReservation(prompt, len(messages)+len(c.specs))
 	// Money is reserved at a true worst case: the provider cannot accept more
 	// input than its context window. A local estimate is not a bound, and a
 	// hard ceiling must not rest on one.
 	money := worstCaseCost(c.binding.ContextWindow, maxOut, c.binding.Pricing)
-	reservation := []amount{{api.DimensionInputTokens, in}, {api.DimensionOutputTokens, maxOut}, {api.DimensionMoney, money}}
-	if dim, err := r.ledger.reserve(reservation...); err != nil {
+	held := reservation{in: in, out: maxOut, money: money, estIn: est.Count}
+	if dim, err := r.ledger.reserve(held.amounts()...); err != nil {
 		if errors.Is(err, errNegativeAmount) {
 			return fail(r.termination(api.OutcomeFailed, api.CauseProviderFailed,
 				fmt.Sprintf("negative %s reservation refused", dim)))
@@ -158,21 +154,17 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 		return fail(r.recordingFailed(""))
 	}
 	start := r.e.clock.Now()
-	resp, err := c.provider.Complete(ctx, api.ProviderRequest{Binding: c.binding, Messages: messages, Tools: c.specs, MaxOutputTokens: maxOut})
+	resp, err := r.complete(ctx, c, api.ProviderRequest{Binding: c.binding, Messages: messages, Tools: c.specs, MaxOutputTokens: maxOut})
 	latency := r.e.clock.Now().Sub(start)
 	if err != nil {
-		// Usage of a failed call is unknown: input stays charged at its
-		// reservation, money keeps the worst case, output is released.
-		r.ledger.settle(api.DimensionOutputTokens, maxOut, 0)
-		r.count(func(a *account) { a.recordCall(est.Count, 0, nil, c.binding.Pricing, latency) })
-		perr := asProviderError(err)
+		perr := r.callFailed(c, held, err, latency)
 		if rerr := r.emit(ctx, api.Event{Kind: api.EventProviderError, Detail: perr.Error()}); rerr != nil {
 			return fail(r.recordingFailed("provider error " + string(perr.Class)))
 		}
 		return api.ProviderResponse{}, perr, api.Termination{}, false
 	}
 	resp.Usage = plausibleUsage(resp.Usage)
-	r.settleCall(c, resp, est.Count, in, maxOut, money, latency)
+	r.settleCall(c, resp, held, latency)
 	if err := r.emit(ctx, api.Event{Kind: api.EventProviderResponse, Detail: "stop " + string(resp.Stop), Usage: &resp.Usage}); err != nil {
 		return fail(r.recordingFailed("provider responded with stop " + string(resp.Stop)))
 	}
@@ -182,24 +174,23 @@ func (r *run) attempt(ctx context.Context, c call, messages []api.Message, n int
 // settleCall replaces the worst-case reservation with reported usage where it
 // exists. Unreported input keeps its upper-bound reservation, unreported
 // output its full reservation; unpriced or partly reported usage keeps the
-// worst-case money charge. estIn is the observation-only estimate.
-func (r *run) settleCall(c call, resp api.ProviderResponse, estIn, in, maxOut, money int64, latency time.Duration) {
+// worst-case money charge. held.estIn is the observation-only estimate.
+func (r *run) settleCall(c call, resp api.ProviderResponse, held reservation, latency time.Duration) {
 	u := resp.Usage
 	if u.Input != nil {
-		r.ledger.settle(api.DimensionInputTokens, in, *u.Input)
+		r.ledger.settle(api.DimensionInputTokens, held.in, *u.Input)
 	}
 	if u.Output != nil {
-		r.ledger.settle(api.DimensionOutputTokens, maxOut, *u.Output)
+		r.ledger.settle(api.DimensionOutputTokens, held.out, *u.Output)
 	}
 	if actual, known := actualCost(u, c.binding.Pricing); known {
-		r.ledger.settle(api.DimensionMoney, money, actual)
+		r.ledger.settle(api.DimensionMoney, held.money, actual)
 	}
-	// The output estimate is an observation only and never reaches the
-	// ledger; an implausible negative one contributes nothing.
-	estOut := max(c.estimate(resp.Text+promptText([]api.Message{{ToolCalls: resp.ToolCalls}}, nil)).Count, 0)
+	// The output estimate is an observation only and never reaches the ledger.
+	estOut := kcontext.ApproximateTokens(resp.Text + promptText([]api.Message{{ToolCalls: resp.ToolCalls}}, nil)).Count
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.acct.recordCall(estIn, estOut, &u, c.binding.Pricing, latency)
+	r.acct.recordCall(held.estIn, estOut, &u, c.binding.Pricing, latency)
 	if resp.ModelVersionObserved != "" {
 		r.provenance.ModelVersionObserved = resp.ModelVersionObserved
 	}

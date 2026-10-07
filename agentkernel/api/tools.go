@@ -64,7 +64,10 @@ type CommandResult struct {
 }
 
 // CommandRunner is the host's process boundary. The kernel never spawns,
-// contains or reaps processes itself.
+// contains or reaps processes itself, and never calls Run on its own
+// goroutine: a host serves a runner with ServeCommands (or its own worker on
+// a CommandCall channel). A command that is not answered within its bound is
+// an uncertain side effect.
 type CommandRunner interface {
 	Run(ctx context.Context, request CommandRequest) (CommandResult, error)
 }

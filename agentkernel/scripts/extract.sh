@@ -16,6 +16,8 @@ esac
 # Tracked and untracked-but-not-ignored module files; nothing else.
 (cd "$repo" && git ls-files -co --exclude-standard -- agentkernel) |
   while IFS= read -r f; do
+    # A tracked file deleted in the working tree is not part of the module.
+    [[ -e "$repo/$f" || -L "$repo/$f" ]] || continue
     rel="${f#agentkernel/}"
     mkdir -p "$dest/$(dirname "$rel")"
     cp -P "$repo/$f" "$dest/$rel"

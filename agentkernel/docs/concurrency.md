@@ -94,6 +94,9 @@ temporary build assignments, not runtime or domain agents.
 | `engine.ledger` | concurrent reservers cannot overspend through independent prechecks | one mutex; all-or-nothing multi-dimension reserve (`TestConcurrentReservationsCannotOverspend`) |
 | one execution | the loop runs on one goroutine; tool-side writes (events, artifacts, account) are serialized | `run.mu` |
 | `storage.Memory*`, `storage.File*` | concurrent readers and writers | mutexes; atomic file replace (`TestRecordsConcurrentReadersWriters`, `TestArtifactsConcurrentPutGet`) |
+| `Records.PutIfAbsent` | exactly one of any number of concurrent creators of a key succeeds, across processes sharing a `FileRecords` root on one local filesystem | mutex (memory); temp file + `link(2)` (file) (`TestPutIfAbsentAdmitsExactlyOne`) |
+| admission | exactly one attempt of an `execution_id` runs at a time, across Engines and processes | `PutIfAbsent` claim held from admission to settlement (`TestConcurrentAttemptsAdmitExactlyOne`, `TestTwoEnginesOneRootAdmitExactlyOne`) |
+| host ports | the kernel never runs host code on its own goroutine and no kernel goroutine outlives `Execute` | bounded `handoff.Exchange` with select, no goroutine (`TestStuck*CannotHoldExecutionOpen`, `TestExchange*`) |
 | `memory.Store` | serialized read-settle-write per store | `sync.RWMutex`; one store per `storage.Records` (`TestConcurrentReadersAndWriters`) |
 | `intelligence.Index` | immutable after build; overlays private | no shared mutable state (`TestConcurrentOverlaysAreIsolated`) |
 | `providers/scripted` | concurrent callers each consume one step | mutex (`TestConcurrentCallsConsumeEachStepOnce`) |

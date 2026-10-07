@@ -28,22 +28,11 @@ const MaxFileBytes = 8 << 20
 // that swaps a parent directory for a link between the component check and the
 // open is not excluded: the window is narrowed, not closed.
 type Workspace struct {
-	root     string
-	snapshot *SnapshotGuard
-}
-
-// SnapshotGuard lets read tools report that the workspace no longer matches
-// the manifest an execution was bound to, so stale context can be refreshed.
-type SnapshotGuard struct {
-	// Bound is the manifest digest the execution was compiled against.
-	Bound string
-	// Current computes the workspace's manifest digest now.
-	Current func() (string, error)
+	root string
 }
 
 // NewWorkspace binds file tools to root, an existing absolute directory.
-// snapshot is optional.
-func NewWorkspace(root string, snapshot *SnapshotGuard) (*Workspace, error) {
+func NewWorkspace(root string) (*Workspace, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, fmt.Errorf("workspace root %q must be a clean absolute path", root)
 	}
@@ -54,10 +43,7 @@ func NewWorkspace(root string, snapshot *SnapshotGuard) (*Workspace, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace root %q is not a directory", root)
 	}
-	if snapshot != nil && (!api.ValidDigest(snapshot.Bound) || snapshot.Current == nil) {
-		return nil, errors.New("snapshot guard needs a bound sha256 digest and a Current function")
-	}
-	return &Workspace{root: root, snapshot: snapshot}, nil
+	return &Workspace{root: root}, nil
 }
 
 // open returns the granted root containing p as an os.Root, the root's
@@ -180,23 +166,6 @@ func checkOpened(gr *os.Root, rel string, opened fs.FileInfo) error {
 	return nil
 }
 
-// snapshotNote is empty when the workspace still matches the bound manifest.
-func (w *Workspace) snapshotNote() string {
-	if w.snapshot == nil {
-		return ""
-	}
-	current, err := w.snapshot.Current()
-	if err != nil {
-		return fmt.Sprintf("note: workspace manifest unknown (%v); content may differ from bound snapshot %s\n",
-			err, w.snapshot.Bound)
-	}
-	if current != w.snapshot.Bound {
-		return fmt.Sprintf("note: workspace manifest is %s, not bound snapshot %s; content below is current\n",
-			current, w.snapshot.Bound)
-	}
-	return ""
-}
-
 // tool is the one Tool implementation every built-in tool is assembled from.
 type tool struct {
 	spec   api.ToolSpec
@@ -209,6 +178,7 @@ func (t *tool) Spec() api.ToolSpec                                             {
 func (t *tool) Kind() api.CapabilityKind                                       { return t.kind }
 func (t *tool) Scope(args json.RawMessage) (Scope, error)                      { return t.scope(args) }
 func (t *tool) Invoke(c context.Context, i Invocation) (api.ToolResult, error) { return t.invoke(c, i) }
+func (t *tool) kernelOwned()                                                   {}
 
 func pathScope(args json.RawMessage) (Scope, error) {
 	var a struct {

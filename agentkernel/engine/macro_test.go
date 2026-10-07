@@ -19,7 +19,7 @@ func TestMacroStepsAreChargedToTheToolBudget(t *testing.T) {
 	args, _ := json.Marshal(map[string][]string{"paths": {"a.txt", "a.txt", "a.txt"}})
 	macro := api.ToolCall{ID: "m1", Name: "read_files", Arguments: args}
 	f := newFixture(t, []scripted.Step{toolUse(macro), end("done")})
-	ws, err := tools.NewWorkspace(f.dir, nil)
+	ws, err := tools.NewWorkspace(f.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,8 @@ func TestMacroStepsAreChargedToTheToolBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.engine, err = engine.New(engine.Config{
-		Providers: map[string]api.Provider{"p1": f.provider}, Broker: broker, Artifacts: f.artifacts,
-		Events: f.sink, Clock: f.clock, OutputLimit: 4096,
+		Providers: serveProvider(t, f.provider), Broker: broker, Artifacts: f.artifacts,
+		Events: api.ServeEvents(t.Context(), f.sink), Clock: f.clock, OutputLimit: 4096,
 	})
 	if err != nil {
 		t.Fatal(err)

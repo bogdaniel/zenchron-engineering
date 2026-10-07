@@ -49,13 +49,13 @@ host `ExecutionProvider` and composes `engine.Engine` with host ports:
 
 | Kernel port | Host implementation |
 | --- | --- |
-| `api.EventSink` | appends to the existing journal/attempt record; an append failure returns an error so the kernel settles `recording_failed` |
-| `api.Clock` | the runtime clock |
-| `api.ArtifactStore` | bridge to the existing artifact store, keyed by digest; integrity-verified `Get` |
-| `api.CommandRunner` | the existing `DockerSandbox` path used by `ToolBroker.RunCommand` (network none, read-only, cap-drop) |
-| `api.CredentialSource` | reads the operator `APIKeyFile` per call, refusing a key inside the candidate workspace (today's rule) |
-| tools | `tools.Workspace` on `CandidateDir`, **plus** host guards the kernel lacks (§5); or host tools implementing `tools.Tool` over the existing resolve gate |
-| `api.Provider` | `providers/openai` / `providers/anthropic` with the host's endpoint and `http.Client` |
+| `api.EventSink` (served by a host worker, `api.ServeEvents`) | appends to the existing journal/attempt record; an append failure returns an error so the kernel settles `recording_failed` |
+| `api.Clock` | `api.SystemClock` (sealed: kernel-owned clocks only) |
+| `storage.Artifacts` | a kernel `storage.FileArtifacts` root; a bridge to the existing artifact store is host code and therefore must sit behind a hand-off (not available in Gate A) |
+| `api.CommandRunner` (served, `api.ServeCommands`) | the existing `DockerSandbox` path used by `ToolBroker.RunCommand` (network none, read-only, cap-drop) |
+| `api.CredentialSource` | reads the operator `APIKeyFile` per call, refusing a key inside the candidate workspace (today's rule); called by the adapter on the host's provider worker |
+| tools | `tools.Workspace` on `CandidateDir`, **plus** host guards the kernel lacks (§5); or host tools (`tools.NewHostTool`, served by `tools.ServeTool`) over the existing resolve gate |
+| `api.Provider` (served, `api.ServeProvider`) | `providers/openai` / `providers/anthropic` with the host's endpoint and `http.Client` |
 
 Request translation:
 
@@ -145,15 +145,15 @@ lacks it.
       host attempt (`RunID`, `OperationID`, `Attempt`) is always one
       `attempt_id`, so a retried or resumed host attempt can never present a
       fresh `execution_id` that escapes the envelope;
-    - supply a durable `engine.Config.Admissions` (the default is in-memory,
-      scoped to one `Engine` instance), and, if several processes or Engines
-      share it, either give the store an atomic compare-and-put or serialize
-      admission of one `execution_id` in the host: `FileRecords` has no
-      compare-and-put, so read-then-write admission can race across
-      processes;
-    - decide how an unsettled attempt (crash, failed settlement write) is
-      resolved, since the kernel refuses every later attempt of that
-      execution;
+    - supply a durable `engine.Config.Admissions` (`storage.FileRecords`; the
+      default is in-memory, scoped to one `Engine` instance). Its
+      `PutIfAbsent` claims are atomic across Engines and processes sharing
+      the root on one local filesystem; a network filesystem needs its own
+      proof;
+    - define the explicit recovery protocol for an abandoned claim (crash,
+      failed settlement write): the kernel never expires one by time and
+      refuses every later attempt of that execution until the host recovers
+      it;
     - keep envelopes that span executions (run, plan, operator) host-owned.
 12. **Harness/host seams.** No exported manifest-digest helper outside
     `intelligence.Build`/`Open` (the host computes `WorkspaceRef.ManifestDigest`

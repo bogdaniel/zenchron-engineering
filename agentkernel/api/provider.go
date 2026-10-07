@@ -77,17 +77,11 @@ type SessionObservation struct {
 }
 
 // Provider is a model adapter. It performs exactly one bounded call per
-// Complete and owns no retry, routing or budget decision.
+// Complete and owns no retry, routing or budget decision. The kernel never
+// calls Complete itself: a host serves every adapter, kernel-written or not,
+// with ServeProvider (or its own worker on a ProviderCall channel).
 type Provider interface {
 	Complete(ctx context.Context, request ProviderRequest) (ProviderResponse, error)
-}
-
-// TokenEstimator is an optional provider capability for local token counts.
-// Its counts are untrusted: a negative one fails the execution closed. An
-// estimate marked Exact is reserved against max_input_tokens as is, so it
-// must never undercount; an inexact one is used only to fit context.
-type TokenEstimator interface {
-	EstimateTokens(text string) TokenEstimate
 }
 
 // ProviderErrorClass is the typed category of a provider failure.

@@ -31,10 +31,6 @@ var epoch = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 // real context deadline from it.
 const far = 10 * 365 * 24 * time.Hour
 
-type fixedClock struct{ now time.Time }
-
-func (c fixedClock) Now() time.Time { return c.now }
-
 // sink is a recording api.EventSink.
 type sink struct {
 	mu     sync.Mutex
@@ -118,19 +114,20 @@ type kernel struct {
 	engine    *engine.Engine
 	sink      *sink
 	dir       string
-	artifacts api.ArtifactStore
+	artifacts storage.Artifacts
 }
 
 type config struct {
 	providers  map[string]api.Provider
 	sources    []api.ContextSource
-	artifacts  api.ArtifactStore
+	artifacts  storage.Artifacts
 	extra      []tools.Tool
-	admissions storage.Records
+	admissions *storage.FileRecords
 }
 
 // newKernel builds an engine over the real broker and file tools in a fresh
-// workspace containing notes.txt and an out/ directory.
+// workspace containing notes.txt and an out/ directory. The test is the
+// host: its workers serve the providers, sources and sink until it ends.
 func newKernel(t *testing.T, c config) *kernel {
 	t.Helper()
 	dir := t.TempDir()
@@ -138,7 +135,7 @@ func newKernel(t *testing.T, c config) *kernel {
 	if err := os.Mkdir(filepath.Join(dir, "out"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ws, err := tools.NewWorkspace(dir, nil)
+	ws, err := tools.NewWorkspace(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +150,17 @@ func newKernel(t *testing.T, c config) *kernel {
 		}
 	}
 	k := &kernel{sink: &sink{}, dir: dir, artifacts: arts}
+	served := map[string]chan<- api.ProviderCall{}
+	for id, p := range c.providers {
+		served[id] = api.ServeProvider(t.Context(), p)
+	}
+	var sources []chan<- api.ContextRequest
+	for _, src := range c.sources {
+		sources = append(sources, api.ServeContext(t.Context(), src))
+	}
 	k.engine, err = engine.New(engine.Config{
-		Providers: c.providers, Broker: broker, Artifacts: arts, Events: k.sink,
-		Clock: fixedClock{epoch}, Sources: c.sources, OutputLimit: 256, Admissions: c.admissions,
+		Providers: served, Broker: broker, Artifacts: arts, Events: api.ServeEvents(t.Context(), k.sink),
+		Clock: api.NewManualClock(epoch), Sources: sources, OutputLimit: 256, Admissions: c.admissions,
 	})
 	if err != nil {
 		t.Fatal(err)

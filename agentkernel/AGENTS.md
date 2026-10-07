@@ -23,6 +23,16 @@ first.
 - Checks: `tests/architecture`, `scripts/check-imports.sh`,
   `scripts/extract.sh`, `scripts/relocate.sh`.
 
+## Host-code rule
+
+The bounded execution path never synchronously runs host-owned code whose
+termination the kernel cannot enforce. A host port is a channel of
+`api.Call`s served by host-owned workers and waited on through
+`internal/handoff.Exchange` (bounded, no goroutine); a type the engine calls
+directly must be kernel-owned and sealed (`tools.Tool`, `storage.Artifacts`,
+`api.Clock`). Never add an interface field to `engine.Config` that a host can
+implement. Execution spec §4.1 is the list.
+
 ## No-authority rule
 
 Nothing here decides acceptance, merge, publication or engineering legitimacy.

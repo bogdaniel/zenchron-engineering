@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/handoff"
 )
 
 // eventSource names this component in every event it records.
@@ -32,8 +33,11 @@ type run struct {
 
 	// settleBy bounds terminal recording; set once when settlement begins.
 	settleBy time.Time
-	// admitted is set once this attempt holds an admission (admission.go).
+	// admitted is set once this attempt holds its execution's admission
+	// claim (admission.go).
 	admitted bool
+	// providerCalls numbers provider hand-offs, for their call IDs.
+	providerCalls int
 
 	routing    *api.RoutingDecision
 	manifest   *api.ContextManifest
@@ -57,9 +61,10 @@ func newRun(e *Engine, parent context.Context, req api.ExecutionRequest) *run {
 
 // emit records one event. After the first recording failure nothing more is
 // recorded and every later emit returns that failure, so the caller stops
-// further side effects. Recording ignores cancellation of the execution (the
+// further side effects. The event is handed to the host's sink worker
+// (handoff.Exchange); recording ignores cancellation of the execution (the
 // sink must still see how a cancelled execution ended) but never outlasts
-// its bound (run.bounded): a sink that does not return in time is a
+// its bound (run.recordingBound): an event not acknowledged in time is a
 // recording failure.
 func (r *run) emit(ctx context.Context, ev api.Event) error {
 	r.mu.Lock()
@@ -70,9 +75,15 @@ func (r *run) emit(ctx context.Context, ev api.Event) error {
 	r.seq++
 	ev.Version, ev.ExecutionID, ev.AttemptID = api.ExecutionVersion, r.req.ExecutionID, r.req.AttemptID
 	ev.Seq, ev.ObservedAt, ev.Source = r.seq, r.e.clock.Now(), eventSource
-	terminal := ev.Kind == api.EventRefused || ev.Kind == api.EventSettled
-	record := func(ctx context.Context) error { return r.e.events.Record(ctx, ev) }
-	if err := r.bounded(ctx, terminal, "event sink", record); err != nil {
+	b := r.recordingBound(ev.Kind == api.EventRefused || ev.Kind == api.EventSettled)
+	callCtx, cancel := recordingContext(ctx, b)
+	defer cancel()
+	id := fmt.Sprintf("%s/%s/event-%d", ev.ExecutionID, ev.AttemptID, ev.Seq)
+	refused, err := handoff.Exchange("event sink", r.e.events, api.EventDelivery{ID: id, Context: callCtx, Request: ev}, b)
+	if err == nil {
+		err = refused
+	}
+	if err != nil {
 		r.recordErr = fmt.Errorf("event %d (%s) not recorded: %w", ev.Seq, ev.Kind, err)
 		return r.recordErr
 	}
@@ -113,14 +124,6 @@ func (r *run) exhausted(dim api.BudgetDimension, detail string) api.Termination 
 	t := r.termination(api.OutcomeExhausted, api.CauseBudgetExhausted, detail)
 	t.Dimension = dim
 	return t
-}
-
-// estimatorFailed settles a provider token estimator that returned a
-// negative count. Such a count would mint context or input capacity, so the
-// execution fails closed instead of using it.
-func (r *run) estimatorFailed(count int64) api.Termination {
-	return r.termination(api.OutcomeFailed, api.CauseProviderFailed,
-		fmt.Sprintf("provider token estimator returned a negative count (%d)", count))
 }
 
 func (r *run) recordingFailed(observed string) api.Termination {

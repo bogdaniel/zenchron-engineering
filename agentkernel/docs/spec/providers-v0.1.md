@@ -32,11 +32,13 @@ An adapter MUST:
 8. resolve the credential through the host's `api.CredentialSource` on every
    call, from `Binding.CredentialHandle`.
 
-An adapter MAY implement `api.TokenEstimator`; none in Gate A does, so the
-engine uses `context.ApproximateTokens` for context fitting and reserves the
-byte upper bound of execution spec §7.4 against `max_input_tokens`. An
-estimator reporting `exact: true` is reserved as is, so it must never
-undercount; a negative count fails the execution closed. An untyped error from an adapter is
+The engine never calls an adapter itself: every adapter, these included, is
+served to it by a host-owned worker (`api.ServeProvider`) and reached through
+a bounded hand-off (execution spec §4.1), because adapters call host code
+(`CredentialSource`, an injected HTTP doer). There is no token-estimator
+port: the engine uses `context.ApproximateTokens` for context fitting and
+reserves the byte upper bound of execution spec §7.4 against
+`max_input_tokens`. An untyped error from an adapter is
 treated by the engine as a non-retryable `transport` failure.
 
 `StopReason`: `end`, `tool_use`, `max_tokens`, `refused`, `other`. The engine

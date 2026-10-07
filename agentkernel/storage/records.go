@@ -68,6 +68,22 @@ func (m *MemoryRecords) Put(_ context.Context, partition, key string, value []by
 	return nil
 }
 
+func (m *MemoryRecords) PutIfAbsent(_ context.Context, partition, key string, value []byte) error {
+	if err := validRecord(partition, key, value); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, taken := m.parts[partition][key]; taken {
+		return ErrExists
+	}
+	if m.parts[partition] == nil {
+		m.parts[partition] = map[string][]byte{}
+	}
+	m.parts[partition][key] = bytes.Clone(value)
+	return nil
+}
+
 func (m *MemoryRecords) Get(_ context.Context, partition, key string) ([]byte, error) {
 	if err := validRecord(partition, key, nil); err != nil {
 		return nil, err
@@ -150,6 +166,41 @@ func (f *FileRecords) Put(ctx context.Context, partition, key string, value []by
 		return err
 	}
 	return writeAtomic(dir, nameEncoding.EncodeToString([]byte(key)), frameRecord(value))
+}
+
+// PutIfAbsent writes the framed value to a synced temp file and links it to
+// the record's name. link(2) creates the name only if it does not exist, as
+// one atomic step, and the name appears with its full content, so neither a
+// racing writer in another process nor a crash can expose a partial value or
+// let two writers both succeed.
+func (f *FileRecords) PutIfAbsent(ctx context.Context, partition, key string, value []byte) (err error) {
+	if err := validRecord(partition, key, value); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dir := f.partitionDir(partition)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := writeTemp(dir, frameRecord(value))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rerr := removeIfExists(tmp); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+	}()
+	err = os.Link(tmp, f.path(partition, key))
+	if errors.Is(err, os.ErrExist) {
+		return ErrExists
+	}
+	if err != nil {
+		return err
+	}
+	return syncDir(dir)
 }
 
 func (f *FileRecords) Get(ctx context.Context, partition, key string) ([]byte, error) {

@@ -8,11 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
-	kcontext "github.com/bogdaniel/zenchron-engineering/agentkernel/context"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/routing"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/tools"
@@ -21,19 +19,28 @@ import (
 // sourceItemLimit bounds how many optional items one ContextSource may offer.
 const sourceItemLimit = 64
 
-// Config is everything the engine is built from. All ports are injected.
+// Config is everything the engine is built from.
+//
+// Host code is never called on the kernel's goroutine. Every port a host
+// implements is a channel of api.Calls served by host-owned workers
+// (api.ServeEvents, api.ServeContext, api.ServeProvider, api.ServeCommands,
+// tools.ServeTool); the kernel waits on each within a bound and spawns no
+// goroutine. What the kernel calls directly is kernel-owned code whose
+// termination it controls: the broker's built-in tools, the artifact and
+// admission stores of package storage, and the api clocks.
 type Config struct {
-	// Providers are adapters keyed by ProviderBinding.ID. Routing chooses among
-	// the request's bindings; a chosen binding with no adapter blocks.
-	Providers map[string]api.Provider
+	// Providers are hand-off channels keyed by ProviderBinding.ID. Routing
+	// chooses among the request's bindings; a chosen binding with no
+	// channel blocks.
+	Providers map[string]chan<- api.ProviderCall
 	// Broker dispatches tool calls; nil means no tools are offered.
 	Broker *tools.Broker
 	// Artifacts stores tool output; required when Broker is set.
-	Artifacts api.ArtifactStore
-	Events    api.EventSink
+	Artifacts storage.Artifacts
+	Events    chan<- api.EventDelivery
 	Clock     api.Clock
 	// Sources supply optional context. Their items are always untrusted.
-	Sources []api.ContextSource
+	Sources []chan<- api.ContextRequest
 	// Observations are optional routing data; StaleAfter is their maximum age
 	// (zero treats every observation as stale, so none is used).
 	Observations []routing.Observation
@@ -41,36 +48,33 @@ type Config struct {
 	// OutputLimit bounds each tool result's inline output in bytes; required
 	// when Broker is set.
 	OutputLimit int
-	// Admissions holds one admission record per execution_id, so a re-entered
-	// attempt is refused and a later attempt starts from what earlier ones
-	// consumed. Nil means an in-memory store owned by this Engine: the
-	// envelope is then enforced within this Engine instance only. Enforcement
-	// across restarts needs a durable store (storage.FileRecords); across
-	// concurrently running Engines it also needs host serialization.
-	Admissions storage.Records
+	// Admissions holds each execution_id's admission claim and record, so a
+	// re-entered or concurrent attempt is refused and a later attempt starts
+	// from what earlier ones consumed. Nil means an in-memory store owned by
+	// this Engine, enforcing the envelope within this Engine only. A
+	// FileRecords store enforces it across restarts and across Engines and
+	// processes sharing its root on one local filesystem (admission.go).
+	Admissions *storage.FileRecords
 	// SettleTimeout is the settlement grace: the longest terminal recording
-	// may take, and the longest an in-flight recording may continue after a
-	// host cancellation. Zero means DefaultSettleTimeout; negative is refused.
+	// may take, and the longest a hand-off may still wait after a host
+	// cancellation. Zero means DefaultSettleTimeout; negative is refused.
 	// The kernel never runs past the budget deadline (or a cancellation) by
-	// more than this grace, provided providers and tools honour their
-	// context (recording ports and the Admissions store are abandoned at
-	// their bound instead).
+	// more than this grace.
 	SettleTimeout time.Duration
 }
 
 // Engine implements api.Executor.
 type Engine struct {
-	providers     map[string]api.Provider
+	providers     map[string]chan<- api.ProviderCall
 	broker        *tools.Broker
-	artifacts     api.ArtifactStore
-	events        api.EventSink
+	artifacts     storage.Artifacts
+	events        chan<- api.EventDelivery
 	clock         api.Clock
-	sources       []api.ContextSource
+	sources       []chan<- api.ContextRequest
 	observations  []routing.Observation
 	staleAfter    time.Duration
 	outputLimit   int
 	admissions    storage.Records
-	admitMu       sync.Mutex
 	settleTimeout time.Duration
 }
 
@@ -99,9 +103,9 @@ func New(cfg Config) (*Engine, error) {
 	if settle == 0 {
 		settle = DefaultSettleTimeout
 	}
-	admissions := cfg.Admissions
-	if admissions == nil {
-		admissions = storage.NewMemoryRecords()
+	var admissions storage.Records = storage.NewMemoryRecords()
+	if cfg.Admissions != nil {
+		admissions = cfg.Admissions
 	}
 	for i, s := range cfg.Sources {
 		if s == nil {
@@ -145,7 +149,7 @@ func (r *run) execute(ctx context.Context) api.Termination {
 	if err := r.emit(ctx, api.Event{Kind: api.EventStarted, Detail: fmt.Sprintf("%d bindings", len(r.req.Providers))}); err != nil {
 		return r.recordingFailed("")
 	}
-	binding, provider, t, ok := r.route(ctx)
+	binding, calls, t, ok := r.route(ctx)
 	if !ok {
 		return t
 	}
@@ -153,14 +157,14 @@ func (r *run) execute(ctx context.Context) api.Termination {
 	if r.e.broker != nil {
 		specs = r.e.broker.Specs(r.req.Grants, r.req.Mode)
 	}
-	messages, t, ok := r.compile(ctx, binding, estimatorFor(provider), specs)
+	messages, t, ok := r.compile(ctx, binding, specs)
 	if !ok {
 		return t
 	}
-	return r.loop(ctx, call{provider: provider, binding: binding, specs: specs, estimate: estimatorFor(provider)}, messages)
+	return r.loop(ctx, call{calls: calls, binding: binding, specs: specs}, messages)
 }
 
-func (r *run) route(ctx context.Context) (api.ProviderBinding, api.Provider, api.Termination, bool) {
+func (r *run) route(ctx context.Context) (api.ProviderBinding, chan<- api.ProviderCall, api.Termination, bool) {
 	decision := routing.Select(routing.Input{
 		Bindings:                   r.req.Providers,
 		RequireHostProvenIsolation: r.req.Constraints.RequireHostProvenIsolation,
@@ -186,7 +190,7 @@ func (r *run) route(ctx context.Context) (api.ProviderBinding, api.Provider, api
 			binding = b
 		}
 	}
-	provider, ok := r.e.providers[binding.ID]
+	calls, ok := r.e.providers[binding.ID]
 	if !ok {
 		// No silent switch to another binding: the host's ranking stands.
 		return binding, nil, r.termination(api.OutcomeBlocked, api.CauseNoEligibleProvider,
@@ -195,14 +199,5 @@ func (r *run) route(ctx context.Context) (api.ProviderBinding, api.Provider, api
 	r.provenance.ProviderID, r.provenance.ProviderKind = binding.ID, binding.Kind
 	r.provenance.Model, r.provenance.ModelVersionBound = binding.Model, binding.ModelVersion
 	r.provenance.ConfigFingerprint, r.provenance.Isolation = binding.ConfigFingerprint, binding.Isolation
-	return binding, provider, api.Termination{}, true
-}
-
-// estimatorFor prefers the provider's own counter; the fallback is the
-// context compiler's approximate bytes/4, always marked inexact.
-func estimatorFor(p api.Provider) kcontext.Estimator {
-	if est, ok := p.(api.TokenEstimator); ok {
-		return est.EstimateTokens
-	}
-	return kcontext.ApproximateTokens
+	return binding, calls, api.Termination{}, true
 }

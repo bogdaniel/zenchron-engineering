@@ -52,7 +52,7 @@ func run(ctx context.Context, dir string) (api.ExecutionResult, error) {
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte(notes), 0o600); err != nil {
 		return api.ExecutionResult{}, err
 	}
-	ws, err := tools.NewWorkspace(dir, nil)
+	ws, err := tools.NewWorkspace(dir)
 	if err != nil {
 		return api.ExecutionResult{}, err
 	}
@@ -64,9 +64,15 @@ func run(ctx context.Context, dir string) (api.ExecutionResult, error) {
 	if err != nil {
 		return api.ExecutionResult{}, err
 	}
+	// The host owns the workers that serve its ports: they outlive the
+	// execution (so a cancelled one can still record how it ended) and stop
+	// when the host is done with them.
+	workers, stop := context.WithCancel(context.Background())
+	defer stop()
 	eng, err := engine.New(engine.Config{
-		Providers: map[string]api.Provider{"scripted": script()},
-		Broker:    broker, Artifacts: artifacts, Events: &events{}, Clock: systemClock{}, OutputLimit: 4096,
+		Providers: map[string]chan<- api.ProviderCall{"scripted": api.ServeProvider(workers, script())},
+		Broker:    broker, Artifacts: artifacts, Events: api.ServeEvents(workers, &events{}),
+		Clock: api.SystemClock{}, OutputLimit: 4096,
 	})
 	if err != nil {
 		return api.ExecutionResult{}, err
@@ -113,10 +119,6 @@ func request(now time.Time) api.ExecutionRequest {
 		}},
 	}
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }
 
 // events keeps every event in memory; a real host persists them.
 type events struct {

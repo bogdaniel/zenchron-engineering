@@ -24,24 +24,6 @@ var epoch = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 // move the fake clock past it instead.
 const budgetSpan = 10 * 365 * 24 * time.Hour
 
-// clock is a controllable api.Clock.
-type clock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *clock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *clock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
 // sink records events; failAt > 0 fails that (1-based) Record call and all later ones.
 type sink struct {
 	mu     sync.Mutex
@@ -95,7 +77,7 @@ func request() api.ExecutionRequest {
 }
 
 type fixture struct {
-	clock     *clock
+	clock     *api.ManualClock
 	sink      *sink
 	artifacts *storage.MemoryArtifacts
 	provider  *scripted.Provider
@@ -106,14 +88,15 @@ type fixture struct {
 type option func(*engine.Config)
 
 // newFixture builds an engine over the real broker, workspace tools and
-// in-memory artifact store, with the scripted provider bound to "p1".
+// in-memory artifact store, with the scripted provider bound to "p1". The
+// test is the host: its workers serve the sink and provider until it ends.
 func newFixture(t *testing.T, steps []scripted.Step, opts ...option) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha beta gamma delta epsilon"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ws, err := tools.NewWorkspace(dir, nil)
+	ws, err := tools.NewWorkspace(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +108,10 @@ func newFixture(t *testing.T, steps []scripted.Step, opts ...option) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{clock: &clock{now: epoch}, sink: &sink{}, artifacts: arts, provider: scripted.New(steps...), dir: dir}
+	f := &fixture{clock: api.NewManualClock(epoch), sink: &sink{}, artifacts: arts, provider: scripted.New(steps...), dir: dir}
 	cfg := engine.Config{
-		Providers: map[string]api.Provider{"p1": f.provider}, Broker: broker, Artifacts: arts,
-		Events: f.sink, Clock: f.clock, OutputLimit: 4096,
+		Providers: serveProvider(t, f.provider), Broker: broker, Artifacts: arts,
+		Events: api.ServeEvents(t.Context(), f.sink), Clock: f.clock, OutputLimit: 4096,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -137,6 +120,15 @@ func newFixture(t *testing.T, steps []scripted.Step, opts ...option) *fixture {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// serveProvider binds p to "p1" through a worker the test owns.
+func serveProvider(t *testing.T, p api.Provider) map[string]chan<- api.ProviderCall {
+	return map[string]chan<- api.ProviderCall{"p1": api.ServeProvider(t.Context(), p)}
+}
+
+func withProvider(t *testing.T, p api.Provider) option {
+	return func(cfg *engine.Config) { cfg.Providers = serveProvider(t, p) }
 }
 
 func (f *fixture) run(t *testing.T, ctx context.Context, req api.ExecutionRequest) api.ExecutionResult {

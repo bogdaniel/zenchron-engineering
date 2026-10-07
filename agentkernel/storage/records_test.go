@@ -165,3 +165,70 @@ func TestRecordsConcurrentReadersWriters(t *testing.T) {
 		})
 	}
 }
+
+// TestPutIfAbsentAdmitsExactlyOne: many writers race to create one key, each
+// through its own store handle where the store has handles (two processes
+// opening one FileRecords root). Exactly one succeeds, every other gets
+// ErrExists, the winner's full value is what any reader ever sees, and no
+// temp file is left behind.
+func TestPutIfAbsentAdmitsExactlyOne(t *testing.T) {
+	ctx := context.Background()
+	for name, open := range recordStores(t) {
+		t.Run(name, func(t *testing.T) {
+			shared := open()
+			handle := func() Records {
+				if name == "memory" {
+					return shared
+				}
+				return open()
+			}
+			const n = 16
+			value := func(i int) []byte { return []byte(fmt.Sprintf("attempt-%02d:%0512d", i, i)) }
+			var wg sync.WaitGroup
+			wins := make(chan int, n)
+			for i := range n {
+				s := handle()
+				wg.Go(func() {
+					err := s.PutIfAbsent(ctx, "claims", "exec-1", value(i))
+					if err == nil {
+						wins <- i
+						return
+					}
+					if !errors.Is(err, ErrExists) {
+						t.Errorf("writer %d: %v", i, err)
+					}
+				})
+				wg.Go(func() {
+					got, err := s.Get(ctx, "claims", "exec-1")
+					if err == nil && len(got) != len(value(0)) {
+						t.Errorf("reader saw a partial value of %d bytes", len(got))
+					}
+				})
+			}
+			wg.Wait()
+			close(wins)
+			var winners []int
+			for i := range wins {
+				winners = append(winners, i)
+			}
+			if len(winners) != 1 {
+				t.Fatalf("%d writers created the key, want exactly 1", len(winners))
+			}
+			got, err := handle().Get(ctx, "claims", "exec-1")
+			if err != nil || string(got) != string(value(winners[0])) {
+				t.Fatalf("stored %q, %v; want the winner's value", got, err)
+			}
+			if err := shared.PutIfAbsent(ctx, "claims", "exec-1", []byte("late")); !errors.Is(err, ErrExists) {
+				t.Fatalf("PutIfAbsent over an existing key = %v, want ErrExists", err)
+			}
+			if keys, _ := shared.List(ctx, "claims"); len(keys) != 1 {
+				t.Fatalf("keys %v: a second record was left", keys)
+			}
+			if f, ok := shared.(*FileRecords); ok {
+				if entries, err := os.ReadDir(f.partitionDir("claims")); err != nil || len(entries) != 1 {
+					t.Fatalf("partition holds %d entries (%v): a temp file was left", len(entries), err)
+				}
+			}
+		})
+	}
+}

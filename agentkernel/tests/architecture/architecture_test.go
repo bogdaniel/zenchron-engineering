@@ -337,14 +337,15 @@ func (m module) parentReference(pkg, lit string) string {
 // any module package. Test files may additionally import testSupport.
 var allowedDeps = map[string][]string{
 	"internal/strictjson":     {},
+	"internal/handoff":        {"api"},
 	"api":                     {"internal/strictjson"},
 	"context":                 {"api"},
 	"routing":                 {"api"},
-	"tools":                   {"api", "internal/strictjson"},
+	"tools":                   {"api", "internal/handoff", "internal/strictjson"},
 	"storage":                 {"api"},
 	"memory":                  {"api", "internal/strictjson", "storage"},
 	"intelligence":            {"api", "internal/strictjson", "storage"},
-	"engine":                  {"api", "context", "routing", "storage", "tools"},
+	"engine":                  {"api", "context", "internal/handoff", "routing", "storage", "tools"},
 	"providers/internal/wire": {"api"},
 	"providers/conformance":   {"api"},
 	"providers/scripted":      {"api"},

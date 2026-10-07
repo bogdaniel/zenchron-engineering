@@ -8,12 +8,13 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 	kcontext "github.com/bogdaniel/zenchron-engineering/agentkernel/context"
+	"github.com/bogdaniel/zenchron-engineering/agentkernel/internal/handoff"
 )
 
 // compile selects context and renders the opening transcript. Required
 // request items are never dropped; if they cannot fit, the execution blocks
 // with insufficient_capacity before any provider call.
-func (r *run) compile(ctx context.Context, b api.ProviderBinding, estimate kcontext.Estimator, specs []api.ToolSpec) ([]api.Message, api.Termination, bool) {
+func (r *run) compile(ctx context.Context, b api.ProviderBinding, specs []api.ToolSpec) ([]api.Message, api.Termination, bool) {
 	var required, optional []api.ContextItem
 	for _, it := range r.req.Context {
 		if it.Required {
@@ -28,25 +29,19 @@ func (r *run) compile(ctx context.Context, b api.ProviderBinding, estimate kcont
 	boundary := boundaryText(r.req, specs)
 	reserved := min(b.MaxOutputTokens, r.req.Budget.MaxOutputTokens)
 	// The boundary, objective framing and tool specs occupy the prompt too.
-	overhead := estimate(boundary + objectiveText(r.req.Objective) + promptText(nil, specs)).Count
-	if overhead < 0 {
-		return nil, r.estimatorFailed(overhead), false
-	}
+	overhead := kcontext.ApproximateTokens(boundary + objectiveText(r.req.Objective) + promptText(nil, specs)).Count
 	input := min(b.ContextWindow-reserved, r.req.Budget.MaxInputTokens) - overhead
 	if input <= 0 {
 		return nil, r.termination(api.OutcomeBlocked, api.CauseInsufficientCapacity,
 			fmt.Sprintf("prompt overhead of %d tokens leaves no input capacity", overhead)), false
 	}
 	out, err := kcontext.Compile(kcontext.Input{
-		Required: required, Optional: optional, Window: input + reserved, ReservedOutput: reserved, Estimate: estimate,
+		Required: required, Optional: optional, Window: input + reserved, ReservedOutput: reserved, Estimate: kcontext.ApproximateTokens,
 	})
 	var capErr *kcontext.InsufficientCapacityError
 	if errors.As(err, &capErr) {
 		return nil, r.termination(api.OutcomeBlocked, api.CauseInsufficientCapacity,
 			fmt.Sprintf("required context needs %d tokens, %d available", capErr.Needed, capErr.Available)), false
-	}
-	if errors.Is(err, kcontext.ErrNegativeEstimate) {
-		return nil, r.termination(api.OutcomeFailed, api.CauseProviderFailed, "provider token estimator: "+err.Error()), false
 	}
 	if err != nil {
 		return nil, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, err.Error()), false
@@ -81,12 +76,7 @@ func (r *run) sourceItems(ctx context.Context) ([]api.ContextItem, []string) {
 	var items []api.ContextItem
 	var notes []string
 	for i, src := range r.e.sources {
-		var got []api.ContextItem
-		err := r.bounded(ctx, false, fmt.Sprintf("context source %d", i), func(ctx context.Context) error {
-			var err error
-			got, err = src.ContextItems(ctx, query)
-			return err
-		})
+		got, err := r.askSource(ctx, i, src, query)
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("source %d unavailable: %v", i, err))
 			continue
@@ -109,4 +99,18 @@ func (r *run) sourceItems(ctx context.Context) ([]api.ContextItem, []string) {
 		}
 	}
 	return items, notes
+}
+
+// askSource hands query to source i's host worker and waits within the
+// recording bound; no answer in time is an unavailable source.
+func (r *run) askSource(ctx context.Context, i int, src chan<- api.ContextRequest, q api.ContextQuery) ([]api.ContextItem, error) {
+	b := r.recordingBound(false)
+	callCtx, cancel := recordingContext(ctx, b)
+	defer cancel()
+	id := fmt.Sprintf("%s/%s/source-%d", r.req.ExecutionID, r.req.AttemptID, i)
+	reply, err := handoff.Exchange(fmt.Sprintf("context source %d", i), src, api.ContextRequest{ID: id, Context: callCtx, Request: q}, b)
+	if err != nil {
+		return nil, err
+	}
+	return reply.Value, reply.Err
 }

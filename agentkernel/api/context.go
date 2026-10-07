@@ -89,7 +89,10 @@ type ContextQuery struct {
 }
 
 // ContextSource supplies optional, untrusted context items. Implementations
-// are repository intelligence views and memory stores.
+// are repository intelligence views and memory stores. The kernel never
+// calls ContextItems itself: a host serves a source with ServeContext (or its
+// own worker on a ContextRequest channel), and a source that does not answer
+// within its bound is noted unavailable.
 type ContextSource interface {
 	ContextItems(ctx context.Context, query ContextQuery) ([]ContextItem, error)
 }

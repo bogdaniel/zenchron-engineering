@@ -19,7 +19,7 @@ func TestA05ReentryAcrossRestartCannotRenewBudget(t *testing.T) {
 		t.Skip("file-backed stores are not supported on windows in Gate A")
 	}
 	root := t.TempDir()
-	open := func() storage.Records {
+	open := func() *storage.FileRecords {
 		r, err := storage.OpenFileRecords(root)
 		if err != nil {
 			t.Fatal(err)
@@ -50,25 +50,5 @@ func TestA05ReentryAcrossRestartCannotRenewBudget(t *testing.T) {
 	if res.Termination.Dimension != api.DimensionIterations || len(after.Requests()) != 1 {
 		t.Fatalf("second attempt: dimension %q after %d calls; 2 of 3 iterations were already spent",
 			res.Termination.Dimension, len(after.Requests()))
-	}
-}
-
-// negativeEstimator answers with a provider token estimator that mints
-// capacity: every count is negative.
-type negativeEstimator struct{ *scripted.Provider }
-
-func (negativeEstimator) EstimateTokens(string) api.TokenEstimate {
-	return api.TokenEstimate{Count: -1 << 40, Exact: true}
-}
-
-// TestA05NegativeEstimateCannotMintBudget: a provider estimator returning a
-// negative count fails the execution closed before any provider call.
-func TestA05NegativeEstimateCannotMintBudget(t *testing.T) {
-	p := negativeEstimator{scripted.New(end("never"))}
-	k := newKernel(t, config{providers: map[string]api.Provider{"p1": p}})
-	res := k.run(t, context.Background(), request("a05-estimator"))
-	want(t, res, api.OutcomeFailed, api.CauseProviderFailed)
-	if len(p.Requests()) != 0 || !strings.Contains(res.Termination.Detail, "estimator") {
-		t.Fatalf("%d provider calls, detail %q", len(p.Requests()), res.Termination.Detail)
 	}
 }

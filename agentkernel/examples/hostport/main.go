@@ -1,7 +1,9 @@
 // Command hostport shows a host supplying the kernel's ports itself: its own
 // CommandRunner, EventSink and CredentialSource, a custom document-analysis
-// tool, and a provider reached through the providers/local adapter. The task
-// is not about a repository at all (#446 A02).
+// tool, and a provider reached through the providers/local adapter. Every
+// port is served by a worker goroutine the host starts and stops; the kernel
+// only hands calls over and waits a bounded time. The task is not about a
+// repository at all (#446 A02).
 //
 //	go run ./examples/hostport
 package main
@@ -53,11 +55,17 @@ func fail(err error) {
 // run executes the document task; dir is the command working directory and
 // events receives the host's JSON-lines event log.
 func run(ctx context.Context, dir string, events io.Writer) (api.ExecutionResult, error) {
-	command, err := tools.NewCommand(hostRunner{documents: documents}, dir)
+	workers, stop := context.WithCancel(context.Background())
+	defer stop()
+	command, err := tools.NewCommand(api.ServeCommands(workers, hostRunner{documents: documents}), dir)
 	if err != nil {
 		return api.ExecutionResult{}, err
 	}
-	broker, err := tools.NewBroker(findClause{documents: documents}, command)
+	clause, err := findClause{documents: documents}.tool(workers)
+	if err != nil {
+		return api.ExecutionResult{}, err
+	}
+	broker, err := tools.NewBroker(clause, command)
 	if err != nil {
 		return api.ExecutionResult{}, err
 	}
@@ -74,8 +82,9 @@ func run(ctx context.Context, dir string, events io.Writer) (api.ExecutionResult
 		return api.ExecutionResult{}, err
 	}
 	eng, err := engine.New(engine.Config{
-		Providers: map[string]api.Provider{"doc-model": model}, Broker: broker, Artifacts: artifacts,
-		Events: &jsonLines{w: events}, Clock: systemClock{}, OutputLimit: 4096,
+		Providers: map[string]chan<- api.ProviderCall{"doc-model": api.ServeProvider(workers, model)},
+		Broker:    broker, Artifacts: artifacts,
+		Events: api.ServeEvents(workers, &jsonLines{w: events}), Clock: api.SystemClock{}, OutputLimit: 4096,
 	})
 	if err != nil {
 		return api.ExecutionResult{}, err
@@ -126,7 +135,3 @@ func request(now time.Time) api.ExecutionRequest {
 		}},
 	}
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }

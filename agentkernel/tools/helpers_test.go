@@ -35,7 +35,7 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 		writeFile(t, filepath.Join(f.root, name), content)
 	}
 	writeFile(t, filepath.Join(f.outside, "outside.txt"), "outside secret")
-	if f.ws, err = NewWorkspace(f.root, nil); err != nil {
+	if f.ws, err = NewWorkspace(f.root); err != nil {
 		t.Fatal(err)
 	}
 	if f.store, err = storage.NewMemoryArtifacts(1 << 20); err != nil {
@@ -137,6 +137,7 @@ func (f *fakeTool) Spec() api.ToolSpec {
 		`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}`)}
 }
 func (f *fakeTool) Kind() api.CapabilityKind { return f.kind }
+func (f *fakeTool) kernelOwned()             {}
 func (f *fakeTool) Scope(args json.RawMessage) (Scope, error) {
 	return pathScope(args)
 }

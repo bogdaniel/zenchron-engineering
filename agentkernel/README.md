@@ -80,14 +80,17 @@ spends provider credit.
 (`TestStandaloneSettlesAndWrites`). Its shape:
 
 ```go
-ws, _ := tools.NewWorkspace(dir, nil)                  // absolute, clean dir
+ws, _ := tools.NewWorkspace(dir)                       // absolute, clean dir
 broker, _ := tools.NewBroker(ws.ReadFile(), ws.WriteFile())
 artifacts, _ := storage.NewMemoryArtifacts(1 << 20)
+workers, stop := context.WithCancel(context.Background()) // the host's workers
+defer stop()
 eng, _ := engine.New(engine.Config{
-	Providers: map[string]api.Provider{"scripted": scripted.New(
+	Providers: map[string]chan<- api.ProviderCall{"scripted": api.ServeProvider(workers, scripted.New(
 		scripted.Step{Response: api.ProviderResponse{Text: "done", Stop: api.StopEnd}},
-	)},
-	Broker: broker, Artifacts: artifacts, Events: sink, Clock: clock, OutputLimit: 4096,
+	))},
+	Broker: broker, Artifacts: artifacts, Events: api.ServeEvents(workers, sink),
+	Clock: api.SystemClock{}, OutputLimit: 4096,
 })
 res, _ := eng.Execute(ctx, api.ExecutionRequest{
 	Version: api.ExecutionVersion, ExecutionID: "ex-1", AttemptID: "a-1",
@@ -104,8 +107,11 @@ res, _ := eng.Execute(ctx, api.ExecutionRequest{
 // res.Termination.Outcome == api.OutcomeCompleted; the error is always nil.
 ```
 
-`sink` implements `api.EventSink` and `clock` implements `api.Clock`; both are
-required, nothing is defaulted.
+`sink` implements `api.EventSink`. Events and a clock are required, nothing is
+defaulted. Every host port (sink, providers, context sources, command runner,
+host tools) is a channel served by a worker goroutine the host starts and
+stops; the kernel only hands calls over and waits a bounded time (execution
+spec §4.1).
 
 ## Limitations
 
@@ -119,21 +125,23 @@ required, nothing is defaulted.
   excluded (capabilities spec §4.1, §9); provenance reports
   `isolation: unproven` unless the host proves otherwise. `.git` paths are
   refused; credential-shaped names and contents are not. Process spawning,
-  containment and reaping belong to the host's `api.CommandRunner`.
+  containment and reaping belong to the host's `api.CommandRunner`, served
+  through `api.ServeCommands`.
 - **No CLI parity.** The OpenAI and Anthropic adapters are raw API adapters,
   not native coding-CLI adapters.
-- **Budget envelope is per execution, enforced per Engine store.** Every
-  attempt of one `execution_id` shares one envelope: re-entry, widening and
-  starting beside an unsettled attempt are refused (execution spec §11.1).
-  The default admission store is in-memory; enforcement across restarts
-  needs `engine.Config.Admissions` backed by `storage.FileRecords`, and
-  several processes sharing one store must serialize admission. Envelopes
-  spanning executions remain the host's.
-- **Bounded recording, not bounded adapters.** A stuck `EventSink`,
-  `ContextSource` or admission store is abandoned after the deadline (or
-  cancellation) plus `SettleTimeout`; its goroutine is left running until it
-  returns. Providers, tools and `CommandRunner`s are never abandoned and must
-  honour their context.
+- **Budget envelope is per execution.** Every attempt of one `execution_id`
+  shares one envelope: re-entry, widening and starting beside an in-flight or
+  unsettled attempt are refused (execution spec §11.1). The default admission
+  store is in-memory (one Engine); `engine.Config.Admissions` backed by
+  `storage.FileRecords` enforces it across restarts and across processes
+  sharing the root on one local filesystem (atomic `PutIfAbsent` claims). A
+  crashed attempt's claim is never expired: recovering it is host work.
+  Envelopes spanning executions remain the host's.
+- **Bounded hand-off, host-owned workers.** The kernel never runs host code
+  on its own goroutines. A stuck host worker (sink, source, provider, command
+  runner, host tool) is given up at its bound (the deadline, or cancellation
+  plus `SettleTimeout`); its goroutine is the host's. An unanswered command or
+  mutating host tool is an uncertain side effect and stops the execution.
 - **Live verification: none.** Adapters are verified against fake transports
   shaped from primary documentation retrieved 2026-10-07.
 - **File-backed stores refuse Windows** (`storage.prepareRoot`): directory

@@ -14,7 +14,7 @@ import (
 
 func commandFixture(t *testing.T, runner *fakeRunner) (*Broker, Env, *storage.MemoryArtifacts) {
 	t.Helper()
-	cmd, err := NewCommand(runner, "/work/space")
+	cmd, err := NewCommand(api.ServeCommands(t.Context(), runner), "/work/space")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestNewCommandValidatesConstruction(t *testing.T) {
 	if _, err := NewCommand(nil, "/x"); err == nil {
 		t.Fatal("nil runner accepted")
 	}
-	if _, err := NewCommand(&fakeRunner{}, "rel"); err == nil {
+	if _, err := NewCommand(make(chan api.CommandCall), "rel"); err == nil {
 		t.Fatal("relative dir accepted")
 	}
 }

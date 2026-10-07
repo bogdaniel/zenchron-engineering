@@ -53,7 +53,7 @@ func (r *fakeRunner) Run(context.Context, api.CommandRequest) (api.CommandResult
 // command ran: the host cannot tell an uncertain mutation from no mutation.
 func TestFindingCommandRanButResultHidesIt(t *testing.T) {
 	runner := &fakeRunner{}
-	cmd, err := tools.NewCommand(runner, t.TempDir())
+	cmd, err := tools.NewCommand(api.ServeCommands(t.Context(), runner), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

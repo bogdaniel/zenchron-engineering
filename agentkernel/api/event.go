@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -40,18 +41,60 @@ type Event struct {
 	Usage       *TokenUsage  `json:"usage,omitempty"`
 }
 
-// EventSink records events. A returned error means the event is not recorded;
-// the kernel then stops further side effects and settles recording_failed.
-// Record's context ignores the execution's cancellation but carries a
-// deadline (the budget deadline, or a settlement grace for terminal events);
-// a call that has not returned by then is abandoned and is a recording
-// failure. Record should honour its context: one that does not keeps its
-// goroutine alive, though never the execution.
+// EventSink records events. A returned error means the event is not
+// recorded; the kernel then stops further side effects and settles
+// recording_failed. The kernel never calls Record itself: a host serves its
+// sink to the kernel with ServeEvents (or its own worker on an
+// EventDelivery channel). Record's context ignores the execution's
+// cancellation but carries the bound the kernel waits for (the budget
+// deadline, or a settlement grace for terminal events) and is cancelled when
+// the kernel stops waiting; an event not acknowledged by then is a recording
+// failure. Each event is identified by execution_id, attempt_id and seq.
 type EventSink interface {
 	Record(ctx context.Context, event Event) error
 }
 
-// Clock is the execution's time source.
+// Clock is the execution's time source. The kernel reads it synchronously,
+// so only kernel-owned clocks satisfy it: SystemClock, or ManualClock for
+// tests and deterministic replay.
 type Clock interface {
 	Now() time.Time
+	kernelClock()
 }
+
+// SystemClock is the wall clock.
+type SystemClock struct{}
+
+func (SystemClock) Now() time.Time { return time.Now() }
+func (SystemClock) kernelClock()   {}
+
+// ManualClock is a clock that moves only when told to.
+type ManualClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// NewManualClock returns a clock reading now.
+func NewManualClock(now time.Time) *ManualClock { return &ManualClock{now: now} }
+
+func (c *ManualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// Set moves the clock to now.
+func (c *ManualClock) Set(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
+}
+
+// Advance moves the clock forward by d.
+func (c *ManualClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func (*ManualClock) kernelClock() {}

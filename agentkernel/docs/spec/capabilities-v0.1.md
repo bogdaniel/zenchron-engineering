@@ -108,7 +108,7 @@ unenforced.
 
 ## 4. File tools (`tools.Workspace`)
 
-`tools.NewWorkspace(root, snapshot)` requires a clean absolute path to an
+`tools.NewWorkspace(root)` requires a clean absolute path to an
 existing directory. Tools: `ReadFile()` → `read_file` (`file.read`),
 `Search()` → `search` (`file.search`), `WriteFile()` → `write_file` and
 `ApplyPatch()` → `apply_patch` (`file.write`), `ReadFiles()` →
@@ -157,13 +157,13 @@ are **not** refused by the kernel's tools (the root `runtime.ToolBroker`
 refuses them through `GuardCandidate`; a Gate B gap, see
 `docs/integration-plan.md`).
 
-### 4.2 Snapshot guard
+### 4.2 Snapshot drift
 
-`tools.SnapshotGuard{Bound, Current}` is optional. When set, `read_file` and
-`search` prefix their output with a note if `Current()` differs from `Bound`
-or fails. This makes drift visible so stale context can be refreshed; it does
-not refuse, and write tools do not consult it. It is a precheck, not
-isolation.
+There is no snapshot guard callback: it would run host code on the kernel's
+goroutine (execution spec §4.1). A host detects workspace drift itself, by
+comparing the manifest it bound (`WorkspaceRef.manifest_digest`) with the
+workspace after the execution; every `read_file` result carries the file's
+digest for that comparison.
 
 ### 4.3 Read and search
 
@@ -203,19 +203,40 @@ also on failure if parent directories were created.
 
 ## 5. Commands (`tools.NewCommand`)
 
-`tools.NewCommand(runner api.CommandRunner, dir string)` returns
+`tools.NewCommand(runner chan<- api.CommandCall, dir string)` returns
 `run_command` (`command.run`). The model supplies only `{"command": <name>}`;
 argv and timeout come solely from the matching `CommandGrant`, and the process
-runs through the host's `CommandRunner` in `dir` (a clean absolute path fixed
-at construction). The kernel never spawns, contains or reaps a process.
+runs in `dir` (a clean absolute path fixed at construction) through the
+host's process boundary, reached only by a bounded hand-off to a host worker
+(`api.ServeCommands(ctx, runner)`; execution spec §4.1). The call's ID is its
+producer. The kernel never spawns, contains or reaps a process, and never
+calls a `CommandRunner` on its own goroutine.
 
-- A runner error is an unknown outcome (`Mutated: true` plus an error →
+- A command the worker never takes before the run context ends did not run:
+  a tool error, not a mutation.
+- A command taken but not answered before the run context ends, or a runner
+  error, is an unknown outcome (`Mutated: true` plus an error →
   `failed/tool_failed`): a command's effect is never assumed absent.
 - The full output (`exit_code`, stdout, stderr) is always recorded as an
   artifact; failure to record it is an unknown outcome.
 - Status is `ok` only for exit code 0; otherwise `error` with
   `exit status N`. A runner-reported truncation is stated in `error`: the
   artifact then holds only the bytes the runner returned.
+
+## 5.1 Host tools (`tools.NewHostTool`)
+
+`tools.Tool` is sealed: only package `tools` implements it, so the broker
+never calls host code directly. A host's own tool is
+`tools.NewHostTool(HostTool{Spec, Kind, PathArgument, Calls})`: `Kind` is a
+file capability kind; `PathArgument` names the string argument holding the
+one workspace-relative path a call touches, from which the broker selects the
+grant exactly as for a built-in tool. The admitted call and selected grant
+(`HostInvocation`, no kernel callback) are handed to the host's worker
+(`tools.ServeTool`) within the run context. Not taken: a tool error, nothing
+ran. Taken but not answered: the outcome is unknown, `mutated` for a mutating
+kind (`failed/tool_failed`, observed as uncertain). An answer's output is
+bounded like any tool's, and a host-supplied `full_output` reference is
+dropped: only the kernel records artifacts.
 
 ## 6. Macro: `read_files`
 
@@ -264,6 +285,15 @@ Stores (`storage`):
   persists marks as `.pin` files across restarts.
 - `FileArtifacts`/`FileRecords` write atomically (temp file, fsync, rename,
   directory fsync) under an explicit absolute root and refuse Windows.
+- `Records.PutIfAbsent` writes only if the key holds no value, atomically:
+  `FileRecords` links a synced temp file to the record name (`link(2)` fails
+  if the name exists), so concurrent writers across processes sharing a root
+  on one local filesystem see exactly one success and every other gets
+  `storage.ErrExists`, and no reader sees a partial value
+  (`TestPutIfAbsentAdmitsExactlyOne`). It backs admission claims (execution
+  spec §11.1).
+- `engine.Config.Artifacts` takes a `storage.Artifacts`, which only this
+  package implements: the kernel calls its artifact store synchronously.
 - `FileArtifacts.Put` counts an existing file for the same key as stored only
   if it verifies; a corrupt copy is rewritten in place.
 - Capacity accounting. An artifact store's capacity bound applies to the
@@ -291,4 +321,4 @@ statement (`unproven` or `host_proven`); the kernel
 itself never claims protected execution.
 `Constraints.RequireHostProvenIsolation` makes routing admit only
 `host_proven` bindings. A host that needs protected execution must supply it
-(its own sandboxed `CommandRunner`, its own tools) and prove it.
+(its own sandboxed `CommandRunner`, its own host tools) and prove it.

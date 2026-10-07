@@ -121,17 +121,14 @@ func promptText(messages []api.Message, specs []api.ToolSpec) string {
 // the provider's own framing (role markers, turn separators, tool wrappers),
 // which promptText does not contain.
 // ponytail: 16 tokens covers the turn framing of current chat templates; a
-// provider whose framing exceeds it must implement an exact TokenEstimator.
+// provider whose framing exceeds it needs a larger allowance here.
 const messageOverheadTokens = 16
 
-// inputReservation is what one call reserves of max_input_tokens. An exact
-// provider count is reserved as is. Otherwise the reservation is an upper
-// bound, not an estimate: the UTF-8 byte length of everything sent plus the
-// framing allowance per entry, because a byte-level BPE tokenizer never
-// emits more tokens than input bytes.
-func inputReservation(est api.TokenEstimate, prompt string, entries int) int64 {
-	if est.Exact {
-		return est.Count
-	}
+// inputReservation is what one call reserves of max_input_tokens. It is an
+// upper bound, not an estimate: the UTF-8 byte length of everything sent
+// plus the framing allowance per entry, because a byte-level BPE tokenizer
+// never emits more tokens than input bytes. The kernel computes it itself:
+// no host code supplies a count the ledger trusts.
+func inputReservation(prompt string, entries int) int64 {
 	return int64(len(prompt)) + messageOverheadTokens*int64(entries)
 }

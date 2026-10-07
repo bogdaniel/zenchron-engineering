@@ -27,11 +27,12 @@ func TestObservedOutcomeSurvivesLateCancel(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			before := runtime.NumGoroutine()
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
 			c.step.Before = func() { cancel(api.Cancellation(api.CancelOperatorStop)) }
 			f := newFixture(t, []scripted.Step{c.step})
+			// Counted after the fixture: its sink and provider workers are the host's.
+			before := runtime.NumGoroutine()
 			res := f.run(t, ctx, request())
 			want(t, res, c.outcome, c.cause)
 			if res.Termination.Cancellation != "" {
@@ -83,7 +84,7 @@ func TestCancellationProvenance(t *testing.T) {
 func TestDeadlineExhaustion(t *testing.T) {
 	var f *fixture
 	step := toolUse(readCall("c1", "a.txt"))
-	step.Before = func() { f.clock.advance(budgetSpan) }
+	step.Before = func() { f.clock.Advance(budgetSpan) }
 	f = newFixture(t, []scripted.Step{step, end("never")})
 	res := f.run(t, context.Background(), request())
 	want(t, res, api.OutcomeExhausted, api.CauseBudgetExhausted)

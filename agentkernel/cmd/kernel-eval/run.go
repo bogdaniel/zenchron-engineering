@@ -99,7 +99,10 @@ func (h *harness) execute(ctx context.Context, t task, m mode, st *cache, dir st
 // run builds a fresh engine and times exactly one Execute.
 func (h *harness) run(ctx context.Context, t task, m mode, obs *observation, ws string,
 	provider *scripted.Provider, env runEnv) (api.ExecutionResult, error) {
-	eng, err := newEngine(ws, provider, env.contextSources())
+	// The harness is the host: it owns the workers serving its ports.
+	workers, stop := context.WithCancel(context.Background())
+	defer stop()
+	eng, err := newEngine(workers, ws, provider, env.contextSources())
 	if err != nil {
 		return api.ExecutionResult{}, err
 	}
@@ -121,8 +124,8 @@ func (h *harness) run(ctx context.Context, t task, m mode, obs *observation, ws 
 	return res, nil
 }
 
-func newEngine(ws string, provider api.Provider, sources []api.ContextSource) (*engine.Engine, error) {
-	w, err := tools.NewWorkspace(ws, nil)
+func newEngine(workers context.Context, ws string, provider api.Provider, sources []api.ContextSource) (*engine.Engine, error) {
+	w, err := tools.NewWorkspace(ws)
 	if err != nil {
 		return nil, err
 	}
@@ -138,9 +141,14 @@ func newEngine(ws string, provider api.Provider, sources []api.ContextSource) (*
 	if err != nil {
 		return nil, err
 	}
+	served := make([]chan<- api.ContextRequest, 0, len(sources))
+	for _, s := range sources {
+		served = append(served, api.ServeContext(workers, s))
+	}
 	return engine.New(engine.Config{
-		Providers: map[string]api.Provider{bindingID: provider}, Broker: broker, Artifacts: artifacts,
-		Events: discardEvents{}, Clock: systemClock{}, Sources: sources, OutputLimit: 8192,
+		Providers: map[string]chan<- api.ProviderCall{bindingID: api.ServeProvider(workers, provider)},
+		Broker:    broker, Artifacts: artifacts, Events: api.ServeEvents(workers, discardEvents{}),
+		Clock: api.SystemClock{}, Sources: served, OutputLimit: 8192,
 	})
 }
 
@@ -171,10 +179,6 @@ func (h *harness) request(t task, m mode, trial int, digest string) (api.Executi
 		}},
 	}, nil
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }
 
 // discardEvents accepts every event; the result's observations mirror them.
 type discardEvents struct{}

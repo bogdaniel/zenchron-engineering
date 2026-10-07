@@ -73,8 +73,8 @@ func (w *Workspace) readFile(ctx context.Context, inv Invocation) (api.ToolResul
 	if len(lines) == 0 {
 		start = 0
 	}
-	header := fmt.Sprintf("%spath: %s\ndigest: %s\nlines: %d-%d of %d\n\n",
-		w.snapshotNote(), a.Path, api.Digest(data), start, end, len(lines))
+	header := fmt.Sprintf("path: %s\ndigest: %s\nlines: %d-%d of %d\n\n",
+		a.Path, api.Digest(data), start, end, len(lines))
 	body := ""
 	if len(lines) > 0 {
 		body = strings.Join(lines[start-1:end], "")
@@ -151,7 +151,7 @@ func (w *Workspace) search(ctx context.Context, inv Invocation) (api.ToolResult,
 	if err != nil && !errors.Is(err, errHitLimit) {
 		return failed("search: %v", err), nil
 	}
-	out := w.snapshotNote() + strings.Join(hits, "")
+	out := strings.Join(hits, "")
 	if errors.Is(err, errHitLimit) {
 		out += fmt.Sprintf("[stopped after %d hits; results are incomplete, narrow the path or pattern]\n", maxSearchHits)
 	}
