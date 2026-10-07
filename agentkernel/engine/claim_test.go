@@ -18,7 +18,7 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/storage"
 )
 
-// The persisted admission partitions (docs/spec/execution-v0.1.md §8).
+// The persisted admission partitions (docs/spec/execution-v0.2.md §8).
 const (
 	claimPartition     = "agentkernel.admission_claims"
 	admissionPartition = "agentkernel.admissions"
@@ -199,5 +199,35 @@ func TestUnsettledAttemptBlocksTheNext(t *testing.T) {
 	wantRefused(t, f.next(t, attempt("att-2")), "unsettled")
 	if len(f.provider.Requests()) != 1 {
 		t.Fatal("attempt after an unsettled one reached the provider")
+	}
+}
+
+// TestV01RecordDeadlineIsNotAnEnvelopeBound: an admission record written by a
+// v0.1 kernel (same encoding; its first attempt's deadline stored in the
+// envelope) admits a new attempt with a later deadline under v0.2, and that
+// attempt still starts from the recorded consumption.
+func TestV01RecordDeadlineIsNotAnEnvelopeBound(t *testing.T) {
+	root := t.TempDir()
+	first := attempt("att-1")
+	first.Budget.MaxIterations = 3
+	data, err := json.Marshal(map[string]any{
+		"budget":   first.Budget,
+		"attempts": []map[string]any{{"attempt_id": "att-1", "consumed": map[string]int64{"iterations": 2}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := openRecords(t, root).Put(context.Background(), admissionPartition, "exec-1", data); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, []scripted.Step{toolUse(readCall("b", "a.txt")), end("never")}, withAdmissions(openRecords(t, root)))
+	second := attempt("att-2")
+	second.Budget.MaxIterations = 3
+	second.Budget.Deadline = first.Budget.Deadline.Add(time.Hour)
+	res := f.next(t, second)
+	want(t, res, api.OutcomeExhausted, api.CauseBudgetExhausted)
+	if res.Termination.Dimension != api.DimensionIterations || len(f.provider.Requests()) != 1 {
+		t.Fatalf("dimension %q after %d calls: want admitted with 2 of 3 iterations already spent",
+			res.Termination.Dimension, len(f.provider.Requests()))
 	}
 }

@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "agentkernel.execution/v0.1 ExecutionResult",
+  "title": "agentkernel.execution/v0.2 ExecutionResult",
   "description": "Mirrors api.ExecutionResult, emitted by the kernel. Observation only: there is no acceptance, merge or authorization field. execution_id and attempt_id are echoed from the request and are not pattern-checked, because a refused request may carry an invalid identifier. Not expressed here: the expected outcome for each cause (documented beside api.Cause), monotonic observation seq, and that Go encodes a nil slice as null (emitters must encode empty arrays as []).",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "execution_id", "attempt_id", "termination", "observations", "artifacts", "usage", "provenance", "event_count"],
   "properties": {
-    "version": {"$ref": "common.v0.1.schema.json#/$defs/version"},
+    "version": {"$ref": "common.v0.2.schema.json#/$defs/version"},
     "execution_id": {"type": "string"},
     "attempt_id": {"type": "string"},
     "termination": {"$ref": "#/$defs/termination"},
     "final_text": {"type": "string"},
     "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
-    "artifacts": {"type": "array", "items": {"$ref": "common.v0.1.schema.json#/$defs/artifact_ref"}},
+    "artifacts": {"type": "array", "items": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"}},
     "usage": {"$ref": "#/$defs/usage"},
     "context": {"$ref": "#/$defs/context_manifest"},
     "routing": {"$ref": "#/$defs/routing_decision"},
@@ -47,7 +47,7 @@
         "dimension": {"$ref": "#/$defs/budget_dimension"},
         "cancellation": {"$ref": "#/$defs/cancellation_provenance"},
         "detail": {"type": "string"},
-        "observed_at": {"$ref": "common.v0.1.schema.json#/$defs/timestamp"}
+        "observed_at": {"$ref": "common.v0.2.schema.json#/$defs/timestamp"}
       }
     },
     "observation": {
@@ -57,11 +57,11 @@
       "required": ["seq", "kind"],
       "properties": {
         "seq": {"type": "integer", "minimum": 0},
-        "kind": {"$ref": "common.v0.1.schema.json#/$defs/event_kind"},
+        "kind": {"$ref": "common.v0.2.schema.json#/$defs/event_kind"},
         "detail": {"type": "string"},
         "tool_call": {"type": "string"},
         "grant": {"type": "string"},
-        "ref": {"$ref": "common.v0.1.schema.json#/$defs/artifact_ref"}
+        "ref": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"}
       }
     },
     "usage": {
@@ -70,8 +70,8 @@
       "additionalProperties": false,
       "required": ["reported", "estimated", "provider_calls", "tool_calls", "iterations", "retries", "artifact_bytes", "latency_millis", "cost"],
       "properties": {
-        "reported": {"$ref": "common.v0.1.schema.json#/$defs/token_usage"},
-        "estimated": {"$ref": "common.v0.1.schema.json#/$defs/token_usage"},
+        "reported": {"$ref": "common.v0.2.schema.json#/$defs/token_usage"},
+        "estimated": {"$ref": "common.v0.2.schema.json#/$defs/token_usage"},
         "provider_calls": {"type": "integer", "minimum": 0},
         "tool_calls": {"type": "integer", "minimum": 0},
         "iterations": {"type": "integer", "minimum": 0},
@@ -101,7 +101,7 @@
       "additionalProperties": false,
       "required": ["digest", "entries", "capacity"],
       "properties": {
-        "digest": {"$ref": "common.v0.1.schema.json#/$defs/sha256_digest"},
+        "digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
         "entries": {"type": "array", "items": {"$ref": "#/$defs/manifest_entry"}},
         "capacity": {"$ref": "#/$defs/capacity"}
       }
@@ -113,14 +113,14 @@
       "required": ["item_id", "kind", "trust", "required", "selected", "reason", "content_digest", "tokens"],
       "properties": {
         "item_id": {"type": "string"},
-        "kind": {"$ref": "common.v0.1.schema.json#/$defs/context_kind"},
-        "trust": {"$ref": "common.v0.1.schema.json#/$defs/trust"},
+        "kind": {"$ref": "common.v0.2.schema.json#/$defs/context_kind"},
+        "trust": {"$ref": "common.v0.2.schema.json#/$defs/trust"},
         "required": {"type": "boolean"},
         "selected": {"type": "boolean"},
         "reason": {"type": "string"},
-        "content_digest": {"$ref": "common.v0.1.schema.json#/$defs/sha256_digest"},
+        "content_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
         "tokens": {"$ref": "#/$defs/token_estimate"},
-        "ref": {"$ref": "common.v0.1.schema.json#/$defs/artifact_ref"}
+        "ref": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"}
       }
     },
     "capacity": {
@@ -184,8 +184,8 @@
         "workspace_id": {"type": "string"},
         "workspace_digest": {"type": "string"},
         "instruction_digest": {"type": "string"},
-        "context_manifest_digest": {"$ref": "common.v0.1.schema.json#/$defs/sha256_digest"},
-        "isolation": {"$ref": "common.v0.1.schema.json#/$defs/isolation"},
+        "context_manifest_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
+        "isolation": {"$ref": "common.v0.2.schema.json#/$defs/isolation"},
         "sessions": {"type": "array", "items": {"$ref": "#/$defs/session_observation"}}
       }
     },

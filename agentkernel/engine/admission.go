@@ -20,7 +20,9 @@ const (
 
 // admissionRecord is what the kernel remembers about one execution_id: the
 // envelope its first attempt was admitted with, which every later attempt
-// shares, and what each settled attempt consumed.
+// shares, and what each settled attempt consumed. Budget.Deadline is stored
+// but never compared: since v0.2 the deadline is attempt-scoped (execution
+// spec §11.1), so a record written under v0.1 is read unchanged.
 type admissionRecord struct {
 	Budget   api.Budget      `json:"budget"`
 	Attempts []attemptRecord `json:"attempts"`
@@ -129,14 +131,13 @@ func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
 	return ""
 }
 
-// widenedBound names the first bound of next that is wider than first's, or
-// returns "". Any change to the money ceiling other than lowering it in the
+// widenedBound names the first cumulative bound of next that is wider than
+// first's, or returns "". The deadline is attempt-scoped and not compared: a
+// new attempt may carry a later one. Any change to the money ceiling other than lowering it in the
 // same currency is a widening: without the same ceiling, earlier money
 // consumption is not comparable.
 func widenedBound(first, next api.Budget) string {
 	switch {
-	case next.Deadline.After(first.Deadline):
-		return "deadline"
 	case next.MaxIterations > first.MaxIterations:
 		return "max_iterations"
 	case next.MaxToolCalls > first.MaxToolCalls:

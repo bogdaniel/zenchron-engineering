@@ -138,7 +138,8 @@ lacks it.
 11. **Attempt identity and budgets.** The kernel enforces one budget
     envelope per `execution_id` through its admission store (execution spec
     §11.1): a re-entered `attempt_id` is refused, a later attempt cannot widen
-    the first budget and starts from recorded consumption, and an unsettled
+    a cumulative bound of the first budget (its deadline is attempt-scoped
+    since v0.2) and starts from recorded consumption, and an unsettled
     prior attempt blocks the next. Gate B must:
     - map the host's attempt identity onto `execution_id`/`attempt_id`
       consistently: one host execution is always one `execution_id`, and one
@@ -189,7 +190,7 @@ An indefinite two-owner loop is not an option.
 - **Rollback.** Disable or remove the agent; new runs use the existing path.
   Recorded attempts keep their recorded provider kind and provenance; turning
   the feature off never reinterprets them. Kernel DTOs persist only as
-  versioned artifacts (`agentkernel.execution/v0.1`), never as canonical host
+  versioned artifacts (`agentkernel.execution/v0.2`), never as canonical host
   records, so a version change cannot rewrite history.
 
 ## 8. Gate B test list

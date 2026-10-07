@@ -17,10 +17,10 @@ import (
 
 const (
 	schemaDir    = "../schemas"
-	requestFile  = "execution-request.v0.1.schema.json"
-	resultFile   = "execution-result.v0.1.schema.json"
-	eventFile    = "event.v0.1.schema.json"
-	commonFile   = "common.v0.1.schema.json"
+	requestFile  = "execution-request.v0.2.schema.json"
+	resultFile   = "execution-result.v0.2.schema.json"
+	eventFile    = "event.v0.2.schema.json"
+	commonFile   = "common.v0.2.schema.json"
 	examplesDir  = "../schemas/examples"
 	validDir     = examplesDir + "/valid"
 	invalidDir   = examplesDir + "/invalid"
@@ -37,6 +37,7 @@ var fixedNow = time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
 // be refused with. Every invalid fixture must appear here and vice versa.
 var invalidRequestField = map[string]string{
 	"request-unknown-version.json":            "version",
+	"request-v0.1-version.json":               "version",
 	"request-unknown-field.json":              "$",
 	"request-duplicate-key.json":              "objective",
 	"request-invalid-identifier.json":         "execution_id",

@@ -37,8 +37,9 @@ func wantRefused(t *testing.T, res api.ExecutionResult, reason string) {
 }
 
 // TestReentryCannotRenewBudget is A05: the same attempt cannot run twice, a
-// later attempt cannot widen the envelope, and it starts from what earlier
-// attempts consumed.
+// later attempt cannot widen a cumulative bound, and it starts from what
+// earlier attempts consumed. Since v0.2 the deadline is attempt-scoped: a new
+// attempt may carry a later one.
 func TestReentryCannotRenewBudget(t *testing.T) {
 	t.Run("same_attempt_refused", func(t *testing.T) {
 		f := newFixture(t, []scripted.Step{end("one"), end("two")})
@@ -62,8 +63,32 @@ func TestReentryCannotRenewBudget(t *testing.T) {
 				res.Termination.Dimension, len(f.provider.Requests()))
 		}
 	})
+	t.Run("later_deadline_new_attempt_admitted_from_consumed", func(t *testing.T) {
+		f := newFixture(t, []scripted.Step{toolUse(readCall("a", "a.txt")), end("one"), toolUse(readCall("b", "a.txt")), end("never")})
+		first := attempt("att-1")
+		first.Budget.MaxIterations = 3
+		want(t, f.next(t, first), api.OutcomeCompleted, api.CauseLoopCompleted)
+		second := attempt("att-2")
+		second.Budget.MaxIterations = 3
+		second.Budget.Deadline = first.Budget.Deadline.Add(time.Hour)
+		res := f.next(t, second)
+		want(t, res, api.OutcomeExhausted, api.CauseBudgetExhausted)
+		if res.Termination.Dimension != api.DimensionIterations || len(f.provider.Requests()) != 3 {
+			t.Fatalf("dimension %q after %d calls: a later deadline must admit the attempt and keep consumption",
+				res.Termination.Dimension, len(f.provider.Requests()))
+		}
+	})
+	t.Run("same_attempt_later_deadline_refused", func(t *testing.T) {
+		f := newFixture(t, []scripted.Step{end("one"), end("two")})
+		want(t, f.next(t, request()), api.OutcomeCompleted, api.CauseLoopCompleted)
+		again := request()
+		again.Budget.Deadline = again.Budget.Deadline.Add(time.Hour)
+		wantRefused(t, f.next(t, again), "already admitted")
+		if len(f.provider.Requests()) != 1 {
+			t.Fatal("re-entered attempt with a later deadline reached the provider")
+		}
+	})
 	widen := map[string]func(*api.Budget){
-		"deadline":       func(b *api.Budget) { b.Deadline = b.Deadline.Add(time.Second) },
 		"max_tool_calls": func(b *api.Budget) { b.MaxToolCalls++ },
 		"max_input":      func(b *api.Budget) { b.MaxInputTokens++ },
 		"retries":        func(b *api.Budget) { b.MaxProviderRetries++ },

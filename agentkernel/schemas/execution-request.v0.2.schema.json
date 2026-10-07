@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "agentkernel.execution/v0.1 ExecutionRequest",
+  "title": "agentkernel.execution/v0.2 ExecutionRequest",
   "description": "Mirrors api.ExecutionRequest. api.DecodeRequest refuses unknown fields, duplicate keys and trailing data; ExecutionRequest.Validate(now) is authoritative. Rules enforced ONLY by Validate (not expressible here): budget.deadline must be after the validation time; context ids, grant handles, command names (per grant) and provider ids must be unique; every context item's content_digest must equal api.Digest(content); with budget.money, every eligible binding's pricing currency must equal money.currency; objective is limited to 65536 BYTES (maxLength below counts code points) and must contain a non-space character by unicode.IsSpace; a root's drive-letter check is per byte. Go's decoder does not require keys to be present, so a missing array or boolean decodes to its zero value and is then judged by Validate; this schema requires every non-omitempty field.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "execution_id", "attempt_id", "objective", "mode", "workspace", "constraints", "context", "grants", "budget", "providers"],
   "properties": {
-    "version": {"$ref": "common.v0.1.schema.json#/$defs/version"},
-    "execution_id": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
-    "attempt_id": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
+    "version": {"$ref": "common.v0.2.schema.json#/$defs/version"},
+    "execution_id": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
+    "attempt_id": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
     "objective": {"type": "string", "minLength": 1, "maxLength": 65536, "pattern": "\\S"},
     "mode": {"$ref": "#/$defs/mode"},
     "workspace": {"$ref": "#/$defs/workspace"},
@@ -55,8 +55,8 @@
       "additionalProperties": false,
       "required": ["id", "manifest_digest", "dirty"],
       "properties": {
-        "id": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
-        "manifest_digest": {"$ref": "common.v0.1.schema.json#/$defs/sha256_digest"},
+        "id": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
+        "manifest_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
         "git_revision": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
         "dirty": {"type": "boolean"}
       }
@@ -74,7 +74,7 @@
           "items": {"enum": ["tools", "artifacts", "cancellation_provenance"]}
         },
         "require_host_proven_isolation": {"type": "boolean"},
-        "instruction_digest": {"$ref": "common.v0.1.schema.json#/$defs/sha256_digest"}
+        "instruction_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"}
       }
     },
     "context_item": {
@@ -83,14 +83,14 @@
       "additionalProperties": false,
       "required": ["id", "kind", "trust", "required", "content", "content_digest"],
       "properties": {
-        "id": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
-        "kind": {"$ref": "common.v0.1.schema.json#/$defs/context_kind"},
-        "trust": {"$ref": "common.v0.1.schema.json#/$defs/trust"},
+        "id": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
+        "kind": {"$ref": "common.v0.2.schema.json#/$defs/context_kind"},
+        "trust": {"$ref": "common.v0.2.schema.json#/$defs/trust"},
         "required": {"type": "boolean"},
         "content": {"type": "string"},
-        "content_digest": {"$ref": "common.v0.1.schema.json#/$defs/sha256_digest"},
+        "content_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
         "revision": {"type": "string"},
-        "ref": {"$ref": "common.v0.1.schema.json#/$defs/artifact_ref"},
+        "ref": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"},
         "score": {"type": "number"}
       },
       "if": {"required": ["kind"], "properties": {"kind": {"enum": ["instruction", "constraint"]}}},
@@ -103,7 +103,7 @@
       "additionalProperties": false,
       "required": ["handle", "kind"],
       "properties": {
-        "handle": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
+        "handle": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
         "kind": {"$ref": "#/$defs/capability_kind"},
         "roots": {"type": "array", "items": {"$ref": "#/$defs/relative_path"}},
         "commands": {"type": "array", "items": {"$ref": "#/$defs/command_grant"}}
@@ -127,18 +127,18 @@
       "additionalProperties": false,
       "required": ["name", "argv", "timeout_seconds"],
       "properties": {
-        "name": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
+        "name": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
         "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "timeout_seconds": {"type": "integer", "minimum": 1}
       }
     },
     "budget": {
-      "description": "api.Budget: the envelope of the whole execution (every attempt of one execution_id together; a later attempt may not widen it and starts from what earlier attempts consumed, execution spec 11.1). deadline must be after the validation time (Validate only).",
+      "description": "api.Budget: the envelope of the whole execution (every attempt of one execution_id together; a later attempt may not widen a cumulative bound and starts from what earlier attempts consumed, execution spec 11.1). deadline is attempt-scoped: a new attempt_id may carry a later one. deadline must be after the validation time (Validate only).",
       "type": "object",
       "additionalProperties": false,
       "required": ["deadline", "max_iterations", "max_tool_calls", "max_input_tokens", "max_output_tokens", "max_artifact_bytes", "max_provider_retries"],
       "properties": {
-        "deadline": {"$ref": "common.v0.1.schema.json#/$defs/timestamp"},
+        "deadline": {"$ref": "common.v0.2.schema.json#/$defs/timestamp"},
         "max_iterations": {"type": "integer", "minimum": 1},
         "max_tool_calls": {"type": "integer", "minimum": 1},
         "max_input_tokens": {"type": "integer", "minimum": 1},
@@ -165,8 +165,8 @@
       "additionalProperties": false,
       "required": ["id", "kind", "model", "model_version", "config_fingerprint", "eligible", "pinned", "preference", "isolation", "context_window", "max_output_tokens"],
       "properties": {
-        "id": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
-        "kind": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
+        "id": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
+        "kind": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
         "model": {"type": "string", "minLength": 1},
         "model_version": {"description": "Literal \"unknown\" when the host cannot pin it.", "type": "string", "minLength": 1},
         "features": {"type": "array", "items": {"type": "string"}},
@@ -174,10 +174,10 @@
         "eligible": {"type": "boolean"},
         "pinned": {"type": "boolean"},
         "preference": {"type": "integer"},
-        "isolation": {"$ref": "common.v0.1.schema.json#/$defs/isolation"},
+        "isolation": {"$ref": "common.v0.2.schema.json#/$defs/isolation"},
         "context_window": {"type": "integer", "minimum": 1},
         "max_output_tokens": {"type": "integer", "minimum": 1},
-        "credential_handle": {"$ref": "common.v0.1.schema.json#/$defs/identifier"},
+        "credential_handle": {"$ref": "common.v0.2.schema.json#/$defs/identifier"},
         "pricing": {"$ref": "#/$defs/pricing"}
       },
       "if": {"required": ["pinned"], "properties": {"pinned": {"const": true}}},
@@ -196,7 +196,7 @@
         "cache_write_input_micros_per_million": {"type": ["integer", "null"], "minimum": 0, "description": "Rate for input tokens written to a provider cache, charged instead of the input rate. null is unknown, never zero; a money ceiling needs it known."},
         "source": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
-        "observed_at": {"$ref": "common.v0.1.schema.json#/$defs/timestamp"}
+        "observed_at": {"$ref": "common.v0.2.schema.json#/$defs/timestamp"}
       }
     }
   }

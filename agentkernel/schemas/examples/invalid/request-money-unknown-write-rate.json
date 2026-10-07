@@ -1,5 +1,5 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-full-1",
   "attempt_id": "attempt-2",
   "objective": "Fix the failing unit test in src/ and run the tests.",

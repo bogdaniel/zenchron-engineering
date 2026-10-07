@@ -1,5 +1,5 @@
 {
-  "version": "agentkernel.execution/v0.2",
+  "version": "agentkernel.execution/v0.1",
   "execution_id": "exec-minimal-1",
   "attempt_id": "attempt-1",
   "objective": "Summarize the repository layout.",
@@ -55,6 +55,5 @@
       "context_window": 32000,
       "max_output_tokens": 4000
     }
-  ],
-  "acceptance": "granted"
+  ]
 }

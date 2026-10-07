@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "agentkernel.execution/v0.1 shared definitions",
+  "title": "agentkernel.execution/v0.2 shared definitions",
   "description": "Types shared by the execution request, result and event contracts. Mirrors agentkernel/api. Referenced by relative URI from the sibling schemas.",
   "$defs": {
     "version": {
       "description": "api.ExecutionVersion. Any other value is refused.",
-      "const": "agentkernel.execution/v0.1"
+      "const": "agentkernel.execution/v0.2"
     },
     "identifier": {
       "description": "api.ValidIdentifier: opaque identifier.",

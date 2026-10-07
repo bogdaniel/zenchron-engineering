@@ -415,3 +415,16 @@ and `host_test.go:83` / `:113` are the `dispatchWithin` calls in
 | Guard | Patch | Decisive failure | Restored |
 | --- | --- | --- | --- |
 | per-refusal nonce namespace in `run.refuse` | `r.refusal = ""` | `refusal_ids_test.go:42: hand-off ID "exec-1/att-1/event-1" sent for 3 different events: [execution.started execution.refused execution.refused]` | passes |
+
+### Contract v0.2: attempt-scoped deadline (#518)
+
+Applied to a disposable copy of the module, one break at a time, each reverted
+before the next; `go test -count=1 ./engine/ ./tests/conformance/ ./api/`.
+
+| Rule | Patch | Decisive failure | Restored |
+| --- | --- | --- | --- |
+| a new attempt may carry a later deadline | `widenedBound` compares the deadline again | `admission_test.go:75: termination blocked/invalid_request (budget widens deadline …), want exhausted/budget_exhausted` (`later_deadline_new_attempt_admitted_from_consumed`); `claim_test.go:228` (`TestV01RecordDeadlineIsNotAnEnvelopeBound`); `budget_integrity_test.go:81` (`TestA05DeadlineIsAttemptScoped`) | passes |
+| the same `attempt_id` is refused, whatever its deadline | settled-attempt check disabled | `admission_test.go:86: termination completed/loop_completed …, want blocked/invalid_request` (`same_attempt_later_deadline_refused`); `budget_integrity_test.go:75: same attempt with a later deadline: {Outcome:exhausted …}` | passes |
+| cumulative bounds still cannot widen | `max_tool_calls` case removed | `admission_test.go:111` (`widened_max_tool_calls`); `budget_integrity_test.go:81: later deadline with a widened tool-call bound: {Outcome:exhausted …}` | passes |
+| consumption carries forward | `ledger.restore` dropped | `admission_test.go:75` (later-deadline attempt completed instead of exhausting iterations); `claim_test.go:228`; `TestPriorConsumptionIsCountedOnce` | passes |
+| v0.1 requests are refused | `Validate` also accepts `agentkernel.execution/v0.1` | `execution_test.go:85` (`TestA04RefusedBeforeAnySideEffect/v0.1_version`); `schema_test.go:164: want *api.ValidationError on "version", got <nil>` (`request-v0.1-version.json`) | passes |
