@@ -141,7 +141,7 @@ unchanged.
 | `collaboration_request` | `target`, `purpose`, `body`; `in_reply_to` makes it the response to a request addressed to the writer | the target unit |
 | `finding` | `subject_handoff`, `category` (`defect`, `risk`, `inconsistency`), `body` | the unit that owns that handoff |
 | `decision_request` | `purpose` (the question), `body` | human or designated authority |
-| `state_update` | `body` | shown to every other unit; it carries no authority |
+| `state_update` | `body` | every other unit sees each unit's latest one; it carries no authority |
 
 Any kind may also set `supersedes` to correct one of its own unit's earlier
 messages of that kind. Every other member, kind combination or unknown member is refused.
@@ -170,6 +170,8 @@ Rules that no message can bypass:
 - A Finding applies only to the exact subject it is bound to. Once the owner
   admits a newer handoff, the older Finding is shown as `stale_findings` and
   does not apply to the new candidate.
+- A response may answer only a live request. Once its author supersedes a
+  request, a response to the old one is refused.
 - A DecisionRequest stays open until authority answers it. `in_reply_to` may
   name only a collaboration request addressed to the writer, so no worker,
   including the requester, can answer one. A `state_update` claiming it was
@@ -185,7 +187,10 @@ addressed to it, current and stale Findings, and the latest update from each
 other unit. Each list is capped at 16 entries and reports how many it omitted.
 The invocation also receives every unit's latest admitted handoff id, so it can
 name one as a Finding subject, and the open decisions. That context is
-admitted data from other workers, never their reasoning.
+admitted data from other workers, never their reasoning. It is rendered inside
+an `UNTRUSTED-INTERWORKER-MESSAGES` frame, exactly like reviewer feedback and
+upstream diffs. Every frame marker in it is neutralized, as it is in those
+frames, so a message cannot close its frame or forge another.
 
 Nothing in this protocol answers a DecisionRequest yet. That needs a separate
 authority surface, which this protocol deliberately does not invent.

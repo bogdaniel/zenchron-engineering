@@ -139,6 +139,22 @@ func TestOnlyAnAddressedRequestCanBeAnswered(t *testing.T) {
 	}
 }
 
+// Only a LIVE request can be answered: once its author supersedes it, a
+// response to the old one is refused, and the replacement can be answered.
+func TestASupersededRequestCannotBeAnswered(t *testing.T) {
+	first := admit(t, commScope(), source("issue-1", "run-a", 1), request("issue-2", "use v1?"))
+	correction := request("issue-2", "use v2?")
+	correction.Supersedes = first[0].ID
+	history := append(first, admit(t, commScope(first...), source("issue-1", "run-a", 2), correction)...)
+	answer := func(id string) MessageDraft {
+		return MessageDraft{Kind: KindCollaborationRequest, Target: "issue-1", InReplyTo: id, Purpose: "answer", Body: "yes"}
+	}
+	refused(t, commScope(history...), source("issue-2", "run-b", 1), "was superseded", answer(first[0].ID))
+	if answered := admit(t, commScope(history...), source("issue-2", "run-b", 1), answer(history[1].ID)); answered[0].InReplyTo != history[1].ID {
+		t.Fatalf("the live request was not answerable: %+v", answered[0])
+	}
+}
+
 // Nothing a worker writes closes a DecisionRequest - not a StateUpdate saying
 // it decided, and not a correction, which is a new open question.
 func TestADecisionRequestIsAWaitNoWorkerCanSatisfy(t *testing.T) {

@@ -841,14 +841,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation and only for a run an orchestration batch created. Every
 	// other run is given no path and is unchanged.
 	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
-	// The message slot (#473) beside it, and the admitted messages routed to
-	// this run's unit, under the same rule: orchestrated runs only.
-	var messagePath, communication string
+	var messagePath, communication string // #473, same rule; communication_slot.go
 	if err == nil {
-		messagePath, err = r.prepareMessageSlot(state, operation.ID, physicalAttempt)
-	}
-	if err == nil && messagePath != "" {
-		communication, err = communicationContext(r.deps.Store, state.run)
+		messagePath, communication, err = r.prepareMessages(state, operation.ID, physicalAttempt)
 	}
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
@@ -1278,11 +1273,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			if handoffPath != "" {
 				events = append(events, handoffObservation(handoffPath, operation.ID, physicalAttempt))
 			}
-			if messagePath != "" {
-				if entry, wrote := messageObservation(messagePath, operation.ID, physicalAttempt); wrote {
-					events = append(events, entry)
-				}
-			}
+			events = appendMessageObservation(events, messagePath, operation.ID, physicalAttempt)
 		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.

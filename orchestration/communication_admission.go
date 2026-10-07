@@ -51,7 +51,7 @@ func AdmitMessages(report MessageReport, digest string, scope MessageScope, sour
 	}
 	admitted := make([]EngineeringMessage, 0, len(report.Messages))
 	for i, draft := range report.Messages {
-		message, err := admitDraft(draft, i, digest, scope, source, units, prior, now)
+		message, err := admitDraft(draft, i, digest, scope, source, units, prior, superseded, now)
 		if err != nil {
 			return nil, fmt.Errorf("message %d: %w", i, err)
 		}
@@ -64,7 +64,7 @@ func AdmitMessages(report MessageReport, digest string, scope MessageScope, sour
 	return admitted, nil
 }
 
-func admitDraft(draft MessageDraft, index int, digest string, scope MessageScope, source MessageSource, units map[string]bool, prior map[string]EngineeringMessage, now time.Time) (EngineeringMessage, error) {
+func admitDraft(draft MessageDraft, index int, digest string, scope MessageScope, source MessageSource, units map[string]bool, prior map[string]EngineeringMessage, superseded map[string]bool, now time.Time) (EngineeringMessage, error) {
 	id, err := MessageID(source.RunID, source.OperationID, source.Attempt, index)
 	if err != nil {
 		return EngineeringMessage{}, err
@@ -91,6 +91,11 @@ func admitDraft(draft MessageDraft, index int, digest string, scope MessageScope
 		// by it. A DecisionRequest is answered by authority, never by a reply.
 		if !ok || request.Kind != KindCollaborationRequest || request.Route.Unit != source.Unit {
 			return EngineeringMessage{}, fmt.Errorf("%s is not an admitted collaboration request addressed to %s", draft.InReplyTo, source.Unit)
+		}
+		// A superseded request is history: its author replaced it, so a
+		// response to it would answer a question nobody is asking any more.
+		if superseded[draft.InReplyTo] {
+			return EngineeringMessage{}, fmt.Errorf("%s was superseded; answer the request that replaced it", draft.InReplyTo)
 		}
 		if draft.Target != request.Source.Unit {
 			return EngineeringMessage{}, fmt.Errorf("a response to %s goes to its requester %s, not %s", draft.InReplyTo, request.Source.Unit, draft.Target)

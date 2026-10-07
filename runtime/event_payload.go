@@ -166,15 +166,7 @@ var eventPayloads = map[string]payloadValidator{
 			positive("attempt", p.Attempt),
 			required("detail", p.Detail))
 	}),
-	EventMessagesObserved: payloadSchema(func(p MessagesObservedPayload) error {
-		if (p.DocumentSHA256 == "") == (p.Refusal == "") {
-			return errors.New("a message observation names exactly one of a document digest or a refusal")
-		}
-		if p.DocumentSHA256 != "" && (p.Count <= 0 || p.Count > orchestration.MaxMessagesPerInvocation) {
-			return fmt.Errorf("a message observation counts %d messages, not 1 to %d", p.Count, orchestration.MaxMessagesPerInvocation)
-		}
-		return errors.Join(required("operation_id", p.OperationID), positive("attempt", p.Attempt))
-	}),
+	EventMessagesObserved: payloadSchema(validateMessagesObserved),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),

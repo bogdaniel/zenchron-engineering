@@ -441,13 +441,16 @@ const neutralizedFrameMarker = "[frame marker removed by runtime]"
 // see that the text contained the marker instead of wondering why it reads
 // oddly.
 //
-// Both markers are removed from every body, not just the one that frames it.
+// Every marker is removed from every body, not just the one that frames it.
 // The blocks are concatenated into one prompt, so a feedback body carrying the
-// upstream marker - or a diff carrying the feedback one - can close the other
-// block's frame just as effectively as its own.
+// upstream or inter-worker marker - or a diff or message carrying the
+// feedback one - can close another block's frame just as effectively as its
+// own.
 func neutralizeFrameMarker(text string) string {
-	text = strings.ReplaceAll(text, feedbackFrameMarker, neutralizedFrameMarker)
-	return strings.ReplaceAll(text, upstreamFrameMarker, neutralizedFrameMarker)
+	for _, marker := range []string{feedbackFrameMarker, upstreamFrameMarker, messagesFrameMarker} {
+		text = strings.ReplaceAll(text, marker, neutralizedFrameMarker)
+	}
+	return text
 }
 
 // neutralizeFramedField is the same for a value interpolated into a frame's

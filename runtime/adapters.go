@@ -125,12 +125,8 @@ type ExecutionRequest struct {
 	// channel the two paths above are, and the runtime - not the provider -
 	// reads it after a completed invocation; see handoff_slot.go.
 	HandoffPath string
-	// MessagePath is the runtime-owned file an ORCHESTRATED invocation may
-	// write typed messages to (#473), beside HandoffPath, and Communication is
-	// the runtime-rendered view of the admitted messages routed to its unit.
-	// See communication_slot.go.
-	MessagePath   string
-	Communication string
+	// MessagePath and Communication: the #473 message slot and inbox; see communication_slot.go.
+	MessagePath, Communication string
 	// RequiredTools are the executables THIS invocation's contract obliges the
 	// worker to run, derived from the contract's own frozen acceptance
 	// obligations.
