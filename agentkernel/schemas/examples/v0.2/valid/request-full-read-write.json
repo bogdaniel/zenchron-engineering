@@ -1,5 +1,5 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-full-1",
   "attempt_id": "attempt-2",
   "objective": "Fix the failing unit test in src/ and run the tests.",
@@ -11,11 +11,7 @@
     "dirty": true
   },
   "constraints": {
-    "required_features": [
-      "tools",
-      "artifacts",
-      "cancellation_provenance"
-    ],
+    "required_features": ["tools", "artifacts", "cancellation_provenance"],
     "require_host_proven_isolation": true,
     "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
   },
@@ -54,50 +50,15 @@
     }
   ],
   "grants": [
-    {
-      "handle": "read-src",
-      "kind": "file.read",
-      "roots": [
-        "src",
-        "docs/api"
-      ]
-    },
-    {
-      "handle": "search-src",
-      "kind": "file.search",
-      "roots": [
-        "src"
-      ]
-    },
-    {
-      "handle": "write-src",
-      "kind": "file.write",
-      "roots": [
-        "src"
-      ]
-    },
+    {"handle": "read-src", "kind": "file.read", "roots": ["src", "docs/api"]},
+    {"handle": "search-src", "kind": "file.search", "roots": ["src"]},
+    {"handle": "write-src", "kind": "file.write", "roots": ["src"]},
     {
       "handle": "run-tests",
       "kind": "command.run",
       "commands": [
-        {
-          "name": "unit-tests",
-          "argv": [
-            "go",
-            "test",
-            "./..."
-          ],
-          "timeout_seconds": 300
-        },
-        {
-          "name": "vet",
-          "argv": [
-            "go",
-            "vet",
-            "./..."
-          ],
-          "timeout_seconds": 120
-        }
+        {"name": "unit-tests", "argv": ["go", "test", "./..."], "timeout_seconds": 300},
+        {"name": "vet", "argv": ["go", "vet", "./..."], "timeout_seconds": 120}
       ]
     }
   ],
@@ -109,10 +70,7 @@
     "max_output_tokens": 40000,
     "max_artifact_bytes": 10485760,
     "max_provider_retries": 2,
-    "money": {
-      "currency": "USD",
-      "max_micros": 2000000
-    }
+    "money": {"currency": "USD", "max_micros": 2000000}
   },
   "providers": [
     {
@@ -120,9 +78,7 @@
       "kind": "anthropic",
       "model": "example-large",
       "model_version": "2026-01-01",
-      "features": [
-        "tools"
-      ],
+      "features": ["tools"],
       "config_fingerprint": "fp-primary",
       "eligible": true,
       "pinned": true,
@@ -130,7 +86,17 @@
       "isolation": "host_proven",
       "context_window": 200000,
       "max_output_tokens": 16000,
-      "credential_handle": "cred:primary"
+      "credential_handle": "cred:primary",
+      "pricing": {
+        "currency": "USD",
+        "input_micros_per_million": 3000000,
+        "output_micros_per_million": 15000000,
+        "cached_input_micros_per_million": 300000,
+        "cache_write_input_micros_per_million": 3000000,
+        "source": "host-rate-card",
+        "version": "2026-09",
+        "observed_at": "2026-09-01T00:00:00Z"
+      }
     },
     {
       "id": "fallback",

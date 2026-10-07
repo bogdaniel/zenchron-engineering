@@ -5,7 +5,7 @@ contract Gate A was accepted on). The words MUST/MUST NOT describe behaviour
 the code in `api/` and `engine/` implements; where the code and issue #446
 differ, §12 says so. Canonical JSON shapes: `schemas/execution-request.v0.2.schema.json`,
 `schemas/execution-result.v0.2.schema.json`, `schemas/event.v0.2.schema.json`,
-`schemas/common.v0.2.schema.json`, with examples under `schemas/examples/`.
+`schemas/common.v0.2.schema.json`, with examples under `schemas/examples/v0.2/`.
 
 ## 1. Entry point
 
@@ -445,26 +445,35 @@ admission. It holds two partitions per `execution_id`:
 
 After validation and before any side effect, `run.admit`:
 
+0. reads the record **without claiming** and refuses
+   `blocked/invalid_request` a record it cannot read under this contract: an
+   unversioned (v0.1) record with any attempt ("legacy unversioned (v0.1)
+   admission state; explicit recovery or migration is required …") or a
+   record of any other version ("admission state of unknown version …").
+   Absent state (no record, or an unversioned record with no attempts) is
+   eligible; a `agentkernel.admission/v0.2` record takes the normal path.
+   Because this precedes the claim, an incompatible-version refusal never
+   creates a claim and leaves none behind. Such a record is never
+   reinterpreted, migrated or expired; it refuses every attempt of that
+   `execution_id` until an explicit recovery or migration protocol (not
+   implemented here) replaces it. A failed read refuses
+   `incomplete/recording_failed`, "nothing ran".
 1. claims the `execution_id` with `Records.PutIfAbsent`. If the claim is held
    it refuses `blocked/invalid_request`: "attempt … already admitted" when the
    holder is this `attempt_id`, else "prior attempt … in flight or unsettled;
    consumption unknown". A failed claim write refuses
    `incomplete/recording_failed`, "nothing ran". A refused contender reserves
    nothing, calls no provider and writes no record.
-2. holding the claim, reads the record and refuses (releasing the claim) a
-   record it cannot read under this contract: an unversioned (v0.1) record
-   with any attempt ("legacy unversioned (v0.1) admission state; explicit
-   recovery or migration is required …") or a record of any other version
-   ("admission state of unknown version …"). Such a record is never
-   reinterpreted, migrated or expired; it refuses every attempt of that
-   `execution_id` until an explicit recovery or migration protocol (not
-   implemented here) replaces it. An unversioned record with no attempts
-   holds no state and is read as absent. It then refuses an
+2. holding the claim, reads the record again (it may have changed since
+   step 0: another attempt settled, or a v0.1 kernel wrote a legacy record)
+   and refuses, releasing the claim, a record step 0 would refuse, an
    `attempt_id` already settled ("already admitted", whatever its deadline)
    or a budget that widens a cumulative bound of the envelope: any larger
    numeric bound, or any money change other than a lower ceiling in the same
    currency ("budget widens …"). The deadline is not compared: the record's
-   stored deadline is the first attempt's and binds no later attempt.
+   stored deadline is the first attempt's and binds no later attempt. If the
+   release itself fails, the claim stays and the detail says "admission
+   claim not released": later attempts are refused (fail closed).
 3. starts the ledger from what the execution has consumed: per dimension, the
    largest cumulative total any settled attempt recorded (money and retries
    included; the deadline is attempt-scoped and never carried). Records are
@@ -508,10 +517,11 @@ deadline; v0.1 refused that as a widening of the execution envelope.
 - `budget.deadline` is attempt-scoped (§11.1); every other bound is unchanged
   and cumulative. Request, result and event shapes are otherwise identical:
   the current schemas are `*.v0.2.schema.json`, whose `version` constant
-  changed. `execution-v0.1.md` and `*.v0.1.schema.json` stay in the tree,
-  unchanged but for a header note, as the contract Gate A evidence was
-  produced under; only v0.2 examples are kept (the v0.1 examples are in Git
-  history at the Gate A commit).
+  changed. v0.2 was added beside v0.1, not over it: `execution-v0.1.md`
+  (one header line added), `*.v0.1.schema.json` and the v0.1 examples under
+  `schemas/examples/{valid,invalid}/` stay unchanged as the contract Gate A
+  evidence was produced under; the current examples are under
+  `schemas/examples/v0.2/`.
 - `api.KernelVersion` is `agentkernel/0.2.0`. Gate A evidence remains
   `agentkernel/0.1.0-gate-a`.
 - Requests: a v0.1 request is refused as an unsupported version, not
@@ -522,10 +532,12 @@ deadline; v0.1 refused that as a widening of the execution envelope.
   `version: agentkernel.admission/v0.2`. v0.1 records carry none, and their
   stored deadline was an execution bound, so they are not reinterpreted
   under v0.2: a non-empty unversioned record, like a record of an unknown
-  version, fails closed (`blocked/invalid_request`, before any side effect,
-  leaving no claim held and the record unchanged) until an explicit
+  version, fails closed (`blocked/invalid_request`, before any side effect
+  and before any claim, leaving the record unchanged) until an explicit
   recovery or migration protocol exists. No auto-migration and no expiry
-  (`engine` `TestUnreadableAdmissionVersionFailsClosed`,
+  (`engine` `TestUnreadableRecordIsRefusedBeforeClaiming`,
+  `TestLegacyRecordAfterClaimReleasesTheClaim`,
+  `TestUnreadableAdmissionVersionFailsClosed`,
   `TestVersionedAdmissionRecordAdmits`).
 
 ## 12. Divergences from issue #446 (stated, not hidden)

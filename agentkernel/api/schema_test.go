@@ -23,7 +23,8 @@ const (
 	resultFile   = "execution-result.v0.2.schema.json"
 	eventFile    = "event.v0.2.schema.json"
 	commonFile   = "common.v0.2.schema.json"
-	examplesDir  = "../schemas/examples"
+	examplesDir  = "../schemas/examples/v0.2"
+	historyDir   = "../schemas/examples"
 	validDir     = examplesDir + "/valid"
 	invalidDir   = examplesDir + "/invalid"
 	rootPointer  = ""
@@ -240,14 +241,16 @@ func (s schemaSet) resolve(t *testing.T, file, ref string) (string, string) {
 	return target, pointer
 }
 
-// TestHistoricalSchemasParse: the v0.1 schemas are kept as the contract Gate
-// A evidence was produced under. They must stay valid JSON; they are not
-// checked against the current Go types.
-func TestHistoricalSchemasParse(t *testing.T) {
-	for _, path := range glob(t, filepath.Join(schemaDir, historyGlob)) {
-		var doc map[string]any
-		if err := json.Unmarshal(readFile(t, path), &doc); err != nil {
-			t.Errorf("parse %s: %v", path, err)
+// TestHistoricalArtifactsParse: the v0.1 schemas and examples are kept,
+// unchanged, as the contract Gate A evidence was produced under. They must
+// stay valid JSON; they are not checked against the current Go types.
+func TestHistoricalArtifactsParse(t *testing.T) {
+	paths := glob(t, filepath.Join(schemaDir, historyGlob))
+	paths = append(paths, glob(t, filepath.Join(historyDir, "valid", "*.json"))...)
+	paths = append(paths, glob(t, filepath.Join(historyDir, "invalid", "*.json"))...)
+	for _, path := range paths {
+		if !json.Valid(readFile(t, path)) {
+			t.Errorf("%s is not valid JSON", path)
 		}
 	}
 }

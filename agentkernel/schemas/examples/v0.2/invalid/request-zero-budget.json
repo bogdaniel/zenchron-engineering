@@ -1,5 +1,5 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-minimal-1",
   "attempt_id": "attempt-1",
   "objective": "Summarize the repository layout.",
@@ -11,10 +11,7 @@
   },
   "constraints": {
     "require_host_proven_isolation": false,
-    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590",
-    "required_features": [
-      "telepathy"
-    ]
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
   },
   "context": [
     {
@@ -38,7 +35,7 @@
   "budget": {
     "deadline": "2099-01-01T00:00:00Z",
     "max_iterations": 4,
-    "max_tool_calls": 8,
+    "max_tool_calls": 0,
     "max_input_tokens": 20000,
     "max_output_tokens": 2000,
     "max_artifact_bytes": 1048576,

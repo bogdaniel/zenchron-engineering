@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Historical: superseded by event.v0.2.schema.json; retained as the contract Gate A evidence was produced under.",
   "title": "agentkernel.execution/v0.1 Event",
   "description": "Mirrors api.Event, emitted by the kernel to an api.EventSink. Enough for host accounting; never a second engineering journal. execution_id and attempt_id are echoed from the request and not pattern-checked. Not expressed here: seq is strictly increasing within one attempt.",
   "type": "object",

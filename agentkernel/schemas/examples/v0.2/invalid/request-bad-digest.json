@@ -1,20 +1,17 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-minimal-1",
   "attempt_id": "attempt-1",
   "objective": "Summarize the repository layout.",
   "mode": "read_only",
   "workspace": {
     "id": "ws-1",
-    "manifest_digest": "sha256:21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08",
+    "manifest_digest": "sha256:XYZ",
     "dirty": false
   },
   "constraints": {
     "require_host_proven_isolation": false,
-    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590",
-    "required_features": [
-      "telepathy"
-    ]
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
   },
   "context": [
     {

@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Historical: superseded by execution-request.v0.2.schema.json; retained as the contract Gate A evidence was produced under.",
   "title": "agentkernel.execution/v0.1 ExecutionRequest",
   "description": "Mirrors api.ExecutionRequest. api.DecodeRequest refuses unknown fields, duplicate keys and trailing data; ExecutionRequest.Validate(now) is authoritative. Rules enforced ONLY by Validate (not expressible here): budget.deadline must be after the validation time; context ids, grant handles, command names (per grant) and provider ids must be unique; every context item's content_digest must equal api.Digest(content); with budget.money, every eligible binding's pricing currency must equal money.currency; objective is limited to 65536 BYTES (maxLength below counts code points) and must contain a non-space character by unicode.IsSpace; a root's drive-letter check is per byte. Go's decoder does not require keys to be present, so a missing array or boolean decodes to its zero value and is then judged by Validate; this schema requires every non-omitempty field.",
   "type": "object",

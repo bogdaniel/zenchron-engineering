@@ -42,7 +42,7 @@ separately scoped integration issue; the plan is
 | `memory` | provenance-bearing derived records over `storage.Records` |
 | `intelligence` | revision-bound Go structural index, overlays, views |
 | `providers/*` | `scripted`, `openai`, `anthropic`, `local`, shared `conformance` suite |
-| `schemas/` | canonical JSON Schemas (`agentkernel.execution/v0.2`) and examples; `*.v0.1.schema.json` are historical (Gate A) |
+| `schemas/` | canonical JSON Schemas (`agentkernel.execution/v0.2`) and examples (`examples/v0.2/`); `*.v0.1.schema.json` and `examples/{valid,invalid}/` are historical (Gate A) |
 | `examples/` | `standalone` (A01) and `hostport` (A02) runnable consumers |
 | `cmd/kernel-eval` | offline benchmark harness over `testdata/eval` (`docs/benchmarks/`) |
 | `tests/` | `architecture` (dependency law) and `conformance` (independent acceptance) |

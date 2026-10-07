@@ -1,5 +1,5 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-minimal-1",
   "attempt_id": "attempt-1",
   "termination": {
@@ -54,7 +54,7 @@
     ]
   },
   "provenance": {
-    "kernel_version": "agentkernel/0.1.0-gate-a",
+    "kernel_version": "agentkernel/0.2.0",
     "provider_id": "scripted",
     "provider_kind": "scripted",
     "model": "scripted-model",

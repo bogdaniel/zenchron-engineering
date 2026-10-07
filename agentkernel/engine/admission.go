@@ -61,23 +61,42 @@ func (rec admissionRecord) consumed() map[api.BudgetDimension]int64 {
 
 // admit decides, before any side effect, whether this attempt may run.
 //
-// The attempt first claims its execution_id with PutIfAbsent: an atomic
-// put-if-absent, so of any number of contenders (goroutines, Engines,
-// processes sharing a FileRecords root) exactly one holds the claim, and the
-// others are refused without reserving budget or calling anything. Only the
-// claim holder reads or writes the execution's record, so that
-// read-modify-write needs no other lock. A claim left by a crashed attempt
-// is never expired by time: its consumption is unknown, so every later
-// attempt is refused until the host recovers it explicitly.
+// It first reads the execution's record without claiming: admission state
+// this contract cannot read (a legacy unversioned record, an unknown
+// version) refuses before any claim exists, so an incompatible-version
+// refusal never leaves one behind. Otherwise the attempt claims its
+// execution_id with PutIfAbsent: an atomic put-if-absent, so of any number
+// of contenders (goroutines, Engines, processes sharing a FileRecords root)
+// exactly one holds the claim, and the others are refused without reserving
+// budget or calling anything. Only the claim holder reads or writes the
+// execution's record, so that read-modify-write needs no other lock. A claim
+// left by a crashed attempt is never expired by time: its consumption is
+// unknown, so every later attempt is refused until the host recovers it
+// explicitly.
 func (r *run) admit(ctx context.Context) (api.Termination, bool) {
 	ctx = context.WithoutCancel(ctx)
-	err := r.e.admissions.PutIfAbsent(ctx, claimPartition, r.req.ExecutionID, []byte(r.req.AttemptID))
+	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	if err != nil {
+		return r.admissionNotRecorded(err), false
+	}
+	if reason := versionRefusal(rec, r.req.ExecutionID); reason != "" {
+		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason), false
+	}
+	err = r.e.admissions.PutIfAbsent(ctx, claimPartition, r.req.ExecutionID, []byte(r.req.AttemptID))
 	if errors.Is(err, storage.ErrExists) {
 		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, r.claimHeld(ctx)), false
 	}
 	if err != nil {
 		return r.admissionNotRecorded(err), false
 	}
+	return r.admitClaimed(ctx)
+}
+
+// admitClaimed finishes admission while holding the claim. It reads the
+// record again, since it may have changed between the unclaimed read and
+// the claim (another attempt settled, or a v0.1 kernel wrote a legacy
+// record), and releases the claim on every refusal.
+func (r *run) admitClaimed(ctx context.Context) (api.Termination, bool) {
 	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
 	if err != nil {
 		return r.releaseClaim(ctx, r.admissionNotRecorded(err)), false

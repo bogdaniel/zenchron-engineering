@@ -1,5 +1,5 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-full-1",
   "attempt_id": "attempt-2",
   "objective": "Fix the failing unit test in src/ and run the tests.",
@@ -130,7 +130,17 @@
       "isolation": "host_proven",
       "context_window": 200000,
       "max_output_tokens": 16000,
-      "credential_handle": "cred:primary"
+      "credential_handle": "cred:primary",
+      "pricing": {
+        "currency": "USD",
+        "input_micros_per_million": 3000000,
+        "output_micros_per_million": 15000000,
+        "cached_input_micros_per_million": 300000,
+        "cache_write_input_micros_per_million": 3000000,
+        "source": "host-rate-card",
+        "version": "2026-09",
+        "observed_at": "2026-09-01T00:00:00Z"
+      }
     },
     {
       "id": "fallback",
@@ -139,7 +149,7 @@
       "model_version": "unknown",
       "config_fingerprint": "fp-fallback",
       "eligible": true,
-      "pinned": false,
+      "pinned": true,
       "preference": 5,
       "isolation": "host_proven",
       "context_window": 128000,

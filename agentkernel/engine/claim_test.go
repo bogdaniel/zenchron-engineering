@@ -225,8 +225,9 @@ func putRecord(t *testing.T, root string, version string, budget api.Budget) []b
 
 // TestUnreadableAdmissionVersionFailsClosed: a legacy unversioned (v0.1)
 // record, or one of an unknown version, is never reinterpreted. A new attempt
-// is refused before any side effect, the record is left as it was, and the
-// refusal leaves no claim held, so it repeats as the same refusal.
+// is refused before any side effect and before any claim, the record is left
+// as it was, and no claim exists afterwards, so it repeats as the same
+// refusal.
 func TestUnreadableAdmissionVersionFailsClosed(t *testing.T) {
 	for name, tc := range map[string]struct{ version, reason string }{
 		"legacy_v0.1": {"", "legacy unversioned (v0.1) admission state; explicit recovery or migration is required"},
@@ -244,8 +245,8 @@ func TestUnreadableAdmissionVersionFailsClosed(t *testing.T) {
 					t.Fatalf("refused attempt had side effects: usage %+v, %d provider calls", u, len(f.provider.Requests()))
 				}
 			}
-			if _, err := records.Get(context.Background(), claimPartition, "exec-1"); !errors.Is(err, storage.ErrNotFound) {
-				t.Fatalf("claim after refusal: %v, want none held", err)
+			if _, err := openRecords(t, root).Get(context.Background(), claimPartition, "exec-1"); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("claim after refusal: %v, want none (read through a second store handle)", err)
 			}
 			after, err := records.Get(context.Background(), admissionPartition, "exec-1")
 			if err != nil || string(after) != string(before) {

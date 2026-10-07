@@ -429,14 +429,18 @@ before the next; `go test -count=1 ./engine/ ./tests/conformance/ ./api/`.
 | consumption carries forward | `ledger.restore` dropped | `admission_test.go:75` (later-deadline attempt completed instead of exhausting iterations); `TestPriorConsumptionIsCountedOnce` | passes |
 | v0.1 requests are refused | `Validate` also accepts `agentkernel.execution/v0.1` | `execution_test.go:85` (`TestA04RefusedBeforeAnySideEffect/v0.1_version`); `schema_test.go:164: want *api.ValidationError on "version", got <nil>` (`request-v0.1-version.json`) | passes |
 
-Review corrections on #530 (versioned admission records, kernel identity,
-historical v0.1 artifacts), same procedure:
+Review corrections on #530 (versioned admission records checked before the
+claim, kernel identity, additive historical v0.1 artifacts), same procedure:
 
 | Rule | Patch | Decisive failure | Restored |
 | --- | --- | --- | --- |
-| a legacy unversioned (v0.1) record fails closed | `versionRefusal` accepts any unversioned record | `claim_test.go:242: termination completed/loop_completed …, want blocked/invalid_request` (`TestUnreadableAdmissionVersionFailsClosed/legacy_v0.1`) | passes |
-| an unknown record version fails closed | unknown version accepted | `claim_test.go:242` (`TestUnreadableAdmissionVersionFailsClosed/unknown`) | passes |
+| an incompatible record is refused before any claim | version checked only after claiming (pre-claim check removed) | `admission_version_test.go:62: refusal left a claim held by "att-2"` (`TestUnreadableRecordIsRefusedBeforeClaiming`, legacy and unknown) | passes |
+| a legacy record seen after the claim is refused | post-claim version recheck removed | `admission_version_test.go:88: admitClaimed = {…}, true; want refused with "legacy unversioned (v0.1)"` (`TestLegacyRecordAfterClaimReleasesTheClaim`) | passes |
+| that refusal releases the claim | `releaseClaim` skipped on post-claim refusal | `admission_version_test.go:91: claim held by "att-2", want ""`; `budget_integrity_test.go:50` | passes |
+| a failed release fails closed and says so | release error dropped | `admission_version_test.go:88: … want refused with "admission claim not released: delete refused"` | passes |
+| a legacy unversioned (v0.1) record fails closed | `versionRefusal` accepts any unversioned record | `admission_version_test.go:59`; `claim_test.go:243: termination completed/loop_completed …, want blocked/invalid_request` (`TestUnreadableAdmissionVersionFailsClosed`) | passes |
+| an unknown record version fails closed | unknown version accepted | `admission_version_test.go:59`; `claim_test.go:243` | passes |
 | every new record carries `agentkernel.admission/v0.2` | version not written on creation | `admission_test.go:47: detail "… legacy unversioned (v0.1) admission state …", want it to say "already admitted"` (and `:60`, `:75`, `:86`, `:111`) | passes |
-| the version refusal leaves no claim held | `releaseClaim` skipped on admission refusal | `claim_test.go:242: detail "attempt \"att-2\" already admitted …", want … legacy …` (second run); `budget_integrity_test.go:50` | passes |
-| `api.KernelVersion` is `agentkernel/0.2.0` | reverted to `agentkernel/0.1.0-gate-a` | `schema_test.go:147: example is agentkernel.execution/v0.2 / agentkernel/0.2.0, want current … / agentkernel/0.1.0-gate-a` | passes |
-| v0.1 schemas are retained | `*.v0.1.schema.json` deleted | `schema_test.go:241: glob ../schemas/*.v0.1.schema.json: <nil> (0 matches)` (`TestHistoricalSchemasParse`) | passes |
+| `api.KernelVersion` is `agentkernel/0.2.0` | reverted to `agentkernel/0.1.0-gate-a` | `schema_test.go:148: example is agentkernel.execution/v0.2 / agentkernel/0.2.0, want current … / agentkernel/0.1.0-gate-a` | passes |
+| v0.1 schemas are retained | `*.v0.1.schema.json` deleted | `schema_test.go:248: glob ../schemas/*.v0.1.schema.json: <nil> (0 matches)` (`TestHistoricalArtifactsParse`) | passes |
+| v0.1 examples are retained | `schemas/examples/valid/` deleted | `schema_test.go:249: glob ../schemas/examples/valid/*.json: <nil> (0 matches)` | passes |

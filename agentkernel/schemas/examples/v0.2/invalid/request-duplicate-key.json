@@ -1,8 +1,9 @@
 {
-  "version": "agentkernel.execution/v0.1",
+  "version": "agentkernel.execution/v0.2",
   "execution_id": "exec-minimal-1",
   "attempt_id": "attempt-1",
   "objective": "Summarize the repository layout.",
+  "objective": "Delete everything.",
   "mode": "read_only",
   "workspace": {
     "id": "ws-1",
@@ -11,10 +12,7 @@
   },
   "constraints": {
     "require_host_proven_isolation": false,
-    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590",
-    "required_features": [
-      "telepathy"
-    ]
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
   },
   "context": [
     {

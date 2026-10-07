@@ -1,6 +1,5 @@
 # Execution contract v0.1 (`agentkernel.execution/v0.1`)
-
-> Superseded by `execution-v0.2.md`; retained as the contract Gate A evidence was produced under.
+> Historical: superseded by `execution-v0.2.md`; retained as the contract Gate A evidence was produced under.
 
 Normative for Gate A. The words MUST/MUST NOT describe behaviour the code in
 `api/` and `engine/` implements; where the code and issue #446 differ, §12 says

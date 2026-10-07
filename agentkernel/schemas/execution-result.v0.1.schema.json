@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Historical: superseded by execution-result.v0.2.schema.json; retained as the contract Gate A evidence was produced under.",
   "title": "agentkernel.execution/v0.1 ExecutionResult",
   "description": "Mirrors api.ExecutionResult, emitted by the kernel. Observation only: there is no acceptance, merge or authorization field. execution_id and attempt_id are echoed from the request and are not pattern-checked, because a refused request may carry an invalid identifier. Not expressed here: the expected outcome for each cause (documented beside api.Cause), monotonic observation seq, and that Go encodes a nil slice as null (emitters must encode empty arrays as []).",
   "type": "object",

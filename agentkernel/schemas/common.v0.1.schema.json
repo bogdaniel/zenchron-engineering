@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Historical: superseded by common.v0.2.schema.json; retained as the contract Gate A evidence was produced under.",
   "title": "agentkernel.execution/v0.1 shared definitions",
   "description": "Types shared by the execution request, result and event contracts. Mirrors agentkernel/api. Referenced by relative URI from the sibling schemas.",
   "$defs": {
