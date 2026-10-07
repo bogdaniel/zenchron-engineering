@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -196,4 +198,52 @@ func newCompositionFixture(t *testing.T) compositionFixture {
 func captureBoundBroker(p candidateBoundProvider, request runtime.ExecutionRequest) (runtime.ToolBroker, error) {
 	bound, err := p.bind(request)
 	return bound.Broker, err
+}
+
+// TestCandidateBoundProviderProbesRequiredToolsInTheContainer is the #522
+// regression. The runtime discovers the probe by asserting exactly this
+// anonymous interface on the execution provider; a wrapper that drops it sends
+// an OpenAI agent's required tools to the host PATH, where the loop never runs.
+//
+// "sh" resolves on any host PATH, so a host probe would report nothing missing.
+// The container probe here reaches a Docker that refuses every call, so the
+// wrapped provider must report it missing - and must have asked Docker.
+func TestCandidateBoundProviderProbesRequiredToolsInTheContainer(t *testing.T) {
+	fixture := newCompositionFixture(t)
+	built, err := newComposition(autonomyFlags{Config: fixture.configPath}, autonomyOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer built.release()
+	bound := built.provider.(candidateBoundProvider)
+	docker := &refusingExecutor{}
+	bound.base.Broker.Sandbox.Executor = docker
+
+	var provider runtime.ExecutionProvider = bound
+	prober, ok := provider.(interface {
+		MissingTools(context.Context, []string) []string
+	})
+	if !ok {
+		t.Fatal("candidateBoundProvider hides MissingTools, so required tools are probed on the host PATH")
+	}
+	if got := prober.MissingTools(context.Background(), []string{"sh"}); len(got) != 1 || got[0] != "sh" {
+		t.Fatalf("missing tools = %v, want [sh] from the refused container probe", got)
+	}
+	if len(docker.calls) == 0 || docker.calls[0][0] != "docker" {
+		t.Fatalf("the probe never reached the sandbox: %v", docker.calls)
+	}
+}
+
+// refusingExecutor records every command and fails all of them.
+type refusingExecutor struct{ calls [][]string }
+
+func (e *refusingExecutor) LookPath(string) error { return nil }
+
+func (e *refusingExecutor) Run(_ context.Context, name string, args []string, _ string, _ []string, _ time.Duration) (runtime.CommandOutput, error) {
+	e.calls = append(e.calls, append([]string{name}, args...))
+	return runtime.CommandOutput{}, errors.New("docker refused")
+}
+
+func (e *refusingExecutor) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (runtime.CommandOutput, error) {
+	return e.Run(ctx, name, args, dir, env, grace)
 }

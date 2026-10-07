@@ -1135,6 +1135,13 @@ type candidateBoundProvider struct{ base runtime.OpenAIProvider }
 
 func (p candidateBoundProvider) Isolation() runtime.ProviderIsolation { return p.base.Isolation() }
 
+// MissingTools forwards the container probe (#522). Without it the runtime's
+// capability check misses and probes required tools on the host PATH instead
+// of in the sandbox the OpenAI loop runs commands in.
+func (p candidateBoundProvider) MissingTools(ctx context.Context, required []string) []string {
+	return p.base.MissingTools(ctx, required)
+}
+
 // Execute binds the two things the broker cannot supply itself: WHICH workspace
 // this invocation may touch, and WHICH runtime operation owns the Docker
 // lifecycle of anything it brokers.
