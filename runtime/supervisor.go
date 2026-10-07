@@ -139,6 +139,9 @@ type SupervisorReport struct {
 	// Orchestration names, bounded, each batch child this pass could not
 	// create or each handoff it could not admit (#470). Empty is healthy.
 	Orchestration []string `json:"orchestration,omitempty"`
+	// WorkGraphs names, bounded, each runnable work unit this pass could not
+	// activate (#472). Empty is healthy.
+	WorkGraphs []string `json:"work_graphs,omitempty"`
 	// Error is a tick that could not enumerate work. It is REPORTED rather
 	// than returned, because a supervisor that exited on one unreadable read
 	// would take every healthy run down with it - the same isolation rule that
@@ -673,6 +676,14 @@ func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	// decides when a run executes.
 	if !report.Draining {
 		report.Plans = s.reconcilePlans(ctx)
+		// WORK GRAPHS are activated BEFORE batches are reconciled, so a unit
+		// whose dependency became satisfied since the last tick gets its
+		// one-issue batch written, its child run created and then driven in
+		// the SAME pass. Like the plan reconciler above, this is dependency
+		// gating and nothing else: everything below - the ceiling, the
+		// rotation, the leases - remains the only thing that decides when a
+		// run executes.
+		report.WorkGraphs = s.reconcileWorkGraphs()
 		report.Orchestration = s.reconcileOrchestration(ctx)
 	}
 	runs, err := s.deps.Store.ActiveRuns()

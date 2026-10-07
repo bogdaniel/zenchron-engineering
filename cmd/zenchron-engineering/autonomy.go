@@ -38,6 +38,7 @@ const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
 	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
+	"workgraph {adopt <proposal.json> --agent <id>|status <graph>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
@@ -279,6 +280,11 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		return autonomyPlan(context.Background(), rest, overrides, stdout)
 	case "orchestrate":
 		return autonomyOrchestrate(rest, stdout)
+	case "workgraph":
+		// One altitude above `orchestrate`: the same explicit issues, with the
+		// dependencies between them stated, so a unit waits for its upstream
+		// handoff instead of the operator watching for it.
+		return autonomyWorkGraph(rest, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a

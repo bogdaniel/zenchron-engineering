@@ -457,6 +457,12 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			return controlError(err)
 		}
 		return controlOK(view)
+	case runtime.ControlWorkGraph:
+		view, err := supervisor.AdoptWorkGraph(ctx, request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
 	case runtime.ControlStatus:
 		policy, err := c.config.SupervisorPolicy()
 		if err != nil {

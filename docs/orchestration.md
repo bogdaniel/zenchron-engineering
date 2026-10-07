@@ -26,8 +26,9 @@ explicit issue list
 ## What it is not
 
 It is **basic explicit orchestration**. It is not automatic roadmap or backlog
-execution, not the later WorkGraph (no dependencies between items), not a
-planner (that is `autonomy plan`, #64), not cross-repository programs, not
+execution, not the WorkGraph (a batch states no dependencies between its items;
+`docs/workgraph.md` is the layer that does, and it consumes the handoff below
+unchanged), not a planner (that is `autonomy plan`, #64), not cross-repository programs, not
 automatic review or remediation routing, not an organization control plane,
 and not the API agent harness (#446).
 

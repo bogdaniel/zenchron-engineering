@@ -468,6 +468,41 @@ CREATE TABLE orchestration_message_refusals (
 	reason            TEXT NOT NULL
 );
 CREATE INDEX orchestration_message_refusals_by_scope ON orchestration_message_refusals(scope);
+`, `
+-- The WorkGraph (#472). Both tables are insert-only, and neither stores a unit
+-- state: a revision document is immutable, an activation is written once, and
+-- every unit state is projected from these two plus the child runs on each read.
+--
+-- A revision is an APPEND. Adopting revision N+1 leaves N and every activation
+-- exactly as they were, which is what keeps a mutation from resetting a budget
+-- a child run has already consumed.
+CREATE TABLE work_graph_revisions (
+	graph_id          TEXT NOT NULL,
+	revision          INTEGER NOT NULL,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL,
+	PRIMARY KEY (graph_id, revision)
+);
+-- One row per unit whose child run this graph has claimed, with the exact
+-- upstream outputs it was activated against. The primary key is what makes
+-- child association idempotent across replay and recovery: a unit is activated
+-- once, so a lost reply or a crashed pass cannot produce a second child run.
+--
+-- batch_id references the #470 batch that owns the child run - the one whose
+-- identity binds this graph, this unit and this exact input set - so the batch
+-- is durable before any activation can name it. run_id carries NO foreign key:
+-- the batch decides the child identity, and the existing orchestration pass
+-- creates that row afterwards.
+CREATE TABLE work_graph_activations (
+	graph_id            TEXT NOT NULL,
+	unit_id             TEXT NOT NULL,
+	batch_id            TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id              TEXT NOT NULL,
+	inputs_digest       TEXT NOT NULL,
+	activated_unix_nano INTEGER NOT NULL,
+	PRIMARY KEY (graph_id, unit_id)
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
