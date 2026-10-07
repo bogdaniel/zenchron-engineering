@@ -319,7 +319,49 @@ func TestAttemptTranscriptPathsAreSafeAndLegible(t *testing.T) {
 // the guard is here, in the source, where a newly added producer fails the
 // suite instead of a run.
 func TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt(t *testing.T) {
-	root := repositoryRootForTest(t)
+	offenders, err := executionRequestOffenders(repositoryRootForTest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("these ExecutionRequest producers do not supply the scheduler attempt, so their transcripts would have no durable identity:\n  %s",
+			strings.Join(offenders, "\n  "))
+	}
+}
+
+// TestExecutionRequestScanSkipsNestedModules: a directory with its own go.mod
+// is a separate module. It cannot construct this module's ExecutionRequest
+// without requiring it, so a same-named type there is not a producer.
+func TestExecutionRequestScanSkipsNestedModules(t *testing.T) {
+	root := t.TempDir()
+	offending := "package p\n\nvar _ = ExecutionRequest{Run: \"r\"}\n"
+	files := map[string]string{
+		"go.mod":        "module example.com/root\n",
+		"a.go":          offending,
+		"nested/go.mod": "module example.com/nested\n",
+		"nested/b.go":   offending,
+	}
+	for name, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	offenders, err := executionRequestOffenders(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offenders) != 1 || !strings.HasPrefix(offenders[0], "a.go: ") {
+		t.Fatalf("offenders = %q, want only the root module's a.go", offenders)
+	}
+}
+
+// executionRequestOffenders scans the module rooted at root for ExecutionRequest
+// literals that omit the scheduler attempt. Nested modules are skipped.
+func executionRequestOffenders(root string) ([]string, error) {
 	var offenders []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -328,6 +370,11 @@ func TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt(t *testing.T) 
 		if entry.IsDir() {
 			if entry.Name() == ".git" || entry.Name() == "fixtures" {
 				return filepath.SkipDir
+			}
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -357,13 +404,7 @@ func TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt(t *testing.T) 
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(offenders) > 0 {
-		t.Fatalf("these ExecutionRequest producers do not supply the scheduler attempt, so their transcripts would have no durable identity:\n  %s",
-			strings.Join(offenders, "\n  "))
-	}
+	return offenders, err
 }
 
 // executionRequestLiterals returns the body of every ExecutionRequest composite
