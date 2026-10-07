@@ -17,10 +17,12 @@ the root `AGENTS.md` and issue #446 §4/§13 and never overrides them.
 Commit sequence on the branch: wave 0 (`4664540` ADR, frozen API, boundary
 scripts, CI; `13bce23` schemas and examples), wave 1 lane integrations
 (`21f07c8` context/memory/routing, `2152543` tools/storage, `1b8c803`
-engine/providers, `0f14510` intelligence), then coordinator API changes
+engine/providers, `0f14510` intelligence), coordinator API changes
 (`f7f3036` execution-scoped replay and cache-write usage, `4696e31` unknown
-cache rates). Wave 2 (harness, independent review, documentation) works in the
-same checkout under the ownership below.
+cache rates), then wave 2 in the same checkout: `2ef5954` harness (examples,
+eval corpus, `cmd/kernel-eval`), `0ac6f55` documentation, `17adf9c`
+independent review (architecture and conformance tests, deliberate-break
+record) and `1406256` lane repairs of the review findings.
 
 ## 2. Ownership
 

@@ -114,16 +114,21 @@ required, nothing is defaulted.
   execution does not resume and an uncertain mutation is never replayed.
 - **No protected-isolation claim.** File-tool guards (`os.Root`, symlinked-root
   refusal, re-check before rename) are development-grade; provenance reports
-  `isolation: unproven` unless the host proves otherwise. Process spawning,
+  `isolation: unproven` unless the host proves otherwise. `.git` paths are
+  refused; credential-shaped names and contents are not. Process spawning,
   containment and reaping belong to the host's `api.CommandRunner`.
 - **No CLI parity.** The OpenAI and Anthropic adapters are raw API adapters,
   not native coding-CLI adapters.
+- **Budgets are per `Execute` call.** The kernel keeps no attempt history; a
+  host must pass only its remaining envelope.
 - **Live verification: none.** Adapters are verified against fake transports
   shaped from primary documentation retrieved 2026-10-07.
 - **File-backed stores refuse Windows** (`storage.prepareRoot`): directory
   fsync is unavailable there.
 - **CI is engineering discipline**, not isolation from a malicious same-user
   process.
+
+Acceptance evidence for Gate A: [`docs/acceptance/gate-a.md`](docs/acceptance/gate-a.md).
 
 ## Contributing
 

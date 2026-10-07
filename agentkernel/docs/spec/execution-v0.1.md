@@ -69,8 +69,9 @@ settles `blocked/invalid_request` (§5). It refuses:
   cached-input or cache-write rate `null` (unknown, never zero); a negative
   rate is refused (`Pricing.valid`).
 
-When several identity fields are invalid, which one is reported is unspecified
-(the three are checked by map iteration).
+Checks run in a fixed order, so the first invalid field reported is
+deterministic (`execution_id`, `attempt_id`, `workspace.id`, then the order
+above).
 
 ### 2.2 Canonical decoding (`api.DecodeRequest`)
 
@@ -116,12 +117,12 @@ they are not an engineering journal.
 | `provider.responded` | after a successful call; carries reported `usage` |
 | `provider.failed` | after a failed call; detail is the redacted `ProviderError` |
 | `tool.proposed` | per tool call, after its reservation, before dispatch |
-| `tool.executed` / `tool.refused` | after dispatch (`refused` for broker refusals) |
+| `tool.executed` / `tool.refused` | after dispatch (`refused` for broker refusals); also, when a tool that reports `mutated` ran and the execution then stops, a `tool.executed` with detail `side effect outcome uncertain: …` (`run.observeUncertainMutation`), so `exhausted`/`failed` is never read as "no side effect happened" |
 | `artifact.recorded` | each artifact a tool stores |
 | `execution.settled` | exactly once, last, unless recording already failed |
 
-`budget.exhausted` is declared in `api` and the schema but **the engine never
-emits it**; exhaustion appears in `execution.settled` and the termination.
+There is no separate exhaustion event: exhaustion is visible in
+`execution.settled` and in `Termination.dimension`.
 
 `EventSink.Record` receives a context detached from cancellation
 (`context.WithoutCancel`), so a cancelled execution still reports how it ended.
@@ -133,7 +134,7 @@ Derived from `engine/engine.go`, `engine/compile.go`, `engine/loop.go`,
 
 | Outcome | Cause | Dimension | Raised when |
 | --- | --- | --- | --- |
-| `completed` | `loop_completed` | — | a provider response has no tool calls and its stop is not `refused` or `max_tokens` (so `end`, `tool_use` without calls, and `other` all complete) |
+| `completed` | `loop_completed` | — | a provider response has no tool calls and stop `end` |
 | `exhausted` | `budget_exhausted` | `iterations` | no model turn can be reserved |
 | `exhausted` | `budget_exhausted` | `output_tokens` | stop `max_tokens`; no output allowance remains; or the reservation fails on output |
 | `exhausted` | `budget_exhausted` | `input_tokens` | the transcript estimate exceeds `context_window − max_output`; or the reservation fails on input |
@@ -142,7 +143,7 @@ Derived from `engine/engine.go`, `engine/compile.go`, `engine/loop.go`,
 | `exhausted` | `budget_exhausted` | `artifact_bytes` | a tool's artifact write was refused by the ledger |
 | `exhausted` | `budget_exhausted` | `deadline` | the budget deadline passed (clock or run context) |
 | `failed` | `provider_refused` | — | stop `refused` (checked before tool calls) |
-| `failed` | `provider_failed` | — | a non-retryable provider error, or a retryable one with no retry allowance, other than the two classes below; untyped adapter errors become non-retryable `transport` |
+| `failed` | `provider_failed` | — | a non-retryable provider error, or a retryable one with no retry allowance, other than the two classes below (untyped adapter errors become non-retryable `transport`); or a response without tool calls whose stop is `other` or `tool_use` ("provider stopped without completing") |
 | `failed` | `tool_failed` | — | `Broker.Dispatch` returned an error: a side effect's outcome is unknown |
 | `blocked` | `provider_unavailable` | — | class `rate_limited` or `unavailable` and no retry is permitted |
 | `blocked` | `invalid_request` | — | validation failed; or `context.Compile` failed for a reason other than capacity |
@@ -187,6 +188,7 @@ host set a ceiling.
 | provider attempt | input = local estimate of the full prompt; output = `min(binding.max_output_tokens, remaining output)`; money = worst case (§7.3) | success: input → reported `input` if present, else the estimate stays; output → reported `output` if present, else the full reservation stays; money → actual cost if computable, else the worst case stays. Failure: output released; input estimate and worst-case money stay |
 | retry | 1 `provider_retries` | — (the next attempt reserves afresh) |
 | tool proposal | 1 tool call, refused proposals included | — |
+| composite-tool step | 1 tool call for each step after the first (`run.chargeStep`, passed as `tools.Env.StepBudget`) | — |
 | artifact write | `len(data)` artifact bytes | refunded if the store's `Put` fails |
 
 ### 7.3 Money
@@ -218,7 +220,9 @@ keeps the worst case.
 
 ### 7.5 Usage (`api.Usage`)
 
-`reported` and `estimated` are never summed. A reported count is non-null only
+`reported` and `estimated` are never summed. A negative reported count is
+implausible wire data and is treated as unknown before settlement
+(`engine.plausibleUsage`). A reported count is non-null only
 if every provider call reported it; a missing one is listed in `unknowns`
 (`reported.input`, `reported.output`, `reported.cached_input`,
 `reported.cache_write_input`). `estimated.input`/`output` are always present;
@@ -244,8 +248,8 @@ card when present. Counters: `provider_calls`, `tool_calls`, `iterations`,
   never infers operator stop or controller shutdown.
 - The budget deadline settles `exhausted/deadline`, never `cancelled`.
 - A provider that returns a response despite cancellation keeps that response:
-  if it proposes no tools the execution completes; otherwise the next
-  `interrupted` check cancels before any tool runs.
+  it settles by its own stop (e.g. `completed` for `end`) if it proposes no
+  tools; otherwise the next `interrupted` check cancels before any tool runs.
 
 **Settlement.** `run.finish` is called exactly once per `Execute`. The
 termination the loop returned is final; nothing observed later rewrites it.
@@ -292,15 +296,21 @@ An artifact store failure inside a tool after a mutation is an unknown outcome
 - The kernel is not crash-resumable: a restarted host starts a new execution
   (new `attempt_id`); no uncertain mutation is replayed as though it did not
   happen.
+- The kernel keeps no record of past executions. Calling `Execute` again with
+  the same `execution_id`/`attempt_id` starts a fresh ledger with the full
+  budget in the request. Attempts, retry eligibility and cumulative budgets
+  are host-owned; a host MUST pass only the remaining envelope (review finding
+  F7, open by design).
 
 ## 12. Divergences from issue #446 (stated, not hidden)
 
-1. `budget.exhausted` exists as an event kind but is never emitted (§4).
-2. Retry exhaustion has no dedicated dimension in the termination (§5).
-3. A provider stop of `other` (OpenAI `incomplete` for a reason other than
-   `max_output_tokens`/`content_filter`; Anthropic `stop_sequence`,
-   `pause_turn` and unknown values) without tool calls settles
-   `completed/loop_completed`. An `incomplete` or `pause_turn` response is
-   therefore reported as a completed loop; hosts must not read `completed` as
-   more than "the provider stopped proposing tools".
-4. `max_input_tokens` is soft when the provider reports no input count (§7.4).
+1. Retry exhaustion has no dedicated dimension in the termination (§5).
+2. `max_input_tokens` is soft when the provider reports no input count (§7.4;
+   review finding F6, open).
+3. Budgets are per call to `Execute`, not per attempt identity (§11; F7).
+
+Resolved in `1406256`: negative reported counts are dropped to unknown before
+settlement, so they cannot credit the ledger (`engine.plausibleUsage`, F1); a
+possibly mutating tool that ran before a stop is observed (F2); `other` and
+`tool_use`-without-calls stops settle `failed`, not `completed` (F3); the
+never-emitted `budget.exhausted` kind was removed.

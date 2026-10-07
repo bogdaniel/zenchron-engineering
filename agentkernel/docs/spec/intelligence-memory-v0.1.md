@@ -242,6 +242,11 @@ Known unknowns and limits:
 
 - The `intelligence.index` partition has no retention or eviction; snapshots
   accumulate per identity until the host deletes them.
+- `Manifest.Digest()` is reachable only through a built index
+  (`Index.Identity().ManifestDigest`); there is no exported helper that
+  computes a workspace manifest digest without `Build`/`Open`, so a host that
+  wants `WorkspaceRef.ManifestDigest` to match a view must build the index
+  first or replicate the selection.
 - Intelligence covers Go plus a generic file manifest only.
 - Relevance scoring is lexical; it is not a quality claim.
 - Pins (memory) are process-local; a restarted process protects nothing until

@@ -4,6 +4,21 @@ Independent review lane record. Every break below was applied to a
 **disposable clone**, never to the real worktree, and nothing broken was
 committed anywhere that is shared.
 
+## Status (updated after `1406256`)
+
+| Finding | Status | Regression check |
+| --- | --- | --- |
+| F1 negative reported usage renewed budget | fixed in `1406256` (`engine.plausibleUsage`) | `tests/conformance` `TestFindingNegativeReportedUsageRenewsBudget` (skip removed) |
+| F2 a command that ran was hidden behind the stop | fixed in `1406256` (`run.observeUncertainMutation`) | `TestFindingCommandRanButResultHidesIt` (skip removed) |
+| F3 unknown/incomplete stop settled `completed` | fixed in `1406256` (stop other than `end` → `failed/provider_failed`) | `TestFindingUnknownStopSettlesCompleted` (skip removed), `engine` `TestRefusalAndOutputBound` |
+| F4 `check-imports.sh` passed on unresolvable imports | fixed in `1406256` (`go list` errors fail the script) | breaks 1a–1c re-run below |
+
+Re-verification after the fix: breaks 1a, 1b and 1c are now caught by
+`scripts/check-imports.sh`, which prints
+`go: can't load test package: ... no required module provides package ...`
+and then exits 1. The "not caught (F4)" cells in the table below record the
+state before `1406256`.
+
 ## Bindings
 
 | Item | Value |
@@ -242,8 +257,8 @@ command above exited 0.
 
 ## Findings from this exercise
 
-- **F4 (medium): `scripts/check-imports.sh` cannot fail on an unresolvable
-  import.** `go list -deps -test ./...` runs inside a process substitution
+- **F4 (medium; fixed in `1406256`): `scripts/check-imports.sh` cannot fail
+  on an unresolvable import.** `go list -deps -test ./...` runs inside a process substitution
   (`done < <(go list ...)`), whose exit status `set -euo pipefail` does not
   observe. A parent-module import is exactly an import `go list` cannot
   resolve, so the script prints the error and then `imports: ok` with exit 0

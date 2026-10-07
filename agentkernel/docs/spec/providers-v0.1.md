@@ -36,9 +36,12 @@ An adapter MAY implement `api.TokenEstimator`; none in Gate A does, so the
 engine uses `context.ApproximateTokens`. An untyped error from an adapter is
 treated by the engine as a non-retryable `transport` failure.
 
-`StopReason`: `end`, `tool_use`, `max_tokens`, `refused`, `other`. See the
-execution spec §5 and §12 for how the engine settles each, including the
-`other` → `completed` divergence.
+`StopReason`: `end`, `tool_use`, `max_tokens`, `refused`, `other`. The engine
+completes only on `end` without tool calls; `other`, or `tool_use` without
+calls, settles `failed/provider_failed` (execution spec §5). Negative usage
+counts from any adapter are treated as unknown by the engine
+(`engine.plausibleUsage`); adapters themselves pass counts through as
+decoded.
 
 ## 2. Shared wire mechanics (`providers/internal/wire`)
 

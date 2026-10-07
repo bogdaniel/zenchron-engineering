@@ -114,8 +114,9 @@ lacks it.
    `ProviderInactivityLimit` and `NoProgressLimit`; the kernel has none.
 2. **Single token budget.** Root `MaxTokens` is one total; the kernel needs
    an input/output split.
-3. **Path policy.** Kernel file tools do not refuse `.git` or credential-shaped
-   names/contents; root `ToolBroker` does.
+3. **Path policy.** Kernel file tools refuse any `.git` component
+   (case-insensitive) but not credential-shaped names or contents; root
+   `ToolBroker` refuses both (`GuardCandidate`).
 4. **Patch semantics.** Root applies unified diffs via `git apply`; kernel
    `apply_patch` is a single exact replacement. No kernel `Diff` tool.
 5. **Isolation.** Root `OpenAIProvider` claims `proven` isolation via its
@@ -123,16 +124,26 @@ lacks it.
    may claim `host_proven` only with host tools and the sandboxed runner.
 6. **Quota vs rate limit.** The kernel classifies every 429 `rate_limited`;
    root distinguishes `provider_quota`.
-7. **`other` stop.** Incomplete/paused provider responses settle `completed`
-   (execution spec §12); the adapter must not map that to success without
-   assurance.
+7. **Uncertain side effects.** An execution that stops after a mutating tool
+   records `tool.executed` "side effect outcome uncertain"; the adapter must
+   map it to candidate reconciliation, never to "nothing changed". (Incomplete
+   or paused provider stops now settle `failed/provider_failed`, not
+   `completed`.)
 8. **Forensic transcript.** Root writes a redacted transcript artifact per
    `(RunID, OperationID, Attempt)`; the kernel records events only.
 9. **Reviewer/feedback/handoff files**, `RequiredTools`/`MissingTools`
    probing, `PriorAttemptFailure` gating: host-side, no kernel equivalent.
 10. **Defaults.** Root defaults zero bounds to finite values; the kernel refuses
     zero, so the adapter supplies every bound explicitly.
-11. **Live adapter verification** under an approved spending bound (providers
+11. **Attempt identity and budgets.** `Execute` keeps no history: the same
+    `execution_id`/`attempt_id` re-entered gets a fresh ledger (F7). The
+    adapter passes only the host's remaining envelope.
+12. **Harness/host seams.** No exported manifest-digest helper outside
+    `intelligence.Build`/`Open` (the host computes `WorkspaceRef.ManifestDigest`
+    itself); `ExecutionResult` has no structured per-call tool results
+    (`cmd/kernel-eval` decodes the transcript); `CapabilityKind` has no
+    non-file read kind; `command.run` is `read_write`-only.
+13. **Live adapter verification** under an approved spending bound (providers
     spec §6).
 
 ## 6. Retiring the duplicate loop

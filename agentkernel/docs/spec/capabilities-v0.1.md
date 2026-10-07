@@ -35,6 +35,12 @@ effect:
   valid-identifier name, non-empty `argv` and `timeout_seconds > 0`.
 - In `read_only` mode, `file.write` and `command.run` grants are refused.
 
+The four kinds are the whole vocabulary. There is no non-file read kind, so a
+host tool over other material (the A02 document tool in `examples/hostport`)
+borrows `file.search` and its root scoping; and `command.run` exists only in
+`read_write`, so a read-only execution cannot run even a non-mutating host
+command. Both are known gaps, not oversights in the broker.
+
 ## 3. Broker (`tools.Broker`)
 
 `tools.NewBroker(tools...)` refuses a nil tool, a name outside
@@ -58,18 +64,22 @@ in the boundary text.
    for file kinds, a command name for `command.run`;
 6. some grant of the tool's kind covers the whole scope: every path lies under
    one of its roots (`rootFor`: lexical containment after
-   `ValidRelativePath`), or the command name is in its `Commands`. The first
-   such grant is selected.
+   `ValidRelativePath`, and no path component equal to `.git` compared
+   case-insensitively — no grant reaches repository metadata), or the
+   command name is in its `Commands`. The first such grant is selected.
 
 **Invocation.** The tool receives `tools.Invocation` with the selected grant
-only. A tool MUST recheck its own guards at side-effect time rather than trust
-the broker.
+only, plus `StepBudget` from `tools.Env` (the engine supplies `run.chargeStep`,
+which charges one tool call per composite step after the first). A tool MUST
+recheck its own guards at side-effect time rather than trust the broker.
 
 **Errors.** A tool returning a Go error yields status `error`. If the tool's
 kind is mutating, or the result says `Mutated`, the broker also returns an
 "outcome unknown" error; the engine then settles `failed/tool_failed` and runs
 nothing further. Status `error`/`refused` without a Dispatch error goes back to
-the model as a tool message.
+the model as a tool message. Whenever the execution stops after a tool whose result says `Mutated`,
+the engine records an extra `tool.executed` event with detail
+`side effect outcome uncertain: …` before settling.
 
 ### 3.1 Output filtering (`tools.bound`)
 
@@ -106,7 +116,9 @@ existing directory. Tools: `ReadFile()` → `read_file` (`file.read`),
 
 ### 4.1 Path guards (`Workspace.open`)
 
-1. The requested path must lie under a granted root (`rootFor`).
+1. The requested path must lie under a granted root and contain no `.git`
+   component, case-insensitively (`rootFor`, `isGitMetadata`;
+   `TestGitMetadataIsNeverReachable`).
 2. The workspace root is opened as an `os.Root`.
 3. `refuseSymlinkedRoot`: every component of the granted root is `Lstat`ed;
    a symlink anywhere in it is refused — a grant names a directory, not
@@ -122,9 +134,9 @@ existing directory. Tools: `ReadFile()` → `read_file` (`file.read`),
 Reads accept only regular files of at most `tools.MaxFileBytes` (8 MiB).
 
 Not guarded: the workspace root path itself may be a symlink (it is resolved
-by `os.Stat`/`os.OpenRoot` at use); `.git` and credential-shaped names are
+by `os.Stat`/`os.OpenRoot` at use); credential-shaped names and contents are
 **not** refused by the kernel's tools (the root `runtime.ToolBroker` refuses
-both; see `docs/integration-plan.md`).
+them through `GuardCandidate`; a Gate B gap, see `docs/integration-plan.md`).
 
 ### 4.2 Snapshot guard
 
@@ -139,7 +151,8 @@ isolation.
 `read_file` output starts with `path`, `digest` (sha256 of the whole file —
 the write precondition) and `lines a-b of n`, then the requested 1-based
 inclusive range. `search` takes a literal or RE2 pattern of 1–1024 bytes, walks
-regular files under one path without following symlinks, skips binary (NUL),
+regular files under one path without following symlinks or entering `.git`
+directories, skips binary (NUL),
 unreadable and oversized files, echoes at most 300 bytes per line and stops at
 1000 hits, stating that the result is incomplete.
 
@@ -187,9 +200,13 @@ one `file.read` grant covering every path. Each step is dispatched through an
 internal broker holding only `read_file`, under only the admitted grant, in
 `read_only` mode, with `OutputLimit / len(paths)` (at least 1) and producer
 `<producer>/step-<i>`; capability is therefore rechecked per step. A non-nil
-`beforeStep(ctx, i)` is the host's per-step budget hook; an error stops the
-macro. **The engine supplies no hook**: a macro proposal costs one tool call in
-the engine ledger, and per-step artifact bytes are metered as usual.
+`beforeStep(ctx, i)` is an additional host per-step hook; an error stops the
+macro. Independently, the first step rides on the macro call's own tool-call
+reservation and every later step is charged through `Invocation.StepBudget`
+(the engine's `run.chargeStep`); a refused charge stops the macro with a
+`budget:` step failure (`TestMacroStepsAreChargedToTheToolBudget`). Per-step
+artifact bytes are metered as usual, so a macro cannot hide work from the
+ledger.
 
 Partial failure: execution stops at the first refused or failed step; the
 result is status `error` naming the step and carrying every completed step's
@@ -225,8 +242,9 @@ Stores (`storage`):
   persists marks as `.pin` files across restarts.
 - `FileArtifacts`/`FileRecords` write atomically (temp file, fsync, rename,
   directory fsync) under an explicit absolute root and refuse Windows.
-- `FileArtifacts.Put` treats an existing file for the same key as already
-  stored without re-verifying it; corruption is reported on `Get`.
+- `FileArtifacts.Put` counts an existing file for the same key as stored only
+  if it verifies; a corrupt copy is rewritten in place without double-counting
+  capacity.
 
 ## 9. Isolation claim
 
