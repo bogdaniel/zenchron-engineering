@@ -1851,17 +1851,6 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 	return nil
 }
 
-// runOperation acquires exactly one operation through the scheduler, records
-// operation.before, performs the bounded side effect, records the effect's
-// typed events, and records operation.after.
-//
-// The order is deliberate and is what the crash matrix depends on:
-//
-//	planned -> (crash here: no side effect happened)
-//	before  -> (crash here: the handler's own probe reconciles the effect)
-//	effect
-//	events
-//	after   -> (crash here: journal is authoritative, store is reconciled)
 // cancelStaleLeasedOperation makes the journal authoritative before the scheduler
 // row is terminal. A cancelled row is not reacquired, so reversing this order can
 // strand a permanent cancelled-row/failed-journal disagreement after a crash.
@@ -1876,6 +1865,17 @@ func (r *EngineeringRuntime) cancelStaleLeasedOperation(state *runState, leased 
 	return err
 }
 
+// runOperation acquires exactly one operation through the scheduler, records
+// operation.before, performs the bounded side effect, records the effect's
+// typed events, and records operation.after.
+//
+// The order is deliberate and is what the crash matrix depends on:
+//
+//	planned -> (crash here: no side effect happened)
+//	before  -> (crash here: the handler's own probe reconciles the effect)
+//	effect
+//	events
+//	after   -> (crash here: journal is authoritative, store is reconciled)
 func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (bool, Outcome, error) {
 	planned, created, err := r.scheduler.Plan(RunOperation{
 		RunID:            state.run.ID,
