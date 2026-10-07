@@ -323,14 +323,9 @@ func (f *FakeSemanticAssuranceProvider) Assure(_ context.Context, r AssuranceReq
 
 // FakeReviewerProvider is the deterministic stand-in for a reviewer worker: it
 // writes a real ReviewerResult to the runtime-owned path it was given, exactly
-// as an installed CLI would, and the runtime then reads and admits it through
-// the production path.
-//
-// It writes a FILE rather than returning a struct on purpose. A fake that
-// returned ExecutionResult.Review directly would skip the adapter's read, the
-// strict decode, the bound and the slot preparation - which is most of what the
-// protocol is - and would prove a state machine production cannot enter. The
-// #126 regression exists because exactly that gap went unnoticed once already.
+// as an installed CLI would, and the host then reads and admits it through the
+// production path (readTypedResultSlots, #521). Writing the file is the only
+// way any provider can state a verdict: ExecutionResult has no field for one.
 type FakeReviewerProvider struct {
 	*FakeExecutionProvider
 	// Verdicts are consumed in order, one per reviewer invocation, so a
@@ -381,7 +376,7 @@ func (f *FakeReviewerProvider) Execute(ctx context.Context, request ExecutionReq
 		if writeErr := os.WriteFile(request.ReviewerResultPath, []byte(raw), 0o600); writeErr != nil {
 			return result, writeErr
 		}
-		return f.read(request, result)
+		return result, nil
 	}
 	if index >= len(f.Verdicts) {
 		// No verdict for this invocation: the reviewer produced prose and
@@ -395,19 +390,5 @@ func (f *FakeReviewerProvider) Execute(ctx context.Context, request ExecutionReq
 	if writeErr := os.WriteFile(request.ReviewerResultPath, document, 0o600); writeErr != nil {
 		return result, writeErr
 	}
-	return f.read(request, result)
-}
-
-// read is the adapter half: the same strict decode CLIAgentProvider performs,
-// so the fixture exercises the production reader rather than a second one.
-func (f *FakeReviewerProvider) read(request ExecutionRequest, result ExecutionResult) (ExecutionResult, error) {
-	review, err := ReadReviewerResult(request.ReviewerResultPath)
-	if err != nil {
-		result.Outcome = OperationFailed
-		result.Failure = &ProviderFailure{Classification: FailureReviewerProtocolIncomplete}
-		result.ReviewRefusal = &ReviewerResultRefusedError{Detail: boundedDetail(err.Error())}
-		return result, nil
-	}
-	result.Review = review
 	return result, nil
 }

@@ -128,15 +128,7 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 	if marshalErr != nil {
 		return result, marshalErr
 	}
-	if writeErr := os.WriteFile(request.FeedbackResolutionPath, document, 0o600); writeErr != nil {
-		return result, writeErr
-	}
-	resolution, readErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
-	if readErr != nil {
-		return result, readErr
-	}
-	result.Resolution = resolution
-	return result, nil
+	return result, os.WriteFile(request.FeedbackResolutionPath, document, 0o600)
 }
 
 // passingAssurance keeps FakeAssuranceProvider topped up so a run can verify

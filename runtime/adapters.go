@@ -323,28 +323,6 @@ type ExecutionResult struct {
 	// provenance to say so. A provider that failed after real work sets it,
 	// so that work stays charged even when the failure routes to a wait.
 	Executed bool
-	// Review is the structured verdict a reviewer stage emitted, read by the
-	// adapter from the runtime-owned result path. It is nil when none was
-	// written, which is an ordinary outcome rather than a failure: a reviewer
-	// that produced only prose produced no verdict, and the stage stays
-	// unsettled. It is a CLAIM at this point and authorizes nothing until
-	// AdmitReviewerResult has checked it.
-	Review *ReviewerResult
-	// ReviewRefusal is set by an adapter that tried to read Review and could
-	// not: the reviewer-result file existed but failed to decode as one. It
-	// carries the runtime's own exact reason, through the same typed refusal
-	// AdmitReviewerResult produces for a result that decoded but failed its
-	// authority checks, so a decode failure and an authority refusal retain
-	// their reason the same way instead of the decode failure's being
-	// discarded down to a bare classification (#374).
-	ReviewRefusal *ReviewerResultRefusedError
-	// Resolution is the structured no-change resolution a producer invocation
-	// emitted, read by the adapter from the runtime-owned result path. It is
-	// nil when none was written - the ordinary case for an invocation that
-	// mutated the workspace, and also the case for one that merely returned
-	// without stating anything. A nil Resolution authorizes no discharge;
-	// see AdmitFeedbackResolution.
-	Resolution *FeedbackResolution
 	// Answer is the invocation's SEMANTIC final answer text, exposed by an
 	// adapter that can state one directly rather than leaving a consumer to
 	// locate it inside the forensic transcript. It is empty whenever the

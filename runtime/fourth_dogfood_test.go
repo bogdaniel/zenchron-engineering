@@ -223,11 +223,13 @@ func (p *interruptedProducer) Execute(_ context.Context, request ExecutionReques
 	}
 	result := ExecutionResult{ProviderID: "test-provider", Model: "gpt-fixture", Attempt: 1, Outcome: Succeeded}
 	if invocation == p.resolveAt {
-		result.Resolution = &FeedbackResolution{
+		if err := writeTypedResultFile(request.FeedbackResolutionPath, FeedbackResolution{
 			SchemaVersion: FeedbackResolutionSchemaVersion,
 			Resolution:    FeedbackResolutionCheckpointComplete,
 			Subject:       request.Candidate.Revision,
 			Tree:          request.Candidate.Tree,
+		}); err != nil {
+			return ExecutionResult{}, err
 		}
 	}
 	if p.completeAt > 0 && invocation >= p.completeAt {

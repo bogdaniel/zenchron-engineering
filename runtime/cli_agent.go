@@ -1546,50 +1546,8 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
-	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.
-	//
-	// It comes from the runtime-owned path and nowhere else: the transcript is
-	// evidence and is never consulted for a verdict, so a worker that talked
-	// about accepting has not accepted, and a transcript that happens to
-	// contain verdict-shaped JSON is still just a transcript.
-	//
-	// A malformed result on a SUCCESSFUL invocation still fails it. A reviewer
-	// that tried to answer and produced something unreadable has not silently
-	// declined to answer, and treating the two the same would hide a broken
-	// protocol behind a stage that merely never settles.
-	//
-	// It fails as a REVIEWER PROTOCOL failure, never as FailureVerification
-	// (#374): nothing was judged, so nothing about the candidate failed
-	// verification, and the exact decode reason is kept on ReviewRefusal
-	// rather than discarded down to a bare classification.
-	if request.ReviewerResultPath != "" {
-		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
-		if reviewErr != nil {
-			result.Outcome = OperationFailed
-			result.Failure = &ProviderFailure{
-				Classification: FailureReviewerProtocolIncomplete, RawDiagnosticRef: artifacts[0].Path,
-			}
-			result.ReviewRefusal = &ReviewerResultRefusedError{Detail: boundedDetail(reviewErr.Error())}
-			return result, nil
-		}
-		result.Review = review
-	}
-	// THE FEEDBACK RESOLUTION, read the same way and for the same reason: a
-	// malformed document on a successful invocation fails it rather than
-	// being silently dropped, and an absent one simply leaves Resolution nil
-	// - which AdmitFeedbackResolution and outstandingReviewKeys already treat
-	// as "nothing was stated" (#376).
-	if request.FeedbackResolutionPath != "" {
-		resolution, resolutionErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
-		if resolutionErr != nil {
-			result.Outcome = OperationFailed
-			result.Failure = &ProviderFailure{
-				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
-			}
-			return result, nil
-		}
-		result.Resolution = resolution
-	}
+	// The typed result slots are read by the HOST, not here (#521):
+	// readTypedResultSlots, right after Execute returns.
 	return result, runErr
 }
 
