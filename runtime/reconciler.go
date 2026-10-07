@@ -1948,6 +1948,15 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		// The scheduler handed back a different eligible operation. It is only
 		// legitimate if the current state still wants exactly that binding.
 		if err := state.validate(desiredOperation{kind: leased.Kind, key: bindingOf(*leased)}, live); err != nil {
+			// Journal the same terminal fact before mutating the scheduler row.
+			// Otherwise a stale retry can leave a durable cancelled-row/failed-
+			// journal disagreement that no future acquisition is able to repair.
+			cancelled := *leased
+			cancelled.State = OperationCancelled
+			cancelled.Lease = nil
+			if err := r.append(state, EventOperationAfter, cancelled.ID, cancelled, nil); err != nil {
+				return false, Outcome{}, err
+			}
 			if _, err := r.scheduler.Finish(leased.ID, OperationCancelled); err != nil {
 				return false, Outcome{}, err
 			}
