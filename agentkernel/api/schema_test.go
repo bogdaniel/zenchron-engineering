@@ -44,6 +44,7 @@ var invalidRequestField = map[string]string{
 	"request-write-grant-read-only.json":      "grants[1]",
 	"request-money-unpriced-eligible.json":    "providers[0]",
 	"request-two-pinned.json":                 "providers",
+	"request-money-unknown-write-rate.json":   "providers[0]",
 	"request-bad-digest.json":                 "workspace.manifest_digest",
 	"request-content-digest-mismatch.json":    "context[0]",
 	"request-root-traversal.json":             "grants[0]",

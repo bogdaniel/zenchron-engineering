@@ -84,44 +84,56 @@ func reported(sum int64, missing bool, unknowns *[]string, name string) *int64 {
 
 // actualCost prices reported usage: input tokens are split into cache reads,
 // cache writes and the rest, each at its own rate. It is known only with a
-// trusted rate card and every count it needs. A missing cache count is not
-// needed when its rate equals the input rate, because the split then cannot
-// change the price. Otherwise the call contributes nothing, so the account's
+// trusted rate card, reported input and output, and every cache part it
+// needs: a part reported as 0 needs no rate; an unreported part is harmless
+// only when its rate is known and equals the input rate; a positive part
+// needs its rate. Otherwise the call contributes nothing, so the account's
 // micros stay a lower bound.
 func actualCost(u api.TokenUsage, p *api.Pricing) (int64, bool) {
 	if p == nil || u.Input == nil || u.Output == nil {
 		return 0, false
 	}
-	cached, okCached := part(u.CachedInput, p.CachedInputMicrosPerMillion == p.InputMicrosPerMillion)
-	written, okWritten := part(u.CacheWriteInput, p.CacheWriteInputMicrosPerMillion == p.InputMicrosPerMillion)
+	cached, cachedCost, okCached := part(u.CachedInput, p.CachedInputMicrosPerMillion, p.InputMicrosPerMillion)
+	written, writtenCost, okWritten := part(u.CacheWriteInput, p.CacheWriteInputMicrosPerMillion, p.InputMicrosPerMillion)
 	if !okCached || !okWritten {
 		return 0, false
 	}
 	plain := max(*u.Input-cached-written, 0)
-	return price(float64(plain)*float64(p.InputMicrosPerMillion) +
-		float64(cached)*float64(p.CachedInputMicrosPerMillion) +
-		float64(written)*float64(p.CacheWriteInputMicrosPerMillion) +
+	return price(float64(plain)*float64(p.InputMicrosPerMillion) + cachedCost + writtenCost +
 		float64(*u.Output)*float64(p.OutputMicrosPerMillion)), true
 }
 
-// part is a reported sub-count of input, or 0 when it is unknown but priced
-// like plain input.
-func part(n *int64, pricedAsInput bool) (int64, bool) {
-	if n != nil {
-		return *n, true
+// part returns one cache part of input, its token-micros-per-million cost and
+// whether both are known.
+func part(n, rate *int64, inputRate int64) (int64, float64, bool) {
+	switch {
+	case n == nil:
+		return 0, 0, rate != nil && *rate == inputRate
+	case *n == 0:
+		return 0, 0, true
+	case rate == nil:
+		return 0, 0, false
+	default:
+		return *n, float64(*n) * float64(*rate), true
 	}
-	return 0, pricedAsInput
 }
 
 // worstCaseCost prices the most a call can cost: every input token at the
-// highest input-side rate and the full output allowance. Unpriced bindings
-// cost 0 here because validation admits a money ceiling only when every
-// eligible binding is priced in its currency.
+// highest input-side rate and the full output allowance. Under a money
+// ceiling validation guarantees every rate is known; without one the money
+// dimension is unbounded and this only feeds the ledger. Unpriced bindings
+// cost 0 here because validation admits a ceiling only when every eligible
+// binding is fully priced in its currency.
 func worstCaseCost(inputTokens, outputTokens int64, p *api.Pricing) int64 {
 	if p == nil {
 		return 0
 	}
-	inRate := max(p.InputMicrosPerMillion, p.CachedInputMicrosPerMillion, p.CacheWriteInputMicrosPerMillion)
+	inRate := p.InputMicrosPerMillion
+	for _, rate := range []*int64{p.CachedInputMicrosPerMillion, p.CacheWriteInputMicrosPerMillion} {
+		if rate != nil {
+			inRate = max(inRate, *rate)
+		}
+	}
 	return price(float64(inputTokens)*float64(inRate) + float64(outputTokens)*float64(p.OutputMicrosPerMillion))
 }
 

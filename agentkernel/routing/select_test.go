@@ -21,7 +21,8 @@ func binding(id string, preference int) api.ProviderBinding {
 }
 
 func priced(b api.ProviderBinding, inputMicros int64) api.ProviderBinding {
-	b.Pricing = &api.Pricing{Currency: "USD", InputMicrosPerMillion: inputMicros, Source: "host", Version: "1"}
+	b.Pricing = &api.Pricing{Currency: "USD", InputMicrosPerMillion: inputMicros, Source: "host", Version: "1",
+		CachedInputMicrosPerMillion: cost(inputMicros), CacheWriteInputMicrosPerMillion: cost(inputMicros)}
 	return b
 }
 
@@ -159,5 +160,24 @@ func TestReportIsDeterministicSummary(t *testing.T) {
 	}
 	if b := r.Providers[1]; b.Chosen != 1 {
 		t.Fatalf("row b = %+v", b)
+	}
+}
+
+// TestUnknownCacheRateLeavesCostUnknown: a cache-write rate may exceed the
+// input rate, so a card without one cannot bound a call's price, and a known
+// higher write rate sets the worst case.
+func TestUnknownCacheRateLeavesCostUnknown(t *testing.T) {
+	partial := priced(binding("partial", 1), 1)
+	partial.Pricing.CacheWriteInputMicrosPerMillion = nil
+	writes := priced(binding("writes", 1), 1)
+	writes.Pricing.CacheWriteInputMicrosPerMillion = cost(1_000_000)
+	full := priced(binding("full", 1), 1_000)
+	d := routing.Select(routing.Input{Bindings: []api.ProviderBinding{partial, writes, full}, Now: now})
+	if d.Chosen != "full" {
+		t.Fatalf("chose %q; the only card with a bounded cheap worst case is full", d.Chosen)
+	}
+	reasons := strings.Join(candidateFor(t, d, "partial").Reasons, "; ")
+	if !strings.Contains(reasons, "worst case unknown") || !strings.Contains(reasons, "cost: unknown") {
+		t.Fatalf("partial card reasons %q", reasons)
 	}
 }

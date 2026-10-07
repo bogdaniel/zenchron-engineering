@@ -157,11 +157,21 @@ func (c *candidate) rankingData(in Input, currency string, latest map[string]Obs
 	c.noteUnknown()
 }
 
-// priceFromRateCard prices a full context window plus maximum output. A price
-// too large to represent stays unknown rather than wrapping to a small number.
+// priceFromRateCard prices a full context window at the highest input-side
+// rate plus maximum output. An unknown cached or cache-write rate leaves the
+// cost unknown, because either may exceed the input rate. A price too large
+// to represent stays unknown rather than wrapping to a small number.
 func (c *candidate) priceFromRateCard(currency string) {
 	b := c.binding
-	worst := (float64(b.ContextWindow)*float64(b.Pricing.InputMicrosPerMillion) +
+	inRate := b.Pricing.InputMicrosPerMillion
+	for _, rate := range []*int64{b.Pricing.CachedInputMicrosPerMillion, b.Pricing.CacheWriteInputMicrosPerMillion} {
+		if rate == nil {
+			c.reasons = append(c.reasons, "cost: rate card lacks a cached or cache-write rate; worst case unknown")
+			return
+		}
+		inRate = max(inRate, *rate)
+	}
+	worst := (float64(b.ContextWindow)*float64(inRate) +
 		float64(b.MaxOutputTokens)*float64(b.Pricing.OutputMicrosPerMillion)) / 1e6
 	if worst < 0 || worst >= math.MaxInt64 {
 		c.reasons = append(c.reasons, "cost: rate card price out of range; not comparable")

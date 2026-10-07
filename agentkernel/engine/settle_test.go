@@ -193,7 +193,7 @@ func TestSettlementRecordingFailureKeepsObservedOutcome(t *testing.T) {
 
 func TestMoneyCeiling(t *testing.T) {
 	pricing := &api.Pricing{Currency: "USD", InputMicrosPerMillion: 1_000_000, OutputMicrosPerMillion: 2_000_000,
-		CachedInputMicrosPerMillion: 100_000, CacheWriteInputMicrosPerMillion: 1_000_000, Source: "test-card", Version: "1"}
+		CachedInputMicrosPerMillion: rate(100_000), CacheWriteInputMicrosPerMillion: rate(1_000_000), Source: "test-card", Version: "1"}
 	t.Run("worst_case_refused_before_call", func(t *testing.T) {
 		f := newFixture(t, []scripted.Step{end("never")})
 		req := request()
@@ -222,7 +222,7 @@ func TestMoneyCeiling(t *testing.T) {
 		f := newFixture(t, []scripted.Step{{Response: api.ProviderResponse{Text: "ok", Stop: api.StopEnd, Usage: usage}}})
 		req := request()
 		card := *pricing
-		card.CacheWriteInputMicrosPerMillion = 1_250_000
+		card.CacheWriteInputMicrosPerMillion = rate(1_250_000)
 		req.Providers[0].Pricing = &card
 		res := f.run(t, context.Background(), req)
 		// 500 plain at 1 + 200 cached at 0.1 + 300 written at 1.25 + 10 output at 2 = 915.
@@ -234,6 +234,36 @@ func TestMoneyCeiling(t *testing.T) {
 		f = newFixture(t, []scripted.Step{{Response: api.ProviderResponse{Text: "ok", Stop: api.StopEnd, Usage: usage}}})
 		if c := f.run(t, context.Background(), req).Usage.Cost; c.Known {
 			t.Fatalf("cost %+v presented as known without the write count", c)
+		}
+	})
+	t.Run("unknown_write_rate_with_reported_writes", func(t *testing.T) {
+		usage := api.TokenUsage{Input: api.Count(1000), Output: api.Count(10), CachedInput: api.Count(0), CacheWriteInput: api.Count(300)}
+		f := newFixture(t, []scripted.Step{{Response: api.ProviderResponse{Text: "ok", Stop: api.StopEnd, Usage: usage}}})
+		req := request()
+		card := *pricing
+		card.CacheWriteInputMicrosPerMillion = nil
+		req.Providers[0].Pricing = &card
+		if c := f.run(t, context.Background(), req).Usage.Cost; c.Known {
+			t.Fatalf("cost %+v presented as known with an unknown write rate", c)
+		}
+		// A reported zero needs no rate.
+		usage.CacheWriteInput = api.Count(0)
+		f = newFixture(t, []scripted.Step{{Response: api.ProviderResponse{Text: "ok", Stop: api.StopEnd, Usage: usage}}})
+		if c := f.run(t, context.Background(), req).Usage.Cost; !c.Known || c.Micros != 1020 {
+			t.Fatalf("cost %+v, want exactly 1020 micros", c)
+		}
+	})
+	t.Run("unknown_write_rate_refuses_ceiling", func(t *testing.T) {
+		f := newFixture(t, []scripted.Step{end("never")})
+		req := request()
+		card := *pricing
+		card.CacheWriteInputMicrosPerMillion = nil
+		req.Providers[0].Pricing = &card
+		req.Budget.Money = &api.MoneyCeiling{Currency: "USD", MaxMicros: 1 << 40}
+		res := f.run(t, context.Background(), req)
+		want(t, res, api.OutcomeBlocked, api.CauseInvalidRequest)
+		if len(f.provider.Requests()) != 0 {
+			t.Fatal("provider called under an unenforceable ceiling")
 		}
 	})
 	t.Run("unreported_usage_unknown", func(t *testing.T) {
@@ -260,3 +290,5 @@ func contains(have []string, want ...string) bool {
 	}
 	return true
 }
+
+func rate(n int64) *int64 { return &n }

@@ -192,8 +192,8 @@
         "currency": {"$ref": "#/$defs/currency"},
         "input_micros_per_million": {"type": "integer", "minimum": 0},
         "output_micros_per_million": {"type": "integer", "minimum": 0},
-        "cached_input_micros_per_million": {"type": "integer", "minimum": 0},
-        "cache_write_input_micros_per_million": {"type": "integer", "minimum": 0, "description": "Rate for input tokens written to a provider cache, charged instead of the input rate."},
+        "cached_input_micros_per_million": {"type": ["integer", "null"], "minimum": 0, "description": "Rate for input tokens read from a provider cache, charged instead of the input rate. null is unknown, never zero; a money ceiling needs it known."},
+        "cache_write_input_micros_per_million": {"type": ["integer", "null"], "minimum": 0, "description": "Rate for input tokens written to a provider cache, charged instead of the input rate. null is unknown, never zero; a money ceiling needs it known."},
         "source": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
         "observed_at": {"$ref": "common.v0.1.schema.json#/$defs/timestamp"}

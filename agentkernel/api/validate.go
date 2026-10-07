@@ -382,20 +382,30 @@ func (p ProviderBinding) validate() error {
 	if p.CredentialHandle != "" && !ValidIdentifier(p.CredentialHandle) {
 		return fmt.Errorf("invalid credential_handle")
 	}
-	if p.Pricing != nil && !p.Pricing.prices(p.Pricing.Currency) {
+	if p.Pricing != nil && !p.Pricing.valid() {
 		return fmt.Errorf("pricing needs currency, non-negative rates, source and version")
 	}
 	return nil
 }
 
-// prices reports whether p is a complete trusted rate card in currency.
+// prices reports whether p is a complete trusted rate card in currency, one
+// that can price a worst case. Unknown cache rates make it incomplete: they
+// may exceed the input rate.
 func (p *Pricing) prices(currency string) bool {
-	if p == nil || p.Currency != currency || !currencyPattern.MatchString(currency) {
+	return p != nil && p.Currency == currency && p.valid() &&
+		p.CachedInputMicrosPerMillion != nil && p.CacheWriteInputMicrosPerMillion != nil
+}
+
+// valid reports whether p is well formed: an unknown cache rate is allowed,
+// a negative one is not.
+func (p *Pricing) valid() bool {
+	if !currencyPattern.MatchString(p.Currency) || p.InputMicrosPerMillion < 0 || p.OutputMicrosPerMillion < 0 {
 		return false
 	}
-	if p.InputMicrosPerMillion < 0 || p.OutputMicrosPerMillion < 0 || p.CachedInputMicrosPerMillion < 0 ||
-		p.CacheWriteInputMicrosPerMillion < 0 {
-		return false
+	for _, rate := range []*int64{p.CachedInputMicrosPerMillion, p.CacheWriteInputMicrosPerMillion} {
+		if rate != nil && *rate < 0 {
+			return false
+		}
 	}
 	return p.Source != "" && p.Version != ""
 }

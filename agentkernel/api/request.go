@@ -157,13 +157,15 @@ const UnknownVersion = "unknown"
 // Pricing is a trusted host-supplied rate card. Absent pricing means cost is
 // unknown, never zero.
 type Pricing struct {
-	Currency                    string `json:"currency"`
-	InputMicrosPerMillion       int64  `json:"input_micros_per_million"`
-	OutputMicrosPerMillion      int64  `json:"output_micros_per_million"`
-	CachedInputMicrosPerMillion int64  `json:"cached_input_micros_per_million"`
-	// CacheWriteInputMicrosPerMillion is the rate for input tokens written to
-	// a provider cache, charged instead of the input rate (not on top of it).
-	CacheWriteInputMicrosPerMillion int64     `json:"cache_write_input_micros_per_million"`
+	Currency               string `json:"currency"`
+	InputMicrosPerMillion  int64  `json:"input_micros_per_million"`
+	OutputMicrosPerMillion int64  `json:"output_micros_per_million"`
+	// CachedInputMicrosPerMillion and CacheWriteInputMicrosPerMillion are the
+	// rates for input tokens read from or written to a provider cache, charged
+	// instead of the input rate. Nil means the rate is unknown, never zero;
+	// either may exceed the input rate, so a money ceiling needs both.
+	CachedInputMicrosPerMillion     *int64    `json:"cached_input_micros_per_million"`
+	CacheWriteInputMicrosPerMillion *int64    `json:"cache_write_input_micros_per_million"`
 	Source                          string    `json:"source"`
 	Version                         string    `json:"version"`
 	ObservedAt                      time.Time `json:"observed_at"`
