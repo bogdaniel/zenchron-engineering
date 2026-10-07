@@ -89,12 +89,16 @@ cache internals do not appear in `api/`.
   any side effect.
 - Finite explicit budgets (deadline, iterations, tool calls, input/output
   tokens, artifact bytes, provider retries); shared atomic reservations; no
-  retry or re-entry renews budget; a monetary ceiling that cannot be enforced
-  from trusted prices and token bounds is refused.
+  retry or re-entry renews budget, enforced by the kernel: `Budget` is the
+  envelope of an `execution_id` across all its attempts, admission is an
+  atomic claim (`storage.Records.PutIfAbsent`), a crashed attempt fails
+  closed, and no clock passage releases a claim; a monetary ceiling that
+  cannot be enforced from trusted prices and token bounds is refused.
 - Capability broker: model tool calls are untrusted proposals; capability comes
-  only from host grants; path/symlink/snapshot guards; expected-content patch
-  preconditions; no unrestricted shell (commands are host-named grants executed
-  through a host `CommandRunner` port).
+  only from host grants; path guards that refuse every symlink and (on unix)
+  hard-linked file; expected-content patch preconditions; no unrestricted
+  shell (commands are host-named grants executed by the host's process
+  boundary).
 - Context compiler: mandatory context is never dropped or summarized;
   impossible mandatory context yields `insufficient_capacity`; retrieved,
   remembered and tool content stays untrusted data.
@@ -110,6 +114,12 @@ cache internals do not appear in `api/`.
   observed provider completion or failure.
 - Recording failure stops further side effects and returns `incomplete` /
   `recording_failed` with the evidence available.
+- Host-code rule (added after review 5443104514): the bounded execution path
+  never synchronously runs host-owned code whose termination it cannot
+  enforce. Event sinks, context sources, providers, command runners and host
+  tools are bounded request/reply hand-offs served by host-owned workers; the
+  kernel starts no goroutine to call them and none outlives `Execute`. Types
+  the engine calls directly are sealed and kernel-owned.
 
 ## 6. Limitations (Gate A, stated, not hidden)
 
