@@ -104,6 +104,11 @@ type SupervisorDependencies struct {
 	// A source that fails holds NOTHING ANSWERED: the graph is reported and
 	// left alone for that pass rather than activated past a hold that may
 	// exist.
+	//
+	// A #473 decision_request message is NOT a hold. That is a worker ASKING
+	// for a decision; a hold is the authority that owns the decision saying the
+	// work may not proceed. Wiring worker messages in here would let a worker
+	// hold its own graph, which is the self-answer path in reverse.
 	WorkUnitHolds func(graphID string) (map[string]orchestration.DecisionWait, error)
 	// Plans is the plan lifecycle service, or the zero value when no plan has
 	// ever been proposed. It is what the plan reconciler resolves assignments

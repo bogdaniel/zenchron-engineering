@@ -232,3 +232,14 @@ integration algorithm; no cross-repository programs; no gate or human-decision
 units (every #472 unit is agent-backed, and gates remain #64's); no typed
 collaboration messages, findings or decision requests (#473); and no changes to
 the handoff protocol itself (#492).
+
+#473's typed messages are scoped to a **batch**, and a graph unit's batch is that
+one unit execution's, so units of one graph do not share a message scope.
+Dependencies deliver through the admitted handoff described above — that is the
+#472 channel. Cross-unit messaging would change #473's scoping and belongs with
+whoever owns that question, not here.
+
+A `decision_request` message (#473) is a worker **asking** for a decision. The
+`awaiting_decision` hold above is the authority that owns a decision saying the
+work may not proceed. They are different facts, and nothing wires the first into
+the second: a worker cannot hold, or release, its own graph.

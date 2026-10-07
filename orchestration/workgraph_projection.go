@@ -131,6 +131,10 @@ func (inputs WorkUnitInputs) canonical() WorkUnitInputs {
 // DecisionWait is a readiness hold a unit is under from an owner OUTSIDE this
 // graph: an unresolved decision the work needs before it may run.
 //
+// It is not #473's decision_request, which is a worker asking for a decision.
+// This is the authority that owns the decision saying the work may not proceed,
+// and only such an owner can report or lift one.
+//
 // It is a seam, deliberately. #472 owns no decision record, no authority and no
 // persistence for one - #508 does - and nothing here can resolve a hold. The
 // graph's only obligation is to REPRESENT it: a held unit is not runnable and
