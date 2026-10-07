@@ -94,7 +94,9 @@ func TestBrokeredExecutionRefusesAnUnboundOperation(t *testing.T) {
 		"no operation identity":    {RunID: "r", Attempt: 1, CandidateDir: t.TempDir()},
 		"no candidate workspace":   {RunID: "r", Attempt: 1, OperationID: "op"},
 		"blank operation identity": {RunID: "r", Attempt: 1, CandidateDir: t.TempDir(), OperationID: "   "},
-		"no scheduler attempt":     {RunID: "r", CandidateDir: t.TempDir(), OperationID: "op"},
+		// Attempt is stated as zero on purpose: this case proves the refusal,
+		// and acceptance H requires a producer to state the attempt explicitly.
+		"no scheduler attempt": {RunID: "r", Attempt: 0, CandidateDir: t.TempDir(), OperationID: "op"},
 	} {
 		t.Run("refuse "+name, func(t *testing.T) {
 			if _, err := bound.Execute(context.Background(), request); err == nil {
