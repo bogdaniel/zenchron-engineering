@@ -250,7 +250,8 @@
       "race": true,
       "sources": [
         "runtime/attempt_*.go",
-        "runtime/execution_scratch.go"
+        "runtime/execution_scratch.go",
+        "runtime/execution_event_transcript.go"
       ],
       "tests": [
         "runtime/attempt_*_test.go",

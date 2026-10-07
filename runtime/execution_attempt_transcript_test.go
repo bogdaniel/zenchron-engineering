@@ -319,142 +319,19 @@ func TestAttemptTranscriptPathsAreSafeAndLegible(t *testing.T) {
 // the guard is here, in the source, where a newly added producer fails the
 // suite instead of a run.
 func TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt(t *testing.T) {
-	offenders, err := executionRequestOffenders(repositoryRootForTest(t))
+	offenders, checked, err := executionRequestOffenders(repositoryRootForTest(t))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A scan that recognizes nothing would pass vacuously; the runtime has
+	// many producers, so zero means the type identity drifted.
+	if checked == 0 {
+		t.Fatal("the scan recognized no host execution request literal at all")
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("these ExecutionRequest producers do not supply the scheduler attempt, so their transcripts would have no durable identity:\n  %s",
 			strings.Join(offenders, "\n  "))
 	}
-}
-
-// TestExecutionRequestScanSkipsNestedModules: a directory with its own go.mod
-// is a separate module. It cannot construct this module's ExecutionRequest
-// without requiring it, so a same-named type there is not a producer.
-func TestExecutionRequestScanSkipsNestedModules(t *testing.T) {
-	root := t.TempDir()
-	offending := "package p\n\nvar _ = ExecutionRequest{Run: \"r\"}\n"
-	files := map[string]string{
-		"go.mod":        "module example.com/root\n",
-		"a.go":          offending,
-		"nested/go.mod": "module example.com/nested\n",
-		"nested/b.go":   offending,
-	}
-	for name, content := range files {
-		path := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	offenders, err := executionRequestOffenders(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(offenders) != 1 || !strings.HasPrefix(offenders[0], "a.go: ") {
-		t.Fatalf("offenders = %q, want only the root module's a.go", offenders)
-	}
-}
-
-// executionRequestOffenders scans the module rooted at root for ExecutionRequest
-// literals that omit the scheduler attempt. Nested modules are skipped.
-func executionRequestOffenders(root string) ([]string, error) {
-	var offenders []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "fixtures" {
-				return filepath.SkipDir
-			}
-			if path != root {
-				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if !strings.HasSuffix(entry.Name(), ".go") {
-			return nil
-		}
-		// This test names the pattern it looks for; finding itself is noise.
-		if entry.Name() == "execution_attempt_transcript_test.go" {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			rel = path
-		}
-		for _, literal := range executionRequestLiterals(string(data)) {
-			// A zero value states nothing and cannot omit a field.
-			if strings.TrimSpace(literal) == "" {
-				continue
-			}
-			if !strings.Contains(literal, "Attempt:") {
-				offenders = append(offenders, rel+": "+firstLine(literal))
-			}
-		}
-		return nil
-	})
-	return offenders, err
-}
-
-// executionRequestLiterals returns the body of every ExecutionRequest composite
-// literal in a file, matching braces so a nested literal does not end it early.
-func executionRequestLiterals(source string) []string {
-	var bodies []string
-	for _, marker := range []string{"ExecutionRequest{", "runtime.ExecutionRequest{"} {
-		from := 0
-		for {
-			at := strings.Index(source[from:], marker)
-			if at < 0 {
-				break
-			}
-			start := from + at + len(marker)
-			depth := 1
-			end := start
-			for end < len(source) && depth > 0 {
-				switch source[end] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-				}
-				end++
-			}
-			// A map of requests keyed by name has its literals inside; those
-			// are found by the same scan on the next iteration.
-			bodies = append(bodies, source[start:min(end, len(source))])
-			from = start
-		}
-	}
-	return bodies
-}
-
-func firstLine(body string) string {
-	line := strings.TrimSpace(body)
-	if at := strings.IndexByte(line, '\n'); at >= 0 {
-		line = line[:at]
-	}
-	if len(line) > 90 {
-		line = line[:90]
-	}
-	return line
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // repositoryRootForTest walks up to the module root so the source guard reads
