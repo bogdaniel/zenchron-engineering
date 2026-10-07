@@ -136,8 +136,12 @@ func (w *Workspace) search(ctx context.Context, inv Invocation) (api.ToolResult,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if d.IsDir() && strings.EqualFold(d.Name(), ".git") {
-			return fs.SkipDir
+		// A submodule or worktree .git is a file; skip any .git entry.
+		if strings.EqualFold(d.Name(), ".git") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if !d.Type().IsRegular() {
 			return nil

@@ -50,8 +50,8 @@ host `ExecutionProvider` and composes `engine.Engine` with host ports:
 | Kernel port | Host implementation |
 | --- | --- |
 | `api.EventSink` (served by a host worker, `api.ServeEvents`) | appends to the existing journal/attempt record; an append failure returns an error so the kernel settles `recording_failed` |
-| `api.Clock` | `api.SystemClock` (sealed: kernel-owned clocks only) |
-| `storage.Artifacts` | a kernel `storage.FileArtifacts` root; a bridge to the existing artifact store is host code and therefore must sit behind a hand-off (not available in Gate A) |
+| `api.Clock` | `api.SystemClock` (`engine.New` accepts only kernel clocks, by exact type) |
+| `Config.Artifacts` | a kernel `storage.FileArtifacts` root; a bridge to the existing artifact store is host code and therefore must sit behind a hand-off (not available in Gate A) |
 | `api.CommandRunner` (served, `api.ServeCommands`) | the existing `DockerSandbox` path used by `ToolBroker.RunCommand` (network none, read-only, cap-drop) |
 | `api.CredentialSource` | reads the operator `APIKeyFile` per call, refusing a key inside the candidate workspace (today's rule); called by the adapter on the host's provider worker |
 | tools | `tools.Workspace` on `CandidateDir`, **plus** host guards the kernel lacks (§5); or host tools (`tools.NewHostTool`, served by `tools.ServeTool`) over the existing resolve gate |

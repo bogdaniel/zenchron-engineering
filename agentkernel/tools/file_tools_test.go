@@ -250,3 +250,20 @@ func TestGitMetadataIsNeverReachable(t *testing.T) {
 	}
 	sameDigests(t, before, digests(t, f.root, f.outside))
 }
+
+// TestSearchSkipsGitFiles: a submodule or worktree ".git" is a regular file
+// ("gitdir: ..."); search skips any entry named .git, file or directory, in
+// any case, so repository metadata is never read or echoed.
+func TestSearchSkipsGitFiles(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"sub/.git": "gitdir: ../.git/modules/sub-gitsecret\n", "other/.GIT": "gitdir: gitsecret\n", "a.txt": "x\n",
+	})
+	env := f.env(api.ModeReadOnly, grant("s", api.CapabilityFileSearch, "."))
+	res, err := f.broker.Dispatch(context.Background(), call("search", map[string]string{"path": ".", "pattern": "gitdir"}), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Output, "gitsecret") {
+		t.Fatalf("search echoed .git file content: %q", res.Output)
+	}
+}

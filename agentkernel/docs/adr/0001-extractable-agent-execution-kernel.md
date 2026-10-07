@@ -119,7 +119,8 @@ cache internals do not appear in `api/`.
   enforce. Event sinks, context sources, providers, command runners and host
   tools are bounded request/reply hand-offs served by host-owned workers; the
   kernel starts no goroutine to call them and none outlives `Execute`. Types
-  the engine calls directly are sealed and kernel-owned.
+  the engine calls directly are kernel-owned, checked by exact concrete type
+  at construction (an embeddable marker method would not seal them).
 
 ## 6. Limitations (Gate A, stated, not hidden)
 

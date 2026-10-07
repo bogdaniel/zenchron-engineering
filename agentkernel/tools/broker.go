@@ -18,9 +18,11 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 )
 
-// Tool is one implementation the broker can dispatch to. Only this package
-// implements it, so the broker never calls host code on the kernel's
-// goroutine: a host's own tool is a NewHostTool served by a host worker.
+// Tool is one implementation the broker can dispatch to. NewBroker accepts
+// only tools this package built (its own concrete type; a host type
+// implementing Tool, or embedding one, is refused), so the broker never
+// calls host code on the kernel's goroutine: a host's own tool is a
+// NewHostTool served by a host worker.
 type Tool interface {
 	// Spec is what the provider sees.
 	Spec() api.ToolSpec
@@ -36,7 +38,6 @@ type Tool interface {
 	// Scope only reads already-validated arguments; it can never create or
 	// widen a grant.
 	Scope(arguments json.RawMessage) (Scope, error)
-	kernelOwned()
 }
 
 // Scope is what one call would touch.
@@ -51,7 +52,9 @@ type Invocation struct {
 	Grant     api.Capability
 	Arguments json.RawMessage
 	Artifacts api.ArtifactStore
-	// Producer binds artifacts the tool records ("<execution>/<attempt>/<call>").
+	// Producer binds artifacts the tool records and is the ID of any hand-off
+	// the call makes: a kernel sequence ("<execution>/<attempt>/tool-<n>"),
+	// never model output.
 	Producer string
 	// OutputLimit bounds ToolResult.Output in bytes; full bytes go to an artifact.
 	OutputLimit int
@@ -71,12 +74,13 @@ type Broker struct {
 var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // NewBroker registers tools; duplicate or invalid names are refused, as is a
-// tool whose input schema is outside the subset the broker can enforce.
+// tool whose input schema is outside the subset the broker can enforce, and
+// any tool this package did not build.
 func NewBroker(tools ...Tool) (*Broker, error) {
 	b := &Broker{tools: map[string]Tool{}, schemas: map[string]objectSchema{}}
 	for i, t := range tools {
-		if t == nil {
-			return nil, fmt.Errorf("tools[%d]: nil tool", i)
+		if own, ok := t.(*tool); !ok || own == nil {
+			return nil, fmt.Errorf("tools[%d]: %T is not a tool built by package tools", i, t)
 		}
 		spec := t.Spec()
 		if !toolNamePattern.MatchString(spec.Name) {

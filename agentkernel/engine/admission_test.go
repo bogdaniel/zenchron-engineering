@@ -67,6 +67,9 @@ func TestReentryCannotRenewBudget(t *testing.T) {
 		"max_tool_calls": func(b *api.Budget) { b.MaxToolCalls++ },
 		"max_input":      func(b *api.Budget) { b.MaxInputTokens++ },
 		"retries":        func(b *api.Budget) { b.MaxProviderRetries++ },
+		"max_iterations": func(b *api.Budget) { b.MaxIterations++ },
+		"max_output":     func(b *api.Budget) { b.MaxOutputTokens++ },
+		"max_artifact":   func(b *api.Budget) { b.MaxArtifactBytes++ },
 		"money_added":    func(b *api.Budget) { b.Money = &api.MoneyCeiling{Currency: "USD", MaxMicros: 1} },
 	}
 	for name, mutate := range widen {
@@ -86,6 +89,15 @@ func TestReentryCannotRenewBudget(t *testing.T) {
 			}
 		})
 	}
+	t.Run("widened_money_currency", func(t *testing.T) {
+		f := newFixture(t, []scripted.Step{end("one"), end("two")})
+		first, second := priced(attempt("att-1"), "USD"), priced(attempt("att-2"), "EUR")
+		want(t, f.next(t, first), api.OutcomeCompleted, api.CauseLoopCompleted)
+		wantRefused(t, f.next(t, second), "widens money")
+		if len(f.provider.Requests()) != 1 {
+			t.Fatal("an attempt in another currency reached the provider")
+		}
+	})
 	t.Run("narrower_attempt_admitted", func(t *testing.T) {
 		f := newFixture(t, []scripted.Step{end("one"), end("two")})
 		f.next(t, attempt("att-1"))
@@ -153,5 +165,33 @@ func TestConcurrentAttemptsAdmitExactlyOne(t *testing.T) {
 	}
 	if g.calls != 1 {
 		t.Fatalf("provider called %d times, want 1", g.calls)
+	}
+}
+
+// priced puts req under a money ceiling in currency, with a full rate card.
+func priced(req api.ExecutionRequest, currency string) api.ExecutionRequest {
+	one := int64(1)
+	req.Budget.Money = &api.MoneyCeiling{Currency: currency, MaxMicros: 1_000_000}
+	req.Providers[0].Pricing = &api.Pricing{Currency: currency, InputMicrosPerMillion: 1, OutputMicrosPerMillion: 1,
+		CachedInputMicrosPerMillion: &one, CacheWriteInputMicrosPerMillion: &one, Source: "card", Version: "1"}
+	return req
+}
+
+// TestPriorConsumptionIsCountedOnce: each attempt's record carries what the
+// execution consumed through that attempt; admission must not add those
+// cumulative records together. Five one-iteration attempts fit a five-
+// iteration envelope exactly; the sixth finds no iteration left.
+func TestPriorConsumptionIsCountedOnce(t *testing.T) {
+	f := newFixture(t, []scripted.Step{end("1"), end("2"), end("3"), end("4"), end("5"), end("never")})
+	for i := 1; i <= 5; i++ {
+		res := f.next(t, attempt(fmt.Sprintf("att-%d", i)))
+		if res.Termination.Outcome != api.OutcomeCompleted {
+			t.Fatalf("attempt %d %s after only %d of 5 iterations were used", i, describeTermination(res), i-1)
+		}
+	}
+	res := f.next(t, attempt("att-6"))
+	want(t, res, api.OutcomeExhausted, api.CauseBudgetExhausted)
+	if res.Termination.Dimension != api.DimensionIterations || len(f.provider.Requests()) != 5 {
+		t.Fatalf("attempt 6 exhausted %q after %d calls, want iterations after 5", res.Termination.Dimension, len(f.provider.Requests()))
 	}
 }

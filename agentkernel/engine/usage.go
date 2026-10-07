@@ -41,12 +41,14 @@ func (a *account) recordCall(estIn, estOut int64, usage *api.TokenUsage, pricing
 	addReported(&a.reportedCached, &a.missingCached, u.CachedInput)
 	addReported(&a.reportedWrite, &a.missingWrite, u.CacheWriteInput)
 	micros, known := actualCost(u, pricing)
-	a.costMicros += micros
-	a.costKnown = a.costKnown && known
+	a.costKnown = a.costKnown && known && a.costMicros <= math.MaxInt64-micros
+	a.costMicros = charge(a.costMicros, micros)
 }
 
+// addReported sums one reported count; a count missing, or a total past
+// int64, leaves the total unknown.
 func addReported(sum *int64, missing *bool, n *int64) {
-	if n == nil {
+	if n == nil || *sum > math.MaxInt64-*n {
 		*missing = true
 		return
 	}
@@ -99,8 +101,11 @@ func actualCost(u api.TokenUsage, p *api.Pricing) (int64, bool) {
 		return 0, false
 	}
 	plain := max(*u.Input-cached-written, 0)
-	return price(float64(plain)*float64(p.InputMicrosPerMillion) + cachedCost + writtenCost +
-		float64(*u.Output)*float64(p.OutputMicrosPerMillion)), true
+	micros := price(float64(plain)*float64(p.InputMicrosPerMillion) + cachedCost + writtenCost +
+		float64(*u.Output)*float64(p.OutputMicrosPerMillion))
+	// A cost past int64 is not a number the ledger can settle to: unknown,
+	// so the worst-case money charge stands.
+	return micros, micros != math.MaxInt64
 }
 
 // part returns one cache part of input, its token-micros-per-million cost and
@@ -138,9 +143,15 @@ func worstCaseCost(inputTokens, outputTokens int64, p *api.Pricing) int64 {
 }
 
 // price converts token-micros-per-million to micros, rounding up so a bound
-// is never understated.
+// is never understated. A value int64 cannot hold saturates at MaxInt64
+// (a float-to-int conversion out of range is implementation-defined and may
+// wrap negative), which a bounded money dimension always refuses.
 // ponytail: float64 is exact below 2^53 token-micros; integer 128-bit math if
 // rate cards ever approach that.
 func price(tokenMicrosPerMillion float64) int64 {
-	return int64(math.Ceil(tokenMicrosPerMillion / 1e6))
+	micros := math.Ceil(tokenMicrosPerMillion / 1e6)
+	if math.IsNaN(micros) || micros >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(micros)
 }

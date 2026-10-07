@@ -12,11 +12,13 @@ import (
 )
 
 // ErrNotTaken reports a call no worker received before the bound: the host
-// never saw it, so it had no effect.
+// never saw it, so it had no effect. That holds because every host hand-off
+// channel is unbuffered (the constructors refuse any other): a send completes
+// only when a worker receives.
 var ErrNotTaken = errors.New("handoff: not taken")
 
 // ErrNoAnswer reports a call a worker received but did not answer before the
-// bound: whatever it did is unknown.
+// bound, or whose reply channel it closed instead: whatever it did is unknown.
 var ErrNoAnswer = errors.New("handoff: not answered")
 
 // Bound is how long the kernel waits on one call.
@@ -33,7 +35,9 @@ type Bound struct {
 // call.Reply to a fresh channel of capacity 1, so a late reply never blocks
 // the worker and is discarded. It starts no goroutine: when the bound
 // passes it returns ErrNotTaken or ErrNoAnswer and nothing of the kernel's
-// is left waiting.
+// is left waiting. A bound already over when it starts (its time passed, or
+// Shorten closed with no grace) hands nothing over: select chooses among
+// ready cases at random, so that is checked before the call is offered.
 func Exchange[Q, R any](what string, calls chan<- api.Call[Q, R], call api.Call[Q, R], b Bound) (R, error) {
 	start := time.Now()
 	reply := make(chan R, 1)
@@ -41,11 +45,17 @@ func Exchange[Q, R any](what string, calls chan<- api.Call[Q, R], call api.Call[
 	w := newWait(b)
 	defer w.stop()
 	var zero R
+	if w.over() {
+		return zero, fmt.Errorf("%w: %s: bound over before call %s was offered", ErrNotTaken, what, call.ID)
+	}
 	for {
 		select {
 		case calls <- call:
 			calls = nil // taken: from here on only the reply or the bound
-		case v := <-reply:
+		case v, ok := <-reply:
+			if !ok {
+				return zero, fmt.Errorf("%w: %s closed the reply to call %s without answering", ErrNoAnswer, what, call.ID)
+			}
 			return v, nil
 		case <-w.expired:
 			elapsed := time.Since(start).Round(time.Millisecond)
@@ -66,10 +76,12 @@ type wait struct {
 	shorten <-chan struct{}
 	until   time.Time
 	grace   time.Duration
+	// end is when the wait ends: Until, or earlier once cut; zero is never.
+	end time.Time
 }
 
 func newWait(b Bound) *wait {
-	w := &wait{shorten: b.Shorten, until: b.Until, grace: b.Grace}
+	w := &wait{shorten: b.Shorten, until: b.Until, grace: b.Grace, end: b.Until}
 	if !b.Until.IsZero() {
 		w.timer = time.NewTimer(time.Until(b.Until))
 		w.expired = w.timer.C
@@ -85,8 +97,20 @@ func (w *wait) cut() {
 		return
 	}
 	w.stop()
+	w.end = end
 	w.timer = time.NewTimer(w.grace)
 	w.expired = w.timer.C
+}
+
+// over reports, without waiting, whether the bound has already ended: a
+// pending Shorten is applied first, then the end time is compared with now.
+func (w *wait) over() bool {
+	select {
+	case <-w.shorten:
+		w.cut()
+	default:
+	}
+	return !w.end.IsZero() && !time.Now().Before(w.end)
 }
 
 func (w *wait) stop() {

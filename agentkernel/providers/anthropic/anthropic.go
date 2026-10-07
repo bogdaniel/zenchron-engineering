@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -267,15 +268,24 @@ func usage(r response) api.TokenUsage {
 	if c := r.Usage.CacheCreation; c != nil && c.Ephemeral1hInputTokens != nil && *c.Ephemeral1hInputTokens > 0 {
 		u.CacheWriteInput = nil
 	}
-	if r.Usage.InputTokens != nil {
-		total := *r.Usage.InputTokens
-		for _, extra := range []*int64{r.Usage.CacheReadInputTokens, r.Usage.CacheCreationInputTokens} {
-			if extra != nil {
-				total += *extra
-			}
-		}
-		u.Input = &total
+	if r.Usage.InputTokens == nil {
+		return u
 	}
+	// Input is the sum of input_tokens and both cache parts. A negative
+	// summand or a sum past int64 is no count at all: input and the parts
+	// become unknown rather than an understated (or wrapped) total.
+	total := int64(0)
+	for _, n := range []*int64{r.Usage.InputTokens, r.Usage.CacheReadInputTokens, r.Usage.CacheCreationInputTokens} {
+		if n == nil {
+			continue
+		}
+		if *n < 0 || total > math.MaxInt64-*n {
+			u.CachedInput, u.CacheWriteInput = nil, nil
+			return u
+		}
+		total += *n
+	}
+	u.Input = &total
 	return u
 }
 

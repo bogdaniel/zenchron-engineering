@@ -55,18 +55,17 @@ type EventSink interface {
 }
 
 // Clock is the execution's time source. The kernel reads it synchronously,
-// so only kernel-owned clocks satisfy it: SystemClock, or ManualClock for
-// tests and deterministic replay.
+// so engine.New accepts only the kernel's own clocks, by exact type:
+// SystemClock, or *ManualClock for tests and deterministic replay. Any other
+// implementation, one embedding these included, is refused.
 type Clock interface {
 	Now() time.Time
-	kernelClock()
 }
 
 // SystemClock is the wall clock.
 type SystemClock struct{}
 
 func (SystemClock) Now() time.Time { return time.Now() }
-func (SystemClock) kernelClock()   {}
 
 // ManualClock is a clock that moves only when told to.
 type ManualClock struct {
@@ -96,5 +95,3 @@ func (c *ManualClock) Advance(d time.Duration) {
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
 }
-
-func (*ManualClock) kernelClock() {}

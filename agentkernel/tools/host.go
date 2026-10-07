@@ -19,7 +19,8 @@ type HostInvocation struct {
 }
 
 // HostToolCall hands one admitted call to a host tool's worker. Its ID is the
-// call's producer ("<execution>/<attempt>/<call>").
+// call's producer, a kernel sequence ("<execution>/<attempt>/tool-<n>"),
+// never the model's tool-call ID.
 type HostToolCall = api.Call[HostInvocation, api.Reply[api.ToolResult]]
 
 // HostTool is a tool the host implements. The kernel reaches it only through
@@ -32,13 +33,15 @@ type HostTool struct {
 	// PathArgument names the string argument holding the one
 	// workspace-relative path a call touches; the grant is selected for it.
 	PathArgument string
-	Calls        chan<- HostToolCall
+	// Calls must be unbuffered (ServeTool returns one), so a call no
+	// worker took is one the host never saw.
+	Calls chan<- HostToolCall
 }
 
 // NewHostTool returns the broker-dispatchable form of h.
 func NewHostTool(h HostTool) (Tool, error) {
-	if h.Calls == nil {
-		return nil, errors.New("host tool needs a calls channel")
+	if h.Calls == nil || cap(h.Calls) != 0 {
+		return nil, errors.New("host tool needs an unbuffered calls channel")
 	}
 	if !h.Kind.Known() || h.Kind == api.CapabilityCommand {
 		return nil, fmt.Errorf("host tool %q: kind %q is not a file capability", h.Spec.Name, h.Kind)

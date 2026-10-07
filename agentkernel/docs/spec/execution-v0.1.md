@@ -17,12 +17,17 @@ type Executor interface {
 `engine.New(engine.Config)` returns the implementation. `New` defaults nothing:
 `Events`, `Clock` and at least one non-nil entry in `Providers` are required; a
 non-nil `Broker` requires `Artifacts` and `OutputLimit > 0`; `Sources` entries
-must be non-nil. Two fields have stated defaults: `Admissions` (nil: an
+must be non-nil. Every hand-off channel (`Providers`, `Events`, `Sources`)
+must be unbuffered (`cap == 0`), or `New` refuses it (§4.1). Two fields have stated defaults: `Admissions` (nil: an
 in-memory `storage.MemoryRecords` owned by the Engine, §11.1) and
 `SettleTimeout` (zero: `engine.DefaultSettleTimeout`, 5 s; negative is
 refused; §4.1). Every port a host can implement is a hand-off channel
-(§4.1); every value the kernel calls directly is of a kernel-owned type
-(`storage.Artifacts`, `*storage.FileRecords`, `api.Clock`, `*tools.Broker`).
+(§4.1); every value the kernel calls directly is of a kernel-owned concrete
+type, checked by exact type in `New` so a host type embedding one is refused:
+`Artifacts` a `*storage.MemoryArtifacts` or `*storage.FileArtifacts`, `Clock`
+an `api.SystemClock` or non-nil `*api.ManualClock`, `Admissions` a
+`*storage.FileRecords`, `Broker` a `*tools.Broker` (whose tools `NewBroker`
+checks the same way).
 `(*Engine).Execute` always returns a settled result and a nil error, including
 for refused requests.
 
@@ -145,15 +150,29 @@ kernel side is one function, `internal/handoff.Exchange`:
   the kernel's is left waiting and no kernel goroutine outlives `Execute`;
 - it distinguishes a call **never taken** (`handoff.ErrNotTaken`: the host
   never saw it, so it had no effect) from one **taken but not answered**
-  (`handoff.ErrNoAnswer`: its effect is unknown);
+  (`handoff.ErrNoAnswer`: its effect is unknown). "Never taken" means "never
+  seen" only because every host hand-off channel is unbuffered: a send
+  completes only when a worker receives. `engine.New`, `tools.NewHostTool`
+  and `tools.NewCommand` refuse a channel with `cap != 0`;
+- a bound already over when `Exchange` starts (its time passed, or `Shorten`
+  already closed with no grace) is checked without blocking before the call
+  is offered, so nothing is handed over (a `select` would choose among ready
+  cases at random); once the send has succeeded, the bound changes nothing
+  about it having been taken;
 - `Reply` is created by the kernel per call with capacity 1, so a worker's
   single reply never blocks, even after the kernel stopped waiting; a late
-  reply is discarded and changes nothing. Workers never close it.
+  reply is discarded and changes nothing. Workers never close it; a reply
+  channel closed without a value is `handoff.ErrNoAnswer` (outcome unknown),
+  never the zero value read as an answer (for an event, "durable").
 - `Context` carries the bound and is cancelled when the kernel stops waiting.
-- `ID` is stable and unique within the attempt: `<execution>/<attempt>/event-<seq>`,
-  `…/source-<i>`, `…/provider-<n>`, and for tools and commands the call's
-  producer `<execution>/<attempt>/<call id>`. The kernel never sends one ID
-  twice; a host seeing it again treats it as the same request.
+- `ID` is stable and unique within the attempt, and always kernel-generated:
+  `<execution>/<attempt>/event-<seq>`, `…/source-<i>`, `…/provider-<n>`, and
+  for tools and commands the call's producer `…/tool-<n>`, `n` numbering the
+  attempt's dispatched tool calls. No part comes from model output: the
+  model's tool-call ID could repeat, or mimic another port's ID. A proposal
+  whose tool-call ID repeats an earlier one of the attempt is refused back to
+  the model (`tool.refused`) and never dispatched. The kernel never sends one
+  ID twice; a host seeing it again treats it as the same request.
 - Queue capacities: the `Serve*` helpers return unbuffered channels and answer
   one call at a time; reply channels have capacity 1. A host wanting parallel
   answers runs its own workers on its own channel.
@@ -173,10 +192,14 @@ host's goroutine, never the kernel's.
 | host tools | `tools.NewHostTool(HostTool{…, Calls})` | the run context | tool error, did not run | outcome unknown; for a mutating kind `failed/tool_failed` and observed as uncertain |
 
 Kernel-owned code is called directly, because the kernel controls its
-termination: the built-in file tools, `tools.Broker` (`tools.Tool` is sealed:
-only package `tools` implements it), the stores of package `storage`
-(`storage.Artifacts` is sealed; admissions take `*storage.FileRecords`), and
-the clocks (`api.Clock` is sealed: `api.SystemClock`, `api.ManualClock`).
+termination: the built-in file tools, `tools.Broker` (`tools.NewBroker`
+accepts only package `tools`' own concrete tool type), the stores of package
+`storage` (`Config.Artifacts` accepts only `*storage.MemoryArtifacts` and
+`*storage.FileArtifacts`; admissions take `*storage.FileRecords`), and the
+clocks (`Config.Clock` accepts only `api.SystemClock` and `*api.ManualClock`).
+These are exact-type checks, not interface marker methods: a host type that
+embeds a kernel type to inherit a marker, then overrides a method with host
+code, is refused at construction.
 Removed host callbacks: `api.TokenEstimator` (token counts are the kernel's
 own, §7.4) and `tools.SnapshotGuard` (a host compares manifests itself).
 
@@ -237,7 +260,16 @@ all dimensions of one operation: every amount or none. Nothing adds to a
 limit; retries spend from the same envelope, and a later attempt of the same
 execution starts from what earlier attempts consumed (§11). A negative amount
 is refused at the root (`errNegativeAmount`, distinct from exhaustion) and
-never lowers what was used. Settlement replaces a
+never lowers what was used. Ledger arithmetic never wraps: the limit check is
+by subtraction (`n > limit − used`), and a reservation, settlement or restore
+whose sum passes `MaxInt64` saturates there and stays saturated, so the
+dimension is exhausted (a provider reporting an input count near `MaxInt64`
+stops further calls in this attempt and every later one). A negative prior
+consumption restored from a record is corrupt, hence unknown, and charged as
+saturated. Money prices are computed in `float64` and converted with a range
+check: a price `int64` cannot hold saturates (`MaxInt64`); a reported usage
+priced that way has an unknown cost and keeps its worst-case money charge.
+Settlement replaces a
 reservation with an actual charge, which may exceed it; the overrun is kept so
 the next reservation fails. Money is always tracked; it refuses only when the
 host set a ceiling.
@@ -297,7 +329,11 @@ observation-only (`usage.estimated.output`) and never reaches the ledger.
 
 `reported` and `estimated` are never summed. Implausible wire data is treated
 as unknown before settlement (`engine.plausibleUsage`): a negative count is
-unknown; and when `input` is reported and `cached_input` or
+unknown, and a negative `input`, `cached_input` or `cache_write_input` makes
+all three unknown (an adapter may already have folded a negative part into
+`input`; adapters that sum parts into `input`, such as `anthropic`, report
+`input` and the parts unknown themselves when a summand is negative or the sum
+overflows); and when `input` is reported and `cached_input` or
 `cache_write_input` exceeds it, or the two known parts together do, the
 partition is impossible and `input`, `cached_input` and `cache_write_input`
 are all unknown, so neither the input reservation nor the worst-case money
@@ -388,8 +424,9 @@ admission. It holds two partitions per `execution_id`:
 - `agentkernel.admission_claims`: the in-flight **claim**, whose value is the
   claiming `attempt_id`;
 - `agentkernel.admissions`: the **record**: the first settled attempt's
-  budget (the envelope) and each settled attempt's `attempt_id` and consumed
-  totals.
+  budget (the envelope) and each settled attempt's `attempt_id` and
+  cumulative consumed totals: the execution's whole charge through that
+  attempt, earlier attempts included (its ledger started from them).
 
 After validation and before any side effect, `run.admit`:
 
@@ -404,10 +441,13 @@ After validation and before any side effect, `run.admit`:
    any bound of the envelope: a later deadline, any larger numeric bound, or
    any money change other than a lower ceiling in the same currency
    ("budget widens …").
-3. starts the ledger from the summed consumption of every settled attempt,
-   in every dimension (money and retries included; the deadline is absolute).
+3. starts the ledger from what the execution has consumed: per dimension, the
+   largest cumulative total any settled attempt recorded (money and retries
+   included; the deadline is absolute). Records are never added together,
+   since each already includes the ones before it.
 
-At settlement the claim holder appends its consumption to the record and then
+At settlement the claim holder appends its ledger's cumulative charge to the
+record and then
 deletes the claim; the read-modify-write happens only while holding the
 claim, so it needs no other lock. If either write fails the result is
 `incomplete/recording_failed` with the observed outcome in `detail`, and the
@@ -447,4 +487,11 @@ never-emitted `budget.exhausted` kind was removed. After review 5443104514:
 cannot renew the execution's budget, with admission atomic across processes
 on one local filesystem (§11.1, F7); impossible cache partitions fail closed
 (§7.5) and the provider estimator port was removed (§7.4); every host port is
-a bounded hand-off that leaves no kernel goroutine behind (§4.1).
+a bounded hand-off that leaves no kernel goroutine behind (§4.1). After the
+second adversarial review of PR #510: ledger arithmetic saturates instead of
+wrapping and prices are range-checked (§7.1); kernel-owned ports are checked
+by exact type, not by embeddable marker methods (§4.1); cumulative attempt
+records are no longer summed (§11.1); hand-off IDs are kernel sequences and a
+repeated model tool-call ID is refused (§4.1); a negative usage part makes
+input unknown (§7.5); an expired bound hands nothing over, a closed reply is
+no answer, and hand-off channels must be unbuffered (§4.1).

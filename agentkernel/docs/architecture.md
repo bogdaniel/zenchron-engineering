@@ -173,7 +173,7 @@ sequenceDiagram
 The engine keeps no state across executions. Per execution it holds a `run`
 (transcript, ledger, account, observations); it is discarded when `Execute`
 returns. Durable state exists only where a host supplies it: the event sink
-behind its worker, a file-backed `storage.Artifacts`, the admission
+behind its worker, a `*storage.FileArtifacts`, the admission
 `storage.FileRecords` (claims and consumption per `execution_id`), and
 `storage.Records` under `memory.Store` or the `intelligence` cache. Storage roots are always explicit absolute paths; nothing
 assumes the parent checkout.

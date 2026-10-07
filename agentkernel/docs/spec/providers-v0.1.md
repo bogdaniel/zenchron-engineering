@@ -46,8 +46,11 @@ completes only on `end` without tool calls; `other`, or `tool_use` without
 calls, settles `failed/provider_failed` (execution spec §5). Negative usage
 counts, and an impossible cache partition (`cached_input` or
 `cache_write_input`, alone or together, exceeding `input`), are treated as
-unknown by the engine (`engine.plausibleUsage`, execution spec §7.5);
-adapters themselves pass counts through as decoded.
+unknown by the engine (`engine.plausibleUsage`, execution spec §7.5; a
+negative input or cache part makes input and both parts unknown). Adapters
+pass counts through as decoded, except where they sum parts into `input`
+(`anthropic`): a negative summand or an overflowing sum makes `input` and
+both cache parts unknown there.
 
 ## 2. Shared wire mechanics (`providers/internal/wire`)
 
@@ -132,7 +135,9 @@ execution transcript. Stop: `end_turn` → `end`; `tool_use` → `tool_use`;
 
 Usage: the API's `input_tokens`, `cache_read_input_tokens` and
 `cache_creation_input_tokens` are additive, so `input` is their sum (absent
-cache fields add nothing); `cached_input` = cache reads; `cache_write_input` =
+cache fields add nothing; a negative summand or a sum past `int64` makes
+`input`, `cached_input` and `cache_write_input` unknown); `cached_input` =
+cache reads; `cache_write_input` =
 cache creation, but **unknown** when `cache_creation.ephemeral_1h_input_tokens
 > 0`, because 1-hour writes bill at a rate one rate card cannot express.
 `cached_input > 0` adds a `SessionObservation`.

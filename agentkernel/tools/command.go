@@ -19,8 +19,8 @@ import (
 // handing a CommandCall to runner (api.ServeCommands). The full output is
 // always recorded as an artifact.
 func NewCommand(runner chan<- api.CommandCall, dir string) (Tool, error) {
-	if runner == nil {
-		return nil, errors.New("command tool needs a command runner channel")
+	if runner == nil || cap(runner) != 0 {
+		return nil, errors.New("command tool needs an unbuffered command runner channel")
 	}
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
 		return nil, fmt.Errorf("command dir %q must be a clean absolute path", dir)

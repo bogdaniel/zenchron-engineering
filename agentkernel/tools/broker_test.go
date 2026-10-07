@@ -10,26 +10,19 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 )
 
-type schemaTool struct {
-	fakeTool
-	schema string
-}
-
-func (s *schemaTool) Spec() api.ToolSpec {
-	return api.ToolSpec{Name: s.name, InputSchema: json.RawMessage(s.schema)}
-}
-
 func TestNewBrokerRefusesInvalidRegistrations(t *testing.T) {
-	read := func(name string) Tool { return &fakeTool{name: name, kind: api.CapabilityFileRead} }
+	read := func(name string) Tool { return fakeTool(name, api.CapabilityFileRead, api.ToolResult{}, nil) }
 	schema := func(s string) Tool {
-		return &schemaTool{fakeTool: fakeTool{name: "s", kind: api.CapabilityFileRead}, schema: s}
+		t := fakeTool("s", api.CapabilityFileRead, api.ToolResult{}, nil).(*tool)
+		t.spec.InputSchema = json.RawMessage(s)
+		return t
 	}
 	cases := map[string][]Tool{
 		"duplicate":    {read("a"), read("a")},
 		"invalid name": {read("bad name")},
 		"dotted name":  {read("a.b")},
 		"nil":          {nil},
-		"unknown kind": {&fakeTool{name: "x", kind: "net.fetch"}},
+		"unknown kind": {fakeTool("x", "net.fetch", api.ToolResult{}, nil)},
 		"open schema":  {schema(`{"type":"object","additionalProperties":true,"properties":{}}`)},
 		"unenforced keyword": {schema(
 			`{"type":"object","additionalProperties":false,"properties":{"p":{"type":"string","pattern":"x"}}}`)},
@@ -124,9 +117,9 @@ func TestOutputBoundKeepsErrorExitCodeAndExactArtifact(t *testing.T) {
 	f := newFixture(t, nil)
 	code := 3
 	full := strings.Repeat("é-line\n", 100)
-	tool := &fakeTool{name: "noisy", kind: api.CapabilityFileRead, result: api.ToolResult{
+	tool := fakeTool("noisy", api.CapabilityFileRead, api.ToolResult{
 		Status: api.ToolError, Output: full, Error: "boom", ExitCode: &code,
-	}}
+	}, nil)
 	b, err := NewBroker(tool)
 	if err != nil {
 		t.Fatal(err)
@@ -156,10 +149,8 @@ func TestRecordingFailureIsExplicit(t *testing.T) {
 	big := strings.Repeat("x", 100)
 	env := Env{Grants: []api.Capability{grant("w", api.CapabilityFileWrite, ".")}, Mode: api.ModeReadWrite,
 		Artifacts: failingStore{}, Producer: "p", OutputLimit: 10}
-	mutator := &fakeTool{name: "mutator", kind: api.CapabilityFileWrite,
-		result: api.ToolResult{Status: api.ToolOK, Output: big, Mutated: true}}
-	reader := &fakeTool{name: "reader", kind: api.CapabilityFileRead,
-		result: api.ToolResult{Status: api.ToolOK, Output: big}}
+	mutator := fakeTool("mutator", api.CapabilityFileWrite, api.ToolResult{Status: api.ToolOK, Output: big, Mutated: true}, nil)
+	reader := fakeTool("reader", api.CapabilityFileRead, api.ToolResult{Status: api.ToolOK, Output: big}, nil)
 	b, err := NewBroker(mutator, reader)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +167,7 @@ func TestRecordingFailureIsExplicit(t *testing.T) {
 }
 
 func TestToolErrorOnMutatingKindIsUnknownOutcome(t *testing.T) {
-	tool := &fakeTool{name: "w", kind: api.CapabilityFileWrite, err: context.DeadlineExceeded}
+	tool := fakeTool("w", api.CapabilityFileWrite, api.ToolResult{}, context.DeadlineExceeded)
 	b, err := NewBroker(tool)
 	if err != nil {
 		t.Fatal(err)

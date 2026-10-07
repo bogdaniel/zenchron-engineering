@@ -26,10 +26,30 @@ type admissionRecord struct {
 	Attempts []attemptRecord `json:"attempts"`
 }
 
-// attemptRecord is one settled attempt and the ledger charge it settled with.
+// attemptRecord is one settled attempt and the ledger charge it settled
+// with. Consumed is cumulative: the execution's whole charge through this
+// attempt, earlier attempts included (the ledger starts from them).
 type attemptRecord struct {
 	AttemptID string                        `json:"attempt_id"`
 	Consumed  map[api.BudgetDimension]int64 `json:"consumed,omitempty"`
+}
+
+// consumed is what the execution has consumed so far: per dimension, the
+// largest cumulative charge any attempt settled with. Records are never
+// added together; each already includes the ones before it. A negative
+// charge is corrupt and stays, so ledger.restore treats it as exhausted.
+func (rec admissionRecord) consumed() map[api.BudgetDimension]int64 {
+	out := map[api.BudgetDimension]int64{}
+	for _, a := range rec.Attempts {
+		for d, n := range a.Consumed {
+			prev, seen := out[d]
+			if seen && (prev < 0 || (n >= 0 && n <= prev)) {
+				continue
+			}
+			out[d] = n
+		}
+	}
+	return out
 }
 
 // admit decides, before any side effect, whether this attempt may run.
@@ -58,13 +78,7 @@ func (r *run) admit(ctx context.Context) (api.Termination, bool) {
 	if reason := admissionRefusal(rec, r.req); reason != "" {
 		return r.releaseClaim(ctx, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason)), false
 	}
-	prior := map[api.BudgetDimension]int64{}
-	for _, a := range rec.Attempts {
-		for d, n := range a.Consumed {
-			prior[d] += n
-		}
-	}
-	r.ledger.restore(prior)
+	r.ledger.restore(rec.consumed())
 	r.admitted = true
 	return api.Termination{}, true
 }

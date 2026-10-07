@@ -178,7 +178,6 @@ func (t *tool) Spec() api.ToolSpec                                             {
 func (t *tool) Kind() api.CapabilityKind                                       { return t.kind }
 func (t *tool) Scope(args json.RawMessage) (Scope, error)                      { return t.scope(args) }
 func (t *tool) Invoke(c context.Context, i Invocation) (api.ToolResult, error) { return t.invoke(c, i) }
-func (t *tool) kernelOwned()                                                   {}
 
 func pathScope(args json.RawMessage) (Scope, error) {
 	var a struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,5 +114,49 @@ func TestExchangeShortenedByCancellation(t *testing.T) {
 		if !errors.Is(err, ErrNoAnswer) || time.Since(start) > grace+time.Second {
 			t.Fatalf("grace %s: err %v after %s", grace, err, time.Since(start))
 		}
+	}
+}
+
+// TestExpiredBoundHandsNothingOver: a bound already over when Exchange starts
+// (its time passed, or Shorten closed with no grace) hands nothing over, even
+// to a ready worker; select alone would pick the send at random.
+func TestExpiredBoundHandsNothingOver(t *testing.T) {
+	calls := make(chan api.Call[int, int])
+	var taken atomic.Int64
+	go func() {
+		for c := range calls {
+			taken.Add(1)
+			c.Reply <- 1
+		}
+	}()
+	cancelled := make(chan struct{})
+	close(cancelled)
+	for i := range 200 {
+		b := Bound{Shorten: cancelled}
+		if i%2 == 1 {
+			b = Bound{Until: time.Now().Add(-time.Millisecond)}
+		}
+		if _, err := Exchange("x", calls, api.Call[int, int]{ID: "id", Context: context.Background()}, b); !errors.Is(err, ErrNotTaken) {
+			t.Fatalf("call %d: err %v, want ErrNotTaken", i, err)
+		}
+	}
+	close(calls)
+	if n := taken.Load(); n > 0 {
+		t.Fatalf("%d of 200 calls were handed to the host after the bound had already ended", n)
+	}
+}
+
+// TestClosedReplyIsNoAnswer: a worker that closes Reply instead of answering
+// gave no answer; the zero value a closed channel yields must not be read as
+// one (for an event it would mean "durable").
+func TestClosedReplyIsNoAnswer(t *testing.T) {
+	calls := make(chan api.Call[int, error])
+	go func() {
+		c := <-calls
+		close(c.Reply)
+	}()
+	v, err := Exchange("x", calls, api.Call[int, error]{ID: "id", Context: context.Background()}, Bound{Until: time.Now().Add(5 * time.Second)})
+	if !errors.Is(err, ErrNoAnswer) {
+		t.Fatalf("closed reply read as answer %v (err %v), want ErrNoAnswer", v, err)
 	}
 }

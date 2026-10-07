@@ -22,12 +22,14 @@ const sourceItemLimit = 64
 // Config is everything the engine is built from.
 //
 // Host code is never called on the kernel's goroutine. Every port a host
-// implements is a channel of api.Calls served by host-owned workers
-// (api.ServeEvents, api.ServeContext, api.ServeProvider, api.ServeCommands,
-// tools.ServeTool); the kernel waits on each within a bound and spawns no
-// goroutine. What the kernel calls directly is kernel-owned code whose
-// termination it controls: the broker's built-in tools, the artifact and
-// admission stores of package storage, and the api clocks.
+// implements is an unbuffered channel of api.Calls served by host-owned
+// workers (api.ServeEvents, api.ServeContext, api.ServeProvider,
+// api.ServeCommands, tools.ServeTool); the kernel waits on each within a
+// bound and spawns no goroutine. What the kernel calls directly is
+// kernel-owned code whose termination it controls, and New accepts only
+// those exact concrete types, so a host type embedding one is refused: the
+// broker's tools (package tools), a *storage.MemoryArtifacts or
+// *storage.FileArtifacts, and an api.SystemClock or *api.ManualClock.
 type Config struct {
 	// Providers are hand-off channels keyed by ProviderBinding.ID. Routing
 	// chooses among the request's bindings; a chosen binding with no
@@ -35,10 +37,12 @@ type Config struct {
 	Providers map[string]chan<- api.ProviderCall
 	// Broker dispatches tool calls; nil means no tools are offered.
 	Broker *tools.Broker
-	// Artifacts stores tool output; required when Broker is set.
-	Artifacts storage.Artifacts
+	// Artifacts stores tool output; required when Broker is set. Only a
+	// *storage.MemoryArtifacts or *storage.FileArtifacts is accepted.
+	Artifacts api.ArtifactStore
 	Events    chan<- api.EventDelivery
-	Clock     api.Clock
+	// Clock is api.SystemClock or a non-nil *api.ManualClock; nothing else.
+	Clock api.Clock
 	// Sources supply optional context. Their items are always untrusted.
 	Sources []chan<- api.ContextRequest
 	// Observations are optional routing data; StaleAfter is their maximum age
@@ -67,7 +71,7 @@ type Config struct {
 type Engine struct {
 	providers     map[string]chan<- api.ProviderCall
 	broker        *tools.Broker
-	artifacts     storage.Artifacts
+	artifacts     api.ArtifactStore
 	events        chan<- api.EventDelivery
 	clock         api.Clock
 	sources       []chan<- api.ContextRequest
@@ -88,10 +92,8 @@ func New(cfg Config) (*Engine, error) {
 	if len(cfg.Providers) == 0 {
 		return nil, errors.New("engine: at least one provider is required")
 	}
-	for id, p := range cfg.Providers {
-		if p == nil {
-			return nil, fmt.Errorf("engine: provider %q is nil", id)
-		}
+	if err := checkPorts(cfg); err != nil {
+		return nil, err
 	}
 	if cfg.Broker != nil && (cfg.Artifacts == nil || cfg.OutputLimit <= 0) {
 		return nil, errors.New("engine: a broker needs an artifact store and a positive output limit")
@@ -107,16 +109,54 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Admissions != nil {
 		admissions = cfg.Admissions
 	}
-	for i, s := range cfg.Sources {
-		if s == nil {
-			return nil, fmt.Errorf("engine: source %d is nil", i)
-		}
-	}
 	return &Engine{
 		providers: cfg.Providers, broker: cfg.Broker, artifacts: cfg.Artifacts, events: cfg.Events,
 		clock: cfg.Clock, sources: cfg.Sources, observations: cfg.Observations, staleAfter: cfg.StaleAfter,
 		outputLimit: cfg.OutputLimit, admissions: admissions, settleTimeout: settle,
 	}, nil
+}
+
+// checkPorts refuses a hand-off channel that is nil or buffered (a buffered
+// send is not a worker taking the call, so ErrNotTaken could no longer mean
+// "the host never saw it"), and any clock or artifact store that is not the
+// kernel's own concrete type: the engine calls those synchronously.
+func checkPorts(cfg Config) error {
+	for id, p := range cfg.Providers {
+		if p == nil || cap(p) != 0 {
+			return fmt.Errorf("engine: provider %q must be a non-nil unbuffered channel", id)
+		}
+	}
+	if cap(cfg.Events) != 0 {
+		return errors.New("engine: events must be an unbuffered channel")
+	}
+	for i, s := range cfg.Sources {
+		if s == nil || cap(s) != 0 {
+			return fmt.Errorf("engine: source %d must be a non-nil unbuffered channel", i)
+		}
+	}
+	switch c := cfg.Clock.(type) {
+	case api.SystemClock:
+	case *api.ManualClock:
+		if c == nil {
+			return errors.New("engine: clock is a nil *api.ManualClock")
+		}
+	default:
+		return fmt.Errorf("engine: clock %T is not api.SystemClock or *api.ManualClock", cfg.Clock)
+	}
+	switch a := cfg.Artifacts.(type) {
+	case nil:
+	case *storage.MemoryArtifacts:
+		if a == nil {
+			return errors.New("engine: artifacts is a nil *storage.MemoryArtifacts")
+		}
+	case *storage.FileArtifacts:
+		if a == nil {
+			return errors.New("engine: artifacts is a nil *storage.FileArtifacts")
+		}
+	default:
+		return fmt.Errorf("engine: artifacts %T is not a store of package storage", cfg.Artifacts)
+	}
+	return nil
 }
 
 // Execute runs one bounded execution. The error is always nil: every request

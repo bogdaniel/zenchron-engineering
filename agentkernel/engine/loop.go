@@ -212,13 +212,19 @@ func asProviderError(err error) *api.ProviderError {
 
 // plausibleUsage drops implausible reported counts to unknown, so they can
 // neither credit the ledger nor price a call below its worst case. A negative
-// count is unknown. Cached and cache-write input are parts of input: when
-// input is reported and a part exceeds it, or the known parts together do,
-// the partition is impossible and input and both parts become unknown.
+// count is unknown. Cached and cache-write input are parts of input, so a
+// negative input or part makes input and both parts unknown (an adapter may
+// have folded the negative part into input already). When input is reported
+// and a part exceeds it, or the known parts together do, the partition is
+// impossible and input and both parts become unknown too.
 func plausibleUsage(u api.TokenUsage) api.TokenUsage {
-	for _, c := range []**int64{&u.Input, &u.Output, &u.CachedInput, &u.CacheWriteInput} {
-		if *c != nil && **c < 0 {
-			*c = nil
+	if u.Output != nil && *u.Output < 0 {
+		u.Output = nil
+	}
+	for _, c := range []*int64{u.Input, u.CachedInput, u.CacheWriteInput} {
+		if c != nil && *c < 0 {
+			u.Input, u.CachedInput, u.CacheWriteInput = nil, nil, nil
+			return u
 		}
 	}
 	if u.Input == nil {

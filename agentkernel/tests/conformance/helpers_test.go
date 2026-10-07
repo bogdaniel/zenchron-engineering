@@ -114,13 +114,13 @@ type kernel struct {
 	engine    *engine.Engine
 	sink      *sink
 	dir       string
-	artifacts storage.Artifacts
+	artifacts api.ArtifactStore
 }
 
 type config struct {
 	providers  map[string]api.Provider
 	sources    []api.ContextSource
-	artifacts  storage.Artifacts
+	artifacts  api.ArtifactStore
 	extra      []tools.Tool
 	admissions *storage.FileRecords
 }

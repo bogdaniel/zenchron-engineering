@@ -171,8 +171,9 @@ digest for that comparison.
 the write precondition) and `lines a-b of n`, then the requested 1-based
 inclusive range. `search` takes a literal or RE2 pattern of 1–1024 bytes, walks
 regular files under one path, refusing a path that crosses a symlink (step 6)
-and never following a symlink, entering a `.git` directory or reading a
-hard-linked file below it; it skips binary (NUL),
+and never following a symlink, entering a `.git` directory, reading a `.git`
+file (a submodule or worktree's `gitdir:` pointer; any entry named `.git`,
+case-insensitively, is skipped) or reading a hard-linked file below it; it skips binary (NUL),
 unreadable and oversized files, echoes at most 300 bytes per line and stops at
 1000 hits, stating that the result is incomplete.
 
@@ -208,8 +209,10 @@ also on failure if parent directories were created.
 argv and timeout come solely from the matching `CommandGrant`, and the process
 runs in `dir` (a clean absolute path fixed at construction) through the
 host's process boundary, reached only by a bounded hand-off to a host worker
-(`api.ServeCommands(ctx, runner)`; execution spec §4.1). The call's ID is its
-producer. The kernel never spawns, contains or reaps a process, and never
+(`api.ServeCommands(ctx, runner)`; execution spec §4.1). `runner` must be
+unbuffered (`NewCommand` refuses `cap != 0`). The call's ID is its producer,
+a kernel sequence (`<execution>/<attempt>/tool-<n>`), never the model's
+tool-call ID. The kernel never spawns, contains or reaps a process, and never
 calls a `CommandRunner` on its own goroutine.
 
 - A command the worker never takes before the run context ends did not run:
@@ -225,8 +228,9 @@ calls a `CommandRunner` on its own goroutine.
 
 ## 5.1 Host tools (`tools.NewHostTool`)
 
-`tools.Tool` is sealed: only package `tools` implements it, so the broker
-never calls host code directly. A host's own tool is
+`tools.NewBroker` accepts only package `tools`' own concrete tool type: a
+host type implementing `tools.Tool`, or embedding a kernel tool and overriding
+a method, is refused, so the broker never calls host code directly. A host's own tool is
 `tools.NewHostTool(HostTool{Spec, Kind, PathArgument, Calls})`: `Kind` is a
 file capability kind; `PathArgument` names the string argument holding the
 one workspace-relative path a call touches, from which the broker selects the
@@ -266,7 +270,8 @@ kinds. The macro's inner dispatch is forced `read_only`.
 
 `api.ArtifactRef{digest, size, media_type, producer}`. Tool output artifacts
 use media type `text/plain; charset=utf-8` and producer
-`<execution_id>/<attempt_id>/<call_id>` (engine-assigned). The engine wraps the
+`<execution_id>/<attempt_id>/tool-<n>` (engine-assigned; `n` numbers the
+attempt's dispatched tool calls, never taken from the model's tool-call ID). The engine wraps the
 host store in `meteredStore`: it reserves artifact bytes before each `Put`
 (refusal settles `exhausted/artifact_bytes`), refunds on `Put` failure,
 appends every stored ref to the result, and emits `artifact.recorded`.
@@ -292,8 +297,9 @@ Stores (`storage`):
   `storage.ErrExists`, and no reader sees a partial value
   (`TestPutIfAbsentAdmitsExactlyOne`). It backs admission claims (execution
   spec §11.1).
-- `engine.Config.Artifacts` takes a `storage.Artifacts`, which only this
-  package implements: the kernel calls its artifact store synchronously.
+- `engine.New` accepts as `Config.Artifacts` only a `*storage.MemoryArtifacts`
+  or `*storage.FileArtifacts`, by exact type (a host type embedding one is
+  refused): the kernel calls its artifact store synchronously.
 - `FileArtifacts.Put` counts an existing file for the same key as stored only
   if it verifies; a corrupt copy is rewritten in place.
 - Capacity accounting. An artifact store's capacity bound applies to the

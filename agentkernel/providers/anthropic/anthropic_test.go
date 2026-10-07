@@ -191,3 +191,25 @@ func testRequest(extra []api.Message) api.ProviderRequest {
 	return api.ProviderRequest{Binding: api.ProviderBinding{ID: "b", Model: "m", CredentialHandle: conformance.CredentialHandle},
 		Messages: msgs, MaxOutputTokens: 8}
 }
+
+// TestNegativeOrOverflowingUsagePartMakesInputUnknown: input is the sum of
+// input_tokens and both cache parts; a negative summand or an overflowing
+// sum makes input and the parts unknown rather than an understated count.
+func TestNegativeOrOverflowingUsagePartMakesInputUnknown(t *testing.T) {
+	for name, body := range map[string]string{
+		"negative_cache_read":  `{"usage":{"input_tokens":100000,"output_tokens":1,"cache_read_input_tokens":-99990,"cache_creation_input_tokens":0}}`,
+		"negative_cache_write": `{"usage":{"input_tokens":100000,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":-5}}`,
+		"negative_input":       `{"usage":{"input_tokens":-1,"output_tokens":1,"cache_read_input_tokens":10,"cache_creation_input_tokens":0}}`,
+		"overflowing_sum":      `{"usage":{"input_tokens":9223372036854775807,"output_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":0}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var r response
+			if err := json.Unmarshal([]byte(body), &r); err != nil {
+				t.Fatal(err)
+			}
+			if u := usage(r); u.Input != nil || u.CachedInput != nil || u.CacheWriteInput != nil {
+				t.Fatalf("usage %+v; want input and both cache parts unknown", u)
+			}
+		})
+	}
+}

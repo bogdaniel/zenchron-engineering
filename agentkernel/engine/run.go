@@ -38,6 +38,11 @@ type run struct {
 	admitted bool
 	// providerCalls numbers provider hand-offs, for their call IDs.
 	providerCalls int
+	// dispatched numbers dispatched tool calls, for their hand-off IDs and
+	// artifact producers; toolCallIDs holds the model's tool-call IDs seen
+	// so far, so a repeated one is refused (both are loop-goroutine only).
+	dispatched  int
+	toolCallIDs map[string]bool
 
 	routing    *api.RoutingDecision
 	manifest   *api.ContextManifest
@@ -48,7 +53,7 @@ type run struct {
 func newRun(e *Engine, parent context.Context, req api.ExecutionRequest) *run {
 	return &run{
 		e: e, req: req, parent: parent, ledger: newLedger(req.Budget),
-		acct: account{costKnown: true},
+		acct: account{costKnown: true}, toolCallIDs: map[string]bool{},
 		provenance: api.Provenance{
 			KernelVersion:     api.KernelVersion,
 			WorkspaceID:       req.Workspace.ID,

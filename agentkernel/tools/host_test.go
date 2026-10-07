@@ -80,11 +80,7 @@ func TestHostToolHandOff(t *testing.T) {
 			b := hostTool(t, c.kind, serve[HostInvocation](t, c.worker, ok))
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			start := time.Now()
-			res, err := b.Dispatch(ctx, call("host_op", `{"doc":"docs/a.txt"}`), f.env(api.ModeReadWrite, grant("g", c.kind, "docs")))
-			if time.Since(start) > 2*time.Second {
-				t.Fatalf("dispatch outlived its context by %s", time.Since(start))
-			}
+			res, err := dispatchWithin(t, b, ctx, call("host_op", `{"doc":"docs/a.txt"}`), f.env(api.ModeReadWrite, grant("g", c.kind, "docs")))
 			if res.Status != c.status || (err != nil) != c.unknown || !strings.Contains(res.Error, c.errorText) {
 				t.Fatalf("result %+v, err %v", res, err)
 			}
@@ -114,10 +110,57 @@ func TestCommandHandOff(t *testing.T) {
 			_, env, _ := commandFixture(t, &fakeRunner{})
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			res, err := b.Dispatch(ctx, call("run_command", `{"command":"unit"}`), env)
+			res, err := dispatchWithin(t, b, ctx, call("run_command", `{"command":"unit"}`), env)
 			if res.Status != api.ToolError || res.Mutated != c.mutated || (err != nil) != c.mutated {
 				t.Fatalf("result %+v, err %v", res, err)
 			}
 		})
+	}
+}
+
+// dispatchWithin runs Dispatch and fails fast, instead of at the test binary
+// timeout, if the hand-off is not bounded by ctx (a 100ms context here).
+func dispatchWithin(t *testing.T, b *Broker, ctx context.Context, c api.ToolCall, env Env) (api.ToolResult, error) {
+	t.Helper()
+	type outcome struct {
+		res api.ToolResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := b.Dispatch(ctx, c, env)
+		done <- outcome{res, err}
+	}()
+	select {
+	case o := <-done:
+		return o.res, o.err
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dispatch still waiting 2s after its context ended: the hand-off is not bounded by the call's context")
+	}
+	return api.ToolResult{}, nil
+}
+
+// embeddedTool is a host type that would pass as a Tool by embedding one and
+// overriding Invoke with host code.
+type embeddedTool struct{ Tool }
+
+func (embeddedTool) Invoke(context.Context, Invocation) (api.ToolResult, error) { select {} }
+
+// TestConstructorsRefuseHostCode: the broker runs only tools this package
+// built, never a host type embedding one; host hand-off channels must be
+// unbuffered, so a call no worker took was seen by no host.
+func TestConstructorsRefuseHostCode(t *testing.T) {
+	f := newFixture(t, nil)
+	if _, err := NewBroker(embeddedTool{f.ws.ReadFile()}); err == nil {
+		t.Fatal("NewBroker accepted a host type embedding a kernel tool")
+	}
+	spec := api.ToolSpec{Name: "host_op", Description: "test", InputSchema: json.RawMessage(
+		`{"type":"object","additionalProperties":false,"required":["doc"],"properties":{"doc":{"type":"string"}}}`)}
+	if _, err := NewHostTool(HostTool{Spec: spec, Kind: api.CapabilityFileRead, PathArgument: "doc",
+		Calls: make(chan HostToolCall, 1)}); err == nil {
+		t.Fatal("NewHostTool accepted a buffered calls channel")
+	}
+	if _, err := NewCommand(make(chan api.CommandCall, 1), "/work/space"); err == nil {
+		t.Fatal("NewCommand accepted a buffered runner channel")
 	}
 }

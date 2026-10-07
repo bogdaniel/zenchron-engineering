@@ -123,27 +123,16 @@ func sameDigests(t *testing.T, before, after map[string]string) {
 }
 
 // fakeTool returns a fixed result; it lets broker tests control output,
-// errors and mutation without touching a filesystem.
-type fakeTool struct {
-	name    string
-	kind    api.CapabilityKind
-	result  api.ToolResult
-	err     error
-	invoked int
-}
-
-func (f *fakeTool) Spec() api.ToolSpec {
-	return api.ToolSpec{Name: f.name, InputSchema: json.RawMessage(
-		`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}`)}
-}
-func (f *fakeTool) Kind() api.CapabilityKind { return f.kind }
-func (f *fakeTool) kernelOwned()             {}
-func (f *fakeTool) Scope(args json.RawMessage) (Scope, error) {
-	return pathScope(args)
-}
-func (f *fakeTool) Invoke(context.Context, Invocation) (api.ToolResult, error) {
-	f.invoked++
-	return f.result, f.err
+// errors and mutation without touching a filesystem. It is built as this
+// package's own tool type, the only one NewBroker accepts.
+func fakeTool(name string, kind api.CapabilityKind, result api.ToolResult, err error) Tool {
+	return &tool{
+		spec: api.ToolSpec{Name: name, InputSchema: json.RawMessage(
+			`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"}}}`)},
+		kind:   kind,
+		scope:  pathScope,
+		invoke: func(context.Context, Invocation) (api.ToolResult, error) { return result, err },
+	}
 }
 
 // failingStore refuses every Put, as a full or broken artifact store would.

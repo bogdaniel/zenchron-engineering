@@ -44,15 +44,26 @@ func (r *run) toolRound(ctx context.Context, calls []api.ToolCall) ([]api.Messag
 	return results, api.Termination{}, true
 }
 
+// dispatch runs one proposal through the broker. Its hand-off ID and
+// artifact producer are a kernel sequence ("<execution>/<attempt>/tool-<n>"),
+// never the model's tool-call ID, which is model output: it could repeat or
+// mimic another port's ID. A proposal repeating an earlier tool-call ID of
+// this attempt is refused back to the model and never dispatched.
 func (r *run) dispatch(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	if r.e.broker == nil {
 		return api.ToolResult{CallID: call.ID, Status: api.ToolRefused, Error: "no tools are available in this execution"}, nil
 	}
+	if r.toolCallIDs[call.ID] {
+		return api.ToolResult{CallID: call.ID, Status: api.ToolRefused,
+			Error: fmt.Sprintf("tool call id %q repeats an earlier call of this execution; not run", call.ID)}, nil
+	}
+	r.toolCallIDs[call.ID] = true
+	r.dispatched++
 	return r.e.broker.Dispatch(ctx, call, tools.Env{
 		Grants:      r.req.Grants,
 		Mode:        r.req.Mode,
 		Artifacts:   &meteredStore{inner: r.e.artifacts, r: r},
-		Producer:    r.req.ExecutionID + "/" + r.req.AttemptID + "/" + call.ID,
+		Producer:    fmt.Sprintf("%s/%s/tool-%d", r.req.ExecutionID, r.req.AttemptID, r.dispatched),
 		OutputLimit: r.e.outputLimit,
 		StepBudget:  r.chargeStep,
 	})

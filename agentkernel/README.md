@@ -109,9 +109,12 @@ res, _ := eng.Execute(ctx, api.ExecutionRequest{
 
 `sink` implements `api.EventSink`. Events and a clock are required, nothing is
 defaulted. Every host port (sink, providers, context sources, command runner,
-host tools) is a channel served by a worker goroutine the host starts and
-stops; the kernel only hands calls over and waits a bounded time (execution
-spec §4.1).
+host tools) is an unbuffered channel served by a worker goroutine the host
+starts and stops (the `Serve*` helpers return one; a buffered channel is
+refused); the kernel only hands calls over, under kernel-generated IDs, and
+waits a bounded time. What the kernel calls directly (clock, artifact store,
+broker tools) must be the kernel's own concrete type: a host type embedding
+one is refused at construction (execution spec §1, §4.1).
 
 ## Limitations
 

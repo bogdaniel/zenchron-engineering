@@ -27,10 +27,14 @@ first.
 
 The bounded execution path never synchronously runs host-owned code whose
 termination the kernel cannot enforce. A host port is a channel of
-`api.Call`s served by host-owned workers and waited on through
-`internal/handoff.Exchange` (bounded, no goroutine); a type the engine calls
-directly must be kernel-owned and sealed (`tools.Tool`, `storage.Artifacts`,
-`api.Clock`). Never add an interface field to `engine.Config` that a host can
+`api.Call`s, always unbuffered (constructors refuse `cap != 0`), served by
+host-owned workers and waited on through `internal/handoff.Exchange`
+(bounded, no goroutine); a type the engine calls directly must be kernel-owned
+and checked by exact concrete type at construction (`tools.NewBroker`: the
+package's own tool type; `engine.New`: `*storage.MemoryArtifacts` /
+`*storage.FileArtifacts`, `api.SystemClock` / `*api.ManualClock`). Never seal
+with an unexported marker method: a host type embedding a kernel type
+inherits it. Hand-off IDs are kernel-generated, never model output. Never add an interface field to `engine.Config` that a host can
 implement. Execution spec §4.1 is the list.
 
 ## No-authority rule

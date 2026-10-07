@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
@@ -59,12 +60,13 @@ func (l *ledger) reserve(amounts ...amount) (api.BudgetDimension, error) {
 			return a.dim, errNegativeAmount
 		}
 		limit, bounded := l.limits[a.dim]
-		if bounded && l.used[a.dim]+a.n > limit {
+		// Compared by subtraction: used+n could wrap past the limit.
+		if bounded && a.n > limit-l.used[a.dim] {
 			return a.dim, errOverLimit
 		}
 	}
 	for _, a := range amounts {
-		l.used[a.dim] += a.n
+		l.used[a.dim] = charge(l.used[a.dim], a.n)
 	}
 	return "", nil
 }
@@ -81,12 +83,16 @@ func (l *ledger) consumed() map[api.BudgetDimension]int64 {
 }
 
 // restore charges what earlier attempts of the same execution consumed. It
-// runs once, at admission, before any reservation.
+// runs once, at admission, before any reservation. A negative prior is a
+// corrupt record: unknown, so the dimension is charged as exhausted.
 func (l *ledger) restore(prior map[api.BudgetDimension]int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for d, n := range prior {
-		l.used[d] += n
+		if n < 0 {
+			n = math.MaxInt64
+		}
+		l.used[d] = charge(l.used[d], n)
 	}
 }
 
@@ -97,7 +103,19 @@ func (l *ledger) restore(prior map[api.BudgetDimension]int64) {
 func (l *ledger) settle(dim api.BudgetDimension, reserved, actual int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.used[dim] += actual - reserved
+	l.used[dim] = charge(l.used[dim], actual-reserved)
+}
+
+// charge adds n to used without wrapping. A sum past MaxInt64 saturates
+// there, and a saturated dimension stays saturated: its true charge is
+// unknown, so nothing (a later release included) may lower it below the
+// limit again. Both operands are non-negative except a release (n < 0) of a
+// reservation used already contains, so only the positive side can overflow.
+func charge(used, n int64) int64 {
+	if used == math.MaxInt64 || (n > 0 && used > math.MaxInt64-n) {
+		return math.MaxInt64
+	}
+	return used + n
 }
 
 // remaining is the unreserved allowance of a bounded dimension, never negative.

@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 )
 
 // ErrNotFound reports an absent record or artifact.
@@ -49,17 +47,6 @@ type Records interface {
 	List(ctx context.Context, partition string) ([]string, error)
 	Delete(ctx context.Context, partition, key string) error
 }
-
-// Artifacts is an artifact store this package implements. engine.Config
-// takes only these: the kernel calls its artifact store synchronously, so it
-// must be code whose termination the kernel itself controls.
-type Artifacts interface {
-	api.ArtifactStore
-	kernelOwned()
-}
-
-func (*MemoryArtifacts) kernelOwned() {}
-func (*FileArtifacts) kernelOwned()   {}
 
 // prepareRoot validates an explicitly supplied storage root and creates it.
 // Windows is refused rather than half-supported: directory fsync, which the
