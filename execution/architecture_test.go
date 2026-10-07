@@ -118,12 +118,14 @@ func TestExecutionAdaptersImportNoHostPackage(t *testing.T) {
 }
 
 // R3: adapters are chosen at the composition root and nowhere else, and the
-// Agent Execution Kernel module is reached by no package of this one. Gate B
-// (#518, ADR-0006) relaxes the second half to exactly execution/agentkernel.
+// Agent Execution Kernel module is reached by exactly one package of this
+// one, its host adapter execution/agentkernel (#518, ADR-0006), and only
+// through the kernel's public packages.
 func TestOnlyTheCompositionRootImportsAdapters(t *testing.T) {
 	for _, edge := range moduleImports(t) {
-		if within(edge.path, module+"/agentkernel") {
-			t.Errorf("R3: %s imports %q: no package of this module may import the agent kernel", edge.file, edge.path)
+		if within(edge.path, module+"/agentkernel") &&
+			(edge.dir != "execution/agentkernel" || within(edge.path, module+"/agentkernel/internal")) {
+			t.Errorf("R3: %s imports %q: only execution/agentkernel may import the agent kernel's public packages", edge.file, edge.path)
 		}
 		rel, inModule := strings.CutPrefix(edge.path, module+"/")
 		if !inModule || !strings.HasPrefix(rel, "execution/") {
