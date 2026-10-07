@@ -125,6 +125,8 @@ type ExecutionRequest struct {
 	// channel the two paths above are, and the runtime - not the provider -
 	// reads it after a completed invocation; see handoff_slot.go.
 	HandoffPath string
+	// MessagePath and Communication: the #473 message slot and inbox; see communication_slot.go.
+	MessagePath, Communication string
 	// RequiredTools are the executables THIS invocation's contract obliges the
 	// worker to run, derived from the contract's own frozen acceptance
 	// obligations.

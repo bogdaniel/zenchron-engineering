@@ -156,7 +156,8 @@ func TestCompletedWithUnresolvedIsRepairedOnceIntoPartial(t *testing.T) {
 	if entries, err := os.ReadDir(request.CandidateDir); err != nil || len(entries) != 0 {
 		t.Fatalf("the repair's working directory holds %d entries (%v), want an empty one", len(entries), err)
 	}
-	if !request.DenyPermissionBypass || len(request.RequiredTools) != 0 || len(request.Findings) != 0 || request.ScratchDir != "" {
+	if !request.DenyPermissionBypass || len(request.RequiredTools) != 0 || len(request.Findings) != 0 || request.ScratchDir != "" ||
+		request.MessagePath != "" {
 		t.Fatalf("the repair request widened its grant: %+v", request)
 	}
 	if !strings.Contains(request.Objective, "completed and unresolved are different answers") ||

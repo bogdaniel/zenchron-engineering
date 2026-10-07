@@ -172,5 +172,8 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 		}
 		fmt.Fprintf(stdout, "#%-6d %-16s %-38s %-9s %-24s %s\n", item.Issue, state, item.RunID, item.Handoff, location, reason)
 	}
+	for _, decision := range view.OpenDecisions {
+		fmt.Fprintf(stdout, "\nWAITING ON HUMAN DECISION %s from %s: %s\n", decision.ID, decision.Source.Unit, decision.Purpose)
+	}
 	return runtime.ExitCompleted, nil
 }

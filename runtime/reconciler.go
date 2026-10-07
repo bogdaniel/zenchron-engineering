@@ -1884,6 +1884,20 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 	return nil
 }
 
+// cancelStaleLeasedOperation makes the journal authoritative before the scheduler
+// row is terminal. A cancelled row is not reacquired, so reversing this order can
+// strand a permanent cancelled-row/failed-journal disagreement after a crash.
+func (r *EngineeringRuntime) cancelStaleLeasedOperation(state *runState, leased RunOperation) error {
+	cancelled := leased
+	cancelled.State = OperationCancelled
+	cancelled.Lease = nil
+	if err := r.append(state, EventOperationAfter, cancelled.ID, cancelled, nil); err != nil {
+		return err
+	}
+	_, err := r.scheduler.Finish(leased.ID, OperationCancelled)
+	return err
+}
+
 // runOperation acquires exactly one operation through the scheduler, records
 // operation.before, performs the bounded side effect, records the effect's
 // typed events, and records operation.after.
@@ -1981,7 +1995,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		// The scheduler handed back a different eligible operation. It is only
 		// legitimate if the current state still wants exactly that binding.
 		if err := state.validate(desiredOperation{kind: leased.Kind, key: bindingOf(*leased)}, live); err != nil {
-			if _, err := r.scheduler.Finish(leased.ID, OperationCancelled); err != nil {
+			if err := r.cancelStaleLeasedOperation(state, *leased); err != nil {
 				return false, Outcome{}, err
 			}
 			return true, Outcome{}, nil

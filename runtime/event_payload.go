@@ -173,6 +173,7 @@ var eventPayloads = map[string]payloadValidator{
 			positive("attempt", p.Attempt),
 			required("detail", p.Detail))
 	}),
+	EventMessagesObserved: payloadSchema(validateMessagesObserved),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),

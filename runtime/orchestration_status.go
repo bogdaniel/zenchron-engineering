@@ -26,6 +26,9 @@ type OrchestrationView struct {
 	// repairs (#492) that were started, and how many of those were repaired.
 	HandoffRepairs HandoffRepairCounts     `json:"handoff_repairs"`
 	Items          []OrchestrationItemView `json:"items"`
+	// OpenDecisions are the batch's live DecisionRequests (#473): each is a
+	// typed wait on human or designated authority that no worker can answer.
+	OpenDecisions []orchestration.EngineeringMessage `json:"open_decisions,omitempty"`
 }
 
 // HandoffRepairCounts is the batch aggregate of handoff protocol repairs.
@@ -103,6 +106,11 @@ func OrchestrationStatus(store *SQLiteOperationStore, stateDir, batchID string, 
 		}
 		view.Items = append(view.Items, projected)
 	}
+	messages, err := queryScopeMessages(tx, batch.ID)
+	if err != nil {
+		return OrchestrationView{}, err
+	}
+	view.OpenDecisions = orchestration.OpenDecisions(messages)
 	if err := tx.Commit(); err != nil {
 		return OrchestrationView{}, err
 	}

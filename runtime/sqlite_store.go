@@ -439,6 +439,35 @@ CREATE TABLE verification_permits (
 	revision INTEGER NOT NULL,
 	document TEXT NOT NULL
 );
+`, `
+-- Typed inter-worker communication (#473). Insert-only, like the handoffs: a
+-- message is immutable once admitted, and a correction is a NEW row naming
+-- the one it supersedes. The partial unique index is the "superseded at most
+-- once" rule, so history stays a chain rather than a fork. seq is admission
+-- order, which is the order every projection reads.
+CREATE TABLE orchestration_messages (
+	seq                INTEGER PRIMARY KEY,
+	id                 TEXT NOT NULL UNIQUE,
+	scope              TEXT NOT NULL,
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	operation_id       TEXT NOT NULL,
+	attempt            INTEGER NOT NULL,
+	supersedes         TEXT,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_messages_by_scope ON orchestration_messages(scope, seq);
+CREATE UNIQUE INDEX orchestration_messages_supersedes ON orchestration_messages(supersedes) WHERE supersedes IS NOT NULL;
+-- An invocation's message report the runtime decided it can never admit,
+-- keyed by the invocation, so it is settled once.
+CREATE TABLE orchestration_message_refusals (
+	id                TEXT PRIMARY KEY,
+	scope             TEXT NOT NULL,
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_message_refusals_by_scope ON orchestration_message_refusals(scope);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

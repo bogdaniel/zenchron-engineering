@@ -843,6 +843,10 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation and only for a run an orchestration batch created. Every
 	// other run is given no path and is unchanged.
 	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
+	var messagePath, communication string // #473, same rule; communication_slot.go
+	if err == nil {
+		messagePath, communication, err = r.prepareMessages(state, operation.ID, physicalAttempt)
+	}
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureUnknown},
@@ -934,6 +938,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
 		HandoffPath:            handoffPath,
+		MessagePath:            messagePath,
+		Communication:          communication,
 		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
@@ -1269,6 +1275,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			if handoffPath != "" {
 				events = append(events, handoffObservation(handoffPath, operation.ID, physicalAttempt))
 			}
+			events = appendMessageObservation(events, messagePath, operation.ID, physicalAttempt)
 		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.

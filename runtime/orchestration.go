@@ -162,6 +162,10 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s issue %d: %v", batch.ID, item.Issue, err)))
 			}
 		}
+		// Messages after handoffs: a Finding names an admitted handoff.
+		if err := admitOrchestratedMessages(s.deps.Store, s.deps.StateDir, batch, now); err != nil {
+			problems = append(problems, boundedDetail(batch.ID+" messages: "+err.Error()))
+		}
 	}
 	return problems
 }
