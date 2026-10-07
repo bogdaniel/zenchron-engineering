@@ -146,12 +146,21 @@ func inspectHandoffRepair(events []EngineeringEvent, operations map[string]RunOp
 		switch repair.State {
 		case Running:
 			target.state = HandoffRepairRunning
-		case Succeeded:
-			var record handoffRepairRecord
+		case Succeeded, OperationFailed:
+			// A repair that FAILED CLOSED (a candidate it could not restore)
+			// is the most serious outcome, and says so; only a cancelled or a
+			// crashed repair reads as interrupted.
+			var record struct {
+				handoffRepairRecord
+				Error string `json:"error"`
+			}
 			if err := json.Unmarshal(repair.Result, &record); err != nil {
 				return handoffRepairTarget{}, fmt.Errorf("handoff repair %s recorded an unreadable result: %w", repair.ID, err)
 			}
 			target.state, target.detail = record.Outcome, record.Detail
+			if repair.State == OperationFailed {
+				target.state, target.detail = HandoffRepairFailed, firstNonEmpty(record.Detail, record.Error)
+			}
 		}
 		return target, nil
 	}

@@ -311,6 +311,35 @@ func TestTheRepairDecisionIsAFunctionOfTheJournal(t *testing.T) {
 	if target, wanted := plan(spent, spent, nil); wanted || target.state != HandoffRepairRunning {
 		t.Fatalf("a controller restarted after the repair started was offered another: %+v", target)
 	}
+	// How a spent repair ended is reported from its own record: one that
+	// failed closed says failed and why; a cancelled or crashed one reads as
+	// interrupted.
+	ended := func(state OperationState, result string) func(map[string]RunOperation) {
+		return func(operations map[string]RunOperation) {
+			for id, op := range operations {
+				if op.Kind == OpHandoffRepair {
+					op.State, op.Result = state, []byte(result)
+					operations[id] = op
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		state  OperationState
+		result string
+		want   string
+		detail string
+	}{
+		{OperationFailed, `{"repair_outcome":"failed","repair_detail":"could not be restored","provider_reached":true,"failure_class":"workspace_integrity"}`, HandoffRepairFailed, "could not be restored"},
+		{OperationFailed, `{"error":"journal unreadable"}`, HandoffRepairFailed, "journal unreadable"},
+		{OperationCancelled, `{"repair_outcome":"failed","repair_detail":"stopped","provider_reached":false}`, HandoffRepairInterrupted, ""},
+		{Leased, ``, HandoffRepairInterrupted, ""},
+	} {
+		target, wanted := plan(spent, spent, ended(tc.state, tc.result))
+		if wanted || target.state != tc.want || target.detail != tc.detail {
+			t.Fatalf("a %s repair reads %q %q (wanted=%t), want %q %q", tc.state, target.state, target.detail, wanted, tc.want, tc.detail)
+		}
+	}
 	moved := append(append([]EngineeringEvent(nil), refused...), EngineeringEvent{
 		Type: EventCandidateBaseIntegrated, RunID: runID, Payload: []byte(`{}`),
 	})
