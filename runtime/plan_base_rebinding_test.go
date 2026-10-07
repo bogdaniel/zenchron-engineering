@@ -3,8 +3,8 @@ package runtime
 // Base rebinding: a plan outlives merges to the default branch.
 //
 // The #119 dogfood ended here. A plan's identity is derived from its repository
-// and its source issue - deliberately, so "two plans for one source" is
-// unrepresentable - and its revision subject is an exact base commit, also
+// and its source issue under unchanged operator configuration (see #131),
+// and its revision subject is an exact base commit, also
 // deliberately, because every candidate, test result and verdict under it is a
 // statement about that exact tree. The cross-revision law compared the WHOLE
 // subject, so the two facts collided: once the repository's trusted base moved,
