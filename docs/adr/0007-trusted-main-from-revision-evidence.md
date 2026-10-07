@@ -1,4 +1,4 @@
-# ADR-0005: Trusted Main Is Derived From Exact-Revision Evidence
+# ADR-0007: Trusted Main Is Derived From Exact-Revision Evidence
 
 - Status: Proposed
 - Date: 2026-10-08
@@ -41,8 +41,11 @@ moves. `controller_succession` admits a successor only when it is the exact
 state of that head.
 
 So "the newest commit on `main`" and "the newest commit that is trusted" are
-the same value by construction. They are the same only because every commit
-had to pass the full suite before it could reach `main`.
+the same value by construction. What justified that was a property of branch
+movement: every merge happened under a ruleset that required a strict green
+`go` on the pull request. It was never an exact-SHA T2 observation of the
+resulting merge commit. Nothing recorded one, and v1 provenance does not carry
+one.
 
 ### Why that collapse now costs throughput
 
@@ -113,11 +116,21 @@ trusted_main = R
   commit, a PR head, or a commit reachable only through a second parent is
   never a candidate. That holds even when that commit is an ancestor of
   `main_head`.
-- **Bounded walk, failing closed.** The walk inspects at most a fixed number of
-  first-parent commits, 100 to start, frozen in `TrustedRevisionPolicy`. If no
-  accepted revision is found within it, there is no trusted main. Adoption then
-  refuses with a typed error that names the bound. It never falls back to
-  `main_head`.
+- **Bounded walk, failing closed.** The walk inspects at most **256**
+  first-parent commits, a value frozen in `TrustedRevisionPolicy`:
+  - `main` gained 117 first-parent commits in the 14 days to 2026-10-08, and 22
+    on its busiest day, so 256 covers more than two weeks of red or pending T2
+    at the observed rate;
+  - a red streak longer than that is an incident to remediate, not a trust
+    question to search further for;
+  - the walk stops at the first accepted revision, so its normal cost is a
+    handful of observations, not 256.
+
+  If no accepted revision is found within the bound, there is no trusted
+  main. A build with no previous trusted main to stand on refuses, with a
+  typed error that names the bound. A running controller enters the §5 hold
+  instead. Neither path ever falls back to `main_head`. Changing the bound
+  changes `TrustedRevisionPolicy`, and so its recorded digest.
 - **Pending and failed are both "not accepted".** The walk skips them. It
   records why it skipped each one, so the answer explains itself (§5).
 - **A later green covers earlier failures.** If C3 fails T2 and C4 passes, C4's
@@ -182,9 +195,23 @@ rules apply:
 - **The producer must be pinned.** A check named `go` from another app, from
   another workflow, or from a pull-request event does not count. Requiring the
   push event on `main` excludes PR merge previews by construction.
-- **The latest completed attempt decides.** A re-run is a new attempt, and its
-  attempt number is recorded. Flakiness is classified separately (see the
-  rollout gate). It is never silently resolved by "any attempt succeeded."
+- **The latest completed attempt decides current eligibility, deterministically.**
+  A re-run is a new attempt of the same check, on the same exact revision.
+  - If its conclusion is success, R is eligible. If it is anything else, R is
+    not.
+  - A pending re-run does not override the latest completed attempt.
+  - "Any attempt succeeded" is not the rule. Neither is "every attempt
+    succeeded".
+  - No human trust-override state exists or is introduced.
+- **Every completed attempt stays observable.** The observation carries every
+  completed attempt's id, number and conclusion, not only the deciding one.
+  When completed attempts on the same revision disagree, R is marked
+  **inconsistent**. That mark does not change eligibility. It is how flakiness
+  becomes visible:
+  - provenance and status show it;
+  - promotion-gate metrics count it as flaky, not as a selector miss;
+  - a later green restores eligibility without erasing the red that came
+    before it.
 
 CI produces evidence and policy authorizes. GitHub Actions is the producer, not
 the trusted-main database. Nothing is stored as "trusted": `trusted_main` is
@@ -205,10 +232,20 @@ source:         {revision, tree}
 containment:    source ⊆ trusted_main
 ```
 
-`adopted-build/1` records stay readable and are never rewritten. Under the old
-policy, `trusted_main` was `main_head`, and every commit on it had passed the
-strict `go` gate. Reading a v1 record as `main_head == trusted_main` is
-therefore exact, not a guess.
+`adopted-build/1` records stay readable and are never rewritten. A v1 record is
+projected faithfully to the old M1-B model, and nothing more:
+
+```text
+main_head      = trusted_main = v1.trusted_main
+trust_root     = v1.trust_root      (including the strict required-go policy it was verified under)
+trust_evidence = legacy             (explicitly absent: no exact-SHA T2 observation was made)
+skipped        = []
+```
+
+The projection must not synthesize a `T2EvidenceObservation`. M1-B's guarantee
+was that the branch moved under a strict required-`go` ruleset. It was not that
+the resulting commit itself had produced T2. The v2 model is deliberately
+stronger on subject binding, and v1 records are not upgraded into claiming it.
 
 ### 5. Trust advances monotonically, and a failure holds trust back without rewriting anything
 
@@ -233,11 +270,42 @@ It does:
 - stay actionable, as remediation work routed through the ordinary
   issue → run path. Nothing new is invented for it.
 
-The controller's `trusted_main` **never moves backwards**. If the resolver
-returns an ancestor of the revision the running controller was adopted from, no
-succession happens and the regression is reported. That case is a re-run
-turning red, or a forge observation that disagrees with an earlier one. A human
-decides what to do with a trust regression. The resolver does not.
+`trusted_main` **never moves backwards**. The monotonic floor is the
+**previous trusted-main fact**, the `trusted_main.revision` recorded in the
+running controller's adopted provenance. It is not the controller's
+`source.revision`:
+
+- an adopted controller may be built from an explicit older source that is
+  contained in a newer trusted main;
+- a resolver answer that is newer than that source, but older than the
+  recorded trusted main, is still a regression.
+
+For a v1 provenance the floor is the projected `trusted_main` above.
+
+The updater compares each resolution with the floor:
+
+```text
+resolved == floor, or a first-parent descendant of it   ordinary: advance or no-op
+resolved is an ancestor of the floor                    regression → HOLD
+no accepted revision within the bound                   → HOLD
+resolved not comparable (floor not on first-parent main) → HOLD
+```
+
+**HOLD** is a visible, degraded updater state with deterministic behaviour:
+
+- **no successor is built or admitted** while it lasts;
+- ordinary engineering service continues: `serve`, scheduling and runs under
+  the current controller are unaffected;
+- `doctor` and controller status report it with the floor, the resolved
+  revision, the reason, and the T2 observations behind it;
+- it **clears automatically** as soon as a resolution reaches the floor or a
+  first-parent descendant of it, for example after a forward commit's T2
+  passes. No acknowledgement step exists.
+
+A human is needed only when monotonic trust cannot be restored that way, for
+example if the floor itself is no longer on `main`'s first-parent chain, which
+branch integrity should make impossible. The resolver never "repairs" trust,
+and the updater never adopts backwards.
 
 ### 6. Evidence staleness: the model now, the implementation later
 
@@ -279,7 +347,8 @@ stage 5  trusted_main resolver + adoption      §1–§5 in runtime, adopted-bui
   ▼
 promotion gate satisfied                       see below
   ▼
-stage 7  ruleset: required PR checks become `evidence` and `evidence-race`;
+stage 7  ruleset: required PR checks become `evidence` (and `evidence-race`,
+         if the open question below resolves that way);
          `go` stops being required (it keeps running on push as T2);
          strict up-to-date stays on
   ▼
@@ -340,8 +409,19 @@ Each is a mutation that an automated test must catch:
 7. a check named `go` from another producer, workflow or event is accepted
    (producer pinning);
 8. `trusted_main` moves backwards and succession proceeds (monotonicity);
-9. `VerifyTrustRoot` still requires `go` (old policy leak), and still refuses
-   bypass, deletion, non-fast-forward or non-merge methods (integrity kept).
+9. the monotonic floor is taken from `source.revision` instead of the recorded
+   `trusted_main.revision`. The test is a controller built from an older
+   source, plus a resolution between that source and its trusted main;
+10. a revision whose latest completed T2 attempt failed is accepted because an
+    earlier attempt passed, or a later passing attempt is not accepted
+    (rerun rule);
+11. disagreeing completed attempts are not marked inconsistent
+    (flakiness visibility);
+12. the v1 projection synthesizes a `T2EvidenceObservation` (legacy honesty);
+13. HOLD does not clear when a forward resolution reaches the floor, or HOLD
+    stops scheduling runs (hold semantics);
+14. `VerifyTrustRoot` still requires `go` (old policy leak), and still refuses
+    bypass, deletion, non-fast-forward or non-merge methods (integrity kept).
 
 #520 already covers the T1-side breaks: registry mapping, unknown fallback,
 T1 invariant, and high-risk escalation. Windows and non-Unix coverage stay in
@@ -367,9 +447,8 @@ T1 invariant, and high-risk escalation. Windows and non-Unix coverage stay in
 
 ## Open questions
 
-- The initial bound of 100 first-parent commits is a guess. Set it from the
-  observed T2 latency and merge rate during shadow.
 - Whether `evidence-race` should be a required PR check at stage 7, or only
-  T2-adjacent. Shadow data on its duration decides.
-- Whether a trust regression (§5) should pause the updater until a human
-  acknowledges it, or only report it.
+  T2-adjacent. This is merge policy, not trust semantics, so stage 5 does not
+  depend on it. Shadow data on its duration decides. The current estimate is
+  2–6 minutes for narrow PRs and 10–20 minutes for wide ones; see
+  `docs/ci-evidence.md`.
