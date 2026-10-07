@@ -21,24 +21,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify formatting
-        run: test -z "$(gofmt -l .)"
-
-      - name: Vet
-        run: go vet ./...
-
-      # A build-tagged file that no CI job compiles rots invisibly:
-      # control_endpoint_other.go referenced an undefined identifier and both
-      # Linux and macOS jobs stayed green, because neither ever selects that
-      # build tag. Compiling for a non-unix target is what makes the refusal
-      # path a checked one.
-      - name: Cross-compile the non-unix build
-        run: GOOS=windows GOARCH=amd64 go build ./...
-
-      # The build above never compiles _test.go files; vet does, so a test
-      # leaning on a Unix-only helper cannot slip in untagged.
-      - name: Vet the non-unix build
-        run: GOOS=windows GOARCH=amd64 go vet ./...
+      - name: Static evidence (T0)
+        run: ci/static.sh
 
       - name: Test
         # The runtime package runs about six minutes and grows with every
@@ -52,3 +36,52 @@ jobs:
         # budget that fails as tests are added, which is the failure being
         # fixed here.
         run: go test -timeout 30m ./...
+
+  # T0 + T1 (#516): static evidence, then the behavioral evidence that
+  # ci/evidence/registry.json selects for what this pull request changed. It
+  # runs beside the full suite above, which stays the required merge gate until
+  # trusted-main adoption no longer reads "every commit on main passed it".
+  evidence:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Static evidence (T0)
+        run: ci/static.sh
+
+      - name: Impact-directed evidence (T1)
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: go run ./ci/evidence -base "$BASE_REF"
+
+  # The -race escalation of high-risk domains the same plan selects. It is a
+  # separate job because it is about four times slower than the plain run.
+  evidence-race:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: High-risk race escalation (T1)
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: go run ./ci/evidence -race -base "$BASE_REF"
