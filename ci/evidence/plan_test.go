@@ -100,6 +100,23 @@ func TestAChangedTestFileSelectsItsWholeDomainAndRacePolicy(t *testing.T) {
 	}
 }
 
+func TestAWholeFallbackEscalatesEveryHighRiskDomain(t *testing.T) {
+	reg, repo := fixture()
+	reg.Whole = []string{"runtime/operations.go"}
+	reg.Domains[1].Race = true // handoff: a second high-risk domain
+	every := []string{"TestControllerCrash", "TestHandoffRepair", "TestShutdown"}
+	for _, p := range []string{"runtime/operations.go", "runtime/brand_new.go", "domain/types.go"} {
+		if got := PlanEvidence(reg, repo, []string{p}); !got.Whole || !slices.Equal(got.Race, every) {
+			t.Errorf("%s: plan = %+v, want whole with every race domain", p, got)
+		}
+	}
+	// A narrow mapped source keeps only its own race domain.
+	got := PlanEvidence(reg, repo, []string{"runtime/controller_succession.go"})
+	if got.Whole || !slices.Equal(got.Race, []string{"TestControllerCrash", "TestShutdown"}) {
+		t.Fatalf("narrow controller change: race = %v", got.Race)
+	}
+}
+
 func TestAHotspotRunsTheWholePackage(t *testing.T) {
 	reg, repo := fixture()
 	// The hotspot is also a controller source: being classified must not

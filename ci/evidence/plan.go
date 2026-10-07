@@ -199,6 +199,15 @@ func PlanEvidence(reg Registry, repo Repo, changed []string) Plan {
 			plan.Reasons = append(plan.Reasons, "whole ./"+reg.FocusedPackage+": "+p+" is outside every package and not declared inert")
 		}
 	}
+	if plan.Whole {
+		// Broad or unknown impact must never carry less race evidence than a
+		// narrow known one: every high-risk domain is escalated.
+		for _, d := range reg.Domains {
+			if d.Race {
+				because[d.Name] = append(because[d.Name], "whole-package fallback escalates every high-risk domain")
+			}
+		}
+	}
 	for _, d := range reg.Domains {
 		reasons, selected := because[d.Name]
 		if !selected {
