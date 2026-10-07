@@ -80,7 +80,7 @@ func TestOrchestrationLifecycleAcceptsRetryLeaseBeforeOperationBefore(t *testing
 }
 
 func TestCancelledRetryStillRequiresMatchingJournalTerminalFact(t *testing.T) {
-	_, dir, runID, store, scheduler, retry := retryLeaseFixture(t)
+	_, runID, store, scheduler, retry := retryLeaseFixture(t)
 	if _, err := scheduler.Finish(retry.ID, OperationCancelled); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestCancelledRetryStillRequiresMatchingJournalTerminalFact(t *testing.T) {
 }
 
 func TestStaleRetryCancellationJournalsBeforeFinishingRow(t *testing.T) {
-	runID, store, scheduler, retry := retryLeaseFixture(t)
+	dir, runID, store, scheduler, retry := retryLeaseFixture(t)
 	run, _, err := store.Run(runID)
 	if err != nil {
 		t.Fatal(err)
