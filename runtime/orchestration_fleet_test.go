@@ -115,7 +115,7 @@ type fleetProvider struct {
 
 func newFleetProvider() *fleetProvider {
 	return &fleetProvider{invocations: map[string]int{}, requests: make(map[string]ExecutionRequest), behaviour: map[string]fleetBehaviour{},
-		repairs: map[string]int{}, repairRequests: map[string]ExecutionRequest{}, repairWith: map[string]fleetRepair{}}
+		repairs: map[string]int{}, repairRequests: make(map[string]ExecutionRequest), repairWith: map[string]fleetRepair{}}
 }
 
 // WritesTypedResults: the controlled worker writes straight to the slot path.
