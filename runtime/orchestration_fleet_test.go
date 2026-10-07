@@ -287,10 +287,13 @@ func fleetContinue(request ExecutionRequest, behaviour fleetBehaviour, invocatio
 	if behaviour == fleetCheckpointThenRestatesSHA {
 		report = `{"schema_version":"0.1","outcome":"completed","summary":"s","candidate_revision":"` + request.Candidate.Revision + `"}`
 	}
-	return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded, Resolution: &FeedbackResolution{
+	if err := writeTypedResultFile(request.FeedbackResolutionPath, FeedbackResolution{
 		SchemaVersion: FeedbackResolutionSchemaVersion, Resolution: FeedbackResolutionCheckpointComplete,
 		Subject: request.Candidate.Revision, Tree: request.Candidate.Tree,
-	}}, os.WriteFile(request.HandoffPath, []byte(report), 0o600)
+	}); err != nil {
+		return ExecutionResult{}, err
+	}
+	return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(report), 0o600)
 }
 
 // request returns the latest request one run's worker received.

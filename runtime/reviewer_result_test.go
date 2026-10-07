@@ -509,9 +509,9 @@ func TestTheAdapterReadsNoVerdictOutOfAFailedInvocation(t *testing.T) {
 					cancel()
 					ctx = bounded
 				}
-				result, _ := provider.Execute(ctx, request)
-				if result.Review != nil {
-					t.Fatalf("a failed invocation carried a verdict out of the adapter: %+v", result.Review)
+				result, typed, _ := executeWithHostSlots(ctx, provider, request)
+				if typed.Review != nil {
+					t.Fatalf("a failed invocation carried a verdict out of the adapter: %+v", typed.Review)
 				}
 				if result.Outcome == Succeeded || result.Failure == nil {
 					t.Fatalf("the invocation did not report a failure: %+v", result)
@@ -541,7 +541,7 @@ func TestAMalformedVerdictFailsAnOtherwiseSuccessfulInvocation(t *testing.T) {
 	}
 	request.ReviewerResultPath = path
 
-	result, err := provider.Execute(context.Background(), request)
+	result, typed, err := executeWithHostSlots(context.Background(), provider, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,13 +554,13 @@ func TestAMalformedVerdictFailsAnOtherwiseSuccessfulInvocation(t *testing.T) {
 	if result.Failure.Classification != FailureReviewerProtocolIncomplete {
 		t.Fatalf("classification %q, want %q", result.Failure.Classification, FailureReviewerProtocolIncomplete)
 	}
-	if result.Review != nil {
-		t.Fatalf("a malformed verdict was carried out anyway: %+v", result.Review)
+	if typed.Review != nil {
+		t.Fatalf("a malformed verdict was carried out anyway: %+v", typed.Review)
 	}
 	// The exact reason is retained rather than discarded down to a bare
 	// classification, so a bounded retry can tell the reviewer what was wrong.
-	if result.ReviewRefusal == nil || !strings.Contains(result.ReviewRefusal.Detail, "not a valid") {
-		t.Fatalf("the exact decode reason was not retained: %+v", result.ReviewRefusal)
+	if typed.ReviewRefusal == nil || !strings.Contains(typed.ReviewRefusal.Detail, "not a valid") {
+		t.Fatalf("the exact decode reason was not retained: %+v", typed.ReviewRefusal)
 	}
 }
 

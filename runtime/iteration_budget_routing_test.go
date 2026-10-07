@@ -64,7 +64,9 @@ func (p *budgetProvider) Execute(_ context.Context, request ExecutionRequest) (E
 			} else {
 				resolution.Resolution = FeedbackResolutionNoChangeRequired
 			}
-			result.Resolution = &resolution
+			if err := writeTypedResultFile(request.FeedbackResolutionPath, resolution); err != nil {
+				return ExecutionResult{}, err
+			}
 		}
 		return result, nil
 	}

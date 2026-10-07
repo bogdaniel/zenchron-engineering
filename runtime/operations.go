@@ -1001,6 +1001,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		Deadline: operation.Deadline,
 	})))
 	watch = endWatch()
+	typed := readTypedResultSlots(reviewerResultPath, feedbackResolutionPath, &result)
 	// THE ATTEMPT EXPLAINS ITSELF DURABLY (#327). Provenance exists only for
 	// an invocation that reached a provider, and it is journalled on EVERY
 	// path out of here - success, failure, deadline, revocation, refusal -
@@ -1087,21 +1088,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// discarded, so an operator sees why it did not bind instead of a bare
 	// "nothing happened".
 	var resolutionErr error
-	if result.Resolution != nil && execErr == nil && result.Failure == nil {
+	if typed.Resolution != nil && execErr == nil && result.Failure == nil {
 		deliveredKeys := make([]string, 0, len(feedback))
 		for _, item := range feedback {
 			deliveredKeys = append(deliveredKeys, item.Key)
 		}
 		switch {
 		case purpose == InvocationContinuation:
-			if resolved, admitErr := AdmitCheckpointCompletion(deliveredKeys, subject.Commit, subject.Tree, result.Resolution); admitErr == nil {
+			if resolved, admitErr := AdmitCheckpointCompletion(deliveredKeys, subject.Commit, subject.Tree, typed.Resolution); admitErr == nil {
 				record.ResolvedFeedback = resolved
 				record.CheckpointResolved = true
 			} else {
 				resolutionErr = admitErr
 			}
 		case !record.Mutated:
-			if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
+			if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, typed.Resolution); admitErr == nil {
 				record.ResolvedFeedback = resolved
 			} else {
 				resolutionErr = admitErr
@@ -1125,7 +1126,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// feedback gate just above. A stage whose role produces a verdict crosses
 	// the reviewer-result protocol in exactly one of two ways: it writes a
 	// result that fails to decode (result.Failure is already set for that, by
-	// the adapter), or it writes a result that decodes (result.Review is
+	// readTypedResultSlots), or it writes a result that decodes (typed.Review is
 	// non-nil). Provider return with NEITHER is a third way - a clean exit
 	// that wrote nothing to the runtime-owned path - and left unchecked it is
 	// the #374 second dogfood shape exactly: the invocation is recorded
@@ -1135,7 +1136,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// bounded-retry class a malformed result gets, so the run keeps asking
 	// for a verdict rather than silently waiting on one that will never come.
 	reviewUnresolved := stage.producesVerdict() && execErr == nil &&
-		result.Failure == nil && result.Review == nil
+		result.Failure == nil && typed.Review == nil
 	// THE CHECKPOINT CONTINUATION COMPLETION GATE (#379), generalizing #376's
 	// feedback gate from feedback discharge to checkpoint continuation itself.
 	// A continuation inherits a checkpoint - work a prior attempt left
@@ -1222,7 +1223,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	if execErr == nil && result.Failure == nil && revoked == "" && providerOutcome(result, execErr) == Succeeded {
 		// Admission happens in the RUNTIME, against the frozen assignment -
-		// never in the adapter, which only read a file. A refused result FAILS
+		// never in the slot read, which only decoded a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
 		// treating that as "no verdict" would let a malformed or mis-scoped
 		// claim look identical to an honest silence.
@@ -1234,8 +1235,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// result that reports OperationFailed or OperationCancelled with a nil
 		// Failure would be exactly the unfinished-invocation-contributing-a-
 		// finished-answer defect this gate exists to close.
-		if result.Review != nil {
-			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
+		if typed.Review != nil {
+			if admitErr := r.admitReview(state, stage, result.ProviderID, typed.Review, operation); admitErr != nil {
 				var refusal *ReviewerResultRefusedError
 				if errors.As(admitErr, &refusal) {
 					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail), Protocol: refusal.Protocol}
@@ -1496,13 +1497,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			mutationResult: record,
 			PriorContext:   result.PriorContext,
 			// Carried whether this refusal came from a decode failure (set by
-			// the adapter on ExecutionResult) or survives from nowhere else:
+			// readTypedResultSlots) or survives from nowhere else:
 			// the admission-refusal path below sets its own ReviewRefusal on
 			// its own executionRecord literal, and this is the OTHER place a
 			// reviewer-role invocation's exact reason must reach the journal
 			// rather than being discarded down to a bare classification
 			// (#374).
-			ReviewRefusal: result.ReviewRefusal,
+			ReviewRefusal: typed.ReviewRefusal,
 			Diagnostic:    r.executionDiagnostic(stage, class, result, execErr),
 			// Real work exists but the producer did not finish, so what it left
 			// is a CHECKPOINT: preserved, exactly identified, reassessed, and
@@ -3645,7 +3646,7 @@ func (r *EngineeringRuntime) missingWorkerTools(ctx context.Context) []string {
 //     retried operation idempotent rather than duplicating a verdict;
 //   - a second, CONFLICTING verdict for the same attempt is refused by the
 //     store's own primary key rather than silently replacing the first.
-func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext, result ExecutionResult, operation RunOperation) error {
+func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext, providerID string, review *ReviewerResult, operation RunOperation) error {
 	binding := state.run.Plan
 	if binding == nil || stage.assignment == nil {
 		return &ReviewerResultRefusedError{Detail: "a reviewer result was produced by a run that is not bound to a plan stage"}
@@ -3680,7 +3681,7 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	if subject == nil {
 		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the assignment froze no upstream candidate for this stage to have reviewed"}
 	}
-	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, *subject, state.run.ID, result.ProviderID, result.Review)
+	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, *subject, state.run.ID, providerID, review)
 	if err != nil {
 		return err
 	}

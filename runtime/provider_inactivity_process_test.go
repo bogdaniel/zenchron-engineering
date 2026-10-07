@@ -206,7 +206,11 @@ func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 	if result.Failure.RawDiagnosticRef != result.Artifacts[0].Path {
 		t.Fatalf("the diagnostic does not name the transcript: %q", result.Failure.RawDiagnosticRef)
 	}
-	if result.Review != nil {
+	verdict := filepath.Join(t.TempDir(), "review.json")
+	if err := writeTypedResultFile(verdict, ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted}); err != nil {
+		t.Fatal(err)
+	}
+	if typed := readTypedResultSlots(verdict, "", &result); typed.Review != nil {
 		t.Fatal("a terminated invocation contributed a verdict")
 	}
 }
