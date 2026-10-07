@@ -1,6 +1,6 @@
 # ADR-0005: The Execution Port
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-07
 - Issue: #521 (child of #445; unblocks #518, Gate B of #446). This ADR lands
   with #521 PR B, which creates the package it describes.

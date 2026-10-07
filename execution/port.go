@@ -9,8 +9,13 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
-// Port can change only the supplied candidate directory. It has
-// no authority and receives no publication credentials.
+// Port runs one bounded execution. Its writes are confined to locations the
+// host supplies in the Request: the candidate directory, plus the
+// runtime-owned paths outside it (ScratchDir and, when set, the result slots
+// ReviewerResultPath, FeedbackResolutionPath, HandoffPath and MessagePath).
+// Writing a result slot states a claim the host decodes and admits; it grants
+// nothing by itself. A Port has no authority and receives no publication
+// credentials.
 type Port interface {
 	Execute(context.Context, Request) (Result, error)
 }
