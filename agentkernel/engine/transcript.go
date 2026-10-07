@@ -105,6 +105,7 @@ func promptText(messages []api.Message, specs []api.ToolSpec) string {
 		sb.WriteString(string(m.Role))
 		sb.WriteString(m.Content)
 		sb.WriteString(m.ToolCallID)
+		sb.Write(m.Replay)
 		for _, c := range m.ToolCalls {
 			sb.WriteString(c.ID + c.Name)
 			sb.Write(c.Arguments)

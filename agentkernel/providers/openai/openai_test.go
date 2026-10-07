@@ -51,8 +51,15 @@ func encode(r api.ProviderResponse) []byte {
 	if r.Usage.Output != nil {
 		usage["output_tokens"] = *r.Usage.Output
 	}
+	details := map[string]any{}
 	if r.Usage.CachedInput != nil {
-		usage["input_tokens_details"] = map[string]any{"cached_tokens": *r.Usage.CachedInput}
+		details["cached_tokens"] = *r.Usage.CachedInput
+	}
+	if r.Usage.CacheWriteInput != nil {
+		details["cache_write_tokens"] = *r.Usage.CacheWriteInput
+	}
+	if len(details) > 0 {
+		usage["input_tokens_details"] = details
 	}
 	if len(usage) > 0 {
 		body["usage"] = usage

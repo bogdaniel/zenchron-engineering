@@ -149,6 +149,7 @@
         "input_micros_per_million": 150000,
         "output_micros_per_million": 600000,
         "cached_input_micros_per_million": 0,
+        "cache_write_input_micros_per_million": 150000,
         "source": "host-rate-card",
         "version": "2026-09",
         "observed_at": "2026-09-01T00:00:00Z"

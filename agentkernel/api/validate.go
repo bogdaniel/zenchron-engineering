@@ -393,7 +393,8 @@ func (p *Pricing) prices(currency string) bool {
 	if p == nil || p.Currency != currency || !currencyPattern.MatchString(currency) {
 		return false
 	}
-	if p.InputMicrosPerMillion < 0 || p.OutputMicrosPerMillion < 0 || p.CachedInputMicrosPerMillion < 0 {
+	if p.InputMicrosPerMillion < 0 || p.OutputMicrosPerMillion < 0 || p.CachedInputMicrosPerMillion < 0 ||
+		p.CacheWriteInputMicrosPerMillion < 0 {
 		return false
 	}
 	return p.Source != "" && p.Version != ""

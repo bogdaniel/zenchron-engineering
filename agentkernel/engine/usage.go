@@ -15,9 +15,9 @@ type account struct {
 	artifactBytes                         int64
 	latency                               time.Duration
 
-	reportedIn, reportedOut, reportedCached int64
-	missingIn, missingOut, missingCached    bool
-	estimatedIn, estimatedOut               int64
+	reportedIn, reportedOut, reportedCached, reportedWrite int64
+	missingIn, missingOut, missingCached, missingWrite     bool
+	estimatedIn, estimatedOut                              int64
 
 	costMicros int64
 	costKnown  bool
@@ -39,6 +39,7 @@ func (a *account) recordCall(estIn, estOut int64, usage *api.TokenUsage, pricing
 	addReported(&a.reportedIn, &a.missingIn, u.Input)
 	addReported(&a.reportedOut, &a.missingOut, u.Output)
 	addReported(&a.reportedCached, &a.missingCached, u.CachedInput)
+	addReported(&a.reportedWrite, &a.missingWrite, u.CacheWriteInput)
 	micros, known := actualCost(u, pricing)
 	a.costMicros += micros
 	a.costKnown = a.costKnown && known
@@ -62,7 +63,8 @@ func (a *account) usage() api.Usage {
 	u.Reported.Input = reported(a.reportedIn, a.missingIn, &u.Unknowns, "reported.input")
 	u.Reported.Output = reported(a.reportedOut, a.missingOut, &u.Unknowns, "reported.output")
 	u.Reported.CachedInput = reported(a.reportedCached, a.missingCached, &u.Unknowns, "reported.cached_input")
-	u.Unknowns = append(u.Unknowns, "estimated.cached_input")
+	u.Reported.CacheWriteInput = reported(a.reportedWrite, a.missingWrite, &u.Unknowns, "reported.cache_write_input")
+	u.Unknowns = append(u.Unknowns, "estimated.cached_input", "estimated.cache_write_input")
 	if a.pricing != nil {
 		u.Cost.Currency, u.Cost.RateSource, u.Cost.RateVersion = a.pricing.Currency, a.pricing.Source, a.pricing.Version
 	}
@@ -80,28 +82,47 @@ func reported(sum int64, missing bool, unknowns *[]string, name string) *int64 {
 	return api.Count(sum)
 }
 
-// actualCost prices reported usage. It is known only with a trusted rate card
-// and every count reported; otherwise the call contributes nothing, so the
-// account's micros stay a lower bound.
+// actualCost prices reported usage: input tokens are split into cache reads,
+// cache writes and the rest, each at its own rate. It is known only with a
+// trusted rate card and every count it needs. A missing cache count is not
+// needed when its rate equals the input rate, because the split then cannot
+// change the price. Otherwise the call contributes nothing, so the account's
+// micros stay a lower bound.
 func actualCost(u api.TokenUsage, p *api.Pricing) (int64, bool) {
-	if p == nil || u.Input == nil || u.Output == nil || u.CachedInput == nil {
+	if p == nil || u.Input == nil || u.Output == nil {
 		return 0, false
 	}
-	uncached := max(*u.Input-*u.CachedInput, 0)
-	return price(float64(uncached)*float64(p.InputMicrosPerMillion) +
-		float64(*u.CachedInput)*float64(p.CachedInputMicrosPerMillion) +
+	cached, okCached := part(u.CachedInput, p.CachedInputMicrosPerMillion == p.InputMicrosPerMillion)
+	written, okWritten := part(u.CacheWriteInput, p.CacheWriteInputMicrosPerMillion == p.InputMicrosPerMillion)
+	if !okCached || !okWritten {
+		return 0, false
+	}
+	plain := max(*u.Input-cached-written, 0)
+	return price(float64(plain)*float64(p.InputMicrosPerMillion) +
+		float64(cached)*float64(p.CachedInputMicrosPerMillion) +
+		float64(written)*float64(p.CacheWriteInputMicrosPerMillion) +
 		float64(*u.Output)*float64(p.OutputMicrosPerMillion)), true
 }
 
+// part is a reported sub-count of input, or 0 when it is unknown but priced
+// like plain input.
+func part(n *int64, pricedAsInput bool) (int64, bool) {
+	if n != nil {
+		return *n, true
+	}
+	return 0, pricedAsInput
+}
+
 // worstCaseCost prices the most a call can cost: every input token at the
-// uncached rate and the full output allowance. Unpriced bindings cost 0 here
-// because validation admits a money ceiling only when every eligible binding
-// is priced in its currency.
+// highest input-side rate and the full output allowance. Unpriced bindings
+// cost 0 here because validation admits a money ceiling only when every
+// eligible binding is priced in its currency.
 func worstCaseCost(inputTokens, outputTokens int64, p *api.Pricing) int64 {
 	if p == nil {
 		return 0
 	}
-	return price(float64(inputTokens)*float64(p.InputMicrosPerMillion) + float64(outputTokens)*float64(p.OutputMicrosPerMillion))
+	inRate := max(p.InputMicrosPerMillion, p.CachedInputMicrosPerMillion, p.CacheWriteInputMicrosPerMillion)
+	return price(float64(inputTokens)*float64(inRate) + float64(outputTokens)*float64(p.OutputMicrosPerMillion))
 }
 
 // price converts token-micros-per-million to micros, rounding up so a bound

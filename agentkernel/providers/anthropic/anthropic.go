@@ -7,6 +7,7 @@
 //   - https://platform.claude.com/docs/en/api/errors
 //   - https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
 //   - https://platform.claude.com/docs/en/build-with-claude/thinking
+//   - https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 //
 // API version header: anthropic-version: 2023-06-01. Every call sends the
 // full transcript; no server-side conversation state is used. No model name
@@ -19,7 +20,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/providers/internal/wire"
@@ -28,8 +28,16 @@ import (
 // APIVersion is the anthropic-version header value the wire shapes follow.
 const APIVersion = "2023-06-01"
 
-// maxReplayTurns bounds the thinking-replay cache (see Provider.replay).
-const maxReplayTurns = 256
+// replayTag marks Replay this adapter wrote. Within a tool-use turn the
+// Messages API requires thinking blocks back unchanged and in order, so the
+// exact assistant content travels in api.Message.Replay; Replay carrying any
+// other tag came from a different adapter and is ignored.
+const replayTag = "anthropic.messages/" + APIVersion
+
+type replay struct {
+	Adapter string          `json:"adapter"`
+	Content json.RawMessage `json:"content"`
+}
 
 // Config wires one adapter instance. Every field is required.
 type Config struct {
@@ -44,18 +52,6 @@ type Config struct {
 // Provider is the Messages API adapter.
 type Provider struct {
 	cfg Config
-
-	// The Messages API requires that, within a tool-use turn, thinking blocks
-	// are passed back unchanged and in order; the neutral api.Message has no
-	// slot for opaque provider blocks. So the adapter remembers the exact
-	// content of assistant turns that carried thinking, keyed by their first
-	// tool_use id, and replays it verbatim. A miss (another instance, or an
-	// evicted turn) degrades to a reconstructed turn the API may reject.
-	// ponytail: bounded FIFO in adapter memory; an api.Message replay field
-	// would remove it (proposal recorded in the lane report).
-	mu     sync.Mutex
-	replay map[string]json.RawMessage
-	order  []string
 }
 
 // New validates cfg.
@@ -63,7 +59,7 @@ func New(cfg Config) (*Provider, error) {
 	if cfg.Endpoint == "" || cfg.Doer == nil || cfg.Credentials == nil || cfg.MaxResponseBytes <= 0 {
 		return nil, fmt.Errorf("anthropic: endpoint, doer, credentials and max response bytes are required")
 	}
-	return &Provider{cfg: cfg, replay: map[string]json.RawMessage{}}, nil
+	return &Provider{cfg: cfg}, nil
 }
 
 // Complete performs one bounded Messages call.
@@ -72,7 +68,7 @@ func (p *Provider) Complete(ctx context.Context, req api.ProviderRequest) (api.P
 	if perr != nil {
 		return api.ProviderResponse{}, perr
 	}
-	body, err := json.Marshal(p.buildRequest(req))
+	body, err := json.Marshal(buildRequest(req))
 	if err != nil {
 		return api.ProviderResponse{}, &api.ProviderError{Class: api.ProviderRejected, Detail: "encode request: " + err.Error()}
 	}
@@ -89,13 +85,10 @@ func (p *Provider) Complete(ctx context.Context, req api.ProviderRequest) (api.P
 	if status < 200 || status > 299 {
 		return api.ProviderResponse{}, wire.Classify(status, raw, secret)
 	}
-	resp, content, perr := parseResponse(raw, req.Binding.ID)
+	resp, perr := parseResponse(raw, req.Binding.ID)
 	if perr != nil {
 		perr.Detail = wire.Redact(perr.Detail, secret)
 		return api.ProviderResponse{}, perr
-	}
-	if content != nil {
-		p.remember(resp.ToolCalls[0].ID, content)
 	}
 	return resp, nil
 }
@@ -142,7 +135,7 @@ type toolResultBlock struct {
 // buildRequest maps the neutral transcript. Consecutive tool messages become
 // one user turn of tool_result blocks, as the Messages API expects results
 // for one assistant turn in the next user turn.
-func (p *Provider) buildRequest(req api.ProviderRequest) request {
+func buildRequest(req api.ProviderRequest) request {
 	out := request{Model: req.Binding.Model, MaxTokens: req.MaxOutputTokens, Messages: []message{}}
 	var system []string
 	var results []any
@@ -164,7 +157,7 @@ func (p *Provider) buildRequest(req api.ProviderRequest) request {
 		case api.RoleUser:
 			out.Messages = append(out.Messages, message{Role: "user", Content: m.Content})
 		case api.RoleAssistant:
-			out.Messages = append(out.Messages, message{Role: "assistant", Content: p.assistantContent(m)})
+			out.Messages = append(out.Messages, message{Role: "assistant", Content: assistantContent(m)})
 		}
 	}
 	flush()
@@ -175,11 +168,10 @@ func (p *Provider) buildRequest(req api.ProviderRequest) request {
 	return out
 }
 
-func (p *Provider) assistantContent(m api.Message) any {
-	if len(m.ToolCalls) > 0 {
-		if raw, ok := p.recall(m.ToolCalls[0].ID); ok {
-			return raw
-		}
+func assistantContent(m api.Message) any {
+	var r replay
+	if json.Unmarshal(m.Replay, &r) == nil && r.Adapter == replayTag && len(r.Content) > 0 {
+		return r.Content
 	}
 	var blocks []any
 	if m.Content != "" {
@@ -189,27 +181,6 @@ func (p *Provider) assistantContent(m api.Message) any {
 		blocks = append(blocks, toolUseBlock{Type: "tool_use", ID: c.ID, Name: c.Name, Input: c.Arguments})
 	}
 	return blocks
-}
-
-func (p *Provider) remember(key string, content json.RawMessage) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, ok := p.replay[key]; ok {
-		return
-	}
-	if len(p.order) == maxReplayTurns {
-		delete(p.replay, p.order[0])
-		p.order = p.order[1:]
-	}
-	p.replay[key] = content
-	p.order = append(p.order, key)
-}
-
-func (p *Provider) recall(key string) (json.RawMessage, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	raw, ok := p.replay[key]
-	return raw, ok
 }
 
 type response struct {
@@ -222,6 +193,9 @@ type response struct {
 		OutputTokens             *int64 `json:"output_tokens"`
 		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+		CacheCreation            *struct {
+			Ephemeral1hInputTokens *int64 `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
 	} `json:"usage"`
 }
 
@@ -233,16 +207,16 @@ type block struct {
 	Input json.RawMessage `json:"input"`
 }
 
-// parseResponse returns the normalized response and, when the turn carries
-// thinking blocks alongside tool_use, the raw content to replay.
-func parseResponse(raw []byte, providerID string) (api.ProviderResponse, json.RawMessage, *api.ProviderError) {
+// parseResponse normalizes a response. A turn carrying thinking blocks
+// alongside tool_use keeps its exact content as Replay.
+func parseResponse(raw []byte, providerID string) (api.ProviderResponse, *api.ProviderError) {
 	var r response
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return api.ProviderResponse{}, nil, wire.Malformed("decode response: %v", err)
+		return api.ProviderResponse{}, wire.Malformed("decode response: %v", err)
 	}
 	var blocks []block
 	if err := json.Unmarshal(r.Content, &blocks); err != nil || r.StopReason == nil {
-		return api.ProviderResponse{}, nil, wire.Malformed("response needs a content array and stop_reason")
+		return api.ProviderResponse{}, wire.Malformed("response needs a content array and stop_reason")
 	}
 	out := api.ProviderResponse{ModelVersionObserved: r.Model, Stop: stopReason(*r.StopReason)}
 	thinking := false
@@ -253,7 +227,7 @@ func parseResponse(raw []byte, providerID string) (api.ProviderResponse, json.Ra
 			text.WriteString(b.Text)
 		case "tool_use":
 			if b.ID == "" || b.Name == "" || !wire.ValidArguments(b.Input) {
-				return api.ProviderResponse{}, nil, wire.Malformed("tool_use needs id, name and object input")
+				return api.ProviderResponse{}, wire.Malformed("tool_use needs id, name and object input")
 			}
 			out.ToolCalls = append(out.ToolCalls, api.ToolCall{ID: b.ID, Name: b.Name, Arguments: b.Input})
 		case "thinking", "redacted_thinking":
@@ -266,20 +240,33 @@ func parseResponse(raw []byte, providerID string) (api.ProviderResponse, json.Ra
 		out.Session = &api.SessionObservation{ProviderID: providerID, CacheReused: true, Ref: r.ID}
 	}
 	if thinking && len(out.ToolCalls) > 0 {
-		return out, r.Content, nil
+		data, err := json.Marshal(replay{Adapter: replayTag, Content: r.Content})
+		if err != nil {
+			return api.ProviderResponse{}, wire.Malformed("encode replay: %v", err)
+		}
+		out.Replay = data
 	}
-	return out, nil, nil
+	return out, nil
 }
 
 // usage normalizes to the kernel's convention that Input counts every input
-// token. The Messages API reports input_tokens excluding cache reads and
-// writes, so all three are summed; an absent cache field adds nothing and an
-// absent cache_read leaves CachedInput unknown.
+// token. The Messages API's input_tokens, cache_read_input_tokens and
+// cache_creation_input_tokens are mutually exclusive and additive, so Input is
+// their sum; CachedInput is the cache reads and CacheWriteInput the cache
+// writes. Writes at the 1-hour TTL are billed at a different rate than 5-minute
+// writes, which one rate card cannot price, so their presence leaves
+// CacheWriteInput unknown. An absent cache field adds nothing to Input and
+// leaves its own count unknown.
 func usage(r response) api.TokenUsage {
 	if r.Usage == nil {
 		return api.TokenUsage{}
 	}
-	u := api.TokenUsage{Output: r.Usage.OutputTokens, CachedInput: r.Usage.CacheReadInputTokens}
+	u := api.TokenUsage{
+		Output: r.Usage.OutputTokens, CachedInput: r.Usage.CacheReadInputTokens, CacheWriteInput: r.Usage.CacheCreationInputTokens,
+	}
+	if c := r.Usage.CacheCreation; c != nil && c.Ephemeral1hInputTokens != nil && *c.Ephemeral1hInputTokens > 0 {
+		u.CacheWriteInput = nil
+	}
 	if r.Usage.InputTokens != nil {
 		total := *r.Usage.InputTokens
 		for _, extra := range []*int64{r.Usage.CacheReadInputTokens, r.Usage.CacheCreationInputTokens} {

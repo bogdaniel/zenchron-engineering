@@ -19,7 +19,7 @@ func testToolRoundTrip(t *testing.T, target Target) {
 	call := api.ToolCall{ID: "call_1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}
 	first := api.ProviderResponse{
 		Text: "reading", ToolCalls: []api.ToolCall{call}, Stop: api.StopToolUse, ModelVersionObserved: Model + "-v1",
-		Usage: api.TokenUsage{Input: api.Count(100), Output: api.Count(20), CachedInput: api.Count(0)},
+		Usage: api.TokenUsage{Input: api.Count(100), Output: api.Count(20), CachedInput: api.Count(30), CacheWriteInput: api.Count(50)},
 	}
 	second := api.ProviderResponse{Text: "done", Stop: api.StopEnd, ModelVersionObserved: Model + "-v1",
 		Usage: api.TokenUsage{Input: api.Count(150), Output: api.Count(5), CachedInput: api.Count(0)}}
@@ -286,5 +286,5 @@ func fmtUsage(u api.TokenUsage) string {
 		}
 		return fmt.Sprint(*p)
 	}
-	return fmt.Sprintf("in=%s out=%s cached=%s", f(u.Input), f(u.Output), f(u.CachedInput))
+	return fmt.Sprintf("in=%s out=%s cached=%s cache_write=%s", f(u.Input), f(u.Output), f(u.CachedInput), f(u.CacheWriteInput))
 }

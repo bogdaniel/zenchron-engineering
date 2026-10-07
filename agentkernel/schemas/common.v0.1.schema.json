@@ -59,14 +59,15 @@
       "type": ["integer", "null"]
     },
     "token_usage": {
-      "description": "api.TokenUsage. Every count is present; null means unknown.",
+      "description": "api.TokenUsage. Every count is present; null means unknown. input counts every input token; cached_input (cache reads) and cache_write_input (cache writes) are the parts of input billed at their own rates.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["input", "output", "cached_input"],
+      "required": ["input", "output", "cached_input", "cache_write_input"],
       "properties": {
         "input": {"$ref": "#/$defs/nullable_count"},
         "output": {"$ref": "#/$defs/nullable_count"},
-        "cached_input": {"$ref": "#/$defs/nullable_count"}
+        "cached_input": {"$ref": "#/$defs/nullable_count"},
+        "cache_write_input": {"$ref": "#/$defs/nullable_count"}
       }
     }
   }

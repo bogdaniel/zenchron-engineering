@@ -23,6 +23,13 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	IsError    bool       `json:"is_error,omitempty"`
+	// Replay is opaque bytes owned by the adapter that produced this assistant
+	// turn, sent back to it verbatim within the same execution (for example
+	// provider reasoning blocks a wire format requires unchanged). The engine
+	// never interprets it and it never appears in an ExecutionResult. It lives
+	// in the execution-owned transcript, so correctness never depends on
+	// provider-held session state. An adapter ignores Replay it did not write.
+	Replay json.RawMessage `json:"replay,omitempty"`
 }
 
 // ProviderRequest is one bounded model call. It carries the full transcript:
@@ -54,6 +61,9 @@ type ProviderResponse struct {
 	Usage                TokenUsage          `json:"usage"`
 	ModelVersionObserved string              `json:"model_version_observed,omitempty"`
 	Session              *SessionObservation `json:"session,omitempty"`
+	// Replay is the adapter's opaque state for this turn; the engine copies it
+	// into the assistant Message it appends (see Message.Replay).
+	Replay json.RawMessage `json:"replay,omitempty"`
 }
 
 // SessionObservation reports provider-side session or prompt-cache reuse. It

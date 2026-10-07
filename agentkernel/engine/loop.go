@@ -33,7 +33,7 @@ func (r *run) loop(ctx context.Context, c call, messages []api.Message) api.Term
 		if !ok {
 			return t
 		}
-		messages = append(messages, api.Message{Role: api.RoleAssistant, Content: resp.Text, ToolCalls: resp.ToolCalls})
+		messages = append(messages, api.Message{Role: api.RoleAssistant, Content: resp.Text, ToolCalls: resp.ToolCalls, Replay: resp.Replay})
 		switch {
 		case resp.Stop == api.StopRefused:
 			return r.termination(api.OutcomeFailed, api.CauseProviderRefused, "provider refused")

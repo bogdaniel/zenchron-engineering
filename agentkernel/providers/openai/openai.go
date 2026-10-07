@@ -6,6 +6,7 @@
 //   - https://developers.openai.com/api/reference/resources/responses/methods/retrieve
 //   - https://developers.openai.com/api/docs/guides/function-calling
 //   - https://developers.openai.com/api/docs/guides/error-codes
+//   - https://developers.openai.com/api/docs/guides/prompt-caching
 //
 // (platform.openai.com/docs returned HTTP 403 to the fetcher on that date; the
 // developers.openai.com pages above are OpenAI's current reference.) The
@@ -162,7 +163,8 @@ type response struct {
 		InputTokens        *int64 `json:"input_tokens"`
 		OutputTokens       *int64 `json:"output_tokens"`
 		InputTokensDetails *struct {
-			CachedTokens *int64 `json:"cached_tokens"`
+			CachedTokens     *int64 `json:"cached_tokens"`
+			CacheWriteTokens *int64 `json:"cache_write_tokens"`
 		} `json:"input_tokens_details"`
 	} `json:"usage"`
 }
@@ -202,8 +204,12 @@ func parseResponse(raw []byte, providerID string) (api.ProviderResponse, *api.Pr
 	out.Stop = stopReason(r, refused, len(out.ToolCalls) > 0)
 	if r.Usage != nil {
 		out.Usage = api.TokenUsage{Input: r.Usage.InputTokens, Output: r.Usage.OutputTokens}
-		if r.Usage.InputTokensDetails != nil {
-			out.Usage.CachedInput = r.Usage.InputTokensDetails.CachedTokens
+		// input_tokens counts every input token; cached and cache-write tokens
+		// are the parts billed at their own rates. Models without a cache-write
+		// charge omit cache_write_tokens, which stays unknown; the engine's cost
+		// is still exact when the rate card prices writes at the input rate.
+		if d := r.Usage.InputTokensDetails; d != nil {
+			out.Usage.CachedInput, out.Usage.CacheWriteInput = d.CachedTokens, d.CacheWriteTokens
 		}
 	}
 	if c := out.Usage.CachedInput; c != nil && *c > 0 {

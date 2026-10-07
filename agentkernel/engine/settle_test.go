@@ -193,7 +193,7 @@ func TestSettlementRecordingFailureKeepsObservedOutcome(t *testing.T) {
 
 func TestMoneyCeiling(t *testing.T) {
 	pricing := &api.Pricing{Currency: "USD", InputMicrosPerMillion: 1_000_000, OutputMicrosPerMillion: 2_000_000,
-		CachedInputMicrosPerMillion: 100_000, Source: "test-card", Version: "1"}
+		CachedInputMicrosPerMillion: 100_000, CacheWriteInputMicrosPerMillion: 1_000_000, Source: "test-card", Version: "1"}
 	t.Run("worst_case_refused_before_call", func(t *testing.T) {
 		f := newFixture(t, []scripted.Step{end("never")})
 		req := request()
@@ -211,9 +211,29 @@ func TestMoneyCeiling(t *testing.T) {
 		req.Providers[0].Pricing = pricing
 		res := f.run(t, context.Background(), req)
 		c := res.Usage.Cost
-		// 100 input (0 cached) at 1 micro + 10 output at 2 micros = 120.
+		// 100 input (0 cached, writes unreported but priced as input) at 1
+		// micro + 10 output at 2 micros = 120.
 		if !c.Known || c.Micros != 120 || c.Currency != "USD" || c.RateSource != "test-card" {
 			t.Fatalf("cost %+v", c)
+		}
+	})
+	t.Run("cache_writes_priced_exactly", func(t *testing.T) {
+		usage := api.TokenUsage{Input: api.Count(1000), Output: api.Count(10), CachedInput: api.Count(200), CacheWriteInput: api.Count(300)}
+		f := newFixture(t, []scripted.Step{{Response: api.ProviderResponse{Text: "ok", Stop: api.StopEnd, Usage: usage}}})
+		req := request()
+		card := *pricing
+		card.CacheWriteInputMicrosPerMillion = 1_250_000
+		req.Providers[0].Pricing = &card
+		res := f.run(t, context.Background(), req)
+		// 500 plain at 1 + 200 cached at 0.1 + 300 written at 1.25 + 10 output at 2 = 915.
+		if c := res.Usage.Cost; !c.Known || c.Micros != 915 {
+			t.Fatalf("cost %+v, want exactly 915 micros", c)
+		}
+		// Unreported writes at a distinct rate cannot be priced.
+		usage.CacheWriteInput = nil
+		f = newFixture(t, []scripted.Step{{Response: api.ProviderResponse{Text: "ok", Stop: api.StopEnd, Usage: usage}}})
+		if c := f.run(t, context.Background(), req).Usage.Cost; c.Known {
+			t.Fatalf("cost %+v presented as known without the write count", c)
 		}
 	})
 	t.Run("unreported_usage_unknown", func(t *testing.T) {

@@ -235,3 +235,21 @@ func countKind(kinds []api.EventKind, k api.EventKind) int {
 	}
 	return n
 }
+
+// TestReplayTravelsInTranscriptOnly: adapter Replay is copied into the next
+// call's assistant message verbatim and never surfaces in the result.
+func TestReplayTravelsInTranscriptOnly(t *testing.T) {
+	step := toolUse(readCall("c1", "a.txt"))
+	step.Response.Replay = json.RawMessage(`{"adapter":"x","content":"opaque-REPLAY-bytes"}`)
+	f := newFixture(t, []scripted.Step{step, end("ok")})
+	res := f.run(t, context.Background(), request())
+	want(t, res, api.OutcomeCompleted, api.CauseLoopCompleted)
+	assistant := f.provider.Requests()[1].Messages[2]
+	if assistant.Role != api.RoleAssistant || string(assistant.Replay) != string(step.Response.Replay) {
+		t.Fatalf("replay not carried: %+v", assistant)
+	}
+	data, err := json.Marshal(res)
+	if err != nil || strings.Contains(string(data), "opaque-REPLAY-bytes") {
+		t.Fatalf("replay leaked into the result (err %v)", err)
+	}
+}

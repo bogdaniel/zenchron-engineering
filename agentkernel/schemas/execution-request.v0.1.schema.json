@@ -187,12 +187,13 @@
       "description": "api.Pricing: a trusted host rate card. Absent pricing means unknown cost, never zero.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["currency", "input_micros_per_million", "output_micros_per_million", "cached_input_micros_per_million", "source", "version", "observed_at"],
+      "required": ["currency", "input_micros_per_million", "output_micros_per_million", "cached_input_micros_per_million", "cache_write_input_micros_per_million", "source", "version", "observed_at"],
       "properties": {
         "currency": {"$ref": "#/$defs/currency"},
         "input_micros_per_million": {"type": "integer", "minimum": 0},
         "output_micros_per_million": {"type": "integer", "minimum": 0},
         "cached_input_micros_per_million": {"type": "integer", "minimum": 0},
+        "cache_write_input_micros_per_million": {"type": "integer", "minimum": 0, "description": "Rate for input tokens written to a provider cache, charged instead of the input rate."},
         "source": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
         "observed_at": {"$ref": "common.v0.1.schema.json#/$defs/timestamp"}

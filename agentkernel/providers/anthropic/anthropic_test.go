@@ -28,7 +28,8 @@ var stopNames = map[api.StopReason]string{
 }
 
 // encode renders a normalized response in the documented Messages shape. The
-// kernel's Input includes cache reads, the wire's input_tokens does not.
+// kernel's Input includes cache reads and writes; the wire's input_tokens
+// excludes both.
 func encode(r api.ProviderResponse) []byte {
 	content := []map[string]any{}
 	if r.Text != "" {
@@ -42,8 +43,10 @@ func encode(r api.ProviderResponse) []byte {
 	usage := map[string]any{}
 	if r.Usage.Input != nil {
 		in := *r.Usage.Input
-		if r.Usage.CachedInput != nil {
-			in -= *r.Usage.CachedInput
+		for _, part := range []*int64{r.Usage.CachedInput, r.Usage.CacheWriteInput} {
+			if part != nil {
+				in -= *part
+			}
 		}
 		usage["input_tokens"] = in
 	}
@@ -52,7 +55,9 @@ func encode(r api.ProviderResponse) []byte {
 	}
 	if r.Usage.CachedInput != nil {
 		usage["cache_read_input_tokens"] = *r.Usage.CachedInput
-		usage["cache_creation_input_tokens"] = 0
+	}
+	if r.Usage.CacheWriteInput != nil {
+		usage["cache_creation_input_tokens"] = *r.Usage.CacheWriteInput
 	}
 	if len(usage) > 0 {
 		body["usage"] = usage
@@ -116,40 +121,68 @@ func TestHeaders(t *testing.T) {
 }
 
 // TestThinkingReplayedVerbatim: within a tool-use turn the API requires
-// thinking blocks back unchanged and in order.
+// thinking blocks back unchanged and in order. The exact content travels in
+// the transcript, so a fresh adapter instance replays it.
 func TestThinkingReplayedVerbatim(t *testing.T) {
 	content := `[{"type":"thinking","thinking":"","signature":"SIG=="},{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a"}}]`
 	first := `{"id":"msg_1","model":"m-1","content":` + content + `,"stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":3}}`
-	second := encode(api.ProviderResponse{Text: "done", Stop: api.StopEnd})
-	tr := conformance.NewTransport(conformance.Reply{Body: []byte(first)}, conformance.Reply{Body: second})
-	p := newTarget(t, conformance.Env{Transport: tr, Credentials: &conformance.Credentials{}, MaxResponseBytes: 4096})
-	resp, err := p.Complete(context.Background(), testRequest(nil))
+	env := func(tr *conformance.Transport) conformance.Env {
+		return conformance.Env{Transport: tr, Credentials: &conformance.Credentials{}, MaxResponseBytes: 4096}
+	}
+	tr1 := conformance.NewTransport(conformance.Reply{Body: []byte(first)})
+	resp, err := newTarget(t, env(tr1)).Complete(context.Background(), testRequest(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	follow := testRequest([]api.Message{
-		{Role: api.RoleAssistant, ToolCalls: resp.ToolCalls},
+		{Role: api.RoleAssistant, ToolCalls: resp.ToolCalls, Replay: resp.Replay},
 		{Role: api.RoleTool, ToolCallID: "toolu_1", Content: "ok"},
 	})
-	if _, err := p.Complete(context.Background(), follow); err != nil {
+	tr2 := conformance.NewTransport(conformance.Reply{Body: encode(api.ProviderResponse{Text: "done", Stop: api.StopEnd})})
+	if _, err := newTarget(t, env(tr2)).Complete(context.Background(), follow); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(tr.Sent()[1].Body, []byte(content)) {
-		t.Fatalf("assistant turn not replayed verbatim:\n%s", tr.Sent()[1].Body)
+	if !bytes.Contains(tr2.Sent()[0].Body, []byte(content)) {
+		t.Fatalf("assistant turn not replayed verbatim:\n%s", tr2.Sent()[0].Body)
+	}
+}
+
+// TestForeignReplayIgnored: Replay written by another adapter is never sent
+// as Messages content.
+func TestForeignReplayIgnored(t *testing.T) {
+	tr := conformance.NewTransport(conformance.Reply{Body: encode(api.ProviderResponse{Text: "done", Stop: api.StopEnd})})
+	call := api.ToolCall{ID: "toolu_1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)}
+	foreign := json.RawMessage(`{"adapter":"openai.responses","content":[{"type":"injected"}]}`)
+	req := testRequest([]api.Message{
+		{Role: api.RoleAssistant, ToolCalls: []api.ToolCall{call}, Replay: foreign},
+		{Role: api.RoleTool, ToolCallID: "toolu_1", Content: "ok"},
+	})
+	if _, err := newTarget(t, conformance.Env{Transport: tr, Credentials: &conformance.Credentials{}, MaxResponseBytes: 4096}).
+		Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	body := tr.Sent()[0].Body
+	if bytes.Contains(body, []byte("injected")) || !bytes.Contains(body, []byte(`"type":"tool_use","id":"toolu_1"`)) {
+		t.Fatalf("foreign replay used or turn not reconstructed:\n%s", body)
 	}
 }
 
 func TestUsageNormalization(t *testing.T) {
 	raw := `{"id":"m","model":"x","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":30,"cache_creation_input_tokens":5}}`
-	resp, _, perr := parseResponse([]byte(raw), "b")
+	resp, perr := parseResponse([]byte(raw), "b")
 	if perr != nil {
 		t.Fatal(perr)
 	}
-	if *resp.Usage.Input != 45 || *resp.Usage.CachedInput != 30 || *resp.Usage.Output != 2 {
+	if *resp.Usage.Input != 45 || *resp.Usage.CachedInput != 30 || *resp.Usage.CacheWriteInput != 5 || *resp.Usage.Output != 2 {
 		t.Fatalf("usage %+v", resp.Usage)
 	}
 	if resp.Session == nil || !resp.Session.CacheReused {
 		t.Fatal("cache reuse not observed")
+	}
+	oneHour := `{"id":"m","model":"x","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2,` +
+		`"cache_read_input_tokens":0,"cache_creation_input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":5}}}`
+	if resp, _ = parseResponse([]byte(oneHour), "b"); resp.Usage.CacheWriteInput != nil || *resp.Usage.Input != 15 {
+		t.Fatalf("1h cache writes must leave the write count unknown: %+v", resp.Usage)
 	}
 }
 

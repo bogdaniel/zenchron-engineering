@@ -1,10 +1,14 @@
 package api
 
 // TokenUsage is a set of token counts. A nil count is unknown, never zero.
+// Input is every input token; CachedInput (served from a provider cache) and
+// CacheWriteInput (written to one) are the parts of Input billed at their own
+// rates.
 type TokenUsage struct {
-	Input       *int64 `json:"input"`
-	Output      *int64 `json:"output"`
-	CachedInput *int64 `json:"cached_input"`
+	Input           *int64 `json:"input"`
+	Output          *int64 `json:"output"`
+	CachedInput     *int64 `json:"cached_input"`
+	CacheWriteInput *int64 `json:"cache_write_input"`
 }
 
 // Usage is the resource account of one execution. Provider-reported counts and
