@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -226,12 +228,36 @@ func TestCandidateBoundProviderProbesRequiredToolsInTheContainer(t *testing.T) {
 	if !ok {
 		t.Fatal("candidateBoundProvider hides MissingTools, so required tools are probed on the host PATH")
 	}
-	if got := prober.MissingTools(context.Background(), []string{"sh"}); len(got) != 1 || got[0] != "sh" {
-		t.Fatalf("missing tools = %v, want [sh] from the refused container probe", got)
+	// A tool that exists ONLY on this test's host PATH: the old host-PATH
+	// fallback would find it and report nothing missing on every machine,
+	// whereas the container probe (refused here) must report it missing.
+	tool := hostOnlyTool(t)
+	if _, err := exec.LookPath(tool); err != nil {
+		t.Fatalf("precondition: %s must be on the host PATH: %v", tool, err)
+	}
+	if got := prober.MissingTools(context.Background(), []string{tool}); len(got) != 1 || got[0] != tool {
+		t.Fatalf("missing tools = %v, want [%s] from the refused container probe", got, tool)
 	}
 	if len(docker.calls) == 0 || docker.calls[0][0] != "docker" {
 		t.Fatalf("the probe never reached the sandbox: %v", docker.calls)
 	}
+}
+
+// hostOnlyTool puts an executable that exists nowhere else on a PATH holding
+// only a test directory, and returns its name.
+func hostOnlyTool(t *testing.T) string {
+	t.Helper()
+	const name = "zenchron-host-only-probe-tool"
+	dir := t.TempDir()
+	file := filepath.Join(dir, name)
+	if goruntime.GOOS == "windows" {
+		file += ".exe"
+	}
+	if err := os.WriteFile(file, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	return name
 }
 
 // refusingExecutor records every command and fails all of them.
