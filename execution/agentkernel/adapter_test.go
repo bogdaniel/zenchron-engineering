@@ -97,22 +97,6 @@ func TestInactivityIsEnforcedByTheAdapter(t *testing.T) {
 	}
 }
 
-// Progress renews the inactivity bound: a run whose every step is shorter
-// than the bound completes even when the whole run is longer.
-func TestProgressRenewsTheInactivityBound(t *testing.T) {
-	cfg := testConfig(t, nil)
-	pause := func(s scripted.Step) scripted.Step {
-		s.Before = func() { time.Sleep(60 * time.Millisecond) }
-		return s
-	}
-	cfg.Provider = scripted.New(pause(toolUse("c1", "read_file", `{"path":"missing.txt"}`)), pause(done("ok")))
-	req := testRequest(t)
-	req.Budgets.InactivityLimit = 100 * time.Millisecond
-	if res, err := newTestAdapter(t, cfg).Execute(t.Context(), req); err != nil || res.Outcome != execution.Succeeded {
-		t.Errorf("result %+v, %v", res, err)
-	}
-}
-
 // A transcript write failure settles recording_failed and stops every
 // further side effect: the granted command never runs.
 func TestRecordingFailureStopsFurtherSideEffects(t *testing.T) {

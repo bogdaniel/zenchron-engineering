@@ -140,6 +140,7 @@ type Adapter struct {
 	commands                        CommandRunner
 	catalogue                       []CommandSpec
 	admissions                      *storage.FileRecords
+	clock                           clock
 }
 
 var _ execution.Port = (*Adapter)(nil)
@@ -170,7 +171,7 @@ func New(cfg Config) (*Adapter, error) {
 		agentID: cfg.AgentID, providerKind: cfg.ProviderKind, authMode: cfg.AuthMode, trustMode: cfg.TrustMode,
 		binding: cfg.Binding, provider: cfg.Provider, costCurrency: cfg.CostCurrency, stateDir: cfg.StateDir,
 		limits: cfg.Limits, transcript: cfg.Transcript, commands: cfg.Commands,
-		catalogue: slices.Clone(cfg.Catalogue), admissions: admissions,
+		catalogue: slices.Clone(cfg.Catalogue), admissions: admissions, clock: systemClock,
 	}, nil
 }
 
@@ -215,14 +216,14 @@ func (a *Adapter) Execute(ctx context.Context, req execution.Request) (execution
 }
 
 func (a *Adapter) run(ctx context.Context, req execution.Request, kreq api.ExecutionRequest) (execution.Result, error) {
-	state := newAttempt(req.AttemptRef(), a.transcript, execution.ProgressRecorder(ctx))
+	state := newAttempt(req.AttemptRef(), a.transcript, execution.ProgressRecorder(ctx), a.clock)
 	w := newWorkers()
 	defer w.stop()
 	// The kernel context ends only through supervise, which keeps the host
 	// cause. Its deadline is already in the kernel budget.
 	kctx, kcancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer kcancel(nil)
-	supervise(w, ctx, kcancel, req.Budgets.InactivityLimit, state.progress)
+	supervise(w, ctx, kcancel, req.Budgets.InactivityLimit, state)
 	eng, err := a.engine(w, state, req, kreq.ExecutionID)
 	if err != nil {
 		return a.refused(req), err

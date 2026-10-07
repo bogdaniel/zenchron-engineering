@@ -31,7 +31,7 @@ A commit cannot contain its own hash, so the binding lands in a later commit
 that changes only this file; verify with
 `git diff --name-only EVIDENCE_HEAD <binding commit>`.
 
-EVIDENCE_HEAD: `ac4b61f614922730761e473f017c2b8aabcaa017` (branch `claude/518-gateb-adapter`)
+EVIDENCE_HEAD: recorded by the binding commit. Superseded first binding: `ac4b61f`, before the corrections the owner asked for on #518 (comment 6047604378).
 
 | Item | Value |
 | --- | --- |
@@ -39,6 +39,17 @@ EVIDENCE_HEAD: `ac4b61f614922730761e473f017c2b8aabcaa017` (branch `claude/518-ga
 | Base | `60ae3c968592bb13ca4d4d197caf5aa087abd81b` (main, merge of #527) |
 | Toolchain | `go version go1.27.1 darwin/arm64` |
 | Environment | offline: scripted provider only, no network, no credentials, no spend |
+
+### Corrections after the owner's review of #529
+
+1. The inactivity watchdog recomputes silence from a monotonic last-observed
+   progress time when its timer fires, and re-arms for the remainder. It no
+   longer cancels on a bare timer edge.
+2. Progress is observed when an event is received, before the transcript
+   write. Write latency never counts as silence, and a write failure stays
+   `recording_failed` on its own.
+3. Wording: the length-prefixed encoding is injective; SHA-256 is
+   collision-resistant, not injective.
 
 ### Commands and results (on EVIDENCE_HEAD, 2026-10-08)
 
@@ -50,7 +61,7 @@ EVIDENCE_HEAD: `ac4b61f614922730761e473f017c2b8aabcaa017` (branch `claude/518-ga
 | `go test ./execution/... -count=1 -race` | `ok execution`, `ok execution/agentkernel` |
 | `cd agentkernel && GOWORK=off go test ./... -count=1` | every package `ok`, module untouched |
 | `go list -deps ./... \| grep agentkernel` | `api`, `engine`, `storage`, `tools` directly, and their own dependencies (`context`, `routing`, `internal/handoff`, `internal/strictjson`); only `execution/agentkernel` imports them |
-| `python3 scripts/check_file_sizes.py` | no file of this change warns or fails (largest: `adapter.go`, 353 lines); the checker's FAIL rows are pre-existing files outside this change |
+| `python3 scripts/check_file_sizes.py` | no file of this change warns or fails (largest: `adapter.go`, 354 lines); the checker's FAIL rows are pre-existing files outside this change |
 
 ### Acceptance rows covered offline
 
@@ -61,7 +72,7 @@ EVIDENCE_HEAD: `ac4b61f614922730761e473f017c2b8aabcaa017` (branch `claude/518-ga
 | 3 operator stop / shutdown keep the host owner | `TestHostCancellationKeepsTheHostOwner`, `TestKernelCauseCarriesMatchingProvenance` |
 | 4 recording failure (transcript half only, §3 seam 1) | `TestRecordingFailureStopsFurtherSideEffects` |
 | 5 budgets: observation-only usage, refusal, admission | `TestUsageIsObservationOnly`, `TestUnmappableHostFieldsAreRefused`, `TestReenteredAttemptIsRefused`, `TestConcurrentAdmissionAdmitsOne`, identity tests |
-| inactivity (plan §5.1) | `TestInactivityIsEnforcedByTheAdapter`, `TestProgressRenewsTheInactivityBound` |
+| inactivity (plan §5.1) | `TestInactivityIsEnforcedByTheAdapter`, `TestProgressObservedAtTheEdgeWins`, `TestSlowTranscriptWriteIsNotInactivity`, `TestGenuineSilenceIsInactivity`, `TestCompletionConcurrentWithExpiryIsPreserved` |
 | uncertain side effect (plan §5.7) | `TestUncertainMutationIsSurfaced`, `TestUncertainSideEffectIsNeverNothingChanged` |
 | hand-off workers bounded to Execute | `TestNoWorkerOutlivesExecute` |
 | `MissingTools` (#522) | `TestMissingToolsProbesTheHostBoundary` |
@@ -72,7 +83,7 @@ Rows 6–12 are not covered by this stage.
 ### Deliberate breaks
 
 Each guard was broken in place, the named tests run, and the source restored.
-All 19 adapter mutations were caught; the decisive line is quoted.
+All 19 adapter mutations and 5 of 6 watchdog mutations were caught (the sixth is explained below the table); the decisive line is quoted.
 
 | Break | Caught by |
 | --- | --- |
@@ -87,18 +98,30 @@ All 19 adapter mutations were caught; the decisive line is quoted.
 | kernel allowed to retry (poll) | `request_test.go:147: kernel retries 3: retries and waits are the host's` |
 | kernel latch decides the cancellation class | `TestHostCancellationKeepsTheHostOwner`, `TestInactivityIsEnforcedByTheAdapter` fail |
 | a late cancellation claims the termination | `adapter_test.go:80: late stop rewrote the outcome` |
-| uncertain side effect hidden | `adapter_test.go:151: uncertain mutation hidden` |
+| uncertain side effect hidden | `adapter_test.go:135: uncertain mutation hidden` |
 | unknown output usage read as zero | `result_test.go:100: unknown usage reported as tokens` |
 | watchdog cancels as a shutdown | `adapter_test.go:92: kernel termination {… Cancellation:controller_shutdown …}` |
 | host cause not translated to kernel provenance | `adapter_test.go:63: operator stop: … Cancellation:unknown …, want cancellation "operator_stop"` |
-| transcript failure swallowed | `adapter_test.go:127: error <nil> is not a *TerminationError` |
-| workers never stopped | `adapter_test.go:245: 6 goroutines after Execute, 2 before` |
-| in-memory admissions per engine | `adapter_test.go:169: error <nil> is not a *TerminationError` |
-| catalogue not consulted by MissingTools | `adapter_test.go:267: missing [], want npm (not catalogued)` |
+| transcript failure swallowed | `adapter_test.go:111: error <nil> is not a *TerminationError` |
+| workers never stopped | `adapter_test.go:229: 6 goroutines after Execute, 2 before` |
+| in-memory admissions per engine | `adapter_test.go:153: error <nil> is not a *TerminationError` |
+| catalogue not consulted by MissingTools | `adapter_test.go:251: missing [], want npm (not catalogued)` |
+| watchdog: plain select (expiry cancels without re-reading progress) | `watchdog_test.go:109: the watchdog armed no timer` (edge test) and `:141` (slow write) |
+| watchdog: write time counted as silence (no in-flight suppression) | `watchdog_test.go:141: the watchdog armed no timer` |
+| watchdog: no refresh when the write ends | `watchdog_test.go:148: the watchdog armed no timer` |
+| watchdog never cancels | `watchdog_test.go:116` and `:158: genuine silence was not cancelled` |
+| expiry rewrites an observed completion | `watchdog_test.go:190: observed completion rewritten by the expiry: {… Outcome:failed …}` |
 | R3 not relaxed | `architecture_test.go:126: R3: …/adapter.go imports …/agentkernel/api: no package of this module may import the agent kernel` |
 | `cmd/` imports the kernel | `architecture_test.go:128: R3: …/zz_mut.go imports …/agentkernel/api: only execution/agentkernel may import …` |
 | a subpackage of the adapter imports the kernel | `architecture_test.go:128: R3: …/sub/x.go …` |
 | the adapter imports `runtime` | `architecture_test.go:114: R2: … an execution adapter may not import runtime` |
+
+The sixth watchdog break, removing the refresh on receipt, survives. While
+the host writes an event the watchdog counts no silence, and the refresh
+when the write ends restarts the clock, so the refresh on receipt has no
+separate observable effect. It stays as the defined observation point. A
+slow write is covered by the write-end refresh and its break; a failing
+write by the recording-failure test.
 
 ## 2. Design of stage 1
 
@@ -116,7 +139,9 @@ artifacts) live under an injected `StateDir`.
 
 `execution_id = "zx-" + hex(SHA-256(lp(RunID) lp(OperationID)))`,
 `attempt_id = "za-" + hex(SHA-256(lp(RunID) lp(OperationID) lp(Attempt)))`,
-`lp(s) = len(s) ":" s`. One host operation is one kernel execution envelope;
+`lp(s) = len(s) ":" s`. The length-prefixed input encoding is injective,
+so it is unambiguous. SHA-256 is collision-resistant, not injective: two
+distinct identities sharing an id would need a SHA-256 collision. One host operation is one kernel execution envelope;
 one physical attempt is one attempt_id. Admissions are durable
 `storage.FileRecords`, so a re-entered attempt is refused and two handles
 admit one.
@@ -145,7 +170,7 @@ In short:
 | `Deadline`, `WallLimit`, context deadline | `Budget.Deadline` | earliest of them and the adapter's `MaxWall` |
 | `MaxTokens` (one total) | `MaxOutputTokens = min(limit, T/2)`, `MaxInputTokens = min(limit, T − out)` | `in + out ≤ T` by construction; `T < 2` refuses |
 | `MaxCostMicros` | `Money{CostCurrency, MaxCostMicros}` | refused unless the binding has a complete trusted rate card in the configured cost currency |
-| `InactivityLimit` | none in the kernel | enforced by the adapter: progress = each recorded kernel event; expiry cancels with `execution.ErrProviderInactive` → `provider_no_progress`, owner `inactivity` |
+| `InactivityLimit` | none in the kernel | enforced by the adapter. Progress is the monotonic instant a kernel event is received, taken before its transcript write. While a write is in flight no silence is counted, and the clock restarts when it ends, so storage latency never reads as inactivity. A write failure is `recording_failed` on its own. The timer only wakes the watchdog, which re-reads the last progress and cancels with `execution.ErrProviderInactive` (→ `provider_no_progress`, owner `inactivity`) only if the silence reached the limit; otherwise it re-arms for the remainder |
 | retries | `MaxProviderRetries = 0` | the host owns retries and waits; a kernel retry is immediate |
 | iterations, tool calls, artifact bytes | the adapter's explicit `Limits` | no host bound exists |
 

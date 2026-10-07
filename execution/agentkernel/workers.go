@@ -53,19 +53,32 @@ func serve[Q, R any](w *workers, handle func(context.Context, Q) R) chan<- api.C
 	return calls
 }
 
+// clock is the watchdog's time source: time.Now (monotonic) and time.After
+// in production, controlled in tests.
+type clock struct {
+	now   func() time.Time
+	after func(time.Duration) <-chan time.Time
+}
+
+var systemClock = clock{now: time.Now, after: time.After}
+
 // supervise translates the host's cancellation into the kernel's, and
 // enforces the host's inactivity bound, on one owned goroutine. The kernel
 // context is cancelled with a cause that keeps the host's own cause (so the
 // host owner is derived from it, never from the kernel) and carries the
 // matching kernel provenance (so the kernel's record agrees).
-func supervise(w *workers, host context.Context, cancel context.CancelCauseFunc, limit time.Duration, progress <-chan struct{}) {
+//
+// The inactivity timer is only a wake-up. When it fires the watchdog
+// re-reads the last observed progress and cancels only if the silence since
+// then really reached the limit; otherwise it re-arms for the remainder. A
+// progress observation racing the expiry therefore wins whenever it was
+// observed first, and time the host spends recording an event is never the
+// provider's silence (attempt.inactive).
+func supervise(w *workers, host context.Context, cancel context.CancelCauseFunc, limit time.Duration, s *attempt) {
 	w.wg.Go(func() {
 		var expired <-chan time.Time
-		var timer *time.Timer
 		if limit > 0 {
-			timer = time.NewTimer(limit)
-			defer timer.Stop()
-			expired = timer.C
+			expired = s.clock.after(limit)
 		}
 		for {
 			select {
@@ -75,12 +88,12 @@ func supervise(w *workers, host context.Context, cancel context.CancelCauseFunc,
 				cancel(kernelCause(context.Cause(host)))
 				return
 			case <-expired:
-				cancel(kernelCause(execution.ErrProviderInactive))
-				return
-			case <-progress:
-				if timer != nil {
-					timer.Reset(limit)
+				remaining, inactive := s.inactive(limit)
+				if inactive {
+					cancel(kernelCause(execution.ErrProviderInactive))
+					return
 				}
+				expired = s.clock.after(remaining)
 			}
 		}
 	})
@@ -107,25 +120,64 @@ type attempt struct {
 	ref        execution.AttemptRef
 	transcript TranscriptWriter
 	record     func(execution.Progress)
-	progress   chan struct{}
+	clock      clock
 
-	mu        sync.Mutex
-	lastKey   string
-	events    int64
-	calls     int
-	responses int
-	lastErr   *api.ProviderError
+	mu sync.Mutex
+	// lastProgress is when the last kernel event was observed (monotonic),
+	// and recording counts events being written by the host right now.
+	lastProgress time.Time
+	recording    int
+	lastKey      string
+	events       int64
+	calls        int
+	responses    int
+	lastErr      *api.ProviderError
 }
 
-func newAttempt(ref execution.AttemptRef, transcript TranscriptWriter, record func(execution.Progress)) *attempt {
-	return &attempt{ref: ref, transcript: transcript, record: record, progress: make(chan struct{}, 1)}
+func newAttempt(ref execution.AttemptRef, transcript TranscriptWriter, record func(execution.Progress), c clock) *attempt {
+	return &attempt{ref: ref, transcript: transcript, record: record, clock: c, lastProgress: c.now()}
 }
 
-// recordEvent is the event sink. The transcript write is the durability the
-// kernel waits for: its failure is returned, so the kernel settles
-// recording_failed and takes no further side effect. Only then is progress
-// recorded and the inactivity bound renewed.
+// inactive reports whether the provider has been silent for the whole limit,
+// or else how long until it would be. While the host is recording an event
+// the kernel is waiting on the host, not on the provider, so that time is
+// never silence; the clock restarts when the write ends.
+func (s *attempt) inactive(limit time.Duration) (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recording > 0 {
+		return limit, false
+	}
+	silence := s.clock.now().Sub(s.lastProgress)
+	if silence >= limit {
+		return 0, true
+	}
+	return limit - silence, false
+}
+
+// observe marks progress the instant a kernel event is received, before the
+// transcript write that may then fail or be slow on its own.
+func (s *attempt) observe() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastProgress = s.clock.now()
+	s.recording++
+}
+
+func (s *attempt) recorded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastProgress = s.clock.now()
+	s.recording--
+}
+
+// recordEvent is the event sink. Progress is observed on receipt; the
+// transcript write is the durability the kernel waits for, and its failure
+// is returned, so the kernel settles recording_failed and takes no further
+// side effect. The host progress recorder then gets a best-effort projection.
 func (s *attempt) recordEvent(ctx context.Context, ev api.Event) error {
+	s.observe()
+	defer s.recorded()
 	line, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("encode event %d: %w", ev.Seq, err)
@@ -140,10 +192,6 @@ func (s *attempt) recordEvent(ctx context.Context, ev api.Event) error {
 	s.mu.Unlock()
 	if s.record != nil {
 		s.record(execution.Progress{Key: key, Age: max(time.Since(ev.ObservedAt), 0)})
-	}
-	select {
-	case s.progress <- struct{}{}:
-	default:
 	}
 	return nil
 }

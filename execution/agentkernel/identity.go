@@ -18,10 +18,12 @@ import (
 // kernel execution, so every physical attempt of it shares one admission
 // envelope and a retry can never present a fresh execution_id that escapes
 // it; one physical attempt is one attempt_id, so a re-entered attempt is
-// refused by admission. Length prefixes make the encoding injective (RunID
-// "a:b" with OperationID "c" never meets RunID "a" with "b:c"), SHA-256 keeps
-// distinct identities apart, and every id is a valid kernel identifier of
-// fixed length (67 bytes) whatever characters the host's ids contain.
+// refused by admission. The length-prefixed input encoding is injective, so
+// it is unambiguous: RunID "a:b" with OperationID "c" never encodes like
+// RunID "a" with "b:c". SHA-256 is not injective; it is collision-resistant,
+// so two distinct encodings sharing an id would need a SHA-256 collision.
+// Every id is a valid kernel identifier of fixed length (67 bytes) whatever
+// characters the host's ids contain.
 func executionID(ref execution.AttemptRef) string {
 	return identity("zx-", ref.RunID, ref.OperationID)
 }
