@@ -1,0 +1,71 @@
+{
+  "version": "agentkernel.execution/v0.1",
+  "execution_id": "exec-minimal-1",
+  "attempt_id": "attempt-1",
+  "termination": {
+    "outcome": "completed",
+    "cause": "loop_completed",
+    "observed_at": "2026-10-07T12:00:05Z"
+  },
+  "final_text": "The repository has api, context and routing packages.",
+  "observations": [
+    {"seq": 1, "kind": "execution.started"},
+    {"seq": 2, "kind": "context.compiled"},
+    {"seq": 3, "kind": "routing.decided", "detail": "chose scripted"},
+    {"seq": 4, "kind": "tool.executed", "tool_call": "call-1", "grant": "read-all",
+     "ref": {"digest": "sha256:c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c", "size": 8, "media_type": "text/plain", "producer": "tool:file.read"}},
+    {"seq": 5, "kind": "execution.settled"}
+  ],
+  "artifacts": [
+    {"digest": "sha256:c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c", "size": 8, "media_type": "text/plain", "producer": "tool:file.read"}
+  ],
+  "usage": {
+    "reported": {"input": 1200, "output": 180, "cached_input": null},
+    "estimated": {"input": 1150, "output": null, "cached_input": null},
+    "provider_calls": 2,
+    "tool_calls": 1,
+    "iterations": 2,
+    "retries": 0,
+    "artifact_bytes": 8,
+    "latency_millis": 5000,
+    "cost": {"known": false, "micros": 0},
+    "unknowns": ["cost", "cached_input"]
+  },
+  "context": {
+    "digest": "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f",
+    "entries": [
+      {
+        "item_id": "task-1",
+        "kind": "task",
+        "trust": "host",
+        "required": true,
+        "selected": true,
+        "reason": "required",
+        "content_digest": "sha256:282092f4720d08473bf4505cbce40e6830cf4bbf083673ceaf003414905844ff",
+        "tokens": {"count": 8, "exact": false}
+      }
+    ],
+    "capacity": {"window": 32000, "reserved_output": 4000, "used": 8, "exact": false}
+  },
+  "routing": {
+    "chosen": "scripted",
+    "candidates": [
+      {"provider_id": "scripted", "eligible": true, "rank": 1, "reasons": ["eligible", "only binding"]}
+    ]
+  },
+  "provenance": {
+    "kernel_version": "agentkernel/0.1.0-gate-a",
+    "provider_id": "scripted",
+    "provider_kind": "scripted",
+    "model": "scripted-model",
+    "model_version_bound": "unknown",
+    "config_fingerprint": "fp-scripted",
+    "workspace_id": "ws-1",
+    "workspace_digest": "sha256:21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08",
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590",
+    "context_manifest_digest": "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f",
+    "isolation": "unproven",
+    "sessions": [{"provider_id": "scripted", "cache_reused": false}]
+  },
+  "event_count": 5
+}

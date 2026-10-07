@@ -1,0 +1,136 @@
+{
+  "version": "agentkernel.execution/v0.1",
+  "execution_id": "exec-full-1",
+  "attempt_id": "attempt-2",
+  "objective": "Fix the failing unit test in src/ and run the tests.",
+  "mode": "read_write",
+  "workspace": {
+    "id": "ws-2",
+    "manifest_digest": "sha256:21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08",
+    "git_revision": "0123456789abcdef0123456789abcdef01234567",
+    "dirty": true
+  },
+  "constraints": {
+    "required_features": ["tools", "artifacts", "cancellation_provenance"],
+    "require_host_proven_isolation": true,
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
+  },
+  "context": [
+    {
+      "id": "instr-1",
+      "kind": "instruction",
+      "trust": "host",
+      "required": true,
+      "content": "Run the unit tests before finishing.",
+      "content_digest": "sha256:b1673ecd2614be24449d98ef5aa82c8ad2ff9e6f824f4bba7460f1039bc98134"
+    },
+    {
+      "id": "constraint-1",
+      "kind": "constraint",
+      "trust": "host",
+      "required": true,
+      "content": "Never modify files outside src/.",
+      "content_digest": "sha256:fd66ee18d9ce1fc1b7402e282bc05d04606abdbce6bb262a19c3a42c010c7024"
+    },
+    {
+      "id": "src-main",
+      "kind": "source",
+      "trust": "workspace",
+      "required": false,
+      "content": "package main",
+      "content_digest": "sha256:512843855fcc92a51c810b1b58e0731c01eac9a6a23c157bfa02aad71edffbe7",
+      "revision": "0123456789abcdef0123456789abcdef01234567",
+      "ref": {
+        "digest": "sha256:c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c",
+        "size": 2048,
+        "media_type": "text/x-go",
+        "producer": "workspace"
+      },
+      "score": 0.75
+    }
+  ],
+  "grants": [
+    {"handle": "read-src", "kind": "file.read", "roots": ["src", "docs/api"]},
+    {"handle": "search-src", "kind": "file.search", "roots": ["src"]},
+    {"handle": "write-src", "kind": "file.write", "roots": ["src"]},
+    {
+      "handle": "run-tests",
+      "kind": "command.run",
+      "commands": [
+        {"name": "unit-tests", "argv": ["go", "test", "./..."], "timeout_seconds": 300},
+        {"name": "vet", "argv": ["go", "vet", "./..."], "timeout_seconds": 120}
+      ]
+    }
+  ],
+  "budget": {
+    "deadline": "2099-01-01T00:00:00Z",
+    "max_iterations": 20,
+    "max_tool_calls": 50,
+    "max_input_tokens": 400000,
+    "max_output_tokens": 40000,
+    "max_artifact_bytes": 10485760,
+    "max_provider_retries": 2,
+    "money": {"currency": "USD", "max_micros": 2000000}
+  },
+  "providers": [
+    {
+      "id": "primary",
+      "kind": "anthropic",
+      "model": "example-large",
+      "model_version": "2026-01-01",
+      "features": ["tools"],
+      "config_fingerprint": "fp-primary",
+      "eligible": true,
+      "pinned": true,
+      "preference": 10,
+      "isolation": "host_proven",
+      "context_window": 200000,
+      "max_output_tokens": 16000,
+      "credential_handle": "cred:primary",
+      "pricing": {
+        "currency": "USD",
+        "input_micros_per_million": 3000000,
+        "output_micros_per_million": 15000000,
+        "cached_input_micros_per_million": 300000,
+        "source": "host-rate-card",
+        "version": "2026-09",
+        "observed_at": "2026-09-01T00:00:00Z"
+      }
+    },
+    {
+      "id": "fallback",
+      "kind": "openai",
+      "model": "example-small",
+      "model_version": "unknown",
+      "config_fingerprint": "fp-fallback",
+      "eligible": true,
+      "pinned": false,
+      "preference": 5,
+      "isolation": "host_proven",
+      "context_window": 128000,
+      "max_output_tokens": 8000,
+      "pricing": {
+        "currency": "USD",
+        "input_micros_per_million": 150000,
+        "output_micros_per_million": 600000,
+        "cached_input_micros_per_million": 0,
+        "source": "host-rate-card",
+        "version": "2026-09",
+        "observed_at": "2026-09-01T00:00:00Z"
+      }
+    },
+    {
+      "id": "unpriced-disabled",
+      "kind": "local",
+      "model": "example-local",
+      "model_version": "unknown",
+      "config_fingerprint": "fp-local",
+      "eligible": false,
+      "pinned": false,
+      "preference": 0,
+      "isolation": "unproven",
+      "context_window": 8000,
+      "max_output_tokens": 1000
+    }
+  ]
+}

@@ -76,7 +76,7 @@ func decodeStrict(data []byte, v any) error {
 	return nil
 }
 
-// rejectDuplicateKeys walks the token stream because encoding/json silently
+// rejectDuplicateKeys also refuses non-lower-case keys and walks the token stream because encoding/json silently
 // keeps the last of two duplicate keys, which would let a conflicting field
 // hide behind an earlier one.
 func rejectDuplicateKeys(data []byte) error {
@@ -120,6 +120,11 @@ func rejectDuplicateKeys(data []byte) error {
 			continue
 		}
 		key := tok.(string)
+		// encoding/json matches field names case-insensitively, so "Mode"
+		// would silently override "mode". Canonical keys are lower case.
+		if strings.ToLower(key) != key {
+			return invalid(key, "non-canonical key spelling")
+		}
 		if top.keys[key] {
 			return invalid(key, "duplicate key")
 		}
@@ -231,6 +236,9 @@ func (it ContextItem) Validate() error {
 	}
 	if it.ContentDigest != Digest([]byte(it.Content)) {
 		return fmt.Errorf("content_digest does not match content")
+	}
+	if it.Ref != nil && (!ValidDigest(it.Ref.Digest) || it.Ref.Size < 0) {
+		return fmt.Errorf("ref needs a sha256 digest and non-negative size")
 	}
 	return nil
 }
