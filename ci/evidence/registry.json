@@ -1,0 +1,373 @@
+{
+  "schema": "zenchron-evidence-registry/1",
+  "focused_package": "runtime",
+  "inert": [
+    "**/*.md",
+    "docs/**",
+    ".github/**",
+    ".claude/**",
+    "agentkernel/**",
+    "ci/**",
+    "scripts/**",
+    "benchmarks/**",
+    "file-size-exceptions.tsv",
+    ".gitignore",
+    "LICENSE"
+  ],
+  "whole": [
+    "runtime/operations.go"
+  ],
+  "domains": [
+    {
+      "name": "guards",
+      "why": "Source-scan guards: cheap structural invariants every runtime change must keep.",
+      "always": true,
+      "run": [
+        "TestEveryOperationKindIsClassifiedDeliberately",
+        "TestNoProductionCodeReadsStateDigestsAsAuthority",
+        "TestPostCommitReadersUseTheSubjectStore",
+        "TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt",
+        "TestEveryRunPolicyMemberIsFrozenAtCreation",
+        "TestEveryPathFieldDeclaresItsRecordedForm"
+      ]
+    },
+    {
+      "name": "adoption",
+      "why": "Trusted-main adoption: trust root, governance observation, adopted builds and credential boundaries.",
+      "race": true,
+      "sources": [
+        "runtime/adopted_*.go",
+        "runtime/trust_root.go",
+        "runtime/governance.go",
+        "runtime/credential_boundary.go",
+        "runtime/controller_source.go"
+      ],
+      "tests": [
+        "runtime/adopted_*_test.go",
+        "runtime/trust_root_test.go",
+        "runtime/governance_test.go",
+        "runtime/credential_boundary_test.go",
+        "runtime/doctor_governance_test.go",
+        "runtime/controller_provenance_test.go",
+        "runtime/governed_remote_test.go"
+      ]
+    },
+    {
+      "name": "controller",
+      "why": "Controller lifecycle: succession, readoption, upgrade, crash/restart, stop ownership and owner processes.",
+      "race": true,
+      "sources": [
+        "runtime/controller*.go",
+        "runtime/termination_owner.go",
+        "runtime/owner*.go",
+        "runtime/process_*.go",
+        "runtime/pause.go"
+      ],
+      "tests": [
+        "runtime/controller_*_test.go",
+        "runtime/owner_test.go",
+        "runtime/pause_test.go",
+        "runtime/orphaned_provider_test.go",
+        "runtime/shutdown_semantics_test.go",
+        "runtime/generation_test.go",
+        "runtime/doctor_controller_test.go"
+      ]
+    },
+    {
+      "name": "supervisor",
+      "why": "The persistent supervisor, its control endpoint, watch, fleet and operator surfaces.",
+      "sources": [
+        "runtime/supervisor*.go",
+        "runtime/control_endpoint*.go",
+        "runtime/control_session.go",
+        "runtime/doctor.go",
+        "runtime/operator.go",
+        "runtime/watch*.go",
+        "runtime/connectivity.go",
+        "runtime/fleet.go",
+        "runtime/gc.go"
+      ],
+      "tests": [
+        "runtime/supervisor*_test.go",
+        "runtime/control_*_test.go",
+        "runtime/doctor_test.go",
+        "runtime/operator_test.go",
+        "runtime/watch*_test.go",
+        "runtime/connectivity_test.go",
+        "runtime/fleet*_test.go",
+        "runtime/gc_test.go",
+        "runtime/status_live_operation_test.go"
+      ]
+    },
+    {
+      "name": "scheduler",
+      "why": "Scheduler, leases, capacity, budgets, retry routing and the reconcile loop.",
+      "race": true,
+      "sources": [
+        "runtime/scheduler.go",
+        "runtime/driver_leases.go",
+        "runtime/capacity*.go",
+        "runtime/reconciler.go",
+        "runtime/run_policy.go",
+        "runtime/deterministic_retry*.go",
+        "runtime/disposition.go",
+        "runtime/work_admission.go"
+      ],
+      "tests": [
+        "runtime/scheduler_test.go",
+        "runtime/driver_leases_test.go",
+        "runtime/capacity*_test.go",
+        "runtime/reconciler_test.go",
+        "runtime/run_policy_test.go",
+        "runtime/deterministic_*_test.go",
+        "runtime/retry_routing_test.go",
+        "runtime/stranded_lease_test.go",
+        "runtime/stopped_run_acquisition_test.go",
+        "runtime/stop_terminal_run_test.go",
+        "runtime/work_admission_test.go",
+        "runtime/active_work_wait_acceptance_test.go",
+        "runtime/budget_semantics_test.go",
+        "runtime/iteration_budget_routing_test.go",
+        "runtime/storage_reservation_test.go"
+      ]
+    },
+    {
+      "name": "store",
+      "why": "Durable state: the SQLite store, the journal, projections and event payloads.",
+      "race": true,
+      "sources": [
+        "runtime/sqlite_store.go",
+        "runtime/journal.go",
+        "runtime/state_storage.go",
+        "runtime/read_store.go",
+        "runtime/projection.go",
+        "runtime/event_payload.go",
+        "runtime/run_summary.go"
+      ],
+      "tests": [
+        "runtime/sqlite_store_test.go",
+        "runtime/journal_test.go",
+        "runtime/read_store_test.go",
+        "runtime/read_scaling_test.go",
+        "runtime/projection_test.go",
+        "runtime/event_*_test.go",
+        "runtime/changes_since_test.go",
+        "runtime/canonical_json_test.go",
+        "runtime/subject_store*_test.go",
+        "runtime/metadata_baseline_test.go"
+      ]
+    },
+    {
+      "name": "handoff",
+      "why": "Typed communication and handoff admission, repair and slots.",
+      "race": true,
+      "sources": [
+        "runtime/handoff_*.go",
+        "runtime/communication_*.go",
+        "runtime/orchestration_handoff.go",
+        "orchestration/handoff.go",
+        "orchestration/communication*.go",
+        "runtime/typed_result_slots.go"
+      ],
+      "tests": [
+        "runtime/*handoff*_test.go",
+        "runtime/communication_test.go",
+        "runtime/typed_result_*_test.go"
+      ]
+    },
+    {
+      "name": "orchestration",
+      "why": "Orchestration batches: lifecycle, status, settlement and its store.",
+      "sources": [
+        "runtime/orchestration.go",
+        "runtime/orchestration_lifecycle.go",
+        "runtime/orchestration_status.go",
+        "runtime/orchestration_store.go",
+        "orchestration/batch.go",
+        "orchestration/item.go"
+      ],
+      "tests": [
+        "runtime/orchestration_*_test.go"
+      ]
+    },
+    {
+      "name": "workgraph",
+      "why": "The durable WorkGraph, its binding and dependency delivery.",
+      "sources": [
+        "runtime/workgraph*.go",
+        "orchestration/workgraph*.go"
+      ],
+      "tests": [
+        "runtime/workgraph*_test.go"
+      ]
+    },
+    {
+      "name": "planning",
+      "why": "The Engineering Planner: plans, templates, the plan reconciler and plan store.",
+      "sources": [
+        "runtime/plan_*.go",
+        "runtime/planner.go",
+        "planning/*.go"
+      ],
+      "tests": [
+        "runtime/plan_*_test.go",
+        "runtime/planner*_test.go",
+        "runtime/planning_*_test.go",
+        "runtime/sixth_dogfood_test.go"
+      ]
+    },
+    {
+      "name": "provider",
+      "why": "Execution providers and agents: invocation, isolation, inactivity, quota and transport.",
+      "sources": [
+        "runtime/provider_*.go",
+        "runtime/claude_stream.go",
+        "runtime/cli_agent.go",
+        "runtime/native_codex.go",
+        "runtime/openai_*.go",
+        "runtime/agent_*.go",
+        "runtime/agents.go",
+        "runtime/adapters.go",
+        "runtime/transport_chatter.go",
+        "runtime/execution_aliases.go",
+        "runtime/execution_scratch.go",
+        "runtime/toolchain_probe.go"
+      ],
+      "tests": [
+        "runtime/provider_*_test.go",
+        "runtime/claude_*_test.go",
+        "runtime/native_codex_test.go",
+        "runtime/openai_*_test.go",
+        "runtime/agent_*_test.go",
+        "runtime/agents_test.go",
+        "runtime/transport_chatter*_test.go",
+        "runtime/worker_toolchain_test.go"
+      ]
+    },
+    {
+      "name": "attempt",
+      "why": "Attempt identity, cancellation and termination provenance.",
+      "race": true,
+      "sources": [
+        "runtime/attempt_*.go",
+        "runtime/execution_scratch.go"
+      ],
+      "tests": [
+        "runtime/attempt_*_test.go",
+        "runtime/execution_*_test.go",
+        "runtime/validation_scratch_test.go",
+        "runtime/cancellation_*_test.go"
+      ]
+    },
+    {
+      "name": "verification",
+      "why": "Verification and assurance: permits, transport, semantic assurance and reviewer results.",
+      "sources": [
+        "runtime/verification_*.go",
+        "runtime/assurance_evidence.go",
+        "runtime/semantic_assurance.go",
+        "runtime/typed_result_capability.go",
+        "runtime/reviewer_result.go",
+        "runtime/review_continuation.go",
+        "runtime/typed_result_slots.go"
+      ],
+      "tests": [
+        "runtime/verification_*_test.go",
+        "runtime/assurance_*_test.go",
+        "runtime/semantic_*_test.go",
+        "runtime/reviewer_*_test.go",
+        "runtime/review_continuation_test.go",
+        "runtime/nested_verification_test.go",
+        "runtime/typed_result_*_test.go"
+      ]
+    },
+    {
+      "name": "candidate",
+      "why": "Candidate commit integrity: git boundaries, held material, quarantine and source history.",
+      "race": true,
+      "sources": [
+        "runtime/candidate_writer.go",
+        "runtime/git*.go",
+        "runtime/repository_git.go",
+        "runtime/source_*.go",
+        "runtime/argv_paths.go",
+        "runtime/held_material.go",
+        "runtime/quarantine.go"
+      ],
+      "tests": [
+        "runtime/candidate_*_test.go",
+        "runtime/git*_test.go",
+        "runtime/repository_git_test.go",
+        "runtime/source_*_test.go",
+        "runtime/argv_paths_test.go",
+        "runtime/commit_*_test.go",
+        "runtime/held_material*_test.go",
+        "runtime/refused_material_quarantine_test.go",
+        "runtime/post_commit_durability_test.go",
+        "runtime/publication_*_test.go"
+      ]
+    },
+    {
+      "name": "github",
+      "why": "The GitHub forge: REST and App transport, feedback observation and remediation.",
+      "sources": [
+        "runtime/github*.go",
+        "runtime/feedback*.go",
+        "runtime/forge_multiplex.go",
+        "runtime/remediation.go"
+      ],
+      "tests": [
+        "runtime/github*_test.go",
+        "runtime/feedback*_test.go",
+        "runtime/conversation_pagination_test.go",
+        "runtime/remediation_test.go"
+      ]
+    },
+    {
+      "name": "authority",
+      "why": "Authority requests, the authority matrix and the configuration lattice.",
+      "race": true,
+      "sources": [
+        "runtime/authority_request.go",
+        "authority/*.go",
+        "policy/*.go"
+      ],
+      "tests": [
+        "runtime/authority_*_test.go",
+        "runtime/provider_authority_test.go",
+        "runtime/lattice_test.go"
+      ]
+    },
+    {
+      "name": "tools",
+      "why": "The tool broker, tool surface and sandbox.",
+      "sources": [
+        "runtime/tool_*.go",
+        "runtime/sandbox.go",
+        "runtime/toolchain_probe.go"
+      ],
+      "tests": [
+        "runtime/tool_*_test.go",
+        "runtime/sandbox*_test.go"
+      ]
+    },
+    {
+      "name": "engine",
+      "why": "The engineering runtime end to end: kernel, configuration and the dogfood and phase scenarios.",
+      "sources": [
+        "runtime/runtime.go",
+        "runtime/kernel.go",
+        "runtime/config.go"
+      ],
+      "tests": [
+        "runtime/runtime_test.go",
+        "runtime/kernel_test.go",
+        "runtime/config*_test.go",
+        "runtime/phase8_test.go",
+        "runtime/fourth_dogfood_test.go",
+        "runtime/fifth_dogfood_test.go",
+        "runtime/hardening_129_test.go"
+      ]
+    }
+  ]
+}
