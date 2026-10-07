@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-func retryLeaseFixture(t *testing.T) (string, *SQLiteOperationStore, Scheduler, RunOperation) {
+func retryLeaseFixture(t *testing.T) (string, string, *SQLiteOperationStore, Scheduler, RunOperation) {
 	t.Helper()
-	_, store := openJournal(t)
+	dir, store := openJournal(t)
 	runID := "r"
 	scheduler := capacityScheduler(store, "owner", 10, 2)
 	planned, _, err := scheduler.Plan(RunOperation{
@@ -38,7 +38,7 @@ func retryLeaseFixture(t *testing.T) (string, *SQLiteOperationStore, Scheduler, 
 	if retry == nil {
 		t.Fatal("failed operation was not leased for retry")
 	}
-	return runID, store, scheduler, *retry
+	return dir, runID, store, scheduler, *retry
 }
 
 func lifecycleSnapshot(t *testing.T, store *SQLiteOperationStore, runID string) (EngineeringRun, RunSnapshot, map[string]RunOperation) {
@@ -67,7 +67,7 @@ func lifecycleSnapshot(t *testing.T, store *SQLiteOperationStore, runID string) 
 }
 
 func TestOrchestrationLifecycleAcceptsRetryLeaseBeforeOperationBefore(t *testing.T) {
-	runID, store, _, retry := retryLeaseFixture(t)
+	_, runID, store, _, retry := retryLeaseFixture(t)
 	run, snapshot, operations := lifecycleSnapshot(t, store, runID)
 	journal := snapshot.Operations[retry.ID]
 	if retry.State != Leased || journal.State != OperationFailed || retry.AttemptIdentity != journal.AttemptIdentity {
@@ -80,7 +80,7 @@ func TestOrchestrationLifecycleAcceptsRetryLeaseBeforeOperationBefore(t *testing
 }
 
 func TestCancelledRetryStillRequiresMatchingJournalTerminalFact(t *testing.T) {
-	runID, store, scheduler, retry := retryLeaseFixture(t)
+	_, dir, runID, store, scheduler, retry := retryLeaseFixture(t)
 	if _, err := scheduler.Finish(retry.ID, OperationCancelled); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestStaleRetryCancellationJournalsBeforeFinishingRow(t *testing.T) {
 	}
 	check(store)
 
-	reopened, err := OpenSQLiteOperationStore(store.path)
+	reopened, err := OpenSQLiteOperationStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
