@@ -39,6 +39,7 @@ var operationCapacityClasses = map[string]CapacityClass{
 	OpCandidatePush:     CapacityWork,
 	OpPullRequestCreate: CapacityWork,
 	OpPullRequestUpdate: CapacityWork,
+	OpHandoffRepair:     CapacityWork,
 }
 
 // OperationCapacityClass classifies one operation kind. It FAILS CLOSED: any
