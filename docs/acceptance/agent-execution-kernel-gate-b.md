@@ -31,7 +31,7 @@ A commit cannot contain its own hash, so the binding lands in a later commit
 that changes only this file; verify with
 `git diff --name-only EVIDENCE_HEAD <binding commit>`.
 
-EVIDENCE_HEAD: recorded by the binding commit. Superseded first binding: `ac4b61f`, before the corrections the owner asked for on #518 (comment 6047604378).
+EVIDENCE_HEAD: `bc976cf0d11e3c6b0eee09e3ffa34630dc5226a4` (branch `claude/518-gateb-adapter`). Superseded first binding: `ac4b61f`, before the corrections the owner asked for on #518 (comment 6047604378).
 
 | Item | Value |
 | --- | --- |
