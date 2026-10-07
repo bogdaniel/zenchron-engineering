@@ -49,8 +49,9 @@ type effect struct {
 	events  []journalEntry
 	result  any
 	state   OperationState
-	// interrupted is set only by invokeExecution, and only when an operator
-	// stop ended the attempt: no provider was started, or the provider's
+	// interrupted is set only by the provider-backed handlers - invokeExecution
+	// and repairHandoff (#492) - and only when an operator stop ended the
+	// attempt: no provider was started, or the provider's
 	// executor committed the stop as the owner of its termination (#213).
 	interrupted bool
 }
@@ -114,6 +115,7 @@ func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op Run
 		OpPullRequestCreate: r.createPullRequest,
 		OpPullRequestUpdate: r.updatePullRequest,
 		OpGitHubObserve:     r.observeGitHub,
+		OpHandoffRepair:     r.repairHandoff,
 	}[op.Kind]
 	if !ok {
 		return failed(deterministicRefusal("operation.handler_missing", fmt.Errorf("no handler for operation kind %q", op.Kind)))
@@ -1622,7 +1624,7 @@ func (s *runState) admitSuccessor(d *ExecutionDiagnostic, operation RunOperation
 		d.SuccessorUnavailable = "execution_continuations_exhausted"
 	// The run TOTAL of provider invocations (a plan stage's headroom). The
 	// projection was read before this attempt began, so it is counted here.
-	case s.providerInvocationLimit() > 0 && s.projection.Attempts[OpExecutionInvoke]+1 >= s.providerInvocationLimit():
+	case s.providerInvocationLimit() > 0 && s.providerInvocationsSpent()+1 >= s.providerInvocationLimit():
 		d.SuccessorUnavailable = "run_provider_invocations_exhausted"
 	}
 	if d.SuccessorUnavailable != "" {

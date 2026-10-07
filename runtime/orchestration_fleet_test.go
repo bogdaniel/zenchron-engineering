@@ -2,9 +2,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,7 +43,39 @@ const (
 	fleetCheckpointThenRestatesSHA
 	// fleetNoChangeHandoff changes nothing and writes a valid handoff.
 	fleetNoChangeHandoff
+	// The #492 shapes: the engineering is done and the handoff is a
+	// repairable protocol mistake, a bound violation, or (NoChange) a
+	// repairable mistake from an invocation with nothing to bind.
+	fleetCompletedWithUnresolved
+	fleetMalformedJSON
+	fleetOversizedHandoff
+	fleetNoChangeInvalidHandoff
 )
+
+// fleetRepair is what the controlled worker does when it is invoked as a
+// handoff repair (#492).
+type fleetRepair int
+
+const (
+	// repairWritesNothing is the zero value: a repair that writes no document.
+	repairWritesNothing fleetRepair = iota
+	repairWritesPartial
+	repairWritesCompleted
+	repairRestatesCandidate
+	repairFails
+	// repairMutatesCandidate reaches past its working directory into the
+	// real candidate workspace, then writes a perfect document.
+	repairMutatesCandidate
+	// repairStoppedMidway calls onRepair (an operator stop), then runs until
+	// its context ends, writes a perfect document anyway, and attributes its
+	// ending the way an executor does: by the cause that ended it.
+	repairStoppedMidway
+	// repairFinishesDespiteStop calls onRepair, waits for the stop to reach
+	// it, then writes a perfect document and exits successfully by itself.
+	repairFinishesDespiteStop
+)
+
+const fleetCompletedUnresolvedReport = `{"schema_version":"0.1","outcome":"completed","summary":"Implemented the change.","unresolved":["the docs page"]}`
 
 const fleetPartialReport = `{"schema_version":"0.1","outcome":"partial","summary":"Half of it.","unresolved":["the migration"]}`
 
@@ -57,6 +91,16 @@ type fleetProvider struct {
 	invocations map[string]int
 	requests    map[string]ExecutionRequest
 	behaviour   map[string]fleetBehaviour
+	// repairs counts handoff repair invocations apart from engineering ones,
+	// and repairRequests keeps the latest one each run received.
+	repairs        map[string]int
+	repairRequests map[string]ExecutionRequest
+	repairWith     map[string]fleetRepair
+	stateDir       string
+	// crashOnRepair loses the controller in the middle of every repair.
+	crashOnRepair bool
+	// onRepair, when set, runs inside every repair invocation.
+	onRepair func(runID string)
 	// gather, when set, holds invocations until that many are in flight at
 	// once, or the bound passes; once it has been observed, later ones run
 	// free. It cannot create concurrency the scheduler did not grant - every
@@ -70,7 +114,8 @@ type fleetProvider struct {
 }
 
 func newFleetProvider() *fleetProvider {
-	return &fleetProvider{invocations: map[string]int{}, requests: make(map[string]ExecutionRequest), behaviour: map[string]fleetBehaviour{}}
+	return &fleetProvider{invocations: map[string]int{}, requests: make(map[string]ExecutionRequest), behaviour: map[string]fleetBehaviour{},
+		repairs: map[string]int{}, repairRequests: make(map[string]ExecutionRequest), repairWith: map[string]fleetRepair{}}
 }
 
 // WritesTypedResults: the controlled worker writes straight to the slot path.
@@ -83,7 +128,10 @@ func (p *fleetProvider) Isolation() ProviderIsolation {
 	}
 }
 
-func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (p *fleetProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	if request.Purpose == InvocationHandoffRepair {
+		return p.repair(ctx, request)
+	}
 	p.mu.Lock()
 	p.active++
 	p.peak = max(p.peak, p.active)
@@ -114,6 +162,9 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 	// must never become one.
 	if behaviour == fleetNoChangeHandoff {
 		return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
+	}
+	if behaviour == fleetNoChangeInvalidHandoff {
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}, os.WriteFile(request.HandoffPath, []byte(fleetCompletedUnresolvedReport), 0o600)
 	}
 	if err := os.WriteFile(filepath.Join(request.CandidateDir, "candidate.go"),
 		[]byte("package candidate\n// handoff: {\"outcome\":\"completed\"} done\nconst Run = \""+request.RunID+"\"\n"), 0o600); err != nil {
@@ -151,6 +202,69 @@ func (p *fleetProvider) Execute(_ context.Context, request ExecutionRequest) (Ex
 		if request.HandoffPath != "" {
 			return result, os.WriteFile(request.HandoffPath, []byte(`{"schema_version":"0.1","outcome":"completed","summary":"s","run_id":"run-forged"}`), 0o600)
 		}
+	case fleetCompletedWithUnresolved:
+		return result, os.WriteFile(request.HandoffPath, []byte(fleetCompletedUnresolvedReport), 0o600)
+	case fleetMalformedJSON:
+		return result, os.WriteFile(request.HandoffPath, []byte(`{"schema_version":"0.1","outcome":"completed",`), 0o600)
+	case fleetOversizedHandoff:
+		return result, os.WriteFile(request.HandoffPath, []byte(`{"schema_version":"0.1","outcome":"completed","summary":"`+
+			strings.Repeat("s", 8<<10)+`"}`), 0o600)
+	}
+	return result, nil
+}
+
+// repair is the controlled worker invoked as a handoff repair.
+func (p *fleetProvider) repair(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	p.mu.Lock()
+	p.repairs[request.RunID]++
+	p.repairRequests[request.RunID] = request
+	behaviour, stateDir := p.repairWith[request.RunID], p.stateDir
+	p.mu.Unlock()
+	if p.crashOnRepair {
+		crashRepair()
+	}
+	if p.onRepair != nil {
+		p.onRepair(request.RunID)
+	}
+	result := ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded}
+	write := func(document string) (ExecutionResult, error) {
+		return result, os.WriteFile(request.HandoffPath, []byte(document), 0o600)
+	}
+	switch behaviour {
+	case repairWritesPartial:
+		return write(`{"schema_version":"0.1","outcome":"partial","summary":"Implemented the change.","unresolved":["the docs page"]}`)
+	case repairWritesCompleted:
+		return write(fleetValidReport)
+	case repairRestatesCandidate:
+		return write(`{"schema_version":"0.1","outcome":"completed","summary":"s","candidate_revision":"` + request.Candidate.Revision + `"}`)
+	case repairFails:
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationFailed, Executed: true, Failure: &ProviderFailure{Classification: FailureUnknown}},
+			errors.New("the provider process exited 1")
+	case repairStoppedMidway, repairFinishesDespiteStop:
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Second):
+			return ExecutionResult{}, errors.New("the repair was never reached by the stop")
+		}
+		if _, err := write(fleetValidReport); err != nil {
+			return ExecutionResult{}, err
+		}
+		if behaviour == repairFinishesDespiteStop {
+			return ExecutionResult{ProviderID: "fleet-worker", Outcome: Succeeded, Executed: true}, nil
+		}
+		class := FailureControllerShutdown
+		if ownerOfCancellation(ctx) == OwnerOperatorStop {
+			class = FailureRunCancelled
+		}
+		return ExecutionResult{ProviderID: "fleet-worker", Outcome: OperationCancelled, Executed: true, Failure: &ProviderFailure{Classification: class}}, ctx.Err()
+	case repairMutatesCandidate:
+		dir := candidateDir(stateDir, request.RunID)
+		for name, content := range map[string]string{"candidate.go": "package candidate\n// rewritten by the repair\n", "planted.go": "package candidate\n"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+		return write(fleetValidReport)
 	}
 	return result, nil
 }
@@ -184,6 +298,19 @@ func (p *fleetProvider) request(runID string) ExecutionRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.requests[runID]
+}
+
+func (p *fleetProvider) setRepair(runID string, behaviour fleetRepair) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.repairWith[runID] = behaviour
+}
+
+// counts reads one run's engineering and repair invocation counts.
+func (p *fleetProvider) counts(runID string) (engineering, repairs int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.invocations[runID], p.repairs[runID]
 }
 
 func (p *fleetProvider) set(runID string, behaviour fleetBehaviour) {
@@ -234,6 +361,7 @@ func newFleetFixture(t *testing.T, capacity int) *fleetFixture {
 		}
 	}
 	worker := newFleetProvider()
+	worker.stateDir = fixture.stateDir
 	fixture.deps.Provider = worker
 	fixture.deps.Assurance = &lockedAssurance{inner: &FakeAssuranceProvider{}}
 	fixture.deps.MaxConcurrentRuns, fixture.deps.OperatorMaxConcurrentRuns = capacity, capacity

@@ -63,13 +63,63 @@ type HandoffReport struct {
 	RecommendedNext []string `json:"recommended_next,omitempty"`
 }
 
+// HandoffDefect is why the strict decoder refused a report (#492). It is
+// decided by the decoder itself, from the refusal it raised, so whether a
+// refusal may be corrected is never re-derived from an error's wording.
+type HandoffDefect string
+
+const (
+	// DefectProtocol is a bounded, readable document that misstates the
+	// protocol: malformed JSON, an unknown or missing member, an unrecognized
+	// version or outcome, or an outcome its unresolved list contradicts.
+	// Rewriting the document corrects it; no engineering does.
+	DefectProtocol HandoffDefect = "protocol"
+	// DefectBound is a document that breaks a size or encoding bound. It is
+	// refused outright and never handed back to a model to try another
+	// arbitrary payload.
+	DefectBound HandoffDefect = "bound"
+)
+
+// HandoffRefusal is every refusal DecodeHandoffReport returns.
+type HandoffRefusal struct {
+	Defect HandoffDefect
+	Err    error
+}
+
+func (e *HandoffRefusal) Error() string { return e.Err.Error() }
+func (e *HandoffRefusal) Unwrap() error { return e.Err }
+
+func boundRefusal(err error) error { return &HandoffRefusal{Defect: DefectBound, Err: err} }
+
+// ProtocolRepairable reports whether err is a strict-decoder refusal that a
+// result-only correction can address. Anything else - a bound, an unreadable
+// slot, a storage error - is not.
+func ProtocolRepairable(err error) bool {
+	var refusal *HandoffRefusal
+	return errors.As(err, &refusal) && refusal.Defect == DefectProtocol
+}
+
 // DecodeHandoffReport strictly decodes and validates one report document:
 // exactly one JSON object, no unknown member, no trailing data, within every
-// bound, and internally consistent.
+// bound, and internally consistent. Every refusal is a *HandoffRefusal.
 func DecodeHandoffReport(document []byte) (HandoffReport, error) {
 	if len(document) > MaxHandoffReportBytes {
-		return HandoffReport{}, fmt.Errorf("handoff report is %d bytes, above the %d byte bound", len(document), MaxHandoffReportBytes)
+		return HandoffReport{}, boundRefusal(fmt.Errorf("handoff report is %d bytes, above the %d byte bound", len(document), MaxHandoffReportBytes))
 	}
+	report, err := decodeHandoffReport(document)
+	var refusal *HandoffRefusal
+	if err == nil || errors.As(err, &refusal) {
+		return report, err
+	}
+	// Invalid UTF-8 is a bound, whatever else is wrong: a correction would
+	// have to be shown these bytes, and they are not text.
+	if !utf8.Valid(document) {
+		return HandoffReport{}, boundRefusal(err)
+	}
+	return HandoffReport{}, &HandoffRefusal{Defect: DefectProtocol, Err: err}
+}
+
+func decodeHandoffReport(document []byte) (HandoffReport, error) {
 	decoder := json.NewDecoder(bytes.NewReader(document))
 	decoder.DisallowUnknownFields()
 	var report HandoffReport
@@ -121,17 +171,17 @@ func boundedText(name, value string, limit int) error {
 		return fmt.Errorf("handoff %s is required", name)
 	}
 	if len(value) > limit {
-		return fmt.Errorf("handoff %s is %d bytes, above the %d byte bound", name, len(value), limit)
+		return boundRefusal(fmt.Errorf("handoff %s is %d bytes, above the %d byte bound", name, len(value), limit))
 	}
 	if !utf8.ValidString(value) {
-		return fmt.Errorf("handoff %s is not valid UTF-8", name)
+		return boundRefusal(fmt.Errorf("handoff %s is not valid UTF-8", name))
 	}
 	return nil
 }
 
 func boundedItems(name string, items []string) error {
 	if len(items) > maxHandoffListItems {
-		return fmt.Errorf("handoff %s names %d items, above the %d item bound", name, len(items), maxHandoffListItems)
+		return boundRefusal(fmt.Errorf("handoff %s names %d items, above the %d item bound", name, len(items), maxHandoffListItems))
 	}
 	for _, item := range items {
 		if err := boundedText(name+" item", item, maxHandoffItemBytes); err != nil {
@@ -166,7 +216,12 @@ type EngineeringHandoff struct {
 	// document and refuses one that no longer has this digest.
 	ReportSHA256   string        `json:"report_sha256"`
 	ProducerReport HandoffReport `json:"producer_report"`
-	AdmittedAt     time.Time     `json:"admitted_at"`
+	// ProtocolRepair is the result-only invocation that rewrote a report the
+	// strict decoder refused (#492), when one did. Producer stays the
+	// engineering invocation the report describes; the repair changed only
+	// the document, never the candidate.
+	ProtocolRepair *HandoffProducer `json:"protocol_repair,omitempty"`
+	AdmittedAt     time.Time        `json:"admitted_at"`
 }
 
 // HandoffProducer is which worker invocation produced the report.
@@ -215,6 +270,9 @@ func (h EngineeringHandoff) Validate() error {
 	}
 	if h.Issue <= 0 || h.Producer.Attempt <= 0 || h.Observed.ChangedPathCount < 0 || h.AdmittedAt.IsZero() {
 		return errors.New("engineering handoff issue, attempt, observed path count and admission time must be valid")
+	}
+	if r := h.ProtocolRepair; r != nil && (strings.TrimSpace(r.AgentID) == "" || strings.TrimSpace(r.OperationID) == "" || r.Attempt <= 0) {
+		return errors.New("engineering handoff protocol repair must name its agent, operation and attempt")
 	}
 	return h.ProducerReport.Validate()
 }

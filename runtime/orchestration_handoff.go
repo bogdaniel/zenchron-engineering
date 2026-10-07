@@ -194,7 +194,7 @@ func admitOrchestratedHandoff(store orchestrationHandoffStore, stateDir string, 
 	}
 	atCommit := &runState{run: run, snapshot: prior, events: prefix, projection: projected}
 	atCommit.collectSources()
-	path, err := HandoffReportPath(stateDir, ExecutionAttemptRef{RunID: run.ID, OperationID: reported.OperationID, Attempt: reported.Attempt})
+	path, err := handoffReportPathOf(stateDir, run.ID, reported)
 	if err != nil {
 		return err
 	}
@@ -212,6 +212,11 @@ func admitOrchestratedHandoff(store orchestrationHandoffStore, stateDir string, 
 		Governance:   orchestration.HandoffGovernance{ContractID: projected.Contract.ID, ContractRevision: projected.Contract.Revision},
 		Observed:     orchestration.HandoffObserved{ChangedPathCount: payload.PathCount, ChangedPathsDigest: payload.PathsDigest},
 		ReportSHA256: digest, ProducerReport: report, AdmittedAt: now,
+	}
+	if reported.RepairOperationID != "" {
+		handoff.ProtocolRepair = &orchestration.HandoffProducer{
+			AgentID: run.AgentID, OperationID: reported.RepairOperationID, Attempt: reported.RepairAttempt,
+		}
 	}
 	if commit.event == EventCandidateCheckpointed {
 		// The snapshot proves the binding; SQLite must keep that proof current
