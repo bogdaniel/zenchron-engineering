@@ -156,7 +156,21 @@ type FileArtifacts struct {
 	root     string
 	maxBytes int64
 	mu       sync.Mutex // serializes Put/Delete/Retain so accounting stays exact
-	used     int64
+	// counted is the single source of capacity accounting: artifact file key
+	// -> data bytes that file actually occupies. used is its running sum and
+	// changes only through setCount.
+	counted map[string]int64
+	used    int64
+}
+
+// setCount records that key now occupies n data bytes; n < 0 forgets key.
+func (s *FileArtifacts) setCount(key string, n int64) {
+	s.used -= s.counted[key]
+	delete(s.counted, key)
+	if n >= 0 {
+		s.counted[key] = n
+		s.used += n
+	}
 }
 
 type artifactHeader struct {
@@ -179,23 +193,25 @@ func OpenFileArtifacts(root string, maxBytes int64) (*FileArtifacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &FileArtifacts{root: root, maxBytes: maxBytes}
+	s := &FileArtifacts{root: root, maxBytes: maxBytes, counted: map[string]int64{}}
 	for _, e := range entries {
 		if len(e.Name()) != sha256.Size*2 || !e.Type().IsRegular() {
 			continue // pins and leftover temp files hold no artifact bytes
 		}
-		size, err := storedSize(filepath.Join(root, e.Name()))
+		size, err := occupiedSize(filepath.Join(root, e.Name()))
 		if err != nil {
 			return nil, err
 		}
-		s.used += size
+		s.setCount(e.Name(), size)
 	}
 	return s, nil
 }
 
-// storedSize is the data size an artifact file accounts for. A file whose
-// header is unreadable counts in full: corruption must not free capacity.
-func storedSize(name string) (int64, error) {
+// occupiedSize is the data bytes an artifact file actually occupies: its
+// length minus its header line. The header's size claim is never trusted, so
+// a corrupt-but-parseable header cannot hide bytes. A file without a
+// parseable header line counts in full: over-count rather than under-count.
+func occupiedSize(name string) (int64, error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return 0, err
@@ -205,14 +221,14 @@ func storedSize(name string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	line, _, ok := bytes.Cut(head, []byte("\n"))
-	var h artifactHeader
-	if ok && json.Unmarshal(line, &h) == nil && h.Size >= 0 {
-		return h.Size, nil
-	}
 	info, err := f.Stat()
 	if err != nil {
 		return 0, err
+	}
+	line, _, ok := bytes.Cut(head, []byte("\n"))
+	var h artifactHeader
+	if ok && json.Unmarshal(line, &h) == nil {
+		return info.Size() - int64(len(line)) - 1, nil
 	}
 	return info.Size(), nil
 }
@@ -235,23 +251,19 @@ func (s *FileArtifacts) Put(ctx context.Context, in api.ArtifactInput) (api.Arti
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// An existing copy counts as stored only if it verifies; a corrupt one is
-	// rewritten in place (its key is already in the accounting).
-	existing := false
-	if _, err := os.Lstat(s.path(ref)); err == nil {
-		if _, err := s.Get(ctx, ref); err == nil {
-			return ref, nil
-		}
-		existing = true
+	// rewritten in place, and the bound applies to its growth over the bytes
+	// that copy was counted as occupying.
+	key := refKey(ref)
+	if _, err := s.Get(ctx, ref); err == nil {
+		return ref, nil
 	}
-	if !existing && s.used+ref.Size > s.maxBytes {
-		return api.ArtifactRef{}, fmt.Errorf("%w: %d + %d > %d bytes", ErrCapacity, s.used, ref.Size, s.maxBytes)
+	if grow := ref.Size - s.counted[key]; grow > 0 && s.used+grow > s.maxBytes {
+		return api.ArtifactRef{}, fmt.Errorf("%w: %d + %d > %d bytes", ErrCapacity, s.used, grow, s.maxBytes)
 	}
-	if err := writeAtomic(s.root, refKey(ref), framed); err != nil {
+	if err := writeAtomic(s.root, key, framed); err != nil {
 		return api.ArtifactRef{}, err
 	}
-	if !existing {
-		s.used += ref.Size
-	}
+	s.setCount(key, ref.Size)
 	return ref, nil
 }
 
@@ -321,14 +333,10 @@ func (s *FileArtifacts) Delete(ctx context.Context, ref api.ArtifactRef) error {
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	size, err := storedSize(s.path(ref))
-	if err != nil {
-		return err
-	}
 	if err := os.Remove(s.path(ref)); err != nil {
 		return err
 	}
-	s.used -= size
+	s.setCount(refKey(ref), -1)
 	return syncDir(s.root)
 }
 

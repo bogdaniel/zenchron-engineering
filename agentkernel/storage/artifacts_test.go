@@ -3,10 +3,12 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -206,4 +208,74 @@ func TestFileArtifactsPutRepairsCorruptCopy(t *testing.T) {
 	if s.used != used {
 		t.Fatalf("repair changed accounting %d -> %d", used, s.used)
 	}
+}
+
+// Capacity accounting follows the bytes on disk, never a header's size claim:
+// a parseable header claiming size 0 must not free capacity across a reopen,
+// and repairing that artifact must charge the growth against the bound.
+func TestFileArtifactsAccountOccupiedBytesNotHeaderClaims(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "a")
+	s, err := OpenFileArtifacts(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUsed := func(s *FileArtifacts, want int64, step string) {
+		t.Helper()
+		if s.used != want {
+			t.Fatalf("%s: used = %d, want %d", step, s.used, want)
+		}
+	}
+	a := input(string(bytes.Repeat([]byte("a"), 40)))
+	ref, err := s.Put(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lying := ref
+	lying.Size = 0
+	header, err := json.Marshal(artifactHeader(lying))
+	if err != nil {
+		t.Fatal(err)
+	}
+	garbage := bytes.Repeat([]byte("g"), 25)
+	if err := os.WriteFile(s.path(ref), append(append(header, '\n'), garbage...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Unparseable files count in full; pins and temp files count nothing.
+	other := filepath.Join(root, strings.Repeat("0", 64))
+	if err := os.WriteFile(other, []byte("no header at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".tmp-x"), garbage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenFileArtifacts(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUsed(s, 25+16, "reopen")
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenFileArtifacts(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUsed(s, 25, "reopen without the headerless file")
+	if _, err := s.Put(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	wantUsed(s, 40, "repair")
+	if _, err := s.Put(ctx, input(string(bytes.Repeat([]byte("b"), 70)))); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("Put past the true bound = %v, want ErrCapacity", err)
+	}
+	wantUsed(s, 40, "refused Put")
+	if err := s.Delete(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+	wantUsed(s, 0, "delete after repair")
+	if _, err := s.Put(ctx, input(string(bytes.Repeat([]byte("b"), 70)))); err != nil {
+		t.Fatalf("Put after freeing bytes = %v", err)
+	}
+	wantUsed(s, 70, "put after delete")
 }
