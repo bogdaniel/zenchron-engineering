@@ -190,14 +190,44 @@ func (s *SQLiteOperationStore) RecordReviewPublication(pub review.Publication) (
 	return inserted == 1, err
 }
 
-// RecordReviewPublicationAttempt durably marks decisionID's external
-// submission as started, BEFORE PublishReview calls GitHub.SubmitReview
-// (#233 P1). A row surviving here with no corresponding ReviewPublication is
-// the uncertain-outcome marker: proof some caller began a POST whose result
-// was never confirmed. An upsert, not insert-once: a caller legitimately
-// retrying its OWN unresolved attempt (the only case that reaches this call
-// at all - see PublishReview's own prior-attempt check) refreshes the
-// timestamp rather than being refused by its own earlier row.
+// AdmitReviewPublicationAttempt is the atomic, ONE-WINNER gate before any
+// external submission (#233 P1-A). It fixes the hole a plain upsert left
+// open: a caller that read "no attempt outstanding" and then paused before
+// writing its own marker could, on resuming, blindly overwrite a DIFFERENT
+// caller's marker that was legitimately admitted in between (that caller
+// having stolen the claim after the first caller's lease genuinely
+// expired) - both then believing themselves admitted, both calling
+// SubmitReview.
+//
+// The INSERT lands in the SAME statement as three conditions, so there is
+// no window between checking them and writing: claimKey is STILL held by
+// token (the lease is current RIGHT NOW, not merely when first read), no
+// attempt is already outstanding, and no publication is already durably
+// recorded. admitted=false on any of these means a DIFFERENT caller already
+// won (or the decision is already resolved) - this caller must refuse
+// without ever calling SubmitReview, never retry the insert as an update.
+func (s *SQLiteOperationStore) AdmitReviewPublicationAttempt(decisionID, claimKey, token string, now time.Time) (admitted bool, err error) {
+	if decisionID == "" || claimKey == "" || token == "" {
+		return false, errors.New("admitting a publication attempt requires its decision identity, claim key and token")
+	}
+	result, err := s.db.Exec(`INSERT INTO review_publication_attempts (decision_id, started_unix_nano)
+		SELECT ?, ?
+		WHERE EXISTS (SELECT 1 FROM review_claims WHERE claim_key = ? AND token = ?)
+		AND NOT EXISTS (SELECT 1 FROM review_publication_attempts WHERE decision_id = ?)
+		AND NOT EXISTS (SELECT 1 FROM review_publications WHERE decision_id = ?)`,
+		decisionID, now.UnixNano(), claimKey, token, decisionID, decisionID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+// RecordReviewPublicationAttempt is the plain, unconditional upsert
+// AdmitReviewPublicationAttempt itself deliberately never falls back to -
+// kept as the honest primitive for directly seeding or refreshing a known
+// attempt row (durable crash/retry test fixtures use it this way), not for
+// admitting a FRESH submission, which must go through the atomic gate above.
 func (s *SQLiteOperationStore) RecordReviewPublicationAttempt(decisionID string, now time.Time) error {
 	if decisionID == "" {
 		return errors.New("a review publication attempt requires its decision identity")
@@ -233,6 +263,68 @@ func (s *SQLiteOperationStore) ReviewPublicationAttempt(decisionID string) (star
 func (s *SQLiteOperationStore) ClearReviewPublicationAttempt(decisionID string) error {
 	_, err := s.db.Exec(`DELETE FROM review_publication_attempts WHERE decision_id = ?`, decisionID)
 	return err
+}
+
+// reviewPublicationFinalizeTestHook runs, if set, after FinalizeReviewPublication's
+// publication INSERT has executed but before its attempt-clearing DELETE and
+// COMMIT - the exact window a real crash there must leave safely
+// recoverable (#233 P1-B). Returning an error forces a rollback, standing in
+// for that crash deterministically. Nil (and therefore free) outside that
+// one test.
+var reviewPublicationFinalizeTestHook func() error
+
+// FinalizeReviewPublication durably records pub as published and resolves
+// its decision's outstanding attempt marker TOGETHER, in one transaction
+// (#233 P1-B). Recording the publication and clearing the marker as two
+// independent writes left a hole: a crash (or a failed second write) between
+// them could durably clear the marker - the only evidence a submission was
+// ever attempted - while the publication itself never committed, leaving
+// neither record behind for the GitHub review that may, in fact, have
+// landed. A transaction makes the two outcomes indivisible: the marker is
+// NEVER observably gone without the publication also being durably present,
+// and a failure here leaves the ORIGINAL state (marker still outstanding, no
+// publication) for the existing outstanding-attempt reconciliation path to
+// resolve on a later call - never a fresh POST.
+//
+// insertedPublication mirrors RecordReviewPublication's own insert-once
+// return: false means a concurrent or earlier finalize already recorded this
+// exact publication (the attempt marker is still cleared here regardless,
+// since the publication being durable either way is what the marker was
+// ever waiting for).
+func (s *SQLiteOperationStore) FinalizeReviewPublication(pub review.Publication) (insertedPublication bool, err error) {
+	if pub.DecisionID == "" {
+		return false, errors.New("finalizing a review publication requires its decision identity")
+	}
+	document, err := CanonicalJSON(pub)
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback() // no-op once Commit has succeeded; the error otherwise is not actionable here
+	result, err := tx.Exec(`INSERT INTO review_publications (decision_id, document) VALUES (?, ?) ON CONFLICT(decision_id) DO NOTHING`,
+		pub.DecisionID, string(document))
+	if err != nil {
+		return false, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if reviewPublicationFinalizeTestHook != nil {
+		if err := reviewPublicationFinalizeTestHook(); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM review_publication_attempts WHERE decision_id = ?`, pub.DecisionID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return inserted == 1, nil
 }
 
 // ReviewPublication reads one decision's publication state. found=false means

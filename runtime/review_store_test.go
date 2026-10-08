@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -273,5 +275,162 @@ func TestClaimReviewIsExclusiveAcrossIndependentStoreHandles(t *testing.T) {
 	claimed, _, err = second.ClaimReview("key-1", "process-b", now, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("expected process B to claim it once released, got claimed=%v err=%v", claimed, err)
+	}
+}
+
+// Mutation check (#233 P1-A): AdmitReviewPublicationAttempt must refuse when
+// the token named does not match the claim's CURRENT holder - not merely
+// when the claim is altogether absent. Removing the token-fence condition
+// from its SQL (the `EXISTS (... AND token = ?)` clause) must make this test
+// fail by admitting the wrong caller.
+func TestAdmitReviewPublicationAttemptRequiresTheCurrentClaimToken(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+	decision := testReviewDecision(t, "head1")
+	if _, _, err := store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	claimKey := "publish:" + decision.ID
+	if _, _, err := store.ClaimReview(claimKey, "owner-a", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	admitted, err := store.AdmitReviewPublicationAttempt(decision.ID, claimKey, "the-wrong-token", now)
+	if err != nil {
+		t.Fatalf("AdmitReviewPublicationAttempt: %v", err)
+	}
+	if admitted {
+		t.Fatal("expected admission to be refused for a token that does not name the current claim holder")
+	}
+	if _, outstanding, err := store.ReviewPublicationAttempt(decision.ID); err != nil || outstanding {
+		t.Fatalf("expected no attempt row to be written, outstanding=%v err=%v", outstanding, err)
+	}
+}
+
+// Mutation check (#233 P1-A): once ANY attempt is outstanding for a
+// decision, a second admission attempt - even one correctly holding the
+// CURRENT claim token - must still be refused, never silently overwrite the
+// existing marker. This is the exact defect a plain upsert had: a caller
+// resuming after a pause could blindly take over a different, already-
+// admitted caller's marker. Removing the "NOT EXISTS attempt" condition
+// (reverting to an upsert) must make this test fail by re-admitting.
+func TestAdmitReviewPublicationAttemptNeverOverwritesAnExistingAttempt(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+	decision := testReviewDecision(t, "head1")
+	if _, _, err := store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	claimKey := "publish:" + decision.ID
+	_, token, err := store.ClaimReview(claimKey, "owner-a", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.AdmitReviewPublicationAttempt(decision.ID, claimKey, token, now)
+	if err != nil || !first {
+		t.Fatalf("expected the first admission to succeed, admitted=%v err=%v", first, err)
+	}
+	second, err := store.AdmitReviewPublicationAttempt(decision.ID, claimKey, token, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("AdmitReviewPublicationAttempt (second): %v", err)
+	}
+	if second {
+		t.Fatal("expected a second admission attempt to be refused while the first attempt is still outstanding")
+	}
+}
+
+// Mutation check (#233 P1-A): admission must also refuse once a publication
+// is already durably recorded, even if no attempt row happens to be
+// outstanding (the FinalizeReviewPublication case: the attempt was already
+// cleared). Removing the "NOT EXISTS publication" condition must make this
+// test fail by admitting a fresh submission for an already-published decision.
+func TestAdmitReviewPublicationAttemptRefusesWhenAlreadyPublished(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+	decision := testReviewDecision(t, "head1")
+	if _, _, err := store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordReviewPublication(review.Publication{DecisionID: decision.ID, Published: true, GitHubReviewID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	claimKey := "publish:" + decision.ID
+	_, token, err := store.ClaimReview(claimKey, "owner-a", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	admitted, err := store.AdmitReviewPublicationAttempt(decision.ID, claimKey, token, now)
+	if err != nil {
+		t.Fatalf("AdmitReviewPublicationAttempt: %v", err)
+	}
+	if admitted {
+		t.Fatal("expected admission to be refused once the decision is already durably published")
+	}
+}
+
+// Mutation check (#233 P1-B): a forced failure injected between
+// FinalizeReviewPublication's publication INSERT and its attempt DELETE -
+// standing in for a crash at exactly that window - must roll back BOTH
+// writes together: the publication must not be durable, and the attempt
+// marker must still be outstanding. Removing the transaction (committing the
+// insert before attempting the delete) must make this test fail by leaving
+// the publication durably recorded despite the injected failure.
+func TestFinalizeReviewPublicationRollsBackBothWritesOnAnInjectedFailure(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+	decision := testReviewDecision(t, "head1")
+	if _, _, err := store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	if err := store.RecordReviewPublicationAttempt(decision.ID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	injected := fmt.Errorf("simulated crash between the publication write and the attempt clear")
+	reviewPublicationFinalizeTestHook = func() error { return injected }
+	defer func() { reviewPublicationFinalizeTestHook = nil }()
+
+	_, err = store.FinalizeReviewPublication(review.Publication{DecisionID: decision.ID, Published: true, GitHubReviewID: 1})
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the injected failure to propagate, got %v", err)
+	}
+	if _, found, err := store.ReviewPublication(decision.ID); err != nil || found {
+		t.Fatalf("expected the publication to NOT be durable after a rolled-back finalize, found=%v err=%v", found, err)
+	}
+	if _, outstanding, err := store.ReviewPublicationAttempt(decision.ID); err != nil || !outstanding {
+		t.Fatalf("expected the attempt marker to remain outstanding after a rolled-back finalize, outstanding=%v err=%v", outstanding, err)
+	}
+
+	// Without the injected failure, the SAME call now commits both writes
+	// together - proving the hook alone was what blocked it, not some other
+	// defect.
+	reviewPublicationFinalizeTestHook = nil
+	inserted, err := store.FinalizeReviewPublication(review.Publication{DecisionID: decision.ID, Published: true, GitHubReviewID: 1})
+	if err != nil || !inserted {
+		t.Fatalf("expected finalize to succeed once unblocked, inserted=%v err=%v", inserted, err)
+	}
+	if _, found, err := store.ReviewPublication(decision.ID); err != nil || !found {
+		t.Fatalf("expected the publication to be durable, found=%v err=%v", found, err)
+	}
+	if _, outstanding, err := store.ReviewPublicationAttempt(decision.ID); err != nil || outstanding {
+		t.Fatalf("expected the attempt marker to be cleared, outstanding=%v err=%v", outstanding, err)
 	}
 }

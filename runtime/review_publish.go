@@ -11,6 +11,12 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
+// reviewPublishAdmissionTestHook runs, if set, immediately before
+// PublishReview attempts the atomic AdmitReviewPublicationAttempt call - the
+// exact window #233 P1-A's regression forces a competing caller into. Nil
+// (and therefore free) outside that one test.
+var reviewPublishAdmissionTestHook func()
+
 // ReviewPublicationDeps is the narrow write surface PublishReview needs.
 type ReviewPublicationDeps struct {
 	Store  *SQLiteOperationStore
@@ -117,15 +123,11 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		if observed, ok, err := observeOwnPublishedReview(ctx, deps, repo, decision); err != nil {
 			return review.Publication{}, err
 		} else if ok {
-			if err := deps.Store.ClearReviewPublicationAttempt(decision.ID); err != nil {
+			// #233 P1-B: the publication and the marker's resolution commit
+			// TOGETHER - a crash between them must never leave the marker
+			// cleared with nothing durable to show for it.
+			if _, err := deps.Store.FinalizeReviewPublication(observed); err != nil {
 				return review.Publication{}, err
-			}
-			inserted, err := deps.Store.RecordReviewPublication(observed)
-			if err != nil {
-				return review.Publication{}, err
-			}
-			if inserted {
-				return observed, nil
 			}
 			existing, _, err := deps.Store.ReviewPublication(decision.ID)
 			return existing, err
@@ -139,12 +141,8 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		// GitHub already carries this exact decision's review - an earlier
 		// attempt landed before its local record did. Reconciling from the
 		// observation makes this crash-safe without submitting a second one.
-		inserted, err := deps.Store.RecordReviewPublication(observed)
-		if err != nil {
+		if _, err := deps.Store.FinalizeReviewPublication(observed); err != nil {
 			return review.Publication{}, err
-		}
-		if inserted {
-			return observed, nil
 		}
 		existing, _, err := deps.Store.ReviewPublication(decision.ID)
 		return existing, err
@@ -152,12 +150,20 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 	if claimLost.Load() {
 		return review.Publication{}, &ReviewClaimLostError{ClaimKey: claimKey}
 	}
-	// #233 P1: durably marked BEFORE the external call - this is the row a
-	// LATER call's own outstanding-attempt check above will find if this
-	// call's own outcome below is never confirmed (a crash, or a claim lost
-	// mid-flight despite the renewal above).
-	if err := deps.Store.RecordReviewPublicationAttempt(decision.ID, clockNow(deps.Clock)); err != nil {
+	// #233 P1-A: admission is atomic and ONE-WINNER - the claim token, the
+	// absence of an outstanding attempt, and the absence of an already-durable
+	// publication are all checked in the SAME write as recording this attempt,
+	// so a caller that paused right here cannot resume and blindly overwrite a
+	// DIFFERENT caller's marker that was legitimately admitted in between.
+	if reviewPublishAdmissionTestHook != nil {
+		reviewPublishAdmissionTestHook()
+	}
+	admitted, err := deps.Store.AdmitReviewPublicationAttempt(decision.ID, claimKey, token, clockNow(deps.Clock))
+	if err != nil {
 		return review.Publication{}, err
+	}
+	if !admitted {
+		return review.Publication{}, &ReviewPublicationAdmissionLostError{DecisionID: decision.ID}
 	}
 	event, wantApprove := reviewStateFor(decision.Verdict)
 	body, err := NewPublication(reviewPublicationBody(decision))
@@ -185,10 +191,7 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		// distinguishes "nothing landed" from "it landed and we only lost the
 		// reply", without ever submitting a second review to find out.
 		if observed, ok, obsErr := observeOwnPublishedReview(ctx, deps, repo, decision); obsErr == nil && ok {
-			if err := deps.Store.ClearReviewPublicationAttempt(decision.ID); err != nil {
-				return review.Publication{}, err
-			}
-			if _, err := deps.Store.RecordReviewPublication(observed); err != nil {
+			if _, err := deps.Store.FinalizeReviewPublication(observed); err != nil {
 				return review.Publication{}, err
 			}
 			return observed, nil
@@ -201,14 +204,11 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 			"publishing review %s: %w (outcome unknown; further attempts are refused until reconciliation confirms it)",
 			decision.ID, submitErr)
 	}
-	if err := deps.Store.ClearReviewPublicationAttempt(decision.ID); err != nil {
-		return review.Publication{}, err
-	}
 	publication := review.Publication{
 		DecisionID: decision.ID, Published: true, GitHubReviewID: created.ID,
 		PublishedVerdict: publishedVerdict, PublishedAt: created.SubmittedAt,
 	}
-	if _, err := deps.Store.RecordReviewPublication(publication); err != nil {
+	if _, err := deps.Store.FinalizeReviewPublication(publication); err != nil {
 		return review.Publication{}, err
 	}
 	return publication, nil
@@ -233,6 +233,21 @@ func (e *ReviewPublicationUncertainError) Error() string {
 		"review %s has an unresolved GitHub submission started at %s whose outcome is unknown; "+
 			"refusing to submit a second review until reconciliation confirms what happened to the first",
 		e.DecisionID, e.StartedAt.Format(time.RFC3339))
+}
+
+// ReviewPublicationAdmissionLostError reports that this caller lost the
+// atomic, one-winner pre-submission admission for decisionID (#233 P1-A):
+// by the moment AdmitReviewPublicationAttempt's write actually ran, either
+// this caller's claim token was no longer current, another attempt was
+// already outstanding, or a publication was already durably recorded. No
+// external submission was attempted by this caller - whichever caller (or
+// durable record) won is the only one authorized to act for this decision.
+type ReviewPublicationAdmissionLostError struct{ DecisionID string }
+
+func (e *ReviewPublicationAdmissionLostError) Error() string {
+	return fmt.Sprintf(
+		"review %s: lost the atomic admission to submit it - another caller is already handling it, or it is already resolved",
+		e.DecisionID)
 }
 
 // ReviewRepositoryMismatchError reports that the repository a caller handed
