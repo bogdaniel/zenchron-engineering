@@ -163,6 +163,18 @@ func (d Decision) Validate() error {
 	if strings.TrimSpace(d.ReviewerAgentID) == "" {
 		return errors.New("a review decision requires the reviewing agent's identity")
 	}
+	// The identity is CANONICAL, never an arbitrary caller-chosen string: it is
+	// what makes DecisionID's determinism an enforced invariant rather than a
+	// convention a caller could silently violate, storing two valid rows for
+	// the same exact subject and reviewer and defeating the one guarantee
+	// this package documents.
+	canonical, err := DecisionID(d.Subject, d.ReviewerAgentID)
+	if err != nil {
+		return err
+	}
+	if d.ID != canonical {
+		return fmt.Errorf("review decision id %q does not match its canonical identity %q for this subject and reviewer", d.ID, canonical)
+	}
 	if !d.Verdict.valid() {
 		return fmt.Errorf("review verdict %q must be %q, %q or %q", d.Verdict, VerdictApprove, VerdictRequestChanges, VerdictCommentOnly)
 	}

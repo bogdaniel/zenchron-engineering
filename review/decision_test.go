@@ -7,14 +7,32 @@ import (
 
 func validDecision(t *testing.T) Decision {
 	t.Helper()
+	subject := Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "abc123"}
+	id, err := DecisionID(subject, "claude")
+	if err != nil {
+		t.Fatalf("DecisionID: %v", err)
+	}
 	return Decision{
 		SchemaVersion:   SchemaVersion,
-		ID:              "review-test",
-		Subject:         Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "abc123"},
+		ID:              id,
+		Subject:         subject,
 		RunID:           "run-1",
 		ReviewerAgentID: "claude",
 		Verdict:         VerdictApprove,
 		CreatedAt:       time.Unix(1700000000, 0).UTC(),
+	}
+}
+
+// Mutation check (#233 B6): Decision.Validate must refuse an ID that does not
+// match its canonical DecisionID for the stated subject and reviewer, which is
+// the one thing that keeps DecisionID's determinism an enforced invariant
+// rather than a convention a caller could silently violate. Removing the
+// canonical-ID check in Validate must make this test fail.
+func TestDecisionValidateRefusesANonCanonicalID(t *testing.T) {
+	d := validDecision(t)
+	d.ID = "review-arbitrary-id-chosen-by-a-second-caller"
+	if err := d.Validate(); err == nil {
+		t.Fatal("expected a non-canonical decision id to be refused")
 	}
 }
 
