@@ -5,12 +5,12 @@ package runtime
 // workspace.
 //
 // It adds no second Git engine and no second candidate/commit path. Every
-// step below reuses what runtime/git.go already established: the local,
+// step below reuses what the runtime already established: the local,
 // credential-free object transfer MaterializeCandidate uses to move a commit
-// between two runtime-owned workspaces, and the merge/ConflictError
-// vocabulary IntegrateBase/Rebase already use to classify a Git conflict
-// deterministically. This file only sequences those over one
-// integration.Contract's canonical plan and reads what Git itself reports.
+// between two runtime-owned workspaces, LocalGitAncestry's exit-status-based
+// ancestry classification, and RestoreTrusted's existing hard-reset recovery.
+// This file only sequences those over one integration.Contract's canonical
+// plan and reads what Git itself reports.
 //
 // It grants no merge or release authority. A clean result is a NEW candidate
 // that still needs its own fresh admission, assurance and review - exactly
@@ -60,15 +60,14 @@ type IntegrationSources func(unitID string) (IntegrationSource, bool)
 // rather than silently absorbed. This function never calls the runtime's
 // RestoreTrusted recovery on an UNEXPLAINED divergence; only the existing
 // FailureWorkspaceIntegrity route, with real operation provenance, decides
-// whether and when that recovery runs. It is used here only to undo
-// progress THIS SAME CALL made moments earlier for an attempt that must now
-// discard it entirely - see the conflict path below.
+// whether and when that recovery runs.
 //
-// On StatusIntegrated, ws's HEAD is the new candidate. On StatusBlocked, ws
-// is returned to exactly the base it started this call at: an input that
-// merged cleanly earlier in this same call is discarded along with the one
-// that then conflicted, so a blocked attempt is never read as having partly
-// applied.
+// Once composition itself begins, EVERY outcome other than
+// StatusIntegrated - a conflict, an invalidated input, or a hard Git error on
+// any step - unconditionally returns ws to the base it started this call at,
+// undoing any earlier step THIS SAME CALL already merged. Provenance for
+// that reset is the call itself: nothing else can have touched ws between a
+// commit this function just made and the reset that undoes it.
 func IntegrateInputs(ws *CandidateWorkspace, contract integration.Contract, sources IntegrationSources) (integration.Result, error) {
 	if err := contract.Validate(); err != nil {
 		return integration.Result{}, err
@@ -88,6 +87,27 @@ func IntegrateInputs(ws *CandidateWorkspace, contract integration.Contract, sour
 		return integration.Result{}, err
 	}
 
+	result, err := composeAgainstVerifiedBase(ws, contract, sources)
+	if result.Status == integration.StatusIntegrated && err == nil {
+		return result, nil
+	}
+	// Discards whatever THIS call mutated: an input invalidated on step 2+,
+	// or a hard Git error partway through the plan, must leave no earlier
+	// step's successful merge standing, exactly like a reported conflict
+	// already does.
+	if resetErr := resetProgressMadeThisCall(ws); resetErr != nil {
+		if err != nil {
+			return integration.Result{}, fmt.Errorf("%w (cleanup also failed: %v)", err, resetErr)
+		}
+		return integration.Result{}, resetErr
+	}
+	return result, err
+}
+
+// composeAgainstVerifiedBase performs the plan itself. Its caller owns
+// discarding any partial progress on every outcome but a clean integration;
+// this function only decides WHICH outcome happened.
+func composeAgainstVerifiedBase(ws *CandidateWorkspace, contract integration.Contract, sources IntegrationSources) (integration.Result, error) {
 	for _, step := range contract.Plan() {
 		source, ok := sources(step.UnitID)
 		if !ok {
@@ -103,7 +123,7 @@ func IntegrateInputs(ws *CandidateWorkspace, contract integration.Contract, sour
 			return integration.Invalidated(contract,
 				fmt.Sprintf("integration input %q could not be read at its admitted subject: %v", step.UnitID, err)), nil
 		}
-		ancestor, err := isAncestor(ws.Dir, contract.BaseRevision, step.Commit)
+		ancestor, err := LocalGitAncestry(ws.Dir)(contract.BaseRevision, step.Commit)
 		if err != nil {
 			return integration.Result{}, fmt.Errorf("verifying integration input %q descends from the verified base: %w", step.UnitID, err)
 		}
@@ -117,15 +137,6 @@ func IntegrateInputs(ws *CandidateWorkspace, contract integration.Contract, sour
 			return integration.Result{}, err
 		}
 		if conflicted {
-			// Discards everything this call composed so far, not merely
-			// this step's own attempt: a blocked result reports back to its
-			// verified base, never a partial multi-input merge. Provenance
-			// for this reset is the call itself - every commit being
-			// undone was made a few lines above, in this same invocation,
-			// with nothing else able to have touched ws in between.
-			if err := resetProgressMadeThisCall(ws); err != nil {
-				return integration.Result{}, err
-			}
 			detail := fmt.Sprintf("merging %q (%s) conflicts with material already composed from this attempt's earlier inputs",
 				step.UnitID, short12(step.Commit))
 			conflict, err := integration.NewConflict(integration.ConflictTextual, detail, paths)
@@ -176,26 +187,6 @@ func fetchExactCommit(dir, sourceDir, commit, tree string) error {
 	return nil
 }
 
-// isAncestor proves base precedes commit, so the contract's base revision is
-// VERIFIED rather than merely stated.
-//
-// `merge-base --is-ancestor`'s exit code alone does not distinguish "no" from
-// "Git could not answer": both commits are already proven individually
-// resolvable by the time this runs (fetchExactCommit, and ws's own checked
-// base), so the only Git-documented non-ancestor exit (1) prints nothing,
-// while every other failure prints a "fatal:" diagnostic. That is an unknown
-// fact, never collapsed into "not an ancestor" - it is returned as an error.
-func isAncestor(dir, base, commit string) (bool, error) {
-	_, err := runGit(dir, "merge-base", "--is-ancestor", base, commit)
-	if err == nil {
-		return true, nil
-	}
-	if strings.Contains(err.Error(), "fatal:") {
-		return false, err
-	}
-	return false, nil
-}
-
 // mergeFetchedCommit merges one already-fetched commit into the current
 // head.
 //
@@ -225,15 +216,23 @@ func mergeFetchedCommit(dir, commit string) (conflicted bool, paths []string, er
 }
 
 // conflictedPaths reads which paths Git itself reports as unmerged.
+//
+// It reads NUL-delimited (`-z`) output rather than one path per line: Git's
+// line-oriented output C-quotes any path with a non-ASCII, control or quote
+// byte (`"caf\303\251.txt"`, not the two real bytes of "é"), and these paths
+// become the exact set VerifyRemediationScope treats as a remediation's
+// permitted scope. A quoted, misspelled path would never match the real
+// changed path and would refuse every legitimate fix to that file. `-z`
+// Git's own NUL-safe format, never quotes.
 func conflictedPaths(dir string) ([]string, error) {
-	out, err := gitOutput(dir, "diff", "--name-only", "--diff-filter=U")
+	out, err := gitOutput(dir, "diff", "--name-only", "-z", "--diff-filter=U")
 	if err != nil {
 		return nil, err
 	}
 	var paths []string
-	for _, line := range strings.Split(out, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			paths = append(paths, line)
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			paths = append(paths, p)
 		}
 	}
 	sort.Strings(paths)
@@ -243,10 +242,10 @@ func conflictedPaths(dir string) ([]string, error) {
 // resetProgressMadeThisCall unconditionally returns ws to its verified base,
 // aborting any merge left in progress first. It is called only from within
 // one IntegrateInputs call, to discard commits that SAME call made for
-// earlier plan steps once a later step conflicts - provenance this function
-// has directly, since nothing else runs between those commits and this
-// reset. It reuses RestoreTrusted, the runtime's existing hard-reset
-// recovery, rather than a second reset path.
+// earlier plan steps once a later step is blocked, invalidated or fails -
+// provenance this function has directly, since nothing else runs between
+// those commits and this reset. It reuses RestoreTrusted, the runtime's
+// existing hard-reset recovery, rather than a second reset path.
 func resetProgressMadeThisCall(ws *CandidateWorkspace) error {
 	if err := abortLeftoverMerge(ws.Dir); err != nil {
 		return err

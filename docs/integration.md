@@ -139,6 +139,15 @@ record.
 
 ## Known limitations and follow-ups
 
+- **`IntegrationSources`' live currency check is proved with synthetic
+  handoff ids, not #472's real store.** `TestIntegrateInputsInvalidatesSupersededHandoff`
+  and the other tests construct `IntegrationSource` directly; no test yet
+  drives it from an actual `WorkGraphProjection`/admitted-handoff read. The
+  interface (resolve a unit id to its LIVE `{Dir, HandoffID}`, re-verified
+  immediately before fetching) is the one #472's real projection should
+  satisfy; wiring it, and rechecking freshness again right before final
+  admission rather than only at the start of composition, is part of the
+  production-wiring follow-up below, not this ticket's isolated-core scope.
 - **Not yet wired into `serve`'s automatic reconciliation.** This ticket adds
   the deterministic composition capability and proves it against controlled
   repositories; it does not add an "integrator" unit kind to

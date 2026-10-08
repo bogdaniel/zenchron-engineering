@@ -190,13 +190,7 @@ func TestIntegrateInputsTextualConflict(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(integrationWS.Dir, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
 		t.Fatalf("a blocked attempt left a merge in progress: %v", err)
 	}
-	head, err := gitOutput(integrationWS.Dir, "rev-parse", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(head) != base {
-		t.Fatalf("a blocked attempt did not leave the workspace at its base: got %s, want %s", short12(strings.TrimSpace(head)), short12(base))
-	}
+	assertWorkspaceAtRevision(t, integrationWS.Dir, base)
 }
 
 // TestIntegrateInputsSucceedsAfterExplicitRecovery proves scenario E
@@ -354,6 +348,9 @@ func TestIntegrateInputsInvalidatesStaleUpstream(t *testing.T) {
 	if result.Status != integration.StatusInvalidated {
 		t.Fatalf("status = %s, want %s", result.Status, integration.StatusInvalidated)
 	}
+	// "a" (step 1) merged cleanly before "b" (step 2) invalidated; that
+	// progress must not survive this outcome.
+	assertWorkspaceAtRevision(t, integrationWS.Dir, base)
 }
 
 // TestIntegrateInputsInvalidatesSupersededHandoff proves finding 4: an input
@@ -399,6 +396,9 @@ func TestIntegrateInputsInvalidatesSupersededHandoff(t *testing.T) {
 	if !strings.Contains(result.Reason, "\"b\"") {
 		t.Fatalf("invalidation reason does not name the superseded input: %q", result.Reason)
 	}
+	// "a" (step 1) merged cleanly before "b" (step 2) invalidated; that
+	// progress must not survive this outcome.
+	assertWorkspaceAtRevision(t, integrationWS.Dir, base)
 }
 
 // TestIntegrateInputsPropagatesNonConflictMergeFailure proves finding 3: a
