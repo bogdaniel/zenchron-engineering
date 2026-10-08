@@ -246,6 +246,26 @@ enrolled, so there is nothing to watch`.** `autonomy watch` needs enrolment.
 `serve` does not: with no enrolment it governs the repository the invocation
 targets and takes explicit submissions only.
 
+**`held at <sha>: …`** on the `serve` upgrade line. The controller will not
+build or adopt a successor, and it keeps serving everything else (ADR-0007 §5).
+It names one of these reasons:
+
+- **`trust regression`:** trusted main resolved behind the trusted main this
+  controller was adopted under. This usually means a re-run of `go` turned red
+  on a commit that was trusted.
+- **no accepted revision:** none of the last 256 commits on `main`'s
+  first-parent chain has a passing exact-revision `go` run from the push to
+  `main`.
+- **`not comparable`:** the resolved trusted main and the floor are not on one
+  line of history.
+- **no floor:** this controller's own provenance could not be read.
+
+The line also shows `main_head` and why the newest commit past trusted main is
+not trusted (`T2 pending`, or `T2 failure (run N attempt M)`). Nothing needs to
+be acknowledged. The hold clears on the next pass after trusted main resolves
+to the floor or past it, typically once a newer merge's `go` passes on `main`.
+Fix the failing commit forward; do not revert or rewrite `main`.
+
 ## Assurance and Docker
 
 **`assurance.verifier_sandbox` FAIL — `the verifier sandbox is <state>: Docker

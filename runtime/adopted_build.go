@@ -371,8 +371,9 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 
 // observeTrustRoot reads the gate and refuses anything that is not one.
 // ObserveTrustedMainRevision answers what trusted main IS right now: the
-// revision the forge reports for the governed branch, and the tree recomputed
-// from a local clone that has been made to hold it.
+// newest revision on main's first-parent chain with accepted exact-revision T2
+// evidence (ADR-0007) - never merely the revision the forge reports for the
+// branch - and the tree recomputed from a local clone that holds it.
 //
 // THE TRUST ROOT IS CHECKED FIRST, exactly as a build checks it. An updater
 // that followed the branch without it would be following whatever main says
@@ -383,24 +384,41 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 // recomputes it: a revision is what the forge says, and a tree is what the
 // object actually contains.
 func ObserveTrustedMainRevision(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, repositoryDir string) (RevisionRecord, error) {
+	view, err := ObserveTrustedMain(ctx, deps, repo, repositoryDir)
+	return view.TrustedMain, err
+}
+
+// TrustedMainView is one observation of the two facts ADR-0007 keeps apart:
+// where main is, and which revision on it is trusted, with the reason every
+// newer commit is not.
+type TrustedMainView struct {
+	TrustedMain RevisionRecord    `json:"trusted_main"`
+	MainHead    string            `json:"main_head"`
+	Skipped     []SkippedRevision `json:"skipped"`
+}
+
+// ObserveTrustedMain is ObserveTrustedMainRevision with the whole answer.
+func ObserveTrustedMain(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, repositoryDir string) (TrustedMainView, error) {
 	deps = deps.withDefaults()
 	if deps.Governance == nil || deps.RefSHA == nil {
-		return RevisionRecord{}, fmt.Errorf("the trust root and trusted main cannot be observed, so no revision may be called trusted")
+		return TrustedMainView{}, fmt.Errorf("the trust root and trusted main cannot be observed, so no revision may be called trusted")
 	}
 	policy := DefaultBranchIntegrityPolicy()
 	if _, err := observeTrustRoot(ctx, deps, repo, policy); err != nil {
-		return RevisionRecord{}, err
+		return TrustedMainView{}, err
 	}
 	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
 	resolution, err := resolveTrustedMain(ctx, deps, repo, repositoryDir, branch)
+	view := TrustedMainView{MainHead: resolution.MainHead, Skipped: resolution.Skipped}
 	if err != nil {
-		return RevisionRecord{}, err
+		return view, err
 	}
 	tree, err := revisionTree(deps, repositoryDir, resolution.TrustedMain)
 	if err != nil {
-		return RevisionRecord{}, err
+		return view, err
 	}
-	return RevisionRecord{Revision: resolution.TrustedMain, Tree: tree}, nil
+	view.TrustedMain = RevisionRecord{Revision: resolution.TrustedMain, Tree: tree}
+	return view, nil
 }
 
 func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy BranchIntegrityPolicy) (TrustedMainRuleset, error) {
