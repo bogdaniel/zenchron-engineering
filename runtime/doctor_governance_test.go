@@ -18,6 +18,9 @@ func (o doctorGovernanceObserver) GovernanceProvenance() CredentialProvenance {
 func (o doctorGovernanceObserver) Rulesets(context.Context, GitHubRepo) ([]TrustedMainRuleset, error) {
 	return o.rulesets, o.err
 }
+func (o doctorGovernanceObserver) RevisionEvidence(context.Context, GitHubRepo, string) ([]T2Attempt, error) {
+	return nil, o.err
+}
 
 func TestDoctorGovernanceVisibility(t *testing.T) {
 	for _, tt := range []struct {

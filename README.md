@@ -376,6 +376,13 @@ re-checked by every client, with no TCP listener and no stored credential beside
 it. Drain, shutdown and stop-all are three different operations, and only the
 last one cancels runs.
 
+Trusted main is not the tip of `main` (ADR-0007). `main_head` is wherever
+`main` is; `trusted_main` is the newest commit on `main`'s first-parent chain
+whose own full-suite (T2) run passed, as observed against exactly that commit.
+A merge moves `main_head` immediately. Adoption only ever stands on
+`trusted_main`, so code whose full assurance is still running, or red, is
+never adopted.
+
 A serving controller REPLACES ITSELF when trusted main moves. It builds the
 successor through the same governed adopted build an operator would run,
 prepares the transition, starts that successor inert, stops taking on new work,

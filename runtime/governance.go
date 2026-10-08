@@ -107,6 +107,10 @@ type ForgeGovernance interface {
 	// bypass disclosure the forge omitted is reported as undisclosed, never as
 	// empty - see TrustedMainRuleset.BypassActorsKnown.
 	Rulesets(ctx context.Context, repo GitHubRepo) ([]TrustedMainRuleset, error)
+	// RevisionEvidence reports every attempt of every CI job the forge ran
+	// against exactly this revision, as reported and unjudged. Whether any of
+	// it is T2 evidence is decided by TrustedRevisionPolicy, not here.
+	RevisionEvidence(ctx context.Context, repo GitHubRepo, revision string) ([]T2Attempt, error)
 	// GovernanceProvenance names the identity these observations came from.
 	GovernanceProvenance() CredentialProvenance
 }
@@ -382,4 +386,103 @@ func (o GitHubGovernanceObserver) Rulesets(ctx context.Context, repo GitHubRepo)
 		rulesets = append(rulesets, observed)
 	}
 	return rulesets, nil
+}
+
+// RevisionEvidence reads GitHub Actions runs whose head is exactly revision,
+// and every job of every attempt of each. Attempts are read individually
+// because a re-run replaces a run's latest jobs: reading only the latest would
+// hide the red a later green followed, which is the inconsistency ADR-0007
+// requires to stay visible.
+//
+// The jobs listing does not say which app produced a job, so the commit's
+// check runs are read too: an Actions job IS a check run with the same id, and
+// the check run carries the producing app's integration id.
+func (o GitHubGovernanceObserver) RevisionEvidence(ctx context.Context, repo GitHubRepo, revision string) ([]T2Attempt, error) {
+	if !isCommitSHA(revision) {
+		return nil, fmt.Errorf("T2 evidence is only observed for an exact commit, not %q", revision)
+	}
+	type workflowRun struct {
+		ID         int64  `json:"id"`
+		Path       string `json:"path"`
+		Event      string `json:"event"`
+		HeadBranch string `json:"head_branch"`
+		RunAttempt int    `json:"run_attempt"`
+	}
+	type checkRun struct {
+		ID  int64 `json:"id"`
+		App struct {
+			ID int64 `json:"id"`
+		} `json:"app"`
+	}
+	type job struct {
+		ID          int64     `json:"id"`
+		Name        string    `json:"name"`
+		HeadSHA     string    `json:"head_sha"`
+		Status      string    `json:"status"`
+		Conclusion  string    `json:"conclusion"`
+		CompletedAt time.Time `json:"completed_at"`
+	}
+	checks, err := listAllPages[checkRun](ctx, o, repo, repoPath(repo)+"/commits/"+revision+"/check-runs?filter=all", "check_runs")
+	if err != nil {
+		return nil, err
+	}
+	producer := map[int64]int64{}
+	for _, c := range checks {
+		producer[c.ID] = c.App.ID
+	}
+	runs, err := listAllPages[workflowRun](ctx, o, repo, repoPath(repo)+"/actions/runs?head_sha="+revision, "workflow_runs")
+	if err != nil {
+		return nil, err
+	}
+	attempts := []T2Attempt{}
+	for _, run := range runs {
+		for attempt := 1; attempt <= run.RunAttempt; attempt++ {
+			path := fmt.Sprintf("%s/actions/runs/%d/attempts/%d/jobs?filter=all", repoPath(repo), run.ID, attempt)
+			jobs, err := listAllPages[job](ctx, o, repo, path, "jobs")
+			if err != nil {
+				return nil, err
+			}
+			for _, j := range jobs {
+				attempts = append(attempts, T2Attempt{
+					RunID: run.ID, Attempt: attempt, IntegrationID: producer[j.ID], Workflow: run.Path, Event: run.Event,
+					Branch: run.HeadBranch, HeadSHA: j.HeadSHA, Job: j.Name, Status: j.Status, Conclusion: j.Conclusion,
+					CompletedAt: j.CompletedAt,
+				})
+			}
+		}
+	}
+	return attempts, nil
+}
+
+// maxEvidencePages bounds one evidence listing at 1,000 items.
+const maxEvidencePages = 10
+
+// listAllPages reads every page of a GitHub listing that reports total_count.
+// Trust evidence is never read from a truncated listing: a listing that does
+// not state its size, that ends short of it, or that exceeds the ceiling is a
+// failed observation, not a smaller answer.
+func listAllPages[T any](ctx context.Context, o GitHubGovernanceObserver, repo GitHubRepo, path, field string) ([]T, error) {
+	all := []T{}
+	for page := 1; page <= maxEvidencePages; page++ {
+		var body map[string]json.RawMessage
+		if err := o.get(ctx, repo, fmt.Sprintf("%s&per_page=100&page=%d", path, page), &body); err != nil {
+			return nil, err
+		}
+		var total int
+		if err := json.Unmarshal(body["total_count"], &total); err != nil {
+			return nil, &GitHubAPIError{Detail: "evidence listing " + path + " does not state its total_count"}
+		}
+		var items []T
+		if err := json.Unmarshal(body[field], &items); err != nil {
+			return nil, &GitHubAPIError{Detail: "evidence listing " + path + " has no " + field}
+		}
+		all = append(all, items...)
+		if len(all) >= total {
+			return all, nil
+		}
+		if len(items) == 0 {
+			return nil, fmt.Errorf("evidence listing %s ended at %d of %d item(s); a truncated listing is not evidence", path, len(all), total)
+		}
+	}
+	return nil, fmt.Errorf("evidence listing %s exceeds %d pages; trust evidence is never read from a truncated listing", path, maxEvidencePages)
 }
