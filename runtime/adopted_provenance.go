@@ -179,16 +179,35 @@ func (p AdoptedBuildProvenance) validateV2() error {
 		return invalid("no T2 trust evidence")
 	}
 	evidence, policy := p.TrustEvidence.Observation, p.TrustedRevisionPolicy
+	// THE POLICY IS FROZEN, so a record cannot carry its own. A record that
+	// changed its policy and its deciding attempt together would otherwise be
+	// internally consistent while proving nothing about the real producer.
+	if *policy != DefaultTrustedRevisionPolicy() {
+		return invalid("its trusted_revision_policy is not the frozen policy")
+	}
+	// AUTHORITY IS RECOMPUTED FROM THE RAW ATTEMPTS. Eligible, Inconsistent
+	// and Deciding are cached conclusions; a record whose cache says success
+	// while its attempts say otherwise is refused, not believed.
+	recomputed := EvaluateT2Evidence(*policy, evidence.Subject, evidence.Attempts)
 	switch {
+	case len(recomputed.Attempts) != len(evidence.Attempts):
+		return invalid("its T2 evidence carries attempts the policy does not accept")
+	case !recomputed.Eligible:
+		return invalid("its raw T2 attempts do not make %s eligible", shortSHA(evidence.Subject))
+	case recomputed.Eligible != evidence.Eligible || recomputed.Inconsistent != evidence.Inconsistent ||
+		evidence.Deciding == nil || !sameAttempt(*recomputed.Deciding, *evidence.Deciding):
+		return invalid("its recorded T2 conclusion disagrees with its raw attempts")
 	case evidence.Subject != p.TrustedMain.Revision:
 		return invalid("its T2 evidence is about %s", shortSHA(evidence.Subject))
-	case !evidence.Eligible:
-		return invalid("its T2 evidence is not eligible")
 	case evidence.Tier != policy.Tier:
 		return invalid("evidence tier %q is not the policy's %q", evidence.Tier, policy.Tier)
-	case evidence.Deciding == nil || evidence.Deciding.Conclusion != "success" || evidence.Deciding.HeadSHA != evidence.Subject ||
-		evidence.Deciding.IntegrationID != policy.IntegrationID:
-		return invalid("its deciding T2 attempt is not a success by the pinned producer on the subject")
 	}
 	return nil
+}
+
+// sameAttempt compares the identity and outcome of two attempts. Times are not
+// compared: they are reported values, not part of the decision.
+func sameAttempt(a, b T2Attempt) bool {
+	return a.RunID == b.RunID && a.Attempt == b.Attempt && a.IntegrationID == b.IntegrationID &&
+		a.HeadSHA == b.HeadSHA && a.Job == b.Job && a.Status == b.Status && a.Conclusion == b.Conclusion
 }
