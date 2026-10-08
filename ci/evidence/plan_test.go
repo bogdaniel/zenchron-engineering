@@ -28,7 +28,7 @@ func fixture() (Registry, Repo) {
 			"runtime/shutdown_semantics_test.go": {"TestShutdown"},
 		},
 		DepDirs:     []string{"orchestration", "domain"},
-		PackageDirs: []string{"runtime", "orchestration", "domain", "cmd/zenchron-engineering"},
+		PackageDirs: []string{"runtime", "orchestration", "domain", "domain/sub", "cmd/zenchron-engineering"},
 	}
 	return reg, repo
 }
@@ -159,5 +159,13 @@ func TestPatterns(t *testing.T) {
 		if got := matches(c.pattern, c.path); got != c.want {
 			t.Errorf("matches(%q, %q) = %v", c.pattern, c.path, got)
 		}
+	}
+}
+
+// A subpackage of a dependency is its own package, not the dependency: its
+// change runs that package whole and must not escalate the focused package.
+func TestASubpackageOfADependencyIsNotTheDependency(t *testing.T) {
+	if got := plan("domain/sub/x.go"); got.Whole || len(got.Race) != 0 {
+		t.Fatalf("a dependency's subpackage escalated the focused package: %+v", got)
 	}
 }
