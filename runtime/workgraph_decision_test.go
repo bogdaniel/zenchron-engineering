@@ -264,6 +264,103 @@ func TestSupervisorResolveDecisionEnforcesAuthorityAndIdempotency(t *testing.T) 
 	}
 }
 
+// TestPlaceWorkUnitHoldNeverRacesAGraphRevision is #508 review P3: a
+// WorkGraph revision that removes a not-yet-activated unit (ValidateMutation
+// permits this - nothing has consumed it yet) racing a hold placement on
+// that SAME unit must decide the hold against ONE consistent revision, never
+// a membership check read before the shared lock and an insert committed
+// after a mutation moved underneath it. Both PlaceWorkUnitHold and
+// AdoptWorkGraph's mutation hold s.orchestrationMu for their whole check, so
+// exactly one of two outcomes is possible, and each is checked on its own
+// terms - never against a state read AFTER both goroutines have finished,
+// which cannot distinguish "the hold was invalid when checked" from "a LATER
+// mutation moved on after a perfectly valid hold already committed":
+//
+//   - the hold is refused, naming no such unit - the mutation's critical
+//     section ran first, and the hold's own check correctly saw "b" already
+//     gone;
+//   - the hold succeeds and is durably stored - its check ran first, while
+//     "b" still named a unit of the current revision, and that revision -
+//     revision 1, immutable once adopted - still proves it today.
+func TestPlaceWorkUnitHoldNeverRacesAGraphRevision(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		fixture := newFleetFixture(t, 4)
+		supervisor := fixture.supervisorWithRealHolds()
+		view := fixture.adoptGraph(supervisor, "claude", 1, []orchestration.WorkUnit{
+			{ID: "a", Purpose: "land the schema", Role: domain.RoleImplementer, Issue: fleetFirstIssue},
+			{ID: "b", Purpose: "land the reader", Role: domain.RoleImplementer, Issue: fleetFirstIssue + 1},
+		})
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		var holdErr, mutateErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, holdErr = supervisor.PlaceWorkUnitHold(ControlRequest{
+				GraphID: view.GraphID, UnitID: "b", Operator: decisionOperator(), Note: "racing a graph mutation",
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			// Revision 2 keeps only "a": a legitimate mutation, since
+			// nothing has activated "b" yet.
+			_, err := supervisor.AdoptWorkGraph(context.Background(), ControlRequest{
+				Repository: "acme/repo", Agent: "claude", Operator: "operator@example",
+				WorkGraph: &orchestration.WorkGraphProposal{Name: "m2-o1", Revision: 2, Units: []orchestration.WorkUnit{
+					{ID: "a", Purpose: "land the schema", Role: domain.RoleImplementer, Issue: fleetFirstIssue},
+				}},
+			})
+			mutateErr = err
+		}()
+		close(start)
+		wg.Wait()
+		if mutateErr != nil {
+			t.Fatalf("iteration %d: revision 2 was refused: %v", i, mutateErr)
+		}
+
+		if holdErr == nil {
+			// The hold's OWN check ran first and saw "b": revision 1, never
+			// rewritten, still proves that was true.
+			revision1, found, err := fixture.store.WorkGraphRevision(view.GraphID, 1)
+			if err != nil || !found {
+				t.Fatalf("iteration %d: revision 1 unreadable: found=%t err=%v", i, found, err)
+			}
+			named := false
+			for _, unit := range revision1.Units {
+				named = named || unit.ID == "b"
+			}
+			if !named {
+				t.Fatalf("iteration %d: a hold succeeded for unit b, which not even revision 1 named", i)
+			}
+			if stored, found, err := fixture.store.WorkUnitHoldByID(mustWorkUnitHoldID(t, view.GraphID, "b")); err != nil || !found || stored.UnitID != "b" {
+				t.Fatalf("iteration %d: PlaceWorkUnitHold reported success but no durable hold exists: found=%t err=%v stored=%+v", i, found, err, stored)
+			}
+			continue
+		}
+		// The mutation's critical section ran first: the hold's own check
+		// correctly saw a revision that no longer names "b", and refused
+		// before writing anything.
+		if !strings.Contains(holdErr.Error(), "names no unit") {
+			t.Fatalf("iteration %d: hold refused for an unexpected reason: %v", i, holdErr)
+		}
+		if _, found, err := fixture.store.WorkUnitHoldByID(mustWorkUnitHoldID(t, view.GraphID, "b")); err != nil || found {
+			t.Fatalf("iteration %d: a refused hold left a durable row anyway: found=%t err=%v", i, found, err)
+		}
+	}
+}
+
+func mustWorkUnitHoldID(t *testing.T, graphID, unitID string) string {
+	t.Helper()
+	id, err := orchestration.WorkUnitHoldID(graphID, unitID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 // TestPlaceWorkUnitHoldNeverRacesActivation is #508 review B3: placing a hold
 // and activating the frontier must be ONE atomic decision, not two reads that
 // can interleave. supervisor.PlaceWorkUnitHold and activateGraphFrontier now

@@ -51,8 +51,15 @@ func (s *SQLiteOperationStore) ScopeMessages(scope string) ([]orchestration.Engi
 // worker-authored decision_request it is asked to resolve, without the
 // resolver needing to already know which scope it lives in.
 func (s *SQLiteOperationStore) MessageByID(id string) (orchestration.EngineeringMessage, bool, error) {
+	return queryMessageByID(s.db, id)
+}
+
+// queryMessageByID is the sqlExecutor-generic read ResolveDecisionRequest
+// (decision_store.go) pins inside its own linearized transaction, exactly as
+// the standalone MessageByID does outside one.
+func queryMessageByID(q sqlExecutor, id string) (orchestration.EngineeringMessage, bool, error) {
 	var document string
-	err := s.db.QueryRow(`SELECT document FROM orchestration_messages WHERE id = ?`, id).Scan(&document)
+	err := q.QueryRow(`SELECT document FROM orchestration_messages WHERE id = ?`, id).Scan(&document)
 	if errors.Is(err, sql.ErrNoRows) {
 		return orchestration.EngineeringMessage{}, false, nil
 	}

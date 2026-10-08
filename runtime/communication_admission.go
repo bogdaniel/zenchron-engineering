@@ -15,12 +15,22 @@ import (
 // This is the #470 batch adapter of MessageScope. A WorkGraph (#472) supplies
 // the same three facts for its own units.
 func batchMessageScope(store *SQLiteOperationStore, batch orchestration.Batch) (orchestration.MessageScope, map[string]*orchestration.HandoffSubject, error) {
+	return queryBatchMessageScope(store.db, batch)
+}
+
+// queryBatchMessageScope is the sqlExecutor-generic read ResolveDecisionRequest
+// (decision_store.go) pins inside its own linearized transaction, exactly as
+// the standalone batchMessageScope does outside one: the request's liveness
+// and its owner's CURRENT subject must come from the SAME held snapshot the
+// final insert commits against, not a read taken moments before it under no
+// lock at all.
+func queryBatchMessageScope(q sqlExecutor, batch orchestration.Batch) (orchestration.MessageScope, map[string]*orchestration.HandoffSubject, error) {
 	scope := orchestration.MessageScope{ID: batch.ID, Subjects: map[string]orchestration.MessageSubject{}}
 	current := map[string]*orchestration.HandoffSubject{}
 	for _, item := range batch.Items {
 		unit := orchestration.BatchItemUnit(item.Issue)
 		scope.Units = append(scope.Units, unit)
-		handoffs, err := store.RunHandoffs(item.RunID)
+		handoffs, err := queryRunHandoffs(q, item.RunID)
 		if err != nil {
 			return orchestration.MessageScope{}, nil, err
 		}
@@ -30,7 +40,7 @@ func batchMessageScope(store *SQLiteOperationStore, batch orchestration.Batch) (
 			current[unit] = &subject
 		}
 	}
-	admitted, err := store.ScopeMessages(batch.ID)
+	admitted, err := queryScopeMessages(q, batch.ID)
 	if err != nil {
 		return orchestration.MessageScope{}, nil, err
 	}

@@ -6,9 +6,10 @@ package runtime
 // activates a WorkUnit directly - #472's existing frontier recomputation
 // decides that on its own next read, exactly as it always has.
 //
-// Two different durable facts can need resolving, and findDecisionRequest is
-// what lets ONE action resolve either without the caller needing to know
-// which kind it named:
+// Two different durable facts can need resolving, and
+// SQLiteOperationStore.ResolveDecisionRequest (decision_store.go) is what
+// lets ONE action resolve either without the caller needing to know which
+// kind it named:
 //
 //   - a #473 decision_request MESSAGE, a worker asking a question from
 //     inside its own run (found by id in the message store, scoped to its
@@ -31,11 +32,14 @@ type DecisionResolutionView struct {
 	Resolution orchestration.DecisionResolution `json:"resolution"`
 }
 
-// ResolveDecision is the governed external-authority action. It finds the
-// live request, builds the actor's authority from the existing operator
-// identity the control endpoint already established for this request, and
-// persists the immutable resolution before anything downstream of it is
-// told.
+// ResolveDecision is the governed external-authority action. It builds the
+// actor's authority from the existing operator identity the control endpoint
+// already established for this request, then delegates finding the live
+// request, validating it, and persisting the immutable resolution to
+// SQLiteOperationStore.ResolveDecisionRequest as ONE linearized database
+// operation (#508 review P2): nothing can supersede the request, move its
+// subject, or write a competing resolution between the check this action
+// relies on and the commit that makes it durable.
 //
 // There is no path here for a worker to supply its own authority: Authority
 // is built from request.Operator and hardcoded to AuthorityKindOperator,
@@ -50,94 +54,15 @@ func (s *Supervisor) ResolveDecision(request ControlRequest) (DecisionResolution
 	if decisionID == "" {
 		return DecisionResolutionView{}, errors.New("a decision resolution names the request it resolves")
 	}
-	ref, current, err := s.findDecisionRequest(decisionID)
-	if err != nil {
-		return DecisionResolutionView{}, err
-	}
 	outcome := orchestration.DecisionOutcome{Kind: request.DecisionOutcomeKind, Value: request.DecisionOutcomeValue}
 	authority := orchestration.DecisionResolutionAuthority{
 		Actor: operator, AuthorityKind: orchestration.AuthorityKindOperator, Provenance: decisionProvenance(request),
 	}
-	reason := BoundedNote(request.Note)
-	existing, found, err := s.deps.Store.DecisionResolutionByRequestID(ref.ID)
+	stored, err := s.deps.Store.ResolveDecisionRequest(decisionID, outcome, BoundedNote(request.Note), authority, s.deps.Clock.Now())
 	if err != nil {
 		return DecisionResolutionView{}, err
-	}
-	var existingPtr *orchestration.DecisionResolution
-	if found {
-		existingPtr = &existing
-	}
-	proposed, err := orchestration.ResolveDecision(ref, current, outcome, reason, authority, existingPtr, s.deps.Clock.Now())
-	if err != nil {
-		return DecisionResolutionView{}, err
-	}
-	stored, inserted, err := s.deps.Store.InsertDecisionResolution(proposed)
-	if err != nil {
-		return DecisionResolutionView{}, err
-	}
-	if !inserted {
-		// A concurrent writer landed between the read above and this insert.
-		// Decide against what is ACTUALLY durable now, not what was read a
-		// moment ago: the stored row, not this request, is the one answer
-		// that may stand.
-		final, err := orchestration.ResolveDecision(ref, current, outcome, reason, authority, &stored, s.deps.Clock.Now())
-		if err != nil {
-			return DecisionResolutionView{}, err
-		}
-		stored = final
 	}
 	return DecisionResolutionView{Resolution: stored}, nil
-}
-
-// findDecisionRequest resolves one request id to its normalized facts,
-// trying the message store first and the hold store second. Neither store
-// naming it is the unknown-request refusal: fail closed, not "probably a
-// hold".
-func (s *Supervisor) findDecisionRequest(id string) (orchestration.DecisionRequestRef, *orchestration.HandoffSubject, error) {
-	message, found, err := s.deps.Store.MessageByID(id)
-	if err != nil {
-		return orchestration.DecisionRequestRef{}, nil, err
-	}
-	if found {
-		return s.decisionRequestFromMessage(message)
-	}
-	hold, found, err := s.deps.Store.WorkUnitHoldByID(id)
-	if err != nil {
-		return orchestration.DecisionRequestRef{}, nil, err
-	}
-	if !found {
-		return orchestration.DecisionRequestRef{}, nil, fmt.Errorf("unknown decision request %s", id)
-	}
-	return hold.Ref(), nil, nil
-}
-
-func (s *Supervisor) decisionRequestFromMessage(message orchestration.EngineeringMessage) (orchestration.DecisionRequestRef, *orchestration.HandoffSubject, error) {
-	if message.Kind != orchestration.KindDecisionRequest {
-		return orchestration.DecisionRequestRef{}, nil, fmt.Errorf("%s is a %s, not a decision request", message.ID, message.Kind)
-	}
-	batch, found, err := s.deps.Store.OrchestrationBatch(message.Scope)
-	if err != nil {
-		return orchestration.DecisionRequestRef{}, nil, err
-	}
-	if !found {
-		return orchestration.DecisionRequestRef{}, nil, fmt.Errorf("decision request %s names scope %s, which is unreadable", message.ID, message.Scope)
-	}
-	scope, current, err := batchMessageScope(s.deps.Store, batch)
-	if err != nil {
-		return orchestration.DecisionRequestRef{}, nil, err
-	}
-	live := false
-	for _, admitted := range orchestration.Live(scope.Admitted) {
-		if admitted.ID == message.ID {
-			live = true
-			break
-		}
-	}
-	ref := orchestration.DecisionRequestRef{ID: message.ID, Scope: message.Scope, Subject: message.Subject, Live: live}
-	if message.Subject == nil {
-		return ref, nil, nil
-	}
-	return ref, current[message.Subject.Owner], nil
 }
 
 // PlaceWorkUnitHold is the governed action that creates #472's readiness-owner
@@ -154,23 +79,6 @@ func (s *Supervisor) PlaceWorkUnitHold(request ControlRequest) (orchestration.Wo
 	if graphID == "" || unitID == "" {
 		return orchestration.WorkUnitHold{}, errors.New("a work unit hold names its graph and its unit")
 	}
-	graph, found, err := s.deps.Store.WorkGraph(graphID)
-	if err != nil {
-		return orchestration.WorkUnitHold{}, err
-	}
-	if !found {
-		return orchestration.WorkUnitHold{}, fmt.Errorf("unknown work graph %s", graphID)
-	}
-	named := false
-	for _, unit := range graph.Units {
-		if unit.ID == unitID {
-			named = true
-			break
-		}
-	}
-	if !named {
-		return orchestration.WorkUnitHold{}, fmt.Errorf("work graph %s names no unit %s", graphID, unitID)
-	}
 	id, err := orchestration.WorkUnitHoldID(graphID, unitID)
 	if err != nil {
 		return orchestration.WorkUnitHold{}, err
@@ -183,16 +91,36 @@ func (s *Supervisor) PlaceWorkUnitHold(request ControlRequest) (orchestration.Wo
 		},
 		RequestedAt: s.deps.Clock.Now(),
 	}
-	// THE SAME LOCK activateGraphFrontier holds across reading holds and
-	// activating a unit (#508 review B3): checking "not yet activated" and
-	// placing the hold must be one atomic step against that section, or a
-	// Tick racing between the two could activate the unit and leave an
-	// accepted "pre-activation" hold attached to a unit that is no longer
-	// pre-activation.
+	// THE SAME LOCK activateGraphFrontier holds across reading holds,
+	// activating a unit, AND adopting a graph revision (AdoptWorkGraph,
+	// workgraph.go). #508 review P3: a revision adopted between this
+	// method's OWN membership check and its hold insertion could remove or
+	// repoint the unit out from under a check already passed, exactly as an
+	// activation could - so BOTH the graph/unit membership check and the
+	// not-yet-activated check are taken fresh, inside this one critical
+	// section, against the CURRENT revision and the CURRENT activations,
+	// never a snapshot read before the lock was held.
 	var stored orchestration.WorkUnitHold
 	err = func() error {
 		s.orchestrationMu.Lock()
 		defer s.orchestrationMu.Unlock()
+		graph, found, err := s.deps.Store.WorkGraph(graphID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("unknown work graph %s", graphID)
+		}
+		named := false
+		for _, unit := range graph.Units {
+			if unit.ID == unitID {
+				named = true
+				break
+			}
+		}
+		if !named {
+			return fmt.Errorf("work graph %s names no unit %s", graphID, unitID)
+		}
 		activations, err := s.deps.Store.WorkUnitActivations(graphID)
 		if err != nil {
 			return err
