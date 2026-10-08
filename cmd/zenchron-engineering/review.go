@@ -86,6 +86,18 @@ func reviewPR(ctx context.Context, number int, flags autonomyFlags, overrides au
 		Source: cwd, Clock: runtime.RealClock{}, Publish: flags.Publish,
 	})
 	if err != nil {
+		// The review itself may have durably succeeded even though this call
+		// still fails overall (publication failed after the decision was
+		// already recorded): the decision is not lost, so show it rather than
+		// leaving the operator with only an opaque error and no indication
+		// that `review status` already has something to read back.
+		if out.Decision.ID != "" {
+			if flags.Text {
+				renderReviewDecision(stdout, out.Decision, out.Created)
+			} else {
+				writeJSON(stdout, out)
+			}
+		}
 		return runtime.ExitFailed, err
 	}
 	if !flags.Text {

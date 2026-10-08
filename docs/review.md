@@ -114,23 +114,28 @@ file schedules anything or holds a lease.
 not a bare `Decision`: #474 needs to know not just what was decided but what
 actually happened on GitHub, without re-deriving it.
 
-**Binding design decision (#233 authority, stated here because it governs how
-#474 may consume this port):** #474 MUST route a `REQUEST_CHANGES` decision to
-producer remediation by reading `ReviewOutcome.Decision.Verdict` directly off
-this port - never by waiting for the published GitHub review to pass ordinary
-human feedback admission (`docs/github-feedback.md`). That admission gate's
-self-loop guard deliberately refuses a review authored by this runtime's own
-publishing identity, including a `REQUEST_CHANGES`, to stop the runtime
-feeding itself. Where the reviewer's publishing identity is the same principal
-that opened the producer PR - the common case absent a deliberately
-provisioned, distinct reviewer-publishing identity - a published review would
-be refused by that very guard and never reach the ordinary feedback path at
-all. The durable `Decision`, read through `ReviewPort`, is the authorized,
-producer-routable signal; GitHub publication is for human visibility and is
-never the channel #474 consumes decisions through. This does not authorize
-cross-WorkGraph chat or a second remediation engine: #474 still owns all
-scheduling, routing and remediation-invocation logic, reading only typed,
-durable state through this one port.
+**Design decision #233 is making about its OWN port (#474 still owns whether
+and how to act on it):** a `REQUEST_CHANGES` decision is never reachable by
+waiting for the published GitHub review to pass ordinary human feedback
+admission (`docs/github-feedback.md`). That admission gate's self-loop guard
+deliberately refuses a review authored by this runtime's own publishing
+identity, including a `REQUEST_CHANGES`, to stop the runtime feeding itself -
+and where the reviewer's publishing identity is the same principal that
+opened the producer PR (the common case absent a deliberately provisioned,
+distinct reviewer-publishing identity), a published review is refused by that
+very guard and never reaches the ordinary feedback path at all. So #233
+exposes `ReviewOutcome.Decision.Verdict` directly through `ReviewPort`,
+unconditionally on whether GitHub publication succeeded, refused, or was
+never attempted - that is as far as #233's authority reaches.
+
+**What this is not:** reading `Decision.Verdict` off this port is not, by
+itself, authorization to run a remediation provider. #474 remains the sole
+owner of deciding whether and how a `REQUEST_CHANGES` decision becomes an
+authorized, exact-subject, anti-self-loop, budget-governed remediation
+invocation - with its own tests for that admission - exactly the way it
+already owns all scheduling and routing logic. This document cannot grant
+#474 authority it does not independently establish; it only commits #233 to
+exposing the fact #474 needs in order to establish it.
 
 ## Known scope limits (first version)
 

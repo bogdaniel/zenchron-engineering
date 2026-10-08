@@ -39,12 +39,18 @@ func CheckReviewIndependence(producer, reviewer ResolvedAgent) error {
 		}
 	}
 	producerFamily, reviewerFamily := VendorFamilyFor(producer.Kind), VendorFamilyFor(reviewer.Kind)
-	if producerFamily == reviewerFamily {
+	// An "unknown" vendor family is not evidence of ANYTHING, including
+	// independence: VendorFamilyFor's own doc comment is explicit that two
+	// unrecognized vendors must never be read as independent merely because
+	// the string "unknown" trivially differs from a real vendor name. Either
+	// side being unrecognized means this check cannot confidently establish
+	// independence at all, so it fails closed the same way a match does.
+	if producerFamily == reviewerFamily || producerFamily == "unknown" || reviewerFamily == "unknown" {
 		return &ReviewIndependenceError{
 			Dimension: "vendor_family",
-			Detail: fmt.Sprintf("producer agent %q and reviewer agent %q are both vendor family %q; "+
-				"selecting a different agent of the same underlying vendor/model does not satisfy independence",
-				producer.ID, reviewer.ID, reviewerFamily),
+			Detail: fmt.Sprintf("producer agent %q (vendor family %q) and reviewer agent %q (vendor family %q) cannot be confirmed independent; "+
+				"an unrecognized vendor family is never evidence of independence, and selecting a different agent of the same known vendor/model does not satisfy it either",
+				producer.ID, producerFamily, reviewer.ID, reviewerFamily),
 		}
 	}
 	return nil

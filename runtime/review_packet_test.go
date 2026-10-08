@@ -226,3 +226,46 @@ func TestBuildReviewPacketFailsClosedWhenTheDiffCannotBeVerified(t *testing.T) {
 		t.Fatal("expected an unverifiable base commit to fail packet assembly closed, not silently drop the diff")
 	}
 }
+
+// Mutation check: an unreadable github.pr_observed event must fail subject
+// resolution closed, never be silently skipped as "doesn't match" - which
+// could resolve a PR to the wrong run (or to none) if the real match was
+// hiding inside the unreadable event. Removing the decode-error propagation
+// in resolveRunForPullRequest must make this test fail.
+func TestResolveRunForPullRequestFailsClosedOnAnUnreadableEvent(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	run := newJournalRun("run-a")
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	// A malformed payload is refused by AppendEvent's own write-time schema
+	// check, so an already-stored-but-unreadable event (schema drift, manual
+	// corruption) is inserted directly - bypassing that check on purpose, the
+	// same way corruption would actually reach disk.
+	event := EngineeringEvent{
+		SchemaVersion: SchemaVersion, ID: newEventID(run.ID), RunID: run.ID, Sequence: 1,
+		Type: EventGitHubPRObserved, OccurredAt: time.Unix(1700000000, 0).UTC(),
+		EventHash: "deliberately-nonempty-for-this-test",
+		Payload:   json.RawMessage(`{"number":7,"head_revision":"x","base_revision":"main","state":"open","unexpected_member":true}`),
+	}
+	document, err := CanonicalJSON(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(
+		`INSERT INTO events (`+sqlitePlanEventInsertColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, event.RunID, event.Sequence, event.Type, event.OperationID, event.PreviousEventID,
+		event.PreviousEventHash, event.StateBefore, event.StateAfter, event.EventHash, string(document), streamRun, "", 1,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := resolveRunForPullRequest(store, run.Repository, 7); err == nil {
+		t.Fatal("expected an unreadable github.pr_observed event to fail resolution closed")
+	}
+}

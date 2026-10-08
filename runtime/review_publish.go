@@ -150,7 +150,14 @@ func observeOwnPublishedReview(ctx context.Context, deps ReviewPublicationDeps, 
 	}
 	self, err := viewer.Viewer(ctx, repo)
 	if err != nil {
-		return review.Publication{}, false, nil
+		// Fails closed, exactly as feedback admission's own self-loop guard
+		// does when it cannot resolve its publication identity
+		// (docs/github-feedback.md): without knowing which account this
+		// runtime publishes as, "no matching review observed" cannot be told
+		// apart from "this decision was already published and we simply
+		// cannot see it", and proceeding to submit anyway risks exactly the
+		// duplicate-publication outcome this reconciliation exists to avoid.
+		return review.Publication{}, false, fmt.Errorf("resolving this runtime's own publishing identity before publication: %w", err)
 	}
 	observation, err := deps.GitHub.Reviews(ctx, repo, decision.Subject.PRNumber, decision.Subject.HeadSHA)
 	if err != nil {

@@ -234,7 +234,12 @@ func resolveRunForPullRequest(store *SQLiteOperationStore, repository string, pr
 			}
 			var payload GitHubPRObservedPayload
 			if err := strictJSON(event.Payload, &payload); err != nil {
-				continue
+				// A github.pr_observed event this build cannot decode is not
+				// evidence this run does NOT own prNumber - it is evidence
+				// the ambiguity check below cannot be trusted at all, since a
+				// genuine match could be hiding inside it. Fail closed rather
+				// than silently resolving to a different run (or to "none").
+				return EngineeringRun{}, false, fmt.Errorf("run %s: unreadable github.pr_observed event: %w", runs[i].ID, err)
 			}
 			if payload.Number != prNumber {
 				continue

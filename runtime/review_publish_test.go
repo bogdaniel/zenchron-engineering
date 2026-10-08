@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -248,4 +249,35 @@ func publishableDecisionForReviewer(t *testing.T, store *SQLiteOperationStore, v
 		t.Fatalf("CreateReviewDecision: %v", err)
 	}
 	return stored
+}
+
+// Mutation check: PublishReview must fail closed when it cannot resolve its
+// own publishing identity, never silently treat that as "nothing published
+// yet" and proceed to submit - which could duplicate an earlier publication
+// this runtime simply cannot see without knowing who it is. Removing the
+// viewer-error propagation in observeOwnPublishedReview must make this test
+// fail by letting PublishReview proceed to SubmitReview.
+func TestPublishReviewFailsClosedWhenItsOwnIdentityCannotBeResolved(t *testing.T) {
+	store, fake := newReviewPublishFixture(t)
+	decision := publishableDecision(t, store, review.VerdictApprove)
+	failingViewer := &viewerErrorForge{FakeGitHubAdapter: fake}
+
+	_, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: failingViewer}, testRepo, decision)
+	if err == nil {
+		t.Fatal("expected a failed self-identity resolution to refuse publication")
+	}
+	for _, call := range fake.Methods() {
+		if call == "SubmitReview" {
+			t.Fatal("expected no SubmitReview call when self-identity could not be resolved")
+		}
+	}
+}
+
+// viewerErrorForge wraps FakeGitHubAdapter and fails Viewer specifically,
+// since FakeGitHubAdapter's own Fail hook is consulted by every method and
+// this test needs ONLY Viewer to fail.
+type viewerErrorForge struct{ *FakeGitHubAdapter }
+
+func (v *viewerErrorForge) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
+	return GitHubActor{}, fmt.Errorf("could not resolve viewer identity")
 }

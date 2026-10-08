@@ -217,3 +217,61 @@ func TestClaimReviewFencingTokenPreventsASupersededOwnerFromActing(t *testing.T)
 		t.Fatalf("expected the claim to be free after B's own release, got claimed=%v err=%v", claimedD, err)
 	}
 }
+
+// Mutation check: a publication row whose document disagrees with its own
+// primary key must be refused, never silently handed back as if it named the
+// requested decision. Removing the row/document agreement check in
+// ReviewPublication must make this test fail.
+func TestReviewPublicationRefusesARowThatDisagreesWithItsDocument(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	requested := testReviewDecision(t, "head1")
+	if _, _, err := store.CreateReviewDecision(requested); err != nil {
+		t.Fatal(err)
+	}
+	mismatched := review.Publication{DecisionID: "review-other", Published: true, GitHubReviewID: 1}
+	document, err := CanonicalJSON(mismatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO review_publications (decision_id, document) VALUES (?, ?)`, requested.ID, string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found, err := store.ReviewPublication(requested.ID); err == nil || found {
+		t.Fatalf("expected a row/document mismatch to be refused, got found=%v err=%v", found, err)
+	}
+}
+
+// TestClaimReviewIsExclusiveAcrossIndependentStoreHandles proves the claim is
+// exclusive across two SEPARATE SQLiteOperationStore handles on the same
+// database file (openPair), not merely within one shared Go struct - the
+// closer simulation of two independent controller processes racing to claim
+// the same review (#233 B4 re-review: "run load-bearing cross-store-handle
+// ... tests").
+func TestClaimReviewIsExclusiveAcrossIndependentStoreHandles(t *testing.T) {
+	_, first, second := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+
+	claimed, token, err := first.ClaimReview("key-1", "process-a", now, time.Minute)
+	if err != nil || !claimed || token == "" {
+		t.Fatalf("process A's claim (handle 1): claimed=%v err=%v", claimed, err)
+	}
+	// A genuinely independent connection must see the claim as held.
+	claimed, _, err = second.ClaimReview("key-1", "process-b", now, time.Minute)
+	if err != nil || claimed {
+		t.Fatalf("expected process B (handle 2) to be refused, got claimed=%v err=%v", claimed, err)
+	}
+	// Released from handle 1; handle 2 can now claim it.
+	if err := first.ReleaseReviewClaim("key-1", token); err != nil {
+		t.Fatalf("ReleaseReviewClaim: %v", err)
+	}
+	claimed, _, err = second.ClaimReview("key-1", "process-b", now, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("expected process B to claim it once released, got claimed=%v err=%v", claimed, err)
+	}
+}

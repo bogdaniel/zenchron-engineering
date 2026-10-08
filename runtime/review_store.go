@@ -158,6 +158,14 @@ func (s *SQLiteOperationStore) ReviewPublication(decisionID string) (review.Publ
 	if err := strictJSON([]byte(document), &pub); err != nil {
 		return review.Publication{}, false, fmt.Errorf("stored review publication is unreadable: %w", err)
 	}
+	// The row's own key and the document's own claimed identity must agree,
+	// the same check queryStreamEvents already makes for a journal row: a
+	// disagreement is not decidable by a caller that only sees the decoded
+	// value, so it is refused here rather than silently handed back as if it
+	// named decisionID.
+	if pub.DecisionID != decisionID {
+		return review.Publication{}, false, fmt.Errorf("stored review publication row %q disagrees with its own document (names %q)", decisionID, pub.DecisionID)
+	}
 	return pub, true, nil
 }
 

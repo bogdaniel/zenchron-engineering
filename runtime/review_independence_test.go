@@ -40,3 +40,21 @@ func TestCheckReviewIndependenceAllowsADifferentVendor(t *testing.T) {
 		t.Fatalf("expected independent vendors to be allowed, got %v", err)
 	}
 }
+
+// Mutation check: an unrecognized ("unknown") vendor family must never be
+// read as evidence of independence, even when it trivially differs from a
+// known family string. Removing the "unknown" guard in CheckReviewIndependence
+// must make this test fail by allowing the pairing through.
+func TestCheckReviewIndependenceRefusesAnUnrecognizedVendorFamily(t *testing.T) {
+	producer := ResolvedAgent{ID: "producer", Kind: "some-future-kind-this-build-does-not-know"}
+	reviewer := ResolvedAgent{ID: "reviewer", Kind: AgentKindClaudeCode}
+	if VendorFamilyFor(producer.Kind) != "unknown" {
+		t.Fatalf("test fixture assumption broken: expected an unrecognized kind to resolve to \"unknown\"")
+	}
+	if err := CheckReviewIndependence(producer, reviewer); err == nil {
+		t.Fatal("expected an unrecognized producer vendor family to refuse independence, not silently pass")
+	}
+	if err := CheckReviewIndependence(reviewer, producer); err == nil {
+		t.Fatal("expected an unrecognized reviewer vendor family to refuse independence, not silently pass")
+	}
+}
