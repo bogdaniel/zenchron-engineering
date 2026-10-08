@@ -1241,6 +1241,13 @@ func reviewerEnvelope(r ExecutionRequest) string {
 }
 
 func providerEnvelope(r ExecutionRequest) string {
+	// An independent review shares planning's non-mutating Mode but owns a
+	// self-contained envelope, so it is checked BEFORE the Mode-based
+	// fallback below - otherwise it would fall into planningEnvelope's
+	// generic text instead of its own reviewer contract.
+	if r.Purpose == InvocationIndependentReview {
+		return independentReviewEnvelope(r)
+	}
 	if r.Mode == domain.InvocationModeNonMutatingPlanning {
 		return planningEnvelope(r)
 	}

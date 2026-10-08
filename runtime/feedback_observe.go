@@ -435,7 +435,7 @@ const neutralizedFrameMarker = "[frame marker removed by runtime]"
 // feedback one - can close another block's frame just as effectively as its
 // own.
 func neutralizeFrameMarker(text string) string {
-	for _, marker := range []string{feedbackFrameMarker, upstreamFrameMarker, messagesFrameMarker} {
+	for _, marker := range []string{feedbackFrameMarker, upstreamFrameMarker, messagesFrameMarker, reviewContextFrameMarker} {
 		text = strings.ReplaceAll(text, marker, neutralizedFrameMarker)
 	}
 	return text
