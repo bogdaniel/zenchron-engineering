@@ -35,14 +35,22 @@ description.
 
 ## The review packet
 
-The complete context is assembled from runtime-owned and machine-observed
-facts: the producing run's identity, candidate commit/tree and contract, the
+Assembled from runtime-owned and machine-observed facts: the producing run's
+identity, phase and disposition, candidate commit/tree and contract, the
 producer's agent id, CI state and existing review metadata for the **exact**
-head, and the exact diff. Issue/PR/review-comment text travels as a clearly
-delimited, labelled, untrusted block (`UNTRUSTED-REVIEW-CONTEXT`) the same way
-an upstream stage's diff already does elsewhere in this runtime - it is data a
-reviewer reasons about, never an instruction this system acts on, and an
-attempt to forge the frame marker from inside that text is neutralized.
+head, and the exact diff (read from the content-verified subject store, never
+from the review workspace directly - see #437 in `docs/architecture.md`).
+Issue/PR/review-comment text travels as a clearly delimited, labelled,
+untrusted block (`UNTRUSTED-REVIEW-CONTEXT`) the same way an upstream stage's
+diff already does elsewhere in this runtime - it is data a reviewer reasons
+about, never an instruction this system acts on, and an attempt to forge the
+frame marker from inside that text is neutralized.
+
+Not yet in the packet: assurance/authority-decision references and the
+run's full execution/remediation history. These are deferred, not silently
+dropped - the packet never claims to carry them, and a reviewer judging an
+obligation it cannot verify from what it was given reports that explicitly as
+a finding rather than assuming it passed (see the reviewer contract below).
 
 ## The reviewer contract
 
@@ -72,13 +80,26 @@ evidence and is reported `stale`; a fresh review is required for the new head.
 `review status` answers exactly this: the latest decision, blocking/
 non-blocking finding counts, and whether it is stale.
 
-Publication to GitHub is idempotent: an already-published decision is a
-no-op, a decision bound to a superseded head is refused before any GitHub
-call, and the crash window between GitHub accepting a review and the local
-publication record committing is closed by observing GitHub's own state
-through the same self-identity primitive (`ForgeViewer`) the feedback
-admission gate already relies on - reconciling from what GitHub shows rather
-than submitting a second review.
+Publication to GitHub is idempotent and matched precisely: every published
+review body carries an immutable, invisible decision-id marker, and
+reconciliation (after a crash, or after a client-side error that may have
+masked a GitHub success) matches on that marker plus this runtime's own
+publishing identity - never on identity alone - so one decision's publication
+can never be mistaken for another's, even when the same identity has
+published several reviews to the same pull request. A decision bound to a
+superseded head is refused before any GitHub call. GitHub's own, textually
+confirmed refusal of a self-approval is the one case that downgrades an
+`APPROVE` to an explicit `COMMENT_ONLY`; every other failure - a timeout, a
+5xx, a rate limit, an auth failure, or any other 422 - is preserved for
+replay.
+
+Concurrency is exclusive, not advisory: performing a review, and separately
+publishing one, each claim a durable key before any expensive or
+externally-visible work, so two concurrent callers for the same exact
+subject and reviewer can never both invoke a provider or both reach GitHub.
+A losing caller is refused immediately with a typed conflict rather than
+blocking; a claim is released on ordinary completion and reclaimed after a
+bounded staleness window if its owner crashed.
 
 ## The #474 interface
 
@@ -123,7 +144,13 @@ durable state through this one port.
 - Findings carry no file/line location yet, so GitHub publication always uses
   the review body, never inline comments.
 - No per-review budget/retry policy is wired to operator configuration; a
-  review is one bounded attempt.
+  review is one bounded attempt (concurrency is still exclusive, see below).
+- The review packet omits assurance/authority-decision references and the
+  run's full execution/remediation history; see "The review packet" above.
+- A reviewer-publishing identity distinct from the producer's own publication
+  identity is an operator provisioning decision (a second credential/App),
+  not something this code enforces or defaults; see "The #474 interface"
+  for why that identity choice matters.
 
 See also: [`github-feedback.md`](github-feedback.md), [`agents.md`](agents.md),
 [`planning.md`](planning.md), [`product-architecture.md`](product-architecture.md).

@@ -97,6 +97,9 @@ func reviewObjective(packet ReviewPacket) string {
 			fmt.Fprintf(&out, " Failing checks: %s.", strings.Join(packet.Trusted.FailingChecks, ", "))
 		}
 	}
+	if packet.Trusted.RunPhase != "" || packet.Trusted.RunDisposition != "" {
+		fmt.Fprintf(&out, " The producing run is currently phase=%s disposition=%s.", packet.Trusted.RunPhase, packet.Trusted.RunDisposition)
+	}
 	out.WriteString("\n\n" + reviewContextFrameMarker + "\n")
 	if packet.Untrusted.IssueNumber > 0 {
 		fmt.Fprintf(&out, "issue #%d title: %s\nissue body:\n%s\n\n",

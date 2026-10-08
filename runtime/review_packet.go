@@ -33,6 +33,12 @@ type ReviewTrustedFacts struct {
 	CandidateTree     string
 	ContractID        string
 	ContractRevision  string
+	// RunPhase and RunDisposition are the producing run's own lifecycle state
+	// at packet-assembly time (e.g. a run still mid-remediation versus one
+	// that already completed), available on the run row this packet already
+	// reads with no further query.
+	RunPhase       Phase
+	RunDisposition Disposition
 	// CIState and FailingChecks are the forge's CI conclusion for EXACTLY
 	// HeadSHA (GitHubAdapter.Checks never answers "latest"), so there is no
 	// stale-CI case to additionally guard against here: an observation bound
@@ -166,6 +172,7 @@ func BuildReviewPacket(ctx context.Context, deps ReviewPacketDeps, repo GitHubRe
 			ProducerAgentID:   run.AgentID,
 			CandidateRevision: run.Candidate.Revision, CandidateTree: run.Candidate.Tree,
 			ContractID: run.Contract.ID, ContractRevision: run.Contract.Revision,
+			RunPhase: run.Phase, RunDisposition: run.Disposition,
 			CIState: checks.State, FailingChecks: failingCheckNames(checks.Runs),
 			ExistingReviews: reviews.Reviews,
 		},

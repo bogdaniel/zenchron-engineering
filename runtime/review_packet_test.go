@@ -137,6 +137,9 @@ func TestBuildReviewPacketAssemblesTrustedAndUntrustedFacts(t *testing.T) {
 	if packet.Trusted.RunID != run.ID || packet.Trusted.ProducerAgentID != "codex" {
 		t.Fatalf("trusted facts not bound to the producing run: %+v", packet.Trusted)
 	}
+	if packet.Trusted.RunPhase != run.Phase || packet.Trusted.RunDisposition != run.Disposition {
+		t.Fatalf("run lifecycle state not carried through: %+v", packet.Trusted)
+	}
 	if packet.Trusted.HeadSHA != testHeadSHA || packet.Trusted.BaseSHA != testOtherSHA {
 		t.Fatalf("trusted facts not bound to the exact head/base: %+v", packet.Trusted)
 	}
