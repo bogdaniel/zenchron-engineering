@@ -140,16 +140,6 @@ func TestFakeGitHubAdapterRoundTripsEveryOperation(t *testing.T) {
 	if err != nil || len(reviews.Reviews) != 1 || len(reviews.Comments) != 1 {
 		t.Fatalf("Reviews: %+v %v", reviews, err)
 	}
-	submitted, err := fake.SubmitReview(ctx, testRepo, 1, GitHubReviewSubmission{
-		CommitSHA: testHeadSHA, Event: GitHubReviewApproved, Body: mustPublication(t, "looks good"),
-	})
-	if err != nil || submitted.State != GitHubReviewApproved || submitted.CommitSHA != testHeadSHA {
-		t.Fatalf("SubmitReview: %+v %v", submitted, err)
-	}
-	afterSubmit, err := fake.Reviews(ctx, testRepo, 1, testHeadSHA)
-	if err != nil || len(afterSubmit.Reviews) != 2 {
-		t.Fatalf("Reviews after SubmitReview: %+v %v", afterSubmit, err)
-	}
 	if observation, err := fake.RefSHA(ctx, testRepo, "issue-7"); err != nil || !observation.Exists || observation.SHA != testHeadSHA {
 		t.Fatalf("RefSHA: %+v %v", observation, err)
 	}
@@ -166,7 +156,7 @@ func TestFakeGitHubAdapterRoundTripsEveryOperation(t *testing.T) {
 
 	want := []string{
 		"Issue", "FindPullRequests", "CreatePullRequest", "FindPullRequests",
-		"UpdatePullRequest", "CommentOnPullRequest", "Checks", "Reviews", "SubmitReview", "Reviews", "RefSHA", "PullRequest",
+		"UpdatePullRequest", "CommentOnPullRequest", "Checks", "Reviews", "RefSHA", "PullRequest",
 	}
 	got := fake.Methods()
 	if len(got) != len(want) {
@@ -447,7 +437,6 @@ func restResponses() map[string]string {
 		"GET /repos/zenchron/fixture/pulls/5/reviews":                        `[{"id":1,"user":{"login":"reviewer","id":3},"state":"CHANGES_REQUESTED","body":"no","commit_id":"` + testHeadSHA + `","submitted_at":"2026-01-02T03:04:05Z"},{"id":2,"state":"APPROVED","commit_id":"` + testOtherSHA + `"}]`,
 		"GET /repos/zenchron/fixture/pulls/5/comments":                       `[{"id":4,"body":"fix this","path":"a.go","commit_id":"` + testHeadSHA + `","created_at":"2026-01-02T03:04:05Z"},{"id":5,"commit_id":"` + testOtherSHA + `"}]`,
 		"POST /repos/zenchron/fixture/issues/5/comments":                     `{}`,
-		"POST /repos/zenchron/fixture/pulls/5/reviews":                       `{"id":9,"user":{"login":"reviewer","id":3},"state":"APPROVED","commit_id":"` + testHeadSHA + `","submitted_at":"2026-01-02T03:04:05Z"}`,
 		"GET /repos/zenchron/fixture/git/ref/heads/issue-7":                  `{"ref":"refs/heads/issue-7","object":{"sha":"` + testHeadSHA + `","type":"commit"}}`,
 	}
 }
@@ -495,12 +484,6 @@ func TestGitHubRESTAdapterShapesItsRequests(t *testing.T) {
 	if err := adapter.CommentOnPullRequest(ctx, testRepo, 5, body); err != nil {
 		t.Fatalf("CommentOnPullRequest: %v", err)
 	}
-	submitted, err := adapter.SubmitReview(ctx, testRepo, 5, GitHubReviewSubmission{
-		CommitSHA: testHeadSHA, Event: GitHubReviewApproved, Body: body,
-	})
-	if err != nil || submitted.State != GitHubReviewApproved || submitted.CommitSHA != testHeadSHA {
-		t.Fatalf("SubmitReview: %+v %v", submitted, err)
-	}
 	if observation, err := adapter.RefSHA(ctx, testRepo, "issue-7"); err != nil || !observation.Exists || observation.SHA != testHeadSHA {
 		t.Fatalf("RefSHA: %+v %v", observation, err)
 	}
@@ -518,7 +501,6 @@ func TestGitHubRESTAdapterShapesItsRequests(t *testing.T) {
 		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/reviews?page=1&per_page=100"},
 		{"GET", "https://api.github.com/repos/zenchron/fixture/pulls/5/comments?page=1&per_page=100"},
 		{"POST", "https://api.github.com/repos/zenchron/fixture/issues/5/comments"},
-		{"POST", "https://api.github.com/repos/zenchron/fixture/pulls/5/reviews"},
 		{"GET", "https://api.github.com/repos/zenchron/fixture/git/ref/heads/issue-7"},
 	}
 	if len(doer.requests) != len(want) {

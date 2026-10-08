@@ -948,9 +948,6 @@ func (r routingForge) Reviews(ctx context.Context, repo GitHubRepo, number int, 
 func (r routingForge) CommentOnPullRequest(ctx context.Context, repo GitHubRepo, number int, body Publication) error {
 	return r.adapter(repo).CommentOnPullRequest(ctx, repo, number, body)
 }
-func (r routingForge) SubmitReview(ctx context.Context, repo GitHubRepo, number int, submission GitHubReviewSubmission) (GitHubReview, error) {
-	return r.adapter(repo).SubmitReview(ctx, repo, number, submission)
-}
 func (r routingForge) RefSHA(ctx context.Context, repo GitHubRepo, ref string) (RefObservation, error) {
 	return r.adapter(repo).RefSHA(ctx, repo, ref)
 }
