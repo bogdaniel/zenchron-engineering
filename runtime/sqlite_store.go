@@ -503,6 +503,31 @@ CREATE TABLE work_graph_activations (
 	activated_unix_nano INTEGER NOT NULL,
 	PRIMARY KEY (graph_id, unit_id)
 );
+`, `
+-- Independent PR review (#233). review_decisions is insert-only and never
+-- rewritten: a moved head or a different reviewer always identifies a
+-- different decision (review.DecisionID), so there is no "latest" to update
+-- in place, only more rows. repository and pr_number are indexed columns
+-- (not only fields inside document) so status and staleness can be answered
+-- with one query instead of a decode-every-row scan.
+--
+-- review_publications is a SEPARATE table on purpose: a publication attempt
+-- that fails after the decision already committed must never be able to
+-- corrupt or erase that decision by sharing its row.
+CREATE TABLE review_decisions (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	pr_number         INTEGER NOT NULL,
+	head_sha          TEXT NOT NULL,
+	run_id            TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE INDEX review_decisions_by_pr ON review_decisions(repository, pr_number, created_unix_nano);
+CREATE TABLE review_publications (
+	decision_id TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	document    TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
