@@ -916,9 +916,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// never through the lease heartbeat: a controller being alive is a
 	// different claim from the work moving, and #238 is the cost of letting the
 	// first stand in for the second.
-	ctx = execution.WithProgressRecorder(ctx,
-		func(progress ProviderProgress) {
-			_, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, progress)
+	// The writer returns the write's error; its derived recorder drops it (#518).
+	ctx = execution.WithProgressWriter(ctx,
+		func(progress ProviderProgress) error {
+			_, err := r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, progress)
+			return err
 		})
 	// A continuation is bounded independently of the original operation.
 	// The absolute deadline also makes a spent (zero) allowance fail closed.
