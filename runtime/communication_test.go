@@ -78,7 +78,7 @@ func simulateInvocation(t *testing.T, fixture *fleetFixture, runID, operationID,
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	entry, wrote := messageObservation(path, operationID, 1)
+	entry, wrote := messageObservation(path, operationID, 1, false)
 	if !wrote {
 		t.Fatal("the harness slot was not observed")
 	}

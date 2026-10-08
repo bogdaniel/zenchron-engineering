@@ -40,6 +40,14 @@ type MessagesObservedPayload struct {
 	DocumentSHA256 string `json:"document_sha256,omitempty"`
 	Count          int    `json:"count,omitempty"`
 	Refusal        string `json:"refusal,omitempty"`
+	// FromCheckpoint marks an observation taken from an attempt the runtime
+	// classified as an incomplete, checkpointed candidate (#508 review P4a):
+	// the producer did not finish, so admission (communication_admission.go)
+	// may trust only this document's decision_request content, and only once
+	// the matching checkpoint commit is itself durably journalled. Absent
+	// (false) is the ordinary, unchanged completing-invocation path #473
+	// already admits.
+	FromCheckpoint bool `json:"from_checkpoint,omitempty"`
 }
 
 // MessageReportPath is the runtime-owned location of ONE invocation's
@@ -107,25 +115,28 @@ func readMessageReport(path string) (report orchestration.MessageReport, digest 
 }
 
 // appendMessageObservation adds the observation of a COMPLETED invocation's
-// slot, if it was given one and wrote to it.
-func appendMessageObservation(events []journalEntry, path, operationID string, attempt int) []journalEntry {
+// slot, if it was given one and wrote to it. fromCheckpoint names a verified,
+// incomplete (checkpointed) attempt's observation (#508 review P4a) rather
+// than an ordinarily completing one; admission treats the two differently
+// (communication_admission.go).
+func appendMessageObservation(events []journalEntry, path, operationID string, attempt int, fromCheckpoint bool) []journalEntry {
 	if path == "" {
 		return events
 	}
-	if entry, wrote := messageObservation(path, operationID, attempt); wrote {
+	if entry, wrote := messageObservation(path, operationID, attempt, fromCheckpoint); wrote {
 		return append(events, entry)
 	}
 	return events
 }
 
-// messageObservation is the journal entry for what one COMPLETED invocation
-// wrote through its message slot; ok=false when it wrote nothing.
-func messageObservation(path, operationID string, attempt int) (journalEntry, bool) {
+// messageObservation is the journal entry for what one invocation wrote
+// through its message slot; ok=false when it wrote nothing.
+func messageObservation(path, operationID string, attempt int, fromCheckpoint bool) (journalEntry, bool) {
 	report, digest, present, err := readMessageReport(path)
 	if !present {
 		return journalEntry{}, false
 	}
-	payload := MessagesObservedPayload{OperationID: operationID, Attempt: attempt}
+	payload := MessagesObservedPayload{OperationID: operationID, Attempt: attempt, FromCheckpoint: fromCheckpoint}
 	if err != nil {
 		payload.Refusal = boundedDetail(err.Error())
 	} else {

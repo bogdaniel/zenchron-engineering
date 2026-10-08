@@ -478,13 +478,13 @@ type CandidateCommittedPayload struct {
 	// not carry. It is the durable half of the #189 ownership decision: a
 	// crashed run's inherited scratch is left out of the tree deliberately,
 	// and an operator reading the journal has to be able to see WHICH paths
-	// rather than infer them from a path count that does not add up.
-	//
-	// It is bounded like every other payload list, and it is never truncated to
+	// rather than infer them from a path count that does not add up. It is
+	// bounded like every other payload list, and it is never truncated to
 	// fit: a workspace holding more debris than one payload may carry is
 	// refused at the commit gate, so this list is always the whole of the
 	// decision or there is no commit to describe.
 	ExcludedPaths []string `json:"excluded_paths,omitempty"`
+	Producing     string   `json:"producing_operation,omitempty"` // producing operation's ID (#508 P4a); optional, unchecked
 }
 
 // ExecutionCompletedPayload records that the producer finished its invocation

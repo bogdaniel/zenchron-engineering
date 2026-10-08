@@ -1289,7 +1289,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			if handoffPath != "" {
 				events = append(events, handoffObservation(handoffPath, operation.ID, physicalAttempt))
 			}
-			events = appendMessageObservation(events, messagePath, operation.ID, physicalAttempt)
+			events = appendMessageObservation(events, messagePath, operation.ID, physicalAttempt, false)
 		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.
@@ -1516,7 +1516,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// the second: one blank README line, produced after eight failed
 			// patch attempts and an exhausted iteration budget, was committed
 			// and sent to assurance as if the objective had been addressed.
-			//
 			// A runtime bound reached with work in the tree is incomplete work
 			// whichever bound it was: the iteration budget, or (#328) the
 			// physical attempt's wall deadline. The deadline case used to fall
@@ -1529,7 +1528,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// A producer that left real work behind did its bounded job, so the
 		// OPERATION succeeded: it is the CANDIDATE that is incomplete, and that
 		// is recorded as a checkpoint rather than as an operation failure.
-		//
 		// A producer that left nothing behind did not satisfy this operation,
 		// so the operation fails - and with the class above it now fails INTO
 		// the existing attempt budget rather than out of the run. The next
@@ -1565,6 +1563,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// settleRefusedMaterial) rather than left for the next attempt.
 		if !execution.Checkpoint {
 			produced.state = OperationFailed
+		} else { // a verified checkpoint preserves its message slot too (#508 P4a)
+			produced.events = appendMessageObservation(produced.events, messagePath, operation.ID, physicalAttempt, true)
 		}
 		state.admitSuccessor(execution.Diagnostic, operation, result.Invocation, execution.Checkpoint, produced.state == OperationFailed, r.deps.Clock.Now())
 		produced.result = execution
@@ -2139,7 +2139,7 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 			{Type: commitEvent, Payload: CandidateCommittedPayload{
 				Commit: result.Commit, Tree: result.Tree,
 				PathCount: len(result.Paths), PathsDigest: pathsDigest(result.Paths),
-				ExcludedPaths: result.Excluded,
+				ExcludedPaths: result.Excluded, Producing: producing,
 			}},
 			{Type: EventReassessmentCompleted, Payload: ReassessmentCompletedPayload{
 				Material:                next.Reassessment.Material,

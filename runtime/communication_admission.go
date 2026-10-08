@@ -180,11 +180,26 @@ func admitOrchestratedMessages(store *SQLiteOperationStore, stateDir string, bat
 			if observed.Refusal != "" || decided[key] != "" {
 				continue
 			}
+			if observed.FromCheckpoint {
+				// #508 review P4a (D1/R2-B): commit BEFORE admit. A checkpoint's
+				// report is never trusted until the runtime has itself durably
+				// journalled the commit that preserves the work it describes;
+				// until then this observation is left undecided, exactly like
+				// an unreadable handoff report already is, and is retried the
+				// next time this batch step runs.
+				eligible, eligErr := checkpointCommitted(events, observed.OperationID)
+				if eligErr != nil {
+					return eligErr
+				}
+				if !eligible {
+					continue
+				}
+			}
 			source := orchestration.MessageSource{
 				Unit: orchestration.BatchItemUnit(item.Issue), RunID: run.ID, AgentID: run.AgentID,
 				OperationID: observed.OperationID, Attempt: observed.Attempt,
 			}
-			admitted, reason, err := admitObservedMessages(stateDir, scope, source, observed.DocumentSHA256, now)
+			admitted, reason, err := admitObservedMessages(stateDir, scope, source, observed.DocumentSHA256, now, observed.FromCheckpoint)
 			if err != nil {
 				return err
 			}
@@ -207,7 +222,17 @@ func admitOrchestratedMessages(store *SQLiteOperationStore, stateDir string, bat
 
 // admitObservedMessages decides one observed report. A non-empty reason is a
 // durable refusal; an error is a failure to decide, retried next pass.
-func admitObservedMessages(stateDir string, scope orchestration.MessageScope, source orchestration.MessageSource, journalled string, now time.Time) ([]orchestration.EngineeringMessage, string, error) {
+//
+// fromCheckpoint names a report from a verified, incomplete (checkpointed)
+// attempt (#508 review P4a, D1/R2-C): the whole report is trusted for
+// decision_request content alone. Any OTHER kind present anywhere in that
+// same document refuses the WHOLE report, immutably, in one decision - never
+// a partial admission split by message, which the existing one-decision-per-
+// report-key refusal identity (ScopeMessageRefusals/RefuseMessages) cannot
+// represent, and never a silent drop of the rest. Do not admit any handoff,
+// reviewer verdict, finding or collaboration_request from an incomplete
+// invocation this way; ordinary, completing invocations are unaffected.
+func admitObservedMessages(stateDir string, scope orchestration.MessageScope, source orchestration.MessageSource, journalled string, now time.Time, fromCheckpoint bool) ([]orchestration.EngineeringMessage, string, error) {
 	path, err := MessageReportPath(stateDir, ExecutionAttemptRef{RunID: source.RunID, OperationID: source.OperationID, Attempt: source.Attempt})
 	if err != nil {
 		return nil, "", err
@@ -216,11 +241,48 @@ func admitObservedMessages(stateDir string, scope orchestration.MessageScope, so
 	if !present || err != nil || digest != journalled {
 		return nil, fmt.Sprintf("the message report is no longer the document journalled when the invocation completed (present=%t, error=%v)", present, err), nil
 	}
+	if fromCheckpoint {
+		for _, draft := range report.Messages {
+			if draft.Kind != orchestration.KindDecisionRequest {
+				return nil, fmt.Sprintf(
+					"an incomplete, checkpointed attempt's report is trusted for %s only; this report also carries %q, so the whole report is refused",
+					orchestration.KindDecisionRequest, draft.Kind), nil
+			}
+		}
+	}
 	admitted, err := orchestration.AdmitMessages(report, digest, scope, source, now)
 	if err != nil {
 		return nil, err.Error(), nil
 	}
 	return admitted, "", nil
+}
+
+// checkpointCommitted reports whether a durable candidate commit or
+// checkpoint exists for the exact execution-invoke OPERATION ID named (the
+// same id bindCandidateCommit/CandidateCommittedPayload.Producing carries,
+// never a bare binding string) - i.e. that THIS attempt's work, if any, was
+// actually preserved by the runtime's own candidate.commit operation -
+// before its message report may be trusted (#508 review P4a, R2-B/R2-C). An
+// empty operation id, or no matching event yet, answers false: not a defect,
+// simply not yet provable, so the caller leaves the observation undecided
+// and retries it on a later pass.
+func checkpointCommitted(events []EngineeringEvent, operationID string) (bool, error) {
+	if operationID == "" {
+		return false, nil
+	}
+	for _, event := range events {
+		if event.Type != EventCandidateCheckpointed && event.Type != EventCandidateCommitted {
+			continue
+		}
+		payload, err := decodePayload[CandidateCommittedPayload](event.Payload)
+		if err != nil {
+			return false, err
+		}
+		if payload.Producing == operationID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // messageInvocationKey identifies one invocation's report, admitted or refused.
