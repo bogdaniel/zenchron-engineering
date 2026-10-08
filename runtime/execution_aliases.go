@@ -38,11 +38,12 @@ type (
 )
 
 const (
-	InvocationInitial       = execution.PurposeInitial
-	InvocationRemediation   = execution.PurposeRemediation
-	InvocationPlanning      = execution.PurposePlanning
-	InvocationContinuation  = execution.PurposeContinuation
-	InvocationHandoffRepair = execution.PurposeHandoffRepair
+	InvocationInitial           = execution.PurposeInitial
+	InvocationRemediation       = execution.PurposeRemediation
+	InvocationPlanning          = execution.PurposePlanning
+	InvocationContinuation      = execution.PurposeContinuation
+	InvocationHandoffRepair     = execution.PurposeHandoffRepair
+	InvocationIndependentReview = execution.PurposeIndependentReview
 
 	FailureTransientProvider                = execution.FailureTransientProvider
 	FailureProviderAccountUnavailable       = execution.FailureProviderAccountUnavailable

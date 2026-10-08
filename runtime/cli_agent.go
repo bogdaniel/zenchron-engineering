@@ -1502,6 +1502,16 @@ func validateExecutionBinding(request ExecutionRequest) error {
 		if request.Mode == domain.InvocationModeNonMutatingPlanning || request.HandoffPath == "" || !request.DenyPermissionBypass {
 			return fmt.Errorf("a handoff repair requires the mutating mode, its runtime-owned slot and a denied permission bypass")
 		}
+	case InvocationIndependentReview:
+		// Same boundary as planning, for the same reason: a reviewer's
+		// restriction is PROVEN by the runtime re-measuring the workspace
+		// afterward, never trusted from what the provider or its output claims.
+		if request.Mode != domain.InvocationModeNonMutatingPlanning {
+			return fmt.Errorf("purpose %q requires the %q mode", request.Purpose, domain.InvocationModeNonMutatingPlanning)
+		}
+		if request.ReviewerResultPath == "" {
+			return fmt.Errorf("purpose %q requires its runtime-owned verdict slot", request.Purpose)
+		}
 	default:
 		return fmt.Errorf("invalid invocation purpose")
 	}
