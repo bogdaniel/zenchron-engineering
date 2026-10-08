@@ -89,6 +89,28 @@ operation itself; #474 owns deciding when to call it and how to route a
 `REQUEST_CHANGES` decision back into producer remediation. Nothing in this
 file schedules anything or holds a lease.
 
+`RequestReview` returns a `ReviewOutcome{Decision, Published, PublishedVerdict}`,
+not a bare `Decision`: #474 needs to know not just what was decided but what
+actually happened on GitHub, without re-deriving it.
+
+**Binding design decision (#233 authority, stated here because it governs how
+#474 may consume this port):** #474 MUST route a `REQUEST_CHANGES` decision to
+producer remediation by reading `ReviewOutcome.Decision.Verdict` directly off
+this port - never by waiting for the published GitHub review to pass ordinary
+human feedback admission (`docs/github-feedback.md`). That admission gate's
+self-loop guard deliberately refuses a review authored by this runtime's own
+publishing identity, including a `REQUEST_CHANGES`, to stop the runtime
+feeding itself. Where the reviewer's publishing identity is the same principal
+that opened the producer PR - the common case absent a deliberately
+provisioned, distinct reviewer-publishing identity - a published review would
+be refused by that very guard and never reach the ordinary feedback path at
+all. The durable `Decision`, read through `ReviewPort`, is the authorized,
+producer-routable signal; GitHub publication is for human visibility and is
+never the channel #474 consumes decisions through. This does not authorize
+cross-WorkGraph chat or a second remediation engine: #474 still owns all
+scheduling, routing and remediation-invocation logic, reading only typed,
+durable state through this one port.
+
 ## Known scope limits (first version)
 
 - `review pr` runs directly in the invoking process; routing it through a
