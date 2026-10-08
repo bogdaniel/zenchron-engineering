@@ -548,6 +548,19 @@ CREATE TABLE review_claims (
 	-- let a stale holder delete or extend a claim it no longer owns.
 	token             TEXT NOT NULL
 );
+-- review_publication_attempts is the durable "an external POST may be in
+-- flight or its outcome is unknown" marker (#233 P1). It is written BEFORE
+-- PublishReview calls GitHub.SubmitReview and removed only once that
+-- decision's outcome is confirmed - either a success this invocation itself
+-- observed, or a later reconciliation that found GitHub's own matching
+-- review. A row surviving past that point is proof no caller has yet
+-- confirmed what happened to some earlier POST, which is exactly the
+-- condition under which a NEW POST must be refused: GitHub's matching
+-- review not being visible yet is never proof it was never accepted.
+CREATE TABLE review_publication_attempts (
+	decision_id       TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	started_unix_nano INTEGER NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

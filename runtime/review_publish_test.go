@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -408,13 +409,179 @@ func TestPublishReviewRenewsItsClaimAcrossASlowSubmitReviewAndDefeatsASteal(t *t
 	if err := <-done; err != nil {
 		t.Fatalf("PublishReview: %v", err)
 	}
-	submitCalls := 0
+	if got := submitReviewCallCount(fake); got != 1 {
+		t.Fatalf("expected exactly one SubmitReview call, got %d", got)
+	}
+}
+
+// submitReviewCallCount counts how many times SubmitReview was actually
+// invoked on fake, which is what every "never a duplicate POST" assertion in
+// this file ultimately needs to check - a refusal that still let the call
+// through would be a refusal in name only.
+func submitReviewCallCount(fake *FakeGitHubAdapter) int {
+	count := 0
 	for _, call := range fake.Methods() {
 		if call == "SubmitReview" {
-			submitCalls++
+			count++
 		}
 	}
-	if submitCalls != 1 {
-		t.Fatalf("expected exactly one SubmitReview call, got %d", submitCalls)
+	return count
+}
+
+// Mutation check (#233 P2): a repository argument that does not match the
+// decision's own subject must be refused before any claim, read or write -
+// never silently publishing one repository's verdict against a different
+// repository's pull request. Removing the repository check in PublishReview
+// must make this test fail by letting SubmitReview (or any GitHub call) run.
+func TestPublishReviewRefusesARepositoryMismatchBeforeAnyExternalCall(t *testing.T) {
+	store, fake := newReviewPublishFixture(t)
+	decision := publishableDecision(t, store, review.VerdictApprove)
+
+	otherRepo := GitHubRepo{Owner: "someone-else", Name: "unrelated"}
+	_, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: fake}, otherRepo, decision)
+	var mismatch *ReviewRepositoryMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("expected a repository mismatch refusal, got %v", err)
+	}
+	if len(fake.Methods()) != 0 {
+		t.Fatalf("expected no GitHub calls at all before the mismatch is checked, got %v", fake.Methods())
+	}
+	if _, found, err := store.ReviewPublication(decision.ID); err != nil || found {
+		t.Fatalf("expected no publication to be recorded, found=%v err=%v", found, err)
+	}
+}
+
+// Mutation check (#233 P1): an outstanding, unresolved publication attempt -
+// recorded here exactly as an earlier, now-crashed invocation would have left
+// it, BEFORE PublishReview ever adds its own fresh call - must refuse a new
+// submission rather than treat GitHub's silence as proof nothing landed.
+// Uses a SEPARATE store handle on the same database file (openPair) to
+// simulate the second invocation being a different, restarted process, not
+// merely a second call sharing the first one's Go state. Removing the
+// outstanding-attempt check in PublishReview must make this test fail by
+// letting SubmitReview run.
+func TestPublishReviewRefusesASecondSubmissionWhileAnEarlierOneIsUncertain(t *testing.T) {
+	_, first, second := openPair(t)
+	fake := NewFakeGitHubAdapter()
+	fake.PullRequests[7] = GitHubPullRequest{Number: 7, HeadSHA: testHeadSHA, BaseSHA: testOtherSHA, BaseRef: "main", State: GitHubOpen}
+	fake.ViewerActor = GitHubActor{Login: "zenchron-engineering[bot]"}
+	decision := publishableDecision(t, first, review.VerdictApprove)
+
+	// Exactly what PublishReview itself writes immediately before calling
+	// SubmitReview - simulated directly here to stand in for an earlier
+	// invocation that started a submission and never confirmed its outcome.
+	if err := first.RecordReviewPublicationAttempt(decision.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("seeding the outstanding attempt: %v", err)
+	}
+
+	_, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: second, GitHub: fake}, testRepo, decision)
+	var uncertain *ReviewPublicationUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("expected a publication-uncertain refusal, got %v", err)
+	}
+	if got := submitReviewCallCount(fake); got != 0 {
+		t.Fatalf("expected no SubmitReview call while an earlier attempt's outcome is unknown, got %d", got)
+	}
+	if _, found, err := second.ReviewPublication(decision.ID); err != nil || found {
+		t.Fatalf("expected no publication to be durably recorded, found=%v err=%v", found, err)
+	}
+}
+
+// Mutation check (#233 P1): once GitHub's own matching review becomes
+// observable, an outstanding attempt resolves through reconciliation alone -
+// never through a second SubmitReview. Uses openPair the same way the
+// refusal test above does, so this is also "recovery after restart": a
+// second process, with no memory of the first's in-process state, correctly
+// finishes what the first one started.
+func TestPublishReviewResolvesAnOutstandingAttemptFromReconciliationAlone(t *testing.T) {
+	_, first, second := openPair(t)
+	fake := NewFakeGitHubAdapter()
+	fake.PullRequests[7] = GitHubPullRequest{Number: 7, HeadSHA: testHeadSHA, BaseSHA: testOtherSHA, BaseRef: "main", State: GitHubOpen}
+	fake.ViewerActor = GitHubActor{Login: "zenchron-engineering[bot]"}
+	decision := publishableDecision(t, first, review.VerdictApprove)
+
+	if err := first.RecordReviewPublicationAttempt(decision.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("seeding the outstanding attempt: %v", err)
+	}
+	// GitHub's own state now shows the first attempt actually landed - the
+	// marker-bearing review the first (crashed) invocation's SubmitReview
+	// call produced, discovered here exactly as a real restart would.
+	fake.ReviewsByHead[testHeadSHA] = GitHubReviewObservation{Reviews: []GitHubReview{{
+		ID: 909, Author: GitHubActor{Login: "zenchron-engineering[bot]"}, State: GitHubReviewApproved,
+		CommitSHA: testHeadSHA, Body: UntrustedText(reviewPublicationBody(decision)),
+	}}}
+
+	publication, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: second, GitHub: fake}, testRepo, decision)
+	if err != nil {
+		t.Fatalf("PublishReview: %v", err)
+	}
+	if !publication.Published || publication.GitHubReviewID != 909 {
+		t.Fatalf("expected the resolved publication to reflect the observed review, got %+v", publication)
+	}
+	if got := submitReviewCallCount(fake); got != 0 {
+		t.Fatalf("expected resolution from reconciliation alone, no new SubmitReview call, got %d", got)
+	}
+	if _, outstanding, err := second.ReviewPublicationAttempt(decision.ID); err != nil || outstanding {
+		t.Fatalf("expected the attempt to be cleared once resolved, outstanding=%v err=%v", outstanding, err)
+	}
+}
+
+// Mutation check (#233 P1): the full interleaving the re-review specifically
+// asked for - A's claim is stolen (a lease expiry, forced deterministically
+// the same way the B4 store tests already do) WHILE A is genuinely blocked
+// inside a delayed SubmitReview, using a separate store handle for B to
+// stand in for a different, restarted process. B must refuse to submit a
+// second review; only once A's own delayed response eventually returns does
+// the decision resolve - and exactly one SubmitReview call ever reaches
+// GitHub. Removing either the pre-POST attempt write or the
+// outstanding-attempt check must make this test fail by letting B submit.
+func TestPublishReviewNeverDoublePublishesAcrossALeaseStealDuringADelayedSubmit(t *testing.T) {
+	_, storeA, storeB := openPair(t)
+	fake := NewFakeGitHubAdapter()
+	fake.PullRequests[7] = GitHubPullRequest{Number: 7, HeadSHA: testHeadSHA, BaseSHA: testOtherSHA, BaseRef: "main", State: GitHubOpen}
+	fake.ViewerActor = GitHubActor{Login: "zenchron-engineering[bot]"}
+	decision := publishableDecision(t, storeA, review.VerdictApprove)
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	adapter := barrierSubmitReviewAdapter{FakeGitHubAdapter: fake, reached: reached, release: release}
+
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: storeA, GitHub: adapter}, testRepo, decision)
+		aDone <- err
+	}()
+	<-reached // A has recorded its attempt and is now blocked inside SubmitReview.
+
+	// B's own PublishReview call claims this same key itself, same as A's
+	// did - the fix under test is what happens AFTER that claim succeeds,
+	// not the claim mechanics themselves (already covered by the B4 store
+	// tests). B's clock reads far enough past A's real claim time that B's
+	// OWN internal ClaimReview call reads A's claim as stale and steals it -
+	// the same artificial-"now" pattern TestClaimReviewReclaimsAStaleClaim
+	// already uses - standing in for A's process having crashed or stopped
+	// renewing, not merely being slow.
+	stolenAt := time.Now().UTC().Add(reviewClaimStaleAfter + time.Minute)
+	_, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: storeB, GitHub: adapter, Clock: fixedClock{at: stolenAt}}, testRepo, decision)
+	var uncertain *ReviewPublicationUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("expected B to refuse with a publication-uncertain error, got %v", err)
+	}
+	if got := submitReviewCallCount(fake); got != 0 {
+		t.Fatalf("expected A's still-in-flight SubmitReview to be the only call so far, got %d completed", got)
+	}
+
+	close(release) // A's delayed response finally arrives.
+	if err := <-aDone; err != nil {
+		t.Fatalf("A's PublishReview: %v", err)
+	}
+	if got := submitReviewCallCount(fake); got != 1 {
+		t.Fatalf("expected exactly one SubmitReview call in total, got %d", got)
+	}
+	published, found, err := storeB.ReviewPublication(decision.ID)
+	if err != nil || !found || !published.Published {
+		t.Fatalf("expected A's eventual success to be durably recorded, found=%v published=%+v err=%v", found, published, err)
+	}
+	if _, outstanding, err := storeB.ReviewPublicationAttempt(decision.ID); err != nil || outstanding {
+		t.Fatalf("expected the attempt to be cleared once A resolved it, outstanding=%v err=%v", outstanding, err)
 	}
 }

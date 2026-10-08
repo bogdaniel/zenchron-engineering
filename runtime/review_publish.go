@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
@@ -19,9 +20,14 @@ type ReviewPublicationDeps struct {
 	Clock Clock
 }
 
-// PublishReview publishes a durable review.Decision to GitHub exactly once
-// (#233 requirements 11, 14, 15). It is always safe to call again: a decision
-// already recorded as published is a no-op, and a publication failure never
+// PublishReview publishes a durable review.Decision to GitHub. It is always
+// safe to call again: a decision already recorded as published is a no-op.
+// It is NOT exactly-once in the strongest sense a single external POST
+// cannot be made to be (#233 P1): when that POST's own outcome is left
+// unknown (its reply was lost, or the process stopped before confirming
+// it), this refuses a second submission rather than guessing, and only ever
+// resolves once reconciliation finds GitHub's own matching review - see the
+// review_publication_attempts handling below. A publication failure never
 // touches the durable decision it failed to publish - RecordReviewPublication
 // writes a wholly separate row.
 //
@@ -33,13 +39,23 @@ type ReviewPublicationDeps struct {
 //
 // repo and number are the decision's own subject restated by the caller as a
 // GitHubRepo/int rather than re-parsed here, because this file has no business
-// re-deriving identity Decision.Subject already states authoritatively.
+// re-deriving identity Decision.Subject already states authoritatively - but
+// repo IS checked against decision.Subject.Repository (#233 P2): it is the
+// one argument here that is NOT re-derived from decision, so a caller handing
+// a different repository is refused before any claim, read or write happens,
+// rather than silently publishing one repository's verdict against another's
+// pull request.
 func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubRepo, decision review.Decision) (review.Publication, error) {
 	if deps.Store == nil || deps.GitHub == nil {
 		return review.Publication{}, fmt.Errorf("publishing a review requires a store and a forge adapter")
 	}
 	if err := decision.Validate(); err != nil {
 		return review.Publication{}, err
+	}
+	if repo.String() != decision.Subject.Repository {
+		return review.Publication{}, &ReviewRepositoryMismatchError{
+			DecisionID: decision.ID, Requested: repo.String(), Subject: decision.Subject.Repository,
+		}
 	}
 	claimKey := "publish:" + decision.ID
 	claimed, token, err := deps.Store.ClaimReview(claimKey, "publish", clockNow(deps.Clock), reviewClaimStaleAfter)
@@ -52,16 +68,16 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 	defer deps.Store.ReleaseReviewClaim(claimKey, token)
 
 	// #233 B4-B: renewed for as long as this claimed section runs, including
-	// the external GitHub reads and the SubmitReview call itself. Without
-	// this, a merely-slow-but-alive publication (a delayed HTTP response, not
-	// a crash) could have its claim stolen mid-flight, letting a second
-	// caller submit the SAME decision while the first's request may still be
-	// accepted - two externally visible reviews for one decision. claimLost
-	// is not acted on here the way #233 B4-A's review-decision admission
-	// acts on it: recording a publication this function itself observed (or
-	// reconciled from GitHub) is always a true fact about what GitHub holds,
-	// never a second external action, so a late write under a lost claim is
-	// harmless rather than requiring refusal.
+	// the external GitHub reads and the SubmitReview call itself, so a
+	// merely-slow-but-alive publication (a delayed HTTP response, not a
+	// crash) is never stolen out from under it. This renewal is a liveness
+	// optimization, not the correctness boundary: the real boundary against a
+	// genuinely lost claim submitting twice is review_publication_attempts
+	// below, which refuses a NEW submission regardless of whether this
+	// goroutine's renewal kept up. claimLost IS still checked, immediately
+	// before this call would otherwise submit (#233 P1 follow-up): a
+	// confirmed loss refuses early rather than racing a POST this caller can
+	// no longer durably account for.
 	renewalStop := make(chan struct{})
 	var claimLost atomic.Bool
 	go renewReviewClaimWhile(deps.Store, claimKey, token, deps.Clock, renewalStop, &claimLost)
@@ -85,6 +101,38 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 			"review decision %s was reached for head %s, and the pull request has since moved to %s; "+
 				"a stale decision is never published as if it applied to the new head", decision.ID, short12(decision.Subject.HeadSHA), short12(current.HeadSHA))
 	}
+
+	// #233 P1: an OUTSTANDING attempt row means some earlier invocation of
+	// THIS call - this process retrying, or a different one after the claim
+	// above was stolen or reclaimed from a crash - already started an
+	// external submission whose outcome was never confirmed. Its absence
+	// from GitHub's current review list (checked right below, same as the
+	// ordinary pre-submission reconciliation) is NOT proof it never landed:
+	// eventual consistency and a merely slow response look identical from
+	// here. So this path NEVER falls through to a fresh SubmitReview - it
+	// either resolves from positive proof, or refuses.
+	if startedAt, outstanding, err := deps.Store.ReviewPublicationAttempt(decision.ID); err != nil {
+		return review.Publication{}, err
+	} else if outstanding {
+		if observed, ok, err := observeOwnPublishedReview(ctx, deps, repo, decision); err != nil {
+			return review.Publication{}, err
+		} else if ok {
+			if err := deps.Store.ClearReviewPublicationAttempt(decision.ID); err != nil {
+				return review.Publication{}, err
+			}
+			inserted, err := deps.Store.RecordReviewPublication(observed)
+			if err != nil {
+				return review.Publication{}, err
+			}
+			if inserted {
+				return observed, nil
+			}
+			existing, _, err := deps.Store.ReviewPublication(decision.ID)
+			return existing, err
+		}
+		return review.Publication{}, &ReviewPublicationUncertainError{DecisionID: decision.ID, StartedAt: startedAt}
+	}
+
 	if observed, ok, err := observeOwnPublishedReview(ctx, deps, repo, decision); err != nil {
 		return review.Publication{}, err
 	} else if ok {
@@ -100,6 +148,16 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		}
 		existing, _, err := deps.Store.ReviewPublication(decision.ID)
 		return existing, err
+	}
+	if claimLost.Load() {
+		return review.Publication{}, &ReviewClaimLostError{ClaimKey: claimKey}
+	}
+	// #233 P1: durably marked BEFORE the external call - this is the row a
+	// LATER call's own outstanding-attempt check above will find if this
+	// call's own outcome below is never confirmed (a crash, or a claim lost
+	// mid-flight despite the renewal above).
+	if err := deps.Store.RecordReviewPublicationAttempt(decision.ID, clockNow(deps.Clock)); err != nil {
+		return review.Publication{}, err
 	}
 	event, wantApprove := reviewStateFor(decision.Verdict)
 	body, err := NewPublication(reviewPublicationBody(decision))
@@ -127,12 +185,24 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		// distinguishes "nothing landed" from "it landed and we only lost the
 		// reply", without ever submitting a second review to find out.
 		if observed, ok, obsErr := observeOwnPublishedReview(ctx, deps, repo, decision); obsErr == nil && ok {
+			if err := deps.Store.ClearReviewPublicationAttempt(decision.ID); err != nil {
+				return review.Publication{}, err
+			}
 			if _, err := deps.Store.RecordReviewPublication(observed); err != nil {
 				return review.Publication{}, err
 			}
 			return observed, nil
 		}
-		return review.Publication{}, fmt.Errorf("publishing review %s: %w", decision.ID, submitErr)
+		// The attempt row is deliberately LEFT IN PLACE: this submission's
+		// outcome is unknown, and that row is the only durable record that a
+		// later call - this decision's own next retry, by this caller or any
+		// other - must refuse to guess past rather than silently resubmit.
+		return review.Publication{}, fmt.Errorf(
+			"publishing review %s: %w (outcome unknown; further attempts are refused until reconciliation confirms it)",
+			decision.ID, submitErr)
+	}
+	if err := deps.Store.ClearReviewPublicationAttempt(decision.ID); err != nil {
+		return review.Publication{}, err
 	}
 	publication := review.Publication{
 		DecisionID: decision.ID, Published: true, GitHubReviewID: created.ID,
@@ -142,6 +212,46 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		return review.Publication{}, err
 	}
 	return publication, nil
+}
+
+// ReviewPublicationUncertainError reports that an earlier publication
+// attempt for this decision started an external submission whose outcome was
+// never confirmed (#233 P1) - a different invocation's claim expired,
+// crashed, or lost its reply, and reconciliation could not find GitHub's own
+// matching review either. Automatically submitting a new review here could
+// duplicate one that is still in flight or whose reply was merely delayed;
+// this refuses instead, and clears on its own the next time reconciliation
+// finds GitHub's matching review - never by guessing that enough time has
+// passed.
+type ReviewPublicationUncertainError struct {
+	DecisionID string
+	StartedAt  time.Time
+}
+
+func (e *ReviewPublicationUncertainError) Error() string {
+	return fmt.Sprintf(
+		"review %s has an unresolved GitHub submission started at %s whose outcome is unknown; "+
+			"refusing to submit a second review until reconciliation confirms what happened to the first",
+		e.DecisionID, e.StartedAt.Format(time.RFC3339))
+}
+
+// ReviewRepositoryMismatchError reports that the repository a caller handed
+// PublishReview does not match the repository decision.Subject itself names
+// (#233 P2). The claim key, the immutable decision id, and every durable
+// record derive from decision.Subject, while repo alone controls which
+// repository's GitHub API every read and write in this call actually
+// reaches; letting the two diverge would let one repository's independently
+// reached verdict be submitted - and durably certified as published -
+// against an entirely different repository's pull request.
+type ReviewRepositoryMismatchError struct {
+	DecisionID string
+	Requested  string
+	Subject    string
+}
+
+func (e *ReviewRepositoryMismatchError) Error() string {
+	return fmt.Sprintf("review %s was reached for repository %s, not %s; refusing to publish it against a different repository",
+		e.DecisionID, e.Subject, e.Requested)
 }
 
 // observeOwnPublishedReview asks GitHub itself whether THIS EXACT decision was

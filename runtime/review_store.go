@@ -190,6 +190,51 @@ func (s *SQLiteOperationStore) RecordReviewPublication(pub review.Publication) (
 	return inserted == 1, err
 }
 
+// RecordReviewPublicationAttempt durably marks decisionID's external
+// submission as started, BEFORE PublishReview calls GitHub.SubmitReview
+// (#233 P1). A row surviving here with no corresponding ReviewPublication is
+// the uncertain-outcome marker: proof some caller began a POST whose result
+// was never confirmed. An upsert, not insert-once: a caller legitimately
+// retrying its OWN unresolved attempt (the only case that reaches this call
+// at all - see PublishReview's own prior-attempt check) refreshes the
+// timestamp rather than being refused by its own earlier row.
+func (s *SQLiteOperationStore) RecordReviewPublicationAttempt(decisionID string, now time.Time) error {
+	if decisionID == "" {
+		return errors.New("a review publication attempt requires its decision identity")
+	}
+	_, err := s.db.Exec(`INSERT INTO review_publication_attempts (decision_id, started_unix_nano) VALUES (?, ?)
+		ON CONFLICT(decision_id) DO UPDATE SET started_unix_nano = excluded.started_unix_nano`,
+		decisionID, now.UnixNano())
+	return err
+}
+
+// ReviewPublicationAttempt reads whether decisionID has an unresolved
+// external-submission attempt outstanding. found=false means no attempt is
+// outstanding - either none was ever made, or the one that was has already
+// been resolved (ClearReviewPublicationAttempt) one way or another.
+func (s *SQLiteOperationStore) ReviewPublicationAttempt(decisionID string) (startedAt time.Time, found bool, err error) {
+	var startedNano int64
+	err = s.db.QueryRow(`SELECT started_unix_nano FROM review_publication_attempts WHERE decision_id = ?`, decisionID).Scan(&startedNano)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return time.Unix(0, startedNano).UTC(), true, nil
+}
+
+// ClearReviewPublicationAttempt resolves decisionID's outstanding attempt
+// marker, once its outcome is known - either this invocation's own
+// SubmitReview succeeded, or a later reconciliation found GitHub's matching
+// review. It is always safe to call on a decision with no outstanding
+// attempt (a no-op), which is what a direct reconciliation path - one that
+// never itself called RecordReviewPublicationAttempt - needs.
+func (s *SQLiteOperationStore) ClearReviewPublicationAttempt(decisionID string) error {
+	_, err := s.db.Exec(`DELETE FROM review_publication_attempts WHERE decision_id = ?`, decisionID)
+	return err
+}
+
 // ReviewPublication reads one decision's publication state. found=false means
 // no publication has ever been recorded for this decision - never attempted,
 // or attempted and not yet durable - which is exactly the state in which a
