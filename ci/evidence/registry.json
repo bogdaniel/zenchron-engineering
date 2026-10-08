@@ -298,7 +298,8 @@
         "runtime/source_*.go",
         "runtime/argv_paths.go",
         "runtime/held_material.go",
-        "runtime/quarantine.go"
+        "runtime/quarantine.go",
+        "runtime/integration.go"
       ],
       "tests": [
         "runtime/candidate_*_test.go",
@@ -310,7 +311,9 @@
         "runtime/held_material*_test.go",
         "runtime/refused_material_quarantine_test.go",
         "runtime/post_commit_durability_test.go",
-        "runtime/publication_*_test.go"
+        "runtime/publication_*_test.go",
+        "runtime/integration_test.go",
+        "runtime/integration_recovery_test.go"
       ]
     },
     {
