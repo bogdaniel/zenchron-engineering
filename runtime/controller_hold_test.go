@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -246,5 +247,55 @@ func TestLocalGitAncestryTellsMissingFromNo(t *testing.T) {
 	}
 	if _, err := ancestry(shaOf('e'), f.head); err == nil {
 		t.Fatal("a missing commit was answered as a plain no")
+	}
+}
+
+// exitWith is a real process exit status, as git's runner would report it.
+func exitWith(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	if err == nil {
+		t.Fatal("the shell did not fail")
+	}
+	return &gitCommandError{message: fmt.Sprintf("git merge-base: exit %d", code), cause: err}
+}
+
+// Both commits are present and merge-base itself fails: that is a failure to
+// report, not "not an ancestor", and the hold says so. Exactly exit 1 is "no".
+func TestAMergeBaseFailureIsNotANo(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mergeBase error
+		answer    bool
+		failed    bool
+	}{
+		"exit 0 is yes":           {nil, true, false},
+		"exit 1 is no":            {exitWith(t, 1), false, false},
+		"exit 128 is a failure":   {exitWith(t, 128), false, true},
+		"a launch failure is too": {errors.New("exec: git: not found"), false, true},
+	} {
+		git := func(_ string, args ...string) (string, error) {
+			if args[0] == "cat-file" {
+				return "", nil
+			}
+			return "", tc.mergeBase
+		}
+		answer, err := gitAncestry(git, "")(runningRevision, movedRevision)
+		if answer != tc.answer || (err != nil) != tc.failed {
+			t.Errorf("%s: answer=%t err=%v", name, answer, err)
+		}
+	}
+
+	failing := func(_ string, args ...string) (string, error) {
+		if args[0] == "cat-file" {
+			return "", nil
+		}
+		return "", exitWith(t, 128)
+	}
+	harness := &updaterHarness{trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-b"}}
+	updater := heldUpdater(t, harness, runningRevision, runningRevision)
+	updater.ports.IsAncestor = gitAncestry(failing, "")
+	update := attemptOnce(updater)
+	if update.State != UpdateHeld || !strings.Contains(update.Detail, "could not be established") || strings.Contains(update.Detail, "not comparable") {
+		t.Fatalf("state = %q (%s)", update.State, update.Detail)
 	}
 }

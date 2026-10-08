@@ -15,8 +15,10 @@ package runtime
 // be fetched, never what is believed.
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -63,7 +65,13 @@ func EnsureControllerSource(stateDir string, remote RemoteIdentity, credentials 
 // commits are proven present first: a missing one is an error to report, not
 // divergent history to diagnose.
 func LocalGitAncestry(dir string) func(ancestor, descendant string) (bool, error) {
-	git := AdoptedBuildDeps{}.withDefaults().Git
+	return gitAncestry(AdoptedBuildDeps{}.withDefaults().Git, dir)
+}
+
+// gitAncestry is LocalGitAncestry over an explicit git, so each of its three
+// outcomes is reachable in a test: exit 0 is yes, exactly exit 1 is no, and
+// any other exit, a launch failure or a missing commit is an error.
+func gitAncestry(git func(dir string, args ...string) (string, error), dir string) func(ancestor, descendant string) (bool, error) {
 	return func(ancestor, descendant string) (bool, error) {
 		for _, commit := range []string{ancestor, descendant} {
 			if _, err := git(dir, "cat-file", "-e", commit+"^{commit}"); err != nil {
@@ -71,6 +79,14 @@ func LocalGitAncestry(dir string) func(ancestor, descendant string) (bool, error
 			}
 		}
 		_, err := git(dir, "merge-base", "--is-ancestor", ancestor, descendant)
-		return err == nil, nil
+		var exit *exec.ExitError
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.As(err, &exit) && exit.ExitCode() == 1:
+			return false, nil
+		default:
+			return false, fmt.Errorf("the ancestry of %s and %s could not be established: %w", shortSHA(ancestor), shortSHA(descendant), err)
+		}
 	}
 }
