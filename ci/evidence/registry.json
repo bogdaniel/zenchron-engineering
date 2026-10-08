@@ -111,6 +111,7 @@
         "runtime/driver_leases.go",
         "runtime/capacity*.go",
         "runtime/reconciler.go",
+        "runtime/external_wait_reasons.go",
         "runtime/run_policy.go",
         "runtime/deterministic_retry*.go",
         "runtime/disposition.go",
