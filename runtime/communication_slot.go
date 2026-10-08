@@ -71,20 +71,24 @@ func validateMessagesObserved(p MessagesObservedPayload) error {
 
 // prepareMessages clears this invocation's message slot and renders the
 // admitted messages routed to its unit. A run no orchestration batch created
-// is given neither, and nothing about it changes.
-func (r *EngineeringRuntime) prepareMessages(state *runState, operationID string, attempt int) (path, communication string, err error) {
+// is given neither, and nothing about it changes. resolved is exactly the
+// set the rendered communication's own resolved_decisions carries (#508
+// P4b) - the fact invokeExecution journals as delivered once reachedWorker
+// is known, never re-derived separately from the same read.
+func (r *EngineeringRuntime) prepareMessages(state *runState, operationID string, attempt int) (
+	path, communication string, resolved []orchestration.DecisionResolution, err error) {
 	if state.run.Orchestration == nil {
-		return "", "", nil
+		return "", "", nil, nil
 	}
 	path, err = MessageReportPath(r.deps.StateDir, ExecutionAttemptRef{RunID: state.run.ID, OperationID: operationID, Attempt: attempt})
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if err := clearResultSlot(path); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	communication, err = communicationContext(r.deps.Store, state.run)
-	return path, communication, err
+	communication, resolved, err = communicationContext(r.deps.Store, state.run)
+	return path, communication, resolved, err
 }
 
 // readMessageReport reads one message slot. present=false is an absent file.

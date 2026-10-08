@@ -69,23 +69,28 @@ type communicationView struct {
 	ResolvedDecisions []orchestration.DecisionResolution `json:"resolved_decisions,omitempty"`
 }
 
-// communicationContext renders the view for one orchestrated run.
-func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (string, error) {
+// communicationContext renders the view for one orchestrated run. resolved
+// is EXACTLY the set the rendered document's own resolved_decisions carries
+// (#508 P4b): the one caller that needs to know what was actually shown,
+// rather than re-deciding it, is the delivery-evidence journalling in
+// invokeExecution (operations.go) - never a second, independent read of the
+// same fact.
+func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (string, []orchestration.DecisionResolution, error) {
 	batch, found, err := store.OrchestrationBatch(run.Orchestration.BatchID)
 	if err != nil || !found {
-		return "", fmt.Errorf("orchestration batch %s of run %s is unreadable (found=%t): %v", run.Orchestration.BatchID, run.ID, found, err)
+		return "", nil, fmt.Errorf("orchestration batch %s of run %s is unreadable (found=%t): %v", run.Orchestration.BatchID, run.ID, found, err)
 	}
 	scope, current, err := batchMessageScope(store, batch)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	unit, ok := batchUnitOf(batch, run.ID)
 	if !ok {
-		return "", fmt.Errorf("run %s is not an item of batch %s", run.ID, batch.ID)
+		return "", nil, fmt.Errorf("run %s is not an item of batch %s", run.ID, batch.ID)
 	}
 	open, resolved, err := splitDecisionsByResolution(store, scope.Admitted)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	view := communicationView{
 		Unit: unit, Handoffs: map[string]string{},
@@ -99,7 +104,7 @@ func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (stri
 		}
 	}
 	rendered, err := CanonicalJSON(view)
-	return string(rendered), err
+	return string(rendered), resolved, err
 }
 
 // splitDecisionsByResolution joins the scope's decision requests against the

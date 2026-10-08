@@ -173,7 +173,8 @@ var eventPayloads = map[string]payloadValidator{
 			positive("attempt", p.Attempt),
 			required("detail", p.Detail))
 	}),
-	EventMessagesObserved: payloadSchema(validateMessagesObserved),
+	EventMessagesObserved:   payloadSchema(validateMessagesObserved),
+	EventDecisionsDelivered: payloadSchema(validateDecisionsDelivered),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),
@@ -837,7 +838,6 @@ type PlanProposedPayload struct {
 	// References is what referenced-issue hydration produced for the invocation
 	// that proposed this revision: which same-repository issues the planner was
 	// given, pinned by digest, and which ones could not be read.
-	//
 	// It is recorded on a SUCCESSFUL proposal as well as a refused attempt,
 	// because "this plan was reasoned from four of the five referenced issues"
 	// is a fact about the plan an operator approves, not a detail of an

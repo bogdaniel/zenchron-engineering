@@ -28,6 +28,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -290,6 +291,54 @@ func (s *SQLiteOperationStore) OpenDecisionRequestsForRun(runID string) ([]orche
 		}
 	}
 	return open, nil
+}
+
+// ResolvedOwnDecisionRequests is #508 P4b's resumption eligibility: every
+// live (not superseded) #473 decision_request message THIS run itself
+// admitted that now carries a durable resolution, sorted by request id for
+// deterministic replay. A superseded request's resolution, if any, is a true
+// historical fact but is excluded here: the question it answered no longer
+// stands, so it never causes a resumption (the same liveness filter
+// OpenDecisionRequestsForRun already applies to the open side).
+func (s *SQLiteOperationStore) ResolvedOwnDecisionRequests(runID string) ([]orchestration.DecisionResolution, error) {
+	rows, err := s.db.Query(`SELECT document FROM orchestration_messages WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []orchestration.EngineeringMessage
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		var message orchestration.EngineeringMessage
+		if err := strictJSON([]byte(document), &message); err != nil {
+			return nil, fmt.Errorf("stored message is unreadable: %w", err)
+		}
+		if err := message.Validate(); err != nil {
+			return nil, fmt.Errorf("stored message is corrupt: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var resolved []orchestration.DecisionResolution
+	for _, message := range orchestration.Live(messages) {
+		if message.Kind != orchestration.KindDecisionRequest {
+			continue
+		}
+		resolution, found, err := s.DecisionResolutionByRequestID(message.ID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			resolved = append(resolved, resolution)
+		}
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].RequestID < resolved[j].RequestID })
+	return resolved, nil
 }
 
 // ResolveDecisionRequest is the WHOLE governed resolution as one linearized

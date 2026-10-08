@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -210,6 +211,10 @@ type runState struct {
 	waitOpenSince time.Time
 	waitOpenWork  time.Duration
 	waitComputed  bool
+	// resolvedOwnDecisions is this run's own live, resolved #473
+	// decision_request messages, read once per load() (#508 P4b); see
+	// decision_resumption.go.
+	resolvedOwnDecisions []orchestration.DecisionResolution
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -232,8 +237,13 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	resolvedOwnDecisions, err := r.deps.Store.ResolvedOwnDecisionRequests(runID)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
+		resolvedOwnDecisions: resolvedOwnDecisions,
 		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own
@@ -1127,7 +1137,18 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	}
 	// Initial implementation: no candidate commit exists yet.
 	if s.projection.CandidateRevision == "" {
-		return "initial|" + s.contractRevision() + "|" + s.pinnedBase(), true
+		initial := "initial|" + s.contractRevision() + "|" + s.pinnedBase()
+		if !s.satisfied(OpExecutionInvoke, initial) {
+			return initial, true
+		}
+		// The initial invocation already ran and produced no candidate work -
+		// the one shape #508 P4b exists for: a decision asked and (so far)
+		// answered with nothing else for this run to plan. See
+		// unresumedDecisionResumeBinding.
+		if binding, ok := s.unresumedDecisionResumeBinding(); ok {
+			return binding, true
+		}
+		return "", false
 	}
 	// Continuation: the head is a runtime-owned checkpoint, so the producer was
 	// interrupted rather than finished. One continuation per checkpoint commit,
@@ -1170,6 +1191,12 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	}
 	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
 		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	// The same #508 P4b fallback as above, for a run whose candidate IS
+	// complete but still has a resolved question of its own with nothing
+	// else left to plan.
+	if binding, ok := s.unresumedDecisionResumeBinding(); ok {
+		return binding, true
 	}
 	return "", false
 }
@@ -1215,7 +1242,17 @@ func digestOfKeys(keys []string) string {
 // operation identity, which is what makes continuation depth replayable.
 const invocationContinuationPrefix = "continuation|"
 
-// startedContinuationBindings is the set of DISTINCT continuation execution
+// isResumptionBinding reports whether binding spends the run's finite
+// continuation-depth ceiling: a checkpoint continuation, or (#508 P4b) a
+// decision resumption. Both resume a run WITHOUT a brand new EngineeringRun,
+// which is exactly the resource continuationLimit() bounds; a decision
+// resumption spends the SAME ceiling rather than a second, unbounded one
+// (#508 review P4b §3/§5, D5 of the earlier architecture review).
+func isResumptionBinding(binding string) bool {
+	return strings.HasPrefix(binding, invocationContinuationPrefix) || strings.HasPrefix(binding, decisionResumptionPrefix)
+}
+
+// startedContinuationBindings is the set of DISTINCT resumption execution
 // bindings durable state shows this run has already started.
 //
 // It reads operations, not events, because an operation IS the binding: every
@@ -1228,7 +1265,7 @@ func (s *runState) startedContinuationBindings() map[string]bool {
 		if op.Kind != OpExecutionInvoke {
 			continue
 		}
-		if binding := bindingOf(op); strings.HasPrefix(binding, invocationContinuationPrefix) {
+		if binding := bindingOf(op); isResumptionBinding(binding) {
 			started[binding] = true
 		}
 	}
@@ -1341,7 +1378,7 @@ func (s *runState) continuationCeilingReached() bool {
 		return false
 	}
 	binding, wanted := bindExecutionInvoke(s)
-	if !wanted || !strings.HasPrefix(binding, invocationContinuationPrefix) {
+	if !wanted || !isResumptionBinding(binding) {
 		return false
 	}
 	started := s.startedContinuationBindings()

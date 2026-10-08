@@ -30,6 +30,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -436,7 +437,6 @@ func (r *EngineeringRuntime) createCandidate(_ context.Context, state *runState,
 	// published. The clone above put the workspace on the trusted base, which
 	// is the right starting point and the wrong subject; this moves it onto the
 	// exact commit the assignment froze and proves it arrived.
-	//
 	// A failure here is a FAILED operation rather than a workspace the run
 	// proceeds with. The workspace exists and is at the base, so continuing
 	// would be the exact substitution this closes - and it would be invisible,
@@ -566,7 +566,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the work is done and unverifiable - which is what both #119 workers
 	// produced, honestly, after an invocation each. This turns that into a wait
 	// an operator can act on.
-	//
 	// It is a CAPABILITY question only. A resolvable tool is one the worker may
 	// run; nothing here grants permission to run anything else, and the list is
 	// operator-owned precisely so a repository cannot extend it.
@@ -640,7 +639,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		defer func() { out.events = append(append([]journalEntry(nil), adopted...), out.events...) }()
 	}
 	// THE SUBJECT, re-proven immediately before the provider runs.
-	//
 	// A plan stage that consumes an unpublished upstream candidate had it
 	// transferred in at clone time. Clone time and execution time are different
 	// moments, and "is this still the exact tree the assignment froze" has to
@@ -674,7 +672,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// The execution SUBJECT is the exact workspace Git head the provider is
 	// about to be shown, observed through the governed runtime Git boundary. It
 	// always exists: on a pristine initial workspace it is the trusted base.
-	//
 	// It is NOT the runtime-owned produced candidate commit. That one is
 	// projection.CandidateRevision, it appears only after the runtime commits a
 	// real producer mutation, and nothing here writes it - which is why an
@@ -695,7 +692,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// a provider is running against this workspace, candidate.run can read
 	// every byte in it, so refusing an individual repo.read afterwards decides
 	// nothing. The gate is the mount, not the tool.
-	//
 	// It is also why this is here rather than one frame later: discovering a
 	// local prerequisite defect by spending a reasoning budget on it is the
 	// same mistake #46 was about, in a different place.
@@ -709,7 +705,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// BEFORE the invocation so the same set that is delivered is the set that
 	// is recorded as consumed afterwards; deriving it twice could deliver one
 	// set and record another.
-	//
 	// Feedback also makes an otherwise-initial invocation a remediation: the
 	// worker is being asked to change something in response to a finding, and
 	// the invocation contract requires a remediation to carry findings.
@@ -723,7 +718,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// actually given a second chance to address. This re-derives exactly the
 	// keys THIS operation's own prior attempt(s) consumed - never a different
 	// or wider set - so a retry is shown exactly what it was shown before.
-	//
 	// It is a UNION with whatever is pending now (#87): feedback admitted while
 	// this operation sat in a durable provider wait must not displace what
 	// its earlier attempt was already given.
@@ -854,15 +848,19 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation and only for a run an orchestration batch created. Every
 	// other run is given no path and is unchanged.
 	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
-	var messagePath, communication string // #473, same rule; communication_slot.go
+	var messagePath, communication string                 // #473, same rule; communication_slot.go
+	var shownDecisions []orchestration.DecisionResolution // #508 P4b delivery evidence
 	if err == nil {
-		messagePath, communication, err = r.prepareMessages(state, operation.ID, physicalAttempt)
+		messagePath, communication, shownDecisions, err = r.prepareMessages(state, operation.ID, physicalAttempt)
 	}
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureUnknown},
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
+	}
+	if refusal := r.decisionResumeStillValid(state, operation); refusal != nil { // #508 P4b §6
+		return *refusal
 	}
 	// THE BUILD SCRATCH, owned by the runtime and scoped to this attempt. An
 	// invocation whose contract obliges `go test` has to be able to EXECUTE the
@@ -1071,7 +1069,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// THE EXPLICIT COMPLETION CLAIM, admitted only against what this attempt
 	// actually was invoked against - never from the provider's own claim that
 	// nothing changed or that it is done.
-	//
 	// A CONTINUATION admits FeedbackResolutionCheckpointComplete, bound to the
 	// exact checkpoint revision AND tree it inherited, independently of
 	// record.Mutated (#379): mutation proves work happened, not that the
@@ -1310,6 +1307,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the comment above defends: re-delivering a human's review because the
 	// work failed afterwards would duplicate it.
 	invoked := reachedWorker(result, execErr)
+	if entry, ok := deliveredDecisionsEvent(shownDecisions, operation.ID, physicalAttempt, state.contractRevision(), state.projection.CandidateRevision); invoked && ok { // #508 P4b: delivery, not completion
+		events = append(events, entry)
+	}
 	if len(pending) > 0 && invoked {
 		delivered := make(map[string]bool, len(feedback))
 		keys := make([]string, 0, len(feedback))

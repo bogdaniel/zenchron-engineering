@@ -500,6 +500,17 @@ const (
 	// and returned to the reviewer on the retry as a finding, so correction is
 	// possible instead of the reviewer guessing what was wrong the first time.
 	FailureReviewerProtocolIncomplete FailureClass = "reviewer_protocol_incomplete"
+	// FailureDecisionBindingStale is a decision-resumed execution.invoke
+	// attempt whose own binding - the exact decision set and candidate
+	// subject it was created against - no longer matches current durable
+	// state: one of its decisions was superseded, a newer one now claims the
+	// coalesced set, or the subject moved, all found by a fresh read taken
+	// immediately before dispatch (#508 review P4b §6). Nothing was
+	// attempted; it routes to a bounded retry of the SAME operation, the
+	// same shape FailureFeedbackUnresolved uses, so a genuinely stale
+	// binding exhausts its own attempts rather than ever being dispatched
+	// with context that would contradict it.
+	FailureDecisionBindingStale FailureClass = "decision_binding_stale"
 )
 
 type FailureRoute string
@@ -538,7 +549,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
 		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
-		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved, FailureConnectivity:
+		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved, FailureConnectivity,
+		FailureDecisionBindingStale:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess

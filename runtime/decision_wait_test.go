@@ -6,10 +6,8 @@ package runtime
 // until an authorized operator resolves it, and the compiled context a later
 // invocation is given reflects the resolution, never the open question.
 //
-// What this file does NOT claim: that resolving a decision automatically
-// produces a SECOND provider invocation of the SAME run (#508 review P4b,
-// not yet built). #508 review P4a closed two defects this file's own history
-// found along the way, but neither one is automatic continuation:
+// #508 review P4a closed two defects this file's own history found along
+// the way:
 //
 //   - A decision_request written by a CHECKPOINTING attempt (the producer
 //     mutated but was cut off, #489's shape) is now observed and, once the
@@ -26,18 +24,21 @@ package runtime
 //     nothing) could flip from Waiting/ReasonDecisionPending back to
 //     Waiting/ReasonGoalStateReached once whatever UNRELATED binding
 //     incidentally kept re-triggering (bindSourceObserve's epoch key, bumped
-//     by the message-observed event itself) stopped re-triggering -
-//     TestADecisionPendingWaitNeverFlipsToGoalStateReached below proves it no
-//     longer can, by ticking far past the point the old code would have
-//     flipped.
+//     by the message-observed event itself) stopped re-triggering.
 //
-// Composing "ask and keep going" into one automatic resumed invocation is
-// #508 review P4b, a separate, reviewed extension to state.plan()'s binding
-// derivation (reconciler.go) - deliberately not in this file. What closes the
-// loop for a run that still needs to do engineering work after a decision,
-// until P4b ships, is an explicit operator action (`autonomy resume`) or a
-// fresh run, exactly as a goal-state-reached run already requires today for
-// any other kind of human answer.
+// #508 review P4b (decision_resumption.go) is what THIS file now also
+// exercises directly: resolving the decision no longer merely lifts the
+// wait - bindExecutionInvoke's fallback proposes exactly one fresh
+// "decision-resumed|..." execution.invoke, a brand new operation on the SAME
+// RunID, under its own ordinary attempt ceiling, once this run has nothing
+// else left to plan. The zero-capacity test below proves the whole shape
+// end to end: zero capacity while open, exactly ONE further invocation once
+// resolved, never two. What P4b still does not do: if that one resumed
+// invocation also finishes the engineering work and produces no FURTHER
+// decision, the run completes through #470/#489's own ordinary lifecycle,
+// unmodified; if it needs a THIRD invocation for some OTHER reason (not a
+// decision), that remains an explicit operator action (`autonomy resume`)
+// or a fresh run, exactly as any other goal-state-reached run requires today.
 
 import (
 	"context"
@@ -192,11 +193,12 @@ func TestAWorkerEmittedDecisionRequestParksItsRunWithZeroCapacity(t *testing.T) 
 	supervisor = fixture.supervisor()
 
 	// THE GATE LIFTS: the next pass sees no open request at all, and
-	// Reconcile falls through to whatever #470's own planner decides for an
-	// invocation that produced nothing - goal_state_reached, same as any
-	// other finished producer with nothing further to plan. #508 is not the
-	// thing that decides that; it only stopped deciding it while the
-	// question stood open.
+	// bindExecutionInvoke's #508 P4b fallback proposes exactly one fresh
+	// "decision-resumed|..." invocation - a brand new operation, the SAME
+	// RunID, under its own ordinary attempt ceiling - since this run has
+	// nothing else left to plan. This is the bounded same-RunID resumption
+	// P4b builds; before it existed, resolving only lifted the wait and left
+	// the run at goal_state_reached with no further invocation at all.
 	var settled EngineeringRun
 	for range 10 {
 		tick()
@@ -211,8 +213,8 @@ func TestAWorkerEmittedDecisionRequestParksItsRunWithZeroCapacity(t *testing.T) 
 	if open, err := fixture.store.OpenDecisionRequestsForRun(runID); err != nil || len(open) != 0 {
 		t.Fatalf("expected no open decision requests after resolution: open=%v err=%v", open, err)
 	}
-	if n := engineeringInvocations(); n != 1 {
-		t.Fatalf("the worker was invoked %d times after the gate lifted; #508 must never itself start a provider", n)
+	if n := engineeringInvocations(); n != 2 {
+		t.Fatalf("the worker was invoked %d times after the gate lifted, want exactly 2 (the original ask, and the one bounded resumption)", n)
 	}
 }
 
@@ -247,7 +249,7 @@ func TestResumedContextCarriesTheResolvedDecisionNotTheOpenOne(t *testing.T) {
 	requestID := open[0].ID
 
 	run := runRowFor(t, fixture, runID)
-	before, err := communicationContext(fixture.store, run)
+	before, _, err := communicationContext(fixture.store, run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +265,7 @@ func TestResumedContextCarriesTheResolvedDecisionNotTheOpenOne(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	after, err := communicationContext(fixture.store, run)
+	after, _, err := communicationContext(fixture.store, run)
 	if err != nil {
 		t.Fatal(err)
 	}
