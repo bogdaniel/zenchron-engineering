@@ -175,7 +175,7 @@ provider_inactivity_seconds bounds how long ONE provider invocation may go
 
 attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
                             is min(this, remaining run work) at attempt start;
-                            absent derives to wall_limit_seconds per run
+                            absent derives to min(3h, wall_limit_seconds) for new runs
 ```
 
 `wall_limit_seconds` is cumulative across every attempt; the attempt limit is
@@ -499,8 +499,41 @@ nothing, spends no attempt, and leaves the run waiting with the reason
 `verification_capacity_unavailable`, an external wait that does not spend
 active-work budget; the next pass that finds a free slot runs it with its
 ordinary semantics. Provider reasoning, semantic assurance and gofmt
-remediation are not verification. A provider's own tool use inside
-`execution.invoke` is not gated by this ceiling.
+remediation are not verification.
+
+**Nested tool permits** (#496) extend that same ceiling to `candidate.run` and
+the native adapter's contract-required executable grants. A provider keeps its
+existing work slot while each tool requests a durable permit bound to that
+physical provider attempt. With ten work slots and two verification slots, ten
+providers may be active and at most two host tool executions may run. Capacity
+wait occurs inside the current invocation: it creates no provider failure,
+remediation, new attempt or attempt refund. Its timestamped interval is excluded
+from active-work accounting, and resumption charges the tool's execution again.
+The current absolute attempt deadline still applies during that wait; #497 owns
+replacing it with a last-resort hard fuse.
+
+Native PATH shims use the attempt's existing scratch grant as transport to the
+controller. The controller alone grants capacity in `runtime.db`, and the tool
+accepts only controller-signed replies bound to its execution identity. This adds
+no database access, executable grant, hook, Git exception or network permission.
+Claude's `--safe-mode` remains in force. The original runtime PATH is restored
+inside the admitted tool subtree, so its subprocesses share that execution's
+permit. Deliberate absolute-path or environment bypass by an `operator_trusted`
+worker remains a residual risk; native shims are not protected isolation.
+Tools and their existing death guards retain ownership through cleanup. A restart
+releases a held permit only after expiry and proof its ownership lock is no longer
+held; container-backed work additionally uses the existing exact-container recovery.
+Unresolved tool cleanup blocks new operations for that run with
+`verification_tool_cleanup_pending`; uncertainty never permits a second attempt
+to overlap the old tool. Uncertain container cleanup retains that permit and its
+verification slot while unrelated work and observation runs remain eligible.
+The native request service also reconciles granted permits after wrapper death;
+proven cleanup and expiry release the permit durably without another scheduler
+request, restoring provider inactivity accounting. This cleanup interval remains
+charged as tool work.
+The forward SQLite migration adds permit storage without resetting existing
+budgets or backfilling grants. Older binaries refuse the newer schema; rollback
+requires a compatible reader or a pre-upgrade database backup.
 
 `status` shows the fleet as six mutually exclusive counts over nonterminal
 runs: **working** (holds a work operation), **observing** (holds an observation),
@@ -512,9 +545,11 @@ they are the same after a restart. Runnable uses the scheduler's own
 eligibility test; the one approximation is liveness, which a read never probes,
 so an abandoned lease counts as working or observing until a scheduler
 reclaims it. Two more counts refine them and are not part of the partition:
-**verifying** (working runs holding a verification slot, shown against
-`max_concurrent_verifications`) and **awaiting verification** (runnable runs
-whose next operation is a verification).
+**verifying** (occupied assurance and nested tool slots, including unresolved
+cleanup, shown against `max_concurrent_verifications`) and **awaiting verification**
+(runnable assurance runs plus working providers waiting solely for tool capacity).
+Per-run JSON includes `verification_tools` with the bound identities, states and
+timestamps. A reasoning provider is working; only a granted tool makes it verifying.
 
 A lease is abandoned in one of two ways, and both are recovered without a
 restart. A **dead** owner's expired lease is reclaimed by any scheduler, as

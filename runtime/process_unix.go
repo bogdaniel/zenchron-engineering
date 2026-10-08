@@ -63,7 +63,8 @@ func runBoundedProcess(ctx context.Context, cmd *exec.Cmd, grace time.Duration) 
 	// the workload, the same refusal had to destroy a healthy provider to
 	// honour itself, which punished a transient fork failure exactly as
 	// harshly as a hostile process.
-	own, stopGuard, err := armOwnerDeathGuard(grace)
+	toolLock, _ := ctx.Value(verificationOwnerFileKey{}).(*os.File)
+	own, stopGuard, err := armOwnerDeathGuard(grace, toolLock)
 	if err != nil {
 		pipes.closeWriters()
 		return OwnerUndecided, err
@@ -346,7 +347,7 @@ var ownerDeathGuardShell = "/bin/sh"
 // the BSDs there is no asymmetry at all: process_owned_unix.go performs the
 // same bare group kill. Reproducing the /proc walk in shell is not the way to
 // close that gap; a guard told which descendants to signal would be.
-func armOwnerDeathGuard(grace time.Duration) (own func(int), stop func(), err error) {
+func armOwnerDeathGuard(grace time.Duration, toolLock *os.File) (own func(int), stop func(), err error) {
 	read, write, err := os.Pipe()
 	if err != nil {
 		return nil, nil, fmt.Errorf("arming the owner-death guard: %w", err)
@@ -368,6 +369,11 @@ func armOwnerDeathGuard(grace time.Duration) (own func(int), stop func(), err er
 	guard := exec.Command(ownerDeathGuardShell, "-c", script)
 	guard.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	guard.ExtraFiles = []*os.File{read} // fd 3 in the guard
+	if toolLock != nil {
+		// A tool can close its descriptor. Its permit still covers the guard's
+		// graceful/forced cleanup after the wrapper dies.
+		guard.ExtraFiles = append(guard.ExtraFiles, toolLock)
+	}
 	// A fixed minimal environment: the guard needs to resolve `sleep` and
 	// nothing else, and it must not carry this process's environment - which
 	// holds provider credentials - into a shell that never needed them.

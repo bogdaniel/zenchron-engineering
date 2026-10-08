@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 	"time"
 )
 
@@ -314,7 +315,7 @@ func TestAWallExpiryIsNotRecordedAsAControllerShutdown(t *testing.T) {
 	if err == nil {
 		t.Fatal("an invocation past its wall bound returned success")
 	}
-	if result.Outcome != OperationFailed {
+	if result.Outcome != execution.Failed {
 		t.Fatalf("outcome = %q, want %q: nothing cancelled this", result.Outcome, OperationFailed)
 	}
 	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete {
@@ -328,7 +329,7 @@ func TestAWallExpiryIsNotRecordedAsAControllerShutdown(t *testing.T) {
 	stopped, cancel := context.WithCancel(context.Background())
 	cancel()
 	shutdown, _ := provider.Execute(stopped, request)
-	if shutdown.Outcome != OperationCancelled {
+	if shutdown.Outcome != execution.Cancelled {
 		t.Fatalf("a cancelled controller produced outcome %q", shutdown.Outcome)
 	}
 	if shutdown.Failure == nil || shutdown.Failure.Classification != FailureControllerShutdown {

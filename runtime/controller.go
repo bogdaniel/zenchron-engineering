@@ -209,8 +209,9 @@ type RunBudgets struct {
 	// successor, while a stop at the run's remaining work exhausts the run.
 	//
 	// It is FROZEN at run creation (absent in configuration derives to
-	// WallLimit) and read back EXACTLY - never from live configuration, never
-	// as min(live, persisted). omitempty, and absent means the run predates
+	// min(DefaultAttemptWallLimit, WallLimit)) and read back EXACTLY - never
+	// from live configuration, never as min(live, persisted). omitempty, and
+	// absent means the run predates
 	// #328 and keeps the legacy rule: the attempt is bounded by its
 	// operation's own remaining WallBudget, nothing else. Nothing is
 	// backfilled.
@@ -477,6 +478,10 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	}, nil
 }
 
+// DefaultAttemptWallLimit is a last-resort physical fuse, separate from the
+// provider inactivity window and cumulative run active-work budget (#497).
+const DefaultAttemptWallLimit = 3 * time.Hour
+
 func (b RunBudgets) defaults() RunBudgets {
 	if b.WallLimit <= 0 {
 		b.WallLimit = time.Hour
@@ -501,12 +506,12 @@ func (b RunBudgets) defaults() RunBudgets {
 	if b.ProviderInactivityLimit <= 0 {
 		b.ProviderInactivityLimit = DefaultProviderInactivitySeconds * time.Second
 	}
-	// THE ABSENT ATTEMPT LIMIT IS DERIVED HERE, not in the configuration
-	// layer, so it never enters the controller-effective digest (ADR-0003 §4).
-	// It derives to the run budget: an operator who states nothing keeps the
-	// one-attempt-may-spend-the-run shape they had, and every stop at that
-	// bound is now reported truthfully as run active-work exhaustion.
-	if b.AttemptWallLimit <= 0 || b.AttemptWallLimit > b.WallLimit {
+	// Resolve the shipped hard fuse only at new-run creation, so an absent
+	// configuration member stays out of the controller-effective digest.
+	if b.AttemptWallLimit <= 0 {
+		b.AttemptWallLimit = DefaultAttemptWallLimit
+	}
+	if b.AttemptWallLimit > b.WallLimit {
 		b.AttemptWallLimit = b.WallLimit
 	}
 	return b

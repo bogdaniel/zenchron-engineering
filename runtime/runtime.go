@@ -108,6 +108,11 @@ const (
 	// evidence or authority; see handoff_slot.go.
 	EventHandoffReported = "handoff.reported"
 	EventHandoffRefused  = "handoff.refused"
+	// EventMessagesObserved records what a FINISHED orchestrated invocation
+	// wrote through its typed message slot (#473): the digest of a valid
+	// report, or why it is refused. Like the handoff observation it is never
+	// evidence, authority or a lifecycle transition; see communication_slot.go.
+	EventMessagesObserved = "messages.observed"
 	// EventControllerSuccessionAdmitted records that one adopted controller
 	// may continue this run under another. It is an ADDITION to the journal
 	// and never an edit: the run row keeps naming its creator, and every
@@ -247,7 +252,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventRunPaused: true, EventRunUnpaused: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventCandidateQuarantined: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true, EventHandoffReported: true, EventHandoffRefused: true}
+var eventTypes = map[string]bool{EventVerificationPermitChanged: true, EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventRunPaused: true, EventRunUnpaused: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventCandidateQuarantined: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true, EventHandoffReported: true, EventHandoffRefused: true, EventMessagesObserved: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -260,27 +265,10 @@ var planEventTypes = map[string]bool{
 	EventPlanRevisionSuperseded: true, EventPlanAttemptRefused: true, EventPlanStageReviewed: true,
 }
 
-type Ref struct {
-	ID       string `json:"id"`
-	Revision string `json:"revision"`
-}
-type Candidate struct {
-	Branch   string `json:"branch"`
-	Revision string `json:"revision"`
-	Tree     string `json:"tree"`
-}
 type Cursor struct {
 	LastSequence  int64  `json:"last_sequence"`
 	LastEventID   string `json:"last_event_id"`
 	LastEventHash string `json:"last_event_hash,omitempty"`
-}
-type Artifact struct {
-	Path        string `json:"path"`
-	SHA256      string `json:"sha256"`
-	MediaType   string `json:"media_type"`
-	LocalOnly   bool   `json:"local_only"`
-	Sanitized   bool   `json:"sanitized"`
-	Publishable bool   `json:"publishable"`
 }
 type EngineeringRun struct {
 	SchemaVersion    string      `json:"schema_version"`
@@ -399,6 +387,7 @@ type RunPlanBinding struct {
 }
 
 type RunOperation struct {
+	Failure *OperationFailure `json:"failure,omitempty"`
 	// RetryNotBefore is purely "not eligible before"; it survives restart and
 	// carries no meaning of its own. RetryDisposition says why and how the
 	// wait is accounted (retryDispositions).
@@ -690,12 +679,6 @@ func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
 	}
 	return op.Lease == nil || (!ownerAlive && !now.Before(op.Lease.ExpiresAt))
 }
-
-// AttemptBound names the bound that ended, or would end, one physical provider
-// attempt. The three are different resources and are reported apart (#328):
-// inactivity is the provider not moving, the attempt wall is this ATTEMPT
-// being long enough, and run active work is the whole RUN's cumulative budget.
-type AttemptBound string
 
 const (
 	BoundProviderInactivity AttemptBound = "provider_inactivity"

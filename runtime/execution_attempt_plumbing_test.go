@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // attemptRecordingProvider reports the identity the RUNTIME handed it, so a
@@ -33,9 +35,9 @@ func (p *attemptRecordingProvider) Execute(_ context.Context, request ExecutionR
 		stop = p.stops[index]
 	}
 	if stop == StopCompleted {
-		return ExecutionResult{ProviderID: "attempt-recorder", Attempt: request.Attempt, Outcome: Succeeded}, nil
+		return ExecutionResult{ProviderID: "attempt-recorder", Attempt: request.Attempt, Outcome: execution.Succeeded}, nil
 	}
-	return ExecutionResult{ProviderID: "attempt-recorder", Attempt: request.Attempt, Outcome: OperationFailed},
+	return ExecutionResult{ProviderID: "attempt-recorder", Attempt: request.Attempt, Outcome: execution.Failed},
 		&ProviderStopError{Reason: stop, Detail: "reasoning iterations exceeded 16"}
 }
 

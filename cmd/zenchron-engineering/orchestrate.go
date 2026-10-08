@@ -138,6 +138,9 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 	fmt.Fprintf(stdout, "ORCHESTRATION %s\nRepository: %s   Agent: %s\n", view.BatchID, view.Repository, view.AgentID)
 	fmt.Fprintf(stdout, "Items: %d total: %d queued, %d running, %d waiting, %d handoff_pending, %d partial, %d completed, %d failed, %d stopped, %d not_created, %d unknown\n\n",
 		c.Total, c.Queued, c.Running, c.Waiting, c.HandoffPending, c.Partial, c.Completed, c.Failed, c.Stopped, c.NotCreated, c.Unknown)
+	if r := view.HandoffRepairs; r.Started > 0 {
+		fmt.Fprintf(stdout, "Handoff repairs: %d started, %d repaired\n\n", r.Started, r.Repaired)
+	}
 	fmt.Fprintf(stdout, "%-7s %-16s %-38s %-9s %-24s %s\n", "ISSUE", "STATE", "RUN", "HANDOFF", "CANDIDATE / PR", "REASON")
 	for _, item := range view.Items {
 		location := orDash(item.CandidateRevision[:min(12, len(item.CandidateRevision))])
@@ -148,7 +151,29 @@ func renderOrchestration(flags autonomyFlags, view runtime.OrchestrationView, st
 		if state == "" {
 			state = "unknown"
 		}
-		fmt.Fprintf(stdout, "#%-6d %-16s %-38s %-9s %-24s %s\n", item.Issue, state, item.RunID, item.Handoff, location, item.Reason)
+		reason := item.Reason
+		if item.HandoffReason != "" && item.HandoffReason != reason {
+			reason = fmt.Sprintf("%s; handoff: %s", reason, item.HandoffReason)
+		}
+		if item.HandoffRepair != "" {
+			reason = fmt.Sprintf("%s; handoff repair: %s", reason, item.HandoffRepair)
+		}
+		if item.Capacity != nil {
+			reason = fmt.Sprintf("%s (%s ceiling %d)", reason, item.Capacity.Class, item.Capacity.Ceiling)
+		}
+		if item.Paused != nil {
+			reason = fmt.Sprintf("%s; paused: %s", reason, item.Paused.Reason)
+		}
+		if item.Executing && item.State != orchestration.ItemRunning {
+			reason += "; work still owned"
+		}
+		if item.Observation != "" {
+			reason = fmt.Sprintf("%s [%s]", reason, item.Observation)
+		}
+		fmt.Fprintf(stdout, "#%-6d %-16s %-38s %-9s %-24s %s\n", item.Issue, state, item.RunID, item.Handoff, location, reason)
+	}
+	for _, decision := range view.OpenDecisions {
+		fmt.Fprintf(stdout, "\nWAITING ON HUMAN DECISION %s from %s: %s\n", decision.ID, decision.Source.Unit, decision.Purpose)
 	}
 	return runtime.ExitCompleted, nil
 }

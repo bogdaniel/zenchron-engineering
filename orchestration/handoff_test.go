@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -23,32 +24,50 @@ func TestAValidHandoffReportDecodes(t *testing.T) {
 
 // TestAnInvalidHandoffReportIsRefused is #470 acceptance H: every way a
 // worker-written document can fail to be one answer this build understands is
-// refused, never repaired or truncated.
+// refused, never repaired or truncated. #492 adds the deterministic class of
+// each refusal: a protocol mistake a result-only correction may address, or a
+// bound that is never handed back to a model.
 func TestAnInvalidHandoffReportIsRefused(t *testing.T) {
 	many := `"` + strings.Repeat(`x","`, maxHandoffListItems) + `x"`
-	for name, document := range map[string]string{
-		"malformed json":        `{"schema_version":"0.1",`,
-		"not an object":         `["completed"]`,
-		"trailing data":         validReport + ` {}`,
-		"unknown member":        `{"schema_version":"0.1","outcome":"completed","summary":"s","verdict":"accept"}`,
-		"restated run identity": `{"schema_version":"0.1","outcome":"completed","summary":"s","run_id":"run-x"}`,
-		"restated candidate":    `{"schema_version":"0.1","outcome":"completed","summary":"s","candidate":"abc"}`,
-		"wrong schema version":  `{"schema_version":"0.2","outcome":"completed","summary":"s"}`,
-		"absent schema version": `{"outcome":"completed","summary":"s"}`,
-		"invalid outcome":       `{"schema_version":"0.1","outcome":"done","summary":"s"}`,
-		"absent outcome":        `{"schema_version":"0.1","summary":"s"}`,
-		"empty summary":         `{"schema_version":"0.1","outcome":"completed","summary":"  "}`,
-		"oversized summary":     `{"schema_version":"0.1","outcome":"completed","summary":"` + strings.Repeat("s", maxSummaryBytes+1) + `"}`,
-		"over-bound list":       `{"schema_version":"0.1","outcome":"completed","summary":"s","recommended_next":[` + many + `]}`,
-		"oversized list item":   `{"schema_version":"0.1","outcome":"completed","summary":"s","recommended_next":["` + strings.Repeat("r", maxHandoffItemBytes+1) + `"]}`,
-		"empty list item":       `{"schema_version":"0.1","outcome":"completed","summary":"s","recommended_next":[""]}`,
-		"completed+unresolved":  `{"schema_version":"0.1","outcome":"completed","summary":"s","unresolved":["x"]}`,
-		"partial+nothing open":  `{"schema_version":"0.1","outcome":"partial","summary":"s"}`,
-		"oversized document":    `{"schema_version":"0.1","outcome":"completed","summary":"s"}` + strings.Repeat(" ", MaxHandoffReportBytes),
+	for name, tc := range map[string]struct {
+		document string
+		defect   HandoffDefect
+	}{
+		"malformed json":        {`{"schema_version":"0.1",`, DefectProtocol},
+		"not an object":         {`["completed"]`, DefectProtocol},
+		"trailing data":         {validReport + ` {}`, DefectProtocol},
+		"unknown member":        {`{"schema_version":"0.1","outcome":"completed","summary":"s","verdict":"accept"}`, DefectProtocol},
+		"restated run identity": {`{"schema_version":"0.1","outcome":"completed","summary":"s","run_id":"run-x"}`, DefectProtocol},
+		"restated candidate":    {`{"schema_version":"0.1","outcome":"completed","summary":"s","candidate":"abc"}`, DefectProtocol},
+		"wrong schema version":  {`{"schema_version":"0.2","outcome":"completed","summary":"s"}`, DefectProtocol},
+		"absent schema version": {`{"outcome":"completed","summary":"s"}`, DefectProtocol},
+		"invalid outcome":       {`{"schema_version":"0.1","outcome":"done","summary":"s"}`, DefectProtocol},
+		"absent outcome":        {`{"schema_version":"0.1","summary":"s"}`, DefectProtocol},
+		"empty summary":         {`{"schema_version":"0.1","outcome":"completed","summary":"  "}`, DefectProtocol},
+		"empty list item":       {`{"schema_version":"0.1","outcome":"completed","summary":"s","recommended_next":[""]}`, DefectProtocol},
+		"completed+unresolved":  {`{"schema_version":"0.1","outcome":"completed","summary":"s","unresolved":["x"]}`, DefectProtocol},
+		"partial+nothing open":  {`{"schema_version":"0.1","outcome":"partial","summary":"s"}`, DefectProtocol},
+		"oversized summary":     {`{"schema_version":"0.1","outcome":"completed","summary":"` + strings.Repeat("s", maxSummaryBytes+1) + `"}`, DefectBound},
+		"over-bound list":       {`{"schema_version":"0.1","outcome":"completed","summary":"s","recommended_next":[` + many + `]}`, DefectBound},
+		"oversized list item":   {`{"schema_version":"0.1","outcome":"completed","summary":"s","recommended_next":["` + strings.Repeat("r", maxHandoffItemBytes+1) + `"]}`, DefectBound},
+		"oversized document":    {`{"schema_version":"0.1","outcome":"completed","summary":"s"}` + strings.Repeat(" ", MaxHandoffReportBytes), DefectBound},
+		"not utf-8":             {"{\"schema_version\":\"0.1\",\"outcome\":\"done\",\"summary\":\"\xff\"}", DefectBound},
 	} {
-		if _, err := DecodeHandoffReport([]byte(document)); err == nil {
+		_, err := DecodeHandoffReport([]byte(tc.document))
+		if err == nil {
 			t.Errorf("%s: an invalid handoff report was admitted", name)
+			continue
 		}
+		var refusal *HandoffRefusal
+		if !errors.As(err, &refusal) || refusal.Defect != tc.defect {
+			t.Errorf("%s: refusal %v classified %+v, want %s", name, err, refusal, tc.defect)
+		}
+		if ProtocolRepairable(err) != (tc.defect == DefectProtocol) {
+			t.Errorf("%s: repairable=%t for a %s refusal", name, ProtocolRepairable(err), tc.defect)
+		}
+	}
+	if ProtocolRepairable(errors.New("the slot holds a symlink")) {
+		t.Error("an error the decoder did not raise was classified repairable")
 	}
 }
 
@@ -90,11 +109,11 @@ func TestItemStateIsAProjectionThatFailsClosed(t *testing.T) {
 		{ChildFacts{true, RunLive, ActivityIdle, HandoffNone, ""}, ItemQueued},
 		{ChildFacts{true, RunLive, ActivityWorking, HandoffNone, ""}, ItemRunning},
 		{ChildFacts{true, RunLive, ActivityWaiting, HandoffNone, ""}, ItemWaiting},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffReported, ""}, ItemRunning},
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffRefused, ""}, ItemHandoffPending},
-		{ChildFacts{true, RunLive, ActivityWorking, HandoffAdmitted, OutcomeCompleted}, ItemCompleted},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffReported, ""}, ItemQueued},
+		{ChildFacts{true, RunLive, ActivityIdle, HandoffRefused, ""}, ItemQueued},
+		{ChildFacts{true, RunLive, ActivityWorking, HandoffAdmitted, OutcomeCompleted}, ItemRunning},
 		// A valid, admitted transfer of PARTIAL work is not completed work.
-		{ChildFacts{true, RunLive, ActivityIdle, HandoffAdmitted, OutcomePartial}, ItemPartial},
+		{ChildFacts{true, RunLive, ActivityFinished, HandoffAdmitted, OutcomePartial}, ItemPartial},
 		{ChildFacts{true, RunCompleted, ActivityIdle, HandoffAdmitted, OutcomePartial}, ItemPartial},
 		// A provider that succeeded and a run that ended are still not a
 		// completed item without an admitted handoff.

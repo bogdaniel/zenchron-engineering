@@ -38,6 +38,7 @@ const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
 	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
+	"workgraph {adopt <proposal.json> --agent <id>|status <graph>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
@@ -279,6 +280,11 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		return autonomyPlan(context.Background(), rest, overrides, stdout)
 	case "orchestrate":
 		return autonomyOrchestrate(rest, stdout)
+	case "workgraph":
+		// One altitude above `orchestrate`: the same explicit issues, with the
+		// dependencies between them stated, so a unit waits for its upstream
+		// handoff instead of the operator watching for it.
+		return autonomyWorkGraph(rest, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
@@ -1091,8 +1097,9 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// resolved. A controller that cannot name its own executable
 			// prepares no guard and says so in provenance rather than
 			// pretending to one.
-			StateDir:  config.StateDir,
-			GitBroker: gitBrokerCommand(),
+			StateDir:           config.StateDir,
+			GitBroker:          gitBrokerCommand(),
+			VerificationBroker: verificationBrokerCommand(),
 			// AND IT IS REQUIRED HERE. This is the production composition: it
 			// always intends the boundary, so a broker it could not resolve is
 			// a controller that cannot enforce #241 rather than a composition
@@ -1126,7 +1133,20 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 // made when the provider is constructed.
 type candidateBoundProvider struct{ base runtime.OpenAIProvider }
 
+// The wrapper must keep every capability of the provider it binds (#522).
+var (
+	_ runtime.IsolationReporter = candidateBoundProvider{}
+	_ runtime.ToolchainProber   = candidateBoundProvider{}
+)
+
 func (p candidateBoundProvider) Isolation() runtime.ProviderIsolation { return p.base.Isolation() }
+
+// MissingTools forwards the container probe (#522). Without it the runtime's
+// capability check misses and probes required tools on the host PATH instead
+// of in the sandbox the OpenAI loop runs commands in.
+func (p candidateBoundProvider) MissingTools(ctx context.Context, required []string) []string {
+	return p.base.MissingTools(ctx, required)
+}
 
 // Execute binds the two things the broker cannot supply itself: WHICH workspace
 // this invocation may touch, and WHICH runtime operation owns the Docker

@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 func TestConnectivityClassification(t *testing.T) {
@@ -291,7 +293,7 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 		t.Fatal("quarantine before the outage")
 	}
 	f.provider.mutate = refusedWrite().mutate
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureConnectivity}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureConnectivity}}
 	if outcome := f.reconcile(runID); outcome.Disposition != Waiting || outcome.Reason != "connectivity_backoff" {
 		t.Fatalf("outage: %+v", outcome)
 	}
@@ -374,7 +376,7 @@ func TestConnectivityRecoveryPreservesCandidateFeedbackAndQuarantine(t *testing.
 	if !reflect.DeepEqual(publication(state), publication(admitted)) || len(quarantinedEvents(t, state.events)) != 1 {
 		t.Fatal("wait changed publication or quarantine")
 	}
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}
 	f.provider.mutate = func(dir string) error {
 		assertA()
 		head, err := gitOutput(dir, "rev-parse", "HEAD")
@@ -513,7 +515,7 @@ func TestConnectivityRetryNotBeforeIsNotTheConnectivityFlag(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
 	f.clock.step = 0
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
 	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
 		t.Fatalf("quota: %+v", out)
 	}
@@ -607,7 +609,7 @@ func TestConnectivityCapacityKeepsRefundedWait(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
 	f.clock.step = 0
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderUnavailable}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderUnavailable}}
 	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_unavailable" {
 		t.Fatalf("capacity: %+v", out)
 	}
@@ -814,13 +816,13 @@ func TestConnectivityResumeDoesNotBringTheProbeForward(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
 	f.clock.step = 0
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderAccountUnavailable}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderAccountUnavailable}}
 	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" {
 		t.Fatalf("account: %+v", out)
 	}
 	waiting := executionOperation(t, f.store, runID)
 	calls := len(f.provider.requests)
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded} // the operator restored it
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded} // the operator restored it
 	f.clock.at = waiting.RetryNotBefore.Add(-time.Second)
 	out, err := f.runtime.Reconcile(context.Background(), runID) // what `autonomy resume` runs
 	if err != nil || out.Disposition != Waiting || out.Reason != "execution_provider_account_unavailable" || len(f.provider.requests) != calls {
@@ -855,7 +857,7 @@ func TestConnectivityProviderWaitRefundsExecutionOnlyWhenNothingRan(t *testing.T
 			runID := f.start()
 			f.clock.step = tc.step
 			f.provider.mutate = func(string) error { f.clock.at = f.clock.at.Add(tc.ran); return nil }
-			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
 			f.provider.Err = tc.err
 			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
 				t.Fatalf("quota: %+v", out)
@@ -922,7 +924,7 @@ func TestConnectivityFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing
 	}
 	comment(501, "add A")
 	keyA := f.state(runID).feedbackState().Pending(f.state(runID).projection.Head())[0].Key
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
 	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
 		t.Fatalf("quota: %+v", out)
 	}
@@ -935,7 +937,7 @@ func TestConnectivityFeedbackAdmittedDuringAProviderWaitJoinsTheRetry(t *testing
 		}
 	}
 	calls := len(f.provider.requests)
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}
 	f.provider.mutate = func(dir string) error {
 		return os.WriteFile(filepath.Join(dir, "recovered.go"), []byte("package candidate\n"), 0600)
 	}
@@ -990,7 +992,7 @@ func TestConnectivityFeedbackDeliveryAcrossAWaitIsBounded(t *testing.T) {
 				return keys
 			}
 			a := admit(tc.before)
-			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
 			if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
 				t.Fatalf("quota: %+v", out)
 			}
@@ -1003,7 +1005,7 @@ func TestConnectivityFeedbackDeliveryAcrossAWaitIsBounded(t *testing.T) {
 			b := admit(tc.during)
 			// The worker now answers with a no-change resolution naming exactly
 			// what it was given, and mutates nothing.
-			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+			f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}
 			f.provider.mutate, f.provider.resolveFeedback = nil, true
 			calls := len(f.provider.requests)
 			f.clock.at = x.RetryNotBefore
@@ -1078,7 +1080,7 @@ func TestConnectivityProviderQuotaWaitIsDurable(t *testing.T) {
 	f := newPhase8Fixture(t)
 	runID := f.start()
 	f.clock.step = 0
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: OperationFailed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Failed, Failure: &ProviderFailure{Classification: FailureProviderQuota}}
 	if out := f.reconcile(runID); out.Disposition != Waiting || out.Reason != "execution_provider_quota" {
 		t.Fatalf("quota: %+v", out)
 	}
@@ -1128,7 +1130,7 @@ func TestConnectivityProviderQuotaWaitIsDurable(t *testing.T) {
 		t.Fatalf("the wait was charged as active work: %s -> %s", active, got)
 	}
 
-	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}
+	f.provider.Result = ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}
 	f.clock.at = waiting.RetryNotBefore
 	f.reconcile(runID)
 	recovered, _, _, err := f.store.Operation(waiting.ID)

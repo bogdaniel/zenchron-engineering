@@ -29,6 +29,7 @@ package runtime
 // tool result, and refused again at the commit gate.
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -198,7 +199,7 @@ func ScanCandidateForCredentialValues(root string) error {
 	if err != nil {
 		return &CredentialMaterialError{Kind: CredentialMaterialInconclusive, Detail: "candidate workspace unavailable"}
 	}
-	return filepath.WalkDir(resolved, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(resolved, func(path string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(resolved, path)
 		if relErr != nil {
 			rel = path
@@ -232,6 +233,11 @@ func ScanCandidateForCredentialValues(root string) error {
 		}
 		return credentialContentVerdict(rel, info.Size(), func() ([]byte, error) { return os.ReadFile(path) }, "workspace entry is unreadable")
 	})
+	var material *CredentialMaterialError
+	if errors.As(err, &material) && material.Kind == CredentialMaterialValue {
+		return deterministicRefusal("candidate.visible_credential_value", err)
+	}
+	return err
 }
 
 // credentialContentVerdict is the one content rule every credential scan

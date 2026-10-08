@@ -37,8 +37,10 @@ import (
 // that used to require a database or a path convention - where is the workspace,
 // where are the logs - are answered here.
 type RunSummary struct {
-	RunID      string `json:"run_id"`
-	Repository string `json:"repository"`
+	producerFinished  bool
+	VerificationTools []VerificationPermit `json:"verification_tools,omitempty"`
+	RunID             string               `json:"run_id"`
+	Repository        string               `json:"repository"`
 	// Issue is the source issue number, or zero for a run whose goal is not an
 	// issue.
 	Issue int `json:"issue,omitempty"`
@@ -136,12 +138,11 @@ type Fleet struct {
 	Unavailable         int `json:"unavailable"`
 	// The verification view (#490). VerificationCapacity is the verification
 	// ceiling, omitted like ObservationCapacity by a reader that does not know
-	// the configuration. A verification is work, so these REFINE the partition
-	// above rather than joining it: Verifying counts the Working runs holding
-	// a verification slot, and AwaitingVerification the Runnable runs whose
-	// next operation is a verification - while Verifying equals
-	// VerificationCapacity, they are waiting on verification capacity, and
-	// each one's reason says so once a driver has been refused.
+	// the configuration. Verifying counts occupied resource slots: assurance
+	// leases plus nested tool grants, including cleanup still awaiting proof.
+	// AwaitingVerification counts runnable assurance runs and working providers
+	// whose tools are waiting with no tool already executing. Neither is added
+	// to the mutually exclusive run partition above.
 	VerificationCapacity int          `json:"verification_capacity,omitempty"`
 	Verifying            int          `json:"verifying"`
 	AwaitingVerification int          `json:"awaiting_verification"`
@@ -350,8 +351,30 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	if err != nil {
 		return Fleet{}, err
 	}
+	permits, err := store.VerificationPermits()
+	if err != nil {
+		return Fleet{}, err
+	}
+	toolsByRun := map[string][]VerificationPermit{}
+	for _, p := range permits {
+		toolsByRun[p.Parent.RunID] = append(toolsByRun[p.Parent.RunID], p)
+		if p.State == VerificationGranted {
+			fleet.Verifying++
+		}
+	}
 	for _, run := range runs {
 		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
+		summary.VerificationTools = toolsByRun[run.ID]
+		toolWaiting, toolHolding := false, false
+		for _, p := range summary.VerificationTools {
+			op := byRun[run.ID][p.Parent.OperationID]
+			toolWaiting = toolWaiting || (p.State == VerificationWaiting && op.State == Running && op.AttemptIdentity == p.Parent.Attempt)
+			toolHolding = toolHolding || p.State == VerificationGranted
+		}
+		if toolWaiting && !toolHolding && summary.Executing {
+			fleet.AwaitingVerification++
+			summary.Reason = ReasonVerificationCapacity
+		}
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
 			switch {
@@ -359,6 +382,10 @@ func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 				fleet.Unavailable++
 			default:
 				state := capacityState(byRun[run.ID], now)
+				if toolHolding && state != CapacityWork && state != CapacityObservation {
+					state = capacityWaiting
+					summary.Reason = ReasonVerificationCleanup
+				}
 				holding, awaiting := verificationOccupancy(byRun[run.ID], now)
 				if state == CapacityWork && holding {
 					fleet.Verifying++
@@ -504,69 +531,14 @@ func verificationOccupancy(all map[string]RunOperation, now time.Time) (holding,
 }
 
 func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {
-	summary := RunSummary{
-		RunID: run.ID, Repository: run.Repository, Agent: run.AgentID,
-		Phase: run.Phase, Disposition: run.Disposition, Reason: run.Reason,
-		Branch: run.Candidate.Branch, Elapsed: now.Sub(run.CreatedAt),
-	}
-	if issue, err := issueNumberOf(run.Goal); err == nil {
-		summary.Issue = issue
-	}
-	if dir := candidateDir(stateDir, run.ID); dirExists(dir) {
-		summary.Workspace = dir
-	}
 	events, err := store.Events(run.ID)
 	if err != nil {
+		summary := initialRunSummary(stateDir, run, now)
 		summary.Error = boundedDetail(err.Error())
 		return summary
 	}
-	snapshot, err := Reduce(run, events)
-	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
-	}
-	projection, err := Project(events)
-	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
-	}
-	// The journal is the authority for the agent binding; the row is only a
-	// projection of it, so a row that somehow disagrees loses.
-	state := &runState{run: run, snapshot: snapshot, events: events, projection: projection}
-	agent, err := state.recordedAgent()
-	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
-	}
-	if agent.AgentID != "" {
-		summary.Agent, summary.ProviderKind = agent.AgentID, agent.Kind
-		summary.TrustMode, summary.Model = agent.TrustMode, agent.Model
-	}
-	summary.Disposition, summary.Reason = snapshot.Disposition, snapshot.Reason
-	summary.CandidateRevision, summary.CandidateTree = projection.CandidateRevision, projection.CandidateTree
-	summary.Attempts = projection.Attempts
-	summary.Held = snapshot.HeldMaterial != nil
-	summary.Paused = snapshot.Paused
-	if operation, ok := state.currentOperation(); ok {
-		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
-	}
+	summary := summarizeRunEvents(stateDir, run, events, now)
 	summary.Executing = executingNow(store, run.ID)
-	if pr := projection.PullRequest; pr != nil {
-		summary.PullRequest, summary.PRState = pr.Number, pr.State
-	}
-	if ci := projection.CI; ci != nil && !ci.Stale {
-		summary.CI = ci.Conclusion
-	}
-	if review := projection.Review; review != nil && !review.Stale {
-		summary.Review = review.State
-	}
-	feedback := state.feedbackState()
-	for _, decision := range feedback.Admitted {
-		if decision.Admitted {
-			summary.FeedbackAdmitted++
-		}
-	}
-	summary.FeedbackPending = len(feedback.Pending(projection.Head()))
 	return summary
 }
 

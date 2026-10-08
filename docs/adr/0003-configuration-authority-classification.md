@@ -191,7 +191,7 @@ an input to the RunPolicyDigest and the SupervisorPolicyDigest.
 | --- | --- | --- | --- |
 | `.zenchron.json:budgets.wall_limit_seconds`, `.zenchron.json:budgets.max_execution_attempts`, `.zenchron.json:budgets.max_execution_continuations`, `.zenchron.json:budgets.max_remediation_attempts`, `.zenchron.json:budgets.max_assurance_attempts` (config.go:607-611) | R | run creation, as the already-tightened value | A repository may narrow its own runs. Re-resolution after freeze has no effect. |
 | `.zenchron.json:budgets.provider_inactivity_seconds` (config.go:616) | A | as the operator field | As the operator field. |
-| `.zenchron.json:budgets.attempt_wall_limit_seconds` | A | run creation, as the already-tightened value | Tighten-only against the operator limit, or the operator `wall_limit_seconds` when none is stated. |
+| `.zenchron.json:budgets.attempt_wall_limit_seconds` | A | run creation, as the already-tightened value | Tighten-only against the operator limit, or the shipped default capped by operator `wall_limit_seconds` when none is stated. |
 | `.zenchron.json:watch.poll_interval_seconds`, `.zenchron.json:watch.max_concurrent_runs`, `.zenchron.json:watch.max_concurrent_observations`, `.zenchron.json:watch.max_concurrent_verifications` (config.go:625-626) | S (moved by B4, #346) | supervisor start | Supervisor cadence and concurrency, loosen-for-self only. |
 
 ### 4. Budget fields needed by #328 (decided before #328 adds them)
@@ -208,6 +208,15 @@ an input to the RunPolicyDigest and the SupervisorPolicyDigest.
 | Ceilings | Operator ceiling. The repository may tighten it. | Operator ceiling. The repository may tighten it. It can never exceed the frozen run budget. |
 | Migration from `wall_limit_seconds` | A config with only `wall_limit_seconds` keeps its meaning as the run active-work budget. | The attempt limit is absent, stays out of the digest, and is derived at run creation by the default rule. A historical run with no frozen attempt limit keeps **today's rule**, which is not "remaining run active-work". Today the attempt bound is the operation's `WallBudget` minus **that operation's own** `ConsumedExecution` (operations.go:1254-1262, scheduler.go:536-541). `WallBudget` is set when the operation is planned from the run's effective wall limit, `min(live, persisted)` (reconciler.go:1583, 915-921), and the bound is further capped by the review-continuation remaining time (operations.go:1259-1263). Cumulative run active time across operations is checked only at reconcile (reconciler.go:785). Nothing is backfilled. **#328 must decide** what `op.WallBudget` becomes: the attempt limit, the remaining run active-work, or the minimum of the two. It must also decide how the review-continuation cap composes with the attempt limit. **Decided by #328:** `op.WallBudget` is kept as the run envelope the operation was planned under, and the attempt deadline composes with it by `min` at `StartWithin` (as does the review-continuation remaining, which is the enclosing envelope once granted). |
 | Restart | Reads the frozen value. Consumed active time comes from the existing durable cumulative counter. | An attempt in flight when its controller died is **abandoned**. Its orphaned interval is charged in full to `ConsumedExecution` (scheduler.go:503-508). The next activation mints a **new** `Deadline` (scheduler.go:536-543). Under #328 that successor is a **new physical attempt**. It counts against same-binding retry or continuation authority (#54), and its deadline is `min(frozen attempt limit, remaining run active-work)`. Neither budget is renewed. |
+
+**Shipped default adopted by #497 (2026-10-06).** The unstated physical-attempt
+hard fuse is three hours, capped by the frozen run wall at new-run creation.
+Repository tightening against an absent operator attempt limit uses that same
+`min(3h, operator wall_limit)` ceiling. An explicit operator limit stays exact.
+The absent configuration member remains absent in the canonical document;
+existing run policies and pre-#328 operation-remainder semantics are unchanged.
+Provider inactivity, verification-wait accounting and termination ownership
+remain separate and unchanged. No live configuration is rewritten.
 
 **Ordering (coordinator decision).** #328 may land **before** B1, provided that it:
 

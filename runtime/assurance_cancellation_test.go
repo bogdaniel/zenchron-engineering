@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // scriptedDocker answers every docker call BaselineGoVerifier makes, as a
@@ -140,7 +142,7 @@ func TestAssureClassifiesCancellationByItsOwner(t *testing.T) {
 		want  FailureClass
 	}{
 		"controller shutdown": {context.Canceled, FailureControllerShutdown},
-		"operator stop":       {errRunStopped, FailureRunCancelled},
+		"operator stop":       {execution.ErrRunStopped, FailureRunCancelled},
 		"inactivity":          {ErrProviderInactive, FailureProviderNoProgress},
 		"deadline":            {nil, FailureExecutionIncomplete},
 	}
@@ -271,7 +273,7 @@ func TestAnOperatorStopDuringAssuranceCancelsTheRun(t *testing.T) {
 	runID := f.start()
 	docker.onBlock = func() {
 		operatorStop(t, f, &runID)()
-		cancel(errRunStopped)
+		cancel(execution.ErrRunStopped)
 	}
 	// The stop finishes the leased assurance operation underneath the pass
 	// that is running it, so that pass may report the operation inactive.

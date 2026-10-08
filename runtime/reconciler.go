@@ -59,6 +59,9 @@ const (
 	OpPullRequestCreate = "pull_request.create"
 	OpPullRequestUpdate = "pull_request.update"
 	OpGitHubObserve     = "github.observe"
+	// OpHandoffRepair is the one result-only correction of a refused
+	// orchestration handoff (#492, handoff_repair.go).
+	OpHandoffRepair = "handoff.repair"
 )
 
 // publicationKinds are the operations that change protected remote state.
@@ -191,6 +194,7 @@ type pushResult struct {
 // runState is one replayed view of one run. Everything a planner may read is
 // here, and nothing here comes from wall time, the filesystem, or the network.
 type runState struct {
+	capacityWait       *CapacityWait
 	feedbackCached     *FeedbackState
 	feedbackEventCount int
 	rt                 *EngineeringRuntime
@@ -455,6 +459,7 @@ const ReasonGoalStateReached = "goal_state_reached"
 const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
 
 var externalWaitReasons = map[string]bool{
+	ReasonDeterministicFailureUnchanged: true,
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.
 	ReasonGoalStateReached:          true,
@@ -483,6 +488,8 @@ var externalWaitReasons = map[string]bool{
 	// wait is bounded by the verifications holding the slots, each of which
 	// runs under its own physical deadline.
 	ReasonVerificationCapacity: true,
+	ReasonWorkCapacity:         true,
+	ReasonObservationCapacity:  true,
 	// The operator has to free disk before anything can proceed; the run is not
 	// working while it waits for them.
 	"state_storage_exhausted": true,
@@ -520,15 +527,18 @@ func (s *runState) activeElapsed(now time.Time) time.Duration {
 	// conditions() asks several times per pass - through the same arithmetic
 	// the plan's ceiling uses.
 	excluded, openSince, openWork := s.externalWait()
-	return activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)
+	openWork += liveExternalWork(s.events, openSince, now)
+	return max(0, activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)-verificationWait(s.events, "", s.run.CreatedAt, now))
 }
 
 // externalWait folds the journal once: the total of the CLOSED external-wait
 // intervals, the start of an open one, and the work performed inside it.
 //
 // An external wait is a STATE, not the gap between two adjacent events. It opens
-// at the run.waiting that declared an external reason and closes only at the
-// next DISPOSITION event - a wait for a different reason, or a terminal event.
+// at the run.waiting that declared an external reason and normally closes at
+// the next DISPOSITION event - a different reason, or a terminal event.
+// A deterministic retry closes its own wait when it actually resumes. Held
+// nested tools suspend idle exclusion until their timestamped release.
 // It deliberately does not close on operation events, because recordDisposition
 // appends run.waiting only when the disposition or reason CHANGES:
 //
@@ -567,52 +577,107 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSince time.Time, openWork time.Duration) {
 	var waitingSince time.Time
 	var work time.Duration
+	var deterministicOperation string
+	declaredWait := false
+	tools := map[string]bool{}
 	started := map[string]time.Time{}
 	closeWait := func(at time.Time) {
 		if waitingSince.IsZero() {
 			return
 		}
-		if idle := at.Sub(waitingSince) - work; idle > 0 {
+		pendingWork := work
+		for _, began := range started {
+			if began.Before(waitingSince) {
+				began = waitingSince
+			}
+			pendingWork += max(0, at.Sub(began))
+		}
+		if idle := at.Sub(waitingSince) - pendingWork; idle > 0 {
 			excluded += idle
 		}
-		waitingSince, work = time.Time{}, 0
-		started = map[string]time.Time{}
+		waitingSince, work, deterministicOperation = time.Time{}, 0, ""
 	}
 	for _, event := range events {
 		switch event.Type {
 		case EventRunWaiting:
 			if externalWaitReasons[payloadReason(event.Payload)] {
-				if waitingSince.IsZero() {
+				declaredWait = true
+				if payloadReason(event.Payload) != ReasonDeterministicFailureUnchanged {
+					deterministicOperation = ""
+				}
+				if waitingSince.IsZero() && len(tools) == 0 {
 					waitingSince = event.OccurredAt
 				}
 				continue
 			}
+			declaredWait = false
 			closeWait(event.OccurredAt)
 		case EventRunCompleted, EventRunFailed, EventRunCancelled:
+			declaredWait = false
 			closeWait(event.OccurredAt)
 		case EventOperationBefore:
-			if !waitingSince.IsZero() && event.OperationID != "" {
+			// This exact operation passed the retry gate and really resumed.
+			// Probes for other operations cannot resolve its contradiction.
+			if event.OperationID != "" && event.OperationID == deterministicOperation {
+				declaredWait = false
+				closeWait(event.OccurredAt)
+			}
+			if event.OperationID != "" {
+				if old, ok := started[event.OperationID]; ok && !waitingSince.IsZero() {
+					if old.Before(waitingSince) {
+						old = waitingSince
+					}
+					work += max(0, event.OccurredAt.Sub(old))
+				}
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
 			// The after record is durable before run.waiting. A crash in that
 			// gap must preserve external-wait accounting as well as the deadline.
-			if waitingSince.IsZero() {
-				var op RunOperation
-				if decodeJSON(event.Payload, &op) == nil {
-					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
+			var op RunOperation
+			if decodeJSON(event.Payload, &op) == nil {
+				if op.State == OperationFailed && op.Failure != nil {
+					declaredWait = true
+					if waitingSince.IsZero() && len(tools) == 0 {
 						waitingSince = event.OccurredAt
+					}
+					deterministicOperation = event.OperationID
+				} else if waitingSince.IsZero() {
+					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
+						declaredWait = true
+						if len(tools) == 0 {
+							waitingSince = event.OccurredAt
+						}
 					}
 				}
 			}
 			if waitingSince.IsZero() || event.OperationID == "" {
+				delete(started, event.OperationID)
 				continue
 			}
 			if at, ok := started[event.OperationID]; ok {
+				if at.Before(waitingSince) {
+					at = waitingSince
+				}
 				if spent := event.OccurredAt.Sub(at); spent > 0 {
 					work += spent
 				}
 				delete(started, event.OperationID)
+			}
+		case EventVerificationPermitChanged:
+			var permit VerificationPermit
+			if decodeJSON(event.Payload, &permit) != nil {
+				continue
+			} // validated at append
+			if permit.State == VerificationGranted {
+				tools[permit.ID] = true
+				closeWait(event.OccurredAt)
+			}
+			if permit.State == VerificationReleased {
+				delete(tools, permit.ID)
+				if declaredWait && len(tools) == 0 && waitingSince.IsZero() {
+					waitingSince = event.OccurredAt
+				}
 			}
 		}
 	}
@@ -627,7 +692,8 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 // means exactly what it means for a run's own wall budget.
 func ActiveElapsed(run EngineeringRun, events []EngineeringEvent, now time.Time) time.Duration {
 	excluded, openSince, openWork := foldExternalWait(events)
-	return activeFrom(run.CreatedAt, excluded, openSince, openWork, now)
+	openWork += liveExternalWork(events, openSince, now)
+	return max(0, activeFrom(run.CreatedAt, excluded, openSince, openWork, now)-verificationWait(events, "", run.CreatedAt, now))
 }
 
 // activeFrom is the arithmetic itself, over a fold either caller supplies. It
@@ -1004,6 +1070,7 @@ var operationSpecs = []operationSpec{
 	{OpExecutionInvoke, bindExecutionInvoke},
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
+	{OpHandoffRepair, bindHandoffRepair},
 	{OpAssuranceGo, bindAssuranceGo},
 	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
@@ -1072,6 +1139,13 @@ func (s *runState) attemptsFor(kind string) int {
 		return s.budgets().MaxRemediationAttempts
 	case OpAssuranceGo, OpAssuranceSemantic:
 		return s.budgets().MaxAssuranceAttempts
+	case OpHandoffRepair:
+		// NOT the repair budget, which is one started operation
+		// (startedRepair). The second attempt exists only for a crash between
+		// the scheduler starting the row and operation.before being
+		// journalled: no provider was reached, and failing the run for it
+		// would be worse than the invocation it never made.
+		return 2
 	default:
 		return 3
 	}
@@ -1253,10 +1327,39 @@ func (s *runState) providerInvocationCeilingReached() bool {
 	// permitted invocation completed the candidate read as failed the moment it
 	// finished - the continuation ceiling has the same exemption, for the same
 	// reason.
-	if _, wanted := bindExecutionInvoke(s); !wanted {
+	//
+	// "Next" is a binding the planner would still DISPATCH: wanted and not yet
+	// satisfied. The binding of the invocation that just succeeded stays wanted
+	// until its output is committed - an initial binding until the candidate
+	// exists - and reading that as a further invocation failed the run before
+	// its last permitted work was ever committed (#514).
+	key, wanted := bindExecutionInvoke(s)
+	if !wanted || s.satisfied(OpExecutionInvoke, key) {
 		return false
 	}
-	return s.projection.Attempts[OpExecutionInvoke] >= limit
+	return s.providerInvocationsSpent() >= limit
+}
+
+// providerInvocationsSpent is the run total MaxProviderInvocations bounds:
+// every begun engineering invocation and every handoff repair that reached a
+// provider (#492). It is the one definition the ceiling, a successor's
+// availability and the remaining-budget view all read.
+func (s *runState) providerInvocationsSpent() int {
+	return providerInvocationsSpent(s.projection, s.snapshot.Operations)
+}
+
+func providerInvocationsSpent(projection RunProjection, operations map[string]RunOperation) int {
+	spent := projection.Attempts[OpExecutionInvoke]
+	for _, op := range operations {
+		if repairReachedProvider(op) {
+			spent++
+		}
+	}
+	return spent
+}
+
+func (s *runState) providerCeiling() providerCeiling {
+	return providerCeiling{limit: s.providerInvocationLimit(), spent: s.providerInvocationsSpent()}
 }
 
 // providerInvocationLimit is the run's total, taken from what the run
@@ -1788,6 +1891,20 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 	return nil
 }
 
+// cancelStaleLeasedOperation makes the journal authoritative before the scheduler
+// row is terminal. A cancelled row is not reacquired, so reversing this order can
+// strand a permanent cancelled-row/failed-journal disagreement after a crash.
+func (r *EngineeringRuntime) cancelStaleLeasedOperation(state *runState, leased RunOperation) error {
+	cancelled := leased
+	cancelled.State = OperationCancelled
+	cancelled.Lease = nil
+	if err := r.append(state, EventOperationAfter, cancelled.ID, cancelled, nil); err != nil {
+		return err
+	}
+	_, err := r.scheduler.Finish(leased.ID, OperationCancelled)
+	return err
+}
+
 // runOperation acquires exactly one operation through the scheduler, records
 // operation.before, performs the bounded side effect, records the effect's
 // typed events, and records operation.after.
@@ -1862,13 +1979,20 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
 		}
 		reason := "operation_unavailable"
-		if consumesVerification(planned.Kind) {
-			saturated, err := r.scheduler.VerificationSaturated(state.run.ID)
+		pending, err := r.scheduler.VerificationCleanupPending(state.run.ID)
+		if err != nil {
+			return false, Outcome{}, err
+		}
+		if pending {
+			reason = ReasonVerificationCleanup
+		}
+		if !pending {
+			capacity, err := r.scheduler.CapacityBlocked(planned)
 			if err != nil {
 				return false, Outcome{}, err
 			}
-			if saturated {
-				reason = ReasonVerificationCapacity
+			if capacity != nil {
+				state.capacityWait, reason = capacity, capacity.reason()
 			}
 		}
 		outcome, err := r.settle(state, waitingOr(live, Waiting), reason)
@@ -1878,7 +2002,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		// The scheduler handed back a different eligible operation. It is only
 		// legitimate if the current state still wants exactly that binding.
 		if err := state.validate(desiredOperation{kind: leased.Kind, key: bindingOf(*leased)}, live); err != nil {
-			if _, err := r.scheduler.Finish(leased.ID, OperationCancelled); err != nil {
+			if err := r.cancelStaleLeasedOperation(state, *leased); err != nil {
 				return false, Outcome{}, err
 			}
 			return true, Outcome{}, nil
@@ -1945,6 +2069,16 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Failed, leased.Kind+"_failure_not_retryable")
 		return false, outcome, err
 	}
+	if identical, err := r.identicalDeterministicFailure(state, *leased); err != nil || identical {
+		if err != nil {
+			return false, Outcome{}, err
+		}
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Waiting, ReasonDeterministicFailureUnchanged)
+		return false, outcome, err
+	}
 	started, err := r.scheduler.StartWithin(leased.ID, state.attemptLimit(r.deps.Clock.Now()))
 	if err != nil {
 		return false, Outcome{}, err
@@ -1953,8 +2087,9 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, Outcome{}, err
 	}
 	produced := r.handle(ctx, state, started)
-	// Only invokeExecution ever sets interrupted: a running provider is the one
-	// started attempt a stop reaches (#213); every other kind is unchanged.
+	// Only the provider-backed handlers set interrupted - invokeExecution and
+	// repairHandoff (#492): a running provider is the one started attempt a
+	// stop reaches (#213); every other kind is unchanged.
 	interrupted := produced.interrupted
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
@@ -1978,6 +2113,10 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	// Even a failure to observe retry inputs must not lose the attempt's
+	// outcome or a commit it already made. Persist it before reporting that
+	// observation error; missing input identity never proves equality.
+	bindingErr := r.recordDeterministicFailure(state, &finished, produced.failure)
 	// The disposition is recorded from the class; the wait and its timing only
 	// while a successor attempt exists, so the last attempt stops truthfully.
 	if finished.State == OperationFailed {
@@ -2003,6 +2142,9 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		if readErr != nil || !found || stored.State != OperationCancelled {
 			return false, Outcome{}, err
 		}
+	}
+	if bindingErr != nil {
+		return false, Outcome{}, bindingErr
 	}
 	// The next pass reloads, finds run.cancelled in replay and settles the run
 	// cancelled through the ordinary terminal path.
@@ -2198,113 +2340,3 @@ func (r *EngineeringRuntime) append(state *runState, eventType, operationID stri
 // function of the run and the events it is handed, and an id is recorded once
 // and then only ever read back. Replay never re-mints one.
 func newEventID(runID string) string { return runID + "-" + rand.Text() }
-
-// recordDisposition persists the run's disposition. The event is appended only
-// when the disposition or its reason actually changes, so a repeated wait does
-// not grow the journal; the run document is always refreshed, so a later
-// resume sees the current identity bindings without replaying.
-func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disposition, reason string) error {
-	// A run the operator has already STOPPED is never settled onto anything
-	// else. Every disposition this pass could record was derived from a
-	// snapshot read at the start of the pass, and CancelRun writes from another
-	// goroutine entirely - the control endpoint's stop-all runs concurrently
-	// with the tick that is driving this run. Recording the stale answer
-	// appended run.waiting after run.cancelled and wrote the run document back
-	// to waiting, which returned the run to the supervisor's active set and
-	// handed the work the operator stopped straight back to the next tick.
-	//
-	// The re-read is not the guarantee - PutRun's own condition is, and it
-	// refuses to replace a cancelled row whatever this pass decided. What the
-	// re-read buys is the COMMON case: a stop that has already landed stops
-	// this pass from appending a junk run.waiting or run.failed to the hash
-	// chain at all, which the write below cannot do anything about because the
-	// append comes first. A stop that lands between this read and that write
-	// is caught by the condition, and adopted straight afterwards.
-	if disposition != Cancelled {
-		live, found, err := r.deps.Store.Run(state.run.ID)
-		if err != nil {
-			return err
-		}
-		if found && live.Disposition == Cancelled {
-			state.run = live
-			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
-			return nil
-		}
-	}
-	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason {
-		eventType, ok := dispositionEvents[disposition]
-		if !ok {
-			return fmt.Errorf("no journal event for disposition %q", disposition)
-		}
-		// A budget boundary names what the run is holding (#203) in the SAME
-		// event that ends it, so the terminal fact and the held material can
-		// never be journalled apart, and replay reads the record back rather
-		// than re-deriving it.
-		// A record already journalled is reused, never re-derived: a later
-		// re-settle carries the SAME identity rather than an opinion of it
-		// from moved state. Only run.failed may carry one.
-		var held *HeldMaterial
-		if disposition == Failed {
-			held = state.snapshot.HeldMaterial
-			if held == nil && BudgetBoundary(disposition, reason) {
-				held = state.heldMaterial(reason)
-			}
-		}
-		payload := dispositionRecord{Reason: reason, HeldMaterial: held}
-		if err := r.append(state, eventType, "", payload, nil); err != nil {
-			return err
-		}
-		state.snapshot.Disposition, state.snapshot.Reason = disposition, reason
-		if held != nil {
-			state.snapshot.HeldMaterial = held
-		}
-	}
-	run := state.run
-	run.Phase = state.phase()
-	run.Disposition = disposition
-	run.Reason = reason
-	run.Base = Ref{ID: r.deps.Repository.DefaultBranch, Revision: state.baseRevision()}
-	run.Candidate = Candidate{Branch: candidateBranch(run.ID), Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree}
-	run.Contract = state.projection.Contract
-	run.UpdatedAt = r.deps.Clock.Now()
-	state.run = run
-	if err := r.deps.Store.PutRun(run); err != nil {
-		return err
-	}
-	// ADOPT WHAT THE ROW ACTUALLY SAYS. The write above is conditional and
-	// refuses silently, so a stop that won the race leaves this pass holding a
-	// disposition the database never accepted. Nothing durable is wrong at that
-	// point - the row and replay both say cancelled, and the acquisition
-	// statement reads the row - but the pass would go on to REPORT `waiting`
-	// for a run the operator stopped, which is the one thing its caller acts
-	// on. One read is cheaper than an operator who believes their stop is still
-	// pending.
-	if disposition != Cancelled {
-		live, found, err := r.deps.Store.Run(run.ID)
-		if err != nil {
-			return err
-		}
-		if found && live.Disposition == Cancelled {
-			state.run = live
-			state.snapshot.Disposition, state.snapshot.Reason = live.Disposition, live.Reason
-		}
-	}
-	return nil
-}
-
-var dispositionEvents = map[Disposition]string{
-	Waiting:   EventRunWaiting,
-	Completed: EventRunCompleted,
-	Failed:    EventRunFailed,
-	Cancelled: EventRunCancelled,
-}
-
-func (r *EngineeringRuntime) settle(state *runState, disposition Disposition, reason string) (Outcome, error) {
-	if err := r.recordDisposition(state, disposition, reason); err != nil {
-		return Outcome{}, err
-	}
-	// Reported from what was RECORDED, not from what was asked for: a pass
-	// settling on stale state over a stopped run records the stop instead, and
-	// the operator's caller has to be told the run is cancelled.
-	return Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
-}

@@ -16,6 +16,11 @@ type TypedResultWriter interface {
 	WritesTypedResults() bool
 }
 
+var (
+	_ TypedResultWriter = CLIAgentProvider{}
+	_ TypedResultWriter = NativeCodexProvider{}
+)
+
 // writesTypedResults is the one place that question is asked of a provider.
 func writesTypedResults(provider ExecutionProvider) bool {
 	writer, ok := provider.(TypedResultWriter)

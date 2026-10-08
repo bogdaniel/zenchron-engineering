@@ -1,0 +1,63 @@
+{
+  "version": "agentkernel.execution/v0.2",
+  "execution_id": "doc-analysis-1",
+  "attempt_id": "attempt-1",
+  "objective": "Extract every obligation and its deadline.",
+  "mode": "read_only",
+  "workspace": {
+    "id": "contracts-2026",
+    "manifest_digest": "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f",
+    "dirty": false
+  },
+  "constraints": {
+    "required_features": ["tools"],
+    "require_host_proven_isolation": false,
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
+  },
+  "context": [
+    {
+      "id": "task",
+      "kind": "task",
+      "trust": "host",
+      "required": true,
+      "content": "Extract every obligation and its deadline.",
+      "content_digest": "sha256:7e52f0015f627c719ec169bb16b22b42be175818732291b64627a32b50cbdfac"
+    },
+    {
+      "id": "contract-excerpt",
+      "kind": "background",
+      "trust": "workspace",
+      "required": false,
+      "content": "Contract text: the supplier delivers within 30 days.",
+      "content_digest": "sha256:ee7eb5cce0f9916382000aac3583109f41ec2db6932b458387fd1850f1278e68"
+    }
+  ],
+  "grants": [
+    {"handle": "read-docs", "kind": "file.read", "roots": ["documents"]},
+    {"handle": "search-docs", "kind": "file.search", "roots": ["documents"]}
+  ],
+  "budget": {
+    "deadline": "2099-01-01T00:00:00Z",
+    "max_iterations": 6,
+    "max_tool_calls": 12,
+    "max_input_tokens": 60000,
+    "max_output_tokens": 4000,
+    "max_artifact_bytes": 2097152,
+    "max_provider_retries": 1
+  },
+  "providers": [
+    {
+      "id": "scripted",
+      "kind": "scripted",
+      "model": "scripted-model",
+      "model_version": "unknown",
+      "config_fingerprint": "fp-scripted",
+      "eligible": true,
+      "pinned": false,
+      "preference": 0,
+      "isolation": "unproven",
+      "context_window": 32000,
+      "max_output_tokens": 4000
+    }
+  ]
+}

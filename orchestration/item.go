@@ -15,18 +15,15 @@ const (
 	// ItemQueued is a live child run that is not holding a capacity slot and
 	// is not waiting on anything but capacity or its turn.
 	ItemQueued ItemState = "queued"
-	// ItemRunning is a live child run holding a scheduler slot, or one whose
-	// worker reported a handoff the runtime has not yet bound to a commit.
+	// ItemRunning is a live child run holding a scheduler slot.
 	ItemRunning ItemState = "running"
 	// ItemWaiting is a live child run in a typed wait or an operator pause.
 	ItemWaiting ItemState = "waiting"
-	// ItemHandoffPending is a child whose latest finished worker invocation
-	// did not transfer an admissible handoff. Provider success is not
-	// orchestration completion.
+	// ItemHandoffPending is a child whose producer stage finished and whose
+	// only remaining orchestration obligation is an admissible handoff.
 	ItemHandoffPending ItemState = "handoff_pending"
-	// ItemCompleted is a child whose latest finished worker invocation
-	// transferred a handoff the runtime admitted and bound to the exact
-	// candidate it committed. The child run keeps its own governed lifecycle.
+	// ItemCompleted is a finished producer stage with an admitted completed
+	// handoff. The child may still await forge review in its governed lifecycle.
 	ItemCompleted ItemState = "completed"
 	// ItemPartial is a child whose latest finished invocation transferred an
 	// ADMITTED handoff that reports unresolved work. Admission proves the
@@ -54,6 +51,8 @@ const (
 	ActivityIdle    RunActivity = "idle"
 	ActivityWorking RunActivity = "working"
 	ActivityWaiting RunActivity = "waiting"
+	// ActivityFinished means the runtime durably reached its producer-stage goal.
+	ActivityFinished RunActivity = "finished"
 )
 
 // HandoffObservation is the latest thing the runtime recorded about a worker
@@ -106,34 +105,34 @@ func ProjectItem(facts ChildFacts) (ItemState, error) {
 	default:
 		return "", fmt.Errorf("unrecognized run termination %q", facts.Termination)
 	}
-	switch facts.Handoff {
-	case HandoffAdmitted:
-		switch facts.HandoffOutcome {
-		case OutcomeCompleted:
-			return ItemCompleted, nil
-		case OutcomePartial:
-			return ItemPartial, nil
-		}
+	if facts.Handoff == HandoffAdmitted && facts.HandoffOutcome != OutcomeCompleted && facts.HandoffOutcome != OutcomePartial {
 		return "", fmt.Errorf("unrecognized admitted handoff outcome %q", facts.HandoffOutcome)
-	case HandoffRefused:
-		return ItemHandoffPending, nil
 	}
-	// A child that ENDED without an admitted handoff will never produce one.
-	if facts.Termination == RunCompleted {
-		return ItemHandoffPending, nil
-	}
-	if facts.Handoff == HandoffReported {
-		return ItemRunning, nil
-	}
+	// Live execution, remediation and waits outrank a previous invocation's
+	// report. A terminal completion with owned work is a torn observation.
 	switch facts.Activity {
 	case ActivityWorking:
+		if facts.Termination == RunCompleted {
+			return "", fmt.Errorf("completed child still owns an operation")
+		}
 		return ItemRunning, nil
-	case ActivityWaiting:
-		return ItemWaiting, nil
-	case ActivityIdle:
-		return ItemQueued, nil
+	case ActivityIdle, ActivityWaiting, ActivityFinished:
+	default:
+		return "", fmt.Errorf("unrecognized run activity %q", facts.Activity)
 	}
-	return "", fmt.Errorf("unrecognized run activity %q", facts.Activity)
+	if facts.Termination == RunCompleted || facts.Activity == ActivityFinished {
+		if facts.Handoff != HandoffAdmitted {
+			return ItemHandoffPending, nil
+		}
+		if facts.HandoffOutcome == OutcomePartial {
+			return ItemPartial, nil
+		}
+		return ItemCompleted, nil
+	}
+	if facts.Activity == ActivityWaiting {
+		return ItemWaiting, nil
+	}
+	return ItemQueued, nil
 }
 
 // Counts is the aggregate a whole batch is read through.

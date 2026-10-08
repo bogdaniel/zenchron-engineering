@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,11 +46,13 @@ type journalEntry struct {
 // effect is a handler's complete answer: what to journal, what to remember on
 // the operation, and how the operation ended.
 type effect struct {
-	events []journalEntry
-	result any
-	state  OperationState
-	// interrupted is set only by invokeExecution, and only when an operator
-	// stop ended the attempt: no provider was started, or the provider's
+	failure *OperationFailure
+	events  []journalEntry
+	result  any
+	state   OperationState
+	// interrupted is set only by the provider-backed handlers - invokeExecution
+	// and repairHandoff (#492) - and only when an operator stop ended the
+	// attempt: no provider was started, or the provider's
 	// executor committed the stop as the owner of its termination (#213).
 	interrupted bool
 }
@@ -65,7 +68,7 @@ func failed(err error) effect {
 	if cause == TransportUnrecognized {
 		cause = ""
 	}
-	return effect{state: OperationFailed, result: struct {
+	return effect{state: OperationFailed, failure: deterministicIdentity(err), result: struct {
 		Error          string         `json:"error"`
 		FailureClass   FailureClass   `json:"failure_class,omitempty"`
 		TransportCause TransportCause `json:"transport_cause,omitempty"`
@@ -113,9 +116,10 @@ func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op Run
 		OpPullRequestCreate: r.createPullRequest,
 		OpPullRequestUpdate: r.updatePullRequest,
 		OpGitHubObserve:     r.observeGitHub,
+		OpHandoffRepair:     r.repairHandoff,
 	}[op.Kind]
 	if !ok {
-		return failed(fmt.Errorf("no handler for operation kind %q", op.Kind))
+		return failed(deterministicRefusal("operation.handler_missing", fmt.Errorf("no handler for operation kind %q", op.Kind)))
 	}
 	return handler(ctx, state, op)
 }
@@ -594,7 +598,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			// writer, and never an operator stop - that is a durable act the
 			// execution watcher observes, not a context.
 			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
-			result := notStartedResult("", "", "", operation.AttemptIdentity, notStarted)
+			result := execution.NotStartedResult("", "", "", operation.AttemptIdentity, notStarted)
 			class := result.Failure.Classification
 			return effect{state: OperationFailed, result: executionRecord{
 				mutationResult: mutationResult{FailureClass: class},
@@ -759,6 +763,16 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
+	// A WORK GRAPH unit's child run receives the exact admitted upstream
+	// handoffs its activation was bound to (#472). An ordinary orchestrated run
+	// and a plan stage run are unchanged: neither has a unit origin.
+	unit, err := r.workUnit(state)
+	if err != nil {
+		return effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
 	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
 	//
 	// It is NOT operation.Attempt. That is the budget counter, and a provider
@@ -840,6 +854,10 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation and only for a run an orchestration batch created. Every
 	// other run is given no path and is unchanged.
 	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
+	var messagePath, communication string // #473, same rule; communication_slot.go
+	if err == nil {
+		messagePath, communication, err = r.prepareMessages(state, operation.ID, physicalAttempt)
+	}
 	if err != nil {
 		return effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureUnknown},
@@ -898,9 +916,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// never through the lease heartbeat: a controller being alive is a
 	// different claim from the work moving, and #238 is the cost of letting the
 	// first stand in for the second.
-	ctx = withProviderProgressRecorder(ctx,
-		func(progress ProviderProgress) {
-			_, _ = r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, progress)
+	// The writer returns the write's error; its derived recorder drops it (#518).
+	ctx = execution.WithProgressWriter(ctx,
+		func(progress ProviderProgress) error {
+			_, err := r.scheduler.RecordProviderProgress(operation.ID, physicalAttempt, progress)
+			return err
 		})
 	// A continuation is bounded independently of the original operation.
 	// The absolute deadline also makes a spent (zero) allowance fail closed.
@@ -925,10 +945,14 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureRunCancelled, ExecutionResult{}, errStoppedBeforeProvider),
 		}}
 	}
-	result, execErr := r.deps.Provider.Execute(executing, stage.apply(ExecutionRequest{
+	executing = withVerificationExecution(executing, r.scheduler,
+		ExecutionAttemptRef{RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt}, r.deps.StateDir)
+	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
 		HandoffPath:            handoffPath,
+		MessagePath:            messagePath,
+		Communication:          communication,
 		ScratchDir:             scratchDir,
 		// The operation that authorized this invocation owns the Docker
 		// lifecycle of anything it brokers. Tool calls inside one invocation
@@ -978,8 +1002,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// The same authority as an instant, so the process bound and the
 		// provenance record cannot describe different realities.
 		Deadline: operation.Deadline,
-	}))
+	})))
 	watch = endWatch()
+	typed := readTypedResultSlots(reviewerResultPath, feedbackResolutionPath, &result)
 	// THE ATTEMPT EXPLAINS ITSELF DURABLY (#327). Provenance exists only for
 	// an invocation that reached a provider, and it is journalled on EVERY
 	// path out of here - success, failure, deadline, revocation, refusal -
@@ -998,6 +1023,23 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	recorded := func(e effect) effect {
 		e.events = append(append([]journalEntry(nil), attemptProvenance...), e.events...)
 		return e
+	}
+	// A tool may outlive an interrupted provider. Until its ownership is
+	// settled, even quarantine or checkpointing could race that writer.
+	pendingTools, toolErr := r.scheduler.VerificationCleanupPending(state.run.ID)
+	if toolErr != nil || pendingTools {
+		class := FailureUnknown
+		if result.Failure != nil {
+			class = result.Failure.Classification
+		}
+		cause := errors.Join(execErr, toolErr)
+		if pendingTools {
+			cause = errors.Join(cause, errors.New("nested verification cleanup remains unverified"))
+		}
+		return recorded(effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: class, ProviderExecuted: reachedWorker(result, execErr)},
+			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, class, result, cause),
+		}})
 	}
 	if err := workspace.AssertIntegrity(); err != nil {
 		return recorded(r.restoreCandidate(workspace, err))
@@ -1049,21 +1091,21 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// discarded, so an operator sees why it did not bind instead of a bare
 	// "nothing happened".
 	var resolutionErr error
-	if result.Resolution != nil && execErr == nil && result.Failure == nil {
+	if typed.Resolution != nil && execErr == nil && result.Failure == nil {
 		deliveredKeys := make([]string, 0, len(feedback))
 		for _, item := range feedback {
 			deliveredKeys = append(deliveredKeys, item.Key)
 		}
 		switch {
 		case purpose == InvocationContinuation:
-			if resolved, admitErr := AdmitCheckpointCompletion(deliveredKeys, subject.Commit, subject.Tree, result.Resolution); admitErr == nil {
+			if resolved, admitErr := AdmitCheckpointCompletion(deliveredKeys, subject.Commit, subject.Tree, typed.Resolution); admitErr == nil {
 				record.ResolvedFeedback = resolved
 				record.CheckpointResolved = true
 			} else {
 				resolutionErr = admitErr
 			}
 		case !record.Mutated:
-			if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, result.Resolution); admitErr == nil {
+			if resolved, admitErr := AdmitFeedbackResolution(deliveredKeys, subject.Commit, typed.Resolution); admitErr == nil {
 				record.ResolvedFeedback = resolved
 			} else {
 				resolutionErr = admitErr
@@ -1087,7 +1129,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// feedback gate just above. A stage whose role produces a verdict crosses
 	// the reviewer-result protocol in exactly one of two ways: it writes a
 	// result that fails to decode (result.Failure is already set for that, by
-	// the adapter), or it writes a result that decodes (result.Review is
+	// readTypedResultSlots), or it writes a result that decodes (typed.Review is
 	// non-nil). Provider return with NEITHER is a third way - a clean exit
 	// that wrote nothing to the runtime-owned path - and left unchecked it is
 	// the #374 second dogfood shape exactly: the invocation is recorded
@@ -1097,7 +1139,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// bounded-retry class a malformed result gets, so the run keeps asking
 	// for a verdict rather than silently waiting on one that will never come.
 	reviewUnresolved := stage.producesVerdict() && execErr == nil &&
-		result.Failure == nil && result.Review == nil
+		result.Failure == nil && typed.Review == nil
 	// THE CHECKPOINT CONTINUATION COMPLETION GATE (#379), generalizing #376's
 	// feedback gate from feedback discharge to checkpoint continuation itself.
 	// A continuation inherits a checkpoint - work a prior attempt left
@@ -1184,7 +1226,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	if execErr == nil && result.Failure == nil && revoked == "" && providerOutcome(result, execErr) == Succeeded {
 		// Admission happens in the RUNTIME, against the frozen assignment -
-		// never in the adapter, which only read a file. A refused result FAILS
+		// never in the slot read, which only decoded a file. A refused result FAILS
 		// the operation: something claimed authority it did not have, and
 		// treating that as "no verdict" would let a malformed or mis-scoped
 		// claim look identical to an honest silence.
@@ -1196,8 +1238,8 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// result that reports OperationFailed or OperationCancelled with a nil
 		// Failure would be exactly the unfinished-invocation-contributing-a-
 		// finished-answer defect this gate exists to close.
-		if result.Review != nil {
-			if admitErr := r.admitReview(state, stage, result, operation); admitErr != nil {
+		if typed.Review != nil {
+			if admitErr := r.admitReview(state, stage, result.ProviderID, typed.Review, operation); admitErr != nil {
 				var refusal *ReviewerResultRefusedError
 				if errors.As(admitErr, &refusal) {
 					refusal = &ReviewerResultRefusedError{StageID: boundedDetail(refusal.StageID), Detail: boundedDetail(refusal.Detail), Protocol: refusal.Protocol}
@@ -1247,6 +1289,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			if handoffPath != "" {
 				events = append(events, handoffObservation(handoffPath, operation.ID, physicalAttempt))
 			}
+			events = appendMessageObservation(events, messagePath, operation.ID, physicalAttempt)
 		}
 	}
 	// The worker has now been shown the feedback, so its delivery is recorded.
@@ -1457,13 +1500,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			mutationResult: record,
 			PriorContext:   result.PriorContext,
 			// Carried whether this refusal came from a decode failure (set by
-			// the adapter on ExecutionResult) or survives from nowhere else:
+			// readTypedResultSlots) or survives from nowhere else:
 			// the admission-refusal path below sets its own ReviewRefusal on
 			// its own executionRecord literal, and this is the OTHER place a
 			// reviewer-role invocation's exact reason must reach the journal
 			// rather than being discarded down to a bare classification
 			// (#374).
-			ReviewRefusal: result.ReviewRefusal,
+			ReviewRefusal: typed.ReviewRefusal,
 			Diagnostic:    r.executionDiagnostic(stage, class, result, execErr),
 			// Real work exists but the producer did not finish, so what it left
 			// is a CHECKPOINT: preserved, exactly identified, reassessed, and
@@ -1585,7 +1628,7 @@ func (s *runState) admitSuccessor(d *ExecutionDiagnostic, operation RunOperation
 		d.SuccessorUnavailable = "execution_continuations_exhausted"
 	// The run TOTAL of provider invocations (a plan stage's headroom). The
 	// projection was read before this attempt began, so it is counted here.
-	case s.providerInvocationLimit() > 0 && s.projection.Attempts[OpExecutionInvoke]+1 >= s.providerInvocationLimit():
+	case s.providerInvocationLimit() > 0 && s.providerInvocationsSpent()+1 >= s.providerInvocationLimit():
 		d.SuccessorUnavailable = "run_provider_invocations_exhausted"
 	}
 	if d.SuccessorUnavailable != "" {
@@ -1769,7 +1812,7 @@ func providerOutcome(result ExecutionResult, err error) OperationState {
 		return OperationFailed
 	}
 	if result.Outcome != "" {
-		return result.Outcome
+		return OperationState(result.Outcome) // the host conversion: same strings, host type
 	}
 	return Succeeded
 }
@@ -1965,7 +2008,7 @@ func (r *EngineeringRuntime) remediateFormat(ctx context.Context, state *runStat
 	}
 	goPaths := FormatPaths(paths)
 	if len(goPaths) == 0 {
-		return failed(fmt.Errorf("format failure has no Go paths"))
+		return failed(deterministicRefusal("format.go_paths_missing", fmt.Errorf("format failure has no Go paths")))
 	}
 	if err := (LocalGofmt{}).Format(ctx, workspace.Dir, goPaths); err != nil {
 		return failed(err)
@@ -2021,7 +2064,7 @@ func (r *EngineeringRuntime) commitCandidate(_ context.Context, state *runState,
 	var recovered *CommitResult
 	if err != nil {
 		if workspace, recovered, err = r.recoverRuntimeCommit(state, prior, err); err != nil {
-			return effect{state: OperationFailed, result: commitFailure{
+			return effect{state: OperationFailed, failure: deterministicIdentity(err), result: commitFailure{
 				Error: boundedDetail(err.Error()), Stage: commitStageWorkspace,
 				RuntimeCommit: prior, UnprovenHead: r.refusedHead(state, prior),
 			}}
@@ -2146,7 +2189,7 @@ type observedHead struct {
 }
 
 func commitFailed(stage string, err error, made *runtimeCommit) effect {
-	return effect{state: OperationFailed, result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
+	return effect{state: OperationFailed, failure: deterministicIdentity(err), result: commitFailure{Error: boundedDetail(err.Error()), Stage: stage, RuntimeCommit: made}}
 }
 
 func candidateCommitMessage(state *runState) string {
@@ -2229,7 +2272,7 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	}
 	head, err := readHead(dir)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	if prior == nil {
 		return refuse("no attempt recorded a runtime commit, so the head is unproven")
@@ -2242,15 +2285,15 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	// Commit records lists both sides.
 	store, err := subjectStore(dir, head.Commit)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	paths, err := diffPaths(store, expected, head.Commit, "--no-renames")
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	metadata, err := gitMetadataDigest(dir)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	switch {
 	case pathsDigest(paths) != prior.PathsDigest:
@@ -2260,10 +2303,10 @@ func (r *EngineeringRuntime) recoverRuntimeCommit(state *runState, prior *runtim
 	}
 	residue, err := dirtyPathsOutside(dir, prior.ExcludedPaths)
 	if err != nil {
-		return refuse(err.Error())
+		return nil, nil, fmt.Errorf("%v; observe runtime commit recovery: %w", cause, err)
 	}
 	if len(residue) > 0 {
-		return refuse("work is still uncommitted: " + quotedPaths(residue))
+		return nil, nil, deterministicRefusal("candidate.residue", fmt.Errorf("%w; work is still uncommitted: %s", cause, quotedPaths(residue)))
 	}
 	return &CandidateWorkspace{
 			Dir: dir, BaseRevision: state.baseRevision(), TrustedMetadata: metadata,
@@ -2504,7 +2547,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	}
 	claims := state.semanticClaims()
 	if len(claims) == 0 {
-		return failed(fmt.Errorf("no semantic claim is required by this contract"))
+		return failed(deterministicRefusal("contract.semantic_claim_missing", fmt.Errorf("no semantic claim is required by this contract")))
 	}
 	paths, err := candidatePaths(workspace.Dir, state.pinnedBase(), commit)
 	if err != nil {
@@ -3097,7 +3140,7 @@ func (r *EngineeringRuntime) buildKernel(state *runState) (KernelState, error) {
 // decision identity #7 derives from it.
 func (r *EngineeringRuntime) buildKernelAt(state *runState, workspaceDir, commit string) (KernelState, error) {
 	if state.source == nil {
-		return KernelState{}, fmt.Errorf("the source snapshot has not been pinned")
+		return KernelState{}, deterministicRefusal("kernel.source_unpinned", fmt.Errorf("the source snapshot has not been pinned"))
 	}
 	text, err := r.untrustedSource(*state.source)
 	if err != nil {
@@ -3445,29 +3488,95 @@ const maxUpstreamDiffBytes = 96 << 10
 func (r *EngineeringRuntime) upstreamOutputs(assignment domain.AgentAssignment) ([]UpstreamContext, error) {
 	outputs := make([]UpstreamContext, 0, len(assignment.Context.UpstreamOutputs))
 	for _, upstream := range assignment.Context.UpstreamOutputs {
-		context := UpstreamContext{
+		context, err := r.withUpstreamDiff(UpstreamContext{
 			StageID: upstream.StageID, RunID: upstream.RunID,
 			Commit: upstream.Candidate, Tree: upstream.Tree,
-		}
-		if upstream.RunID != "" && upstream.Candidate != "" {
-			dir := candidateDir(r.deps.StateDir, upstream.RunID)
-			if dirExists(dir) {
-				run, found, err := r.deps.Store.Run(upstream.RunID)
-				if err != nil {
-					return nil, err
-				}
-				base := ""
-				if found {
-					base = run.Base.Revision
-				}
-				if diff, truncated := readCandidateDiff(dir, base, upstream.Candidate); diff != "" {
-					context.Diff, context.Truncated = diff, truncated
-				}
-			}
+		})
+		if err != nil {
+			return nil, err
 		}
 		outputs = append(outputs, context)
 	}
 	return outputs, nil
+}
+
+// withUpstreamDiff fills in the change an upstream output actually contains.
+//
+// It is ONE reader with two callers - plan stages and WorkGraph units - because
+// "what did this upstream produce" has one answer. Best effort by design: a
+// reclaimed workspace is a missing diff, not a failed invocation, and the
+// consumer is told the diff could not be read rather than handed silence.
+func (r *EngineeringRuntime) withUpstreamDiff(context UpstreamContext) (UpstreamContext, error) {
+	if context.RunID == "" || context.Commit == "" {
+		return context, nil
+	}
+	dir := candidateDir(r.deps.StateDir, context.RunID)
+	if !dirExists(dir) {
+		return context, nil
+	}
+	run, found, err := r.deps.Store.Run(context.RunID)
+	if err != nil {
+		return UpstreamContext{}, err
+	}
+	base := ""
+	if found {
+		base = run.Base.Revision
+	}
+	if diff, truncated := readCandidateDiff(dir, base, context.Commit); diff != "" {
+		context.Diff, context.Truncated = diff, truncated
+	}
+	return context, nil
+}
+
+// workUnitContext is the upstream a WorkGraph unit's child run consumes (#472).
+//
+// It is read from the run's OWN durable binding: the run names the batch that
+// created it, and that batch's origin names the unit and the exact admitted
+// handoffs the unit was activated against. So the invocation receives precisely
+// the inputs the activation recorded, and an invocation of a run bound to some
+// other batch receives none of them.
+//
+// Composing upstream CODE into this candidate is #475's; this carries the exact
+// handoff and subject into the invocation, which is what makes the activation's
+// recorded input set a fact about the execution rather than bookkeeping.
+type workUnitContext struct{ upstream []UpstreamContext }
+
+// apply gives the invocation its upstream. It widens nothing: permissions,
+// prohibitions and acceptance still come from the compiled contract.
+func (w workUnitContext) apply(request ExecutionRequest) ExecutionRequest {
+	if len(w.upstream) > 0 {
+		request.Upstream = w.upstream
+	}
+	return request
+}
+
+func (r *EngineeringRuntime) workUnit(state *runState) (workUnitContext, error) {
+	if state.run.Orchestration == nil || state.run.Orchestration.BatchID == "" {
+		return workUnitContext{}, nil
+	}
+	batch, found, err := r.deps.Store.OrchestrationBatch(state.run.Orchestration.BatchID)
+	if err != nil {
+		return workUnitContext{}, err
+	}
+	if !found || batch.Origin == nil || len(batch.Origin.Inputs) == 0 {
+		return workUnitContext{}, nil
+	}
+	upstream := make([]UpstreamContext, 0, len(batch.Origin.Inputs))
+	for _, input := range batch.Origin.Inputs {
+		context, err := r.withUpstreamDiff(UpstreamContext{
+			StageID: input.UnitID, RunID: input.RunID,
+			Commit: input.CandidateRevision, Tree: input.CandidateTree,
+			Handoff: &UpstreamHandoff{
+				ID: input.HandoffID, Outcome: input.Outcome, Summary: input.Summary,
+				Unresolved: input.Unresolved, RecommendedNext: input.RecommendedNext,
+			},
+		})
+		if err != nil {
+			return workUnitContext{}, err
+		}
+		upstream = append(upstream, context)
+	}
+	return workUnitContext{upstream: upstream}, nil
 }
 
 // readCandidateDiff reads one upstream run's change. It is best effort by
@@ -3517,12 +3626,10 @@ func (r *EngineeringRuntime) missingWorkerTools(ctx context.Context) []string {
 	if len(toolchain.RequiredTools) == 0 {
 		return nil
 	}
-	if provider, ok := r.deps.Provider.(interface {
-		MissingTools(context.Context, []string) []string
-	}); ok {
-		return provider.MissingTools(ctx, toolchain.RequiredTools)
+	if prober, ok := r.deps.Provider.(ToolchainProber); ok {
+		return prober.MissingTools(ctx, toolchain.RequiredTools)
 	}
-	return CLIAgentProvider{Toolchain: toolchain}.missingTools()
+	return hostMissingTools(toolchain)
 }
 
 // admitReview checks one structured reviewer result and, if it may become
@@ -3540,7 +3647,7 @@ func (r *EngineeringRuntime) missingWorkerTools(ctx context.Context) []string {
 //     retried operation idempotent rather than duplicating a verdict;
 //   - a second, CONFLICTING verdict for the same attempt is refused by the
 //     store's own primary key rather than silently replacing the first.
-func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext, result ExecutionResult, operation RunOperation) error {
+func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext, providerID string, review *ReviewerResult, operation RunOperation) error {
 	binding := state.run.Plan
 	if binding == nil || stage.assignment == nil {
 		return &ReviewerResultRefusedError{Detail: "a reviewer result was produced by a run that is not bound to a plan stage"}
@@ -3575,7 +3682,7 @@ func (r *EngineeringRuntime) admitReview(state *runState, stage planStageContext
 	if subject == nil {
 		return &ReviewerResultRefusedError{StageID: binding.StageID, Detail: "the assignment froze no upstream candidate for this stage to have reviewed"}
 	}
-	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, *subject, state.run.ID, result.ProviderID, result.Review)
+	payload, err := AdmitReviewerResult(declared, *stage.assignment, binding, *subject, state.run.ID, providerID, review)
 	if err != nil {
 		return err
 	}

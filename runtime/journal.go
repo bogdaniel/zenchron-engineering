@@ -185,6 +185,12 @@ func (s *SQLiteOperationStore) queryRuns(where string, args ...any) ([]Engineeri
 // is O(n) per event. A cached snapshot per run is the upgrade if a journal ever
 // grows past a few thousand events.
 func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent, error) {
+	return s.appendEventWithMutation(e, nil)
+}
+
+// appendEventWithMutation couples scheduler-owned resource state to its
+// journal observation under the existing stream transaction.
+func (s *SQLiteOperationStore) appendEventWithMutation(e EngineeringEvent, mutate func(*sql.Tx) error) (EngineeringEvent, error) {
 	if e.ID == "" || e.RunID == "" {
 		return EngineeringEvent{}, fmt.Errorf("event id and run id are required")
 	}
@@ -220,7 +226,7 @@ func (s *SQLiteOperationStore) AppendEvent(e EngineeringEvent) (EngineeringEvent
 		}
 	}
 	return s.appendToStream(e, journalStream{
-		kind: streamRun, id: e.RunID, allocate: allocate,
+		kind: streamRun, id: e.RunID, allocate: allocate, mutate: mutate,
 		// The run row is read INSIDE the transaction. That read is what the
 		// dropped foreign key used to guarantee: an event may not be journalled
 		// against a run that does not exist.
@@ -261,6 +267,7 @@ type journalStream struct {
 	events   func(*sql.Tx) ([]EngineeringEvent, error)
 	digest   func([]EngineeringEvent) (string, error)
 	insert   func(*sql.Tx, EngineeringEvent, string, int64) error
+	mutate   func(*sql.Tx) error
 	// allocate finalizes a payload member whose value depends on the events
 	// already in the stream, INSIDE the append transaction and against the
 	// events this append is ordered after.
@@ -369,6 +376,11 @@ func (s *SQLiteOperationStore) appendToStream(e EngineeringEvent, stream journal
 	}
 	if err := stream.insert(tx, e, string(canonical), globalSequence); err != nil {
 		return EngineeringEvent{}, err
+	}
+	if stream.mutate != nil {
+		if err := stream.mutate(tx); err != nil {
+			return EngineeringEvent{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return EngineeringEvent{}, err

@@ -45,18 +45,6 @@ import (
 	"time"
 )
 
-// ErrProviderInactive is the cause a cancelled provider context carries when
-// the inactivity policy - not the deadline, not a shutdown, not the operator -
-// is what ended the invocation.
-//
-// It is a CAUSE rather than a return value because the thing that observes the
-// silence is the process runner, several frames below the adapter that has to
-// classify it, and context.Cause is the one channel that already crosses that
-// boundary. Without it an inactivity kill was indistinguishable from a
-// supervisor shutdown through ctx.Err() alone, and those two mean opposite
-// things to a run: one is a dead provider, the other is a resumable pause.
-var ErrProviderInactive = errors.New("the provider produced no output within its inactivity bound")
-
 // DefaultProviderInactivitySeconds is the shipped no-progress window.
 //
 // It is ten minutes, and it is derived from this repository's own conventions
@@ -112,31 +100,6 @@ func withProviderInactivity(ctx context.Context, limit time.Duration, record fun
 	return context.WithValue(bounded, inactivityPolicyKey{}, policy), func() { cancel(nil) }
 }
 
-type progressRecorderKey struct{}
-
-// withProviderProgressRecorder supplies the DURABLE half of the policy: where
-// observed progress is written so that status can report it and a restart can
-// read it back.
-//
-// It is separate from the bound itself because the two come from different
-// places. The bound is a budget and travels with the request, like every other
-// budget; the recorder is the caller's own durable operation state, which an
-// adapter must not know the shape of. A caller that keeps none - the planner,
-// a probe, a test - supplies none, and the bound still applies.
-func withProviderProgressRecorder(ctx context.Context, record func(ProviderProgress)) context.Context {
-	if record == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, progressRecorderKey{}, record)
-}
-
-// providerProgressRecorder returns the caller's durable progress recorder, or
-// nil when none was supplied.
-func providerProgressRecorder(ctx context.Context) func(ProviderProgress) {
-	record, _ := ctx.Value(progressRecorderKey{}).(func(ProviderProgress))
-	return record
-}
-
 // providerInactivityCause reports whether this context was ended by the
 // inactivity policy. It is the adapter's question, and it is asked of the
 // CAUSE so that a deadline, a shutdown and a stall stay three answers.
@@ -159,7 +122,8 @@ func providerInactivityLimit(ctx context.Context) time.Duration {
 // evidence that the invocation is moving. The cancel and the durable recorder
 // are shared; the timing is not.
 type inactivityWatch struct {
-	policy *inactivityPolicy
+	policy       *inactivityPolicy
+	verification *verificationExecution
 	// start is the monotonic origin, so every duration below survives a
 	// wall-clock adjustment. last is nanoseconds since start.
 	start time.Time
@@ -198,24 +162,6 @@ type observation struct {
 	at  time.Time
 	// suspendedSince is when a structured main-thread tool opened, or zero.
 	suspendedSince time.Time
-}
-
-// ProviderProgress is one durable observation of a live provider invocation,
-// as Scheduler.RecordProviderProgress receives it.
-type ProviderProgress struct {
-	// Key is the progress fingerprint; the durable instant moves only when it
-	// changes.
-	Key string
-	// Age is how long before this write the progress was OBSERVED. The row
-	// must say when the work moved, not when the coalescer wrote it (#352).
-	Age time.Duration
-	// Suspended reports a structured main-thread tool held open (#322), and
-	// SuspendedAge how long before this write it opened.
-	Suspended    bool
-	SuspendedAge time.Duration
-	// Final is the recorder's closing write: the process has ended under an
-	// observing controller, so nothing it observed is still unwritten.
-	Final bool
 }
 
 // progressRecordInterval is how often one process may write durable progress:
@@ -263,6 +209,9 @@ func armInactivityWatch(ctx context.Context) *inactivityWatch {
 	w := &inactivityWatch{
 		policy: policy, start: time.Now(),
 		quit: make(chan struct{}), stopped: make(chan struct{}), ended: ctx.Done(),
+	}
+	if v, ok := verificationExecutionFrom(ctx); ok {
+		w.verification = &v
 	}
 	if policy.record != nil {
 		w.recorder = newProgressRecorder(policy.record, progressRecordInterval(policy.limit))
@@ -479,7 +428,18 @@ func (o observation) progress(final bool) ProviderProgress {
 
 // silent reports how long it has been since output arrived.
 func (w *inactivityWatch) silent() time.Duration {
-	return time.Since(w.start) - time.Duration(w.last.Load())
+	since := w.start.Add(time.Duration(w.last.Load()))
+	now := time.Now()
+	silent := now.Sub(since)
+	if w.verification != nil {
+		var err error
+		silent, err = w.verification.silence(since, now)
+		if err != nil {
+			w.policy.cancel(err)
+			return 0
+		}
+	}
+	return max(silent, 0)
 }
 
 // complete records that the PROCESS FINISHED FIRST.

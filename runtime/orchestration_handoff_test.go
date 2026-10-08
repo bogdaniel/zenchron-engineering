@@ -263,7 +263,7 @@ func TestARestartRecreatesNothingAndRecoversWhatDidNotLand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := engine.planOrchestrationBatch(id, fleetIssues(10), "operator@example", nil)
+	planned, err := engine.planOrchestrationBatch(id, fleetIssues(10), "operator@example", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,11 +53,6 @@ const (
 	AgentKindOpenAIResponses = "openai_responses"
 )
 
-// TrustMode is what the runtime may honestly claim about the boundary around
-// one execution worker. It is not a capability and never an authority: an
-// operator_trusted agent may author a change and still cannot authorize it.
-type TrustMode string
-
 const (
 	// TrustOperatorTrusted is a tool the local operator installed,
 	// authenticated and chose to run. Its candidate WRITE scope is bounded

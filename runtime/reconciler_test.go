@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ type isolatedProvider struct {
 
 func newIsolatedProvider(mutate func(dir string) error) *isolatedProvider {
 	return &isolatedProvider{
-		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "test-provider", Outcome: Succeeded}},
+		FakeExecutionProvider: &FakeExecutionProvider{Result: ExecutionResult{ProviderID: "test-provider", Outcome: execution.Succeeded}},
 		mutate:                mutate,
 	}
 }
@@ -128,15 +129,7 @@ func (p *isolatedProvider) Execute(ctx context.Context, request ExecutionRequest
 	if marshalErr != nil {
 		return result, marshalErr
 	}
-	if writeErr := os.WriteFile(request.FeedbackResolutionPath, document, 0o600); writeErr != nil {
-		return result, writeErr
-	}
-	resolution, readErr := ReadFeedbackResolution(request.FeedbackResolutionPath)
-	if readErr != nil {
-		return result, readErr
-	}
-	result.Resolution = resolution
-	return result, nil
+	return result, os.WriteFile(request.FeedbackResolutionPath, document, 0o600)
 }
 
 // passingAssurance keeps FakeAssuranceProvider topped up so a run can verify

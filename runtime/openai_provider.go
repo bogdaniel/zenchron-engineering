@@ -49,6 +49,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 const openaiProviderID = "openai-responses"
@@ -65,52 +67,6 @@ const priorAttemptPreamble = "UNTRUSTED PRIOR-ATTEMPT OBSERVATIONS (runtime-supp
 // satisfies it; no dependency is added.
 type Doer interface {
 	Do(*http.Request) (*http.Response, error)
-}
-
-// ProviderStop is the typed reason a bounded reasoning loop ended. Every exit
-// from the loop carries one, so exhaustion is diagnosable and never silent.
-type ProviderStop string
-
-const (
-	StopCompleted        ProviderStop = "completed"
-	StopIterationBudget  ProviderStop = "iteration_budget_exhausted"
-	StopToolCallBudget   ProviderStop = "tool_call_budget_exhausted"
-	StopTokenBudget      ProviderStop = "token_budget_exhausted"
-	StopDeadlineExceeded ProviderStop = "deadline_exceeded"
-	StopNoProgress       ProviderStop = "no_progress"
-	StopCancelled        ProviderStop = "cancelled"
-	StopProviderError    ProviderStop = "provider_error"
-	// StopCostBudgetUnenforceable means the request named a MaxCostMicros
-	// ceiling but no trusted cost oracle is configured. The Responses API
-	// reports token usage, not money, and there is no authoritative source of
-	// monetary cost here: a requested ceiling that cannot be checked is refused
-	// rather than silently honored as if it were enforced.
-	StopCostBudgetUnenforceable ProviderStop = "cost_budget_unenforceable"
-)
-
-// ProviderStopError is the diagnosable outcome of a bounded loop. ExecutionResult
-// has no field for a stop reason and adapters.go is shared, so the reason is
-// carried as a typed error the caller matches with errors.As.
-type ProviderStopError struct {
-	Reason ProviderStop
-	Detail string
-	// Status and Code are the SAFE control-plane facts about an HTTP exchange
-	// that actually happened: the response status, and the provider's own error
-	// code when it returned one. Both are absent when no exchange occurred.
-	// Neither is credential-bearing, and the response BODY is deliberately not
-	// here - it belongs in the redacted transcript artifact, never in a caller's
-	// durable diagnostic.
-	Status int
-	Code   string
-	// Param names WHICH request field the provider rejected. It is a short,
-	// provider-authored field path (the observed 400 named "tools[0].name"),
-	// never a message body: without it an operator has to open the raw
-	// transcript to learn what was actually wrong with the request.
-	Param string
-}
-
-func (e *ProviderStopError) Error() string {
-	return string(e.Reason) + ": " + e.Detail
 }
 
 type OpenAIProvider struct {
@@ -545,13 +501,13 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		return ExecutionResult{Executed: exchanged}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext, Executed: exchanged}
+	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: execution.Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext, Executed: exchanged}
 	if stop == StopCompleted {
 		return result, nil
 	}
-	result.Outcome = OperationFailed
+	result.Outcome = execution.Failed
 	if stop == StopCancelled || stop == StopDeadlineExceeded {
-		result.Outcome = OperationCancelled
+		result.Outcome = execution.Cancelled
 	}
 	result.Failure = &ProviderFailure{Classification: classification, RawDiagnosticRef: artifacts[0].Path}
 	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode, Param: providerParam}

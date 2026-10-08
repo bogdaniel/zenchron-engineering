@@ -384,18 +384,6 @@ func (r *EngineeringRuntime) feedbackContext(runID string, pending []FeedbackObs
 	return items
 }
 
-// FeedbackContext is one admitted item as a worker sees it: framed, attributed
-// and delimited. It is DATA. The trusted instruction text tells the worker so,
-// and nothing in this struct is ever treated as an instruction to the system.
-type FeedbackContext struct {
-	Key    string
-	Class  FeedbackClass
-	Actor  string
-	Path   string
-	Commit string
-	Body   string
-}
-
 // feedbackBlock renders admitted feedback for a prompt. The delimiters are the
 // same framing the pinned source text uses, because the trust status is the
 // same: third-party data describing desired behaviour.
@@ -441,13 +429,16 @@ const neutralizedFrameMarker = "[frame marker removed by runtime]"
 // see that the text contained the marker instead of wondering why it reads
 // oddly.
 //
-// Both markers are removed from every body, not just the one that frames it.
+// Every marker is removed from every body, not just the one that frames it.
 // The blocks are concatenated into one prompt, so a feedback body carrying the
-// upstream marker - or a diff carrying the feedback one - can close the other
-// block's frame just as effectively as its own.
+// upstream or inter-worker marker - or a diff or message carrying the
+// feedback one - can close another block's frame just as effectively as its
+// own.
 func neutralizeFrameMarker(text string) string {
-	text = strings.ReplaceAll(text, feedbackFrameMarker, neutralizedFrameMarker)
-	return strings.ReplaceAll(text, upstreamFrameMarker, neutralizedFrameMarker)
+	for _, marker := range []string{feedbackFrameMarker, upstreamFrameMarker, messagesFrameMarker} {
+		text = strings.ReplaceAll(text, marker, neutralizedFrameMarker)
+	}
+	return text
 }
 
 // neutralizeFramedField is the same for a value interpolated into a frame's
@@ -492,7 +483,33 @@ func upstreamBlock(items []UpstreamContext) string {
 		if strings.TrimSpace(body) == "" {
 			body = "[the runtime could not read this stage's diff]"
 		}
-		out.WriteString("\n" + body + "\n" + upstreamFrameMarker + "\n")
+		out.WriteString("\n" + upstreamHandoffLines(item.Handoff) + body + "\n" + upstreamFrameMarker + "\n")
+	}
+	return out.String()
+}
+
+// upstreamHandoffLines states the producer's admitted handoff report INSIDE the
+// untrusted frame. The report is worker-authored, so it is neutralized and
+// framed exactly as the diff is: it describes what a producer says it did, and
+// it expands nothing the consumer may do.
+func upstreamHandoffLines(handoff *UpstreamHandoff) string {
+	if handoff == nil {
+		return ""
+	}
+	var out strings.Builder
+	// Every value is a ONE-LINE field: neutralizeFramedField is what the frame
+	// header lines already use, and it collapses the newlines that would
+	// otherwise let a producer's summary pose as another labelled line.
+	fmt.Fprintf(&out, "handoff %s outcome %s\nsummary: %s\n",
+		neutralizeFramedField(handoff.ID), neutralizeFramedField(handoff.Outcome),
+		neutralizeFramedField(handoff.Summary))
+	for _, label := range []struct {
+		name  string
+		items []string
+	}{{"unresolved", handoff.Unresolved}, {"recommended next", handoff.RecommendedNext}} {
+		for _, item := range label.items {
+			fmt.Fprintf(&out, "%s: %s\n", label.name, neutralizeFramedField(item))
+		}
 	}
 	return out.String()
 }

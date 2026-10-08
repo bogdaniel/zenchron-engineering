@@ -40,6 +40,7 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
+	EventVerificationPermitChanged: payloadSchema(func(p VerificationPermit) error { return p.validate() }),
 	EventReviewContinuationGranted: payloadSchema(func(p ReviewContinuationGrant) error {
 		if p.ActiveBaseline < 0 || p.Allowance <= 0 || p.Allowance > 30*time.Minute {
 			return errors.New("invalid review continuation envelope")
@@ -71,10 +72,10 @@ var eventPayloads = map[string]payloadValidator{
 	// nothing, and strict because a recorded claim must be complete.
 	EventRunCreated: optionalPayload(payloadSchema(RunCreatedPayload.validate)),
 
-	EventRunWaiting:   dispositionPayload(false),
-	EventRunCompleted: dispositionPayload(false),
-	EventRunFailed:    dispositionPayload(true),
-	EventRunCancelled: dispositionPayload(false),
+	EventRunWaiting:   dispositionPayload(false, true),
+	EventRunCompleted: dispositionPayload(false, false),
+	EventRunFailed:    dispositionPayload(true, false),
+	EventRunCancelled: dispositionPayload(false, false),
 	// A pause records who asked and why; an unpause records who asked. Neither
 	// carries a disposition, a reason code or any authority (#86).
 	EventRunPaused: payloadSchema(func(p RunPausePayload) error {
@@ -151,20 +152,28 @@ var eventPayloads = map[string]payloadValidator{
 		if p.Outcome != orchestration.OutcomeCompleted && p.Outcome != orchestration.OutcomePartial {
 			return fmt.Errorf("handoff outcome %q is not a recognized outcome", p.Outcome)
 		}
+		if (p.RepairOperationID == "") != (p.RepairAttempt == 0) {
+			return errors.New("a repaired handoff report names both its repair operation and attempt, or neither")
+		}
 		return errors.Join(
 			required("operation_id", p.OperationID),
 			positive("attempt", p.Attempt),
+			nonNegative("repair_attempt", p.RepairAttempt),
 			required("report_sha256", p.ReportSHA256))
 	}),
 	EventHandoffRefused: payloadSchema(func(p HandoffRefusedPayload) error {
 		if p.Kind != HandoffMissing && p.Kind != HandoffInvalid {
 			return fmt.Errorf("handoff refusal kind %q is not a recognized kind", p.Kind)
 		}
+		if p.Repairable && (p.Kind != HandoffInvalid || p.ReportSHA256 == "") {
+			return errors.New("only an invalid report with a digest of its refused bytes is repairable")
+		}
 		return errors.Join(
 			required("operation_id", p.OperationID),
 			positive("attempt", p.Attempt),
 			required("detail", p.Detail))
 	}),
+	EventMessagesObserved: payloadSchema(validateMessagesObserved),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),
@@ -300,6 +309,25 @@ var eventPayloads = map[string]payloadValidator{
 // validateEventPayload enforces the byte ceiling and the per-type schema. It
 // runs before the append transaction, so a refused event writes no row.
 func validateEventPayload(e EngineeringEvent) error {
+	if e.Type == EventVerificationPermitChanged {
+		var p VerificationPermit
+		if err := strictJSON(e.Payload, &p); err != nil {
+			return err
+		}
+		if p.Parent.RunID != e.RunID || p.Parent.OperationID != e.OperationID {
+			return errors.New("verification observation does not match its parent")
+		}
+		at := p.RequestedAt
+		if p.GrantedAt != nil {
+			at = *p.GrantedAt
+		}
+		if p.ReleasedAt != nil {
+			at = *p.ReleasedAt
+		}
+		if !e.OccurredAt.Equal(at) {
+			return errors.New("verification observation does not match its transition time")
+		}
+	}
 	validate, implemented := eventPayloads[e.Type]
 	if !implemented {
 		if eventTypes[e.Type] {
@@ -323,36 +351,6 @@ func validateEventPayload(e EngineeringEvent) error {
 	return validate(e.Payload)
 }
 
-// dispositionPayload is what Reduce reads from the run disposition events.
-// Only run.failed may carry held material (#203); on any other disposition it
-// is refused rather than ignored.
-func dispositionPayload(mayHold bool) payloadValidator {
-	return func(raw json.RawMessage) error {
-		if len(raw) == 0 {
-			return nil
-		}
-		var payload dispositionRecord
-		if err := strictJSON(raw, &payload); err != nil {
-			return err
-		}
-		switch {
-		case payload.HeldMaterial == nil:
-			return nil
-		case !mayHold:
-			return errors.New("held_material is recorded only on run.failed")
-		}
-		return payload.HeldMaterial.validate()
-	}
-}
-
-// dispositionRecord is the run disposition payload. HeldMaterial is present
-// only on a budget-boundary failure that held valuable material (#203); every
-// older event, and every other disposition, has none.
-type dispositionRecord struct {
-	Reason       string        `json:"reason,omitempty"`
-	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
-}
-
 // operationPayload is the RunOperation lifecycle payload Reduce folds into the
 // snapshot. Reduce separately checks that the operation's run id matches the run
 // and that the event's operation id agrees; this only checks the shape.
@@ -367,7 +365,7 @@ func operationPayload(raw json.RawMessage) error {
 	if operation.ID == "" || operation.RunID == "" {
 		return errors.New("operation lifecycle payload requires an operation id and run id")
 	}
-	return nil
+	return operation.Failure.validate()
 }
 
 // strictJSON decodes exactly one JSON value into target, rejecting unknown

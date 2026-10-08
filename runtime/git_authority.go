@@ -416,45 +416,6 @@ func stashSubcommand(rest []string) string {
 	return "push"
 }
 
-// GitRefusal is the durable record of one refused provider Git operation.
-//
-// It is written by the broker, inside the provider's process tree, into a
-// runtime-owned file the provider is not told the purpose of - the same
-// unspoofable-slot pattern the reviewer verdict uses. The adapter reads it
-// after the invocation so the refusal becomes attempt evidence rather than a
-// line of stderr the provider could have paraphrased.
-type GitRefusal struct {
-	// Operation is the bounded, redacted argv the provider asked for.
-	Operation string `json:"operation"`
-	// Reason is the runtime's own words for what it refused.
-	Reason string `json:"reason"`
-	// Target is the RESOURCE the invocation resolved to. It is recorded because
-	// a refusal is not interpretable without it: the same argv is a protected
-	// operation against the candidate and an ordinary one against a test's own
-	// fixture, and #257 exists because the boundary could not tell them apart.
-	Target GitTargetClass `json:"target,omitempty"`
-	// Origin is the actor that DIRECTLY originated the invocation, established
-	// from execution topology in git_origin.go. It is recorded on every
-	// refusal, including as "unknown", because a record that omits the actor
-	// is the record #259 exists to replace: the same refusal means opposite
-	// things depending on whether a model, the provider's own machinery or a
-	// test binary issued it, and 63 of them once meant the opposite of what
-	// was concluded. Nothing in this file reads it.
-	Origin GitActorOrigin `json:"origin"`
-	// OriginBasis is HOW that was established, so the derivation is auditable
-	// rather than asserted.
-	OriginBasis string `json:"origin_basis,omitempty"`
-	// DirtyPaths is the bounded set of candidate paths that would have been
-	// discarded, or empty when the workspace held no delta. It is OBSERVATION
-	// for the operator and for the provider's next decision; it is not what
-	// the refusal was based on. See BrokerGitCommand.
-	DirtyPaths []string `json:"dirty_paths,omitempty"`
-	// DirtyCount is the true total, which DirtyPaths may have been bounded
-	// below. A record that showed three paths without saying there were forty
-	// would understate what was at stake.
-	DirtyCount int `json:"dirty_count,omitempty"`
-}
-
 // maxRefusalDirtyPaths bounds what one refusal record names. The count is
 // always exact; the list is a sample, because a provider that dirtied a
 // thousand files must not be able to grow a durable record by that much.

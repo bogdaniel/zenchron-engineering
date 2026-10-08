@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // transcriptProvider writes its transcript through the real evidence store, so
@@ -62,7 +64,7 @@ func (p *transcriptProvider) Execute(_ context.Context, request ExecutionRequest
 	p.stored = append(p.stored, artifacts[0].Path)
 	if quota {
 		return ExecutionResult{
-			ProviderID: "codex", Attempt: request.Attempt, Outcome: OperationFailed,
+			ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Failed,
 			Artifacts: artifacts,
 			Failure:   &ProviderFailure{Classification: FailureProviderQuota, RawDiagnosticRef: artifacts[0].Path},
 		}, nil
@@ -73,7 +75,7 @@ func (p *transcriptProvider) Execute(_ context.Context, request ExecutionRequest
 		}
 	}
 	return ExecutionResult{
-		ProviderID: "codex", Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
+		ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Succeeded, Artifacts: artifacts,
 	}, nil
 }
 
@@ -248,8 +250,9 @@ func TestTheEvidenceStoreStillRefusesTheSameIdentityTwice(t *testing.T) {
 // the crash this test is about: the dispatch happened, so the identity is
 // spent, and the evidence that would prove it is exactly what is missing.
 type crashingProvider struct {
-	attempts []int
-	crashes  int
+	attempts            []int
+	crashes             int
+	verificationParents []ExecutionAttemptRef
 }
 
 func (p *crashingProvider) Isolation() ProviderIsolation {
@@ -259,17 +262,19 @@ func (p *crashingProvider) Isolation() ProviderIsolation {
 	}
 }
 
-func (p *crashingProvider) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (p *crashingProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	p.attempts = append(p.attempts, request.Attempt)
+	v, _ := verificationExecutionFrom(ctx)
+	p.verificationParents = append(p.verificationParents, v.Parent)
 	if len(p.attempts) <= p.crashes {
 		// Dispatched, and then nothing. No transcript is stored, so the slot
 		// this invocation claimed still LOOKS free to the evidence store.
 		return ExecutionResult{
-			ProviderID: "codex", Attempt: request.Attempt, Outcome: OperationFailed,
+			ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Failed,
 			Failure: &ProviderFailure{Classification: FailureProviderQuota},
 		}, nil
 	}
-	return ExecutionResult{ProviderID: "codex", Attempt: request.Attempt, Outcome: Succeeded}, nil
+	return ExecutionResult{ProviderID: "codex", Attempt: request.Attempt, Outcome: execution.Succeeded}, nil
 }
 
 // TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt is the crash hole
@@ -335,6 +340,9 @@ func TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt(t *testing.T) {
 		t.Fatalf("the provider was not reached again: %v", provider.attempts)
 	}
 	crashed := provider.attempts[1]
+	if parent := provider.verificationParents[1]; parent.RunID != runID || parent.OperationID != operation.ID || parent.Attempt != crashed {
+		t.Fatalf("nested tool grant did not bind the reserved physical attempt: %+v / %d", parent, crashed)
+	}
 	if crashed <= seeded.Attempt {
 		t.Fatalf("the invocation landed on or behind seeded evidence: got %d, seeded %d", crashed, seeded.Attempt)
 	}

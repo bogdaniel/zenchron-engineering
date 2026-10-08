@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 var ErrSandboxUnavailable = fmt.Errorf("required sandbox capability is unavailable or unenforceable")
@@ -188,6 +189,9 @@ func (OSCommandExecutor) Run(ctx context.Context, name string, args []string, di
 	lock := candidateWriterFrom(ctx)
 	if lock != nil {
 		cmd.ExtraFiles = []*os.File{lock}
+	}
+	if toolLock, ok := ctx.Value(verificationOwnerFileKey{}).(*os.File); ok {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, toolLock)
 	}
 	stopWatch := watch.watchUntilComplete()
 	owner, err := runBoundedProcess(ctx, cmd, grace)
@@ -766,37 +770,6 @@ func (s ArtifactStore) StoreExecutionAttemptTranscript(providerID string, attemp
 	return s.writeTranscript(prefix, stdout, stderr, true)
 }
 
-// PriorAttemptObservations is the runtime's bounded, deterministic account of
-// what an eligible retry inherited from earlier attempts of the SAME execution
-// binding - and, just as importantly, of what it did not.
-//
-// It is PROVENANCE, not content. Text is the model-visible material and is
-// deliberately not persisted: the observations themselves already exist as the
-// immutable per-attempt artifacts #55 established, and a durable row that
-// duplicated them would grow without bound. What is persisted answers the
-// operator's question - which earlier attempts were supplied, which were
-// dropped by the aggregate bound, which were individually truncated, how many
-// bytes crossed, and a digest proving the assembly was deterministic.
-type PriorAttemptObservations struct {
-	RunID       string `json:"run_id"`
-	OperationID string `json:"operation_id"`
-	Attempt     int    `json:"attempt"`
-	// Supplied, Omitted and Truncated are ascending attempt numbers. Omitted
-	// names an attempt that HAD observations and did not fit the aggregate
-	// bound; Truncated names one whose own observations were cut to the
-	// per-attempt bound. An attempt that observed nothing appears in neither,
-	// because nothing about it was dropped.
-	Supplied  []int  `json:"supplied_attempts,omitempty"`
-	Omitted   []int  `json:"omitted_attempts,omitempty"`
-	Truncated []int  `json:"truncated_attempts,omitempty"`
-	Bytes     int    `json:"bytes"`
-	Digest    string `json:"digest,omitempty"`
-
-	// Text is the assembled model-visible context. It is excluded from the
-	// durable record on purpose; see the type comment.
-	Text string `json:"-"`
-}
-
 const (
 	maxPriorAttemptContextBytes    = 64 << 10
 	maxPriorAttemptTranscriptBytes = 16 << 10
@@ -1145,7 +1118,7 @@ func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
 	return FailureUnknown
 }
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r)
+	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r) + messageEnvelope(r)
 }
 
 // feedbackResolutionEnvelope states the REQUIRED OUTPUT when a producer
@@ -1270,6 +1243,9 @@ func reviewerEnvelope(r ExecutionRequest) string {
 func providerEnvelope(r ExecutionRequest) string {
 	if r.Mode == domain.InvocationModeNonMutatingPlanning {
 		return planningEnvelope(r)
+	}
+	if r.Purpose == InvocationHandoffRepair {
+		return handoffRepairEnvelope(r)
 	}
 	return fmt.Sprintf("Modify only %s. Run=%s source=%s controller=%s base=%s candidate=%s/%s contract=%s/%s purpose=%s. Objective: %s. Acceptance obligations: %s. Constraints: %s. Prohibitions: %s. Permissions: %s. Findings: %s. Do not access paths outside that workspace.", r.CandidateDir, r.RunID, r.SourceSnapshot.ID, r.ControllerID, r.Base.Revision, r.Candidate.Revision, r.Candidate.Tree, r.Contract.ID, r.Contract.Revision, r.Purpose, r.Objective, strings.Join(r.AcceptanceObligations, "; "), strings.Join(r.Constraints, "; "), strings.Join(r.Prohibitions, "; "), strings.Join(r.Permissions, "; "), findingSummary(r.Findings)) + reviewerEnvelope(r) + verifierEvidenceEnvelope(r)
 }
@@ -1583,7 +1559,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		// The caller's cancellation is classified exactly as it is for the
 		// verification run below: not a prerequisite verdict (#447).
 		if ctx.Err() != nil {
-			class = cancellationClass(context.Cause(ctx))
+			class = execution.CancellationClass(context.Cause(ctx))
 		}
 		return AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), FailureClass: class}, err
 	}
@@ -1635,7 +1611,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		// never a verdict that spends remediation.
 		switch {
 		case ctx.Err() != nil:
-			result.FailureClass = cancellationClass(context.Cause(ctx))
+			result.FailureClass = execution.CancellationClass(context.Cause(ctx))
 		case verdict:
 			result.FailureClass = FailureVerification
 		default:

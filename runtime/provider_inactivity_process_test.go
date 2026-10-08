@@ -23,6 +23,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // inactivityCLI answers the capability probe from a string and runs the
@@ -176,7 +178,7 @@ func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 	}
 
 	// A TYPED STALL, and specifically not a shutdown, a deadline or an unknown.
-	if result.Outcome != OperationFailed {
+	if result.Outcome != execution.Failed {
 		t.Fatalf("outcome = %q, want a failed operation", result.Outcome)
 	}
 	if result.Failure == nil || result.Failure.Classification != FailureProviderNoProgress {
@@ -206,7 +208,11 @@ func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 	if result.Failure.RawDiagnosticRef != result.Artifacts[0].Path {
 		t.Fatalf("the diagnostic does not name the transcript: %q", result.Failure.RawDiagnosticRef)
 	}
-	if result.Review != nil {
+	verdict := filepath.Join(t.TempDir(), "review.json")
+	if err := writeTypedResultFile(verdict, ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted}); err != nil {
+		t.Fatal(err)
+	}
+	if typed := readTypedResultSlots(verdict, "", &result); typed.Review != nil {
 		t.Fatal("a terminated invocation contributed a verdict")
 	}
 }
@@ -232,7 +238,7 @@ func TestAProviderThatKeepsTalkingIsNotKilledForSilence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a provider that was producing output was failed: %v", err)
 	}
-	if result.Outcome != Succeeded || result.Failure != nil {
+	if result.Outcome != execution.Succeeded || result.Failure != nil {
 		t.Fatalf("outcome = %q failure = %#v, want an untouched success", result.Outcome, result.Failure)
 	}
 	if result.Invocation.TerminationCause != "provider_returned" {
@@ -473,7 +479,7 @@ func TestObservedOutputReachesTheDurableProgressRecorder(t *testing.T) {
 
 	var mu sync.Mutex
 	var keys []string
-	ctx := withProviderProgressRecorder(context.Background(), func(progress ProviderProgress) {
+	ctx := execution.WithProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		mu.Lock()
 		defer mu.Unlock()
 		if !progress.Final {

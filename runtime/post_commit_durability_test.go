@@ -222,12 +222,12 @@ func TestARestartAfterAnUnjournalledCommitHoldsItAsUnproven(t *testing.T) {
 	if journalMentions(events, EventCandidateCommitted) || len(journalPayloads[AssuranceObservedPayload](t, events, EventAssuranceObserved)) != 0 {
 		t.Fatalf("an unproven head was adopted (outcome %s/%s)", outcome.Disposition, outcome.Reason)
 	}
-	if outcome.Disposition != Failed || outcome.Reason != OpCandidateCommit+attemptsExhaustedSuffix {
+	if outcome.Disposition != Waiting || outcome.Reason != ReasonDeterministicFailureUnchanged {
 		t.Fatalf("outcome %s/%s", outcome.Disposition, outcome.Reason)
 	}
 	attempts := commitAttempts(t, events)
-	if len(attempts) < 2 {
-		t.Fatalf("%d refused attempts after restart, want the retry exercised", len(attempts))
+	if len(attempts) != 1 {
+		t.Fatalf("%d refused attempts after restart, want one deterministic refusal", len(attempts))
 	}
 	for i, a := range attempts {
 		if a.Stage != commitStageWorkspace || a.RuntimeCommit != nil || a.UnprovenHead == nil ||
@@ -239,7 +239,10 @@ func TestARestartAfterAnUnjournalledCommitHoldsItAsUnproven(t *testing.T) {
 		t.Fatalf("head %s with %s commits past the base, want %s preserved and never recommitted", got, count, head)
 	}
 	notPublished(t, fixture, runID)
-	held := fixture.state(runID).snapshot.HeldMaterial
+	// A deterministic wait retains a non-terminal workspace. Its durable
+	// operation result still proves exactly the same held identity; only a
+	// terminal budget failure stores HeldMaterial on the snapshot.
+	held := fixture.state(runID).heldMaterial(outcome.Reason)
 	if held == nil || held.Kind != HeldUnprovenHead || held.Revision != head || held.Tree != tree || held.ContentDigest != "" ||
 		held.Operation != "" || held.PathCount != 0 || held.NextStep != HeldNextOperatorRelease {
 		t.Fatalf("held %+v, want unproven_head at %s", held, head)
@@ -254,7 +257,7 @@ func TestARefusedCommitIsStillUncommitted(t *testing.T) {
 		return os.WriteFile(filepath.Join(dir, "id_rsa"), []byte("not a key\n"), 0600)
 	}
 	runID := fixture.start()
-	fixture.reconcile(runID)
+	outcome := fixture.reconcile(runID)
 	attempts := commitAttempts(t, journalOf(t, fixture.runtime, runID))
 	if len(attempts) == 0 {
 		t.Fatal("the commit was not refused")
@@ -267,7 +270,13 @@ func TestARefusedCommitIsStillUncommitted(t *testing.T) {
 	if _, _, count := runtimeCommitsPastBase(t, fixture, runID); count != "0" {
 		t.Fatalf("%s commits past the base", count)
 	}
-	if held := fixture.state(runID).snapshot.HeldMaterial; held == nil || held.Kind != HeldUncommitted || held.Revision != fixture.base {
+	if outcome.Disposition != Waiting || outcome.Reason != ReasonDeterministicFailureUnchanged {
+		t.Fatalf("outcome %+v", outcome)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("%d deterministic refusals, want one", len(attempts))
+	}
+	if held := fixture.state(runID).heldMaterial(outcome.Reason); held == nil || held.Kind != HeldUncommitted || held.Revision != fixture.base {
 		t.Fatalf("held %+v, want uncommitted material at the base", held)
 	}
 }
@@ -316,8 +325,8 @@ func TestAProviderForgedRuntimeCommitIsNeverAdopted(t *testing.T) {
 		t.Fatalf("a forged commit was adopted (outcome %s/%s)", outcome.Disposition, outcome.Reason)
 	}
 	attempts := commitAttempts(t, events)
-	if len(attempts) < 2 {
-		t.Fatalf("%d failed commit attempts (outcome %s/%s), want the retry exercised", len(attempts), outcome.Disposition, outcome.Reason)
+	if outcome.Disposition != Waiting || outcome.Reason != ReasonDeterministicFailureUnchanged || len(attempts) != 1 {
+		t.Fatalf("%d failed commit attempts (outcome %s/%s), want one deterministic refusal", len(attempts), outcome.Disposition, outcome.Reason)
 	}
 	for i, a := range attempts {
 		if a.Stage != commitStageWorkspace || a.RuntimeCommit != nil || a.UnprovenHead == nil || a.UnprovenHead.Commit != forged {
@@ -328,7 +337,7 @@ func TestAProviderForgedRuntimeCommitIsNeverAdopted(t *testing.T) {
 	if got := mustGit(t, dir, "rev-parse", "HEAD"); got != forged {
 		t.Fatalf("the forged commit was not preserved: head %s, was %s", got, forged)
 	}
-	if held := fixture.state(runID).snapshot.HeldMaterial; held == nil || held.Kind != HeldUnprovenHead || held.Revision != forged ||
+	if held := fixture.state(runID).heldMaterial(outcome.Reason); held == nil || held.Kind != HeldUnprovenHead || held.Revision != forged ||
 		held.Operation != "" || held.NextStep != HeldNextOperatorRelease {
 		t.Fatalf("held %+v, want unproven_head at %s", held, forged)
 	}

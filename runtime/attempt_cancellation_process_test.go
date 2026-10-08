@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // A provider that is running, and when asked to terminate takes 250ms of grace
@@ -41,7 +43,7 @@ func runWithStopAt(t *testing.T, script string, wall, stop time.Duration) (Execu
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	timer := time.AfterFunc(stop, func() { cancel(errRunStopped) })
+	timer := time.AfterFunc(stop, func() { cancel(execution.ErrRunStopped) })
 	defer timer.Stop()
 	started := time.Now()
 	result, _ := provider.Execute(ctx, request)
@@ -60,7 +62,7 @@ func terminationOf(result ExecutionResult) string {
 // The deadline owns the ending.
 func TestARealDeadlineKillStillDrainingWhenAStopLandsKeepsTheDeadline(t *testing.T) {
 	result, _ := runWithStopAt(t, gracefulProviderScript, 100*time.Millisecond, 200*time.Millisecond)
-	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete || result.Outcome == OperationCancelled {
+	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete || result.Outcome == execution.Cancelled {
 		t.Fatalf("outcome %q failure %#v: a deadline kill was reattributed to a later stop", result.Outcome, result.Failure)
 	}
 	if got := terminationOf(result); got != TerminationDeadlineReached {
@@ -78,7 +80,7 @@ func TestARealProviderThatExitedWithAQuotaKeepsItWhenAStopLandsLater(t *testing.
 	if elapsed < stop {
 		t.Fatalf("the adapter returned after %s, before the stop landed: the pipe was not held", elapsed)
 	}
-	if result.Failure == nil || result.Failure.Classification != FailureProviderQuota || result.Outcome == OperationCancelled {
+	if result.Failure == nil || result.Failure.Classification != FailureProviderQuota || result.Outcome == execution.Cancelled {
 		t.Fatalf("outcome %q failure %#v: the provider's own exit was replaced by the stop", result.Outcome, result.Failure)
 	}
 	if got := terminationOf(result); got == TerminationRunStopped || got == TerminationDeadlineReached {
@@ -90,7 +92,7 @@ func TestARealProviderThatExitedWithAQuotaKeepsItWhenAStopLandsLater(t *testing.
 // that then clears the descendant did not end the provider.
 func TestARealProviderThatExitedCleanlyIsNotRecordedAsStopped(t *testing.T) {
 	result, _ := runWithStopAt(t, "sleep 5 &\necho done\nexit 0\n", 0, 150*time.Millisecond)
-	if result.Outcome == OperationCancelled || terminationOf(result) == TerminationRunStopped ||
+	if result.Outcome == execution.Cancelled || terminationOf(result) == TerminationRunStopped ||
 		(result.Failure != nil && (result.Failure.Classification == FailureRunCancelled || result.Failure.Classification == FailureControllerShutdown)) {
 		t.Fatalf("outcome %q termination %q failure %#v: a clean exit was attributed to the stop", result.Outcome, terminationOf(result), result.Failure)
 	}
@@ -100,7 +102,7 @@ func TestARealProviderThatExitedCleanlyIsNotRecordedAsStopped(t *testing.T) {
 // stop, and the executor initiated that termination because of it.
 func TestARealRunningProviderIsEndedByTheStop(t *testing.T) {
 	result, _ := runWithStopAt(t, gracefulProviderScript, 0, 100*time.Millisecond)
-	if result.Outcome != OperationCancelled || result.Failure == nil || result.Failure.Classification != FailureRunCancelled {
+	if result.Outcome != execution.Cancelled || result.Failure == nil || result.Failure.Classification != FailureRunCancelled {
 		t.Fatalf("outcome %q failure %#v, want cancelled run_cancelled", result.Outcome, result.Failure)
 	}
 	if got := terminationOf(result); got != TerminationRunStopped {
@@ -151,9 +153,9 @@ func TestTheExecutorCommitsTheFirstDecisiveTerminalEvent(t *testing.T) {
 			// invocation deadline.
 			controller, shutdownNow := context.WithCancel(context.Background())
 			defer shutdownNow()
-			execution, stopNow := context.WithCancelCause(controller)
+			watcher, stopNow := context.WithCancelCause(controller)
 			defer stopNow(nil)
-			watched, inactiveNow := context.WithCancelCause(execution)
+			watched, inactiveNow := context.WithCancelCause(watcher)
 			defer inactiveNow(nil)
 			var deadlineAt time.Duration
 			for _, e := range c.events {
@@ -171,7 +173,7 @@ func TestTheExecutorCommitsTheFirstDecisiveTerminalEvent(t *testing.T) {
 				var fire func()
 				switch event(e[0]) {
 				case stop:
-					fire = func() { stopNow(errRunStopped) }
+					fire = func() { stopNow(execution.ErrRunStopped) }
 				case inactivity:
 					fire = func() { inactiveNow(ErrProviderInactive) }
 				case shutdown:
@@ -247,7 +249,7 @@ func TestAnExitedRootIsNotTerminatedByALaterContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond) // the root has exited; nothing has reaped it
-	cancel(errRunStopped)
+	cancel(execution.ErrRunStopped)
 	time.Sleep(100 * time.Millisecond)
 	close(release)
 	got := <-done
@@ -312,10 +314,10 @@ func TestRootExitedDoesNotReap(t *testing.T) {
 func TestAStopBeforeStartIsNotAProviderTermination(t *testing.T) {
 	requireBoundedProcess(t)
 	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(errRunStopped)
+	cancel(execution.ErrRunStopped)
 	owner, err := runBoundedProcess(ctx, exec.CommandContext(ctx, "sh", "-c", "exit 0"), time.Second)
 	var notStarted *ProviderNotStartedError
-	if owner != OwnerNotStarted || !errors.As(err, &notStarted) || !errors.Is(notStarted.Cause, errRunStopped) {
+	if owner != OwnerNotStarted || !errors.As(err, &notStarted) || !errors.Is(notStarted.Cause, execution.ErrRunStopped) {
 		t.Fatalf("owner %q err %v, want not_started with the stop as its cause", owner, err)
 	}
 	provider, request, _ := inactivityFixture(t, "exit 0\n")
@@ -341,7 +343,7 @@ func TestAStalledReapAfterALinearizedExitKeepsTheOwner(t *testing.T) {
 	defer func() { probeRootExited = restore }()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	timer := time.AfterFunc(50*time.Millisecond, func() { cancel(errRunStopped) })
+	timer := time.AfterFunc(50*time.Millisecond, func() { cancel(execution.ErrRunStopped) })
 	defer timer.Stop()
 	started := time.Now()
 	owner, _ := runBoundedProcess(ctx, exec.Command("sh", "-c", "while :; do sleep 0.02; done"), 300*time.Millisecond)
