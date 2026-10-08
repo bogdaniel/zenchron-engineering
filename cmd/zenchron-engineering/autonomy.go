@@ -39,6 +39,7 @@ const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
 	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
 	"workgraph {adopt <proposal.json> --agent <id>|status <graph>} [--text]|" +
+	"review {pr <number> --agent <id> [--publish]|status <number>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
@@ -233,6 +234,10 @@ type autonomyFlags struct {
 	// a handshake nobody will perform - and it is the contract the predecessor
 	// starts the next generation through.
 	SuccessorOf string
+	// Publish authorizes GitHub publication of an independent review's
+	// decision (#233). Performing a review and publishing it are separately
+	// authorized: this flag is the operator statement for the second one.
+	Publish bool
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -285,6 +290,10 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		// dependencies between them stated, so a unit waits for its upstream
 		// handoff instead of the operator watching for it.
 		return autonomyWorkGraph(rest, stdout)
+	case "review":
+		// First-class independent PR review (#233): a review operation in its
+		// own right, not a plan stage and not a hand-assembled prompt.
+		return autonomyReview(context.Background(), rest, overrides, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
@@ -1208,6 +1217,9 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			continue
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
+			continue
+		case "--publish":
+			flags.Publish, args = true, args[1:]
 			continue
 		case "--deterministic":
 			// Compile the plan with NO model invocation. It is the honest
