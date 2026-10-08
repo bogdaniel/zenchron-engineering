@@ -273,6 +273,11 @@ func (s *sharedForge) CommentOnPullRequest(ctx context.Context, repo GitHubRepo,
 	defer s.leave("CommentOnPullRequest")
 	return s.forge.CommentOnPullRequest(ctx, repo, number, body)
 }
+func (s *sharedForge) SubmitReview(ctx context.Context, repo GitHubRepo, number int, submission GitHubReviewSubmission) (GitHubReview, error) {
+	s.enter("SubmitReview")
+	defer s.leave("SubmitReview")
+	return s.forge.SubmitReview(ctx, repo, number, submission)
+}
 func (s *sharedForge) RefSHA(ctx context.Context, repo GitHubRepo, ref string) (RefObservation, error) {
 	s.enter("RefSHA")
 	defer s.leave("RefSHA")

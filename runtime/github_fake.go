@@ -61,6 +61,8 @@ type FakeGitHubAdapter struct {
 	ViewerActor GitHubActor
 	// NextNumber is the number CreatePullRequest assigns.
 	NextNumber int
+	// NextReviewID is the id SubmitReview assigns to the review it creates.
+	NextReviewID int64
 	// Discoveries scripts successive DiscoverIssues answers, consumed in order;
 	// the last one repeats. Empty means "derive the answer from Issues", which
 	// is the ordinary case: every issue in Issues that carries the opt-in label.
@@ -285,6 +287,39 @@ func (f *FakeGitHubAdapter) CommentOnPullRequest(_ context.Context, repo GitHubR
 	}
 	f.Comments[number] = append(f.Comments[number], body.Body())
 	return nil
+}
+
+// SubmitReview records one review against the exact commit it names and makes
+// it observable through Reviews/ReviewsByHead, the same way the real forge
+// makes a submitted review observable on a later read.
+func (f *FakeGitHubAdapter) SubmitReview(_ context.Context, repo GitHubRepo, number int, submission GitHubReviewSubmission) (GitHubReview, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recordLocked(GitHubCall{Method: "SubmitReview", Repo: repo, Number: number, SHA: submission.CommitSHA, Body: submission.Body.Body()}); err != nil {
+		return GitHubReview{}, err
+	}
+	if _, ok := f.PullRequests[number]; !ok {
+		return GitHubReview{}, fmt.Errorf("no pull request %d in %s", number, repo)
+	}
+	if _, err := reviewEvent(submission.Event); err != nil {
+		return GitHubReview{}, err
+	}
+	if submission.Body.Body() == "" && len(submission.Comments) == 0 {
+		return GitHubReview{}, fmt.Errorf("a review requires an explicitly cleared publication body or at least one inline comment")
+	}
+	f.NextReviewID++
+	review := GitHubReview{
+		ID: f.NextReviewID, Author: f.ViewerActor, State: submission.Event,
+		Body: UntrustedText(submission.Body.Body()), CommitSHA: submission.CommitSHA, SubmittedAt: time.Now(),
+	}
+	if f.ReviewsByHead == nil {
+		f.ReviewsByHead = map[string]GitHubReviewObservation{}
+	}
+	observation := f.ReviewsByHead[submission.CommitSHA]
+	observation.HeadSHA = submission.CommitSHA
+	observation.Reviews = append(observation.Reviews, review)
+	f.ReviewsByHead[submission.CommitSHA] = observation
+	return review, nil
 }
 
 // RefSHA reports a ref not present in Refs as a genuine absence: Exists is
