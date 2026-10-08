@@ -403,6 +403,14 @@ func TestAV2RecordMustProveItsTrustedMain(t *testing.T) {
 			p.TrustEvidence.Observation.Deciding.Conclusion = "failure"
 			p.TrustEvidence.Observation.Eligible = false
 		},
+		// The raw attempts stay valid; only the cached deciding attempt lies.
+		"a cached deciding workflow": func(p *AdoptedBuildProvenance) {
+			p.TrustEvidence.Observation.Deciding.Workflow = ".github/workflows/assurance.yml"
+		},
+		"a cached deciding event":  func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.Event = "pull_request" },
+		"a cached deciding branch": func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.Branch = "claude/feature" },
+		"a cached deciding job":    func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.Job = "evidence" },
+		"a cached deciding run":    func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.RunID++ },
 		"an unpinned attempt smuggled in": func(p *AdoptedBuildProvenance) {
 			extra := p.TrustEvidence.Observation.Attempts[0]
 			extra.Workflow = ".github/workflows/assurance.yml"
