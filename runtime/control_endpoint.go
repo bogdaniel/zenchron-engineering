@@ -169,6 +169,21 @@ type ControlRequest struct {
 	Template        string `json:"template,omitempty"`
 	Deterministic   bool   `json:"deterministic,omitempty"`
 	SubstituteHuman string `json:"substitute_human,omitempty"`
+	// GraphID and UnitID name one WorkGraph unit a decision hold (#508) is
+	// placed on. Neither is a permission: UnitID selects among the units the
+	// named graph's own adopted revision already names, and the supervisor
+	// refuses one it does not recognize.
+	GraphID string `json:"graph_id,omitempty"`
+	UnitID  string `json:"unit_id,omitempty"`
+	// DecisionID names the live request a decision-resolve action (#508)
+	// answers: a #473 decision_request message id, or a work-unit hold id.
+	DecisionID string `json:"decision_id,omitempty"`
+	// DecisionOutcomeKind and DecisionOutcomeValue are the bounded, typed
+	// answer (orchestration.DecisionOutcome): allow_deny, selected_option or
+	// text, prescribed by the request's own contract rather than invented by
+	// whoever answers it.
+	DecisionOutcomeKind  string `json:"decision_outcome_kind,omitempty"`
+	DecisionOutcomeValue string `json:"decision_outcome_value,omitempty"`
 	// ExpectedController is the controller binding (ControllerBuildBinding)
 	// the requester observed. When present, `serve` refuses unless its OWN
 	// measured identity has that binding, and executes the verb inside its
@@ -211,6 +226,13 @@ const (
 	ControlPlanApprove = "plan-approve"
 	ControlPlanReject  = "plan-reject"
 	ControlPlanRevise  = "plan-revise"
+	// ControlWorkGraphHold places an operator's hold on one not-yet-activated
+	// WorkGraph unit (#508): GraphID, UnitID and, in Note, the hold's purpose.
+	ControlWorkGraphHold = "workgraph-hold"
+	// ControlResolveDecision answers one live decision request (#508):
+	// DecisionID, DecisionOutcomeKind, DecisionOutcomeValue and, in Note, the
+	// resolution's optional rationale.
+	ControlResolveDecision = "decision-resolve"
 )
 
 // ControlResponse is the answer. Payload is the command's own JSON result.

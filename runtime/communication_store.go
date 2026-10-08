@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,6 +44,29 @@ func (s *SQLiteOperationStore) AdmitMessages(messages []orchestration.Engineerin
 // ScopeMessages reads one scope's admitted messages in admission order.
 func (s *SQLiteOperationStore) ScopeMessages(scope string) ([]orchestration.EngineeringMessage, error) {
 	return queryScopeMessages(s.db, scope)
+}
+
+// MessageByID reads one admitted message by its own identity, regardless of
+// scope. It is how a decision resolution (#508) finds the exact
+// worker-authored decision_request it is asked to resolve, without the
+// resolver needing to already know which scope it lives in.
+func (s *SQLiteOperationStore) MessageByID(id string) (orchestration.EngineeringMessage, bool, error) {
+	var document string
+	err := s.db.QueryRow(`SELECT document FROM orchestration_messages WHERE id = ?`, id).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return orchestration.EngineeringMessage{}, false, nil
+	}
+	if err != nil {
+		return orchestration.EngineeringMessage{}, false, err
+	}
+	var message orchestration.EngineeringMessage
+	if err := strictJSON([]byte(document), &message); err != nil {
+		return orchestration.EngineeringMessage{}, false, fmt.Errorf("stored message is unreadable: %w", err)
+	}
+	if err := message.Validate(); err != nil {
+		return orchestration.EngineeringMessage{}, false, fmt.Errorf("stored message is corrupt: %w", err)
+	}
+	return message, true, nil
 }
 
 func queryScopeMessages(q eventQuerier, scope string) ([]orchestration.EngineeringMessage, error) {

@@ -15,15 +15,33 @@ import (
 )
 
 const workgraphUsage = "usage: zenchron-engineering autonomy workgraph " +
-	"{adopt <proposal.json> --agent <id> [--repo owner/name] [--text]|status <graph> [--text]} [--config <path>]"
+	"{adopt <proposal.json> --agent <id> [--repo owner/name] [--text]|status <graph> [--text]|" +
+	"hold <graph> <unit> [--note <purpose>]|resolve <request-id> <outcome> [--note <reason>]} [--config <path>]"
 
-// autonomyWorkGraph is the WorkGraph operator surface (#472): adopt a proposed
-// revision, or read one graph's units, dependencies and frontier.
+// autonomyWorkGraph is the WorkGraph operator surface (#472, #508): adopt a
+// proposed revision, read one graph's units, dependencies and frontier, place
+// an operator's hold on a unit before its first activation, or resolve a live
+// decision request - the hold's own, or a worker's #473 decision_request.
 func autonomyWorkGraph(args []string, stdout io.Writer) (int, error) {
-	// The subject - a graph id or a proposal path - comes first; a flag there
-	// is a usage error, never read as one.
+	// The subject - a graph id, a proposal path, or a hold's/decision's two
+	// positionals - comes first; a flag there is a usage error, never read
+	// as one. hold and resolve NAME TWO subjects, so their flags start one
+	// position later than adopt's and status's single subject.
 	if len(args) < 2 || strings.HasPrefix(args[1], "--") {
 		return runtime.ExitInvalid, errors.New(workgraphUsage)
+	}
+	if args[0] == "hold" || args[0] == "resolve" {
+		if len(args) < 3 || strings.HasPrefix(args[2], "--") {
+			return runtime.ExitInvalid, errors.New(workgraphUsage)
+		}
+		flags, err := parseAutonomyFlags(args[3:])
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		if args[0] == "resolve" {
+			return resolveDecision(flags, args[1], args[2], stdout)
+		}
+		return holdWorkUnit(flags, args[1], args[2], stdout)
 	}
 	flags, err := parseAutonomyFlags(args[2:])
 	if err != nil {
@@ -36,6 +54,68 @@ func autonomyWorkGraph(args []string, stdout io.Writer) (int, error) {
 		return workGraphStatus(flags, args[1], stdout)
 	}
 	return runtime.ExitInvalid, errors.New(workgraphUsage)
+}
+
+// holdWorkUnit is the governed action (#508) that places #472's
+// readiness-owner seam on one not-yet-activated unit: an operator's gate, not
+// a worker's, since a unit has no run to write one from before its first
+// activation.
+func holdWorkUnit(flags autonomyFlags, graphID, unitID string, stdout io.Writer) (int, error) {
+	config, err := loadOrchestrationConfig(flags)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	operator, err := config.ResolveOperator()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	if !runtime.SupervisorRunning(config.StateDir) {
+		return runtime.ExitInvalid, fmt.Errorf(
+			"a work unit hold is placed against the supervisor that owns the graph; run `zenchron-engineering serve` first. State directory: %s", config.StateDir)
+	}
+	delegated, payload, sent, err := delegatePayloadSent(config.StateDir, runtime.ControlRequest{
+		Command: runtime.ControlWorkGraphHold, GraphID: graphID, UnitID: unitID, Note: flags.Note, Operator: operator.ID,
+	})
+	if !delegated {
+		return runtime.ExitInvalid, fmt.Errorf("the supervisor on %s stopped while this request was being sent; run the command again", config.StateDir)
+	}
+	if err != nil {
+		// A hold's identity is deterministic from the graph and unit alone
+		// (orchestration.WorkUnitHoldID), so a lost reply is safe to retry:
+		// the identical request finds the hold already placed instead of
+		// refusing it as a conflict.
+		if id, idErr := orchestration.WorkUnitHoldID(graphID, unitID); sent && idErr == nil && errors.Is(err, runtime.ErrControlReplyLost) {
+			return runtime.ExitFailed, fmt.Errorf("%w; the hold, if it was placed, is %s", err, id)
+		}
+		return runtime.ExitFailed, err
+	}
+	var hold orchestration.WorkUnitHold
+	if err := json.Unmarshal(payload, &hold); err != nil {
+		return runtime.ExitFailed, fmt.Errorf("the supervisor's answer is not a work unit hold: %w", err)
+	}
+	if err := writeJSON(stdout, hold); err != nil {
+		return runtime.ExitFailed, err
+	}
+	return runtime.ExitCompleted, nil
+}
+
+// dispatchDecisionControl is the supervisor-side half of the two #508
+// governed verbs: placing a hold, and resolving the live request it (or a
+// #473 message) names. Kept out of serve.go's own dispatch switch, which
+// every other verb already shares, so adding these two costs it one line.
+func dispatchDecisionControl(supervisor *runtime.Supervisor, request runtime.ControlRequest) runtime.ControlResponse {
+	if request.Command == runtime.ControlWorkGraphHold {
+		hold, err := supervisor.PlaceWorkUnitHold(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(hold)
+	}
+	view, err := supervisor.ResolveDecision(request)
+	if err != nil {
+		return controlError(err)
+	}
+	return controlOK(view)
 }
 
 func adoptWorkGraph(flags autonomyFlags, path string, stdout io.Writer) (int, error) {
@@ -100,7 +180,13 @@ func workGraphStatus(flags autonomyFlags, graphID string, stdout io.Writer) (int
 		return runtime.ExitFailed, err
 	}
 	defer store.Close()
-	view, err := runtime.WorkGraphStatus(store, config.StateDir, graphID, time.Now().UTC(), nil)
+	// Holds (#508) are read the same way with or without a running
+	// supervisor: the store, not an in-memory source, is their only owner.
+	holds, err := store.WorkGraphHolds(graphID)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	view, err := runtime.WorkGraphStatus(store, config.StateDir, graphID, time.Now().UTC(), holds)
 	if err != nil {
 		return runtime.ExitFailed, err
 	}

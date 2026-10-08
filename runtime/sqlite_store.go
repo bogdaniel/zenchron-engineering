@@ -503,6 +503,35 @@ CREATE TABLE work_graph_activations (
 	activated_unix_nano INTEGER NOT NULL,
 	PRIMARY KEY (graph_id, unit_id)
 );
+`, `
+-- Durable, authorized decision resolution (#508). Both tables are insert-only.
+--
+-- work_unit_holds is #472's readiness-owner seam, supplied: a hold an operator
+-- placed on one WorkGraph unit before its first activation. Its primary key IS
+-- the identity rule - a unit can be held at most once, ever - so a lost reply
+-- finds the hold already placed instead of a conflict.
+CREATE TABLE work_unit_holds (
+	id                TEXT PRIMARY KEY,
+	graph_id          TEXT NOT NULL,
+	unit_id           TEXT NOT NULL,
+	requested_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL,
+	UNIQUE(graph_id, unit_id)
+);
+CREATE INDEX work_unit_holds_by_graph ON work_unit_holds(graph_id);
+-- decision_resolutions answers exactly one live request - a worker-authored
+-- #473 decision_request message, or a work_unit_holds row above - with its id
+-- deterministic from the request alone (orchestration.DecisionResolutionID).
+-- One request can therefore have at most one row here, ever: an identical
+-- retry finds it, and a conflicting answer is refused before a second row
+-- could exist to disagree with the first.
+CREATE TABLE decision_resolutions (
+	id                TEXT PRIMARY KEY,
+	request_id        TEXT NOT NULL UNIQUE,
+	scope             TEXT NOT NULL,
+	resolved_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
