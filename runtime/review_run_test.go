@@ -220,3 +220,45 @@ func TestRunIndependentReviewRefusesWhenHeadMovesMidAssembly(t *testing.T) {
 		t.Fatal("expected a head that moved mid-assembly to be refused")
 	}
 }
+
+// Mutation check: a restart between the durable decision committing and its
+// GitHub publication must be able to COMPLETE the publication on retry, not
+// merely discover the decision already exists and stop. Removing the publish
+// attempt in RunIndependentReview's existing-decision path must make this
+// test fail.
+func TestRunIndependentReviewPublishesOnRetryAfterACrashBeforePublication(t *testing.T) {
+	in, fake, _ := reviewRunFixture(t)
+	document, err := json.Marshal(ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Provider = reviewStubProvider{document: string(document)}
+
+	// First call: decision recorded, but NOT published - models the crash
+	// between those two durable steps.
+	first, err := RunIndependentReview(context.Background(), in)
+	if err != nil || !first.Created || first.Publication != nil {
+		t.Fatalf("expected a created, unpublished decision, got %+v %v", first, err)
+	}
+	// Retry with --publish: must complete publication without re-reviewing.
+	in.Publish = true
+	second, err := RunIndependentReview(context.Background(), in)
+	if err != nil {
+		t.Fatalf("retry RunIndependentReview: %v", err)
+	}
+	if second.Created {
+		t.Fatal("expected the retry to find the existing decision, not create a new one")
+	}
+	if second.Publication == nil || !second.Publication.Published {
+		t.Fatalf("expected the retry to complete publication, got %+v", second.Publication)
+	}
+	submits := 0
+	for _, call := range fake.Methods() {
+		if call == "SubmitReview" {
+			submits++
+		}
+	}
+	if submits != 1 {
+		t.Fatalf("expected exactly one SubmitReview call, got %d", submits)
+	}
+}

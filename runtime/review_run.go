@@ -95,7 +95,21 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	if existing, found, err := in.Store.ReviewDecision(decisionID); err != nil {
 		return RunIndependentReviewOutput{}, err
 	} else if found {
-		return RunIndependentReviewOutput{Decision: existing, Created: false}, nil
+		out := RunIndependentReviewOutput{Decision: existing, Created: false}
+		if in.Publish {
+			// The decision already exists, but this invocation may be exactly
+			// the retry that recovers from a crash between the decision
+			// committing and its publication - requirement: a restart must be
+			// able to complete publication, not merely discover there was
+			// nothing left to decide. PublishReview is itself idempotent, so
+			// this is always safe to attempt.
+			publication, err := PublishReview(ctx, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, existing)
+			if err != nil {
+				return out, err
+			}
+			out.Publication = &publication
+		}
+		return out, nil
 	}
 	reviewID := decisionID
 	workspace, err := CreatePlanningWorkspace(in.StateDir, reviewID, in.Source, pr.HeadSHA, "")
