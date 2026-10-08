@@ -1,11 +1,11 @@
-# Execution contract v0.1 (`agentkernel.execution/v0.1`)
-> Historical: superseded by `execution-v0.2.md`; retained as the contract Gate A evidence was produced under.
+# Execution contract v0.2 (`agentkernel.execution/v0.2`)
 
-Normative for Gate A. The words MUST/MUST NOT describe behaviour the code in
-`api/` and `engine/` implements; where the code and issue #446 differ, §12 says
-so. Canonical JSON shapes: `schemas/execution-request.v0.1.schema.json`,
-`schemas/execution-result.v0.1.schema.json`, `schemas/event.v0.1.schema.json`,
-`schemas/common.v0.1.schema.json`, with examples under `schemas/examples/`.
+Normative for the module since #518 (§11.2 lists what changed from v0.1, the
+contract Gate A was accepted on). The words MUST/MUST NOT describe behaviour
+the code in `api/` and `engine/` implements; where the code and issue #446
+differ, §12 says so. Canonical JSON shapes: `schemas/execution-request.v0.2.schema.json`,
+`schemas/execution-result.v0.2.schema.json`, `schemas/event.v0.2.schema.json`,
+`schemas/common.v0.2.schema.json`, with examples under `schemas/examples/v0.2/`.
 
 ## 1. Entry point
 
@@ -36,7 +36,7 @@ for refused requests.
 
 | Field | Meaning |
 | --- | --- |
-| `version` | MUST equal `api.ExecutionVersion` (`agentkernel.execution/v0.1`). |
+| `version` | MUST equal `api.ExecutionVersion` (`agentkernel.execution/v0.2`). |
 | `execution_id`, `attempt_id` | Host identities, echoed in every event and the result. `execution_id` keys the execution-wide budget envelope shared by all its attempts (§11); an `attempt_id` is admitted at most once per execution. |
 | `objective` | Host text, non-blank, at most `api.MaxObjectiveBytes` (64 KiB). Rendered as the user turn's framing; not system text. |
 | `mode` | `read_only` or `read_write` (see capabilities spec). |
@@ -44,7 +44,7 @@ for refused requests.
 | `constraints` | `required_features`, `require_host_proven_isolation`, `instruction_digest` (recorded in provenance, never interpreted). |
 | `context` | `[]ContextItem`; `required: true` items are never dropped (§6). |
 | `grants` | `[]Capability`; the only source of tool authority. |
-| `budget` | Finite envelope for the whole execution, all attempts together (§7, §11). |
+| `budget` | Finite envelope for the whole execution, all attempts together (§7, §11), except `deadline`, which is attempt-scoped (§11.1). |
 | `providers` | `[]ProviderBinding`; the host's eligibility decisions. No credential value; `credential_handle` names one the host resolves. |
 
 ### 2.1 Validation (`ExecutionRequest.Validate(now)`)
@@ -108,7 +108,7 @@ field, by construction.
 | `usage` | §7.5. |
 | `context` | The `ContextManifest`, once compiled. |
 | `routing` | The `RoutingDecision`, once routed. |
-| `provenance` | `kernel_version` (`api.KernelVersion` = `agentkernel/0.1.0-gate-a`), chosen provider id/kind/model, `model_version_bound` and `model_version_observed`, `config_fingerprint`, workspace id and digest, `instruction_digest`, `context_manifest_digest`, `isolation` (the chosen binding's host statement; `unproven` before routing), `sessions` (§9). |
+| `provenance` | `kernel_version` (`api.KernelVersion` = `agentkernel/0.2.0`; Gate A evidence was produced by `agentkernel/0.1.0-gate-a`), chosen provider id/kind/model, `model_version_bound` and `model_version_observed`, `config_fingerprint`, workspace id and digest, `instruction_digest`, `context_manifest_digest`, `isolation` (the chosen binding's host statement; `unproven` before routing), `sessions` (§9). |
 | `event_count` | Number of events recorded (equals `len(observations)`). |
 
 ## 4. Events (`api.Event`, `api.EventSink`)
@@ -231,7 +231,7 @@ Derived from `engine/engine.go`, `engine/compile.go`, `engine/loop.go`,
 | `failed` | `provider_failed` | — | the ledger refused a negative reservation; a non-retryable provider error, or a retryable one with no retry allowance, other than the two classes below (untyped adapter errors become non-retryable `transport`); or a response without tool calls whose stop is `other` or `tool_use` ("provider stopped without completing") |
 | `failed` | `tool_failed` | — | `Broker.Dispatch` returned an error: a side effect's outcome is unknown (including a command or mutating host tool taken but not answered within its bound, §4.1) |
 | `blocked` | `provider_unavailable` | — | class `rate_limited` or `unavailable` and no retry is permitted |
-| `blocked` | `invalid_request` | — | validation failed; admission refused the attempt (already admitted, a widened budget, or a prior attempt in flight or unsettled, §11.1); or `context.Compile` failed for a reason other than capacity |
+| `blocked` | `invalid_request` | — | validation failed; admission refused the attempt (already admitted, a widened cumulative bound, or a prior attempt in flight or unsettled, §11.1); or `context.Compile` failed for a reason other than capacity |
 | `blocked` | `insufficient_capacity` | — | prompt overhead leaves no input capacity, or required context does not fit |
 | `blocked` | `no_eligible_provider` | — | routing blocked, or the chosen binding has no configured adapter (no fallback) |
 | `cancelled` | `host_cancelled` | — | the caller's context ended; `cancellation` is set (§8) |
@@ -407,7 +407,10 @@ An artifact store failure inside a tool after a mutation is an unknown outcome
 
 ## 11. Compatibility and versioning
 
-- One version is accepted and emitted: `agentkernel.execution/v0.1`.
+- One version is accepted and emitted: `agentkernel.execution/v0.2`. Any
+  other `version`, `agentkernel.execution/v0.1` included, is refused
+  `blocked/invalid_request` on field `version` before any side effect
+  (fail closed; §11.2).
 - Because `DecodeRequest` refuses unknown fields, any new request field is a
   contract change for existing decoders. Changes follow `AGENTS.md`: the
   acceptance case requiring it, schema and example updates in the same commit,
@@ -421,39 +424,68 @@ An artifact store failure inside a tool after a mutation is an unknown outcome
 ### 11.1 Admission: one envelope per execution
 
 `Budget` is the envelope of the whole execution, every attempt of one
-`execution_id` together. The admission store is kernel-owned
-(`Config.Admissions *storage.FileRecords`; nil: an in-memory
+`execution_id` together, with one exception: `deadline` is **attempt-scoped**.
+`execution_id` is stable for the execution and `attempt_id` is unique per
+physical attempt. Every new `attempt_id` carries its own deadline, which may
+be later than an earlier attempt's; nothing clamps it to the first attempt's.
+Iterations, tool calls, input and output tokens, artifact bytes, provider
+retries and money are **execution-scoped and cumulative**. The admission
+store is kernel-owned (`Config.Admissions *storage.FileRecords`; nil: an in-memory
 `storage.MemoryRecords` owned by the Engine), so no host code runs inside
 admission. It holds two partitions per `execution_id`:
 
 - `agentkernel.admission_claims`: the in-flight **claim**, whose value is the
   claiming `attempt_id`;
-- `agentkernel.admissions`: the **record**: the first settled attempt's
-  budget (the envelope) and each settled attempt's `attempt_id` and
-  cumulative consumed totals: the execution's whole charge through that
-  attempt, earlier attempts included (its ledger started from them).
+- `agentkernel.admissions`: the **record**: its `version`
+  (`agentkernel.admission/v0.2`, written when the record is created), the
+  first settled attempt's budget (the envelope) and each settled attempt's
+  `attempt_id` and cumulative consumed totals: the execution's whole charge
+  through that attempt, earlier attempts included (its ledger started from
+  them).
 
 After validation and before any side effect, `run.admit`:
 
+0. reads the record **without claiming** and refuses
+   `blocked/invalid_request` a record it cannot read under this contract: a
+   present unversioned (v0.1) record ("legacy unversioned (v0.1)
+   admission state; explicit recovery or migration is required …") or a
+   record of any other version ("admission state of unknown version …").
+   Presence is decided at the storage lookup: only a missing record
+   (`storage.ErrNotFound`) is a new execution. A present
+   `agentkernel.admission/v0.2` record takes the normal path; a present
+   unversioned record is legacy whatever it contains (no attempts, an empty
+   budget, `{}`).
+   Because this precedes the claim, an incompatible-version refusal never
+   creates a claim and leaves none behind. Such a record is never
+   reinterpreted, migrated or expired; it refuses every attempt of that
+   `execution_id` until an explicit recovery or migration protocol (not
+   implemented here) replaces it. A failed read refuses
+   `incomplete/recording_failed`, "nothing ran".
 1. claims the `execution_id` with `Records.PutIfAbsent`. If the claim is held
    it refuses `blocked/invalid_request`: "attempt … already admitted" when the
    holder is this `attempt_id`, else "prior attempt … in flight or unsettled;
    consumption unknown". A failed claim write refuses
    `incomplete/recording_failed`, "nothing ran". A refused contender reserves
    nothing, calls no provider and writes no record.
-2. holding the claim, reads the record and refuses (releasing the claim) an
-   `attempt_id` already settled ("already admitted") or a budget that widens
-   any bound of the envelope: a later deadline, any larger numeric bound, or
-   any money change other than a lower ceiling in the same currency
-   ("budget widens …").
+2. holding the claim, reads the record again (it may have changed since
+   step 0: another attempt settled, or a v0.1 kernel wrote a legacy record)
+   and refuses, releasing the claim, a record step 0 would refuse, an
+   `attempt_id` already settled ("already admitted", whatever its deadline)
+   or a budget that widens a cumulative bound of the envelope: any larger
+   numeric bound, or any money change other than a lower ceiling in the same
+   currency ("budget widens …"). The deadline is not compared: the record's
+   stored deadline is the first attempt's and binds no later attempt. If the
+   release itself fails, the claim stays and the detail says "admission
+   claim not released": later attempts are refused (fail closed).
 3. starts the ledger from what the execution has consumed: per dimension, the
    largest cumulative total any settled attempt recorded (money and retries
-   included; the deadline is absolute). Records are never added together,
-   since each already includes the ones before it.
+   included; the deadline is attempt-scoped and never carried). Records are
+   never added together, since each already includes the ones before it.
 
 At settlement the claim holder appends its ledger's cumulative charge to the
-record and then
-deletes the claim; the read-modify-write happens only while holding the
+record (creating it at `agentkernel.admission/v0.2` only when absent, and
+refusing to extend a present record of another version) and then deletes
+the claim; the read-modify-write happens only while holding the
 claim, so it needs no other lock. If either write fails the result is
 `incomplete/recording_failed` with the observed outcome in `detail`, and the
 claim stays, so later attempts are refused. A claim left by a crashed attempt
@@ -478,6 +510,40 @@ the attempt (fail closed), never admits two.
 execution's. Authority that spans executions (a cumulative spend across
 `execution_id`s, a per-task or per-operator envelope) remains the host's: the
 kernel enforces exactly the per-execution envelope above.
+
+### 11.2 Changes from v0.1
+
+v0.2 is a contract correction made under #518 with the repository owner's
+approval (issue #518, comment 6047604378, item 1). A host retry re-anchors its
+deadline at its own lease, so a later attempt legitimately carries a later
+deadline; v0.1 refused that as a widening of the execution envelope.
+
+- `budget.deadline` is attempt-scoped (§11.1); every other bound is unchanged
+  and cumulative. Request, result and event shapes are otherwise identical:
+  the current schemas are `*.v0.2.schema.json`, whose `version` constant
+  changed. v0.2 was added beside v0.1, not over it: `execution-v0.1.md`
+  (one header line added), `*.v0.1.schema.json` and the v0.1 examples under
+  `schemas/examples/{valid,invalid}/` stay unchanged as the contract Gate A
+  evidence was produced under; the current examples are under
+  `schemas/examples/v0.2/`.
+- `api.KernelVersion` is `agentkernel/0.2.0`. Gate A evidence remains
+  `agentkernel/0.1.0-gate-a`.
+- Requests: a v0.1 request is refused as an unsupported version, not
+  accepted with v0.1 semantics. One kernel enforcing two deadline rules for
+  one `execution_id` could not say which rule an attempt was admitted under,
+  so a host moves to v0.2 explicitly.
+- Admission records are versioned: every new record carries
+  `version: agentkernel.admission/v0.2`. v0.1 records carry none, and their
+  stored deadline was an execution bound, so they are not reinterpreted
+  under v0.2: any present unversioned record, even one with no attempts,
+  like a record of an unknown version, fails closed (`blocked/invalid_request`, before any side effect
+  and before any claim, leaving the record unchanged) until an explicit
+  recovery or migration protocol exists. No auto-migration and no expiry
+  (`engine` `TestUnreadableRecordIsRefusedBeforeClaiming`,
+  `TestLegacyRecordAfterClaimReleasesTheClaim`,
+  `TestSettlementNeverExtendsALegacyRecord`, `TestAbsentRecordIsANewExecution`,
+  `TestUnreadableAdmissionVersionFailsClosed`,
+  `TestVersionedAdmissionRecordAdmits`).
 
 ## 12. Divergences from issue #446 (stated, not hidden)
 

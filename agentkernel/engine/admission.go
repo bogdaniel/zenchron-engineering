@@ -18,10 +18,17 @@ const (
 	claimPartition     = "agentkernel.admission_claims"
 )
 
+// admissionVersion is written on every admission record. A record of any
+// other version, an unversioned (v0.1) one included, is not reinterpreted:
+// admission refuses until an explicit recovery or migration exists.
+const admissionVersion = "agentkernel.admission/v0.2"
+
 // admissionRecord is what the kernel remembers about one execution_id: the
 // envelope its first attempt was admitted with, which every later attempt
-// shares, and what each settled attempt consumed.
+// shares, and what each settled attempt consumed. Budget.Deadline is stored
+// but never compared: the deadline is attempt-scoped (execution spec §11.1).
 type admissionRecord struct {
+	Version  string          `json:"version,omitempty"`
 	Budget   api.Budget      `json:"budget"`
 	Attempts []attemptRecord `json:"attempts"`
 }
@@ -54,28 +61,47 @@ func (rec admissionRecord) consumed() map[api.BudgetDimension]int64 {
 
 // admit decides, before any side effect, whether this attempt may run.
 //
-// The attempt first claims its execution_id with PutIfAbsent: an atomic
-// put-if-absent, so of any number of contenders (goroutines, Engines,
-// processes sharing a FileRecords root) exactly one holds the claim, and the
-// others are refused without reserving budget or calling anything. Only the
-// claim holder reads or writes the execution's record, so that
-// read-modify-write needs no other lock. A claim left by a crashed attempt
-// is never expired by time: its consumption is unknown, so every later
-// attempt is refused until the host recovers it explicitly.
+// It first reads the execution's record without claiming: admission state
+// this contract cannot read (a legacy unversioned record, an unknown
+// version) refuses before any claim exists, so an incompatible-version
+// refusal never leaves one behind. Otherwise the attempt claims its
+// execution_id with PutIfAbsent: an atomic put-if-absent, so of any number
+// of contenders (goroutines, Engines, processes sharing a FileRecords root)
+// exactly one holds the claim, and the others are refused without reserving
+// budget or calling anything. Only the claim holder reads or writes the
+// execution's record, so that read-modify-write needs no other lock. A claim
+// left by a crashed attempt is never expired by time: its consumption is
+// unknown, so every later attempt is refused until the host recovers it
+// explicitly.
 func (r *run) admit(ctx context.Context) (api.Termination, bool) {
 	ctx = context.WithoutCancel(ctx)
-	err := r.e.admissions.PutIfAbsent(ctx, claimPartition, r.req.ExecutionID, []byte(r.req.AttemptID))
+	rec, present, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	if err != nil {
+		return r.admissionNotRecorded(err), false
+	}
+	if reason := versionRefusal(rec, present, r.req.ExecutionID); reason != "" {
+		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason), false
+	}
+	err = r.e.admissions.PutIfAbsent(ctx, claimPartition, r.req.ExecutionID, []byte(r.req.AttemptID))
 	if errors.Is(err, storage.ErrExists) {
 		return r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, r.claimHeld(ctx)), false
 	}
 	if err != nil {
 		return r.admissionNotRecorded(err), false
 	}
-	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	return r.admitClaimed(ctx)
+}
+
+// admitClaimed finishes admission while holding the claim. It reads the
+// record again, since it may have changed between the unclaimed read and
+// the claim (another attempt settled, or a v0.1 kernel wrote a legacy
+// record), and releases the claim on every refusal.
+func (r *run) admitClaimed(ctx context.Context) (api.Termination, bool) {
+	rec, present, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
 	if err != nil {
 		return r.releaseClaim(ctx, r.admissionNotRecorded(err)), false
 	}
-	if reason := admissionRefusal(rec, r.req); reason != "" {
+	if reason := admissionRefusal(rec, present, r.req); reason != "" {
 		return r.releaseClaim(ctx, r.termination(api.OutcomeBlocked, api.CauseInvalidRequest, reason)), false
 	}
 	r.ledger.restore(rec.consumed())
@@ -114,7 +140,10 @@ func (r *run) admissionNotRecorded(err error) api.Termination {
 }
 
 // admissionRefusal names why req may not start, or returns "".
-func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
+func admissionRefusal(rec admissionRecord, present bool, req api.ExecutionRequest) string {
+	if reason := versionRefusal(rec, present, req.ExecutionID); reason != "" {
+		return reason
+	}
 	for _, a := range rec.Attempts {
 		if a.AttemptID == req.AttemptID {
 			return fmt.Sprintf("attempt %q already admitted for execution %q", req.AttemptID, req.ExecutionID)
@@ -129,14 +158,29 @@ func admissionRefusal(rec admissionRecord, req api.ExecutionRequest) string {
 	return ""
 }
 
-// widenedBound names the first bound of next that is wider than first's, or
-// returns "". Any change to the money ceiling other than lowering it in the
+// versionRefusal names why rec cannot be read under this contract, or
+// returns "". Only an absent record is new; a present one is read only at
+// admissionVersion, whatever it contains: an unversioned (v0.1) record with
+// no attempts or an empty budget is still legacy state.
+func versionRefusal(rec admissionRecord, present bool, executionID string) string {
+	switch {
+	case !present, rec.Version == admissionVersion:
+		return ""
+	case rec.Version == "":
+		return fmt.Sprintf("execution %q has legacy unversioned (v0.1) admission state; "+
+			"explicit recovery or migration is required before a %s attempt", executionID, admissionVersion)
+	}
+	return fmt.Sprintf("execution %q has admission state of unknown version %q; "+
+		"explicit recovery or migration is required", executionID, rec.Version)
+}
+
+// widenedBound names the first cumulative bound of next that is wider than
+// first's, or returns "". The deadline is attempt-scoped and not compared: a
+// new attempt may carry a later one. Any change to the money ceiling other than lowering it in the
 // same currency is a widening: without the same ceiling, earlier money
 // consumption is not comparable.
 func widenedBound(first, next api.Budget) string {
 	switch {
-	case next.Deadline.After(first.Deadline):
-		return "deadline"
 	case next.MaxIterations > first.MaxIterations:
 		return "max_iterations"
 	case next.MaxToolCalls > first.MaxToolCalls:
@@ -176,31 +220,35 @@ func (r *run) settleAdmission(ctx context.Context) error {
 // recordConsumption appends this attempt to its execution's record. Only the
 // claim holder calls it, so the read-modify-write cannot interleave.
 func (r *run) recordConsumption(ctx context.Context) error {
-	rec, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
+	rec, present, err := r.e.loadAdmission(ctx, r.req.ExecutionID)
 	if err != nil {
 		return err
 	}
-	if len(rec.Attempts) == 0 {
-		rec.Budget = r.req.Budget
+	if reason := versionRefusal(rec, present, r.req.ExecutionID); reason != "" {
+		return errors.New(reason)
+	}
+	if !present {
+		rec.Version, rec.Budget = admissionVersion, r.req.Budget
 	}
 	rec.Attempts = append(rec.Attempts, attemptRecord{AttemptID: r.req.AttemptID, Consumed: r.ledger.consumed()})
 	return r.e.saveAdmission(ctx, r.req.ExecutionID, rec)
 }
 
-// loadAdmission returns the execution's record; an absent one is empty.
-func (e *Engine) loadAdmission(ctx context.Context, executionID string) (admissionRecord, error) {
+// loadAdmission returns the execution's record and whether one is stored;
+// only storage.ErrNotFound means absent.
+func (e *Engine) loadAdmission(ctx context.Context, executionID string) (admissionRecord, bool, error) {
 	var rec admissionRecord
 	data, err := e.admissions.Get(ctx, admissionPartition, executionID)
 	if errors.Is(err, storage.ErrNotFound) {
-		return rec, nil
+		return rec, false, nil
 	}
 	if err != nil {
-		return rec, err
+		return rec, false, err
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return rec, fmt.Errorf("admission record unreadable: %w", err)
+		return rec, true, fmt.Errorf("admission record unreadable: %w", err)
 	}
-	return rec, nil
+	return rec, true, nil
 }
 
 func (e *Engine) saveAdmission(ctx context.Context, executionID string, rec admissionRecord) error {

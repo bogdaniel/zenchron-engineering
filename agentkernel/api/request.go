@@ -10,8 +10,9 @@ import (
 )
 
 // ExecutionVersion is the only request/result/event contract version this
-// module accepts and emits.
-const ExecutionVersion = "agentkernel.execution/v0.1"
+// module accepts and emits. v0.2 made Budget.Deadline attempt-scoped
+// (execution spec §11.1); v0.1 requests are refused as an unsupported version.
+const ExecutionVersion = "agentkernel.execution/v0.2"
 
 // Executor runs one bounded execution. It returns a settled result for every
 // request it could evaluate, including refusals; the error is reserved for a
@@ -73,9 +74,11 @@ type Constraints struct {
 
 // Budget is the finite envelope of one execution: every attempt of one
 // ExecutionID together. The kernel admits each AttemptID once, refuses an
-// attempt that widens the first admitted budget or starts beside an
-// unsettled one, and charges a later attempt with what earlier attempts
-// consumed. Envelopes spanning several executions remain the host's. Every
+// attempt that widens a cumulative bound of the first admitted budget or
+// starts beside an unsettled one, and charges a later attempt with what
+// earlier attempts consumed. Deadline alone is attempt-scoped: each new
+// AttemptID carries its own, which may be later than an earlier attempt's,
+// and it is never charged across attempts. Envelopes spanning several executions remain the host's. Every
 // numeric bound is required and positive except MaxProviderRetries, which
 // may be zero. MaxInputTokens is a hard bound: without an exact provider
 // count each call reserves a byte upper bound of its input.

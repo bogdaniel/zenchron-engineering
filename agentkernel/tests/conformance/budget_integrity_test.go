@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/providers/scripted"
@@ -50,5 +51,40 @@ func TestA05ReentryAcrossRestartCannotRenewBudget(t *testing.T) {
 	if res.Termination.Dimension != api.DimensionIterations || len(after.Requests()) != 1 {
 		t.Fatalf("second attempt: dimension %q after %d calls; 2 of 3 iterations were already spent",
 			res.Termination.Dimension, len(after.Requests()))
+	}
+}
+
+// TestA05DeadlineIsAttemptScoped (v0.2): a new attempt of an admitted
+// execution may carry a later deadline and starts from what earlier attempts
+// consumed; the same attempt with a later deadline is still refused, and a
+// later deadline does not let a cumulative bound widen.
+func TestA05DeadlineIsAttemptScoped(t *testing.T) {
+	read := func(id string) scripted.Step {
+		return toolUse(call(id, "read_file", map[string]any{"path": "notes.txt"}))
+	}
+	provider := scripted.New(read("c1"), end("first attempt done"), read("c2"), end("never"))
+	k := newKernel(t, config{providers: providers(provider)})
+	req := request("a05-deadline")
+	req.Budget.MaxIterations = 3
+	want(t, k.run(t, context.Background(), req), api.OutcomeCompleted, api.CauseLoopCompleted)
+
+	later := req
+	later.Budget.Deadline = req.Budget.Deadline.Add(time.Hour)
+	res, _ := k.engine.Execute(context.Background(), later) // same sink: k.run's single-settlement check does not apply
+	if res.Termination.Outcome != api.OutcomeBlocked || !strings.Contains(res.Termination.Detail, "already admitted") {
+		t.Fatalf("same attempt with a later deadline: %+v", res.Termination)
+	}
+	widened := later
+	widened.AttemptID, widened.Budget.MaxToolCalls = "att-2", req.Budget.MaxToolCalls+1
+	res, _ = k.engine.Execute(context.Background(), widened)
+	if res.Termination.Outcome != api.OutcomeBlocked || !strings.Contains(res.Termination.Detail, "widens max_tool_calls") {
+		t.Fatalf("later deadline with a widened tool-call bound: %+v", res.Termination)
+	}
+	later.AttemptID = "att-3"
+	res, _ = k.engine.Execute(context.Background(), later)
+	want(t, res, api.OutcomeExhausted, api.CauseBudgetExhausted)
+	if res.Termination.Dimension != api.DimensionIterations || len(provider.Requests()) != 3 {
+		t.Fatalf("new attempt with a later deadline: dimension %q after %d calls; 2 of 3 iterations were already spent",
+			res.Termination.Dimension, len(provider.Requests()))
 	}
 }

@@ -113,7 +113,7 @@ type Provenance struct {
 }
 
 // KernelVersion identifies this implementation in provenance.
-const KernelVersion = "agentkernel/0.1.0-gate-a"
+const KernelVersion = "agentkernel/0.2.0"
 
 // RoutingDecision is the explainable record of provider selection.
 type RoutingDecision struct {
