@@ -260,11 +260,26 @@ an `UNTRUSTED-INTERWORKER-MESSAGES` frame, exactly like reviewer feedback and
 upstream diffs. Every frame marker in it is neutralized, as it is in those
 frames, so a message cannot close its frame or forge another.
 
-Nothing in this protocol answers a DecisionRequest yet. That needs a separate
-authority surface, which this protocol deliberately does not invent.
-Dependency-driven delivery between units belongs to the WorkGraph (#472). It
-supplies the same three facts a batch supplies today: units, admitted handoff
-subjects and scope history.
+Nothing in this protocol answers a DecisionRequest yet. #508 owns the
+authorized resolution path; #473 owns only creating, routing, durability and
+visibility of the request, including refusing a self-answer. #508 reads
+open decisions through this package's own exported surface — the
+`EngineeringMessage` records `OpenDecisions` returns, each with its immutable
+id, its requester's provenance (`Source`), its scope and, where it is
+subject-bound, its exact `Subject` — and `SQLiteOperationStore.ScopeMessages`
+to read a scope's full history. #473 performs no resolution and keeps no
+second decision store; #508 writes the resolution fact elsewhere.
+
+A WorkGraph (#472) unit executes as its own one-item batch (see
+`docs/workgraph.md`), so it already has this same message channel: a
+DecisionRequest, Finding or StateUpdate about itself works exactly as
+described above. Units of one graph do NOT share a message scope with each
+other, though — each unit's batch names only itself, so a message addressed to
+another unit is refused as not naming a unit of that scope. Dependency
+delivery between units flows through the admitted handoff #472 already
+consumes, not through cross-unit messages; widening this scope so unrelated
+graph units could message each other directly is a deliberate non-goal of
+this protocol.
 
 ## Status
 
